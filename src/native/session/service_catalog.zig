@@ -4,7 +4,13 @@ const capability = @import("../kernel_api/capability.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
+const units = @import("../core/units.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const userspace_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
+const userspace_flags = @import("../task/userspace_flags.zig");
+
+const kibibytes = units.kibibytes;
+const mebibytes = units.mebibytes;
 
 pub const KernelTcbComponent = enum(u8) {
     scheduling,
@@ -88,6 +94,7 @@ pub const IsolationProfile = struct {
 pub const UserspaceImageIdentity = struct {
     bundle_id: []const u8,
     artifact_name: []const u8,
+    source_path: []const u8 = "src/userspace/component_main.zig",
     display_name: []const u8,
     publisher: []const u8 = "zigos.system",
     label: []const u8,
@@ -95,6 +102,7 @@ pub const UserspaceImageIdentity = struct {
     role_tag: u32,
     heartbeat_increment: u32,
     contract_flags: u32,
+    service_kind: userspace_mailbox.ServiceKind = .generic,
 };
 
 pub const BootstrapTiming = struct {
@@ -249,16 +257,16 @@ pub const catalog = [_]ServiceCatalogEntry{
             .entry = "zigos.session.manager",
             .role_tag = 0xA101,
             .heartbeat_increment = 1,
-            .contract_flags = 1 << 0,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
         },
         .description = "restartable native session and task coordinator",
         .service_bootstrap = .{
             .mode = .native_direct,
             .budget = .{
                 .cpu_time_ticks = 50_000,
-                .memory_bytes = 8 * 1024 * 1024,
+                .memory_bytes = mebibytes(8),
                 .endpoint_slots = 16,
-                .shared_memory_bytes = 256 * 1024,
+                .shared_memory_bytes = kibibytes(256),
                 .background_allowed = false,
             },
             .correlation_base = 0,
@@ -285,7 +293,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .entry = "zigos.policy.mediation",
             .role_tag = 0xA10A,
             .heartbeat_increment = 10,
-            .contract_flags = (1 << 0) | (1 << 6),
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_POLICY_BOUNDARY,
         },
         .description = "runtime grants, denials, and policy enforcement",
         .service_bootstrap = .{
@@ -315,16 +323,16 @@ pub const catalog = [_]ServiceCatalogEntry{
             .entry = "zigos.permission.review",
             .role_tag = 0xA102,
             .heartbeat_increment = 2,
-            .contract_flags = (1 << 0) | (1 << 1) | (1 << 2),
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_OWNS_UI_SURFACE | userspace_flags.FLAG_PERMISSION_REVIEW,
         },
         .description = "task-scoped permission review service for reviewed grants and denials",
         .service_bootstrap = .{
             .mode = .native_direct,
             .budget = .{
                 .cpu_time_ticks = 10_000,
-                .memory_bytes = 512 * 1024,
+                .memory_bytes = kibibytes(512),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 16 * 1024,
+                .shared_memory_bytes = kibibytes(16),
                 .background_allowed = false,
             },
             .correlation_base = 302,
@@ -348,16 +356,16 @@ pub const catalog = [_]ServiceCatalogEntry{
             .entry = "zigos.service.registry",
             .role_tag = 0xA115,
             .heartbeat_increment = 21,
-            .contract_flags = 1 << 0,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
         },
         .description = "typed service registration and brokered connection directory",
         .service_bootstrap = .{
             .mode = .kernel_contract,
             .budget = .{
                 .cpu_time_ticks = 8_000,
-                .memory_bytes = 512 * 1024,
+                .memory_bytes = kibibytes(512),
                 .endpoint_slots = 8,
-                .shared_memory_bytes = 64 * 1024,
+                .shared_memory_bytes = kibibytes(64),
                 .background_allowed = false,
             },
             .correlation_base = 24,
@@ -379,12 +387,14 @@ pub const catalog = [_]ServiceCatalogEntry{
         .userspace_image = .{
             .bundle_id = "zigos.system.network-stack",
             .artifact_name = "userspace-network-stack.elf",
+            .source_path = "src/userspace/service_main.zig",
             .display_name = "Network Stack",
             .label = "network-service",
             .entry = "zigos.service.network.policy",
             .role_tag = 0xA10B,
             .heartbeat_increment = 11,
-            .contract_flags = (1 << 0) | (1 << 5),
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_NETWORK_BOUNDARY,
+            .service_kind = .network,
         },
         .description = "network stack, egress mediation, and device-backed packet IO",
         .service_bootstrap = .{
@@ -410,12 +420,14 @@ pub const catalog = [_]ServiceCatalogEntry{
         .userspace_image = .{
             .bundle_id = "zigos.system.storage-object",
             .artifact_name = "userspace-storage-object.elf",
+            .source_path = "src/userspace/service_main.zig",
             .display_name = "Storage Object Service",
             .label = "workspace-storage",
             .entry = "zigos.object.workspace",
             .role_tag = 0xA10C,
             .heartbeat_increment = 12,
-            .contract_flags = (1 << 0) | (1 << 4),
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_STORAGE_BOUNDARY,
+            .service_kind = .storage,
         },
         .description = "content-addressed object versions, workspace authority, snapshots, and derived file-bridge views",
         .service_bootstrap = .{
@@ -440,12 +452,14 @@ pub const catalog = [_]ServiceCatalogEntry{
         .userspace_image = .{
             .bundle_id = "zigos.system.package-service",
             .artifact_name = "userspace-package-service.elf",
+            .source_path = "src/userspace/service_main.zig",
             .display_name = "Package Install Service",
             .label = "package-service",
             .entry = "zigos.package.install",
             .role_tag = 0xA10E,
             .heartbeat_increment = 14,
-            .contract_flags = 1 << 0,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
+            .service_kind = .package,
         },
         .description = "bundle install, update, and channel management",
         .service_bootstrap = .{
@@ -471,12 +485,14 @@ pub const catalog = [_]ServiceCatalogEntry{
         .userspace_image = .{
             .bundle_id = "zigos.system.compositor",
             .artifact_name = "userspace-compositor.elf",
+            .source_path = "src/userspace/service_main.zig",
             .display_name = "Compositor Session",
             .label = "compositor-session",
             .entry = "zigos.ui.session",
             .role_tag = 0xA10F,
             .heartbeat_increment = 15,
-            .contract_flags = (1 << 0) | (1 << 1),
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_OWNS_UI_SURFACE,
+            .service_kind = .compositor,
         },
         .description = "compositor, input routing, and UI session ownership",
         .service_bootstrap = .{
@@ -507,7 +523,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .entry = "zigos.index.search",
             .role_tag = 0xA110,
             .heartbeat_increment = 16,
-            .contract_flags = 1 << 0,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
         },
         .description = "indexing and search query service",
         .service_bootstrap = .{
@@ -532,12 +548,14 @@ pub const catalog = [_]ServiceCatalogEntry{
         .userspace_image = .{
             .bundle_id = "zigos.system.sync-service",
             .artifact_name = "userspace-sync-service.elf",
+            .source_path = "src/userspace/service_main.zig",
             .display_name = "Sync Replication",
             .label = "sync-service",
             .entry = "zigos.sync.replication",
             .role_tag = 0xA111,
             .heartbeat_increment = 17,
-            .contract_flags = (1 << 0) | (1 << 3),
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_BACKGROUND_ELIGIBLE,
+            .service_kind = .sync,
         },
         .description = "local-first sync and replication service",
         .service_bootstrap = .{
@@ -568,7 +586,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .entry = "zigos.media.print",
             .role_tag = 0xA112,
             .heartbeat_increment = 18,
-            .contract_flags = (1 << 0) | (1 << 3),
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_BACKGROUND_ELIGIBLE,
         },
         .description = "media and print helper pipeline",
         .service_bootstrap = .{
@@ -827,16 +845,16 @@ fn defaultServiceBudget(class: ServiceClass) task_runtime.ResourceBudget {
     return switch (class) {
         .network_stack, .storage_object, .compositor_ui_session => .{
             .cpu_time_ticks = 16_000,
-            .memory_bytes = 1024 * 1024,
+            .memory_bytes = mebibytes(1),
             .endpoint_slots = 8,
-            .shared_memory_bytes = 128 * 1024,
+            .shared_memory_bytes = kibibytes(128),
             .background_allowed = false,
         },
         else => .{
             .cpu_time_ticks = 8_000,
-            .memory_bytes = 512 * 1024,
+            .memory_bytes = kibibytes(512),
             .endpoint_slots = 6,
-            .shared_memory_bytes = 64 * 1024,
+            .shared_memory_bytes = kibibytes(64),
             .background_allowed = false,
         },
     };

@@ -1,5 +1,8 @@
 const vga = @import("../drivers/vga.zig");
 
+const DECIMAL_U64_BUFFER_BYTES: usize = 20;
+const HEX_U64_BUFFER_BYTES: usize = 16;
+
 pub fn printDec(value: anytype) void {
     var v: u64 = @as(u64, @intCast(value));
     if (v == 0) {
@@ -8,7 +11,7 @@ pub fn printDec(value: anytype) void {
     }
 
     // SAFETY: populated by the digit extraction loop below.
-    var digits: [20]u8 = undefined;
+    var digits: [DECIMAL_U64_BUFFER_BYTES]u8 = undefined;
     var count: usize = 0;
     while (v > 0) : (v /= 10) {
         digits[count] = @as(u8, @intCast('0' + (v % 10)));
@@ -30,7 +33,7 @@ pub fn printHex(value: anytype) void {
 
     const hex = "0123456789ABCDEF";
     // SAFETY: populated by the nibble extraction loop below.
-    var digits: [16]u8 = undefined;
+    var digits: [HEX_U64_BUFFER_BYTES]u8 = undefined;
     var count: usize = 0;
     while (v > 0) : (v >>= 4) {
         digits[count] = hex[@as(usize, @intCast(v & 0xF))];

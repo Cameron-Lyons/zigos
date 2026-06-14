@@ -1,8 +1,34 @@
 const std = @import("std");
+const acpi = @import("acpi.zig");
+const endian = @import("../utils/endian.zig");
+const checksum = @import("../utils/checksum.zig");
+
+const finishChecksum = checksum.finishSum8Prefix;
+const readU32Le = endian.readU32Le;
+const readU64Le = endian.readU64Le;
+const writeU32Le = endian.writeU32Le;
+const writeU64Le = endian.writeU64Le;
 
 pub const MADT_SIGNATURE = "APIC";
-pub const SDT_HEADER_LENGTH: usize = 36;
+pub const SDT_HEADER_LENGTH: usize = acpi.SDT_HEADER_LENGTH;
 pub const MADT_HEADER_LENGTH: usize = 44;
+const MADT_TEST_TABLE_BYTES: usize = 88;
+const MADT_LOCAL_APIC_ADDRESS_OFFSET = SDT_HEADER_LENGTH;
+const MADT_FLAGS_OFFSET = SDT_HEADER_LENGTH + 4;
+const MADT_PC_AT_COMPATIBLE_FLAG: u32 = 0x1;
+const MADT_ENTRY_HEADER_BYTES: usize = 2;
+const MADT_ENTRY_TYPE_OFFSET: usize = 0;
+const MADT_ENTRY_LENGTH_OFFSET: usize = 1;
+const MADT_LOCAL_APIC_MIN_BYTES: usize = 8;
+const MADT_LOCAL_APIC_FLAGS_OFFSET: usize = 4;
+const MADT_IO_APIC_MIN_BYTES: usize = 12;
+const MADT_ISO_MIN_BYTES: usize = 10;
+const MADT_LOCAL_APIC_NMI_MIN_BYTES: usize = 6;
+const MADT_LOCAL_APIC_ADDRESS_OVERRIDE_MIN_BYTES: usize = 12;
+const MADT_LOCAL_APIC_ADDRESS_OVERRIDE_OFFSET: usize = 4;
+const MADT_X2APIC_MIN_BYTES: usize = 16;
+const MADT_X2APIC_FLAGS_OFFSET: usize = 12;
+const MADT_PROCESSOR_ENABLED_FLAG: u32 = 0x1;
 
 pub const Error = error{
     TooSmall,
@@ -51,21 +77,21 @@ pub fn parseMadt(table: []const u8) Error!Summary {
     if (table.len < MADT_HEADER_LENGTH) return error.TooSmall;
     if (!std.mem.eql(u8, table[0..MADT_SIGNATURE.len], MADT_SIGNATURE)) return error.BadSignature;
 
-    const table_length = readU32Le(table[4..8]);
+    const sdt = try acpi.parseSdtHeader(table);
+    const table_length = sdt.length;
     if (table_length < MADT_HEADER_LENGTH or table_length > table.len) return error.InvalidLength;
-    if (!checksumIsValid(table[0..table_length])) return error.BadChecksum;
 
     var summary = Summary{
-        .local_apic_address = readU32Le(table[SDT_HEADER_LENGTH .. SDT_HEADER_LENGTH + 4]),
-        .pc_at_compatible = (readU32Le(table[SDT_HEADER_LENGTH + 4 .. SDT_HEADER_LENGTH + 8]) & 0x1) != 0,
+        .local_apic_address = readU32Le(table[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4]),
+        .pc_at_compatible = (readU32Le(table[MADT_FLAGS_OFFSET..][0..4]) & MADT_PC_AT_COMPATIBLE_FLAG) != 0,
     };
 
     var offset: usize = MADT_HEADER_LENGTH;
     while (offset < table_length) {
-        if (offset + 2 > table_length) return error.InvalidEntryLength;
-        const entry_type = EntryType.fromByte(table[offset]);
-        const entry_length = table[offset + 1];
-        if (entry_length < 2 or offset + entry_length > table_length) return error.InvalidEntryLength;
+        if (offset + MADT_ENTRY_HEADER_BYTES > table_length) return error.InvalidEntryLength;
+        const entry_type = EntryType.fromByte(table[offset + MADT_ENTRY_TYPE_OFFSET]);
+        const entry_length = table[offset + MADT_ENTRY_LENGTH_OFFSET];
+        if (entry_length < MADT_ENTRY_HEADER_BYTES or offset + entry_length > table_length) return error.InvalidEntryLength;
 
         parseEntry(entry_type, table[offset .. offset + entry_length], &summary);
         offset += entry_length;
@@ -77,32 +103,32 @@ pub fn parseMadt(table: []const u8) Error!Summary {
 fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) void {
     switch (entry_type) {
         .processor_local_apic => {
-            if (entry.len < 8) return;
+            if (entry.len < MADT_LOCAL_APIC_MIN_BYTES) return;
             summary.processor_count += 1;
-            if ((readU32Le(entry[4..8]) & 0x1) != 0) {
+            if ((readU32Le(entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
                 summary.enabled_processor_count += 1;
             }
         },
         .io_apic => {
-            if (entry.len < 12) return;
+            if (entry.len < MADT_IO_APIC_MIN_BYTES) return;
             summary.io_apic_count += 1;
         },
         .interrupt_source_override => {
-            if (entry.len < 10) return;
+            if (entry.len < MADT_ISO_MIN_BYTES) return;
             summary.interrupt_source_override_count += 1;
         },
         .local_apic_nmi => {
-            if (entry.len < 6) return;
+            if (entry.len < MADT_LOCAL_APIC_NMI_MIN_BYTES) return;
             summary.local_apic_nmi_count += 1;
         },
         .local_apic_address_override => {
-            if (entry.len < 12) return;
-            summary.local_apic_address = readU64Le(entry[4..12]);
+            if (entry.len < MADT_LOCAL_APIC_ADDRESS_OVERRIDE_MIN_BYTES) return;
+            summary.local_apic_address = readU64Le(entry[MADT_LOCAL_APIC_ADDRESS_OVERRIDE_OFFSET..][0..8]);
         },
         .processor_local_x2apic => {
-            if (entry.len < 16) return;
+            if (entry.len < MADT_X2APIC_MIN_BYTES) return;
             summary.x2apic_count += 1;
-            if ((readU32Le(entry[12..16]) & 0x1) != 0) {
+            if ((readU32Le(entry[MADT_X2APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
                 summary.enabled_processor_count += 1;
             }
         },
@@ -110,94 +136,41 @@ fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) void 
     }
 }
 
-fn checksumIsValid(bytes: []const u8) bool {
-    var sum: u8 = 0;
-    for (bytes) |byte| {
-        sum +%= byte;
-    }
-    return sum == 0;
-}
-
-fn readU32Le(bytes: []const u8) u32 {
-    return @as(u32, bytes[0]) |
-        (@as(u32, bytes[1]) << 8) |
-        (@as(u32, bytes[2]) << 16) |
-        (@as(u32, bytes[3]) << 24);
-}
-
-fn readU64Le(bytes: []const u8) u64 {
-    return @as(u64, bytes[0]) |
-        (@as(u64, bytes[1]) << 8) |
-        (@as(u64, bytes[2]) << 16) |
-        (@as(u64, bytes[3]) << 24) |
-        (@as(u64, bytes[4]) << 32) |
-        (@as(u64, bytes[5]) << 40) |
-        (@as(u64, bytes[6]) << 48) |
-        (@as(u64, bytes[7]) << 56);
-}
-
-fn writeU32Le(bytes: []u8, value: u32) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-    bytes[2] = @truncate(value >> 16);
-    bytes[3] = @truncate(value >> 24);
-}
-
-fn writeU64Le(bytes: []u8, value: u64) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-    bytes[2] = @truncate(value >> 16);
-    bytes[3] = @truncate(value >> 24);
-    bytes[4] = @truncate(value >> 32);
-    bytes[5] = @truncate(value >> 40);
-    bytes[6] = @truncate(value >> 48);
-    bytes[7] = @truncate(value >> 56);
-}
-
-fn finishChecksum(bytes: []u8, checksum_index: usize, length: usize) void {
-    bytes[checksum_index] = 0;
-    var sum: u8 = 0;
-    for (bytes[0..length]) |byte| {
-        sum +%= byte;
-    }
-    bytes[checksum_index] = 0 -% sum;
-}
-
-fn validMadt() [88]u8 {
-    var table = [_]u8{0} ** 88;
+fn validMadt() [MADT_TEST_TABLE_BYTES]u8 {
+    var table = [_]u8{0} ** MADT_TEST_TABLE_BYTES;
     @memcpy(table[0..4], MADT_SIGNATURE);
     writeU32Le(table[4..8], table.len);
     table[8] = 5;
     @memcpy(table[10..16], "ZIGOS ");
     @memcpy(table[16..24], "NUC11TN ");
-    writeU32Le(table[SDT_HEADER_LENGTH .. SDT_HEADER_LENGTH + 4], 0xFEE0_0000);
-    writeU32Le(table[SDT_HEADER_LENGTH + 4 .. SDT_HEADER_LENGTH + 8], 1);
+    writeU32Le(table[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4], 0xFEE0_0000);
+    writeU32Le(table[MADT_FLAGS_OFFSET..][0..4], MADT_PC_AT_COMPATIBLE_FLAG);
 
     table[44] = @intFromEnum(EntryType.processor_local_apic);
-    table[45] = 8;
+    table[45] = MADT_LOCAL_APIC_MIN_BYTES;
     table[46] = 0;
     table[47] = 1;
-    writeU32Le(table[48..52], 1);
+    writeU32Le(table[48..52], MADT_PROCESSOR_ENABLED_FLAG);
 
     table[52] = @intFromEnum(EntryType.io_apic);
-    table[53] = 12;
+    table[53] = MADT_IO_APIC_MIN_BYTES;
     table[54] = 2;
     writeU32Le(table[56..60], 0xFEC0_0000);
     writeU32Le(table[60..64], 0);
 
     table[64] = @intFromEnum(EntryType.interrupt_source_override);
-    table[65] = 10;
+    table[65] = MADT_ISO_MIN_BYTES;
     table[66] = 0;
     table[67] = 0;
     writeU32Le(table[68..72], 2);
     table[72] = 0x0D;
 
     table[74] = @intFromEnum(EntryType.local_apic_address_override);
-    table[75] = 12;
+    table[75] = MADT_LOCAL_APIC_ADDRESS_OVERRIDE_MIN_BYTES;
     writeU64Le(table[78..86], 0x0000_0000_FEE0_0000);
 
     table[86] = @intFromEnum(EntryType.local_apic_nmi);
-    table[87] = 2;
+    table[87] = MADT_ENTRY_HEADER_BYTES;
 
     finishChecksum(table[0..], 9, table.len);
     return table;

@@ -1,4 +1,6 @@
 pub const IDT_ENTRIES = 256;
+const OFFSET_LOW_MASK = 0xFFFF;
+const OFFSET_HIGH_SHIFT = 16;
 
 pub const IdtEntry = packed struct {
     offset_low: u16,
@@ -51,10 +53,10 @@ pub var idt: [IDT_ENTRIES]IdtEntry = [_]IdtEntry{IdtEntry{
 pub fn setGate(n: u8, handler: *const fn () callconv(.c) void, selector: u16, type_attr: u8) void {
     const addr = @intFromPtr(handler);
     idt[n] = IdtEntry{
-        .offset_low = @truncate(addr & 0xFFFF),
+        .offset_low = @truncate(addr & OFFSET_LOW_MASK),
         .selector = selector,
         .type_attr = type_attr,
-        .offset_high = @truncate((addr >> 16) & 0xFFFF),
+        .offset_high = @truncate((addr >> OFFSET_HIGH_SHIFT) & OFFSET_LOW_MASK),
     };
 }
 

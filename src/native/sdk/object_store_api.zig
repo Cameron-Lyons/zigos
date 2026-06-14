@@ -1,6 +1,8 @@
 const std = @import("std");
-const object_store = @import("../storage/object_store.zig");
+const object_store_facade = @import("../storage/object_store.zig");
 const signing = @import("../core/signing.zig");
+
+const object_store = object_store_facade.api;
 
 pub const Store = object_store.Store;
 pub const ObjectType = object_store.ObjectType;
@@ -20,9 +22,9 @@ pub const ObjectHandle = struct {
     version_id: object_store.ids.VersionId,
     object_type: ObjectType,
     label_len: usize = 0,
-    label: [48]u8 = [_]u8{0} ** 48,
+    label: [object_store.MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** object_store.MAX_METADATA_LABEL_BYTES,
     content_type_len: usize = 0,
-    content_type: [64]u8 = [_]u8{0} ** 64,
+    content_type: [object_store.MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** object_store.MAX_CONTENT_TYPE_BYTES,
 
     pub fn labelSlice(self: *const ObjectHandle) []const u8 {
         return self.label[0..self.label_len];
@@ -195,7 +197,7 @@ fn copyText(dest: []u8, source: []const u8) error{TextTooLong}!usize {
 test "object-store SDK stores signed versions and queries developer fixtures" {
     const identity = signing.SignerIdentity{
         .label = "sdk.object-store",
-        .seed = [_]u8{0x34} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0x34),
     };
     var client = Client.init(identity);
     const first = try client.putDocument("notes.md", "text/markdown", "# Notes");

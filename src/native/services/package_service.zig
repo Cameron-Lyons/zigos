@@ -2,6 +2,8 @@ const std = @import("std");
 const manifest = @import("../policy/manifest.zig");
 const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
 const capability = @import("../kernel_api/capability.zig");
+const crypto_hash = @import("../core/crypto_hash.zig");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const bundle_digest = @import("package_service_digest.zig");
@@ -11,6 +13,7 @@ const model = @import("package_service_model.zig");
 const native_util = @import("../core/util.zig");
 const service_authority = @import("service_authority.zig");
 const signing = @import("../core/signing.zig");
+const units = @import("../core/units.zig");
 
 pub const MAX_INSTALLED_BUNDLES = model.MAX_INSTALLED_BUNDLES;
 pub const MAX_LABEL_BYTES = model.MAX_LABEL_BYTES;
@@ -45,6 +48,7 @@ pub const BundleRevision = model.BundleRevision;
 pub const InstalledBundle = model.InstalledBundle;
 pub const AuthorityContext = service_authority.Context;
 pub const AuthorityError = service_authority.Error;
+pub const Digest = bundle_digest.Digest;
 
 pub const Error = bundle_ops.Error || error{
     BundleNotFound,
@@ -86,7 +90,7 @@ pub const Service = struct {
         publisher_principal: principal.PrincipalId,
         issuer: principal.PrincipalId,
         publisher: []const u8,
-        public_key: [32]u8,
+        public_key: signing.PublicKey,
     ) principal.KeyringError!*principal.PrincipalKeyRecord {
         return self.trust_store.bindPublisher(publisher_principal, issuer, publisher, public_key);
     }
@@ -94,7 +98,7 @@ pub const Service = struct {
     fn trustPolicyAuthorityRoot(
         self: *Service,
         authority: principal.PrincipalId,
-        public_key: [32]u8,
+        public_key: signing.PublicKey,
     ) principal.KeyringError!*principal.PrincipalKeyRecord {
         return self.trust_store.bindPolicyAuthorityRoot(authority, public_key);
     }
@@ -291,7 +295,7 @@ pub const PackagePort = struct {
         publisher_principal: principal.PrincipalId,
         issuer: principal.PrincipalId,
         publisher: []const u8,
-        public_key: [32]u8,
+        public_key: signing.PublicKey,
     ) (AuthorityError || principal.KeyringError)!*principal.PrincipalKeyRecord {
         _ = try self.requirePackageAuthority(authority, .capability_mint);
         return self.service.trustPublisher(publisher_principal, issuer, publisher, public_key);
@@ -301,7 +305,7 @@ pub const PackagePort = struct {
         self: *PackagePort,
         authority: AuthorityContext,
         policy_authority: principal.PrincipalId,
-        public_key: [32]u8,
+        public_key: signing.PublicKey,
     ) (AuthorityError || principal.KeyringError)!*principal.PrincipalKeyRecord {
         _ = try self.requirePackageAuthority(authority, .capability_mint);
         return self.service.trustPolicyAuthorityRoot(policy_authority, public_key);
@@ -375,10 +379,10 @@ fn publisherKeyWasRevoked(
 }
 
 fn bundleKey(bundle_id: []const u8) u64 {
-    var hasher = std.hash.Wyhash.init(0x5A47_504B_4742_554E);
-    var len_bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, len_bytes[0..], bundle_id.len, .little);
-    hasher.update(len_bytes[0..]);
+    var hasher = std.hash.Wyhash.init(hash_seeds.package_bundle_key);
+    var len_bytes: [@sizeOf(u64)]u8 = undefined;
+    std.mem.writeInt(u64, &len_bytes, bundle_id.len, .little);
+    hasher.update(&len_bytes);
     hasher.update(bundle_id);
     return indexed_arena.nonZeroKey(hasher.final());
 }
@@ -390,10 +394,10 @@ fn trustTestPublisher(
 ) !void {
     _ = try service.trustPolicyAuthorityRoot(
         .{ .kind = .policy_authority, .serial = 1 },
-        [_]u8{0x51} ** 32,
+        signing.publicKeyFromByte(0x51),
     );
     _ = try service.trustPublisher(
-        .{ .kind = .app, .serial = std.hash.Wyhash.hash(0x5A47_5445_5354, publisher) },
+        .{ .kind = .app, .serial = std.hash.Wyhash.hash(hash_seeds.package_test_publisher, publisher) },
         .{ .kind = .policy_authority, .serial = 1 },
         publisher,
         try signing.publicKey(signer_identity),
@@ -442,7 +446,7 @@ test "package port requires service authority before install update rollback and
     const task_id: u64 = 742;
     const signer_identity = signing.SignerIdentity{
         .label = "package-port-signer",
-        .seed = [_]u8{0x5E} ** 32,
+        .seed = signing.seedFromByte(0x5E),
     };
     var bundle = manifest_fixtures.notesBundle();
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
@@ -468,7 +472,7 @@ test "package port requires service authority before install update rollback and
         .capability_id = mint_only.id,
         .now_ticks = 10,
     };
-    _ = try port.trustPolicyAuthorityRoot(mint_authority, .{ .kind = .policy_authority, .serial = 1 }, [_]u8{0x51} ** 32);
+    _ = try port.trustPolicyAuthorityRoot(mint_authority, .{ .kind = .policy_authority, .serial = 1 }, signing.publicKeyFromByte(0x51));
     _ = try port.trustPublisher(
         mint_authority,
         .{ .kind = .app, .serial = 741 },
@@ -537,12 +541,12 @@ test "package service enforces signed manifests policy gated sources updates rol
         .allowed_install_sources = &.{ "store:zigos", "repo:corp" },
     }, .{
         .label = "policy-key",
-        .seed = [_]u8{0x22} ** 32,
+        .seed = signing.seedFromByte(0x22),
     });
 
     const bundle_key = signing.SignerIdentity{
         .label = "bundle-key",
-        .seed = [_]u8{0x23} ** 32,
+        .seed = signing.seedFromByte(0x23),
     };
     const v1_permissions = [_]manifest.PermissionRequest{
         .{
@@ -690,7 +694,7 @@ test "package service rejects invalid signatures and rollback before any update"
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test",
-        .seed = [_]u8{0x31} ** 32,
+        .seed = signing.seedFromByte(0x31),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
     const permissions = [_]manifest.PermissionRequest{
@@ -739,7 +743,7 @@ test "package service rejects invalid signatures and rollback before any update"
 test "package service rejects untrusted self-signed and revoked publisher bundles" {
     const signer_identity = signing.SignerIdentity{
         .label = "self-signed-example",
-        .seed = [_]u8{0x38} ** 32,
+        .seed = signing.seedFromByte(0x38),
     };
     const components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
@@ -785,7 +789,7 @@ test "package service rejects oversized manifests instead of truncating stored m
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-bounds",
-        .seed = [_]u8{0x36} ** 32,
+        .seed = signing.seedFromByte(0x36),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
     const long_bundle_id = [_]u8{'b'} ** (MAX_LABEL_BYTES + 1);
@@ -833,7 +837,7 @@ test "package service treats lease and target scope changes as declared permissi
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-lease-scope",
-        .seed = [_]u8{0x34} ** 32,
+        .seed = signing.seedFromByte(0x34),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
     const interfaces = [_]manifest.InterfaceDecl{
@@ -918,7 +922,7 @@ test "package service requires schema changes to carry an explicit signed versio
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-compat",
-        .seed = [_]u8{0x35} ** 32,
+        .seed = signing.seedFromByte(0x35),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
     const interfaces = [_]manifest.InterfaceDecl{
@@ -980,7 +984,7 @@ test "package service resolves installed manifests with stable slices" {
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-resolve",
-        .seed = [_]u8{0x32} ** 32,
+        .seed = signing.seedFromByte(0x32),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
     const provided_interfaces = [_]manifest.InterfaceDecl{
@@ -1016,7 +1020,7 @@ test "package service resolves installed manifests with stable slices" {
             .expected_duration_seconds = 30,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
             },
             .network = .local_network_only,
             .visibility = .status_only,
@@ -1075,12 +1079,12 @@ test "package service indexes rebuild after persisted slots are loaded" {
     };
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-rebuild",
-        .seed = [_]u8{0x38} ** 32,
+        .seed = signing.seedFromByte(0x38),
     };
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     service.slots[3].in_use = true;
-    try bundle_ops.installNew(&service.slots[3].bundle, bundle, 1, [_]u8{0x11} ** 32);
+    try bundle_ops.installNew(&service.slots[3].bundle, bundle, 1, crypto_hash.digestFromByte(0x11));
     service.rebuildIndexes();
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
@@ -1092,7 +1096,7 @@ test "package service round-trips the example writer manifest fields without wid
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-example-writer",
-        .seed = [_]u8{0x37} ** 32,
+        .seed = signing.seedFromByte(0x37),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
 
@@ -1139,7 +1143,7 @@ test "package service rejects example writer manifest updates that widen permiss
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-example-writer-update",
-        .seed = [_]u8{0x39} ** 32,
+        .seed = signing.seedFromByte(0x39),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
 

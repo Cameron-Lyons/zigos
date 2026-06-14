@@ -23,19 +23,19 @@ else
 
 pub const storage_signer = signing.SignerIdentity{
     .label = "zigos-storage-key",
-    .seed = [_]u8{0x81} ** 32,
+    .seed = signing.seedFromByte(0x81),
 };
 pub const workspace_signer = signing.SignerIdentity{
     .label = "zigos-workspace-key",
-    .seed = [_]u8{0x82} ** 32,
+    .seed = signing.seedFromByte(0x82),
 };
 pub const export_signer = signing.SignerIdentity{
     .label = "zigos-export-key",
-    .seed = [_]u8{0x83} ** 32,
+    .seed = signing.seedFromByte(0x83),
 };
 pub const diagnostic_ledger_signer = signing.SignerIdentity{
     .label = "zigos-diagnostic-ledger",
-    .seed = [_]u8{0x84} ** 32,
+    .seed = signing.seedFromByte(0x84),
 };
 
 pub const Context = struct {

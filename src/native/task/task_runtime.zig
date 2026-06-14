@@ -8,6 +8,7 @@ const model = @import("task_runtime_model.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const std = @import("std");
+const units = @import("../core/units.zig");
 
 pub const MAX_TASKS = model.MAX_TASKS;
 pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
@@ -78,6 +79,9 @@ const taskHasCapability = model.taskHasCapability;
 const taskOwnerIndexKey = model.taskOwnerIndexKey;
 const rebuildCapabilityIndex = model.rebuildCapabilityIndex;
 const validateUserspaceImage = model.validateUserspaceImage;
+const TEST_TASK_MEMORY_BYTES: usize = units.kibibytes(4);
+const TEST_MINIMAL_MEMORY_BYTES: usize = 256;
+const TEST_MINIMAL_SHARED_MEMORY_BYTES: usize = 512;
 const findAddressSpaceSlot = model.findAddressSpaceSlot;
 const defaultInitialComponent = model.defaultInitialComponent;
 const makeLaunchProvenance = model.makeLaunchProvenance;
@@ -673,9 +677,9 @@ test "new tasks start with zero ambient authority and no capabilities" {
         .component_class = .session_manager,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
             .background_allowed = false,
         },
         .ui_surface_id = 7,
@@ -714,9 +718,9 @@ test "task runtime crosses the first task slab page with indexed handles" {
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
                 .endpoint_slots = 2,
-                .shared_memory_bytes = 1024,
+                .shared_memory_bytes = units.kibibytes(1),
             },
         });
         last_task_id = task.id;
@@ -736,9 +740,9 @@ test "granting and revoking capabilities updates the task table" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 5_000,
-            .memory_bytes = 4096,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = 8,
-            .shared_memory_bytes = 8192,
+            .shared_memory_bytes = units.kibibytes(8),
             .background_allowed = true,
         },
     });
@@ -771,9 +775,9 @@ test "task runtime records redacted crash report provenance" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 3_000,
-            .memory_bytes = 4096,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = 4,
-            .shared_memory_bytes = 8192,
+            .shared_memory_bytes = units.kibibytes(8),
         },
         .launch = .{
             .boundary = .userspace_process,
@@ -800,9 +804,9 @@ test "restoring a snapshot rebuilds authoritative indexes" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 3_000,
-            .memory_bytes = 4096,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = 4,
-            .shared_memory_bytes = 8192,
+            .shared_memory_bytes = units.kibibytes(8),
             .background_allowed = true,
         },
     });
@@ -831,9 +835,9 @@ test "explicit resource classes override the default task classification" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 500,
-            .memory_bytes = 2048,
+            .memory_bytes = units.kibibytes(2),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
             .resource_class = .batch_compute,
             .background_allowed = true,
         },
@@ -851,9 +855,9 @@ test "userspace launch provenance is recorded for explicit image launches" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 2_000,
-            .memory_bytes = 2048,
+            .memory_bytes = units.kibibytes(2),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
             .background_allowed = false,
         },
         .local_only = true,
@@ -889,9 +893,9 @@ test "userspace tasks materialize executable mappings in their address spaces" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_500,
-            .memory_bytes = 4096,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
         .initial_component = .{
@@ -925,9 +929,9 @@ test "audit trail keeps the most recent events" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 256,
+            .memory_bytes = TEST_MINIMAL_MEMORY_BYTES,
             .endpoint_slots = 2,
-            .shared_memory_bytes = 512,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
         },
     });
 
@@ -952,9 +956,9 @@ test "tasks can attach execution components while preserving launch substrate" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 500,
-            .memory_bytes = 4096,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .initial_component = .{
             .substrate = .typed_component_abi,
@@ -984,9 +988,9 @@ test "tasks are isolated in separate process address space and namespace hosts a
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 512,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
         },
     });
     const app_task = try runtime.createTask(.{
@@ -994,9 +998,9 @@ test "tasks are isolated in separate process address space and namespace hosts a
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 512,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
         },
         .local_only = true,
     });
@@ -1022,9 +1026,9 @@ test "rehosting a userspace task rebuilds the mapped executable state" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 2_000,
-            .memory_bytes = 4096,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
         .initial_component = .{
@@ -1059,9 +1063,9 @@ test "terminating a task clears its capabilities and marks the state" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 512,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
         },
     });
 

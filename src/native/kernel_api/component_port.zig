@@ -6,7 +6,9 @@ const generated_image_fixtures = if (@import("builtin").is_test) @import("../tas
 const native_kernel = @import("native_kernel.zig");
 const operation_metadata = @import("operation_metadata.zig");
 const request_header = @import("../core/request_header.zig");
+const shared_memory = @import("shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const Error = native_kernel.Error || error{
     UnexpectedOperation,
@@ -14,6 +16,8 @@ pub const Error = native_kernel.Error || error{
     SubjectTaskMismatch,
     UnsupportedAbiVersion,
 };
+const TEST_ATA_SECTOR_COUNT: u64 = 2048;
+const TEST_PORT_TASK_BYTES: usize = 512;
 
 pub const TaskCreateRequest = struct {
     header: abi.RequestHeader,
@@ -598,7 +602,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
-    var shared = @import("shared_memory.zig").Table.init();
+    var shared = shared_memory.Table.init();
     var kernel = native_kernel.Kernel.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
@@ -613,9 +617,9 @@ test "kernel port enforces operation ids and forwards typed task create requests
         .component_class = .session_manager,
         .budget = .{
             .cpu_time_ticks = 10_000,
-            .memory_bytes = 4096,
+            .memory_bytes = shared_memory.PAGE_SIZE,
             .endpoint_slots = 8,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
         },
         .local_only = true,
     });
@@ -638,9 +642,9 @@ test "kernel port enforces operation ids and forwards typed task create requests
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 512,
+                .memory_bytes = TEST_PORT_TASK_BYTES,
                 .endpoint_slots = 2,
-                .shared_memory_bytes = 512,
+                .shared_memory_bytes = TEST_PORT_TASK_BYTES,
             },
             .local_only = true,
             .launch = .{
@@ -665,9 +669,9 @@ test "kernel port enforces operation ids and forwards typed task create requests
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 512,
+                .memory_bytes = TEST_PORT_TASK_BYTES,
                 .endpoint_slots = 2,
-                .shared_memory_bytes = 512,
+                .shared_memory_bytes = TEST_PORT_TASK_BYTES,
             },
             .local_only = true,
         },
@@ -680,9 +684,9 @@ test "kernel port enforces operation ids and forwards typed task create requests
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 512,
+                .memory_bytes = TEST_PORT_TASK_BYTES,
                 .endpoint_slots = 2,
-                .shared_memory_bytes = 512,
+                .shared_memory_bytes = TEST_PORT_TASK_BYTES,
             },
             .local_only = true,
         },
@@ -695,7 +699,7 @@ test "kernel port validates and forwards typed device broker requests" {
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
-    var shared = @import("shared_memory.zig").Table.init();
+    var shared = shared_memory.Table.init();
     var kernel = native_kernel.Kernel.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
@@ -711,9 +715,9 @@ test "kernel port validates and forwards typed device broker requests" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
         .launch = .{
@@ -750,7 +754,7 @@ test "kernel port validates and forwards typed device broker requests" {
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 2048,
+        .sector_count = TEST_ATA_SECTOR_COUNT,
     }));
 
     const descriptor = try port.deviceDescribe(.{

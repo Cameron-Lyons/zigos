@@ -1,4 +1,5 @@
 const std = @import("std");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("device_graph.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
@@ -22,7 +23,7 @@ pub const TRANSPORT_REPLAY_WINDOW: u64 = 32;
 pub const state_workspace_label = "system-sync";
 pub const state_signer = signing.SignerIdentity{
     .label = "zigos-sync-state",
-    .seed = [_]u8{0xA7} ** 32,
+    .seed = signing.seedFromByte(0xA7),
 };
 
 pub const TransportMode = enum(u8) {
@@ -521,10 +522,10 @@ pub fn zeroDeviceGraphRecord() device_graph.DeviceRecord {
         .platform_key_bound = false,
         .platform_key_label_len = 0,
         .platform_key_label = [_]u8{0} ** device_graph.MAX_LABEL_BYTES,
-        .platform_key_digest = [_]u8{0} ** 32,
+        .platform_key_digest = crypto_hash.zero_digest,
         .platform_root_generation = 0,
         .platform_root_provenance = measured_boot.RootProvenance.synthetic_host,
-        .platform_root_digest = [_]u8{0} ** 32,
+        .platform_root_digest = crypto_hash.zero_digest,
     };
 }
 

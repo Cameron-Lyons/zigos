@@ -20,6 +20,8 @@ pub const MAX_VERSION_PARENTS: usize = 2;
 pub const MAX_OBJECT_QUERY_RESULTS: usize = 16;
 pub const MAX_OBJECT_HISTORY_RESULTS: usize = 16;
 const MAX_METADATA_MESSAGE_BYTES: usize = 256;
+pub const MAX_METADATA_LABEL_BYTES: usize = 48;
+pub const MAX_CONTENT_TYPE_BYTES: usize = 64;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -61,16 +63,16 @@ pub const ObjectType = enum(u8) {
     event_stream,
 };
 
-pub const BlobAddress = [32]u8;
-pub const ChunkAddress = [32]u8;
-pub const VersionAddress = [32]u8;
+pub const BlobAddress = crypto_hash.Digest;
+pub const ChunkAddress = crypto_hash.Digest;
+pub const VersionAddress = crypto_hash.Digest;
 
 pub const SignedMetadata = struct {
     signature: manifest.Signature = .{},
     label_len: usize = 0,
-    label: [48]u8 = [_]u8{0} ** 48,
+    label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
     content_type_len: usize = 0,
-    content_type: [64]u8 = [_]u8{0} ** 64,
+    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
     created_at_ticks: u64 = 0,
 
     pub fn init(
@@ -142,9 +144,9 @@ pub const ObjectQueryResult = struct {
     snapshot_count: u16 = 0,
     updated_at_ticks: u64 = 0,
     label_len: usize = 0,
-    label: [48]u8 = [_]u8{0} ** 48,
+    label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
     content_type_len: usize = 0,
-    content_type: [64]u8 = [_]u8{0} ** 64,
+    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
 
     pub fn labelSlice(self: *const ObjectQueryResult) []const u8 {
         return self.label[0..@min(self.label_len, self.label.len)];
@@ -164,9 +166,9 @@ pub const ObjectHistoryEntry = struct {
     payload_len: usize = 0,
     created_at_ticks: u64 = 0,
     label_len: usize = 0,
-    label: [48]u8 = [_]u8{0} ** 48,
+    label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
     content_type_len: usize = 0,
-    content_type: [64]u8 = [_]u8{0} ** 64,
+    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
 
     pub fn labelSlice(self: *const ObjectHistoryEntry) []const u8 {
         return self.label[0..@min(self.label_len, self.label.len)];
@@ -308,7 +310,7 @@ pub const VersionRecord = struct {
 };
 
 pub const ChunkRef = struct {
-    address: ChunkAddress = [_]u8{0} ** 32,
+    address: ChunkAddress = crypto_hash.zero_digest,
     payload_len: u16 = 0,
     slot_index: usize = 0,
 };
@@ -383,8 +385,8 @@ const VersionSlot = struct {
         .parent_count = 0,
         .parent_version_ids = [_]ids.VersionId{ids.VersionId.zero} ** MAX_VERSION_PARENTS,
         .object_type = .blob,
-        .blob_address = [_]u8{0} ** 32,
-        .version_address = [_]u8{0} ** 32,
+        .blob_address = crypto_hash.zero_digest,
+        .version_address = crypto_hash.zero_digest,
         .metadata = .{},
         .payload_len = 0,
         .blob_slot_index = 0,
@@ -395,8 +397,8 @@ const VersionSlot = struct {
 pub const BlobSlot = struct {
     in_use: bool = false,
     blob: BlobRecord = .{
-        .address = [_]u8{0} ** 32,
-        .merkle_root = [_]u8{0} ** 32,
+        .address = crypto_hash.zero_digest,
+        .merkle_root = crypto_hash.zero_digest,
         .payload_len = 0,
         .chunk_count = 0,
         .chunks = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS,
@@ -408,7 +410,7 @@ pub const BlobSlot = struct {
 pub const ChunkSlot = struct {
     in_use: bool = false,
     chunk: ChunkRecord = .{
-        .address = [_]u8{0} ** 32,
+        .address = crypto_hash.zero_digest,
         .payload_len = 0,
         .payload = [_]u8{0} ** MAX_CHUNK_BYTES,
     },
@@ -1087,7 +1089,7 @@ fn chunkCountForLen(payload_len: usize) usize {
 
 pub fn computeBlobAddress(payload: []const u8) BlobAddress {
     var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
-    const chunk_count = buildChunkRefs(payload, &chunk_refs) catch return [_]u8{0} ** 32;
+    const chunk_count = buildChunkRefs(payload, &chunk_refs) catch return crypto_hash.zero_digest;
     return computeBlobManifestAddress(payload.len, chunk_refs[0..chunk_count]);
 }
 
@@ -1113,7 +1115,7 @@ pub fn computeBlobMerkleRoot(chunk_refs: []const ChunkRef) BlobAddress {
         return crypto_hash.finalize(&empty_hasher);
     }
 
-    var level = [_]BlobAddress{[_]u8{0} ** 32} ** MAX_BLOB_CHUNKS;
+    var level = [_]BlobAddress{crypto_hash.zero_digest} ** MAX_BLOB_CHUNKS;
     var level_count = chunk_refs.len;
     for (chunk_refs, 0..) |chunk_ref, index| {
         var hasher = crypto_hash.init();
@@ -1224,7 +1226,7 @@ fn metadataMessage(
     return buffer[0..writer.offset];
 }
 
-fn computePayloadDigest(payload: []const u8) [32]u8 {
+fn computePayloadDigest(payload: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     var offset: usize = 0;
     while (offset < payload.len) {

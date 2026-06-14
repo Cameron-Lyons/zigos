@@ -4,7 +4,9 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const bootstrap_capabilities = @import("../session/bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
+const shared_memory = @import("../kernel_api/shared_memory.zig");
 const support = @import("../session/session_manager_support.zig");
+const units = @import("../core/units.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -37,9 +39,9 @@ pub fn run(
             .owner = state.ids.storage_service,
             .budget = .{
                 .cpu_time_ticks = 8_000,
-                .memory_bytes = 512 * 1024,
+                .memory_bytes = units.kibibytes(512),
                 .endpoint_slots = 6,
-                .shared_memory_bytes = 128 * 1024,
+                .shared_memory_bytes = units.kibibytes(128),
                 .background_allowed = false,
             },
             .local_only = true,
@@ -70,9 +72,9 @@ pub fn run(
             .owner = .{ .kind = .app, .serial = 10 },
             .budget = .{
                 .cpu_time_ticks = 6_000,
-                .memory_bytes = 512 * 1024,
+                .memory_bytes = units.kibibytes(512),
                 .endpoint_slots = 6,
-                .shared_memory_bytes = 128 * 1024,
+                .shared_memory_bytes = units.kibibytes(128),
                 .background_allowed = false,
             },
             .local_only = true,
@@ -137,7 +139,7 @@ pub fn run(
         .header = component_port.makeHeader(.shared_memory_create, 7, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
         .owner_task_id = transport_probe_task.task_id,
-        .size_bytes = 4096,
+        .size_bytes = shared_memory.PAGE_SIZE,
     }, 5) catch unreachable;
     _ = kernel_port.sharedMemoryMap(.{
         .header = component_port.makeHeader(.shared_memory_map, 8, transport_probe_task.task_id),
@@ -272,9 +274,9 @@ pub fn run(
             .owner = .{ .kind = .app, .serial = 11 },
             .budget = .{
                 .cpu_time_ticks = 1_000,
-                .memory_bytes = 128 * 1024,
+                .memory_bytes = units.kibibytes(128),
                 .endpoint_slots = 2,
-                .shared_memory_bytes = 32 * 1024,
+                .shared_memory_bytes = units.kibibytes(32),
                 .background_allowed = false,
             },
             .local_only = true,

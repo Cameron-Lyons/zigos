@@ -4,6 +4,10 @@ const event_ledger = @import("../platform/event_ledger.zig");
 const policy_object = @import("policy_object.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const units = @import("../core/units.zig");
+
+const POLICY_LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(2);
+const DEVICE_LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1);
 
 pub const Error = policy_object.Error || device_graph.Error || event_ledger.Error || error{
     NoActiveOrganizationPolicy,
@@ -241,7 +245,7 @@ test "enterprise management applies overrides revokes and audits organization po
     const authority = principal.PrincipalId{ .kind = .policy_authority, .serial = 42 };
     const authority_signer = signing.SignerIdentity{
         .label = "corp-root",
-        .seed = [_]u8{0xA5} ** 32,
+        .seed = signing.seedFromByte(0xA5),
     };
     _ = try roots.bindPolicyAuthorityRoot(authority, try signing.publicKey(authority_signer));
 
@@ -267,7 +271,7 @@ test "enterprise management applies overrides revokes and audits organization po
 
     const untrusted_signer = signing.SignerIdentity{
         .label = "not-corp-root",
-        .seed = [_]u8{0xA6} ** 32,
+        .seed = signing.seedFromByte(0xA6),
     };
     try std.testing.expectError(error.UnauthorizedAuthority, manager.applyOrganizationPolicy(session, .{
         .scope = .organization,
@@ -329,7 +333,7 @@ test "enterprise management applies overrides revokes and audits organization po
         @as(u8, @intCast(ledger.latestKind(.policy_change).?.detail_code)),
     ).?);
 
-    var export_buffer: [2048]u8 = undefined;
+    var export_buffer: [POLICY_LEDGER_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=policy_change") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "action=applied") != null);
@@ -342,7 +346,7 @@ test "enterprise management gates device trust administration through existing g
     const authority = principal.PrincipalId{ .kind = .policy_authority, .serial = 77 };
     const authority_signer = signing.SignerIdentity{
         .label = "device-admin-root",
-        .seed = [_]u8{0xB1} ** 32,
+        .seed = signing.seedFromByte(0xB1),
     };
     _ = try roots.bindPolicyAuthorityRoot(authority, try signing.publicKey(authority_signer));
 
@@ -355,11 +359,11 @@ test "enterprise management gates device trust administration through existing g
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 700 };
     const user_signer = signing.SignerIdentity{
         .label = "managed-user-root",
-        .seed = [_]u8{0xB2} ** 32,
+        .seed = signing.seedFromByte(0xB2),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "managed-laptop",
-        .seed = [_]u8{0xB3} ** 32,
+        .seed = signing.seedFromByte(0xB3),
     };
     _ = try devices.ensureUserRoot(user, "managed-user", user_signer);
 
@@ -428,7 +432,7 @@ test "enterprise management gates device trust administration through existing g
         40,
     ));
 
-    var export_buffer: [1024]u8 = undefined;
+    var export_buffer: [DEVICE_LEDGER_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=device_trust_change") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "trusted=yes") != null);

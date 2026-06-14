@@ -1,11 +1,36 @@
 const std = @import("std");
+const acpi = @import("acpi.zig");
+const endian = @import("../utils/endian.zig");
+const checksum = @import("../utils/checksum.zig");
+
+const finishChecksum = checksum.finishSum8Prefix;
+const readU16Le = endian.readU16Le;
+const readU32Le = endian.readU32Le;
+const readU64Le = endian.readU64Le;
+const writeU16Le = endian.writeU16Le;
+const writeU32Le = endian.writeU32Le;
+const writeU64Le = endian.writeU64Le;
 
 pub const FADT_SIGNATURE = "FACP";
-pub const SDT_HEADER_LENGTH: usize = 36;
+pub const SDT_HEADER_LENGTH: usize = acpi.SDT_HEADER_LENGTH;
 pub const MIN_FADT_PM_LENGTH: usize = 96;
+const FADT_TEST_TABLE_BYTES: usize = 132;
+const FADT_REVISION_OFFSET: usize = 8;
+const FADT_DSDT_OFFSET: usize = 40;
+const FADT_SCI_INTERRUPT_OFFSET: usize = 46;
+const FADT_PM1A_EVENT_BLOCK_OFFSET: usize = 56;
+const FADT_PM1B_EVENT_BLOCK_OFFSET: usize = 60;
+const FADT_PM1A_CONTROL_BLOCK_OFFSET: usize = 64;
+const FADT_PM1B_CONTROL_BLOCK_OFFSET: usize = 68;
+const FADT_PM_TIMER_BLOCK_OFFSET: usize = 76;
+const FADT_PM1_EVENT_LENGTH_OFFSET: usize = 88;
+const FADT_PM1_CONTROL_LENGTH_OFFSET: usize = 89;
+const FADT_PM_TIMER_LENGTH_OFFSET: usize = 91;
+const MIN_PM1_CONTROL_LENGTH: u8 = 2;
 pub const RESET_REGISTER_OFFSET: usize = 116;
 pub const RESET_VALUE_OFFSET: usize = 128;
 pub const GENERIC_ADDRESS_STRUCTURE_BYTES: usize = 12;
+const GAS_ADDRESS_OFFSET: usize = 4;
 
 pub const Error = error{
     TooSmall,
@@ -44,28 +69,28 @@ pub fn parseFadt(table: []const u8) Error!FixedAcpiDescription {
     if (table.len < MIN_FADT_PM_LENGTH) return error.TooSmall;
     if (!std.mem.eql(u8, table[0..FADT_SIGNATURE.len], FADT_SIGNATURE)) return error.BadSignature;
 
-    const table_length = readU32Le(table[4..8]);
+    const sdt = try acpi.parseSdtHeader(table);
+    const table_length = sdt.length;
     if (table_length < MIN_FADT_PM_LENGTH or table_length > table.len) return error.InvalidLength;
-    if (!checksumIsValid(table[0..table_length])) return error.BadChecksum;
 
-    const pm1a_control_block = readU32Le(table[64..68]);
-    const pm1b_control_block = readU32Le(table[68..72]);
-    const pm1_control_length = table[89];
+    const pm1a_control_block = readU32Le(table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4]);
+    const pm1b_control_block = readU32Le(table[FADT_PM1B_CONTROL_BLOCK_OFFSET..][0..4]);
+    const pm1_control_length = table[FADT_PM1_CONTROL_LENGTH_OFFSET];
     if (pm1a_control_block == 0 and pm1b_control_block == 0) return error.MissingPmControlBlock;
-    if (pm1_control_length < 2) return error.InvalidPmControlLength;
+    if (pm1_control_length < MIN_PM1_CONTROL_LENGTH) return error.InvalidPmControlLength;
 
     return .{
-        .revision = table[8],
-        .dsdt_address = readU32Le(table[40..44]),
-        .sci_interrupt = readU16Le(table[46..48]),
-        .pm1a_event_block = readU32Le(table[56..60]),
-        .pm1b_event_block = readU32Le(table[60..64]),
+        .revision = table[FADT_REVISION_OFFSET],
+        .dsdt_address = readU32Le(table[FADT_DSDT_OFFSET..][0..4]),
+        .sci_interrupt = readU16Le(table[FADT_SCI_INTERRUPT_OFFSET..][0..2]),
+        .pm1a_event_block = readU32Le(table[FADT_PM1A_EVENT_BLOCK_OFFSET..][0..4]),
+        .pm1b_event_block = readU32Le(table[FADT_PM1B_EVENT_BLOCK_OFFSET..][0..4]),
         .pm1a_control_block = pm1a_control_block,
         .pm1b_control_block = pm1b_control_block,
-        .pm_timer_block = readU32Le(table[76..80]),
-        .pm1_event_length = table[88],
+        .pm_timer_block = readU32Le(table[FADT_PM_TIMER_BLOCK_OFFSET..][0..4]),
+        .pm1_event_length = table[FADT_PM1_EVENT_LENGTH_OFFSET],
         .pm1_control_length = pm1_control_length,
-        .pm_timer_length = table[91],
+        .pm_timer_length = table[FADT_PM_TIMER_LENGTH_OFFSET],
         .reset_register = parseResetRegister(table[0..table_length]),
         .reset_value = if (table_length > RESET_VALUE_OFFSET) table[RESET_VALUE_OFFSET] else 0,
     };
@@ -74,7 +99,7 @@ pub fn parseFadt(table: []const u8) Error!FixedAcpiDescription {
 fn parseResetRegister(table: []const u8) ?GenericAddress {
     if (table.len < RESET_REGISTER_OFFSET + GENERIC_ADDRESS_STRUCTURE_BYTES) return null;
     const gas = table[RESET_REGISTER_OFFSET .. RESET_REGISTER_OFFSET + GENERIC_ADDRESS_STRUCTURE_BYTES];
-    const address = readU64Le(gas[4..12]);
+    const address = readU64Le(gas[GAS_ADDRESS_OFFSET..][0..8]);
     if (address == 0) return null;
     return .{
         .address_space_id = gas[0],
@@ -85,87 +110,25 @@ fn parseResetRegister(table: []const u8) ?GenericAddress {
     };
 }
 
-fn checksumIsValid(bytes: []const u8) bool {
-    var sum: u8 = 0;
-    for (bytes) |byte| {
-        sum +%= byte;
-    }
-    return sum == 0;
-}
-
-fn readU16Le(bytes: []const u8) u16 {
-    return @as(u16, bytes[0]) | (@as(u16, bytes[1]) << 8);
-}
-
-fn readU32Le(bytes: []const u8) u32 {
-    return @as(u32, bytes[0]) |
-        (@as(u32, bytes[1]) << 8) |
-        (@as(u32, bytes[2]) << 16) |
-        (@as(u32, bytes[3]) << 24);
-}
-
-fn readU64Le(bytes: []const u8) u64 {
-    return @as(u64, bytes[0]) |
-        (@as(u64, bytes[1]) << 8) |
-        (@as(u64, bytes[2]) << 16) |
-        (@as(u64, bytes[3]) << 24) |
-        (@as(u64, bytes[4]) << 32) |
-        (@as(u64, bytes[5]) << 40) |
-        (@as(u64, bytes[6]) << 48) |
-        (@as(u64, bytes[7]) << 56);
-}
-
-fn writeU16Le(bytes: []u8, value: u16) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-}
-
-fn writeU32Le(bytes: []u8, value: u32) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-    bytes[2] = @truncate(value >> 16);
-    bytes[3] = @truncate(value >> 24);
-}
-
-fn writeU64Le(bytes: []u8, value: u64) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-    bytes[2] = @truncate(value >> 16);
-    bytes[3] = @truncate(value >> 24);
-    bytes[4] = @truncate(value >> 32);
-    bytes[5] = @truncate(value >> 40);
-    bytes[6] = @truncate(value >> 48);
-    bytes[7] = @truncate(value >> 56);
-}
-
-fn finishChecksum(bytes: []u8, checksum_index: usize, length: usize) void {
-    bytes[checksum_index] = 0;
-    var sum: u8 = 0;
-    for (bytes[0..length]) |byte| {
-        sum +%= byte;
-    }
-    bytes[checksum_index] = 0 -% sum;
-}
-
-fn validFadt() [132]u8 {
-    var table = [_]u8{0} ** 132;
+fn validFadt() [FADT_TEST_TABLE_BYTES]u8 {
+    var table = [_]u8{0} ** FADT_TEST_TABLE_BYTES;
     @memcpy(table[0..4], FADT_SIGNATURE);
     writeU32Le(table[4..8], table.len);
-    table[8] = 6;
+    table[FADT_REVISION_OFFSET] = 6;
     @memcpy(table[10..16], "ZIGOS ");
     @memcpy(table[16..24], "NUC11TN ");
-    writeU32Le(table[40..44], 0x00AB_C000);
-    writeU16Le(table[46..48], 9);
-    writeU32Le(table[56..60], 0x1800);
-    writeU32Le(table[64..68], 0x1804);
-    writeU32Le(table[76..80], 0x1808);
-    table[88] = 4;
-    table[89] = 2;
-    table[91] = 4;
+    writeU32Le(table[FADT_DSDT_OFFSET..][0..4], 0x00AB_C000);
+    writeU16Le(table[FADT_SCI_INTERRUPT_OFFSET..][0..2], 9);
+    writeU32Le(table[FADT_PM1A_EVENT_BLOCK_OFFSET..][0..4], 0x1800);
+    writeU32Le(table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4], 0x1804);
+    writeU32Le(table[FADT_PM_TIMER_BLOCK_OFFSET..][0..4], 0x1808);
+    table[FADT_PM1_EVENT_LENGTH_OFFSET] = 4;
+    table[FADT_PM1_CONTROL_LENGTH_OFFSET] = MIN_PM1_CONTROL_LENGTH;
+    table[FADT_PM_TIMER_LENGTH_OFFSET] = 4;
     table[RESET_REGISTER_OFFSET] = 1;
     table[RESET_REGISTER_OFFSET + 1] = 8;
     table[RESET_REGISTER_OFFSET + 3] = 1;
-    writeU64Le(table[RESET_REGISTER_OFFSET + 4 .. RESET_REGISTER_OFFSET + 12], 0xCF9);
+    writeU64Le(table[RESET_REGISTER_OFFSET + GAS_ADDRESS_OFFSET ..][0..8], 0xCF9);
     table[RESET_VALUE_OFFSET] = 0x06;
     finishChecksum(table[0..], 9, table.len);
     return table;
@@ -185,13 +148,13 @@ test "FADT parser extracts PM control and reset plumbing" {
 
 test "FADT parser rejects missing PM control blocks" {
     var table = validFadt();
-    writeU32Le(table[64..68], 0);
+    writeU32Le(table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4], 0);
     finishChecksum(table[0..], 9, table.len);
     try std.testing.expectError(error.MissingPmControlBlock, parseFadt(table[0..]));
 }
 
 test "FADT parser rejects corrupt checksum" {
     var table = validFadt();
-    table[64] +%= 1;
+    table[FADT_PM1A_CONTROL_BLOCK_OFFSET] +%= 1;
     try std.testing.expectError(error.BadChecksum, parseFadt(table[0..]));
 }

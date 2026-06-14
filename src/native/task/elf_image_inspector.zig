@@ -8,7 +8,7 @@ pub const Inspection = struct {
     loadable_segment_count: u16,
     byte_len: usize,
     bootstrap_mailbox_address: u64,
-    file_sha256: [task_runtime.MAX_IMAGE_HASH_BYTES]u8,
+    file_sha256: crypto_hash.Digest,
     executable_image: task_runtime.ExecutableImageSpec,
 };
 

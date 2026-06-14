@@ -1,5 +1,6 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const builtin = @import("builtin");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const debug_contract = @import("../security/debug_contract.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
 const id_index = @import("../core/id_index.zig");
@@ -8,6 +9,7 @@ const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const runtime_host = @import("task_runtime_host.zig");
 const std = @import("std");
+const units = @import("../core/units.zig");
 const native_util = @import("../core/util.zig");
 
 pub const TASK_PAGE_SIZE: usize = 32;
@@ -21,14 +23,14 @@ pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_COMPONENT_LABEL_BYTES: usize = 48;
 pub const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
 pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
-pub const MAX_IMAGE_HASH_BYTES: usize = 32;
+pub const MAX_IMAGE_HASH_BYTES: usize = crypto_hash.digest_bytes;
 pub const INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const TASK_OWNER_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const CAPABILITY_INDEX_CAPACITY: usize = MAX_TASK_CAPABILITIES * 2;
 pub const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
-pub const DEFAULT_USER_STACK_SIZE_BYTES: usize = 64 * 1024;
+pub const DEFAULT_USER_STACK_SIZE_BYTES: usize = units.kibibytes(64);
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = 0x0804_8000;
-pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: usize = 8 * 1024;
+pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: usize = units.kibibytes(8);
 
 pub const TaskState = enum(u8) {
     staged,
@@ -86,7 +88,7 @@ pub const ExecutableImageSpec = struct {
     stack_top: u64 = DEFAULT_USER_STACK_TOP,
     stack_size_bytes: usize = DEFAULT_USER_STACK_SIZE_BYTES,
     file_size_bytes: usize = 0,
-    file_sha256: [MAX_IMAGE_HASH_BYTES]u8 = [_]u8{0} ** MAX_IMAGE_HASH_BYTES,
+    file_sha256: crypto_hash.Digest = crypto_hash.zero_digest,
     segment_count: usize = 0,
     segments: [MAX_EXECUTABLE_SEGMENTS]ExecutableSegmentSpec = [_]ExecutableSegmentSpec{ExecutableSegmentSpec{}} ** MAX_EXECUTABLE_SEGMENTS,
 

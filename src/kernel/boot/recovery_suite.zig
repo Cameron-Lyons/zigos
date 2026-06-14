@@ -278,7 +278,7 @@ fn service(serial: u64) principal.PrincipalId {
 fn signer(label: []const u8, byte: u8) signing.SignerIdentity {
     return .{
         .label = label,
-        .seed = [_]u8{byte} ** 32,
+        .seed = signing.seedFromByte(byte),
     };
 }
 

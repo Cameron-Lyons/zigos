@@ -46,6 +46,12 @@ const sync_transport = @import("../../native/sync/sync_transport.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
 
+const COMPOSITOR_RENDER_BUFFER_BYTES: usize = 1024;
+const SYNC_ADAPTER_REPLAY_BUFFER_BYTES: usize = 96;
+const XHCI_CAPABILITY_MMAP_BYTES: usize = 24;
+const TEST_ATA_SECTOR_COUNT: u64 = 4096;
+const DRIVER_RING_BYTES: usize = shared_memory.PAGE_SIZE;
+
 pub fn isolationProofDepthGate() !void {
     try std.testing.expect(runtime_negative_proofs.processIsolationBlocksForeignSharedMemory());
     try std.testing.expect(runtime_negative_proofs.syscallSubjectSpoofingIsRejected());
@@ -177,14 +183,14 @@ pub fn syncAdapterDepthGate() !void {
     try tablet_log.append(try sync_adapters.DocumentOperation.insert(5, " and tablet", tablet, 1));
 
     var merged_log = sync_adapters.DocumentOperationLog{};
-    var output: [96]u8 = undefined;
+    var output: [SYNC_ADAPTER_REPLAY_BUFFER_BYTES]u8 = undefined;
     const merged = try sync_adapters.mergeDocumentOperationLogs("hello", &laptop_log, &tablet_log, &merged_log, output[0..]);
     try std.testing.expectEqualStrings("hello and tablet from laptop", merged);
     try std.testing.expectEqual(@as(u64, 1), merged_log.clockFor(laptop));
     try std.testing.expectEqual(@as(u64, 1), merged_log.clockFor(tablet));
 
     try merged_log.mergeFrom(&tablet_log);
-    var replay: [96]u8 = undefined;
+    var replay: [SYNC_ADAPTER_REPLAY_BUFFER_BYTES]u8 = undefined;
     const replayed = try merged_log.apply("hello", replay[0..]);
     try std.testing.expectEqualStrings(merged, replayed);
 }
@@ -357,7 +363,7 @@ pub fn firstHardwareTargetGate() !void {
         .bar4 = 0,
         .bar5 = 0,
     }));
-    var mmap = [_]u8{0} ** 24;
+    var mmap = [_]u8{0} ** XHCI_CAPABILITY_MMAP_BYTES;
     mmap[0] = 20;
     mmap[4] = 0;
     mmap[5] = 0;
@@ -512,7 +518,7 @@ pub fn driverBoundaryAuditGate() !void {
         .bundle_id = "svc.driver.backlog",
         .display_name = "Backlog Driver",
         .publisher = "zigos.spec",
-        .signature = .{ .format = "ed25519", .signer = "zigos-spec-driver" },
+        .signature = .{ .format = manifest.SIGNATURE_FORMAT_ED25519, .signer = "zigos-spec-driver" },
     };
     const driver = try directory.register(.{
         .service_id = 811,
@@ -553,7 +559,7 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 4096,
+        .sector_count = TEST_ATA_SECTOR_COUNT,
     };
 
     device_broker.reset();
@@ -1268,7 +1274,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .bundle_id = "svc.driver.storage-boundary",
         .display_name = "Storage Boundary Driver",
         .publisher = "zigos.spec",
-        .signature = .{ .format = "ed25519", .signer = "zigos-spec-driver" },
+        .signature = .{ .format = manifest.SIGNATURE_FORMAT_ED25519, .signer = "zigos-spec-driver" },
     };
     const registered_driver = try directory.register(.{
         .service_id = storage_service.id,
@@ -1310,13 +1316,13 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     const request_ring = try kernel.sharedMemoryCreate(
         kernelContext(bootstrap_task.id, .shared_memory_create, bootstrap_authority.id, .{ .task = control_task.task_id }),
         control_task.task_id,
-        4096,
+        DRIVER_RING_BYTES,
         10,
     );
     const completion_ring = try kernel.sharedMemoryCreate(
         kernelContext(bootstrap_task.id, .shared_memory_create, bootstrap_authority.id, .{ .task = control_task.task_id }),
         control_task.task_id,
-        4096,
+        DRIVER_RING_BYTES,
         11,
     );
     _ = try kernel.sharedMemoryMap(
@@ -1510,7 +1516,7 @@ pub fn uxRenderingGate() !void {
         .bundle_id = "app.backlog",
         .display_name = "Backlog App",
         .publisher = "zigos.spec",
-        .signature = .{ .format = "ed25519", .signer = "zigos-spec-app" },
+        .signature = .{ .format = manifest.SIGNATURE_FORMAT_ED25519, .signer = "zigos-spec-app" },
     };
     const request = manifest.PermissionRequest{
         .kind = .clipboard,
@@ -1525,7 +1531,7 @@ pub fn uxRenderingGate() !void {
     const item = try compositor.ensureReviewItem(window.id, bundle, request);
     const decision = try compositor.recordDecision(window.id, request, false, false, null);
 
-    var render_buffer: [1024]u8 = undefined;
+    var render_buffer: [COMPOSITOR_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered_window = try compositor_session.renderWindowToBuffer(&render_buffer, window);
     try std.testing.expect(std.mem.indexOf(u8, rendered_window, "type=app_panel") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered_window, "bundle=app.backlog") != null);

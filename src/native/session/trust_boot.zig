@@ -27,6 +27,11 @@ const volume_backend = @import("../storage/volume/backend.zig");
 
 const build_bootloader_source_label = "src/boot/boot64.S";
 const build_bootloader_measurement_label = "multiboot-v1:zigos_native";
+const BASE_SELECTOR_LINE_BUFFER_BYTES: usize = 128;
+const BASE_IMAGE_DIGEST_OFFSET: usize = 0;
+const POLICY_DIGEST_OFFSET: usize = crypto_hash.digest_bytes;
+const BASE_IMAGE_SLOT_INDEX_OFFSET: usize = crypto_hash.digest_bytes * 2;
+const BASE_IMAGE_SLOT_PAYLOAD_BYTES: usize = BASE_IMAGE_SLOT_INDEX_OFFSET + @sizeOf(u64);
 const critical_service_classes = [_]service_catalog.ServiceClass{
     .policy_mediation,
     .storage_object,
@@ -105,11 +110,11 @@ pub const TrustBoot = struct {
     ) bool {
         const state_signer = signing.SignerIdentity{
             .label = "zigos-base-state",
-            .seed = [_]u8{0xA1} ** 32,
+            .seed = signing.seedFromByte(0xA1),
         };
         const image_signer = signing.SignerIdentity{
             .label = "zigos-base-image",
-            .seed = [_]u8{0xA2} ** 32,
+            .seed = signing.seedFromByte(0xA2),
         };
 
         var base_manager = immutable_base.Manager.init(
@@ -193,11 +198,11 @@ pub const TrustBoot = struct {
         const owner = graph.state.ids.package_service;
         const state_signer = signing.SignerIdentity{
             .label = "zigos-base-state",
-            .seed = [_]u8{0xA1} ** 32,
+            .seed = signing.seedFromByte(0xA1),
         };
         const image_signer = signing.SignerIdentity{
             .label = "zigos-base-image",
-            .seed = [_]u8{0xA2} ** 32,
+            .seed = signing.seedFromByte(0xA2),
         };
 
         var manager = immutable_base.Manager.init(
@@ -512,7 +517,7 @@ pub const TrustBoot = struct {
     fn productionBaseImageManifestDigest(
         self: *const TrustBoot,
         graph: *const service_graph_builder_mod.ServiceGraph,
-    ) [32]u8 {
+    ) crypto_hash.Digest {
         var hasher = crypto_hash.init();
         hashPrincipal(&hasher, "policy-authority", graph.state.ids.policy_authority);
         hashPrincipal(&hasher, "session-service", graph.state.ids.session_service);
@@ -543,20 +548,20 @@ pub const TrustBoot = struct {
         self: *const TrustBoot,
         graph: *const service_graph_builder_mod.ServiceGraph,
         slot_index: u8,
-    ) [72]u8 {
+    ) [BASE_IMAGE_SLOT_PAYLOAD_BYTES]u8 {
         const base_digest = self.productionBaseImageManifestDigest(graph);
         const policy_digest = self.productionPolicyDigest(graph);
-        var payload = [_]u8{0} ** 72;
-        @memcpy(payload[0..32], &base_digest);
-        @memcpy(payload[32..64], &policy_digest);
-        std.mem.writeInt(u64, payload[64..72], slot_index, .little);
+        var payload = [_]u8{0} ** BASE_IMAGE_SLOT_PAYLOAD_BYTES;
+        @memcpy(payload[BASE_IMAGE_DIGEST_OFFSET..][0..crypto_hash.digest_bytes], &base_digest);
+        @memcpy(payload[POLICY_DIGEST_OFFSET..][0..crypto_hash.digest_bytes], &policy_digest);
+        std.mem.writeInt(u64, payload[BASE_IMAGE_SLOT_INDEX_OFFSET..][0..@sizeOf(u64)], slot_index, .little);
         return payload;
     }
 
     fn productionPolicyDigest(
         self: *const TrustBoot,
         graph: *const service_graph_builder_mod.ServiceGraph,
-    ) [32]u8 {
+    ) crypto_hash.Digest {
         var hasher = crypto_hash.init();
         hashPrincipal(&hasher, "session-capability-holder", graph.state.session_capability.holder);
         hashCapability(&hasher, "session-capability", &graph.state.session_capability);
@@ -594,7 +599,7 @@ pub const TrustBoot = struct {
     fn recordMeasurementComparison(self: *TrustBoot, boot: *const measured_boot.BootRecord) void {
         const measurement_signer = signing.SignerIdentity{
             .label = "zigos-measured-boot-state",
-            .seed = [_]u8{0xA6} ** 32,
+            .seed = signing.seedFromByte(0xA6),
         };
         const direct_previous = loadDirectMeasuredBootSummary(self.native_store.storage_service_instance.service_id);
         var journal = measured_boot.MeasurementJournal.init(
@@ -638,15 +643,15 @@ pub const TrustBoot = struct {
         const target_device = principal.PrincipalId{ .kind = .device, .serial = 82_203 };
         const user_signer = signing.SignerIdentity{
             .label = "zigos-health-user",
-            .seed = [_]u8{0xB4} ** 32,
+            .seed = signing.seedFromByte(0xB4),
         };
         const source_signer = signing.SignerIdentity{
             .label = "zigos-health-source",
-            .seed = [_]u8{0xB5} ** 32,
+            .seed = signing.seedFromByte(0xB5),
         };
         const target_signer = signing.SignerIdentity{
             .label = "zigos-health-target",
-            .seed = [_]u8{0xB6} ** 32,
+            .seed = signing.seedFromByte(0xB6),
         };
 
         const authority_capability = try sync_service.mintEndpointConnectAuthority(self.capability_table, sync, tick_base, tick_base + 1_000);
@@ -717,7 +722,7 @@ fn baseSelectionMatches(
 }
 
 fn printBaseSelectorActiveSlot(selection: immutable_base.BootSelection) void {
-    var buffer: [128]u8 = undefined;
+    var buffer: [BASE_SELECTOR_LINE_BUFFER_BYTES]u8 = undefined;
     const line = std.fmt.bufPrint(
         &buffer,
         "{s}{d} generation={d} rollback={d}\n",
@@ -731,7 +736,7 @@ fn printBaseSelectorActiveSlot(selection: immutable_base.BootSelection) void {
     console.print(line);
 }
 
-fn productionKernelMeasurementDigest() ![32]u8 {
+fn productionKernelMeasurementDigest() !crypto_hash.Digest {
     var hasher = crypto_hash.init();
     const bootloader_digest = try bootloaderProvidedMeasurementDigest();
     const kernel_digest = try kernelImageDigest();
@@ -745,7 +750,7 @@ fn productionRootProvenance() measured_boot.RootProvenance {
     return .emulator_provided;
 }
 
-fn bootloaderProvidedMeasurementDigest() ![32]u8 {
+fn bootloaderProvidedMeasurementDigest() !crypto_hash.Digest {
     if (builtin.target.os.tag == .freestanding) {
         const root = @import("root");
         if (@hasDecl(root, "bootloaderMeasurementDigest")) {
@@ -756,7 +761,7 @@ fn bootloaderProvidedMeasurementDigest() ![32]u8 {
     return emulatorProvidedBootloaderMeasurementDigest();
 }
 
-fn bootloaderSourceDigest() ![32]u8 {
+fn bootloaderSourceDigest() !crypto_hash.Digest {
     if (builtin.target.os.tag == .freestanding) {
         const root = @import("root");
         if (@hasDecl(root, "bootloaderSourceDigest")) {
@@ -767,7 +772,7 @@ fn bootloaderSourceDigest() ![32]u8 {
     return emulatorProvidedBootloaderSourceDigest();
 }
 
-fn kernelImageDigest() ![32]u8 {
+fn kernelImageDigest() !crypto_hash.Digest {
     if (builtin.target.os.tag == .freestanding) {
         const root = @import("root");
         if (@hasDecl(root, "kernelImageDigest")) {
@@ -778,14 +783,14 @@ fn kernelImageDigest() ![32]u8 {
     return emulatorProvidedKernelImageDigest();
 }
 
-fn emulatorProvidedBootloaderSourceDigest() [32]u8 {
+fn emulatorProvidedBootloaderSourceDigest() crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "measurement-source", "host-emulator-bootloader-source");
     crypto_hash.updateBytes(&hasher, "entry", build_bootloader_source_label);
     return crypto_hash.finalize(&hasher);
 }
 
-fn emulatorProvidedBootloaderMeasurementDigest() [32]u8 {
+fn emulatorProvidedBootloaderMeasurementDigest() crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "measurement-source", "host-emulator-bootloader-measurement");
     crypto_hash.updateBytes(&hasher, "bootloader", "multiboot-v1");
@@ -793,7 +798,7 @@ fn emulatorProvidedBootloaderMeasurementDigest() [32]u8 {
     return crypto_hash.finalize(&hasher);
 }
 
-fn emulatorProvidedKernelImageDigest() [32]u8 {
+fn emulatorProvidedKernelImageDigest() crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "measurement-source", "host-emulator-kernel-image");
     crypto_hash.updateBytes(&hasher, "kernel", "kernel-zigos-native.elf");
@@ -961,7 +966,7 @@ fn loadDirectMeasuredBootSummary(storage_service_id: u64) ?measured_boot.BootSum
         .generation = std.mem.readInt(u64, sector[direct_measured_boot_generation_offset..][0..@sizeOf(u64)], .little),
         .record_count = std.mem.readInt(u16, sector[direct_measured_boot_record_count_offset..][0..@sizeOf(u16)], .little),
         .kind_counts = [_]u16{0} ** measured_boot.MEASUREMENT_KIND_COUNT,
-        .root_digest = [_]u8{0} ** 32,
+        .root_digest = crypto_hash.zero_digest,
     };
     var offset: usize = direct_measured_boot_kind_counts_offset;
     for (&summary.kind_counts) |*count| {

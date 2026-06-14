@@ -21,6 +21,7 @@ const rendering = @import("rendering.zig");
 const task_launch = @import("task_launch.zig");
 
 const appendFmt = rendering.appendFmt;
+const USER_DIAGNOSTICS_BUFFER_BYTES = rendering.USER_DIAGNOSTICS_BUFFER_BYTES;
 const yesNo = native_util.yesNo;
 
 pub const MAX_SHELL_OBJECT_RESULTS: usize = 4;
@@ -176,7 +177,7 @@ pub const HumaneShellConfig = struct {
     snapshot_signer: signing.SignerIdentity,
     document_edit_signer: signing.SignerIdentity = .{
         .label = "humane-shell-document-edit",
-        .seed = [_]u8{0x4e} ** 32,
+        .seed = signing.seedFromByte(0x4e),
     },
 };
 
@@ -512,7 +513,7 @@ pub const HumaneShell = struct {
             yesNo(self.state.remote_diagnostics_require_opt_in),
         });
         if (self.state.diagnostics_ran) {
-            var diagnostics_buffer: [768]u8 = undefined;
+            var diagnostics_buffer: [USER_DIAGNOSTICS_BUFFER_BYTES]u8 = undefined;
             const diagnostics = try self.ledger.renderUserVisibleDiagnosticsToBuffer(&diagnostics_buffer);
             try appendFmt(buffer, &used, "{s}\n", .{diagnostics});
         }
@@ -689,7 +690,7 @@ pub const HumaneShell = struct {
         self.state.sync_transport_frames = saturatingU16(summary.transport_frame_count);
         self.state.sync_conflicts = saturatingU16(summary.conflict_count);
         if (summary.conflict_count != 0) {
-            var detail_buffer: [96]u8 = undefined;
+            var detail_buffer: [compositor_session.MAX_WINDOW_DETAIL_BYTES]u8 = undefined;
             const detail = std.fmt.bufPrint(&detail_buffer, "sync conflicts: {d}", .{summary.conflict_count}) catch "sync conflicts";
             _ = try self.dispatchCompositor(.{
                 .operation = .open_view,
@@ -723,7 +724,7 @@ pub const HumaneShell = struct {
         const task = try self.requireTask();
         if (self.state.selected_object_id == 0) try self.queryObjects();
         const latest = self.storage.latestVersion(self.state.selected_object_id) orelse return error.ObjectMissing;
-        var detail_buffer: [64]u8 = undefined;
+        var detail_buffer: [compositor_session.MAX_WINDOW_DETAIL_BYTES]u8 = undefined;
         const detail = std.fmt.bufPrint(&detail_buffer, "object:{d}", .{self.state.selected_object_id}) catch "object";
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,
@@ -812,7 +813,7 @@ pub const HumaneShell = struct {
             self.objectConflictDevice(),
             self.state.selected_object_id,
         );
-        var detail_buffer: [96]u8 = undefined;
+        var detail_buffer: [compositor_session.MAX_WINDOW_DETAIL_BYTES]u8 = undefined;
         const detail = std.fmt.bufPrint(&detail_buffer, "object conflict: {d}", .{review.object_id}) catch "object conflict";
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,

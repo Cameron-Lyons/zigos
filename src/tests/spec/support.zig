@@ -1,17 +1,19 @@
 const std = @import("std");
 const capability = @import("../../native/kernel_api/capability.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
+const hash_seeds = @import("../../native/core/hash_seeds.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const principal = @import("../../native/core/principal.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const service_authority = @import("../../native/services/service_authority.zig");
 const signing = @import("../../native/core/signing.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
+const units = @import("../../native/core/units.zig");
 
 pub fn signer(label: []const u8, fill: u8) signing.SignerIdentity {
     return .{
         .label = label,
-        .seed = [_]u8{fill} ** 32,
+        .seed = signing.seedFromByte(fill),
     };
 }
 
@@ -50,10 +52,10 @@ pub fn trustPackagePublisher(
     publisher: []const u8,
 ) !void {
     const issuer = policyAuthority(1);
-    _ = try port.trustPolicyAuthorityRoot(authority, issuer, [_]u8{0x5A} ** 32);
+    _ = try port.trustPolicyAuthorityRoot(authority, issuer, signing.publicKeyFromByte(0x5A));
     _ = try port.trustPublisher(
         authority,
-        .{ .kind = .app, .serial = std.hash.Wyhash.hash(0x5A47_5350_4543, publisher) },
+        .{ .kind = .app, .serial = std.hash.Wyhash.hash(hash_seeds.package_spec_publisher, publisher) },
         issuer,
         publisher,
         try signing.publicKey(identity),
@@ -132,9 +134,9 @@ pub fn driverAuthority(
 pub fn defaultBudget(background_allowed: bool) task_runtime.ResourceBudget {
     return .{
         .cpu_time_ticks = 10_000,
-        .memory_bytes = 256 * 1024,
+        .memory_bytes = units.kibibytes(256),
         .endpoint_slots = 8,
-        .shared_memory_bytes = 16 * 1024,
+        .shared_memory_bytes = units.kibibytes(16),
         .background_allowed = background_allowed,
     };
 }

@@ -10,6 +10,7 @@ const HumaneShellRequest = humane_shell.HumaneShellRequest;
 const HumaneShellResponse = humane_shell.HumaneShellResponse;
 const HumaneShellStatus = humane_shell.HumaneShellStatus;
 const appendFmt = rendering.appendFmt;
+const USER_DIAGNOSTICS_BUFFER_BYTES = rendering.USER_DIAGNOSTICS_BUFFER_BYTES;
 const yesNo = native_util.yesNo;
 
 pub const BootPhase = enum(u8) {
@@ -304,7 +305,7 @@ pub const BootedSystem = struct {
             });
         }
         if (self.shell.state.diagnostics_ran) {
-            var diagnostics_buffer: [768]u8 = undefined;
+            var diagnostics_buffer: [USER_DIAGNOSTICS_BUFFER_BYTES]u8 = undefined;
             const diagnostics = try self.shell.ledger.renderUserVisibleDiagnosticsToBuffer(&diagnostics_buffer);
             try appendFmt(buffer, &used, "{s}\n", .{diagnostics});
         }

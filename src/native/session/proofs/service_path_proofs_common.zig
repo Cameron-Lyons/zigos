@@ -5,10 +5,15 @@ const component_port = @import("../../kernel_api/component_port.zig");
 const endpoint = @import("../../kernel_api/endpoint.zig");
 const generated_image_fixtures = if (@import("builtin").is_test) @import("../../task/generated_image_fixtures.zig") else struct {};
 const principal = @import("../../core/principal.zig");
+const shared_memory = @import("../../kernel_api/shared_memory.zig");
 const signing = @import("../../core/signing.zig");
 const storage_driver_protocol = @import("../../drivers/storage_driver_protocol.zig");
 const syscall_surface = @import("../../kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
+const units = @import("../../core/units.zig");
+
+pub const RESOURCE_PROBE_SHARED_MEMORY_BYTES = units.kibibytes(1);
+pub const STORAGE_GRANT_SECTOR_COUNT: u64 = 4096;
 
 pub fn createResourceProbeTask(
     kernel_port: *component_port.KernelPort,
@@ -23,7 +28,7 @@ pub fn createResourceProbeTask(
         8_001,
         "resource-proof",
         "app.resource-proof",
-        1024,
+        RESOURCE_PROBE_SHARED_MEMORY_BYTES,
         81,
     );
 }
@@ -48,9 +53,9 @@ pub fn createBootedServiceTask(
             .component_class = .service_component,
             .budget = .{
                 .cpu_time_ticks = 1_200,
-                .memory_bytes = 64 * 1024,
+                .memory_bytes = units.kibibytes(64),
                 .endpoint_slots = 2,
-                .shared_memory_bytes = 4096,
+                .shared_memory_bytes = shared_memory.PAGE_SIZE,
             },
             .local_only = true,
             .initial_component = .{
@@ -100,7 +105,7 @@ pub fn createBootedProbeTask(
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 1_200,
-                .memory_bytes = 64 * 1024,
+                .memory_bytes = units.kibibytes(64),
                 .endpoint_slots = 1,
                 .shared_memory_bytes = shared_memory_bytes,
             },
@@ -454,13 +459,13 @@ pub fn storageGrant() storage_driver_protocol.AtaBrokerGrant {
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 4096,
+        .sector_count = STORAGE_GRANT_SECTOR_COUNT,
     };
 }
 
 pub fn signer(label: []const u8, seed: u8) signing.SignerIdentity {
     return .{
         .label = label,
-        .seed = [_]u8{seed} ** 32,
+        .seed = signing.seedFromByte(seed),
     };
 }

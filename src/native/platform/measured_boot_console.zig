@@ -1,4 +1,6 @@
 const builtin = @import("builtin");
+const crypto_hash = @import("../core/crypto_hash.zig");
+const hex = @import("../core/hex.zig");
 const measured_boot = @import("measured_boot.zig");
 
 const console = if (builtin.target.os.tag == .freestanding)
@@ -30,10 +32,9 @@ pub fn printMeasurementSummary(boot: *const measured_boot.BootRecord) void {
     }
 }
 
-fn printHexDigest(digest: *const [32]u8) void {
-    const hex = "0123456789abcdef";
+fn printHexDigest(digest: *const crypto_hash.Digest) void {
     for (digest.*) |byte| {
-        console.printChar(hex[byte >> 4]);
-        console.printChar(hex[byte & 0x0f]);
+        console.printChar(hex.lowerDigit(byte >> 4));
+        console.printChar(hex.lowerDigit(byte));
     }
 }

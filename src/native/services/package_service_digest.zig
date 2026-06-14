@@ -1,7 +1,9 @@
 const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 
-pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
+pub const Digest = crypto_hash.Digest;
+
+pub fn digestBundle(bundle: manifest.BundleManifest) Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "bundle-id", bundle.bundle_id);
     crypto_hash.updateBytes(&hasher, "display-name", bundle.display_name);
@@ -67,7 +69,7 @@ pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
     return crypto_hash.finalize(&hasher);
 }
 
-pub fn permissionDigest(requests: []const manifest.PermissionRequest) [32]u8 {
+pub fn permissionDigest(requests: []const manifest.PermissionRequest) Digest {
     var hasher = crypto_hash.init();
     for (requests, 0..) |request, index| {
         const rights_bits = request.rights.toBits();

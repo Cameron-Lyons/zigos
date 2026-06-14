@@ -18,7 +18,7 @@ pub const SecretRecord = struct {
     label_len: usize,
     label: [MAX_LABEL_BYTES]u8,
     sealed_digest_present: bool,
-    sealed_digest: [32]u8,
+    sealed_digest: crypto_hash.Digest,
     value_len: usize,
     value: [MAX_VALUE_BYTES]u8,
 
@@ -38,9 +38,9 @@ pub const SecretHandle = struct {
 
 pub const HardwareSealProvider = struct {
     available: bool = false,
-    sealFn: *const fn (label: []const u8, raw: []const u8) [32]u8 = defaultSeal,
+    sealFn: *const fn (label: []const u8, raw: []const u8) crypto_hash.Digest = defaultSeal,
 
-    pub fn seal(self: HardwareSealProvider, label: []const u8, raw: []const u8) ?[32]u8 {
+    pub fn seal(self: HardwareSealProvider, label: []const u8, raw: []const u8) ?crypto_hash.Digest {
         if (!self.available) return null;
         return self.sealFn(label, raw);
     }
@@ -192,19 +192,19 @@ fn zeroSecret() SecretRecord {
         .label_len = 0,
         .label = [_]u8{0} ** MAX_LABEL_BYTES,
         .sealed_digest_present = false,
-        .sealed_digest = [_]u8{0} ** 32,
+        .sealed_digest = crypto_hash.zero_digest,
         .value_len = 0,
         .value = [_]u8{0} ** MAX_VALUE_BYTES,
     };
 }
 
-fn digestSecretMaterial(raw: []const u8) [32]u8 {
+fn digestSecretMaterial(raw: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "secret-material", raw);
     return crypto_hash.finalize(&hasher);
 }
 
-fn defaultSeal(label: []const u8, raw: []const u8) [32]u8 {
+fn defaultSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "hardware-seal-label", label);
     crypto_hash.updateBytes(&hasher, "hardware-seal-material", raw);
@@ -233,7 +233,7 @@ test "secure secret store returns handles by default and only exports raw when a
 
 test "secure secret store uses hardware seal provider when available" {
     const Provider = struct {
-        fn seal(label: []const u8, raw: []const u8) [32]u8 {
+        fn seal(label: []const u8, raw: []const u8) crypto_hash.Digest {
             var hasher = crypto_hash.init();
             crypto_hash.updateBytes(&hasher, "test-hardware", label);
             crypto_hash.updateBytes(&hasher, "sealed", raw);

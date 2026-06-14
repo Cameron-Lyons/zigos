@@ -1,4 +1,13 @@
 const std = @import("std");
+const endian = @import("../utils/endian.zig");
+const checksum = @import("../utils/checksum.zig");
+
+const checksumIsValid = checksum.sum8IsZero;
+const finishChecksum = checksum.finishSum8Prefix;
+const readU32Le = endian.readU32Le;
+const readU64Le = endian.readU64Le;
+const writeU32Le = endian.writeU32Le;
+const writeU64Le = endian.writeU64Le;
 
 pub const RSDP_SIGNATURE = "RSD PTR ";
 pub const RSDP_V1_LENGTH: usize = 20;
@@ -7,6 +16,24 @@ pub const RSDP_ALIGNMENT: usize = 16;
 pub const SDT_HEADER_LENGTH: usize = 36;
 pub const RSDT_SIGNATURE = "RSDT";
 pub const XSDT_SIGNATURE = "XSDT";
+const RSDP_SCAN_TEST_MEMORY_BYTES: usize = 128;
+const SDT_SIGNATURE_OFFSET: usize = 0;
+const SDT_SIGNATURE_BYTES: usize = 4;
+const SDT_LENGTH_OFFSET: usize = 4;
+const SDT_REVISION_OFFSET: usize = 8;
+const SDT_CHECKSUM_OFFSET: usize = 9;
+const SDT_OEM_ID_OFFSET: usize = 10;
+const SDT_OEM_ID_BYTES: usize = 6;
+const SDT_OEM_TABLE_ID_OFFSET: usize = 16;
+const SDT_OEM_TABLE_ID_BYTES: usize = 8;
+const RSDP_CHECKSUM_OFFSET: usize = 8;
+const RSDP_OEM_ID_OFFSET: usize = 9;
+const RSDP_OEM_ID_BYTES: usize = 6;
+const RSDP_REVISION_OFFSET: usize = 15;
+const RSDP_RSDT_ADDRESS_OFFSET: usize = 16;
+const RSDP_LENGTH_OFFSET: usize = 20;
+const RSDP_XSDT_ADDRESS_OFFSET: usize = 24;
+const RSDP_EXTENDED_CHECKSUM_OFFSET: usize = 32;
 
 pub const Error = error{
     TooSmall,
@@ -36,22 +63,28 @@ pub const SdtHeader = struct {
     oem_table_id: [8]u8,
 };
 
+pub fn sdtLengthFromHeader(header: []const u8) Error!u32 {
+    if (header.len < SDT_HEADER_LENGTH) return error.TooSmall;
+    const length = readU32Le(header[SDT_LENGTH_OFFSET..][0..4]);
+    if (length < SDT_HEADER_LENGTH) return error.InvalidLength;
+    return length;
+}
+
 pub fn parseSdtHeader(table: []const u8) Error!SdtHeader {
-    if (table.len < SDT_HEADER_LENGTH) return error.TooSmall;
-    const length = readU32Le(table[4..8]);
-    if (length < SDT_HEADER_LENGTH or length > table.len) return error.InvalidLength;
+    const length = try sdtLengthFromHeader(table);
+    if (length > table.len) return error.InvalidLength;
     if (!checksumIsValid(table[0..length])) return error.BadChecksum;
 
     var signature: [4]u8 = undefined;
     var oem_id: [6]u8 = undefined;
     var oem_table_id: [8]u8 = undefined;
-    @memcpy(signature[0..], table[0..4]);
-    @memcpy(oem_id[0..], table[10..16]);
-    @memcpy(oem_table_id[0..], table[16..24]);
+    @memcpy(signature[0..], table[SDT_SIGNATURE_OFFSET..][0..SDT_SIGNATURE_BYTES]);
+    @memcpy(oem_id[0..], table[SDT_OEM_ID_OFFSET..][0..SDT_OEM_ID_BYTES]);
+    @memcpy(oem_table_id[0..], table[SDT_OEM_TABLE_ID_OFFSET..][0..SDT_OEM_TABLE_ID_BYTES]);
     return .{
         .signature = signature,
         .length = length,
-        .revision = table[8],
+        .revision = table[SDT_REVISION_OFFSET],
         .oem_id = oem_id,
         .oem_table_id = oem_table_id,
     };
@@ -87,10 +120,10 @@ pub fn parseRsdp(bytes: []const u8) Error!Rsdp {
     if (!checksumIsValid(bytes[0..RSDP_V1_LENGTH])) return error.BadChecksum;
 
     var oem_id: [6]u8 = undefined;
-    @memcpy(&oem_id, bytes[9..15]);
+    @memcpy(&oem_id, bytes[RSDP_OEM_ID_OFFSET..][0..RSDP_OEM_ID_BYTES]);
 
-    const revision = bytes[15];
-    const rsdt_address = readU32Le(bytes[16..20]);
+    const revision = bytes[RSDP_REVISION_OFFSET];
+    const rsdt_address = readU32Le(bytes[RSDP_RSDT_ADDRESS_OFFSET..][0..4]);
     if (revision < 2) {
         return .{
             .revision = revision,
@@ -102,7 +135,7 @@ pub fn parseRsdp(bytes: []const u8) Error!Rsdp {
     }
 
     if (bytes.len < RSDP_V2_MIN_LENGTH) return error.TooSmall;
-    const length = readU32Le(bytes[20..24]);
+    const length = readU32Le(bytes[RSDP_LENGTH_OFFSET..][0..4]);
     if (length < RSDP_V2_MIN_LENGTH or length > bytes.len) return error.InvalidLength;
     if (!checksumIsValid(bytes[0..length])) return error.BadChecksum;
 
@@ -110,7 +143,7 @@ pub fn parseRsdp(bytes: []const u8) Error!Rsdp {
         .revision = revision,
         .oem_id = oem_id,
         .rsdt_address = rsdt_address,
-        .xsdt_address = readU64Le(bytes[24..32]),
+        .xsdt_address = readU64Le(bytes[RSDP_XSDT_ADDRESS_OFFSET..][0..8]),
         .length = length,
     };
 }
@@ -132,96 +165,35 @@ fn alignedOffset(base_physical_address: usize) usize {
     return if (remainder == 0) 0 else RSDP_ALIGNMENT - remainder;
 }
 
-fn checksumIsValid(bytes: []const u8) bool {
-    var sum: u8 = 0;
-    for (bytes) |byte| {
-        sum +%= byte;
-    }
-    return sum == 0;
-}
-
 fn rootEntrySize(signature: []const u8) Error!usize {
     if (std.mem.eql(u8, signature, XSDT_SIGNATURE)) return @sizeOf(u64);
     if (std.mem.eql(u8, signature, RSDT_SIGNATURE)) return @sizeOf(u32);
     return error.BadSignature;
 }
 
-fn readU32Le(bytes: []const u8) u32 {
-    return @as(u32, bytes[0]) |
-        (@as(u32, bytes[1]) << 8) |
-        (@as(u32, bytes[2]) << 16) |
-        (@as(u32, bytes[3]) << 24);
-}
-
-fn readU64Le(bytes: []const u8) u64 {
-    return @as(u64, bytes[0]) |
-        (@as(u64, bytes[1]) << 8) |
-        (@as(u64, bytes[2]) << 16) |
-        (@as(u64, bytes[3]) << 24) |
-        (@as(u64, bytes[4]) << 32) |
-        (@as(u64, bytes[5]) << 40) |
-        (@as(u64, bytes[6]) << 48) |
-        (@as(u64, bytes[7]) << 56);
-}
-
-fn writeU32Le(bytes: []u8, value: u32) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-    bytes[2] = @truncate(value >> 16);
-    bytes[3] = @truncate(value >> 24);
-}
-
-fn writeU64Le(bytes: []u8, value: u64) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-    bytes[2] = @truncate(value >> 16);
-    bytes[3] = @truncate(value >> 24);
-    bytes[4] = @truncate(value >> 32);
-    bytes[5] = @truncate(value >> 40);
-    bytes[6] = @truncate(value >> 48);
-    bytes[7] = @truncate(value >> 56);
-}
-
-fn finishChecksum(bytes: []u8, checksum_index: usize, length: usize) void {
-    bytes[checksum_index] = 0;
-    var sum: u8 = 0;
-    for (bytes[0..length]) |byte| {
-        sum +%= byte;
-    }
-    bytes[checksum_index] = 0 -% sum;
-}
-
 fn validXsdt() [SDT_HEADER_LENGTH + 16]u8 {
     var table = [_]u8{0} ** (SDT_HEADER_LENGTH + 16);
-    @memcpy(table[0..4], XSDT_SIGNATURE);
-    writeU32Le(table[4..8], table.len);
-    table[8] = 1;
-    @memcpy(table[10..16], "ZIGOS ");
-    @memcpy(table[16..24], "NUC11TN ");
+    @memcpy(table[SDT_SIGNATURE_OFFSET..][0..SDT_SIGNATURE_BYTES], XSDT_SIGNATURE);
+    writeU32Le(table[SDT_LENGTH_OFFSET..][0..4], table.len);
+    table[SDT_REVISION_OFFSET] = 1;
+    @memcpy(table[SDT_OEM_ID_OFFSET..][0..SDT_OEM_ID_BYTES], "ZIGOS ");
+    @memcpy(table[SDT_OEM_TABLE_ID_OFFSET..][0..SDT_OEM_TABLE_ID_BYTES], "NUC11TN ");
     writeU64Le(table[SDT_HEADER_LENGTH .. SDT_HEADER_LENGTH + 8], 0x0000_0000_00AB_C000);
     writeU64Le(table[SDT_HEADER_LENGTH + 8 .. SDT_HEADER_LENGTH + 16], 0x0000_0000_00AC_C000);
-    finishChecksum(table[0..], 9, table.len);
+    finishChecksum(table[0..], SDT_CHECKSUM_OFFSET, table.len);
     return table;
 }
 
 fn validRsdpV2() [RSDP_V2_MIN_LENGTH]u8 {
     var rsdp = [_]u8{0} ** RSDP_V2_MIN_LENGTH;
     @memcpy(rsdp[0..8], RSDP_SIGNATURE);
-    @memcpy(rsdp[9..15], "ZIGOS ");
-    rsdp[15] = 2;
-    rsdp[16] = 0x34;
-    rsdp[17] = 0x12;
-    rsdp[20] = RSDP_V2_MIN_LENGTH;
-    rsdp[24] = 0x88;
-    rsdp[25] = 0x77;
-    rsdp[26] = 0x66;
-    rsdp[27] = 0x55;
-    rsdp[28] = 0x44;
-    rsdp[29] = 0x33;
-    rsdp[30] = 0x22;
-    rsdp[31] = 0x11;
-    finishChecksum(rsdp[0..], 8, RSDP_V1_LENGTH);
-    finishChecksum(rsdp[0..], 32, RSDP_V2_MIN_LENGTH);
+    @memcpy(rsdp[RSDP_OEM_ID_OFFSET..][0..RSDP_OEM_ID_BYTES], "ZIGOS ");
+    rsdp[RSDP_REVISION_OFFSET] = 2;
+    writeU32Le(rsdp[RSDP_RSDT_ADDRESS_OFFSET..][0..4], 0x1234);
+    writeU32Le(rsdp[RSDP_LENGTH_OFFSET..][0..4], RSDP_V2_MIN_LENGTH);
+    writeU64Le(rsdp[RSDP_XSDT_ADDRESS_OFFSET..][0..8], 0x1122_3344_5566_7788);
+    finishChecksum(rsdp[0..], RSDP_CHECKSUM_OFFSET, RSDP_V1_LENGTH);
+    finishChecksum(rsdp[0..], RSDP_EXTENDED_CHECKSUM_OFFSET, RSDP_V2_MIN_LENGTH);
     return rsdp;
 }
 
@@ -243,7 +215,7 @@ test "ACPI RSDP parser rejects corrupted checksums" {
 
 test "ACPI RSDP scanner finds aligned descriptors" {
     const rsdp_bytes = validRsdpV2();
-    var memory = [_]u8{0} ** 128;
+    var memory = [_]u8{0} ** RSDP_SCAN_TEST_MEMORY_BYTES;
     @memcpy(memory[32 .. 32 + rsdp_bytes.len], rsdp_bytes[0..]);
     const found = findRsdp(memory[0..], 0xE0000) orelse return error.MissingRsdp;
     try std.testing.expectEqual(@as(usize, 0xE0020), found.physical_address);
@@ -252,7 +224,7 @@ test "ACPI RSDP scanner finds aligned descriptors" {
 
 test "ACPI RSDP scanner aligns by physical address" {
     const rsdp_bytes = validRsdpV2();
-    var memory = [_]u8{0} ** 128;
+    var memory = [_]u8{0} ** RSDP_SCAN_TEST_MEMORY_BYTES;
     @memcpy(memory[15 .. 15 + rsdp_bytes.len], rsdp_bytes[0..]);
     const found = findRsdp(memory[0..], 0xE0001) orelse return error.MissingRsdp;
     try std.testing.expectEqual(@as(usize, 0xE0010), found.physical_address);

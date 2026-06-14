@@ -509,7 +509,8 @@ pub fn printReadyBanner() void {
 }
 
 fn printNumber(value: u64) void {
-    var buffer: [20]u8 = undefined;
+    const DECIMAL_U64_BUFFER_BYTES: usize = 20;
+    var buffer: [DECIMAL_U64_BUFFER_BYTES]u8 = undefined;
     const text = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch return;
     console.print(text);
 }

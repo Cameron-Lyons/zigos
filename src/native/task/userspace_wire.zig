@@ -4,15 +4,14 @@ const binary_cursor = @import("binary_cursor");
 pub const CopyTextExactError = error{DestinationTooSmall};
 pub const FNV1A_64_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
 pub const FNV1A_64_PRIME: u64 = 0x0000_0100_0000_01B3;
+pub const Writer = binary_cursor.Writer;
+pub const Reader = binary_cursor.Reader;
 
 pub fn copyTextExact(dest: []u8, src: []const u8) CopyTextExactError!usize {
     if (src.len > dest.len) return error.DestinationTooSmall;
     @memcpy(dest[0..src.len], src);
     return src.len;
 }
-
-pub const Writer = binary_cursor.Writer;
-pub const Reader = binary_cursor.Reader;
 
 pub fn fnv1a64(bytes: []const u8) u64 {
     return fnv1a64WithSeed(FNV1A_64_OFFSET_BASIS, bytes);
@@ -56,7 +55,8 @@ test "userspace wire cursor round-trips fixed and variable fields" {
     const TestWriter = Writer(Error, error.Full);
     const TestReader = Reader(Error, error.Corrupt);
 
-    var buffer: [16]u8 = undefined;
+    const TEST_WIRE_BUFFER_BYTES: usize = 16;
+    var buffer: [TEST_WIRE_BUFFER_BYTES]u8 = undefined;
     var writer = TestWriter{ .buffer = &buffer };
     try writer.writeByte(0xAB);
     try writer.writeU16(0x1234);
@@ -71,8 +71,9 @@ test "userspace wire cursor round-trips fixed and variable fields" {
 }
 
 test "userspace wire exact copy and fnv integer helpers are explicit" {
-    var buffer = [_]u8{0} ** 4;
-    try std.testing.expectEqual(@as(usize, 4), try copyTextExact(&buffer, "zigo"));
+    const COPY_TEXT_TEST_BUFFER_BYTES: usize = 4;
+    var buffer = [_]u8{0} ** COPY_TEXT_TEST_BUFFER_BYTES;
+    try std.testing.expectEqual(@as(usize, COPY_TEXT_TEST_BUFFER_BYTES), try copyTextExact(&buffer, "zigo"));
     try std.testing.expectError(error.DestinationTooSmall, copyTextExact(buffer[0..3], "zigo"));
 
     const seeded = fnv1a64("seed");

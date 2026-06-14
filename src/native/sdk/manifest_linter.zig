@@ -1,8 +1,10 @@
 const std = @import("std");
 const idl = @import("idl.zig");
 const manifest = @import("../policy/manifest.zig");
+const units = @import("../core/units.zig");
 
 pub const MAX_ISSUES: usize = 24;
+const BACKGROUND_BUDGET_INFO_MEMORY_BYTES: usize = units.kibibytes(256);
 
 pub const Severity = enum(u8) {
     info,
@@ -107,7 +109,7 @@ pub fn lint(bundle: manifest.BundleManifest) Report {
     }
 
     for (bundle.background_tasks) |task| {
-        if (task.budget.cpu_time_ticks > 2_000 or task.budget.memory_bytes > 256 * 1024) {
+        if (task.budget.cpu_time_ticks > 2_000 or task.budget.memory_bytes > BACKGROUND_BUDGET_INFO_MEMORY_BYTES) {
             report.add(.info, .background_budget, task.id);
         }
     }

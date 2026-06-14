@@ -6,9 +6,16 @@ const denial_explanation = @import("denial_explanation.zig");
 const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
+const units = @import("../core/units.zig");
 const workspace = @import("../storage/workspace.zig");
 
 pub const RenderError = error{NoSpaceLeft};
+const GRANT_SCOPE_RENDER_BUFFER_BYTES: usize = 320;
+const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
+const SHARE_SHEET_RENDER_BUFFER_BYTES: usize = 360;
+const BACKGROUND_ACTIVITY_BUFFER_BYTES: usize = 360;
+const REVOCATION_RECEIPT_BUFFER_BYTES: usize = 240;
+const BLOCKED_EXPLANATION_BUFFER_BYTES: usize = 300;
 
 pub const GrantScope = struct {
     resource: []const u8 = "",
@@ -488,7 +495,7 @@ test "humane grant scopes explain scope expiry and revocation" {
         .resource = "relay.zigos.dev",
         .expires_at_ticks = 120,
     };
-    var buffer: [320]u8 = undefined;
+    var buffer: [GRANT_SCOPE_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderGrantScopeToBuffer(&buffer, request, grant, 100);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "named data route only") != null);
@@ -509,7 +516,7 @@ test "humane permission receipts include grant reason duration egress and revoca
             .principal = "trusted-devices",
         },
     };
-    var buffer: [512]u8 = undefined;
+    var buffer: [PERMISSION_RECEIPT_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderPermissionReceiptToBuffer(&buffer, .{
         .task_id = 42,
         .bundle_id = "app.trip",
@@ -537,7 +544,7 @@ test "humane share sheets describe object scoped grants" {
         .reshare_policy = .owner_only,
         .audit_visibility = .shared_participants,
     }).withObjectScope(@import("../core/ids.zig").object(55), "documents/shared.md");
-    var buffer: [360]u8 = undefined;
+    var buffer: [SHARE_SHEET_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderShareSheetToBuffer(&buffer, 12, grant, 40);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "one object (documents/shared.md)") != null);
@@ -555,19 +562,19 @@ test "humane background activity and revocation receipts are user readable" {
         .background_task_id = [_]u8{ 's', 'y', 'n', 'c' } ++ [_]u8{0} ** (background_dispatch.MAX_TASK_ID_BYTES - 4),
         .trigger = .sync_completion,
         .expected_duration_seconds = 40,
-        .budget = .{ .cpu_time_ticks = 1100, .memory_bytes = 96 * 1024 },
+        .budget = .{ .cpu_time_ticks = 1100, .memory_bytes = units.kibibytes(96) },
         .network = .local_network_only,
         .visibility = .status_only,
         .state = .running,
         .tick = 50,
     };
-    var activity_buffer: [360]u8 = undefined;
+    var activity_buffer: [BACKGROUND_ACTIVITY_BUFFER_BYTES]u8 = undefined;
     const activity = try renderBackgroundActivityToBuffer(&activity_buffer, record);
     try std.testing.expect(std.mem.indexOf(u8, activity, "job=sync") != null);
     try std.testing.expect(std.mem.indexOf(u8, activity, "visible=status only") != null);
     try std.testing.expect(std.mem.indexOf(u8, activity, "local network only") != null);
 
-    var revoked_buffer: [240]u8 = undefined;
+    var revoked_buffer: [REVOCATION_RECEIPT_BUFFER_BYTES]u8 = undefined;
     const revoked = try renderRevocationReceiptToBuffer(&revoked_buffer, 9, .network_egress, "relay.zigos.dev", 77, "data route grant revoked");
     try std.testing.expect(std.mem.indexOf(u8, revoked, "is off now") != null);
     try std.testing.expect(std.mem.indexOf(u8, revoked, "approve a new permission review") != null);
@@ -580,7 +587,7 @@ test "humane blocked explanations say what happened next" {
         .rights = .{ .device = .{ .device_use = true } },
     };
     const explanation = denial_explanation.forPermissionDecision(.camera, abi.DenialReason.policy_denied);
-    var buffer: [300]u8 = undefined;
+    var buffer: [BLOCKED_EXPLANATION_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderBlockedExplanationToBuffer(&buffer, "Camera Notes", request, explanation);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Blocked: Camera Notes") != null);

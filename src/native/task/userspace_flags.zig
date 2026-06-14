@@ -1,0 +1,9 @@
+pub const FLAG_SYSTEM_BUNDLE: u32 = 1 << 0;
+pub const FLAG_OWNS_UI_SURFACE: u32 = 1 << 1;
+pub const FLAG_PERMISSION_REVIEW: u32 = 1 << 2;
+pub const FLAG_BACKGROUND_ELIGIBLE: u32 = 1 << 3;
+pub const FLAG_STORAGE_BOUNDARY: u32 = 1 << 4;
+pub const FLAG_NETWORK_BOUNDARY: u32 = 1 << 5;
+pub const FLAG_POLICY_BOUNDARY: u32 = 1 << 6;
+pub const FLAG_DRIVER_BOUNDARY: u32 = 1 << 7;
+pub const FLAG_MMU_PROOF_PROBE: u32 = 1 << 9;

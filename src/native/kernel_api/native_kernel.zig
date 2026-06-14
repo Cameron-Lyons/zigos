@@ -14,6 +14,7 @@ const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const EndpointCreateResult = struct {
     endpoint: abi.EndpointDescriptor,
@@ -828,6 +829,7 @@ fn testContext(operation: abi.NativeOperation, capability_id: u64, target: Kerne
 }
 
 const test_policy_authority: principal.PrincipalId = .{ .kind = .policy_authority, .serial = 1 };
+const TEST_ATA_SECTOR_COUNT: u64 = 4096;
 
 const TestKernelHarness = struct {
     runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
@@ -851,9 +853,9 @@ const TestKernelHarness = struct {
             .component_class = .session_manager,
             .budget = .{
                 .cpu_time_ticks = 10_000,
-                .memory_bytes = 4096,
+                .memory_bytes = shared_memory.PAGE_SIZE,
                 .endpoint_slots = 8,
-                .shared_memory_bytes = 4096,
+                .shared_memory_bytes = shared_memory.PAGE_SIZE,
             },
             .local_only = true,
         });
@@ -903,9 +905,9 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
             .resource_class = .emergency_system_critical,
         },
         .local_only = true,
@@ -923,9 +925,9 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
             .resource_class = .batch_compute,
         },
         .local_only = true,
@@ -955,7 +957,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     }, 8);
     _ = try kernel.endpointConnect(testContext(.endpoint_connect, app_endpoint.capability_id, .none), service_endpoint.capability_id, service_endpoint.endpoint.endpoint_id, 8);
 
-    const shared_result = try kernel.sharedMemoryCreate(testContext(.shared_memory_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, 4096, 9);
+    const shared_result = try kernel.sharedMemoryCreate(testContext(.shared_memory_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, shared_memory.PAGE_SIZE, 9);
     try kernel.endpointSend(testContext(.endpoint_send, app_endpoint.capability_id, .none), 11, "sync-open", shared_result.capability_id, false, 9);
     const received = (try kernel.endpointRecv(testContext(.endpoint_recv, service_endpoint.capability_id, .none), service_task_desc.task_id, 10)).?;
     try std.testing.expectEqualStrings("sync-open", received.payload[0..received.payload_len]);
@@ -988,9 +990,9 @@ test "native kernel descriptor authorization enforces request task scope" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
     });
@@ -999,9 +1001,9 @@ test "native kernel descriptor authorization enforces request task scope" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
     });
@@ -1038,9 +1040,9 @@ test "native kernel rejects app and service launches without signed userspace im
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
     }, 5));
@@ -1049,9 +1051,9 @@ test "native kernel rejects app and service launches without signed userspace im
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
         .launch = .{
@@ -1066,9 +1068,9 @@ test "native kernel rejects app and service launches without signed userspace im
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
         .launch = .{
@@ -1085,9 +1087,9 @@ test "native kernel rejects app and service launches without signed userspace im
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
         .launch = .{
@@ -1116,9 +1118,9 @@ test "native kernel leaves typed service registration outside the TCB" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
         .initial_component = .{
@@ -1152,9 +1154,9 @@ test "capability mint query revoke and task termination are exposed by the nativ
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
     });
@@ -1240,9 +1242,9 @@ test "capability grant plan does not mint when runtime attachment cannot fit" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
     });
@@ -1300,9 +1302,9 @@ test "native kernel brokers device metadata and port io through device capabilit
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
         .launch = .{
@@ -1339,7 +1341,7 @@ test "native kernel brokers device metadata and port io through device capabilit
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 4096,
+        .sector_count = TEST_ATA_SECTOR_COUNT,
     }));
 
     const descriptor = try kernel.deviceDescribe(testContext(.device_describe, device_capability.id, .none), 12);

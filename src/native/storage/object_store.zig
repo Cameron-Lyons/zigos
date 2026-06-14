@@ -1,6 +1,8 @@
 const builtin = @import("builtin");
 const store = @import("object_store/store.zig");
 
+pub const api = store;
+
 pub const ids = store.ids;
 
 pub const MAX_OBJECTS = store.MAX_OBJECTS;
@@ -15,6 +17,8 @@ pub const MAX_PAYLOAD_BYTES = store.MAX_PAYLOAD_BYTES;
 pub const MAX_VERSION_PARENTS = store.MAX_VERSION_PARENTS;
 pub const MAX_OBJECT_QUERY_RESULTS = store.MAX_OBJECT_QUERY_RESULTS;
 pub const MAX_OBJECT_HISTORY_RESULTS = store.MAX_OBJECT_HISTORY_RESULTS;
+pub const MAX_METADATA_LABEL_BYTES = store.MAX_METADATA_LABEL_BYTES;
+pub const MAX_CONTENT_TYPE_BYTES = store.MAX_CONTENT_TYPE_BYTES;
 
 pub const StoreConfig = store.StoreConfig;
 pub const ObjectType = store.ObjectType;

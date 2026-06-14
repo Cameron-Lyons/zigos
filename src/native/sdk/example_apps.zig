@@ -2,6 +2,9 @@ const std = @import("std");
 const manifest = @import("../policy/manifest.zig");
 const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
 const signing = @import("../core/signing.zig");
+const units = @import("../core/units.zig");
+
+const kibibytes = units.kibibytes;
 
 pub const ExampleKind = enum(u8) {
     writer,
@@ -21,27 +24,27 @@ pub const ExamplePackage = struct {
 
 pub const writer_signer = signing.SignerIdentity{
     .label = "example.writer.bundle",
-    .seed = [_]u8{0xA1} ** signing.SEED_BYTES,
+    .seed = signing.seedFromByte(0xA1),
 };
 
 pub const viewer_signer = signing.SignerIdentity{
     .label = "example.viewer.bundle",
-    .seed = [_]u8{0xA2} ** signing.SEED_BYTES,
+    .seed = signing.seedFromByte(0xA2),
 };
 
 pub const first_party_writer_signer = signing.SignerIdentity{
     .label = "zigos.writer.bundle",
-    .seed = [_]u8{0xB1} ** signing.SEED_BYTES,
+    .seed = signing.seedFromByte(0xB1),
 };
 
 pub const first_party_workbench_signer = signing.SignerIdentity{
     .label = "zigos.workbench.bundle",
-    .seed = [_]u8{0xB2} ** signing.SEED_BYTES,
+    .seed = signing.seedFromByte(0xB2),
 };
 
 pub const first_party_studio_signer = signing.SignerIdentity{
     .label = "zigos.studio.bundle",
-    .seed = [_]u8{0xB3} ** signing.SEED_BYTES,
+    .seed = signing.seedFromByte(0xB3),
 };
 
 pub const writer_idl =
@@ -280,8 +283,8 @@ const first_party_writer_background_tasks = [_]manifest.BackgroundTaskDecl{
         .expected_duration_seconds = 20,
         .budget = .{
             .cpu_time_ticks = 700,
-            .memory_bytes = 96 * 1024,
-            .shared_memory_bytes = 12 * 1024,
+            .memory_bytes = kibibytes(96),
+            .shared_memory_bytes = kibibytes(12),
         },
         .network = .local_network_only,
         .visibility = .status_only,
@@ -351,8 +354,8 @@ const first_party_workbench_background_tasks = [_]manifest.BackgroundTaskDecl{
         .expected_duration_seconds = 45,
         .budget = .{
             .cpu_time_ticks = 2_400,
-            .memory_bytes = 384 * 1024,
-            .shared_memory_bytes = 32 * 1024,
+            .memory_bytes = kibibytes(384),
+            .shared_memory_bytes = kibibytes(32),
         },
         .network = .none,
         .visibility = .user_visible,
@@ -438,8 +441,8 @@ const first_party_studio_background_tasks = [_]manifest.BackgroundTaskDecl{
         .expected_duration_seconds = 60,
         .budget = .{
             .cpu_time_ticks = 3_000,
-            .memory_bytes = 512 * 1024,
-            .shared_memory_bytes = 64 * 1024,
+            .memory_bytes = kibibytes(512),
+            .shared_memory_bytes = kibibytes(64),
         },
         .network = .none,
         .visibility = .user_visible,

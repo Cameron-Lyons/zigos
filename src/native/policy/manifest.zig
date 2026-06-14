@@ -1,5 +1,6 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
+const units = @import("../core/units.zig");
 
 pub const InterfaceDecl = struct {
     name: []const u8,
@@ -438,7 +439,7 @@ test "validate rejects background tasks without explicit background permission" 
             .expected_duration_seconds = 30,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
             },
             .network = .local_network_only,
             .visibility = .status_only,
@@ -558,8 +559,8 @@ test "validate accepts a signed local-first bundle manifest" {
             .expected_duration_seconds = 30,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 64 * 1024,
-                .shared_memory_bytes = 8 * 1024,
+                .memory_bytes = units.kibibytes(64),
+                .shared_memory_bytes = units.kibibytes(8),
             },
             .network = .local_network_only,
             .visibility = .status_only,
@@ -584,7 +585,7 @@ test "validate accepts a signed local-first bundle manifest" {
         },
         .update_channel = .beta,
         .signature = .{
-            .format = "ed25519",
+            .format = SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-dev-key",
         },
     };
@@ -677,7 +678,7 @@ test "validate rejects background tasks that omit network and visibility declara
                 .expected_duration_seconds = 10,
                 .budget = .{
                     .cpu_time_ticks = 100,
-                    .memory_bytes = 1024,
+                    .memory_bytes = units.kibibytes(1),
                 },
                 .visibility = .status_only,
             },
@@ -696,7 +697,7 @@ test "validate rejects background tasks that omit network and visibility declara
                 .expected_duration_seconds = 10,
                 .budget = .{
                     .cpu_time_ticks = 100,
-                    .memory_bytes = 1024,
+                    .memory_bytes = units.kibibytes(1),
                 },
                 .network = .local_network_only,
             },
@@ -720,7 +721,7 @@ test "validate rejects background task declarations without background run right
             .expected_duration_seconds = 10,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
             },
             .network = .local_network_only,
             .visibility = .status_only,

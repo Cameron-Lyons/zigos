@@ -1,4 +1,5 @@
 const std = @import("std");
+const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -24,6 +25,9 @@ pub const EgressDecision = struct {
 pub const EgressBroker = *const fn (request: EgressRequest) EgressDecision;
 pub const MAX_NATIVE_PAYLOAD_BYTES: usize = 160;
 pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
+const SERVICE_IDENTITY_FRAME_MAGIC = "ZGNI";
+const DISCOVERY_FRAME_MAGIC = "ZGND";
+const NativeFrameWriter = binary_cursor.Writer(Error, error.PayloadTooLarge);
 
 pub const Error = error{
     EgressDenied,
@@ -43,8 +47,8 @@ pub const NativeServiceIdentityConnection = struct {
     source_mac: [6]u8,
     service_identity_len: usize = 0,
     service_identity: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
-    peer_root_digest: [32]u8,
-    key: [32]u8,
+    peer_root_digest: crypto_hash.Digest,
+    key: crypto_hash.Digest,
     attested: bool,
     peer_root_digest_present: bool,
     attestation_required: bool,
@@ -62,8 +66,8 @@ pub const NativeServiceIdentityFrame = struct {
     capability_id: u64,
     payload_len: usize,
     ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
-    payload_digest: [32]u8,
-    peer_root_digest: [32]u8,
+    payload_digest: crypto_hash.Digest,
+    peer_root_digest: crypto_hash.Digest,
     encrypted: bool,
     egress_allowed: bool,
     attested: bool,
@@ -84,7 +88,7 @@ pub const NativeLocalDiscoveryConnection = struct {
     source_mac: [6]u8,
     discovery_class_len: usize = 0,
     discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
-    key: [32]u8,
+    key: crypto_hash.Digest,
     scoped_discovery: bool,
     egress_decision: network_policy.EgressDecision,
 
@@ -99,7 +103,7 @@ pub const NativeLocalDiscoveryFrame = struct {
     capability_id: u64,
     probe_len: usize,
     ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
-    probe_digest: [32]u8,
+    probe_digest: crypto_hash.Digest,
     discovery_class_len: usize = 0,
     discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     encrypted: bool,
@@ -398,7 +402,7 @@ pub fn sendActiveFrame(frame: []const u8) bool {
     return true;
 }
 
-fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) [32]u8 {
+fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "connection", connection.id);
     crypto_hash.updateInt(&hasher, "policy", connection.policy_id);
@@ -411,14 +415,14 @@ fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) [32]u
     return crypto_hash.finalize(&hasher);
 }
 
-fn nativePayloadDigest(connection: *const NativeServiceIdentityConnection, payload: []const u8) [32]u8 {
+fn nativePayloadDigest(connection: *const NativeServiceIdentityConnection, payload: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "key", &connection.key);
     crypto_hash.updateBytes(&hasher, "payload", payload);
     return crypto_hash.finalize(&hasher);
 }
 
-fn nativeDiscoveryKey(connection: *const NativeLocalDiscoveryConnection) [32]u8 {
+fn nativeDiscoveryKey(connection: *const NativeLocalDiscoveryConnection) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "connection", connection.id);
     crypto_hash.updateInt(&hasher, "policy", connection.policy_id);
@@ -429,7 +433,7 @@ fn nativeDiscoveryKey(connection: *const NativeLocalDiscoveryConnection) [32]u8 
     return crypto_hash.finalize(&hasher);
 }
 
-fn nativeDiscoveryDigest(connection: *const NativeLocalDiscoveryConnection, payload: []const u8) [32]u8 {
+fn nativeDiscoveryDigest(connection: *const NativeLocalDiscoveryConnection, payload: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "key", &connection.key);
     crypto_hash.updateBytes(&hasher, "discovery-class", connection.discoveryClassSlice());
@@ -447,25 +451,18 @@ fn encodeNativeFrame(
     const required_len = 4 + (3 * @sizeOf(u64)) + connection.source_mac.len + 1 + identity.len + 1 + frame.payload_len + frame.payload_digest.len;
     if (buffer.len < required_len) return error.PayloadTooLarge;
 
-    var index: usize = 0;
-    @memcpy(buffer[index..][0..4], "ZGNI");
-    index += 4;
-    writeU64(buffer, &index, frame.connection_id);
-    writeU64(buffer, &index, frame.policy_id);
-    writeU64(buffer, &index, frame.capability_id);
-    @memcpy(buffer[index..][0..connection.source_mac.len], &connection.source_mac);
-    index += connection.source_mac.len;
-    buffer[index] = @intCast(identity.len);
-    index += 1;
-    @memcpy(buffer[index..][0..identity.len], identity);
-    index += identity.len;
-    buffer[index] = @intCast(frame.payload_len);
-    index += 1;
-    @memcpy(buffer[index..][0..frame.payload_len], frame.ciphertextSlice());
-    index += frame.payload_len;
-    @memcpy(buffer[index..][0..frame.payload_digest.len], &frame.payload_digest);
-    index += frame.payload_digest.len;
-    return buffer[0..index];
+    var writer = NativeFrameWriter{ .buffer = buffer };
+    try writer.writeBytes(SERVICE_IDENTITY_FRAME_MAGIC);
+    try writer.writeU64(frame.connection_id);
+    try writer.writeU64(frame.policy_id);
+    try writer.writeU64(frame.capability_id);
+    try writer.writeBytes(&connection.source_mac);
+    try writer.writeByte(@intCast(identity.len));
+    try writer.writeBytes(identity);
+    try writer.writeByte(@intCast(frame.payload_len));
+    try writer.writeBytes(frame.ciphertextSlice());
+    try writer.writeBytes(&frame.payload_digest);
+    return buffer[0..writer.offset];
 }
 
 fn encodeDiscoveryFrame(
@@ -478,36 +475,22 @@ fn encodeDiscoveryFrame(
     const required_len = 4 + (3 * @sizeOf(u64)) + connection.source_mac.len + 1 + discovery_class.len + 1 + frame.probe_len + frame.probe_digest.len;
     if (buffer.len < required_len) return error.PayloadTooLarge;
 
-    var index: usize = 0;
-    @memcpy(buffer[index..][0..4], "ZGND");
-    index += 4;
-    writeU64(buffer, &index, frame.connection_id);
-    writeU64(buffer, &index, frame.policy_id);
-    writeU64(buffer, &index, frame.capability_id);
-    @memcpy(buffer[index..][0..connection.source_mac.len], &connection.source_mac);
-    index += connection.source_mac.len;
-    buffer[index] = @intCast(discovery_class.len);
-    index += 1;
-    @memcpy(buffer[index..][0..discovery_class.len], discovery_class);
-    index += discovery_class.len;
-    buffer[index] = @intCast(frame.probe_len);
-    index += 1;
-    @memcpy(buffer[index..][0..frame.probe_len], frame.ciphertextSlice());
-    index += frame.probe_len;
-    @memcpy(buffer[index..][0..frame.probe_digest.len], &frame.probe_digest);
-    index += frame.probe_digest.len;
-    return buffer[0..index];
-}
-
-fn writeU64(buffer: []u8, index: *usize, value: u64) void {
-    std.mem.writeInt(u64, buffer[index.*..][0..@sizeOf(u64)], value, .little);
-    index.* += @sizeOf(u64);
+    var writer = NativeFrameWriter{ .buffer = buffer };
+    try writer.writeBytes(DISCOVERY_FRAME_MAGIC);
+    try writer.writeU64(frame.connection_id);
+    try writer.writeU64(frame.policy_id);
+    try writer.writeU64(frame.capability_id);
+    try writer.writeBytes(&connection.source_mac);
+    try writer.writeByte(@intCast(discovery_class.len));
+    try writer.writeBytes(discovery_class);
+    try writer.writeByte(@intCast(frame.probe_len));
+    try writer.writeBytes(frame.ciphertextSlice());
+    try writer.writeBytes(&frame.probe_digest);
+    return buffer[0..writer.offset];
 }
 
 fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principal.PrincipalId) void {
-    var bytes: [9]u8 = undefined;
-    bytes[0] = @intFromEnum(value.kind);
-    std.mem.writeInt(u64, bytes[1..9], value.serial, .little);
+    const bytes = value.keyBytes();
     crypto_hash.updateBytes(hasher, tag, &bytes);
 }
 
@@ -578,8 +561,8 @@ test "native network stack gates service identity packets on attested policy cap
     const service_owner = principal.PrincipalId{ .kind = .service, .serial = 70 };
     const source = principal.PrincipalId{ .kind = .device, .serial = 700 };
     const target = principal.PrincipalId{ .kind = .device, .serial = 701 };
-    const pinned_digest = [_]u8{0xA1} ** 32;
-    const wrong_digest = [_]u8{0xA2} ** 32;
+    const pinned_digest = crypto_hash.digestFromByte(0xA1);
+    const wrong_digest = crypto_hash.digestFromByte(0xA2);
 
     const policy = try policies.create(.{
         .owner = service_owner,

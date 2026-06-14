@@ -1,5 +1,6 @@
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -10,6 +11,7 @@ pub const MAX_SYSTEM_IMAGES: usize = 2;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const state_workspace_label = "system-base";
 
+const PERSISTED_STATE_PAYLOAD_BUFFER_BYTES: usize = 512;
 const state_entry_path = "state/activation";
 const empty_slot: u8 = 0xFF;
 
@@ -289,7 +291,7 @@ pub const Manager = struct {
     }
 
     fn persist(self: *Manager, tick: u64) Error!void {
-        var payload: [512]u8 = undefined;
+        var payload: [PERSISTED_STATE_PAYLOAD_BUFFER_BYTES]u8 = undefined;
         const encoded = try self.encode(payload[0..]);
         const existing_entry = self.storage.resolve(self.workspace_id, state_entry_path) catch |err| switch (err) {
             error.EntryNotFound => null,
@@ -399,7 +401,7 @@ fn zeroImage() SystemImage {
         .activation_generation = 0,
         .signer_len = 0,
         .signer = [_]u8{0} ** MAX_LABEL_BYTES,
-        .measurement = [_]u8{0} ** 32,
+        .measurement = crypto_hash.zero_digest,
     };
 }
 
@@ -443,11 +445,11 @@ test "immutable base persists signed read-only image activation and rollback met
     const owner = principal.PrincipalId{ .kind = .service, .serial = 61 };
     const state_signer = signing.SignerIdentity{
         .label = "platform-state",
-        .seed = [_]u8{0x61} ** 32,
+        .seed = signing.seedFromByte(0x61),
     };
     const image_signer = signing.SignerIdentity{
         .label = "platform-image",
-        .seed = [_]u8{0x62} ** 32,
+        .seed = signing.seedFromByte(0x62),
     };
 
     var storage = storage_service.Service.initWithStore(901, 41, owner, &storage_checkpoint_store);
@@ -493,11 +495,11 @@ test "immutable base verification rejects mutable signer and measurement tamperi
     const owner = principal.PrincipalId{ .kind = .service, .serial = 62 };
     const state_signer = signing.SignerIdentity{
         .label = "platform-state",
-        .seed = [_]u8{0x63} ** 32,
+        .seed = signing.seedFromByte(0x63),
     };
     const image_signer = signing.SignerIdentity{
         .label = "platform-image",
-        .seed = [_]u8{0x64} ** 32,
+        .seed = signing.seedFromByte(0x64),
     };
 
     var storage = storage_service.Service.initWithStore(902, 43, owner, &storage_checkpoint_store);

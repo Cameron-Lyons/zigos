@@ -5,10 +5,17 @@ const notification_center = @import("../services/notification_center.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
+const units = @import("../core/units.zig");
 
 const Event = event_ledger.Event;
 const EventKind = event_ledger.EventKind;
 const Ledger = event_ledger.Ledger;
+const DIAGNOSTIC_EXPORT_BUFFER_BYTES = units.kibibytes(2);
+const REMOTE_SHARE_BUFFER_BYTES = units.kibibytes(1);
+const USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES: usize = 768;
+const DOCUMENT_KNOWLEDGE_BUFFER_BYTES: usize = 512;
+const DETAIL_PAYLOAD_BUFFER_BYTES: usize = 96;
+const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
 
 test "event ledger exports structured redacted diagnostics and audit history" {
     var ledger = Ledger.init();
@@ -25,7 +32,7 @@ test "event ledger exports structured redacted diagnostics and audit history" {
     try ledger.recordDeviceTrustChange(user, device_subject, false, 25, "device revoked");
     try ledger.recordSuspiciousAppBehavior(app_subject, 33, 26, 9001, "contacts plus network burst", true);
 
-    var buffer: [2048]u8 = undefined;
+    var buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "service=network_stack") != null);
@@ -39,7 +46,7 @@ test "event ledger exports structured redacted diagnostics and audit history" {
     try std.testing.expect(std.mem.indexOf(u8, full, "tax-return.pdf") != null);
     try std.testing.expectEqual(EventKind.device_trust_change, ledger.latestKind(.device_trust_change).?.kind);
 
-    var summary_buffer: [768]u8 = undefined;
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
     const summary = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
     try std.testing.expect(std.mem.indexOf(u8, summary, "user_visible=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "privacy=redacted") != null);
@@ -63,7 +70,7 @@ test "event ledger requires explicit opt-in before remote sharing personal devic
 
     try ledger.recordSyncConflict(user, 41, 50, "documents/payroll.xlsx conflict", true);
 
-    var buffer: [1024]u8 = undefined;
+    var buffer: [REMOTE_SHARE_BUFFER_BYTES]u8 = undefined;
     try std.testing.expectError(error.ConsentRequired, ledger.exportRemoteShare(&buffer, .{}));
 
     const opted_in = try ledger.exportRemoteShare(&buffer, .{
@@ -88,7 +95,7 @@ test "event ledger remote sharing scrubs protected diagnostics unless explicitly
     try ledger.recordPermissionDecision(user, 61, .screen_capture, false, .policy_denied, 61, "private customer deck", true);
     try ledger.recordSyncConflict(user, 62, 62, "documents/secrets.md conflict", true);
 
-    var buffer: [2048]u8 = undefined;
+    var buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
     try std.testing.expectError(error.ConsentRequired, ledger.exportRemoteShare(&buffer, .{
         .include_protected_content = true,
     }));
@@ -126,7 +133,7 @@ test "event ledger indexes structured queries by kind subject and task" {
     try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .task_id = 44 }));
     try std.testing.expectEqual(EventKind.capability_revocation, ledger.latestKind(.capability_revocation).?.kind);
 
-    var records: [4]Event = undefined;
+    var records: [QUERY_EVENT_RECORD_CAPACITY]Event = undefined;
     const task_matches = ledger.queryEvents(.{ .task_id = 44 }, &records);
     try std.testing.expectEqual(@as(usize, 2), task_matches.len);
     try std.testing.expectEqual(@as(u64, 1), task_matches[0].sequence);
@@ -141,7 +148,7 @@ test "event ledger indexes structured queries by kind subject and task" {
     try std.testing.expectEqual(@as(usize, 2), protected.len);
     try std.testing.expectEqualStrings("alice protected", protected[0].detailSlice());
 
-    var export_buffer: [2048]u8 = undefined;
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "#1 tick=10 kind=permission_decision") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "blocked_help=\"Blocked: This app") != null);
@@ -159,7 +166,7 @@ test "event ledger renders what an app knows about a document" {
     try ledger.recordCapabilityGrant(user, task_id, 700, .object_access, 11, "Permission receipt: granted Object access for workspace://trip/documents/plan.md; data leaves: none; revoke: Permission Review");
     try ledger.recordCapabilityGrant(user, task_id, 701, .network_egress, 12, "Permission receipt: data leaves: sync object workspace://trip/documents/plan.md with trusted-devices; revoke: Permission Review");
 
-    var buffer: [512]u8 = undefined;
+    var buffer: [DOCUMENT_KNOWLEDGE_BUFFER_BYTES]u8 = undefined;
     const before_revoke = try ledger.renderAppDocumentKnowledgeToBuffer(&buffer, task_id, document);
     try std.testing.expect(std.mem.indexOf(u8, before_revoke, "knows=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, before_revoke, "active_grants=1") != null);
@@ -180,7 +187,7 @@ test "event ledger persists history across restart" {
     const owner = principal.PrincipalId{ .kind = .service, .serial = 44 };
     const signer = signing.SignerIdentity{
         .label = "diagnostic-ledger",
-        .seed = [_]u8{0xA7} ** 32,
+        .seed = signing.seedFromByte(0xA7),
     };
 
     var storage = storage_service.Service.initWithStore(901, 300, owner, &storage_checkpoint_store);
@@ -193,7 +200,7 @@ test "event ledger persists history across restart" {
     try std.testing.expect(restarted.loaded_existing_state);
     try std.testing.expectEqual(EventKind.device_trust_change, restarted.latestKind(.device_trust_change).?.kind);
 
-    var buffer: [1024]u8 = undefined;
+    var buffer: [REMOTE_SHARE_BUFFER_BYTES]u8 = undefined;
     const exported = try restarted.exportText(&buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=update_transition") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=device_trust_change") != null);
@@ -208,7 +215,7 @@ test "event ledger batches durable writes until persistence batch flush" {
     const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
     const signer = signing.SignerIdentity{
         .label = "diagnostic-ledger-batched",
-        .seed = [_]u8{0xAA} ** 32,
+        .seed = signing.seedFromByte(0xAA),
     };
 
     var storage = storage_service.Service.initWithStore(904, 306, owner, &storage_checkpoint_store);
@@ -244,7 +251,7 @@ test "event ledger persists user visible policy ux history across restart and qu
     const app = principal.PrincipalId{ .kind = .app, .serial = 9 };
     const signer = signing.SignerIdentity{
         .label = "policy-ux-history",
-        .seed = [_]u8{0xA9} ** 32,
+        .seed = signing.seedFromByte(0xA9),
     };
 
     var storage = storage_service.Service.initWithStore(903, 304, owner, &storage_checkpoint_store);
@@ -291,14 +298,14 @@ test "event ledger persists user visible policy ux history across restart and qu
     try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .notification, .task_id = 503 }));
     try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .task_flow, .task_id = 503 }));
 
-    var events_buffer: [4]Event = undefined;
+    var events_buffer: [QUERY_EVENT_RECORD_CAPACITY]Event = undefined;
     const redacted = restarted.queryEvents(.{ .kind = .permission_decision, .task_id = 503 }, &events_buffer);
     try std.testing.expectEqual(@as(usize, 1), redacted.len);
     try std.testing.expectEqualStrings("redacted", redacted[0].detailSlice());
     const full = restarted.queryEvents(.{ .kind = .permission_decision, .task_id = 503, .include_protected_content = true }, &events_buffer);
     try std.testing.expectEqualStrings("screen capture blocked", full[0].detailSlice());
 
-    var export_buffer: [2048]u8 = undefined;
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try restarted.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=permission_review") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=capability_grant") != null);
@@ -316,7 +323,7 @@ test "event ledger persistence retains full in-memory history and detail payload
     const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
     const signer = signing.SignerIdentity{
         .label = "diagnostic-ledger-bounded",
-        .seed = [_]u8{0xA8} ** 32,
+        .seed = signing.seedFromByte(0xA8),
     };
 
     var storage = storage_service.Service.initWithStore(902, 302, owner, &storage_checkpoint_store);
@@ -324,7 +331,7 @@ test "event ledger persistence retains full in-memory history and detail payload
 
     var tick: u64 = 10;
     while (tick < 18) : (tick += 1) {
-        var detail_buffer: [96]u8 = undefined;
+        var detail_buffer: [DETAIL_PAYLOAD_BUFFER_BYTES]u8 = undefined;
         const detail = try std.fmt.bufPrint(&detail_buffer, "event-{d}-detail-abcdefghijklmnopqrstuvwxyz-0123456789", .{tick});
         try ledger.recordUpdateTransition(
             owner,
@@ -342,7 +349,7 @@ test "event ledger persistence retains full in-memory history and detail payload
     var restarted = try Ledger.initPersistent(&restarted_storage, owner, signer);
     try std.testing.expectEqual(@as(u64, 9), restarted.next_sequence);
 
-    var buffer: [2048]u8 = undefined;
+    var buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try restarted.exportText(&buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "#1 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "#8 ") != null);

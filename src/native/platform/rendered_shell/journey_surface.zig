@@ -230,7 +230,7 @@ pub const JourneySurface = struct {
         if (!summary.offline_first or !summary.personal_e2ee or !summary.used_device_to_device) return error.SyncPolicyMissing;
         _ = try self.ux.syncWorkspace(self.config.workspace_id, self.config.user, "device-to-device");
         if (summary.conflict_count != 0) {
-            var detail_buffer: [96]u8 = undefined;
+            var detail_buffer: [compositor_session.MAX_WINDOW_DETAIL_BYTES]u8 = undefined;
             const detail = std.fmt.bufPrint(&detail_buffer, "sync conflicts: {d}", .{summary.conflict_count}) catch "sync conflicts";
             _ = try self.compositor.openSyncConflictReview(task, self.config.workspace_id, detail);
             _ = try self.ux.syncConflictReview(self.config.workspace_id, self.config.user, detail);

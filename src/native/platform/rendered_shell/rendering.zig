@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const USER_DIAGNOSTICS_BUFFER_BYTES: usize = 768;
+
 pub fn renderControl(buffer: []u8, used: *usize, name: []const u8, done: bool) !void {
     try appendFmt(buffer, used, "control={s} state={s}\n", .{ name, if (done) "done" else "ready" });
 }

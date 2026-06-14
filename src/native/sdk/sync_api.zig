@@ -5,7 +5,9 @@ const object_store = @import("../storage/object_store.zig");
 const object_store_api = @import("object_store_api.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
-const sync_service = @import("../sync/sync_service.zig");
+const sync_service_facade = @import("../sync/sync_service.zig");
+
+const sync_service = sync_service_facade.api;
 
 pub const TransportMode = sync_service.TransportMode;
 pub const WorkspacePolicy = sync_service.WorkspacePolicy;
@@ -26,15 +28,15 @@ pub const DEFAULT_PEER_DEVICE = principal.PrincipalId{ .kind = .device, .serial 
 
 pub const user_identity = signing.SignerIdentity{
     .label = "sdk.sync.user",
-    .seed = [_]u8{0x41} ** signing.SEED_BYTES,
+    .seed = signing.seedFromByte(0x41),
 };
 pub const local_device_identity = signing.SignerIdentity{
     .label = "sdk.sync.local",
-    .seed = [_]u8{0x42} ** signing.SEED_BYTES,
+    .seed = signing.seedFromByte(0x42),
 };
 pub const peer_device_identity = signing.SignerIdentity{
     .label = "sdk.sync.peer",
-    .seed = [_]u8{0x43} ** signing.SEED_BYTES,
+    .seed = signing.seedFromByte(0x43),
 };
 
 pub const LocalFirstWorkspace = struct {
@@ -258,7 +260,7 @@ test "sync SDK configures local-first policy and records replica state" {
 
     const contract_signer = signing.SignerIdentity{
         .label = "sdk.sync.contract",
-        .seed = [_]u8{0x44} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0x44),
     };
     const contract = try node.registerDatabaseContract(workspace_id, "app.zigos.writer", "writer-db", contract_signer);
     try std.testing.expectEqualStrings("app.zigos.writer", contract.bundleIdSlice());

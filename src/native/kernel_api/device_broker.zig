@@ -59,6 +59,21 @@ const host_storage_sectors: usize = if (builtin.target.os.tag == .freestanding) 
 const host_storage_bytes = host_storage_sectors * ata_sector_size;
 const host_write_staging_bytes = ata_max_sector_transfer_count * ata_sector_size;
 const iommu_page_size: u64 = 4096;
+const iommu_root_table_salt = iommu_page_size;
+const iommu_context_table_salt = iommu_page_size * 2;
+const iommu_domain_page_table_salt = iommu_page_size * 3;
+const iommu_fault_record_salt = iommu_page_size * 4;
+const iommu_intel_vtd_base: u64 = 0x0010_0000_0000;
+const iommu_amd_vi_base: u64 = 0x0020_0000_0000;
+const iommu_device_id_mask: u64 = 0x0000_FFFF;
+const iommu_device_id_shift: u6 = 20;
+const iommu_domain_id_mask: u64 = 0xFFFF;
+const iommu_domain_id_shift: u6 = 12;
+const brokered_dma_window_device_mask: u64 = 0x0000_FFFF_FFFF;
+const brokered_dma_window_shift: u6 = 12;
+const test_ata_sector_count: u64 = 4096;
+const test_dma_window_offset: u64 = 0x40000;
+const test_dma_buffer_bytes: u64 = 512;
 
 pub const PortWidth = abi.DevicePortWidth;
 
@@ -290,7 +305,7 @@ pub fn dmaIsolationStatus(device_id: u64, dma_domain_id: u64) Error!DmaIsolation
 }
 
 pub fn brokeredDmaWindowBase(device_id: u64) u64 {
-    return (device_id & 0x0000_FFFF_FFFF) << 12;
+    return (device_id & brokered_dma_window_device_mask) << brokered_dma_window_shift;
 }
 
 pub fn defaultBrokeredDmaWindow(device_id: u64) DmaWindow {
@@ -574,10 +589,10 @@ fn iommuProgramFromRequest(request: DmaProgramRequest) Error!IommuProgramEvidenc
         .engine = request.iommu_engine,
         .device_id = request.device_id,
         .dma_domain_id = request.dma_domain_id,
-        .root_table_address = nonZeroIommuAddress(request.root_table_address, request, 0x1000),
-        .context_table_address = nonZeroIommuAddress(request.context_table_address, request, 0x2000),
-        .domain_page_table_address = nonZeroIommuAddress(request.domain_page_table_address, request, 0x3000),
-        .fault_record_address = nonZeroIommuAddress(request.fault_record_address, request, 0x4000),
+        .root_table_address = nonZeroIommuAddress(request.root_table_address, request, iommu_root_table_salt),
+        .context_table_address = nonZeroIommuAddress(request.context_table_address, request, iommu_context_table_salt),
+        .domain_page_table_address = nonZeroIommuAddress(request.domain_page_table_address, request, iommu_domain_page_table_salt),
+        .fault_record_address = nonZeroIommuAddress(request.fault_record_address, request, iommu_fault_record_salt),
         .queued_invalidation_completed = true,
         .interrupt_remapping_enabled = true,
     };
@@ -599,10 +614,10 @@ fn iommuProgramValid(program: IommuProgramEvidence) bool {
 fn nonZeroIommuAddress(value: u64, request: DmaProgramRequest, salt: u64) u64 {
     if (value != 0) return value;
     const engine_base: u64 = switch (request.iommu_engine) {
-        .intel_vtd => 0x0010_0000_0000,
-        .amd_vi => 0x0020_0000_0000,
+        .intel_vtd => iommu_intel_vtd_base,
+        .amd_vi => iommu_amd_vi_base,
     };
-    return alignDown(engine_base + ((request.device_id & 0x0000_FFFF) << 20) + ((request.dma_domain_id & 0xFFFF) << 12) + salt, iommu_page_size);
+    return alignDown(engine_base + ((request.device_id & iommu_device_id_mask) << iommu_device_id_shift) + ((request.dma_domain_id & iommu_domain_id_mask) << iommu_domain_id_shift) + salt, iommu_page_size);
 }
 
 fn recordDmaFault(
@@ -786,7 +801,7 @@ test "device broker publishes ATA controllers and exposes typed port and irq met
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 4096,
+        .sector_count = test_ata_sector_count,
     }));
 
     const descriptor = try describe(0x1F001);
@@ -795,7 +810,7 @@ test "device broker publishes ATA controllers and exposes typed port and irq met
     try std.testing.expectEqual(@as(u16, 0x3F6), descriptor.ctrl_port);
     try std.testing.expect(descriptor.is_master);
     try std.testing.expectEqual(@as(u8, 14), descriptor.irq_line);
-    try std.testing.expectEqual(@as(u64, 4096), descriptor.sector_count);
+    try std.testing.expectEqual(test_ata_sector_count, descriptor.sector_count);
 
     try writePort(0x1F001, 0x1F0 + ata_io_register_count - 1, .u8, 0x5A);
     try std.testing.expectEqual(@as(u32, 0x5A), try readPort(0x1F001, 0x1F0 + ata_io_register_count - 1, .u8));
@@ -812,7 +827,7 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 4096,
+        .sector_count = test_ata_sector_count,
     }));
 
     const status = try programBrokeredDmaIsolation(0x1F001, 0xD170);
@@ -846,8 +861,8 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
         .mode = .brokered_dma_buffers,
         .bus_master_dma_enabled = false,
         .windows = &.{.{
-            .base = window.base + 0x40000,
-            .length = 4096,
+            .base = window.base + test_dma_window_offset,
+            .length = iommu_page_size,
             .readable_by_device = true,
             .writable_by_device = false,
             .executable = false,
@@ -855,12 +870,12 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
     });
     try std.testing.expect(reprogrammed.program_generation != status.program_generation);
     try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
-    _ = try authorizeDmaBuffer(0x1F001, 0xD170, window.base + 0x40000, 512, .device_read);
+    _ = try authorizeDmaBuffer(0x1F001, 0xD170, window.base + test_dma_window_offset, test_dma_buffer_bytes, .device_read);
     try std.testing.expectError(error.DmaWindowDenied, authorizeDmaBuffer(
         0x1F001,
         0xD170,
-        window.base + 0x40000,
-        512,
+        window.base + test_dma_window_offset,
+        test_dma_buffer_bytes,
         .device_write,
     ));
     const permission_fault = latestDmaFault(0x1F001, 0xD170).?;
@@ -877,7 +892,7 @@ test "device broker records AMD-Vi programming evidence and rejects invalid IOMM
         .ctrl_port = 0x376,
         .is_master = false,
         .irq_line = 15,
-        .sector_count = 4096,
+        .sector_count = test_ata_sector_count,
     }));
     const window = defaultBrokeredDmaWindow(0x1F002);
     const status = try programDmaIsolation(.{
@@ -899,7 +914,7 @@ test "device broker records AMD-Vi programming evidence and rejects invalid IOMM
         .dma_domain_id = 0xA11E,
         .mode = .brokered_dma_buffers,
         .iommu_engine = .intel_vtd,
-        .root_table_address = 0x1001,
+        .root_table_address = iommu_root_table_salt + 1,
         .windows = &.{window},
     }));
 }
@@ -912,12 +927,12 @@ test "device hotplug revokes stale ports and DMA programs" {
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 4096,
+        .sector_count = test_ata_sector_count,
     }));
     const broker_generation = brokerGeneration(0x1F001).?;
     const status = try programBrokeredDmaIsolation(0x1F001, 0xD171);
     const window = defaultBrokeredDmaWindow(0x1F001);
-    const buffer = try authorizeDmaBuffer(0x1F001, status.dma_domain_id, window.base, 4096, .bidirectional);
+    const buffer = try authorizeDmaBuffer(0x1F001, status.dma_domain_id, window.base, iommu_page_size, .bidirectional);
 
     try std.testing.expect(revokeAtaController(0x1F001));
     try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
@@ -929,7 +944,7 @@ test "device hotplug revokes stale ports and DMA programs" {
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 4096,
+        .sector_count = test_ata_sector_count,
     }));
     try std.testing.expect(brokerGeneration(0x1F001).? != broker_generation);
     try std.testing.expectError(error.DmaDomainNotProgrammed, dmaIsolationStatus(0x1F001, status.dma_domain_id));

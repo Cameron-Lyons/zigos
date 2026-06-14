@@ -3,6 +3,7 @@ const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const native_util = @import("../core/util.zig");
 const notification_center = @import("notification_center.zig");
 const principal = @import("../core/principal.zig");
+const units = @import("../core/units.zig");
 
 pub const MAX_JOBS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
@@ -187,7 +188,7 @@ fn schedulerRequest(kind: JobKind) accelerator_scheduler.Request {
             .class = .media_export,
             .wants_gpu = true,
             .wants_media_engine = true,
-            .shared_memory_bytes = 32 * 1024,
+            .shared_memory_bytes = units.kibibytes(32),
         },
         .print_document => .{
             .class = .background_light,

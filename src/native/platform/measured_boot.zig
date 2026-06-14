@@ -1,6 +1,8 @@
 const std = @import("std");
+const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const driver_service = @import("../drivers/driver_service.zig");
+const hex = @import("../core/hex.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
 const policy_manifest = @import("../policy/manifest.zig");
@@ -8,17 +10,18 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
+const units = @import("../core/units.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const copyText = native_util.copyText;
 
 pub const production_artifact_manifest_signer = signing.SignerIdentity{
     .label = "zigos-artifact-manifest",
-    .seed = [_]u8{0xB7} ** 32,
+    .seed = signing.seedFromByte(0xB7),
 };
 
 pub const build_artifact_manifest_signer = signing.SignerIdentity{
     .label = "zigos-build-artifact-manifest",
-    .seed = [_]u8{0xC7} ** 32,
+    .seed = signing.seedFromByte(0xC7),
 };
 
 pub const MAX_RECORDS: usize = 16;
@@ -31,6 +34,13 @@ pub const state_workspace_label = "system-measured-boot";
 const state_entry_path = "state/latest";
 const state_magic = "ZMB1";
 const state_version: u16 = 1;
+const ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES: usize = units.kibibytes(2);
+const BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES: usize = units.kibibytes(4);
+const BOOT_SUMMARY_PAYLOAD_BUFFER_BYTES: usize = 128;
+const BUILD_ARTIFACT_LABEL_BUFFER_BYTES: usize = 32;
+const UserspaceServiceMeasurementPayload = [62]u8;
+const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
+const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 pub const MeasurementKind = enum(u8) {
     kernel,
@@ -50,7 +60,7 @@ pub const MeasurementRecord = struct {
     kind: MeasurementKind,
     label_len: usize,
     label: [MAX_LABEL_BYTES]u8,
-    digest: [32]u8,
+    digest: crypto_hash.Digest,
 
     pub fn labelSlice(self: *const MeasurementRecord) []const u8 {
         return self.label[0..self.label_len];
@@ -69,7 +79,7 @@ pub const BuildArtifactEntry = struct {
     kind: BuildArtifactKind,
     label_len: usize,
     label: [MAX_LABEL_BYTES]u8,
-    digest: [32]u8,
+    digest: crypto_hash.Digest,
 
     pub fn labelSlice(self: *const BuildArtifactEntry) []const u8 {
         return self.label[0..self.label_len];
@@ -93,7 +103,7 @@ pub const ArtifactManifest = struct {
         return self.addDigest(kind, label, hashMeasurement(kind, label, payload));
     }
 
-    pub fn addDigest(self: *ArtifactManifest, kind: MeasurementKind, label: []const u8, digest: [32]u8) Error!void {
+    pub fn addDigest(self: *ArtifactManifest, kind: MeasurementKind, label: []const u8, digest: crypto_hash.Digest) Error!void {
         if (self.entry_count >= MAX_MANIFEST_ENTRIES) return error.RecordTableFull;
         self.entries[self.entry_count] = .{
             .kind = kind,
@@ -109,14 +119,14 @@ pub const ArtifactManifest = struct {
         self: *ArtifactManifest,
         image: *const userspace_loader.ImageRecord,
     ) Error!void {
-        var payload = [_]u8{0} ** 62;
+        var payload = std.mem.zeroes(UserspaceServiceMeasurementPayload);
         @memcpy(payload[0..32], &image.file_sha256);
         std.mem.writeInt(u64, payload[32..40], image.id, .little);
         std.mem.writeInt(u64, payload[40..48], image.entry_point, .little);
         std.mem.writeInt(u64, payload[48..56], @intCast(image.byte_len), .little);
         std.mem.writeInt(u32, payload[56..60], image.contract_flags, .little);
         std.mem.writeInt(u16, payload[60..62], image.component_abi_version, .little);
-        return self.add(.critical_service, image.bundleIdSlice(), payload[0..62]);
+        return self.add(.critical_service, image.bundleIdSlice(), payload[0..]);
     }
 
     pub fn addCriticalServiceImage(
@@ -152,7 +162,7 @@ pub const SignedArtifactManifest = struct {
     signature: policy_manifest.Signature,
 
     pub fn verify(self: *const SignedArtifactManifest, expected_signer: signing.SignerIdentity) bool {
-        var payload_buffer: [2048]u8 = undefined;
+        var payload_buffer: [ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
         const payload = encodeArtifactManifest(self.manifest, &payload_buffer) catch return false;
         return signing.verifyTrusted(self.signature, payload, expected_signer) and requiredArtifactShape(&self.manifest);
     }
@@ -173,7 +183,7 @@ pub const BuildArtifactManifest = struct {
         };
     }
 
-    pub fn addDigest(self: *BuildArtifactManifest, kind: BuildArtifactKind, label: []const u8, digest: [32]u8) Error!void {
+    pub fn addDigest(self: *BuildArtifactManifest, kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!void {
         if (self.entry_count >= MAX_BUILD_ARTIFACTS) return error.RecordTableFull;
         self.entries[self.entry_count] = try buildArtifactEntry(kind, label, digest);
         self.entry_count += 1;
@@ -195,7 +205,7 @@ pub const BuildArtifactManifest = struct {
     }
 
     pub fn verify(self: *const BuildArtifactManifest) bool {
-        var payload_buffer: [4096]u8 = undefined;
+        var payload_buffer: [BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
         const payload = encodeBuildArtifactManifest(self.generation, self.entries[0..self.entry_count], &payload_buffer) catch return false;
         return signing.verifyTrusted(self.signature, payload, build_artifact_manifest_signer) and
             requiredBuildArtifactShape(self);
@@ -206,7 +216,7 @@ pub const BootRecord = struct {
     generation: u64,
     record_count: usize,
     records: [MAX_RECORDS]MeasurementRecord,
-    root_digest: [32]u8,
+    root_digest: crypto_hash.Digest,
     root_provenance: RootProvenance = .synthetic_host,
     artifact_manifest_verified: bool = false,
 
@@ -226,9 +236,9 @@ pub const BootRecord = struct {
         return self.hasVerifiedRoot() and self.root_provenance == .bootloader_provided;
     }
 
-    pub fn computedRootDigest(self: *const BootRecord) ?[32]u8 {
+    pub fn computedRootDigest(self: *const BootRecord) ?crypto_hash.Digest {
         if (self.record_count > MAX_RECORDS) return null;
-        var root = [_]u8{0} ** 32;
+        var root = crypto_hash.zero_digest;
         for (self.records[0..self.record_count], 0..) |record, index| {
             root = hashDigest(root, record, index);
         }
@@ -245,7 +255,7 @@ pub const BootloaderMeasurementHandoff = struct {
     generation: u64,
     record_count: usize,
     records: [MAX_RECORDS]MeasurementRecord,
-    root_digest: [32]u8,
+    root_digest: crypto_hash.Digest,
 
     pub fn fromBootRecord(boot: *const BootRecord) Error!BootloaderMeasurementHandoff {
         if (boot.record_count > MAX_RECORDS) return error.ManifestMismatch;
@@ -264,7 +274,7 @@ pub const BootSummary = struct {
     generation: u64,
     record_count: u16,
     kind_counts: [MEASUREMENT_KIND_COUNT]u16,
-    root_digest: [32]u8,
+    root_digest: crypto_hash.Digest,
 
     pub fn fromRecord(boot: *const BootRecord) BootSummary {
         var summary = BootSummary{
@@ -340,7 +350,7 @@ pub const Recorder = struct {
         return self.addDigest(kind, label, hashMeasurement(kind, label, payload));
     }
 
-    pub fn addDigest(self: *Recorder, kind: MeasurementKind, label: []const u8, digest: [32]u8) Error!void {
+    pub fn addDigest(self: *Recorder, kind: MeasurementKind, label: []const u8, digest: crypto_hash.Digest) Error!void {
         if (self.record_count >= MAX_RECORDS) return error.RecordTableFull;
         self.records[self.record_count] = .{
             .kind = kind,
@@ -372,7 +382,7 @@ pub const Recorder = struct {
     }
 
     pub fn finalize(self: *const Recorder) BootRecord {
-        var root = [_]u8{0} ** 32;
+        var root = crypto_hash.zero_digest;
         for (self.records[0..self.record_count], 0..) |record, index| {
             root = hashDigest(root, record, index);
         }
@@ -385,11 +395,22 @@ pub const Recorder = struct {
     }
 };
 
+pub fn addMeasuredArtifact(
+    recorder: *Recorder,
+    artifact_manifest: *ArtifactManifest,
+    kind: MeasurementKind,
+    label: []const u8,
+    payload: []const u8,
+) Error!void {
+    try recorder.add(kind, label, payload);
+    try artifact_manifest.add(kind, label, payload);
+}
+
 pub fn signArtifactManifest(
     artifact_manifest: ArtifactManifest,
     identity: signing.SignerIdentity,
 ) anyerror!SignedArtifactManifest {
-    var payload_buffer: [2048]u8 = undefined;
+    var payload_buffer: [ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
     const payload = try encodeArtifactManifest(artifact_manifest, &payload_buffer);
     return .{
         .manifest = artifact_manifest,
@@ -412,7 +433,7 @@ pub fn buildArtifactDigestMatches(
     manifest: *const BuildArtifactManifest,
     kind: BuildArtifactKind,
     label: []const u8,
-    digest: *const [32]u8,
+    digest: *const crypto_hash.Digest,
 ) bool {
     const entry = manifest.find(kind, label) orelse return false;
     return std.mem.eql(u8, &entry.digest, digest);
@@ -459,7 +480,7 @@ pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
     try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&missing_entry));
 }
 
-pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: [32]u8) Error!BuildArtifactEntry {
+pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!BuildArtifactEntry {
     var entry = zeroBuildArtifactEntry();
     entry.kind = kind;
     entry.label_len = copyText(&entry.label, label);
@@ -486,7 +507,7 @@ pub fn buildArtifactManifestFromGenerated(comptime generated: anytype) Error!Bui
 }
 
 fn signBuildArtifactManifestForTest(manifest: *BuildArtifactManifest) !void {
-    var payload_buffer: [4096]u8 = undefined;
+    var payload_buffer: [BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
     const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
     manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
 }
@@ -625,7 +646,7 @@ pub const MeasurementJournal = struct {
     }
 
     fn persist(self: *MeasurementJournal, summary: BootSummary, tick: u64) anyerror!void {
-        var payload_buffer: [128]u8 = undefined;
+        var payload_buffer: [BOOT_SUMMARY_PAYLOAD_BUFFER_BYTES]u8 = undefined;
         const payload = try encodeSummary(summary, &payload_buffer);
         const existing_entry = self.storage.resolve(self.workspace_id, state_entry_path) catch |err| switch (err) {
             error.EntryNotFound => null,
@@ -657,7 +678,7 @@ fn zeroRecord() MeasurementRecord {
         .kind = .kernel,
         .label_len = 0,
         .label = [_]u8{0} ** MAX_LABEL_BYTES,
-        .digest = [_]u8{0} ** 32,
+        .digest = crypto_hash.zero_digest,
     };
 }
 
@@ -666,11 +687,11 @@ fn zeroBuildArtifactEntry() BuildArtifactEntry {
         .kind = .bootloader_source,
         .label_len = 0,
         .label = [_]u8{0} ** MAX_LABEL_BYTES,
-        .digest = [_]u8{0} ** 32,
+        .digest = crypto_hash.zero_digest,
     };
 }
 
-fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8) [32]u8 {
+fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "measurement-kind", kind);
     crypto_hash.updateBytes(&hasher, "label", label);
@@ -678,10 +699,10 @@ fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8
     return crypto_hash.finalize(&hasher);
 }
 
-fn rawSha256(bytes: []const u8) [32]u8 {
+fn rawSha256(bytes: []const u8) crypto_hash.Digest {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(bytes);
-    var digest: [32]u8 = undefined;
+    var digest: crypto_hash.Digest = undefined;
     hasher.final(&digest);
     return digest;
 }
@@ -703,7 +724,8 @@ fn removeBuildArtifactEntry(manifest: *BuildArtifactManifest, index: usize) Erro
     manifest.entries[manifest.entry_count] = zeroBuildArtifactEntry();
 }
 
-const CriticalServiceMeasurementPayload = [64]u8;
+const CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES: usize = 64;
+const CriticalServiceMeasurementPayload = [CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES]u8;
 
 fn criticalServiceMeasurementPayload(
     payload: *CriticalServiceMeasurementPayload,
@@ -717,10 +739,10 @@ fn criticalServiceMeasurementPayload(
     std.mem.writeInt(u16, payload[56..58], @intFromEnum(service.class), .little);
     std.mem.writeInt(u32, payload[58..62], image.contract_flags, .little);
     std.mem.writeInt(u16, payload[62..64], image.component_abi_version, .little);
-    return payload[0..64];
+    return payload[0..];
 }
 
-fn driverSetDigest(directory: *const driver_service.Directory) [32]u8 {
+fn driverSetDigest(directory: *const driver_service.Directory) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     var driver_count: usize = 0;
     for (directory.slots) |slot| {
@@ -747,7 +769,7 @@ fn driverSetDigest(directory: *const driver_service.Directory) [32]u8 {
     return crypto_hash.finalize(&hasher);
 }
 
-fn hashDigest(root: [32]u8, record: MeasurementRecord, index: usize) [32]u8 {
+fn hashDigest(root: crypto_hash.Digest, record: MeasurementRecord, index: usize) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "root", &root);
     crypto_hash.updateEnum(&hasher, "record-kind", record.kind);
@@ -814,16 +836,9 @@ fn appendManifestFormat(buffer: []u8, offset: usize, comptime fmt: []const u8, a
     return offset + text.len;
 }
 
-fn appendHexDigest(buffer: []u8, offset: usize, digest: *const [32]u8) error{NoSpaceLeft}!usize {
-    const hex = "0123456789abcdef";
-    if (offset + 64 > buffer.len) return error.NoSpaceLeft;
-    var cursor = offset;
-    for (digest.*) |byte| {
-        buffer[cursor] = hex[byte >> 4];
-        buffer[cursor + 1] = hex[byte & 0x0f];
-        cursor += 2;
-    }
-    return cursor;
+fn appendHexDigest(buffer: []u8, offset: usize, digest: *const crypto_hash.Digest) error{NoSpaceLeft}!usize {
+    const encoded = hex.encodeLower(digest.*[0..], buffer[offset..]) catch return error.NoSpaceLeft;
+    return offset + encoded.len;
 }
 
 fn encodeSummary(summary: BootSummary, buffer: []u8) Error![]const u8 {
@@ -850,7 +865,7 @@ fn decodeSummary(payload: []const u8) Error!BootSummary {
         .generation = try reader.readU64(),
         .record_count = try reader.readU16(),
         .kind_counts = [_]u16{0} ** MEASUREMENT_KIND_COUNT,
-        .root_digest = [_]u8{0} ** 32,
+        .root_digest = crypto_hash.zero_digest,
     };
     if (summary.record_count > MAX_RECORDS) return error.CorruptState;
     try reader.readBytes(&summary.root_digest);
@@ -863,56 +878,6 @@ fn decodeSummary(payload: []const u8) Error!BootSummary {
     if (!reader.eof()) return error.CorruptState;
     return summary;
 }
-
-const CursorWriter = struct {
-    buffer: []u8,
-    offset: usize = 0,
-
-    fn writeBytes(self: *CursorWriter, bytes: []const u8) Error!void {
-        if (self.offset + bytes.len > self.buffer.len) return error.StateTooLarge;
-        @memcpy(self.buffer[self.offset .. self.offset + bytes.len], bytes);
-        self.offset += bytes.len;
-    }
-
-    fn writeU16(self: *CursorWriter, value: u16) Error!void {
-        var bytes: [2]u8 = undefined;
-        std.mem.writeInt(u16, &bytes, value, .little);
-        try self.writeBytes(&bytes);
-    }
-
-    fn writeU64(self: *CursorWriter, value: u64) Error!void {
-        var bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &bytes, value, .little);
-        try self.writeBytes(&bytes);
-    }
-};
-
-const CursorReader = struct {
-    buffer: []const u8,
-    offset: usize = 0,
-
-    fn readBytes(self: *CursorReader, dest: []u8) Error!void {
-        if (self.offset + dest.len > self.buffer.len) return error.CorruptState;
-        @memcpy(dest, self.buffer[self.offset .. self.offset + dest.len]);
-        self.offset += dest.len;
-    }
-
-    fn readU16(self: *CursorReader) Error!u16 {
-        var bytes: [2]u8 = undefined;
-        try self.readBytes(&bytes);
-        return std.mem.readInt(u16, &bytes, .little);
-    }
-
-    fn readU64(self: *CursorReader) Error!u64 {
-        var bytes: [8]u8 = undefined;
-        try self.readBytes(&bytes);
-        return std.mem.readInt(u64, &bytes, .little);
-    }
-
-    fn eof(self: *const CursorReader) bool {
-        return self.offset == self.buffer.len;
-    }
-};
 
 fn stateObjectId() u64 {
     return native_util.fnv1a64WithSeed(0xB0075A7E600D0001, "platform:measured-boot:latest");
@@ -1010,7 +975,7 @@ test "driver set measurements bind signed driver records and restart generation"
         .display_name = "Network Driver",
         .publisher = "zigos.dev",
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-driver-key",
         },
     };
@@ -1050,7 +1015,7 @@ test "measured boot journal persists and compares latest boot summary across res
     const owner = principal.PrincipalId{ .kind = .service, .serial = 160 };
     const state_signer = signing.SignerIdentity{
         .label = "measured-boot-state",
-        .seed = [_]u8{0xA1} ** 32,
+        .seed = signing.seedFromByte(0xA1),
     };
 
     var first_storage = storage_service.Service.initWithStore(1_600, 160, owner, &checkpoint_store);
@@ -1122,7 +1087,7 @@ test "signed artifact manifests bind required boot artifact classes before activ
 
     const wrong_signer = signing.SignerIdentity{
         .label = "untrusted-artifact-manifest",
-        .seed = [_]u8{0xB8} ** 32,
+        .seed = signing.seedFromByte(0xB8),
     };
     const wrong_authority = try signArtifactManifest(artifact_manifest, wrong_signer);
     try std.testing.expect(!verifySignedArtifactManifest(
@@ -1134,7 +1099,7 @@ test "signed artifact manifests bind required boot artifact classes before activ
         .generation = artifact_manifest.generation,
         .record_count = artifact_manifest.entry_count,
         .records = [_]MeasurementRecord{zeroRecord()} ** MAX_RECORDS,
-        .root_digest = [_]u8{0} ** 32,
+        .root_digest = crypto_hash.zero_digest,
     };
     @memcpy(boot.records[0..artifact_manifest.entry_count], artifact_manifest.entries[0..artifact_manifest.entry_count]);
     try std.testing.expect(bootRecordMatchesManifest(&boot, &artifact_manifest));
@@ -1144,16 +1109,20 @@ test "signed artifact manifests bind required boot artifact classes before activ
 
 test "build-generated artifact manifests reject tampered bootloader source measurement and authority" {
     var manifest = BuildArtifactManifest.init(1);
-    try manifest.addDigest(.bootloader_source, "src/boot/boot64.S", [_]u8{0x10} ** 32);
-    try manifest.addDigest(.bootloader_measurement, "multiboot-v1:zigos_native", [_]u8{0x11} ** 32);
+    const bootloader_source_digest = crypto_hash.digestFromByte(0x10);
+    const bootloader_measurement_digest = crypto_hash.digestFromByte(0x11);
+    const unexpected_bootloader_digest = crypto_hash.digestFromByte(0x12);
+
+    try manifest.addDigest(.bootloader_source, "src/boot/boot64.S", bootloader_source_digest);
+    try manifest.addDigest(.bootloader_measurement, "multiboot-v1:zigos_native", bootloader_measurement_digest);
     inline for (0..10) |index| {
-        const digest = [_]u8{@intCast(0x20 + index)} ** 32;
-        var label_buffer: [32]u8 = undefined;
+        const digest = crypto_hash.digestFromByte(@intCast(0x20 + index));
+        var label_buffer: [BUILD_ARTIFACT_LABEL_BUFFER_BYTES]u8 = undefined;
         const label = try std.fmt.bufPrint(&label_buffer, "zigos.system.test-{d}", .{index});
         try manifest.addDigest(.userspace_image, label, digest);
     }
 
-    var payload_buffer: [4096]u8 = undefined;
+    var payload_buffer: [BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
     const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
     manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
 
@@ -1163,25 +1132,25 @@ test "build-generated artifact manifests reject tampered bootloader source measu
         &manifest,
         .bootloader_source,
         "src/boot/boot64.S",
-        &[_]u8{0x10} ** 32,
+        &bootloader_source_digest,
     ));
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
         .bootloader_measurement,
         "multiboot-v1:zigos_native",
-        &[_]u8{0x11} ** 32,
+        &bootloader_measurement_digest,
     ));
     try std.testing.expect(!buildArtifactDigestMatches(
         &manifest,
         .bootloader_source,
         "src/boot/boot64.S",
-        &[_]u8{0x12} ** 32,
+        &unexpected_bootloader_digest,
     ));
     try std.testing.expect(!buildArtifactDigestMatches(
         &manifest,
         .bootloader_measurement,
         "multiboot-v1:zigos_native",
-        &[_]u8{0x12} ** 32,
+        &unexpected_bootloader_digest,
     ));
 
     for (0..manifest.entry_count) |entry_index| {
@@ -1193,7 +1162,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     var wrong_authority = manifest;
     const wrong_signer = signing.SignerIdentity{
         .label = "untrusted-build-artifact-manifest",
-        .seed = [_]u8{0xC8} ** 32,
+        .seed = signing.seedFromByte(0xC8),
     };
     wrong_authority.signature = try signing.signWithDefaultRegistry(.ed25519, wrong_signer, payload);
     try std.testing.expect(!verifyBuildArtifactManifest(&wrong_authority));
@@ -1208,22 +1177,14 @@ test "bootloader measurement handoff rejects unsigned manifests and tampered sta
     var recorder = Recorder.init();
     recorder.begin(33);
 
-    try artifact_manifest.add(.kernel, "kernel-zigos-native", "kernel=v7");
-    try recorder.add(.kernel, "kernel-zigos-native", "kernel=v7");
-    try artifact_manifest.add(.base_image, "stable-f", "image=v7");
-    try recorder.add(.base_image, "stable-f", "image=v7");
-    try artifact_manifest.add(.critical_service, "policy", "healthy");
-    try recorder.add(.critical_service, "policy", "healthy");
-    try artifact_manifest.add(.critical_service, "storage", "healthy");
-    try recorder.add(.critical_service, "storage", "healthy");
-    try artifact_manifest.add(.critical_service, "compositor", "healthy");
-    try recorder.add(.critical_service, "compositor", "healthy");
-    try artifact_manifest.add(.critical_service, "network", "healthy");
-    try recorder.add(.critical_service, "network", "healthy");
-    try artifact_manifest.add(.policy, "production-policy-set", "strict");
-    try recorder.add(.policy, "production-policy-set", "strict");
-    try artifact_manifest.add(.driver_set, "production-driver-set", "drivers=v7");
-    try recorder.add(.driver_set, "production-driver-set", "drivers=v7");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos-native", "kernel=v7");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .base_image, "stable-f", "image=v7");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "compositor", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "production-policy-set", "strict");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "production-driver-set", "drivers=v7");
 
     const signed_manifest = try signArtifactManifest(artifact_manifest, production_artifact_manifest_signer);
     const boot = recorder.finalize();
@@ -1274,22 +1235,14 @@ test "verified boot chain rejects synthetic provenance and every mismatched arti
     var recorder = Recorder.init();
     recorder.begin(22);
 
-    try artifact_manifest.add(.kernel, "kernel-zigos-native", "kernel=v6");
-    try recorder.add(.kernel, "kernel-zigos-native", "kernel=v6");
-    try artifact_manifest.add(.base_image, "stable-e", "image=v6");
-    try recorder.add(.base_image, "stable-e", "image=v6");
-    try artifact_manifest.add(.critical_service, "policy", "healthy");
-    try recorder.add(.critical_service, "policy", "healthy");
-    try artifact_manifest.add(.critical_service, "storage", "healthy");
-    try recorder.add(.critical_service, "storage", "healthy");
-    try artifact_manifest.add(.critical_service, "compositor", "healthy");
-    try recorder.add(.critical_service, "compositor", "healthy");
-    try artifact_manifest.add(.critical_service, "network", "healthy");
-    try recorder.add(.critical_service, "network", "healthy");
-    try artifact_manifest.add(.policy, "production-policy-set", "strict");
-    try recorder.add(.policy, "production-policy-set", "strict");
-    try artifact_manifest.add(.driver_set, "production-driver-set", "drivers=v6");
-    try recorder.add(.driver_set, "production-driver-set", "drivers=v6");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos-native", "kernel=v6");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .base_image, "stable-e", "image=v6");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "compositor", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "production-policy-set", "strict");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "production-driver-set", "drivers=v6");
 
     var boot = recorder.finalize();
     try verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);

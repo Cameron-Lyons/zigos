@@ -1,4 +1,5 @@
 const std = @import("std");
+const binary_cursor = @import("binary_cursor");
 const capability = @import("../kernel_api/capability.zig");
 const device_graph = @import("device_graph.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
@@ -41,6 +42,8 @@ pub const Error = harness.Error || endpoint.Error || network_driver_task.Error |
 pub const MAX_CAPTURED_PACKETS: usize = 16;
 pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
 pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 1;
+const NativeFrameWriter = binary_cursor.Writer(Error, error.PacketTooLarge);
+const NativeFrameReader = binary_cursor.Reader(Error, error.NativeTransportMalformedFrame);
 
 pub const NativeTransportAbi = struct {
     pub const magic = [_]u8{ 'Z', 'G', 'S', 'T' };
@@ -475,35 +478,29 @@ pub fn assertLastCapturedNativeSyncFrame(
 
 pub fn decodeNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
     if (frame.len < NativeTransportAbi.fixed_header_bytes + 32) return error.NativeTransportMalformedFrame;
-    if (!std.mem.eql(u8, frame[0..4], &NativeTransportAbi.magic)) return error.NativeTransportMalformedFrame;
 
-    var index: usize = 4;
-    const abi_version = readU16(frame, &index);
+    var reader = NativeFrameReader{ .buffer = frame };
+    if (!std.mem.eql(u8, try reader.readSlice(NativeTransportAbi.magic.len), &NativeTransportAbi.magic)) return error.NativeTransportMalformedFrame;
+
+    const abi_version = try reader.readU16();
     if (abi_version != NativeTransportAbi.version) return error.NativeTransportMalformedFrame;
-    const header_len = readU16(frame, &index);
+    const header_len = try reader.readU16();
     if (header_len != NativeTransportAbi.fixed_header_bytes) return error.NativeTransportMalformedFrame;
 
-    const session_id = readU64(frame, &index);
-    const sequence = readU64(frame, &index);
-    const transport = try parseTransportMode(frame[index]);
-    index += 1;
-    const source_kind = try parsePrincipalKind(frame[index]);
-    index += 1;
-    const target_kind = try parsePrincipalKind(frame[index]);
-    index += 1;
-    const flags = frame[index];
-    index += 1;
-    const policy_id = readU64(frame, &index);
-    const capability_id = readU64(frame, &index);
-    const source_serial = readU64(frame, &index);
-    const target_serial = readU64(frame, &index);
-    const ciphertext_len = readU16(frame, &index);
-    const required_len = index + ciphertext_len + 32;
-    if (required_len != frame.len) return error.NativeTransportMalformedFrame;
-
-    const ciphertext = frame[index..][0..ciphertext_len];
-    index += ciphertext_len;
-    const packet_digest = frame[index..][0..32];
+    const session_id = try reader.readU64();
+    const sequence = try reader.readU64();
+    const transport = try parseTransportMode(try reader.readByte());
+    const source_kind = try parsePrincipalKind(try reader.readByte());
+    const target_kind = try parsePrincipalKind(try reader.readByte());
+    const flags = try reader.readByte();
+    const policy_id = try reader.readU64();
+    const capability_id = try reader.readU64();
+    const source_serial = try reader.readU64();
+    const target_serial = try reader.readU64();
+    const ciphertext_len = try reader.readU16();
+    if (reader.remaining() != ciphertext_len + 32) return error.NativeTransportMalformedFrame;
+    const ciphertext = try reader.readSlice(ciphertext_len);
+    const packet_digest = try reader.readSlice(32);
 
     return .{
         .abi_version = abi_version,
@@ -532,35 +529,26 @@ pub fn encodeNativeSyncFrame(
     const required_len = NativeTransportAbi.fixed_header_bytes + ciphertext.len + frame.packet_digest.len;
     if (buffer.len < required_len) return error.PacketTooLarge;
 
-    var index: usize = 0;
-    @memcpy(buffer[index..][0..4], &NativeTransportAbi.magic);
-    index += 4;
-    std.mem.writeInt(u16, buffer[index..][0..2], NativeTransportAbi.version, .little);
-    index += 2;
-    std.mem.writeInt(u16, buffer[index..][0..2], @intCast(NativeTransportAbi.fixed_header_bytes), .little);
-    index += 2;
-    writeU64(buffer, &index, session.id);
-    writeU64(buffer, &index, sequence);
-    buffer[index] = @intFromEnum(session.transport);
-    index += 1;
-    buffer[index] = @intFromEnum(frame.packet.source_device.kind);
-    index += 1;
-    buffer[index] = @intFromEnum(frame.packet.target_device.kind);
-    index += 1;
-    buffer[index] = (if (frame.packet.encrypted) NativeTransportAbi.flag_encrypted else 0) |
+    var writer = NativeFrameWriter{ .buffer = buffer };
+    try writer.writeBytes(&NativeTransportAbi.magic);
+    try writer.writeU16(NativeTransportAbi.version);
+    try writer.writeU16(@intCast(NativeTransportAbi.fixed_header_bytes));
+    try writer.writeU64(session.id);
+    try writer.writeU64(sequence);
+    try writer.writeByte(@intFromEnum(session.transport));
+    try writer.writeByte(@intFromEnum(frame.packet.source_device.kind));
+    try writer.writeByte(@intFromEnum(frame.packet.target_device.kind));
+    const flags = (if (frame.packet.encrypted) NativeTransportAbi.flag_encrypted else 0) |
         (if (frame.packet.egress_allowed) NativeTransportAbi.flag_egress_allowed else 0);
-    index += 1;
-    writeU64(buffer, &index, frame.packet.policy_id);
-    writeU64(buffer, &index, frame.packet.capability_id);
-    writeU64(buffer, &index, frame.packet.source_device.serial);
-    writeU64(buffer, &index, frame.packet.target_device.serial);
-    std.mem.writeInt(u16, buffer[index..][0..2], @intCast(ciphertext.len), .little);
-    index += 2;
-    @memcpy(buffer[index..][0..ciphertext.len], ciphertext);
-    index += ciphertext.len;
-    @memcpy(buffer[index..][0..frame.packet_digest.len], &frame.packet_digest);
-    index += frame.packet_digest.len;
-    return buffer[0..index];
+    try writer.writeByte(flags);
+    try writer.writeU64(frame.packet.policy_id);
+    try writer.writeU64(frame.packet.capability_id);
+    try writer.writeU64(frame.packet.source_device.serial);
+    try writer.writeU64(frame.packet.target_device.serial);
+    try writer.writeU16(@intCast(ciphertext.len));
+    try writer.writeBytes(ciphertext);
+    try writer.writeBytes(&frame.packet_digest);
+    return buffer[0..writer.offset];
 }
 
 fn parseTransportMode(raw: u8) Error!sync_state.TransportMode {
@@ -581,23 +569,6 @@ fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
         @intFromEnum(principal.PrincipalKind.team) => .team,
         else => error.NativeTransportMalformedFrame,
     };
-}
-
-fn readU16(buffer: []const u8, index: *usize) u16 {
-    const value = std.mem.readInt(u16, buffer[index.*..][0..2], .little);
-    index.* += 2;
-    return value;
-}
-
-fn readU64(buffer: []const u8, index: *usize) u64 {
-    const value = std.mem.readInt(u64, buffer[index.*..][0..@sizeOf(u64)], .little);
-    index.* += @sizeOf(u64);
-    return value;
-}
-
-fn writeU64(buffer: []u8, index: *usize, value: u64) void {
-    std.mem.writeInt(u64, buffer[index.*..][0..@sizeOf(u64)], value, .little);
-    index.* += @sizeOf(u64);
 }
 
 test "native sync transport uses endpoints and reconnects without the in-process relay queue" {
@@ -633,7 +604,7 @@ test "native sync transport uses endpoints and reconnects without the in-process
         .now_ticks = 20,
     }, 45, 46, source, target, "relay.native.sync");
 
-    const signer = signing.SignerIdentity{ .label = "native-sync-transport", .seed = [_]u8{0x45} ** 32 };
+    const signer = signing.SignerIdentity{ .label = "native-sync-transport", .seed = signing.seedFromByte(0x45) };
     native_transport.disconnect(&connection);
     try std.testing.expectError(error.NativeTransportDisconnected, native_transport.sendSigned(&connection, "queued while offline", signer));
     native_transport.reconnect(&connection);
@@ -715,7 +686,7 @@ test "native sync transport captures encrypted driver packets and handles replay
         .evidence = .{ .destination = .{ .domain = "relay.capture.sync" } },
         .now_ticks = 20,
     }, 95, 96, source, target, "relay.capture.sync");
-    const signer = signing.SignerIdentity{ .label = "native-sync-capture", .seed = [_]u8{0x52} ** 32 };
+    const signer = signing.SignerIdentity{ .label = "native-sync-capture", .seed = signing.seedFromByte(0x52) };
 
     const delivered = try native_transport.sendSigned(&connection, "object delta", signer);
     try std.testing.expect(delivered.network_delivered);
@@ -762,10 +733,10 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     const target = principal.PrincipalId{ .kind = .device, .serial = 172 };
     const owner = principal.PrincipalId{ .kind = .service, .serial = 173 };
     const app = principal.PrincipalId{ .kind = .app, .serial = 174 };
-    const user_signer = signing.SignerIdentity{ .label = "native-revocation-user", .seed = [_]u8{0x61} ** 32 };
-    const source_signer = signing.SignerIdentity{ .label = "native-revocation-source", .seed = [_]u8{0x62} ** 32 };
-    const target_signer = signing.SignerIdentity{ .label = "native-revocation-target", .seed = [_]u8{0x63} ** 32 };
-    const frame_signer = signing.SignerIdentity{ .label = "native-revocation-frame", .seed = [_]u8{0x64} ** 32 };
+    const user_signer = signing.SignerIdentity{ .label = "native-revocation-user", .seed = signing.seedFromByte(0x61) };
+    const source_signer = signing.SignerIdentity{ .label = "native-revocation-source", .seed = signing.seedFromByte(0x62) };
+    const target_signer = signing.SignerIdentity{ .label = "native-revocation-target", .seed = signing.seedFromByte(0x63) };
+    const frame_signer = signing.SignerIdentity{ .label = "native-revocation-frame", .seed = signing.seedFromByte(0x64) };
 
     _ = try graph.ensureUserRoot(user, "owner", user_signer);
     _ = try graph.enrollDevice(user, source, "source", user_signer, source_signer, 1);
@@ -885,7 +856,7 @@ test "native sync transport falls back through booted relay and encrypts object 
         .evidence = .{ .destination = .{ .domain = "relay.fallback.sync" } },
         .now_ticks = 20,
     }, 105, 106, source, target, "relay.fallback.sync");
-    const signer = signing.SignerIdentity{ .label = "native-sync-fallback", .seed = [_]u8{0x53} ** 32 };
+    const signer = signing.SignerIdentity{ .label = "native-sync-fallback", .seed = signing.seedFromByte(0x53) };
 
     const share = try native_transport.encryptObjectShare(&connection, 12, 34, 56, "enc:per-object-secret");
     try std.testing.expectEqual(@as(u64, 12), share.workspace_id);

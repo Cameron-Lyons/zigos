@@ -5,6 +5,7 @@ const native_util = @import("../core/util.zig");
 
 pub const MAX_EVENTS: usize = 96;
 pub const MAX_LABEL_BYTES: usize = 96;
+const EXPORT_TEXT_TEST_BUFFER_BYTES: usize = 1024;
 
 pub const EventKind = enum(u8) {
     idl_parsed,
@@ -235,7 +236,7 @@ test "debugger records ABI checks and exports a redaction-safe trace" {
     try std.testing.expectEqual(@as(usize, 1), session.countKind(.service_call_provenance));
     try std.testing.expectEqual(@as(usize, 1), session.countKind(.crash_report));
 
-    var output: [1024]u8 = undefined;
+    var output: [EXPORT_TEXT_TEST_BUFFER_BYTES]u8 = undefined;
     const text = try session.exportText(&output);
     try std.testing.expect(std.mem.indexOf(u8, text, "kind=abi_message_checked") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "after-rollback") != null);

@@ -20,6 +20,10 @@ const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
+const units = @import("../../native/core/units.zig");
+
+const DENIAL_EXPLANATION_BUFFER_BYTES: usize = 256;
+const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1);
 
 pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     var recorder = measured_boot.Recorder.init();
@@ -160,7 +164,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
         .class = .media_export,
         .wants_gpu = true,
         .wants_media_engine = true,
-        .shared_memory_bytes = 4096,
+        .shared_memory_bytes = shared_memory.PAGE_SIZE,
     });
     var runtime = task_runtime.Runtime.init();
     const foreground_task = try runtime.createTask(.{
@@ -170,7 +174,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
         .local_only = true,
     });
     var shared = shared_memory.Table.init();
-    const zero_copy = try shared.createWithAccess(ids.task(foreground_task.id), 4096, .{
+    const zero_copy = try shared.createWithAccess(ids.task(foreground_task.id), shared_memory.PAGE_SIZE, .{
         .media = true,
     });
     const engine_claim = try scheduler.claimWithSharedMemory(.{
@@ -179,7 +183,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
             .class = .media_export,
             .wants_gpu = true,
             .wants_media_engine = true,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
         },
         .require_accelerator = true,
         .shared_memory_object_id = zero_copy.id,
@@ -195,9 +199,9 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 2_000,
-            .memory_bytes = 128 * 1024,
+            .memory_bytes = units.kibibytes(128),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 4 * 1024,
+            .shared_memory_bytes = units.kibibytes(4),
             .resource_class = .emergency_system_critical,
         },
         .local_only = true,
@@ -218,7 +222,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
 
 pub fn failuresStayExplainableRestartableAndRedacted() !void {
     const denied = denial_explanation.forPermissionDecision(.screen_capture, .policy_denied);
-    var explanation_buffer: [256]u8 = undefined;
+    var explanation_buffer: [DENIAL_EXPLANATION_BUFFER_BYTES]u8 = undefined;
     const rendered = try denial_explanation.renderToBuffer(&explanation_buffer, denied);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "policy=user-grant-policy") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "missing=screen-capture-capability") != null);
@@ -246,7 +250,7 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
         .display_name = "Storage Driver Runtime",
         .publisher = "zigos.spec",
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-spec-driver",
         },
     };
@@ -293,7 +297,7 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
     try std.testing.expectEqual(@as(u32, 2), storage_driver.restart_generation);
     try std.testing.expect(notifications.latestVisible(30) == null);
 
-    var export_buffer: [1024]u8 = undefined;
+    var export_buffer: [LEDGER_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "policy=user-grant-policy") != null);

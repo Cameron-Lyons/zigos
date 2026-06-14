@@ -1,21 +1,18 @@
 const std = @import("std");
 const example_apps = @import("../native/sdk/example_apps.zig");
+const crypto_hash = @import("../native/core/crypto_hash.zig");
+const hex = @import("../native/core/hex.zig");
 const manifest = @import("../native/policy/manifest.zig");
 const package_service = @import("../native/services/package_service.zig");
 const signing = @import("../native/core/signing.zig");
+const units = @import("../native/core/units.zig");
 
-pub const Error = error{
-    UnknownCommand,
-    UnknownExample,
-    InvalidHex,
-    InvalidHexLength,
-    HexOutputTooSmall,
-};
+const stdout_buffer_bytes: usize = units.kibibytes(4);
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const io = init.io;
-    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_buffer: [stdout_buffer_bytes]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
 
     if (args.len < 2) {
@@ -39,13 +36,13 @@ pub fn main(init: std.process.Init) !void {
         );
     } else if (std.mem.eql(u8, args[1], "sign-digest")) {
         if (args.len != 5) return error.InvalidHexLength;
-        const seed = try decodeFixed(signing.SEED_BYTES, args[3]);
-        const digest = try decodeFixed(32, args[4]);
+        const seed = try hex.decodeFixed(signing.SEED_BYTES, args[3]);
+        const digest = try hex.decodeFixed(crypto_hash.digest_bytes, args[4]);
         try printSignature(&stdout_writer.interface, args[2], seed, digest, .ed25519);
     } else if (std.mem.eql(u8, args[1], "sign-hybrid-digest")) {
         if (args.len != 5) return error.InvalidHexLength;
-        const seed = try decodeFixed(signing.SEED_BYTES, args[3]);
-        const digest = try decodeFixed(32, args[4]);
+        const seed = try hex.decodeFixed(signing.SEED_BYTES, args[3]);
+        const digest = try hex.decodeFixed(crypto_hash.digest_bytes, args[4]);
         try printSignature(&stdout_writer.interface, args[2], seed, digest, .ed25519_ml_dsa65_hybrid_preview);
     } else if (std.mem.eql(u8, args[1], "provider-policy")) {
         if (args.len != 2) return error.UnknownCommand;
@@ -73,18 +70,18 @@ fn printUsage(writer: anytype) !void {
 fn printSignedManifest(writer: anytype, bundle: manifest.BundleManifest, signer: signing.SignerIdentity) !void {
     const digest = package_service.digestBundle(bundle);
     const signature = try signing.signWithDefaultRegistry(.ed25519, signer, &digest);
-    var digest_hex: [32 * 2]u8 = undefined;
-    var public_key_hex: [manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES * 2]u8 = undefined;
-    var signature_hex: [manifest.MAX_SIGNATURE_VALUE_BYTES * 2]u8 = undefined;
+    var digest_hex: [crypto_hash.hex_digest_bytes]u8 = undefined;
+    var public_key_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES)]u8 = undefined;
+    var signature_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_VALUE_BYTES)]u8 = undefined;
     try writer.print(
         "bundle={s}\ndigest={s}\nformat={s}\nsigner={s}\npublic_key={s}\nsignature={s}\n",
         .{
             bundle.bundle_id,
-            try encodeHex(&digest, &digest_hex),
+            try hex.encodeLower(&digest, &digest_hex),
             signature.format,
             signature.signer,
-            try encodeHex(signature.publicKeySlice(), &public_key_hex),
-            try encodeHex(signature.valueSlice(), &signature_hex),
+            try hex.encodeLower(signature.publicKeySlice(), &public_key_hex),
+            try hex.encodeLower(signature.valueSlice(), &signature_hex),
         },
     );
 }
@@ -93,7 +90,7 @@ fn printSignature(
     writer: anytype,
     label: []const u8,
     seed: [signing.SEED_BYTES]u8,
-    digest: [32]u8,
+    digest: crypto_hash.Digest,
     profile: signing.SignatureProfile,
 ) !void {
     const identity = signing.SignerIdentity{
@@ -107,8 +104,8 @@ fn printSignature(
     try registry.register(hybrid_provider_impl.provider());
     const provider = registry.find(profile) orelse return error.UnknownCommand;
     const signature = try registry.sign(profile, identity, &digest);
-    var public_key_hex: [manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES * 2]u8 = undefined;
-    var signature_hex: [manifest.MAX_SIGNATURE_VALUE_BYTES * 2]u8 = undefined;
+    var public_key_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES)]u8 = undefined;
+    var signature_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_VALUE_BYTES)]u8 = undefined;
     try writer.print(
         "provider={s}\nrole={s}\nprovider_boundary={s}\ncustody={s}\nverifier_protocol={s}\nfips_standard={s}\npost_quantum_algorithm={s}\nfips_204={s}\nfips_140_validated_module={s}\nvalidation_certificate={s}\nrelease_eligible={s}\nformat={s}\nsigner={s}\npublic_key={s}\nsignature={s}\n",
         .{
@@ -125,8 +122,8 @@ fn printSignature(
             if (provider.releaseEligible()) "yes" else "no",
             signature.format,
             signature.signer,
-            try encodeHex(signature.publicKeySlice(), &public_key_hex),
-            try encodeHex(signature.valueSlice(), &signature_hex),
+            try hex.encodeLower(signature.publicKeySlice(), &public_key_hex),
+            try hex.encodeLower(signature.valueSlice(), &signature_hex),
         },
     );
 }
@@ -153,37 +150,6 @@ fn printProviderPolicy(writer: anytype) !void {
     });
 }
 
-pub fn encodeHex(bytes: []const u8, output: []u8) Error![]const u8 {
-    if (output.len < bytes.len * 2) return error.HexOutputTooSmall;
-    const digits = "0123456789abcdef";
-    var cursor: usize = 0;
-    for (bytes) |byte| {
-        output[cursor] = digits[byte >> 4];
-        output[cursor + 1] = digits[byte & 0x0f];
-        cursor += 2;
-    }
-    return output[0..cursor];
-}
-
-pub fn decodeFixed(comptime len: usize, text: []const u8) Error![len]u8 {
-    if (text.len != len * 2) return error.InvalidHexLength;
-    var result: [len]u8 = undefined;
-    var index: usize = 0;
-    while (index < len) : (index += 1) {
-        const high = try hexValue(text[index * 2]);
-        const low = try hexValue(text[index * 2 + 1]);
-        result[index] = (high << 4) | low;
-    }
-    return result;
-}
-
-fn hexValue(byte: u8) Error!u8 {
-    if (byte >= '0' and byte <= '9') return byte - '0';
-    if (byte >= 'a' and byte <= 'f') return 10 + byte - 'a';
-    if (byte >= 'A' and byte <= 'F') return 10 + byte - 'A';
-    return error.InvalidHex;
-}
-
 test "signing CLI helpers encode decode and verify manifest digests" {
     const package = example_apps.writer();
     const digest = package_service.digestBundle(package.bundle);
@@ -194,9 +160,9 @@ test "signing CLI helpers encode decode and verify manifest digests" {
     try std.testing.expect(signing.verifyWithDefaultRegistry(hybrid_signature, &digest));
     try std.testing.expect(hybrid_signature.usesHybridPostQuantumProfile());
 
-    var digest_hex: [64]u8 = undefined;
-    const encoded = try encodeHex(&digest, &digest_hex);
-    const decoded = try decodeFixed(32, encoded);
+    var digest_hex: [crypto_hash.hex_digest_bytes]u8 = undefined;
+    const encoded = try hex.encodeLower(&digest, &digest_hex);
+    const decoded = try hex.decodeFixed(crypto_hash.digest_bytes, encoded);
     try std.testing.expectEqualSlices(u8, &digest, &decoded);
-    try std.testing.expectError(error.InvalidHexLength, decodeFixed(32, "abcd"));
+    try std.testing.expectError(error.InvalidHexLength, hex.decodeFixed(32, "abcd"));
 }

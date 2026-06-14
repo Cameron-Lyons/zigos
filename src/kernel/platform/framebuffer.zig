@@ -22,24 +22,35 @@ pub const PixelMask = struct {
     reserved: u32,
 };
 
+const RGBX8888_MASK = PixelMask{
+    .red = 0x00FF_0000,
+    .green = 0x0000_FF00,
+    .blue = 0x0000_00FF,
+    .reserved = 0xFF00_0000,
+};
+const FRAMEBUFFER_32BPP_BYTES: u8 = 4;
+const MAX_LINEAR_DIMENSION_PIXELS: u32 = 16_384;
+const TEST_FRAMEBUFFER_ADDRESS: u64 = 0x8000_0000;
+const GOP_TEST_WIDTH: u32 = 1920;
+const GOP_TEST_HEIGHT: u32 = 1080;
+const GOP_TEST_STRIDE_PIXELS: u32 = 2048;
+const SVGA_TEST_WIDTH: u32 = 1024;
+const SVGA_TEST_HEIGHT: u32 = 768;
+const SVGA_BAD_STRIDE_PIXELS: u32 = 1000;
+
 pub const Info = struct {
     physical_address: u64,
     width: u32,
     height: u32,
     pixels_per_scan_line: u32,
     format: PixelFormat,
-    pixel_mask: PixelMask = .{
-        .red = 0x00FF_0000,
-        .green = 0x0000_FF00,
-        .blue = 0x0000_00FF,
-        .reserved = 0xFF00_0000,
-    },
+    pixel_mask: PixelMask = RGBX8888_MASK,
     buffer_bytes: u64,
 
     pub fn bytesPerPixel(self: Info) Error!u8 {
         return switch (self.format) {
-            .rgbx8888, .bgrx8888 => 4,
-            .bitmask => if (valid32BitColorMask(self.pixel_mask)) 4 else error.UnsupportedPixelFormat,
+            .rgbx8888, .bgrx8888 => FRAMEBUFFER_32BPP_BYTES,
+            .bitmask => if (valid32BitColorMask(self.pixel_mask)) FRAMEBUFFER_32BPP_BYTES else error.UnsupportedPixelFormat,
         };
     }
 
@@ -53,7 +64,7 @@ pub fn validate(info: ?Info) Error!Info {
     const framebuffer = info orelse return error.MissingFramebuffer;
     if (framebuffer.physical_address == 0) return error.InvalidAddress;
     if (framebuffer.width == 0 or framebuffer.height == 0) return error.InvalidResolution;
-    if (framebuffer.width > 16384 or framebuffer.height > 16384) return error.InvalidResolution;
+    if (framebuffer.width > MAX_LINEAR_DIMENSION_PIXELS or framebuffer.height > MAX_LINEAR_DIMENSION_PIXELS) return error.InvalidResolution;
     if (framebuffer.pixels_per_scan_line < framebuffer.width) return error.InvalidStride;
 
     const minimum_bytes = try framebuffer.minimumBufferBytes();
@@ -83,35 +94,39 @@ fn valid32BitColorMask(mask: PixelMask) bool {
 
 test "framebuffer validation accepts UEFI GOP-style linear modes" {
     const info = try validate(.{
-        .physical_address = 0x8000_0000,
-        .width = 1920,
-        .height = 1080,
-        .pixels_per_scan_line = 2048,
+        .physical_address = TEST_FRAMEBUFFER_ADDRESS,
+        .width = GOP_TEST_WIDTH,
+        .height = GOP_TEST_HEIGHT,
+        .pixels_per_scan_line = GOP_TEST_STRIDE_PIXELS,
         .format = .bgrx8888,
-        .buffer_bytes = 2048 * 1080 * 4,
+        .buffer_bytes = testLinearBufferBytes(GOP_TEST_STRIDE_PIXELS, GOP_TEST_HEIGHT),
     });
-    try std.testing.expectEqual(@as(u8, 4), try info.bytesPerPixel());
-    try std.testing.expectEqual(@as(u64, 2048 * 1080 * 4), try info.minimumBufferBytes());
+    try std.testing.expectEqual(FRAMEBUFFER_32BPP_BYTES, try info.bytesPerPixel());
+    try std.testing.expectEqual(testLinearBufferBytes(GOP_TEST_STRIDE_PIXELS, GOP_TEST_HEIGHT), try info.minimumBufferBytes());
 }
 
 test "framebuffer validation rejects undersized buffers and bad stride" {
     try std.testing.expectError(error.InvalidStride, validate(.{
-        .physical_address = 0x8000_0000,
-        .width = 1024,
-        .height = 768,
-        .pixels_per_scan_line = 1000,
+        .physical_address = TEST_FRAMEBUFFER_ADDRESS,
+        .width = SVGA_TEST_WIDTH,
+        .height = SVGA_TEST_HEIGHT,
+        .pixels_per_scan_line = SVGA_BAD_STRIDE_PIXELS,
         .format = .rgbx8888,
-        .buffer_bytes = 1024 * 768 * 4,
+        .buffer_bytes = testLinearBufferBytes(SVGA_TEST_WIDTH, SVGA_TEST_HEIGHT),
     }));
 
     try std.testing.expectError(error.BufferTooSmall, validate(.{
-        .physical_address = 0x8000_0000,
-        .width = 1024,
-        .height = 768,
-        .pixels_per_scan_line = 1024,
+        .physical_address = TEST_FRAMEBUFFER_ADDRESS,
+        .width = SVGA_TEST_WIDTH,
+        .height = SVGA_TEST_HEIGHT,
+        .pixels_per_scan_line = SVGA_TEST_WIDTH,
         .format = .rgbx8888,
-        .buffer_bytes = (1024 * 768 * 4) - 1,
+        .buffer_bytes = testLinearBufferBytes(SVGA_TEST_WIDTH, SVGA_TEST_HEIGHT) - 1,
     }));
+}
+
+fn testLinearBufferBytes(pixels_per_scan_line: u32, height: u32) u64 {
+    return @as(u64, pixels_per_scan_line) * @as(u64, height) * @as(u64, FRAMEBUFFER_32BPP_BYTES);
 }
 
 test "framebuffer validation rejects overlapping bitmasks" {

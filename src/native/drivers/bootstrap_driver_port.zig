@@ -31,6 +31,7 @@ pub const EgressDecision = network_driver_task.EgressDecision;
 pub const EgressBroker = network_driver_task.EgressBroker;
 pub const NetworkActivator = *const fn (device_id: u64) ?*const NetworkDevice;
 pub const StorageActivator = *const fn (device_id: u64) ?storage_volume.Backend;
+pub const MAX_PUBLISHER_BYTES: usize = 32;
 
 pub const StoragePublicationKind = enum(u8) {
     backend,
@@ -42,7 +43,7 @@ pub const DeviceDataPlanePublication = struct {
     device_class: driver_service.DeviceClass = .graphics_adapter,
     device_id: u64,
     publisher_len: usize = 0,
-    publisher: [32]u8 = [_]u8{0} ** 32,
+    publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     kernel_bootstrap: bool = true,
     active_service_id: u64 = 0,
 
@@ -58,7 +59,7 @@ pub const Error = error{
 pub const NetworkPublication = struct {
     device_id: u64,
     publisher_len: usize = 0,
-    publisher: [32]u8 = [_]u8{0} ** 32,
+    publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     network_device: ?*const NetworkDevice = null,
     activator: ?NetworkActivator = null,
     kernel_bootstrap: bool = true,
@@ -72,7 +73,7 @@ pub const NetworkPublication = struct {
 pub const StoragePublication = struct {
     device_id: u64,
     publisher_len: usize = 0,
-    publisher: [32]u8 = [_]u8{0} ** 32,
+    publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     backend: ?storage_volume.Backend = null,
     ata_session: ?storage_driver_task.AtaControllerSession = null,
     activator: ?StorageActivator = null,

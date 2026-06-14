@@ -181,7 +181,7 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     var store = object_store.Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x91} ** 32,
+        .seed = signing.seedFromByte(0x91),
     };
     const object = try store.putVersion(.{
         .preferred_object_id = ids.object(900),

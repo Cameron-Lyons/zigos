@@ -2,13 +2,15 @@ const std = @import("std");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const capability = @import("../kernel_api/capability.zig");
 const principal = @import("../core/principal.zig");
+const shared_memory = @import("../kernel_api/shared_memory.zig");
+const units = @import("../core/units.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
 pub const Snapshot = struct {
-    memory_capacity_bytes: usize = 512 * 1024 * 1024,
+    memory_capacity_bytes: usize = units.mebibytes(512),
     thermal_milli_celsius: u32 = 45_000,
     battery_percent: u8 = 100,
     battery_charging: bool = true,
@@ -164,9 +166,9 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 1,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
             .resource_class = .foreground_interactive,
         },
         .local_only = true,
@@ -188,9 +190,9 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 2_000,
-            .memory_bytes = 128 * 1024,
+            .memory_bytes = units.kibibytes(128),
             .endpoint_slots = 1,
-            .shared_memory_bytes = 8192,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE * 2,
             .resource_class = .background_light,
             .background_allowed = true,
         },
@@ -212,7 +214,7 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
     }, false));
 
     const counters = collectLiveCounters(&runtime, &scheduler, .{
-        .memory_capacity_bytes = 512 * 1024,
+        .memory_capacity_bytes = units.kibibytes(512),
         .thermal_milli_celsius = 91_000,
         .battery_percent = 12,
         .battery_charging = false,
@@ -222,9 +224,9 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
     });
     try std.testing.expectEqual(@as(u64, 3_000), counters.total_cpu_budget_ticks);
     try std.testing.expectEqual(@as(u64, 125), counters.consumed_cpu_ticks);
-    try std.testing.expectEqual(@as(usize, 512 * 1024), counters.memory_capacity_bytes);
-    try std.testing.expectEqual(@as(usize, 192 * 1024), counters.reserved_memory_bytes);
-    try std.testing.expectEqual(@as(usize, 12 * 1024), counters.reserved_shared_memory_bytes);
+    try std.testing.expectEqual(@as(usize, units.kibibytes(512)), counters.memory_capacity_bytes);
+    try std.testing.expectEqual(@as(usize, units.kibibytes(192)), counters.reserved_memory_bytes);
+    try std.testing.expectEqual(@as(usize, shared_memory.PAGE_SIZE * 3), counters.reserved_shared_memory_bytes);
     try std.testing.expectEqual(@as(usize, 1), counters.privacy_sensitive_task_count);
 
     var provider = try FreestandingPlatformTelemetryProvider.initForBootedService(91, 91_000, 30, counters);
@@ -258,7 +260,7 @@ test "platform telemetry providers expose test-only host fake and production fre
     var freestanding = try FreestandingPlatformTelemetryProvider.initForBootedService(5, 50, 6, .{
         .total_cpu_budget_ticks = 2_000,
         .consumed_cpu_ticks = 500,
-        .memory_capacity_bytes = 128 * 1024,
+        .memory_capacity_bytes = units.kibibytes(128),
         .thermal_milli_celsius = 76_000,
         .battery_percent = 90,
         .battery_charging = true,

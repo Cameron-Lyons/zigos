@@ -1,6 +1,8 @@
 const abi = @import("../../core/abi.zig");
 const native_ux = @import("../native_ux.zig");
+const shared_memory = @import("../../kernel_api/shared_memory.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
+const units = @import("../../core/units.zig");
 
 pub fn startConfiguredTask(
     ux: *native_ux.Controller,
@@ -13,9 +15,9 @@ pub fn startConfiguredTask(
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_200,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
         },
         .ui_surface_id = config.ui_surface_id,
         .local_only = true,

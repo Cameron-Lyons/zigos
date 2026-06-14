@@ -26,6 +26,11 @@ const resourceQuery = common.resourceQuery;
 const sharedMemoryCreateResult = common.sharedMemoryCreateResult;
 const sharedMemoryMapResult = common.sharedMemoryMapResult;
 const storageGrant = common.storageGrant;
+const units = @import("../../core/units.zig");
+
+const SHARED_MEMORY_PAGE_BYTES: usize = shared_memory_mod.PAGE_SIZE;
+const DMA_PAGE_BYTES: u64 = shared_memory_mod.PAGE_SIZE;
+const DMA_TAIL_PROBE_OFFSET_BYTES: u64 = units.kibibytes(1);
 
 pub fn proveResourceAccountingSyscalls(
     kernel_port: *component_port.KernelPort,
@@ -40,8 +45,8 @@ pub fn proveResourceAccountingSyscalls(
 
     const resources = try resourceQuery(kernel_port, session_task_id, session_authority_id, probe.task_id, 82);
     try std.testing.expectEqual(@as(u64, 1_200), resources.cpu_time_ticks);
-    try std.testing.expectEqual(@as(u64, 64 * 1024), resources.memory_bytes);
-    try std.testing.expectEqual(@as(u64, 1024), resources.shared_memory_bytes);
+    try std.testing.expectEqual(@as(u64, units.kibibytes(64)), resources.memory_bytes);
+    try std.testing.expectEqual(@as(u64, common.RESOURCE_PROBE_SHARED_MEMORY_BYTES), resources.shared_memory_bytes);
     try std.testing.expectEqual(@as(u16, 0), resources.endpoint_count);
 
     _ = try expectEndpointCreate(kernel_port, session_task_id, session_authority_id, probe.task_id, "resource.probe", 83);
@@ -49,7 +54,7 @@ pub fn proveResourceAccountingSyscalls(
     try std.testing.expectEqual(abi.SyscallStatus.conflict, endpoint_over_budget.status);
     try std.testing.expectEqual(abi.DenialReason.budget_exhausted, endpoint_over_budget.denial_reason);
 
-    const shared_memory = try expectSharedMemoryCreate(kernel_port, session_task_id, session_authority_id, probe.task_id, 1024, 85);
+    const shared_memory = try expectSharedMemoryCreate(kernel_port, session_task_id, session_authority_id, probe.task_id, common.RESOURCE_PROBE_SHARED_MEMORY_BYTES, 85);
     try expectSharedMemoryMap(kernel_port, probe.task_id, shared_memory.capability_id, probe.task_id, 86);
     const shared_over_budget = sharedMemoryCreateResult(kernel_port, session_task_id, session_authority_id, probe.task_id, 1, 87);
     try std.testing.expectEqual(abi.SyscallStatus.conflict, shared_over_budget.status);
@@ -92,7 +97,7 @@ pub fn proveBootedSharedMemoryMappingRevocation(
         8_010,
         "shared-owner",
         "app.service-path.shared-owner",
-        8 * 1024,
+        units.kibibytes(8),
         130,
     );
     const peer = try createBootedProbeTask(
@@ -103,13 +108,13 @@ pub fn proveBootedSharedMemoryMappingRevocation(
         8_011,
         "shared-peer",
         "app.service-path.shared-peer",
-        8 * 1024,
+        units.kibibytes(8),
         131,
     );
     runtime.allowHostPointerSyscallsForTask(owner.task_id);
     runtime.allowHostPointerSyscallsForTask(peer.task_id);
 
-    const created = try expectSharedMemoryCreate(kernel_port, session_task_id, session_authority_id, owner.task_id, 4096, 132);
+    const created = try expectSharedMemoryCreate(kernel_port, session_task_id, session_authority_id, owner.task_id, SHARED_MEMORY_PAGE_BYTES, 132);
     const object_id = ids.sharedMemory(created.object.object_id);
     const peer_capability = try capability_table.mintBootRoot(.{
         .holder = runtime.find(peer.task_id).?.owner,
@@ -142,7 +147,7 @@ pub fn proveBootedSharedMemoryMappingRevocation(
     const peer_mmu_mapping = try kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(object_id, ids.task(peer.task_id));
     try std.testing.expectEqual(owner_mapping.page_base, peer_mapping.page_base);
     try std.testing.expectEqual(@as(usize, 1), owner_mapping.page_count);
-    try std.testing.expectEqual(@as(usize, 4096), peer_mapping.size_bytes);
+    try std.testing.expectEqual(SHARED_MEMORY_PAGE_BYTES, peer_mapping.size_bytes);
     try std.testing.expect(!owner_mapping.zero_copy);
     try std.testing.expectEqual(owner_mapping.page_base, owner_mmu_mapping.physical_base);
     try std.testing.expectEqual(owner_mmu_mapping.physical_base, peer_mmu_mapping.physical_base);
@@ -172,7 +177,7 @@ pub fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(owner_mmu_mapping));
     try std.testing.expectEqual(@as(usize, 0), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(object_id));
 
-    const accelerated = try kernel_port.kernel.shared_memory_table.createLabeledWithAccess(ids.task(owner.task_id), 8192, "booted-accelerator", .{
+    const accelerated = try kernel_port.kernel.shared_memory_table.createLabeledWithAccess(ids.task(owner.task_id), shared_memory_mod.PAGE_SIZE * 2, "booted-accelerator", .{
         .gpu = true,
         .media = true,
     });
@@ -226,8 +231,8 @@ pub fn proveBootedDriverPermissions(
     try std.testing.expect(storage_authority.rights.has(.object_read));
     try std.testing.expect(storage_authority.rights.has(.object_write));
     try std.testing.expect(!storage_authority.rights.has(.network_local));
-    try std.testing.expect(storage_driver.allowsDma(storage_driver.dma_ranges[0].base, 4096));
-    try std.testing.expect(!storage_driver.allowsDma(storage_driver.dma_ranges[0].base + storage_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expect(storage_driver.allowsDma(storage_driver.dma_ranges[0].base, DMA_PAGE_BYTES));
+    try std.testing.expect(!storage_driver.allowsDma(storage_driver.dma_ranges[0].base + storage_driver.dma_ranges[0].length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PAGE_BYTES));
 
     device_broker.reset();
     defer device_broker.reset();

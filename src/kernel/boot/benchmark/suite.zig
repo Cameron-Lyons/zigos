@@ -3,12 +3,18 @@ const x86 = @import("../../../arch/x86.zig");
 const abi = @import("../../../native/core/abi.zig");
 const console = @import("../../utils/console.zig");
 const qemu_exit = @import("../../utils/qemu_exit.zig");
+const benchmark_cases = @import("cases.zig");
+const benchmark_authority = @import("authority.zig");
+const benchmark_identities = @import("identities.zig");
+const benchmark_reporting = @import("reporting.zig");
 const boot_markers = @import("../markers.zig");
 const capability = @import("../../../native/kernel_api/capability.zig");
 const shared_memory = @import("../../../native/kernel_api/shared_memory.zig");
+const crypto_hash = @import("../../../native/core/crypto_hash.zig");
 const ids = @import("../../../native/core/ids.zig");
 const principal = @import("../../../native/core/principal.zig");
 const signing = @import("../../../native/core/signing.zig");
+const units = @import("../../../native/core/units.zig");
 const manifest = @import("../../../native/policy/manifest.zig");
 const denial_explanation = @import("../../../native/policy/denial_explanation.zig");
 const permission_review = @import("../../../native/policy/permission_review.zig");
@@ -41,16 +47,29 @@ const driver_service = @import("../../../native/drivers/driver_service.zig");
 const contract = @import("../../../native/session/contract.zig");
 const supervisor_mod = @import("../../../native/session/supervisor.zig");
 
-const BenchmarkCase = struct {
-    name: []const u8,
-    iterations: u32,
-    runIteration: *const fn (iteration: u32) u64,
-};
+const kibibytes = units.kibibytes;
+const mebibytes = units.mebibytes;
+const app = benchmark_identities.app;
+const device = benchmark_identities.device;
+const policyAuthority = benchmark_identities.policyAuthority;
+const service = benchmark_identities.service;
+const signer = benchmark_identities.signer;
+const user = benchmark_identities.user;
+const benchmarkSyncAuthority = benchmark_authority.benchmarkSyncAuthority;
+const mintBenchmarkSyncAuthority = benchmark_authority.mintBenchmarkSyncAuthority;
+const mintDriverAuthority = benchmark_authority.mintDriverAuthority;
+const zeroSyncAuthority = benchmark_authority.zeroSyncAuthority;
 
-const QualityGateCase = struct {
-    name: []const u8,
-    run: *const fn () u64,
-};
+const PERMISSION_REVIEW_BENCH_BUFFER_BYTES: usize = kibibytes(2);
+const EVENT_LEDGER_BENCH_BUFFER_BYTES: usize = kibibytes(2);
+const DENIAL_EXPLANATION_BENCH_BUFFER_BYTES: usize = 192;
+const CAPABILITY_REUSE_MINTED_IDS: usize = 128;
+const FAIRNESS_BACKGROUND_TASKS: usize = 4;
+const LATENCY_BACKGROUND_TASKS: usize = 4;
+const UPDATE_HEALTH_CORE_SERVICE_COUNT: usize = 3;
+
+const BenchmarkCase = benchmark_cases.BenchmarkCase;
+const QualityGateCase = benchmark_cases.QualityGateCase;
 
 const ScalingCapabilityTable = capability.CapabilityTableWith(.{
     .max_capabilities = 512,
@@ -167,44 +186,44 @@ const UpdateHealthContext = struct {
     compositor: compositor_session.Session = compositor_session.Session.init(),
     supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
     ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
-    core_service_ids: [3]u64 = [_]u64{0} ** 3,
+    core_service_ids: [UPDATE_HEALTH_CORE_SERVICE_COUNT]u64 = [_]u64{0} ** UPDATE_HEALTH_CORE_SERVICE_COUNT,
     request: update_health.CheckRequest = undefined,
 };
 
-const cases = [_]BenchmarkCase{
-    .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = benchmarkCapabilityDerive },
-    .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = benchmarkCapabilityMintReuseFreeSlot },
-    .{ .name = "capability.target_generation_lookup", .iterations = 4_000, .runIteration = benchmarkCapabilityTargetGenerationLookup },
-    .{ .name = "permission.review.render_grants", .iterations = 12_000, .runIteration = benchmarkPermissionReviewRender },
-    .{ .name = "network_policy.authorize_connection", .iterations = 60_000, .runIteration = benchmarkNetworkPolicyAuthorize },
-    .{ .name = "background_dispatch.allowed_sync", .iterations = 8_000, .runIteration = benchmarkBackgroundDispatch },
-    .{ .name = "task_runtime.checkpoint.write_restore", .iterations = 8_000, .runIteration = benchmarkTaskCheckpointWriteRestore },
-    .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = benchmarkAcceleratorClaimRelease },
-    .{ .name = "storage.file_bridge.resolve_view", .iterations = 40_000, .runIteration = benchmarkFileBridgeResolve },
-    .{ .name = "storage.workspace.commit_overlay", .iterations = 12_000, .runIteration = benchmarkWorkspaceCommitOverlay },
-    .{ .name = "storage.volume.replay_segmented_log", .iterations = 24, .runIteration = benchmarkStorageVolumeReplaySegmentedLog },
-    .{ .name = "storage.volume.compact_checkpoint", .iterations = 1, .runIteration = benchmarkStorageVolumeCompactCheckpoint },
-    .{ .name = "package_revision.rollforward_rollback", .iterations = 20_000, .runIteration = benchmarkPackageRevision },
-    .{ .name = "indexing_service.query_ranked", .iterations = 20_000, .runIteration = benchmarkIndexingQuery },
-    .{ .name = "media_print.submit_complete", .iterations = 8_000, .runIteration = benchmarkMediaPrintSubmitComplete },
-    .{ .name = "event_ledger.export_redacted", .iterations = 4_000, .runIteration = benchmarkEventLedgerExport },
-    .{ .name = "secret_store.import_handle_export", .iterations = 20_000, .runIteration = benchmarkSecretStoreImportHandleExport },
-    .{ .name = "denial_explanation.render_policy_hint", .iterations = 32_000, .runIteration = benchmarkDenialExplanationRender },
-    .{ .name = "sync_service.overlay_session_flow", .iterations = 8_000, .runIteration = benchmarkOverlaySessionFlow },
-    .{ .name = "recovery_environment.reinstall_restore_repair", .iterations = 4, .runIteration = benchmarkRecoveryLifecycle },
-    .{ .name = "update_health.validate_pending_activation", .iterations = 8, .runIteration = benchmarkUpdateHealthValidation },
-    .{ .name = "driver_recovery.restart_driver", .iterations = 512, .runIteration = benchmarkDriverRecoveryRestart },
-};
+const cases = benchmark_cases.benchmarkCases(.{
+    .capability_derive = benchmarkCapabilityDerive,
+    .capability_mint_reuse_free_slot = benchmarkCapabilityMintReuseFreeSlot,
+    .capability_target_generation_lookup = benchmarkCapabilityTargetGenerationLookup,
+    .permission_review_render = benchmarkPermissionReviewRender,
+    .network_policy_authorize = benchmarkNetworkPolicyAuthorize,
+    .background_dispatch = benchmarkBackgroundDispatch,
+    .task_checkpoint_write_restore = benchmarkTaskCheckpointWriteRestore,
+    .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
+    .file_bridge_resolve = benchmarkFileBridgeResolve,
+    .workspace_commit_overlay = benchmarkWorkspaceCommitOverlay,
+    .storage_volume_replay_segmented_log = benchmarkStorageVolumeReplaySegmentedLog,
+    .storage_volume_compact_checkpoint = benchmarkStorageVolumeCompactCheckpoint,
+    .package_revision = benchmarkPackageRevision,
+    .indexing_query = benchmarkIndexingQuery,
+    .media_print_submit_complete = benchmarkMediaPrintSubmitComplete,
+    .event_ledger_export = benchmarkEventLedgerExport,
+    .secret_store_import_handle_export = benchmarkSecretStoreImportHandleExport,
+    .denial_explanation_render = benchmarkDenialExplanationRender,
+    .overlay_session_flow = benchmarkOverlaySessionFlow,
+    .recovery_lifecycle = benchmarkRecoveryLifecycle,
+    .update_health_validation = benchmarkUpdateHealthValidation,
+    .driver_recovery_restart = benchmarkDriverRecoveryRestart,
+});
 
-const quality_gates = [_]QualityGateCase{
-    .{ .name = "battery_saver.batch_delay", .run = qualityBatterySaverBatchDelay },
-    .{ .name = "thermal_critical.background_delay", .run = qualityThermalCriticalBackgroundDelay },
-    .{ .name = "memory_pressure.batch_delay", .run = qualityMemoryPressureBatchDelay },
-    .{ .name = "scheduler_fairness.max_min_dispatch_ratio_percent", .run = qualitySchedulerFairnessRatioPercent },
-    .{ .name = "starvation_resistance.min_dispatches_after_pressure", .run = qualityStarvationResistanceAfterPressure },
-    .{ .name = "background_throttling.delayed_dispatches", .run = qualityBackgroundThrottlingDelayedDispatches },
-    .{ .name = "latency_under_load.max_foreground_wait_ticks", .run = qualityLatencyUnderLoadMaxWaitTicks },
-};
+const quality_gates = benchmark_cases.qualityGateCases(.{
+    .battery_saver_batch_delay = qualityBatterySaverBatchDelay,
+    .thermal_critical_background_delay = qualityThermalCriticalBackgroundDelay,
+    .memory_pressure_batch_delay = qualityMemoryPressureBatchDelay,
+    .scheduler_fairness_ratio_percent = qualitySchedulerFairnessRatioPercent,
+    .starvation_resistance_after_pressure = qualityStarvationResistanceAfterPressure,
+    .background_throttling_delayed_dispatches = qualityBackgroundThrottlingDelayedDispatches,
+    .latency_under_load_max_wait_ticks = qualityLatencyUnderLoadMaxWaitTicks,
+});
 
 const permission_review_requests = [_]manifest.PermissionRequest{
     .{
@@ -254,7 +273,7 @@ const background_tasks = [_]manifest.BackgroundTaskDecl{
         .expected_duration_seconds = 40,
         .budget = .{
             .cpu_time_ticks = 1_100,
-            .memory_bytes = 96 * 1024,
+            .memory_bytes = kibibytes(96),
         },
         .network = .local_network_only,
         .visibility = .status_only,
@@ -352,10 +371,10 @@ const package_bundle_v2 = manifest.BundleManifest{
     },
 };
 
-var permission_review_buffer: [2048]u8 = undefined;
+var permission_review_buffer: [PERMISSION_REVIEW_BENCH_BUFFER_BYTES]u8 = undefined;
 var permission_review_grants: [permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
-var event_ledger_buffer: [2048]u8 = undefined;
-var denial_explanation_buffer: [192]u8 = undefined;
+var event_ledger_buffer: [EVENT_LEDGER_BENCH_BUFFER_BYTES]u8 = undefined;
+var denial_explanation_buffer: [DENIAL_EXPLANATION_BENCH_BUFFER_BYTES]u8 = undefined;
 
 var file_bridge_context = FileBridgeContext{};
 var storage_volume_context = StorageVolumeContext{};
@@ -384,7 +403,7 @@ pub fn run() noreturn {
     }
     const quality_cycles = runQualityGates();
 
-    emitSummary(cases.len, quality_gates.len, quality_cycles, total_cycles);
+    benchmark_reporting.emitSummary(cases.len, quality_gates.len, quality_cycles, total_cycles);
     console.print(boot_markers.bench_pass);
     console.print("\n");
     qemu_exit.success();
@@ -443,7 +462,7 @@ fn prepareFileBridgeFixture() void {
 
 fn prepareNetworkPolicyFixture() void {
     network_policy_context.directory = network_policy.Directory.init();
-    const digest = [_]u8{0xAA} ** 32;
+    const digest = crypto_hash.digestFromByte(0xAA);
     const policy = network_policy_context.directory.create(.{
         .owner = service(8),
         .label = "relay",
@@ -483,9 +502,9 @@ fn prepareBackgroundFixture() void {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 10_000_000,
-            .memory_bytes = 2 * 1024 * 1024,
+            .memory_bytes = mebibytes(2),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
+            .shared_memory_bytes = kibibytes(64),
             .background_allowed = true,
         },
         .ui_surface_id = 9,
@@ -494,7 +513,6 @@ fn prepareBackgroundFixture() void {
             .bundle_id = background_bundle.bundle_id,
         },
     }) catch unreachable;
-    task.state = .active;
     background_context.task_id = task.id;
 }
 
@@ -561,9 +579,9 @@ fn prepareTaskCheckpointFixture() void {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
+            .memory_bytes = mebibytes(2),
             .endpoint_slots = 8,
-            .shared_memory_bytes = 128 * 1024,
+            .shared_memory_bytes = kibibytes(128),
             .background_allowed = true,
         },
         .ui_surface_id = 12,
@@ -588,8 +606,8 @@ fn prepareTaskCheckpointFixture() void {
         primary.id,
         .{
             .cpu_time_ticks = 400,
-            .memory_bytes = 32 * 1024,
-            .shared_memory_bytes = 4 * 1024,
+            .memory_bytes = kibibytes(32),
+            .shared_memory_bytes = kibibytes(4),
         },
         .local_network_only,
         .status_only,
@@ -606,9 +624,9 @@ fn prepareTaskCheckpointFixture() void {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 4_000,
-            .memory_bytes = 128 * 1024,
+            .memory_bytes = kibibytes(128),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 8 * 1024,
+            .shared_memory_bytes = kibibytes(8),
             .background_allowed = false,
         },
         .local_only = true,
@@ -630,7 +648,7 @@ fn preparePackageFixture() void {
     package_context.service = package_service.Service.init();
     const slot = &package_context.service.slots[0];
     slot.in_use = true;
-    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32) catch unreachable;
+    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
     package_context.service.rebuildIndexes();
 }
 
@@ -725,7 +743,7 @@ fn runCase(case: BenchmarkCase) u64 {
         checksum +%= case.runIteration(iteration);
     }
     const cycles = x86.rdtsc() - start;
-    emitResult(case.name, case.iterations, cycles, checksum);
+    benchmark_reporting.emitResult(case.name, case.iterations, cycles, checksum);
     return cycles;
 }
 
@@ -734,7 +752,7 @@ fn runQualityGates() u64 {
     inline for (quality_gates) |gate| {
         total_cycles +%= runQualityGate(gate);
     }
-    emitQualitySummary(quality_gates.len, total_cycles);
+    benchmark_reporting.emitQualitySummary(quality_gates.len, total_cycles);
     return total_cycles;
 }
 
@@ -742,55 +760,8 @@ fn runQualityGate(gate: QualityGateCase) u64 {
     const start = x86.rdtsc();
     const value = gate.run();
     const cycles = x86.rdtsc() - start;
-    emitQualityGate(gate.name, value, cycles);
+    benchmark_reporting.emitQualityGate(gate.name, value, cycles);
     return cycles;
-}
-
-fn emitResult(name: []const u8, iterations: u32, cycles: u64, checksum: u64) void {
-    const scaled_cycles_per_op = if (iterations == 0)
-        0
-    else
-        @divTrunc(cycles * 100, iterations);
-    const whole = @divTrunc(scaled_cycles_per_op, 100);
-    const frac = @mod(scaled_cycles_per_op, 100);
-
-    var buffer: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(
-        &buffer,
-        "BENCH:RESULT:{s}:iterations={d}:cycles={d}:cycles_per_op={d}.{d:0>2}:checksum={d}\n",
-        .{ name, iterations, cycles, whole, frac, checksum },
-    ) catch unreachable;
-    console.print(line);
-}
-
-fn emitQualityGate(name: []const u8, value: u64, cycles: u64) void {
-    var buffer: [160]u8 = undefined;
-    const line = std.fmt.bufPrint(
-        &buffer,
-        "BENCH:QUALITY:{s}:value={d}:cycles={d}\n",
-        .{ name, value, cycles },
-    ) catch unreachable;
-    console.print(line);
-}
-
-fn emitQualitySummary(gate_count: usize, total_cycles: u64) void {
-    var buffer: [96]u8 = undefined;
-    const line = std.fmt.bufPrint(
-        &buffer,
-        "BENCH:QUALITY_SUMMARY:gates={d}:total_cycles={d}\n",
-        .{ gate_count, total_cycles },
-    ) catch unreachable;
-    console.print(line);
-}
-
-fn emitSummary(benchmark_count: usize, quality_gate_count: usize, quality_cycles: u64, total_cycles: u64) void {
-    var buffer: [128]u8 = undefined;
-    const line = std.fmt.bufPrint(
-        &buffer,
-        "BENCH:SUMMARY:benchmarks={d}:quality_gates={d}:quality_cycles={d}:total_cycles={d}\n",
-        .{ benchmark_count, quality_gate_count, quality_cycles, total_cycles },
-    ) catch unreachable;
-    console.print(line);
 }
 
 fn benchmarkCapabilityDerive(iteration: u32) u64 {
@@ -841,7 +812,7 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
 
 fn benchmarkCapabilityMintReuseFreeSlot(iteration: u32) u64 {
     var table = ScalingCapabilityTable.init();
-    var minted_ids: [128]u64 = [_]u64{0} ** 128;
+    var minted_ids: [CAPABILITY_REUSE_MINTED_IDS]u64 = [_]u64{0} ** CAPABILITY_REUSE_MINTED_IDS;
     var checksum: u64 = iteration;
 
     for (&minted_ids, 0..) |*capability_id, index| {
@@ -1020,7 +991,7 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
 
     var shared = shared_memory.Table.init();
     const task_id = ids.task(800 + iteration);
-    const object = shared.createWithAccess(task_id, 64 * 1024, .{
+    const object = shared.createWithAccess(task_id, kibibytes(64), .{
         .cpu = true,
         .gpu = true,
     }) catch unreachable;
@@ -1110,12 +1081,12 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
 fn benchmarkPackageRevision(iteration: u32) u64 {
     _ = iteration;
     const slot = &package_context.service.slots[0];
-    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32) catch unreachable;
+    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
     package_service_bundle_ops.installRevision(
         &slot.bundle,
         package_bundle_v2,
         2,
-        [_]u8{0x22} ** 32,
+        crypto_hash.digestFromByte(0x22),
     ) catch unreachable;
     const active = package_service_bundle_ops.resolveActiveManifest(&slot.bundle, &package_context.resolved);
     const launch_plan = package_context.service.buildLaunchPlan("app.notes") catch unreachable;
@@ -1398,7 +1369,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         .display_name = "Driver Runtime",
         .publisher = "zigos.spec",
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-driver-key",
         },
     };
@@ -1445,7 +1416,7 @@ fn qualityBatterySaverBatchDelay() u64 {
     scheduler.bind(&catalog, &runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_001, 701, 1, .{
         .total_cpu_budget_ticks = 200_000,
-        .memory_capacity_bytes = 8 * 1024 * 1024,
+        .memory_capacity_bytes = mebibytes(8),
         .battery_percent = 12,
         .battery_charging = false,
         .npu_driver_online = true,
@@ -1458,7 +1429,7 @@ fn qualityBatterySaverBatchDelay() u64 {
         "quality-battery-batch",
         "app.quality.battery-batch",
         load_dispatch_cpu_tick_cost * 4,
-        64 * 1024,
+        kibibytes(64),
         null,
     );
     if (!scheduler.registerTask(batch.id)) return 0;
@@ -1479,7 +1450,7 @@ fn qualityThermalCriticalBackgroundDelay() u64 {
     scheduler.bind(&catalog, &runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_002, 702, 1, .{
         .total_cpu_budget_ticks = 200_000,
-        .memory_capacity_bytes = 8 * 1024 * 1024,
+        .memory_capacity_bytes = mebibytes(8),
         .thermal_milli_celsius = 92_000,
     });
 
@@ -1490,7 +1461,7 @@ fn qualityThermalCriticalBackgroundDelay() u64 {
         "quality-thermal-background",
         "app.quality.thermal-background",
         load_dispatch_cpu_tick_cost * 4,
-        64 * 1024,
+        kibibytes(64),
         null,
     );
     if (!scheduler.registerTask(background.id)) return 0;
@@ -1511,7 +1482,7 @@ fn qualityMemoryPressureBatchDelay() u64 {
     scheduler.bind(&catalog, &runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_003, 703, 1, .{
         .total_cpu_budget_ticks = 200_000,
-        .memory_capacity_bytes = 32 * 1024,
+        .memory_capacity_bytes = kibibytes(32),
         .npu_driver_online = true,
     });
 
@@ -1522,7 +1493,7 @@ fn qualityMemoryPressureBatchDelay() u64 {
         "quality-memory-batch",
         "app.quality.memory-batch",
         load_dispatch_cpu_tick_cost * 4,
-        128 * 1024,
+        kibibytes(128),
         null,
     );
     if (!scheduler.registerTask(batch.id)) return 0;
@@ -1530,7 +1501,7 @@ fn qualityMemoryPressureBatchDelay() u64 {
         .class = .batch_compute,
         .wants_npu = true,
         .memory_bandwidth_units = 256,
-        .shared_memory_bytes = 64 * 1024,
+        .shared_memory_bytes = kibibytes(64),
     }, false)) return 0;
     _ = scheduler.runNext(2);
 
@@ -1549,10 +1520,10 @@ fn qualitySchedulerFairnessRatioPercent() u64 {
     scheduler.bind(&catalog, &runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_004, 704, 1, .{
         .total_cpu_budget_ticks = 1_000_000,
-        .memory_capacity_bytes = 16 * 1024 * 1024,
+        .memory_capacity_bytes = mebibytes(16),
     });
 
-    var task_ids: [4]u64 = [_]u64{0} ** 4;
+    var task_ids: [FAIRNESS_BACKGROUND_TASKS]u64 = [_]u64{0} ** FAIRNESS_BACKGROUND_TASKS;
     for (&task_ids, 0..) |*task_id, index| {
         const task = createLoadTask(
             &runtime,
@@ -1561,7 +1532,7 @@ fn qualitySchedulerFairnessRatioPercent() u64 {
             "quality-fair-background",
             "app.quality.fair-background",
             load_dispatch_cpu_tick_cost * 128,
-            64 * 1024,
+            kibibytes(64),
             null,
         );
         task_id.* = task.id;
@@ -1599,7 +1570,7 @@ fn qualityStarvationResistanceAfterPressure() u64 {
         "quality-starve-background",
         "app.quality.starve-background",
         load_dispatch_cpu_tick_cost,
-        64 * 1024,
+        kibibytes(64),
         null,
     );
     const batch = createLoadTask(
@@ -1609,7 +1580,7 @@ fn qualityStarvationResistanceAfterPressure() u64 {
         "quality-starve-batch",
         "app.quality.starve-batch",
         load_dispatch_cpu_tick_cost,
-        64 * 1024,
+        kibibytes(64),
         null,
     );
     if (!scheduler.registerTask(background.id)) return 0;
@@ -1617,14 +1588,14 @@ fn qualityStarvationResistanceAfterPressure() u64 {
 
     configureLoadTelemetry(&scheduler, 7_005, 705, 1, .{
         .total_cpu_budget_ticks = 200_000,
-        .memory_capacity_bytes = 8 * 1024 * 1024,
+        .memory_capacity_bytes = mebibytes(8),
         .thermal_milli_celsius = 92_000,
     });
     _ = scheduler.runNext(2);
 
     configureLoadTelemetry(&scheduler, 7_005, 705, 3, .{
         .total_cpu_budget_ticks = 200_000,
-        .memory_capacity_bytes = 8 * 1024 * 1024,
+        .memory_capacity_bytes = mebibytes(8),
     });
     _ = scheduler.runNext(4);
     _ = scheduler.runNext(5);
@@ -1642,9 +1613,9 @@ fn qualityBackgroundThrottlingDelayedDispatches() u64 {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
+            .memory_bytes = mebibytes(2),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
+            .shared_memory_bytes = kibibytes(64),
             .background_allowed = true,
         },
         .local_only = false,
@@ -1652,15 +1623,14 @@ fn qualityBackgroundThrottlingDelayedDispatches() u64 {
             .bundle_id = background_bundle.bundle_id,
         },
     }) catch unreachable;
-    task.state = .active;
 
     var dispatcher = background_dispatch.Controller.init();
     dispatcher.configure(.{
         .max_active_jobs = 2,
         .max_expected_duration_seconds = 300,
         .max_cpu_time_ticks = 2_000,
-        .max_memory_bytes = 128 * 1024,
-        .max_shared_memory_bytes = 64 * 1024,
+        .max_memory_bytes = kibibytes(128),
+        .max_shared_memory_bytes = kibibytes(64),
     });
 
     const first = dispatcher.dispatch(&runtime, task.id, background_bundle, "sync", .sync_completion, 10) catch unreachable;
@@ -1682,10 +1652,10 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
     scheduler.bind(&catalog, &runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_006, 706, 1, .{
         .total_cpu_budget_ticks = 1_000_000,
-        .memory_capacity_bytes = 16 * 1024 * 1024,
+        .memory_capacity_bytes = mebibytes(16),
     });
 
-    var background_ids: [4]u64 = [_]u64{0} ** 4;
+    var background_ids: [LATENCY_BACKGROUND_TASKS]u64 = [_]u64{0} ** LATENCY_BACKGROUND_TASKS;
     for (&background_ids, 0..) |*task_id, index| {
         const task = createLoadTask(
             &runtime,
@@ -1694,7 +1664,7 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
             "quality-latency-background",
             "app.quality.latency-background",
             load_dispatch_cpu_tick_cost * 128,
-            64 * 1024,
+            kibibytes(64),
             null,
         );
         task_id.* = task.id;
@@ -1708,7 +1678,7 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
         "quality-latency-foreground",
         "app.quality.latency-foreground",
         load_dispatch_cpu_tick_cost * 32,
-        64 * 1024,
+        kibibytes(64),
         9,
     );
     if (!scheduler.registerTask(foreground.id)) return std.math.maxInt(u64);
@@ -1773,7 +1743,7 @@ fn createLoadTask(
             .cpu_time_ticks = cpu_ticks,
             .memory_bytes = memory_bytes,
             .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
+            .shared_memory_bytes = kibibytes(64),
             .resource_class = class,
             .background_allowed = class == .background_light or class == .batch_compute,
         },
@@ -2115,9 +2085,9 @@ fn seedUpdateHealthUiProbe(session: *compositor_session.Session) update_health.U
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = kibibytes(64),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 4 * 1024,
+            .shared_memory_bytes = kibibytes(4),
         },
         .ui_surface_id = 3,
         .initial_component = .{
@@ -2127,86 +2097,6 @@ fn seedUpdateHealthUiProbe(session: *compositor_session.Session) update_health.U
     }) catch unreachable;
     _ = session.openTaskView(task, "Update Health") catch unreachable;
     return .{ .session = session };
-}
-
-fn zeroSyncAuthority() sync_service.AuthorityContext {
-    return .{
-        .task_id = 0,
-        .principal = .{ .kind = .service, .serial = 0 },
-        .capability_id = 0,
-        .now_ticks = 0,
-    };
-}
-
-fn mintBenchmarkSyncAuthority(
-    capability_table: *capability.CapabilityTable,
-    service_instance: *const sync_service.Service,
-) capability.Capability {
-    return capability_table.mintBootRoot(.{
-        .holder = service_instance.owner,
-        .issuer = policyAuthority(1),
-        .target = .{ .kind = .service, .id = service_instance.service_id },
-        .rights = .{ .service = .{
-            .endpoint_connect = true,
-        } },
-        .scope = .{
-            .task_id = service_instance.task_id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = false,
-        },
-        .audit = .{},
-    }) catch unreachable;
-}
-
-fn benchmarkSyncAuthority(
-    service_instance: *const sync_service.Service,
-    authority_capability: capability.Capability,
-    now_ticks: u64,
-) sync_service.AuthorityContext {
-    return .{
-        .task_id = service_instance.task_id,
-        .principal = service_instance.owner,
-        .capability_id = authority_capability.id,
-        .now_ticks = now_ticks,
-    };
-}
-
-fn mintDriverAuthority(
-    capability_table: *capability.CapabilityTable,
-    holder: principal.PrincipalId,
-    task_id: u64,
-    device_id: u64,
-    device_class: driver_service.DeviceClass,
-) capability.Capability {
-    return capability_table.mintBootRoot(.{
-        .holder = holder,
-        .issuer = policyAuthority(1),
-        .target = driver_service.authorityTarget(device_id),
-        .rights = driver_service.allowedRightsFor(device_class),
-        .scope = .{
-            .task_id = task_id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
-    }) catch unreachable;
-}
-
-fn signer(label: []const u8, seed_byte: u8) signing.SignerIdentity {
-    return .{
-        .label = label,
-        .seed = [_]u8{seed_byte} ** 32,
-    };
 }
 
 fn resolveBridgeEntry(
@@ -2223,24 +2113,4 @@ fn resolveBridgeEntry(
 fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
     const bridge_context: *const FileBridgeContext = @ptrCast(@alignCast(context));
     return bridge_context.version_present and version_id == bridge_context.expected_version_id;
-}
-
-fn user(serial: u64) principal.PrincipalId {
-    return .{ .kind = .user, .serial = serial };
-}
-
-fn app(serial: u64) principal.PrincipalId {
-    return .{ .kind = .app, .serial = serial };
-}
-
-fn service(serial: u64) principal.PrincipalId {
-    return .{ .kind = .service, .serial = serial };
-}
-
-fn device(serial: u64) principal.PrincipalId {
-    return .{ .kind = .device, .serial = serial };
-}
-
-fn policyAuthority(serial: u64) principal.PrincipalId {
-    return .{ .kind = .policy_authority, .serial = serial };
 }

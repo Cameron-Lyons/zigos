@@ -12,6 +12,14 @@ const native_ux = @import("../platform/native_ux.zig");
 const permission_review = @import("permission_review.zig");
 const policy_mediation = @import("policy_mediation.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
+
+const REVIEW_RENDER_BUFFER_BYTES: usize = units.kibibytes(4);
+const REVIEW_CARD_BUFFER_BYTES: usize = 512;
+const REVIEW_DECISION_BUFFER_BYTES: usize = 320;
+const REVIEW_PROMPT_BUFFER_BYTES: usize = 512;
+const REVIEW_FLOW_BUFFER_BYTES: usize = 320;
+const REVIEW_WINDOW_BUFFER_BYTES: usize = 320;
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -176,7 +184,7 @@ pub const RenderedReviewSurface = struct {
             &self.bundle,
             self.decisions[0..self.decision_count],
         );
-        var review_buffer: [4096]u8 = undefined;
+        var review_buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
         const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &self.bundle) catch unreachable;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
@@ -221,7 +229,7 @@ pub const RenderedReviewSurface = struct {
         const compositor = self.service.compositor orelse return error.ReviewWindowMissing;
         const item = compositor.findReviewItemConst(window_id, request.kind, request.resource) orelse return error.ReviewWindowMissing;
 
-        var item_buffer: [512]u8 = undefined;
+        var item_buffer: [REVIEW_CARD_BUFFER_BYTES]u8 = undefined;
         const rendered_item = compositor_session.renderReviewItemToBuffer(&item_buffer, window_id, item) catch return;
         try ledger.recordPermissionReview(
             task.owner,
@@ -233,7 +241,7 @@ pub const RenderedReviewSurface = struct {
             false,
         );
 
-        var decision_buffer: [320]u8 = undefined;
+        var decision_buffer: [REVIEW_DECISION_BUFFER_BYTES]u8 = undefined;
         const rendered_decision = compositor_session.renderDecisionToBuffer(&decision_buffer, window_id, item) catch return;
         try ledger.recordPermissionDecision(
             task.owner,
@@ -358,7 +366,7 @@ pub const Service = struct {
 
             self.presentReviewRequest(review_window_id, bundle, request);
             const session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
-            var prompt_buffer: [512]u8 = undefined;
+            var prompt_buffer: [REVIEW_PROMPT_BUFFER_BYTES]u8 = undefined;
             const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, &bundle, index) catch unreachable;
             console.print(prompt);
             console.print("    command: allow [local] [lease=<ticks>] | deny (revokable later)\n");
@@ -379,7 +387,7 @@ pub const Service = struct {
         }
 
         const reviewed_session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
-        var review_buffer: [4096]u8 = undefined;
+        var review_buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
         const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &bundle) catch unreachable;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
@@ -534,7 +542,7 @@ pub const Service = struct {
             decision.local_only,
             decision.lease_ticks,
         ) catch return;
-        var buffer: [320]u8 = undefined;
+        var buffer: [REVIEW_FLOW_BUFFER_BYTES]u8 = undefined;
         const rendered = native_ux.renderReviewFlowToBuffer(&buffer, flow) catch return;
         console.print(rendered);
         console.print("\n");
@@ -553,7 +561,7 @@ pub const Service = struct {
             if (response.status != .ok) return null;
             const window = service.session.findWindowConst(response.window_id) orelse return response.window_id;
             if (!existed) {
-                var buffer: [320]u8 = undefined;
+                var buffer: [REVIEW_WINDOW_BUFFER_BYTES]u8 = undefined;
                 const rendered = compositor_session.renderWindowToBuffer(&buffer, window) catch return window.id;
                 console.print(rendered);
                 console.print("\n");
@@ -565,7 +573,7 @@ pub const Service = struct {
         const existed = compositor.findWindowForTaskBundleConst(app_task.id, bundle.bundle_id) != null;
         const window = compositor.beginPermissionReview(self.task_id, app_task, bundle) catch return null;
         if (!existed) {
-            var buffer: [320]u8 = undefined;
+            var buffer: [REVIEW_WINDOW_BUFFER_BYTES]u8 = undefined;
             const rendered = compositor_session.renderWindowToBuffer(&buffer, window) catch return window.id;
             console.print(rendered);
             console.print("\n");
@@ -597,7 +605,7 @@ pub const Service = struct {
             });
             if (response.status != .ok) return;
             const item = service.session.findReviewItemConst(window_id, request.kind, request.resource) orelse return;
-            var buffer: [512]u8 = undefined;
+            var buffer: [REVIEW_CARD_BUFFER_BYTES]u8 = undefined;
             const rendered = compositor_session.renderReviewItemToBuffer(&buffer, window_id, item) catch return;
             console.print(rendered);
             console.print("\n");
@@ -606,7 +614,7 @@ pub const Service = struct {
 
         const compositor = self.compositor orelse return;
         const item = compositor.ensureReviewItem(window_id, bundle, request) catch return;
-        var buffer: [512]u8 = undefined;
+        var buffer: [REVIEW_CARD_BUFFER_BYTES]u8 = undefined;
         const rendered = compositor_session.renderReviewItemToBuffer(&buffer, window_id, item) catch return;
         console.print(rendered);
         console.print("\n");
@@ -631,7 +639,7 @@ pub const Service = struct {
             });
             if (response.status != .ok) return;
             const item = service.session.findReviewItemConst(window_id, request.kind, request.resource) orelse return;
-            var buffer: [320]u8 = undefined;
+            var buffer: [REVIEW_DECISION_BUFFER_BYTES]u8 = undefined;
             const rendered = compositor_session.renderDecisionToBuffer(&buffer, window_id, item) catch return;
             console.print(rendered);
             console.print("\n");
@@ -646,7 +654,7 @@ pub const Service = struct {
             decision.local_only,
             decision.lease_ticks,
         ) catch return;
-        var buffer: [320]u8 = undefined;
+        var buffer: [REVIEW_DECISION_BUFFER_BYTES]u8 = undefined;
         const rendered = compositor_session.renderDecisionToBuffer(&buffer, window_id, item) catch return;
         console.print(rendered);
         console.print("\n");
@@ -664,19 +672,28 @@ pub const Service = struct {
     }
 };
 
-test "review service retries invalid commands clamps leases and records audits" {
-    var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 1 },
+fn createReviewTestTask(
+    runtime: *task_runtime.Runtime,
+    owner_serial: u64,
+    ui_surface_id: ?u64,
+) !*task_runtime.TaskRecord {
+    return runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = owner_serial },
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
+        .ui_surface_id = ui_surface_id,
         .local_only = true,
     });
+}
+
+test "review service retries invalid commands clamps leases and records audits" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createReviewTestTask(&runtime, 1, null);
     const scripted_inputs = [_][]const u8{
         "wat",
         "allow local lease=60",
@@ -702,15 +719,10 @@ test "review service retries invalid commands clamps leases and records audits" 
             },
         },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-        .signature = .{
-            .format = "ed25519",
-            .signer = "zigos-dev-key",
-        },
+    var bundle = manifest_fixtures.basicNotesBundle(&permissions);
+    bundle.signature = .{
+        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .signer = "zigos-dev-key",
     };
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 
@@ -728,17 +740,7 @@ test "review service retries invalid commands clamps leases and records audits" 
 
 test "review service rejects invalid manifests before auditing" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 2 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .local_only = true,
-    });
+    const task = try createReviewTestTask(&runtime, 2, null);
     const scripted_inputs = [_][]const u8{"allow"};
     var service = Service.init(11, 12, &runtime, &scripted_inputs);
     var bundle = manifest_fixtures.syncPushBundle();
@@ -751,17 +753,7 @@ test "review service rejects invalid manifests before auditing" {
 
 test "review service refuses partial grants when visible decisions exceed capacity" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 46 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .local_only = true,
-    });
+    const task = try createReviewTestTask(&runtime, 46, null);
     var permissions: [MAX_REVIEW_DECISIONS + 1]manifest.PermissionRequest = undefined;
     for (&permissions) |*request| {
         request.* = .{
@@ -794,18 +786,7 @@ test "review service refuses partial grants when visible decisions exceed capaci
 
 test "review service uses manifest-aware scripted plans through compositor service path" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 3 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .ui_surface_id = 33,
-        .local_only = true,
-    });
+    const task = try createReviewTestTask(&runtime, 3, 33);
     const fallback_inputs = [_][]const u8{"deny"};
     const scripted_plan = [_]ScriptedPlanEntry{
         .{
@@ -843,18 +824,7 @@ test "review service uses manifest-aware scripted plans through compositor servi
 
 test "review service renders commands from a typed decision profile" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 4 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .ui_surface_id = 34,
-        .local_only = true,
-    });
+    const task = try createReviewTestTask(&runtime, 4, 34);
     const profile = [_]ProfileRule{
         .{
             .bundle_id = "app.notes",
@@ -891,15 +861,10 @@ test "review service renders commands from a typed decision profile" {
             .required = false,
         },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-        .signature = .{
-            .format = "ed25519",
-            .signer = "zigos-dev-key",
-        },
+    var bundle = manifest_fixtures.basicNotesBundle(&permissions);
+    bundle.signature = .{
+        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .signer = "zigos-dev-key",
     };
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 
@@ -912,18 +877,7 @@ test "review service renders commands from a typed decision profile" {
 
 test "rendered permission review surface drives allow deny controls through compositor display and policy grants" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 44 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .ui_surface_id = 71,
-        .local_only = true,
-    });
+    const task = try createReviewTestTask(&runtime, 44, 71);
     var compositor = compositor_session.Session.init();
     var checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(45, 46, &runtime, &compositor, &checkpoint_store);
@@ -962,7 +916,7 @@ test "rendered permission review surface drives allow deny controls through comp
         .publisher = "zigos.dev",
         .requested_permissions = &permissions,
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-dev-key",
         },
     };
@@ -1039,18 +993,7 @@ test "rendered permission review surface drives allow deny controls through comp
 
 test "rendered permission review surface requires every visible decision before grants" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 45 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .ui_surface_id = 74,
-        .local_only = true,
-    });
+    const task = try createReviewTestTask(&runtime, 45, 74);
     var compositor = compositor_session.Session.init();
     var checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(47, 48, &runtime, &compositor, &checkpoint_store);
@@ -1076,7 +1019,7 @@ test "rendered permission review surface requires every visible decision before 
         .publisher = "zigos.dev",
         .requested_permissions = &permissions,
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-dev-key",
         },
     };

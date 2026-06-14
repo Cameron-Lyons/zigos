@@ -11,6 +11,7 @@ const native_util = @import("../core/util.zig");
 const std = @import("std");
 const service_bootstrap = @import("service_bootstrap.zig");
 const service_contract = @import("service_contracts.zig");
+const units = @import("../core/units.zig");
 const root = @import("root");
 const storage_volume_mod = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
     root.storage_volume
@@ -602,9 +603,9 @@ fn connectClient(
             .owner = .{ .kind = .app, .serial = 20 },
             .budget = .{
                 .cpu_time_ticks = 6_000,
-                .memory_bytes = 512 * 1024,
+                .memory_bytes = units.kibibytes(512),
                 .endpoint_slots = 16,
-                .shared_memory_bytes = 64 * 1024,
+                .shared_memory_bytes = units.kibibytes(64),
                 .background_allowed = false,
             },
             .local_only = true,

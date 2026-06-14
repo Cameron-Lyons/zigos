@@ -356,31 +356,31 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
 
     const state_signer = signing.SignerIdentity{
         .label = "platform-state",
-        .seed = [_]u8{0x71} ** 32,
+        .seed = signing.seedFromByte(0x71),
     };
     const image_signer = signing.SignerIdentity{
         .label = "platform-image",
-        .seed = [_]u8{0x72} ** 32,
+        .seed = signing.seedFromByte(0x72),
     };
     const object_signer = signing.SignerIdentity{
         .label = "platform-storage",
-        .seed = [_]u8{0x73} ** 32,
+        .seed = signing.seedFromByte(0x73),
     };
     const user_signer = signing.SignerIdentity{
         .label = "platform-user",
-        .seed = [_]u8{0x74} ** 32,
+        .seed = signing.seedFromByte(0x74),
     };
     const device_signer = signing.SignerIdentity{
         .label = "primary-device",
-        .seed = [_]u8{0x75} ** 32,
+        .seed = signing.seedFromByte(0x75),
     };
     const tablet_signer = signing.SignerIdentity{
         .label = "tablet-device",
-        .seed = [_]u8{0x76} ** 32,
+        .seed = signing.seedFromByte(0x76),
     };
     const tablet_rotated_signer = signing.SignerIdentity{
         .label = "tablet-device-v2",
-        .seed = [_]u8{0x77} ** 32,
+        .seed = signing.seedFromByte(0x77),
     };
 
     var storage = storage_service.Service.initWithStore(920, 51, storage_owner, &storage_checkpoint_store);
@@ -472,11 +472,11 @@ test "recovery environment requires boot-profile recovery session gates and refu
     const untrusted_device = principal.PrincipalId{ .kind = .device, .serial = 44 };
     const user_signer = signing.SignerIdentity{
         .label = "negative-user",
-        .seed = [_]u8{0x91} ** 32,
+        .seed = signing.seedFromByte(0x91),
     };
     const rotated_signer = signing.SignerIdentity{
         .label = "negative-device-v2",
-        .seed = [_]u8{0x92} ** 32,
+        .seed = signing.seedFromByte(0x92),
     };
 
     var storage = storage_service.Service.initWithStore(922, 53, storage_owner, &storage_checkpoint_store);

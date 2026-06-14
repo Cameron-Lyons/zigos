@@ -5,6 +5,7 @@ const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const capability = @import("../kernel_api/capability.zig");
 const task_runtime = @import("task_runtime.zig");
+const units = @import("../core/units.zig");
 const userspace_executor = @import("userspace_executor.zig");
 const userspace_loader = @import("userspace_loader.zig");
 
@@ -1306,7 +1307,7 @@ test "userspace scheduler requires observed platform telemetry before waking har
 
     var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(2, 20, 3, .{
         .total_cpu_budget_ticks = 10_000,
-        .memory_capacity_bytes = 512 * 1024,
+        .memory_capacity_bytes = units.kibibytes(512),
         .gpu_driver_online = false,
         .npu_driver_online = false,
         .media_driver_online = true,
@@ -1340,7 +1341,7 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = DISPATCH_CPU_TICK_COST * 2,
-            .memory_bytes = 128 * 1024,
+            .memory_bytes = units.kibibytes(128),
             .endpoint_slots = TEST_TASK_ENDPOINT_SLOTS,
             .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
             .resource_class = .batch_compute,
@@ -1374,7 +1375,7 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
 
     var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(3, 21, 2, .{
         .total_cpu_budget_ticks = 10_000,
-        .memory_capacity_bytes = 1024 * 1024,
+        .memory_capacity_bytes = units.mebibytes(1),
         .gpu_driver_online = false,
         .npu_driver_online = true,
         .media_driver_online = false,
@@ -1420,7 +1421,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     try std.testing.expect(scheduler.registerTask(foreground.id));
     var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(22, 220, 101, .{
         .total_cpu_budget_ticks = 10_000,
-        .memory_capacity_bytes = 512 * 1024,
+        .memory_capacity_bytes = units.kibibytes(512),
         .thermal_milli_celsius = 91_000,
         .gpu_driver_online = true,
         .npu_driver_online = true,
@@ -1461,7 +1462,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     try std.testing.expect(scheduler.registerTask(media_task.id));
     try provider.observeLive(220, 102, .{
         .total_cpu_budget_ticks = 10_000,
-        .memory_capacity_bytes = 512 * 1024,
+        .memory_capacity_bytes = units.kibibytes(512),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 15,
         .battery_charging = false,
@@ -1506,7 +1507,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
 
     var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(30, 300, 10, .{
         .total_cpu_budget_ticks = 20_000,
-        .memory_capacity_bytes = 1024 * 1024,
+        .memory_capacity_bytes = units.mebibytes(1),
         .thermal_milli_celsius = 91_000,
         .battery_percent = 80,
         .battery_charging = true,
@@ -1547,7 +1548,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
 
     try provider.observeLive(300, 14, .{
         .total_cpu_budget_ticks = 20_000,
-        .memory_capacity_bytes = 1024 * 1024,
+        .memory_capacity_bytes = units.mebibytes(1),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 12,
         .battery_charging = false,
@@ -1573,7 +1574,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
 
     try provider.observeLive(300, 16, .{
         .total_cpu_budget_ticks = 20_000,
-        .memory_capacity_bytes = 1024 * 1024,
+        .memory_capacity_bytes = units.mebibytes(1),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 80,
         .battery_charging = true,

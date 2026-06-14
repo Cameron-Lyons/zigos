@@ -1,9 +1,13 @@
 const std = @import("std");
+const ascii = @import("../utils/ascii.zig");
 
 pub const MAGIC: u32 = 0x5A43_5248;
 pub const VERSION: u16 = 1;
 pub const REDACTION_POLICY_VERSION: u16 = 1;
 pub const MAX_REASON_BYTES: usize = 64;
+pub const REDACTED_REPORT_BUFFER_BYTES: usize = 256;
+const REDACTED_SUMMARY_BUFFER_BYTES: usize = 160;
+const REDACTED_SUMMARY_TEST_BUFFER_BYTES: usize = 128;
 
 pub const Error = error{
     BadMagic,
@@ -112,7 +116,7 @@ pub fn redactionMetadata(record: Record) RedactionMetadata {
 }
 
 pub fn redactedReport(record: Record, buffer: []u8) []const u8 {
-    var summary_buffer: [160]u8 = undefined;
+    var summary_buffer: [REDACTED_SUMMARY_BUFFER_BYTES]u8 = undefined;
     const summary = redactedSummary(record, &summary_buffer);
     const metadata = redactionMetadata(record);
     return std.fmt.bufPrint(
@@ -135,7 +139,7 @@ fn reasonContainsSensitiveData(reason: []const u8) bool {
 fn redactionMarkerMask(reason: []const u8) u32 {
     var mask: u32 = 0;
     for (SENSITIVE_MARKERS, 0..) |marker, index| {
-        if (containsAsciiIgnoreCase(reason, marker)) {
+        if (ascii.containsIgnoreCase(reason, marker)) {
             mask |= @as(u32, 1) << @intCast(index);
         }
     }
@@ -149,23 +153,6 @@ fn fingerprintReason(reason: []const u8) u64 {
         hash *%= 0x0000_0100_0000_01B3;
     }
     return hash;
-}
-
-fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var offset: usize = 0;
-    while (offset + needle.len <= haystack.len) : (offset += 1) {
-        var matched = true;
-        for (needle, 0..) |needle_byte, index| {
-            if (std.ascii.toLower(haystack[offset + index]) != std.ascii.toLower(needle_byte)) {
-                matched = false;
-                break;
-            }
-        }
-        if (matched) return true;
-    }
-    return false;
 }
 
 fn checksum(record: Record) u32 {
@@ -182,7 +169,7 @@ test "crash record validates and redacts to summary metadata" {
     const record = try init(.panic, 42, 100, 0x1234, 0x5678, "panic before ready");
     try validate(record);
 
-    var buffer: [128]u8 = undefined;
+    var buffer: [REDACTED_SUMMARY_TEST_BUFFER_BYTES]u8 = undefined;
     const summary = redactedSummary(record, buffer[0..]);
     try std.testing.expect(std.mem.indexOf(u8, summary, "boot=42") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "panic before ready") != null);
@@ -191,7 +178,7 @@ test "crash record validates and redacts to summary metadata" {
 test "crash record redacts sensitive reason text by default" {
     const record = try init(.panic, 42, 100, 0x1234, 0x5678, "capability token secret=abc");
 
-    var buffer: [128]u8 = undefined;
+    var buffer: [REDACTED_SUMMARY_TEST_BUFFER_BYTES]u8 = undefined;
     const summary = redactedSummary(record, buffer[0..]);
     try std.testing.expect(std.mem.indexOf(u8, summary, "[redacted]") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "secret=abc") == null);
@@ -202,7 +189,7 @@ test "crash record redacts sensitive reason text by default" {
     try std.testing.expect(metadata.marker_mask != 0);
     try std.testing.expectEqual(metadata.reason_fingerprint, redactionMetadata(record).reason_fingerprint);
 
-    var report_buffer: [256]u8 = undefined;
+    var report_buffer: [REDACTED_REPORT_BUFFER_BYTES]u8 = undefined;
     const report = redactedReport(record, &report_buffer);
     try std.testing.expect(std.mem.indexOf(u8, report, "redacted=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "reason_fingerprint=0x") != null);

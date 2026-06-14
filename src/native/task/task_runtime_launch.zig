@@ -2,6 +2,9 @@ const crypto_hash = @import("../core/crypto_hash.zig");
 const native_util = @import("../core/util.zig");
 const std = @import("std");
 
+pub const SYNTHETIC_SEGMENT_BYTES: u32 = 4096;
+pub const SYNTHETIC_SEGMENT_ALIGNMENT: u32 = 0x1000;
+
 pub fn zeroExecutionComponent(RecordType: type) RecordType {
     var record = std.mem.zeroes(RecordType);
     record.substrate = .typed_component_abi;
@@ -106,20 +109,20 @@ pub fn syntheticUserspaceImage(
     image.segments[0] = .{
         .virtual_address = default_entry_point,
         .file_offset = 0,
-        .file_size = 4096,
-        .memory_size = 4096,
-        .alignment = 0x1000,
+        .file_size = SYNTHETIC_SEGMENT_BYTES,
+        .memory_size = SYNTHETIC_SEGMENT_BYTES,
+        .alignment = SYNTHETIC_SEGMENT_ALIGNMENT,
         .access = .{
             .read = true,
             .execute = true,
         },
     };
     image.segments[1] = .{
-        .virtual_address = default_entry_point + 0x1000,
-        .file_offset = 4096,
-        .file_size = 4096,
-        .memory_size = 4096,
-        .alignment = 0x1000,
+        .virtual_address = default_entry_point + SYNTHETIC_SEGMENT_ALIGNMENT,
+        .file_offset = SYNTHETIC_SEGMENT_BYTES,
+        .file_size = SYNTHETIC_SEGMENT_BYTES,
+        .memory_size = SYNTHETIC_SEGMENT_BYTES,
+        .alignment = SYNTHETIC_SEGMENT_ALIGNMENT,
         .access = .{
             .read = true,
             .write = true,

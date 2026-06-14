@@ -1,5 +1,7 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
+const crypto_hash = @import("../core/crypto_hash.zig");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -45,7 +47,7 @@ pub const CreateRequest = struct {
     target: []const u8 = "",
     explicit_internet_grant: bool = false,
     require_remote_attestation: bool = false,
-    pinned_root_digest: ?[32]u8 = null,
+    pinned_root_digest: ?crypto_hash.Digest = null,
 };
 
 pub const PolicyRecord = struct {
@@ -60,7 +62,7 @@ pub const PolicyRecord = struct {
     explicit_internet_grant: bool,
     require_remote_attestation: bool,
     pinned_root_digest_present: bool,
-    pinned_root_digest: [32]u8,
+    pinned_root_digest: crypto_hash.Digest,
 
     pub fn labelSlice(self: *const PolicyRecord) []const u8 {
         return self.label[0..self.label_len];
@@ -83,7 +85,7 @@ pub const ConnectionEvidence = struct {
     destination: Destination,
     attested: bool = false,
     peer_root_digest_present: bool = false,
-    peer_root_digest: [32]u8 = [_]u8{0} ** 32,
+    peer_root_digest: crypto_hash.Digest = crypto_hash.zero_digest,
 };
 
 pub const EgressDecisionReason = enum(u8) {
@@ -442,12 +444,12 @@ fn zeroPolicy() PolicyRecord {
         .explicit_internet_grant = false,
         .require_remote_attestation = false,
         .pinned_root_digest_present = false,
-        .pinned_root_digest = [_]u8{0} ** 32,
+        .pinned_root_digest = crypto_hash.zero_digest,
     };
 }
 
 fn policyRequestKey(request: CreateRequest) u64 {
-    var hasher = std.hash.Wyhash.init(0x5A47_4E45_5450_4F4C);
+    var hasher = std.hash.Wyhash.init(hash_seeds.network_policy_request_key);
     updatePrincipalHash(&hasher, request.owner);
     updateOptionalU64Hash(&hasher, request.workspace_id);
     updateSliceHash(&hasher, request.label);
@@ -461,7 +463,7 @@ fn policyRequestKey(request: CreateRequest) u64 {
 }
 
 fn policyRecordRequestKey(policy: *const PolicyRecord) u64 {
-    var hasher = std.hash.Wyhash.init(0x5A47_4E45_5450_4F4C);
+    var hasher = std.hash.Wyhash.init(hash_seeds.network_policy_request_key);
     updatePrincipalHash(&hasher, policy.owner);
     updateOptionalU64Hash(&hasher, policy.workspace_id);
     updateSliceHash(&hasher, policy.labelSlice());
@@ -509,9 +511,9 @@ fn updateByteHash(hasher: *std.hash.Wyhash, value: u8) void {
 }
 
 fn updateU64Hash(hasher: *std.hash.Wyhash, value: u64) void {
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..], value, .little);
-    hasher.update(bytes[0..]);
+    var bytes: [@sizeOf(u64)]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    hasher.update(&bytes);
 }
 
 fn updateSliceHash(hasher: *std.hash.Wyhash, value: []const u8) void {
@@ -654,7 +656,7 @@ test "network policy objects require explicit targets for scoped discovery and i
 test "network policy connections can require remote attestation and pinned service identities" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 10 };
-    const pinned_digest = [_]u8{0xAB} ** 32;
+    const pinned_digest = crypto_hash.digestFromByte(0xAB);
     const policy = try directory.create(.{
         .owner = owner,
         .label = "notes-overlay",
@@ -671,7 +673,7 @@ test "network policy connections can require remote attestation and pinned servi
         .destination = .{ .service_identity = "overlay.notes.sync" },
         .attested = true,
         .peer_root_digest_present = true,
-        .peer_root_digest = [_]u8{0xCD} ** 32,
+        .peer_root_digest = crypto_hash.digestFromByte(0xCD),
     })).reason);
 
     const decision = try directory.authorizeConnection(policy.id, .{
@@ -688,7 +690,7 @@ test "network policy connections can require remote attestation and pinned servi
 test "network policy creation is idempotent for identical requests" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 11 };
-    const pinned_digest = [_]u8{0xBC} ** 32;
+    const pinned_digest = crypto_hash.digestFromByte(0xBC);
 
     const first = try directory.create(.{
         .owner = owner,
@@ -727,7 +729,7 @@ fn paddedTarget(text: []const u8) [MAX_TARGET_BYTES]u8 {
 test "network policy indexes rebuild after persisted slots are loaded" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 12 };
-    const pinned_digest = [_]u8{0xDE} ** 32;
+    const pinned_digest = crypto_hash.digestFromByte(0xDE);
 
     directory.policies[3] = .{
         .in_use = true,
@@ -892,8 +894,8 @@ test "egress broker binds connection creation to attested pinned service identit
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 13 };
     const app = principal.PrincipalId{ .kind = .app, .serial = 13 };
-    const pinned_digest = [_]u8{0xD1} ** 32;
-    const wrong_digest = [_]u8{0xD2} ** 32;
+    const pinned_digest = crypto_hash.digestFromByte(0xD1);
+    const wrong_digest = crypto_hash.digestFromByte(0xD2);
 
     const overlay = try directory.create(.{
         .owner = owner,

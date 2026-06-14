@@ -3,6 +3,7 @@ const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
+const units = @import("../core/units.zig");
 
 pub const Engine = enum(u8) {
     cpu,
@@ -703,7 +704,7 @@ fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCoun
         .npu_available = counters.npu_driver_online,
         .media_available = counters.media_driver_online,
         .cpu_budget_ticks = saturatingSubTicks(counters.total_cpu_budget_ticks, counters.consumed_cpu_ticks),
-        .memory_bandwidth_units = available_memory_bytes / 1024,
+        .memory_bandwidth_units = available_memory_bytes / units.bytes_per_kib,
     };
 }
 
@@ -752,7 +753,7 @@ test "accelerator scheduler preserves responsiveness while degrading opportunist
     const interactive = controller.plan(.{
         .class = .foreground_interactive,
         .wants_gpu = true,
-        .shared_memory_bytes = 8192,
+        .shared_memory_bytes = units.kibibytes(8),
     });
     try std.testing.expect(!interactive.delayed);
     try std.testing.expectEqual(Engine.gpu, interactive.engine);
@@ -773,7 +774,7 @@ test "accelerator scheduler uses media engines and privacy mode falls back from 
         .class = .media_export,
         .wants_gpu = true,
         .wants_media_engine = true,
-        .shared_memory_bytes = 16 * 1024,
+        .shared_memory_bytes = units.kibibytes(16),
     });
     try std.testing.expectEqual(Engine.media, media_export_plan.engine);
     try std.testing.expect(media_export_plan.zero_copy_allowed);
@@ -854,7 +855,7 @@ test "accelerator scheduler consumes emulator telemetry samples" {
     const interactive = controller.plan(.{
         .class = .foreground_interactive,
         .wants_gpu = true,
-        .shared_memory_bytes = 4096,
+        .shared_memory_bytes = shared_memory.PAGE_SIZE,
     });
     try std.testing.expect(!interactive.delayed);
     try std.testing.expectEqual(Engine.gpu, interactive.engine);
@@ -887,7 +888,7 @@ test "accelerator scheduler consumes emulator telemetry samples" {
     const media_export = controller.plan(.{
         .class = .media_export,
         .wants_media_engine = true,
-        .shared_memory_bytes = 8192,
+        .shared_memory_bytes = units.kibibytes(8),
     });
     try std.testing.expectEqual(Engine.media, media_export.engine);
     try std.testing.expect(media_export.degraded);
@@ -920,7 +921,7 @@ test "accelerator scheduler consumes booted platform provider samples" {
     const foreground = controller.plan(.{
         .class = .foreground_interactive,
         .wants_gpu = true,
-        .shared_memory_bytes = 4096,
+        .shared_memory_bytes = shared_memory.PAGE_SIZE,
     });
     try std.testing.expect(!foreground.delayed);
     try std.testing.expectEqual(Engine.gpu, foreground.engine);
@@ -943,7 +944,7 @@ test "accelerator scheduler consumes booted platform provider samples" {
     const media_export = controller.plan(.{
         .class = .media_export,
         .wants_media_engine = true,
-        .shared_memory_bytes = 8192,
+        .shared_memory_bytes = units.kibibytes(8),
     });
     try std.testing.expectEqual(Engine.media, media_export.engine);
     try std.testing.expect(media_export.degraded);
@@ -955,14 +956,14 @@ test "accelerator scheduler consumes booted platform provider samples" {
 test "accelerator scheduler derives hardware telemetry from booted live counters" {
     try std.testing.expectError(error.TelemetryProviderUnauthorized, BootedPlatformTelemetryProvider.initForBootedService(0, 70, 99, .{
         .total_cpu_budget_ticks = 10_000,
-        .memory_capacity_bytes = 128 * 1024,
+        .memory_capacity_bytes = units.kibibytes(128),
     }));
     var provider = try BootedPlatformTelemetryProvider.initForBootedService(8, 70, 100, .{
         .total_cpu_budget_ticks = 10_000,
         .consumed_cpu_ticks = 3_000,
-        .memory_capacity_bytes = 128 * 1024,
-        .reserved_memory_bytes = 64 * 1024,
-        .reserved_shared_memory_bytes = 16 * 1024,
+        .memory_capacity_bytes = units.kibibytes(128),
+        .reserved_memory_bytes = units.kibibytes(64),
+        .reserved_shared_memory_bytes = units.kibibytes(16),
         .gpu_driver_online = true,
         .npu_driver_online = false,
         .media_driver_online = true,
@@ -995,15 +996,15 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
 
     try std.testing.expectError(error.TelemetryProviderUnauthorized, provider.observeLive(71, 101, .{
         .total_cpu_budget_ticks = 10_000,
-        .memory_capacity_bytes = 128 * 1024,
+        .memory_capacity_bytes = units.kibibytes(128),
     }));
     try std.testing.expectEqual(@as(u32, 2), provider.rejected_observation_count);
 
     try provider.observeLive(70, 102, .{
         .total_cpu_budget_ticks = 10_000,
         .consumed_cpu_ticks = 2_000,
-        .memory_capacity_bytes = 256 * 1024,
-        .reserved_memory_bytes = 64 * 1024,
+        .memory_capacity_bytes = units.kibibytes(256),
+        .reserved_memory_bytes = units.kibibytes(64),
         .gpu_driver_online = true,
         .npu_driver_online = true,
         .media_driver_online = false,
@@ -1026,7 +1027,7 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
 test "accelerator scheduler tracks exclusive engine claims and zero-copy attachments" {
     var controller = Controller.init();
     var shared = shared_memory.Table.init();
-    const object = try shared.createWithAccess(ids.task(9), 32 * 1024, .{
+    const object = try shared.createWithAccess(ids.task(9), units.kibibytes(32), .{
         .media = true,
         .gpu = true,
     });
@@ -1037,7 +1038,7 @@ test "accelerator scheduler tracks exclusive engine claims and zero-copy attachm
             .class = .media_export,
             .wants_gpu = true,
             .wants_media_engine = true,
-            .shared_memory_bytes = 32 * 1024,
+            .shared_memory_bytes = units.kibibytes(32),
         },
         .require_accelerator = true,
         .shared_memory_object_id = object.id,
@@ -1058,7 +1059,7 @@ test "accelerator scheduler tracks exclusive engine claims and zero-copy attachm
             .class = .media_export,
             .wants_gpu = true,
             .wants_media_engine = true,
-            .shared_memory_bytes = 32 * 1024,
+            .shared_memory_bytes = units.kibibytes(32),
         },
         .require_accelerator = true,
     }));
@@ -1069,7 +1070,7 @@ test "accelerator scheduler tracks exclusive engine claims and zero-copy attachm
             .class = .media_export,
             .wants_gpu = true,
             .wants_media_engine = true,
-            .shared_memory_bytes = 32 * 1024,
+            .shared_memory_bytes = units.kibibytes(32),
         },
     });
     try std.testing.expectEqual(Engine.cpu, degraded.engine);

@@ -1,9 +1,12 @@
 const std = @import("std");
 const manifest = @import("../policy/manifest.zig");
+const units = @import("../core/units.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
 
 const copyText = native_util.copyText;
+const kibibytes = units.kibibytes;
+const mebibytes = units.mebibytes;
 
 pub const MAX_RECORDS: usize = 16;
 pub const MAX_TASK_ID_BYTES: usize = 48;
@@ -35,8 +38,8 @@ pub const DispatchPolicy = struct {
     max_active_jobs: usize = 2,
     max_expected_duration_seconds: u32 = 300,
     max_cpu_time_ticks: u64 = 10_000,
-    max_memory_bytes: usize = 512 * 1024,
-    max_shared_memory_bytes: usize = 64 * 1024,
+    max_memory_bytes: usize = kibibytes(512),
+    max_shared_memory_bytes: usize = kibibytes(64),
 };
 
 pub const DispatchRecord = struct {
@@ -297,53 +300,110 @@ fn zeroRecord() DispatchRecord {
     };
 }
 
-test "background dispatch accepts declared triggers and preserves task metadata" {
-    var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .app, .serial = 300 },
+const TEST_APP_MEMORY_BYTES: usize = mebibytes(2);
+const TEST_APP_SHARED_MEMORY_BYTES: usize = kibibytes(64);
+const TEST_SMALL_APP_MEMORY_BYTES: usize = kibibytes(512);
+const TEST_SYNC_BACKGROUND_MEMORY_BYTES: usize = kibibytes(64);
+const TEST_SAFE_BUNDLE_ID = "app.safe";
+const TEST_SYNC_BACKGROUND_ID = "sync";
+
+const TestTaskSpec = struct {
+    serial: u64,
+    bundle_id: []const u8 = TEST_SAFE_BUNDLE_ID,
+    cpu_time_ticks: u64 = 20_000,
+    memory_bytes: usize = TEST_APP_MEMORY_BYTES,
+    shared_memory_bytes: usize = TEST_APP_SHARED_MEMORY_BYTES,
+    ui_surface_id: ?u64 = null,
+    local_only: bool = false,
+    background_allowed: bool = true,
+};
+
+fn createActiveTestTask(runtime: *task_runtime.Runtime, spec: TestTaskSpec) !*task_runtime.TaskRecord {
+    return runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = spec.serial },
         .component_class = .app_component,
         .budget = .{
-            .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
+            .cpu_time_ticks = spec.cpu_time_ticks,
+            .memory_bytes = spec.memory_bytes,
             .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = true,
+            .shared_memory_bytes = spec.shared_memory_bytes,
+            .background_allowed = spec.background_allowed,
         },
-        .ui_surface_id = 9,
-        .local_only = false,
+        .ui_surface_id = spec.ui_surface_id,
+        .local_only = spec.local_only,
         .launch = .{
-            .bundle_id = "app.background",
+            .bundle_id = spec.bundle_id,
         },
     });
-    task.state = .active;
+}
+
+fn backgroundRunPermission(resource: []const u8) manifest.PermissionRequest {
+    return .{
+        .kind = .background_execution,
+        .resource = resource,
+        .rights = .{ .task = .{ .background_run = true } },
+    };
+}
+
+fn syncBackgroundTask() manifest.BackgroundTaskDecl {
+    return .{
+        .id = TEST_SYNC_BACKGROUND_ID,
+        .trigger = .sync_completion,
+        .expected_duration_seconds = 30,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = TEST_SYNC_BACKGROUND_MEMORY_BYTES,
+        },
+        .network = .local_network_only,
+        .visibility = .status_only,
+    };
+}
+
+fn testBundle(
+    bundle_id: []const u8,
+    display_name: []const u8,
+    permissions: []const manifest.PermissionRequest,
+    background_tasks: []const manifest.BackgroundTaskDecl,
+) manifest.BundleManifest {
+    return .{
+        .bundle_id = bundle_id,
+        .display_name = display_name,
+        .publisher = "zigos.test",
+        .requested_permissions = permissions,
+        .background_tasks = background_tasks,
+    };
+}
+
+test "background dispatch accepts declared triggers and preserves task metadata" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createActiveTestTask(&runtime, .{
+        .serial = 300,
+        .bundle_id = "app.background",
+        .ui_surface_id = 9,
+        .local_only = false,
+    });
 
     const permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "schedule", .rights = .{ .task = .{ .background_run = true } } },
-        .{ .kind = .background_execution, .resource = "push", .rights = .{ .task = .{ .background_run = true } } },
-        .{ .kind = .background_execution, .resource = "change", .rights = .{ .task = .{ .background_run = true } } },
-        .{ .kind = .background_execution, .resource = "proximity", .rights = .{ .task = .{ .background_run = true } } },
-        .{ .kind = .background_execution, .resource = "sensor", .rights = .{ .task = .{ .background_run = true } } },
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
-        .{ .kind = .background_execution, .resource = "media", .rights = .{ .task = .{ .background_run = true } } },
-        .{ .kind = .background_execution, .resource = "policy", .rights = .{ .task = .{ .background_run = true } } },
+        backgroundRunPermission("schedule"),
+        backgroundRunPermission("push"),
+        backgroundRunPermission("change"),
+        backgroundRunPermission("proximity"),
+        backgroundRunPermission("sensor"),
+        backgroundRunPermission(TEST_SYNC_BACKGROUND_ID),
+        backgroundRunPermission("media"),
+        backgroundRunPermission("policy"),
     };
     const background_tasks = [_]manifest.BackgroundTaskDecl{
-        .{ .id = "schedule", .trigger = .user_approved_scheduled_job, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .none, .visibility = .status_only },
-        .{ .id = "push", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 800, .memory_bytes = 32 * 1024 }, .network = .named_service_identities, .visibility = .hidden },
-        .{ .id = "change", .trigger = .local_object_change, .expected_duration_seconds = 15, .budget = .{ .cpu_time_ticks = 900, .memory_bytes = 16 * 1024 }, .network = .none, .visibility = .audit_only },
-        .{ .id = "proximity", .trigger = .device_proximity, .expected_duration_seconds = 10, .budget = .{ .cpu_time_ticks = 500, .memory_bytes = 16 * 1024 }, .network = .none, .visibility = .user_visible },
-        .{ .id = "sensor", .trigger = .sensor_rule, .expected_duration_seconds = 25, .budget = .{ .cpu_time_ticks = 700, .memory_bytes = 24 * 1024 }, .network = .none, .visibility = .status_only },
-        .{ .id = "sync", .trigger = .sync_completion, .expected_duration_seconds = 40, .budget = .{ .cpu_time_ticks = 1_200, .memory_bytes = 96 * 1024 }, .network = .local_network_only, .visibility = .status_only },
-        .{ .id = "media", .trigger = .media_export_completion, .expected_duration_seconds = 35, .budget = .{ .cpu_time_ticks = 1_100, .memory_bytes = 48 * 1024 }, .network = .named_domains, .visibility = .status_only },
-        .{ .id = "policy", .trigger = .organization_policy_task, .expected_duration_seconds = 45, .budget = .{ .cpu_time_ticks = 1_300, .memory_bytes = 80 * 1024 }, .network = .none, .visibility = .audit_only },
+        .{ .id = "schedule", .trigger = .user_approved_scheduled_job, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = TEST_SYNC_BACKGROUND_MEMORY_BYTES }, .network = .none, .visibility = .status_only },
+        .{ .id = "push", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 800, .memory_bytes = kibibytes(32) }, .network = .named_service_identities, .visibility = .hidden },
+        .{ .id = "change", .trigger = .local_object_change, .expected_duration_seconds = 15, .budget = .{ .cpu_time_ticks = 900, .memory_bytes = kibibytes(16) }, .network = .none, .visibility = .audit_only },
+        .{ .id = "proximity", .trigger = .device_proximity, .expected_duration_seconds = 10, .budget = .{ .cpu_time_ticks = 500, .memory_bytes = kibibytes(16) }, .network = .none, .visibility = .user_visible },
+        .{ .id = "sensor", .trigger = .sensor_rule, .expected_duration_seconds = 25, .budget = .{ .cpu_time_ticks = 700, .memory_bytes = kibibytes(24) }, .network = .none, .visibility = .status_only },
+        .{ .id = TEST_SYNC_BACKGROUND_ID, .trigger = .sync_completion, .expected_duration_seconds = 40, .budget = .{ .cpu_time_ticks = 1_200, .memory_bytes = kibibytes(96) }, .network = .local_network_only, .visibility = .status_only },
+        .{ .id = "media", .trigger = .media_export_completion, .expected_duration_seconds = 35, .budget = .{ .cpu_time_ticks = 1_100, .memory_bytes = kibibytes(48) }, .network = .named_domains, .visibility = .status_only },
+        .{ .id = "policy", .trigger = .organization_policy_task, .expected_duration_seconds = 45, .budget = .{ .cpu_time_ticks = 1_300, .memory_bytes = kibibytes(80) }, .network = .none, .visibility = .audit_only },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.background",
-        .display_name = "Background",
-        .publisher = "zigos.test",
-        .requested_permissions = &permissions,
-        .background_tasks = &background_tasks,
-    };
+    const bundle = testBundle("app.background", "Background", &permissions, &background_tasks);
 
     var controller = Controller.init();
     for (background_tasks) |background_task| {
@@ -367,55 +427,28 @@ test "background dispatch accepts declared triggers and preserves task metadata"
 
 test "background dispatch throttles delayed work and denies abusive budgets" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .app, .serial = 301 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = true,
-        },
-        .local_only = false,
-        .launch = .{
-            .bundle_id = "app.safe",
-        },
-    });
-    task.state = .active;
+    const task = try createActiveTestTask(&runtime, .{ .serial = 301, .local_only = false });
 
     const safe_permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
+        backgroundRunPermission(TEST_SYNC_BACKGROUND_ID),
     };
     const abusive_permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "heavy", .rights = .{ .task = .{ .background_run = true } } },
+        backgroundRunPermission("heavy"),
     };
     const safe_tasks = [_]manifest.BackgroundTaskDecl{
-        .{ .id = "sync", .trigger = .sync_completion, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .local_network_only, .visibility = .status_only },
+        syncBackgroundTask(),
     };
     const abusive_tasks = [_]manifest.BackgroundTaskDecl{
-        .{ .id = "heavy", .trigger = .media_export_completion, .expected_duration_seconds = 900, .budget = .{ .cpu_time_ticks = 50_000, .memory_bytes = 8 * 1024 * 1024, .shared_memory_bytes = 256 * 1024 }, .network = .named_domains, .visibility = .status_only },
+        .{ .id = "heavy", .trigger = .media_export_completion, .expected_duration_seconds = 900, .budget = .{ .cpu_time_ticks = 50_000, .memory_bytes = mebibytes(8), .shared_memory_bytes = kibibytes(256) }, .network = .named_domains, .visibility = .status_only },
     };
 
-    const safe_bundle = manifest.BundleManifest{
-        .bundle_id = "app.safe",
-        .display_name = "Safe",
-        .publisher = "zigos.test",
-        .requested_permissions = &safe_permissions,
-        .background_tasks = &safe_tasks,
-    };
-    const abusive_bundle = manifest.BundleManifest{
-        .bundle_id = "app.safe",
-        .display_name = "Safe",
-        .publisher = "zigos.test",
-        .requested_permissions = &abusive_permissions,
-        .background_tasks = &abusive_tasks,
-    };
+    const safe_bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &safe_permissions, &safe_tasks);
+    const abusive_bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &abusive_permissions, &abusive_tasks);
 
     var controller = Controller.init();
-    const first = try controller.dispatch(&runtime, task.id, safe_bundle, "sync", .sync_completion, 20);
-    const second = try controller.dispatch(&runtime, task.id, safe_bundle, "sync", .sync_completion, 21);
-    const third = try controller.dispatch(&runtime, task.id, safe_bundle, "sync", .sync_completion, 22);
+    const first = try controller.dispatch(&runtime, task.id, safe_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 20);
+    const second = try controller.dispatch(&runtime, task.id, safe_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 21);
+    const third = try controller.dispatch(&runtime, task.id, safe_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 22);
     const heavy = try controller.dispatch(&runtime, task.id, abusive_bundle, "heavy", .media_export_completion, 23);
 
     try std.testing.expect(first.allowed);
@@ -425,74 +458,40 @@ test "background dispatch throttles delayed work and denies abusive budgets" {
     try std.testing.expect(!heavy.allowed);
     try std.testing.expectEqual(DecisionReason.budget_exceeded, heavy.reason);
 
-    const no_background_task = try runtime.createTask(.{
-        .owner = .{ .kind = .app, .serial = 302 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = false,
-        },
+    const no_background_task = try createActiveTestTask(&runtime, .{
+        .serial = 302,
         .local_only = true,
+        .background_allowed = false,
     });
-    no_background_task.state = .active;
-    const denied = try controller.dispatch(&runtime, no_background_task.id, safe_bundle, "sync", .sync_completion, 24);
+    const denied = try controller.dispatch(&runtime, no_background_task.id, safe_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 24);
     try std.testing.expectEqual(DecisionReason.background_not_allowed, denied.reason);
 }
 
 test "background dispatch denies remote work for local-only tasks and user-visible work without a surface" {
     var runtime = task_runtime.Runtime.init();
-    const local_only = try runtime.createTask(.{
-        .owner = .{ .kind = .app, .serial = 311 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 5_000,
-            .memory_bytes = 512 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = true,
-        },
+    const local_only = try createActiveTestTask(&runtime, .{
+        .serial = 311,
+        .cpu_time_ticks = 5_000,
+        .memory_bytes = TEST_SMALL_APP_MEMORY_BYTES,
         .local_only = true,
-        .launch = .{
-            .bundle_id = "app.safe",
-        },
     });
-    local_only.state = .active;
 
-    const no_surface = try runtime.createTask(.{
-        .owner = .{ .kind = .app, .serial = 312 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 5_000,
-            .memory_bytes = 512 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = true,
-        },
+    const no_surface = try createActiveTestTask(&runtime, .{
+        .serial = 312,
+        .cpu_time_ticks = 5_000,
+        .memory_bytes = TEST_SMALL_APP_MEMORY_BYTES,
         .local_only = false,
-        .launch = .{
-            .bundle_id = "app.safe",
-        },
     });
-    no_surface.state = .active;
 
     const permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "remote", .rights = .{ .task = .{ .background_run = true } } },
-        .{ .kind = .background_execution, .resource = "visible", .rights = .{ .task = .{ .background_run = true } } },
+        backgroundRunPermission("remote"),
+        backgroundRunPermission("visible"),
     };
     const tasks = [_]manifest.BackgroundTaskDecl{
-        .{ .id = "remote", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .named_domains, .visibility = .status_only },
-        .{ .id = "visible", .trigger = .device_proximity, .expected_duration_seconds = 10, .budget = .{ .cpu_time_ticks = 500, .memory_bytes = 32 * 1024 }, .network = .none, .visibility = .user_visible },
+        .{ .id = "remote", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = TEST_SYNC_BACKGROUND_MEMORY_BYTES }, .network = .named_domains, .visibility = .status_only },
+        .{ .id = "visible", .trigger = .device_proximity, .expected_duration_seconds = 10, .budget = .{ .cpu_time_ticks = 500, .memory_bytes = kibibytes(32) }, .network = .none, .visibility = .user_visible },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.safe",
-        .display_name = "Safe",
-        .publisher = "zigos.test",
-        .requested_permissions = &permissions,
-        .background_tasks = &tasks,
-    };
+    const bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &permissions, &tasks);
 
     var controller = Controller.init();
     const remote_denied = try controller.dispatch(&runtime, local_only.id, bundle, "remote", .push_event, 25);
@@ -504,100 +503,45 @@ test "background dispatch denies remote work for local-only tasks and user-visib
 
 test "background dispatch requires the launched bundle and explicit run rights" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .app, .serial = 303 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = true,
-        },
-        .local_only = true,
-        .launch = .{
-            .bundle_id = "app.safe",
-        },
-    });
-    task.state = .active;
+    const task = try createActiveTestTask(&runtime, .{ .serial = 303, .local_only = true });
 
     const safe_permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
+        backgroundRunPermission(TEST_SYNC_BACKGROUND_ID),
     };
     const missing_right_permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .policy = .{} } },
+        .{ .kind = .background_execution, .resource = TEST_SYNC_BACKGROUND_ID, .rights = .{ .policy = .{} } },
     };
     const tasks = [_]manifest.BackgroundTaskDecl{
-        .{ .id = "sync", .trigger = .sync_completion, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .local_network_only, .visibility = .status_only },
+        syncBackgroundTask(),
     };
 
-    const foreign_bundle = manifest.BundleManifest{
-        .bundle_id = "app.foreign",
-        .display_name = "Foreign",
-        .publisher = "zigos.test",
-        .requested_permissions = &safe_permissions,
-        .background_tasks = &tasks,
-    };
-    const missing_right_bundle = manifest.BundleManifest{
-        .bundle_id = "app.safe",
-        .display_name = "Safe",
-        .publisher = "zigos.test",
-        .requested_permissions = &missing_right_permissions,
-        .background_tasks = &tasks,
-    };
+    const foreign_bundle = testBundle("app.foreign", "Foreign", &safe_permissions, &tasks);
+    const missing_right_bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &missing_right_permissions, &tasks);
 
     var controller = Controller.init();
-    const mismatch = try controller.dispatch(&runtime, task.id, foreign_bundle, "sync", .sync_completion, 30);
+    const mismatch = try controller.dispatch(&runtime, task.id, foreign_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 30);
     try std.testing.expectEqual(DecisionReason.bundle_mismatch, mismatch.reason);
 
-    const missing_right = try controller.dispatch(&runtime, task.id, missing_right_bundle, "sync", .sync_completion, 31);
+    const missing_right = try controller.dispatch(&runtime, task.id, missing_right_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 31);
     try std.testing.expectEqual(DecisionReason.background_permission_missing, missing_right.reason);
 }
 
 test "background dispatch reuses completed and denied record slots" {
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .app, .serial = 304 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = true,
-        },
-        .local_only = true,
-        .launch = .{
-            .bundle_id = "app.safe",
-        },
-    });
-    task.state = .active;
+    const task = try createActiveTestTask(&runtime, .{ .serial = 304, .local_only = true });
 
     const permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
+        backgroundRunPermission(TEST_SYNC_BACKGROUND_ID),
     };
     const tasks = [_]manifest.BackgroundTaskDecl{
-        .{
-            .id = "sync",
-            .trigger = .sync_completion,
-            .expected_duration_seconds = 30,
-            .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 },
-            .network = .local_network_only,
-            .visibility = .status_only,
-        },
+        syncBackgroundTask(),
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.safe",
-        .display_name = "Safe",
-        .publisher = "zigos.test",
-        .requested_permissions = &permissions,
-        .background_tasks = &tasks,
-    };
+    const bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &permissions, &tasks);
 
     var controller = Controller.init();
     var iteration: usize = 0;
     while (iteration < MAX_RECORDS + 4) : (iteration += 1) {
-        const decision = try controller.dispatch(&runtime, task.id, bundle, "sync", .sync_completion, 40 + iteration);
+        const decision = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 40 + iteration);
         try std.testing.expect(decision.allowed);
         try std.testing.expect(try controller.complete(&runtime, decision.record_id.?));
     }

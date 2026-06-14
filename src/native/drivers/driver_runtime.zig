@@ -4,14 +4,17 @@ const bootstrap_driver_port = @import("bootstrap_driver_port.zig");
 const driver_service = @import("driver_service.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
+const manifest = @import("../policy/manifest.zig");
 const root = @import("root");
 const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
     root.storage_volume
 else
     @import("../storage/storage_volume.zig");
 const native_util = @import("../core/util.zig");
+const units = @import("../core/units.zig");
 
 pub const MAX_ACTIVATIONS: usize = 8;
+pub const MAX_ACTIVATION_PUBLISHER_BYTES: usize = bootstrap_driver_port.MAX_PUBLISHER_BYTES;
 const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
 
 pub const ActivationMode = enum(u8) {
@@ -31,7 +34,7 @@ pub const ActivationRecord = struct {
     activation_generation: u32,
     kernel_bootstrap: bool,
     publisher_len: usize,
-    publisher: [32]u8,
+    publisher: [MAX_ACTIVATION_PUBLISHER_BYTES]u8,
 
     pub fn publisherSlice(self: *const ActivationRecord) []const u8 {
         return self.publisher[0..self.publisher_len];
@@ -100,7 +103,7 @@ pub const Runtime = struct {
             .activation_generation = 0,
             .kernel_bootstrap = false,
             .publisher_len = 0,
-            .publisher = [_]u8{0} ** 32,
+            .publisher = [_]u8{0} ** MAX_ACTIVATION_PUBLISHER_BYTES,
         };
         if (record.dma_domain_id == 0 or !record.iommu_enforced) return error.MissingDmaDomain;
 
@@ -263,7 +266,7 @@ fn zeroActivation() ActivationRecord {
         .activation_generation = 0,
         .kernel_bootstrap = false,
         .publisher_len = 0,
-        .publisher = [_]u8{0} ** 32,
+        .publisher = [_]u8{0} ** MAX_ACTIVATION_PUBLISHER_BYTES,
     };
 }
 
@@ -319,7 +322,7 @@ test "kernel bootstrap cannot publish network data-plane transports" {
             .display_name = "Network Driver",
             .publisher = "zigos.spec",
             .signature = .{
-                .format = "ed25519",
+                .format = manifest.SIGNATURE_FORMAT_ED25519,
                 .signer = "zigos-spec-driver",
             },
         },
@@ -383,9 +386,9 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
         .launch = .{
@@ -423,7 +426,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
             .display_name = "Storage Driver Runtime",
             .publisher = "zigos.spec",
             .signature = .{
-                .format = "ed25519",
+                .format = manifest.SIGNATURE_FORMAT_ED25519,
                 .signer = "zigos-spec-driver",
             },
         },
@@ -580,7 +583,7 @@ test "runtime deactivates only the requested driver class for shared services" {
         .dma_range_count = 0,
         .dma_ranges = empty_dma_ranges,
         .signer_len = 0,
-        .signer = [_]u8{0} ** 32,
+        .signer = [_]u8{0} ** driver_service.MAX_SIGNER_BYTES,
     };
     const input_driver = driver_service.DriverRecord{
         .service_id = service_id,
@@ -595,7 +598,7 @@ test "runtime deactivates only the requested driver class for shared services" {
         .dma_range_count = 0,
         .dma_ranges = empty_dma_ranges,
         .signer_len = 0,
-        .signer = [_]u8{0} ** 32,
+        .signer = [_]u8{0} ** driver_service.MAX_SIGNER_BYTES,
     };
 
     var runtime = Runtime.init();

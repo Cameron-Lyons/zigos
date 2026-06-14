@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 
@@ -153,7 +154,7 @@ const PolicyAuthorizeRequestWire = extern struct {
 
 const PackageInstallRequestWire = extern struct {
     header: WireHeader,
-    bundle_digest: [32]u8,
+    bundle_digest: crypto_hash.Digest,
     bundle_id_len: u16,
     source_identity_len: u16,
     schema_version: u32,
@@ -162,7 +163,7 @@ const PackageInstallRequestWire = extern struct {
 
 const PackageUpdateRequestWire = extern struct {
     header: WireHeader,
-    bundle_digest: [32]u8,
+    bundle_digest: crypto_hash.Digest,
     bundle_id_len: u16,
     source_identity_len: u16,
     from_schema_version: u32,

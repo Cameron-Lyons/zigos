@@ -38,10 +38,7 @@ pub fn dispatchTaskTerminate(
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.TaskTerminateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
     const terminated = component_port.invokeGenerated(.task_terminate, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, abi.BoolResponse{
-        .value = @intFromBool(terminated),
-        ._reserved = [_]u8{0} ** 7,
-    });
+    return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(terminated));
 }
 
 pub fn dispatchTimeQuery(

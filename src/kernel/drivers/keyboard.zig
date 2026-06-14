@@ -19,8 +19,10 @@ pub const LineDiscipline = struct {
     refresh_line: *const fn (context: *anyopaque) void,
 };
 
+const CHAR_BUFFER_CAPACITY: usize = 256;
+
 // SAFETY: used as a circular buffer; entries written before being read via buffer_start/buffer_end indices
-var char_buffer: [256]u8 = undefined;
+var char_buffer: [CHAR_BUFFER_CAPACITY]u8 = undefined;
 var buffer_start: usize = 0;
 var buffer_end: usize = 0;
 

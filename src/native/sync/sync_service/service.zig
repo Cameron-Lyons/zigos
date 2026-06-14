@@ -67,6 +67,8 @@ pub const AuthorityContext = service_authority.Context;
 pub const AuthorityError = service_authority.Error;
 pub const PeerReplicationError = AuthorityError || Error || sync_transport.Error;
 
+const DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES: usize = 160;
+
 const WorkspacePolicySlot = state_support.WorkspacePolicySlot;
 const ReplicaSlot = state_support.ReplicaSlot;
 const ConflictSlot = state_support.ConflictSlot;
@@ -657,7 +659,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             label: []const u8,
             identity: signing.SignerIdentity,
         ) Error!*DatabaseContract {
-            var message_buffer: [160]u8 = undefined;
+            var message_buffer: [DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES]u8 = undefined;
             const message = state_support.databaseContractMessage(&message_buffer, workspace_id, bundle_id, label) catch return error.InvalidContractSignature;
             const signature = signing.sign(identity, message) catch return error.InvalidContractSignature;
             if (!signing.verify(signature, message)) return error.InvalidContractSignature;

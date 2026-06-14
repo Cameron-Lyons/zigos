@@ -50,6 +50,9 @@ jobs:
         sudo apt-get install -y shellcheck
 
     - name: Run lint target
+      env:
+        ZIGOS_REQUIRE_ZLINT: "1"
+        ZIGOS_REQUIRE_ACTIONLINT: "1"
       run: |
         ./scripts/zig.sh build lint
 

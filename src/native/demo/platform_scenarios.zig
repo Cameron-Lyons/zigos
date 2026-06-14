@@ -13,6 +13,7 @@ const signing = @import("../core/signing.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 const update_health = @import("../platform/update_health.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const workspace_mod = @import("../storage/workspace.zig");
@@ -20,6 +21,7 @@ const support = @import("scenario_support.zig");
 
 const paired_device_tick: u64 = 141;
 const ux_flow_ledger_start_tick: u64 = paired_device_tick + 1;
+const MEASUREMENT_TEXT_BUFFER_BYTES: usize = 96;
 
 pub fn run(
     context: *support.Context,
@@ -29,23 +31,23 @@ pub fn run(
 ) void {
     const platform_state_signer = signing.SignerIdentity{
         .label = "zigos-base-state",
-        .seed = [_]u8{0xA1} ** 32,
+        .seed = signing.seedFromByte(0xA1),
     };
     const platform_image_signer = signing.SignerIdentity{
         .label = "zigos-base-image",
-        .seed = [_]u8{0xA2} ** 32,
+        .seed = signing.seedFromByte(0xA2),
     };
     const recovery_device_signer = signing.SignerIdentity{
         .label = "recovery-device",
-        .seed = [_]u8{0xA3} ** 32,
+        .seed = signing.seedFromByte(0xA3),
     };
     const recovery_rotated_signer = signing.SignerIdentity{
         .label = "recovery-device-v2",
-        .seed = [_]u8{0xA4} ** 32,
+        .seed = signing.seedFromByte(0xA4),
     };
     const paired_device_signer = signing.SignerIdentity{
         .label = "paired-device",
-        .seed = [_]u8{0xA5} ** 32,
+        .seed = signing.seedFromByte(0xA5),
     };
     const local_device_principal = principal.PrincipalId{ .kind = .device, .serial = 1 };
     const recovery_device_principal = principal.PrincipalId{
@@ -235,7 +237,7 @@ pub fn run(
     measured.begin(immutable_base_manager.activation_generation);
     measured.add(.kernel, "kernel-zigos-native", "platform-native-kernel") catch unreachable;
     measured.add(.base_image, active_base_image.labelSlice(), &active_base_image.measurement) catch unreachable;
-    var policy_measure: [96]u8 = undefined;
+    var policy_measure: [MEASUREMENT_TEXT_BUFFER_BYTES]u8 = undefined;
     const policy_measure_text = std.fmt.bufPrint(
         &policy_measure,
         "offline={d}:e2ee={d}:overlay={d}",
@@ -256,7 +258,7 @@ pub fn run(
         if (criticalServiceImage(context, service_record)) |image| {
             measured.addCriticalServiceImage(service_record, image) catch unreachable;
         } else {
-            var service_measure: [96]u8 = undefined;
+            var service_measure: [MEASUREMENT_TEXT_BUFFER_BYTES]u8 = undefined;
             const service_measure_text = std.fmt.bufPrint(
                 &service_measure,
                 "{s}:{d}:{d}",
@@ -438,9 +440,9 @@ pub fn run(
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 6_000,
-            .memory_bytes = 512 * 1024,
+            .memory_bytes = units.kibibytes(512),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 32 * 1024,
+            .shared_memory_bytes = units.kibibytes(32),
             .background_allowed = false,
         },
         .ui_surface_id = 2,
@@ -665,7 +667,7 @@ fn recordMeasuredBootComparison(
     const measurement_owner = context.package_service_principal;
     const measurement_signer = signing.SignerIdentity{
         .label = "zigos-measured-boot-state",
-        .seed = [_]u8{0xA6} ** 32,
+        .seed = signing.seedFromByte(0xA6),
     };
     var journal = measured_boot.MeasurementJournal.init(
         context.storage_service_instance,

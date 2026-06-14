@@ -1,8 +1,10 @@
 const std = @import("std");
 const abi = @import("../../core/abi.zig");
 const attestation_service = @import("../../platform/attestation_service.zig");
+const binary_cursor = @import("binary_cursor");
 const capability = @import("../../kernel_api/capability.zig");
 const component_port = @import("../../kernel_api/component_port.zig");
+const crypto_hash = @import("../../core/crypto_hash.zig");
 const measured_boot = @import("../../platform/measured_boot.zig");
 const network_driver_task = @import("../../drivers/network_driver_task.zig");
 const network_policy = @import("../../sync/network_policy.zig");
@@ -21,6 +23,7 @@ const expectEndpointCreateWithFlags = common.expectEndpointCreateWithFlags;
 const expectEndpointRecv = common.expectEndpointRecv;
 const expectEndpointSend = common.expectEndpointSend;
 const signer = common.signer;
+const addMeasuredNetworkArtifact = measured_boot.addMeasuredArtifact;
 
 pub fn proveBootedSyncServicePath(
     kernel_port: *component_port.KernelPort,
@@ -567,7 +570,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     network_service_task: *task_runtime.TaskRecord,
     policy_id: u64,
     discovery_policy_id: u64,
-    peer_root_digest: [32]u8,
+    peer_root_digest: crypto_hash.Digest,
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
 ) !void {
@@ -766,17 +769,6 @@ fn verifiedBootedNetworkPeer(generation: u64) !measured_boot.BootRecord {
     return boot;
 }
 
-fn addMeasuredNetworkArtifact(
-    recorder: *measured_boot.Recorder,
-    artifact_manifest: *measured_boot.ArtifactManifest,
-    kind: measured_boot.MeasurementKind,
-    label: []const u8,
-    payload: []const u8,
-) !void {
-    try recorder.add(kind, label, payload);
-    try artifact_manifest.add(kind, label, payload);
-}
-
 fn exchangeSyncFrameOverNativeEndpoint(
     kernel_port: *component_port.KernelPort,
     source_task_id: u64,
@@ -833,6 +825,8 @@ fn expectSyncFrameRejectedOverNativeEndpoint(
 }
 
 const sync_frame_magic = [_]u8{ 'Z', 'G', 'S', 'F' };
+const SyncFrameWriter = binary_cursor.Writer(anyerror, error.SyncFrameTooLarge);
+const SyncFrameReader = binary_cursor.Reader(anyerror, error.InvalidSyncFrame);
 
 fn encodeSyncFrame(buffer: []u8, frame: sync_service.TransportFrame) ![]const u8 {
     if (frame.source_device.kind != .device or frame.target_device.kind != .device) return error.InvalidSyncFrame;
@@ -841,53 +835,42 @@ fn encodeSyncFrame(buffer: []u8, frame: sync_service.TransportFrame) ![]const u8
     const required_len = sync_frame_magic.len + (5 * @sizeOf(u64)) + 3 + @sizeOf(u32) + 1 + path.len;
     if (buffer.len < required_len) return error.SyncFrameTooLarge;
 
-    var index: usize = 0;
-    @memcpy(buffer[index..][0..sync_frame_magic.len], &sync_frame_magic);
-    index += sync_frame_magic.len;
-    writeU64(buffer, &index, frame.workspace_id);
-    writeU64(buffer, &index, frame.object_id);
-    writeU64(buffer, &index, frame.version_id);
-    writeU64(buffer, &index, frame.source_device.serial);
-    writeU64(buffer, &index, frame.target_device.serial);
-    buffer[index] = @intFromEnum(frame.transport);
-    index += 1;
-    buffer[index] = @intFromEnum(frame.semantic);
-    index += 1;
-    buffer[index] = @intFromBool(frame.encrypted);
-    index += 1;
-    std.mem.writeInt(u32, buffer[index..][0..@sizeOf(u32)], frame.workspace_generation, .little);
-    index += @sizeOf(u32);
-    buffer[index] = @intCast(path.len);
-    index += 1;
-    @memcpy(buffer[index..][0..path.len], path);
-    index += path.len;
-    return buffer[0..index];
+    var writer = SyncFrameWriter{ .buffer = buffer };
+    try writer.writeBytes(&sync_frame_magic);
+    try writer.writeU64(frame.workspace_id);
+    try writer.writeU64(frame.object_id);
+    try writer.writeU64(frame.version_id);
+    try writer.writeU64(frame.source_device.serial);
+    try writer.writeU64(frame.target_device.serial);
+    try writer.writeByte(@intFromEnum(frame.transport));
+    try writer.writeByte(@intFromEnum(frame.semantic));
+    try writer.writeByte(@intFromBool(frame.encrypted));
+    try writer.writeU32(frame.workspace_generation);
+    try writer.writeByte(@intCast(path.len));
+    try writer.writeBytes(path);
+    return buffer[0..writer.offset];
 }
 
 fn decodeSyncFrame(payload: []const u8, path_buffer: *[workspace.MAX_ENTRY_PATH_BYTES]u8) !sync_service.TransportFrameRequest {
     const min_len = sync_frame_magic.len + (5 * @sizeOf(u64)) + 3 + @sizeOf(u32) + 1;
     if (payload.len < min_len) return error.InvalidSyncFrame;
-    if (!std.mem.eql(u8, payload[0..sync_frame_magic.len], &sync_frame_magic)) return error.InvalidSyncFrame;
 
-    var index: usize = sync_frame_magic.len;
-    const workspace_id = readU64(payload, &index);
-    const object_id = readU64(payload, &index);
-    const version_id = readU64(payload, &index);
-    const source_serial = readU64(payload, &index);
-    const target_serial = readU64(payload, &index);
-    const transport: sync_service.TransportMode = @enumFromInt(payload[index]);
-    index += 1;
-    const semantic: sync_service.SyncSemantic = @enumFromInt(payload[index]);
-    index += 1;
-    const encrypted = payload[index] != 0;
-    index += 1;
-    const workspace_generation = std.mem.readInt(u32, payload[index..][0..@sizeOf(u32)], .little);
-    index += @sizeOf(u32);
-    const path_len = payload[index];
-    index += 1;
-    if (payload.len != index + path_len) return error.InvalidSyncFrame;
+    var reader = SyncFrameReader{ .buffer = payload };
+    if (!std.mem.eql(u8, try reader.readSlice(sync_frame_magic.len), &sync_frame_magic)) return error.InvalidSyncFrame;
+
+    const workspace_id = try reader.readU64();
+    const object_id = try reader.readU64();
+    const version_id = try reader.readU64();
+    const source_serial = try reader.readU64();
+    const target_serial = try reader.readU64();
+    const transport: sync_service.TransportMode = @enumFromInt(try reader.readByte());
+    const semantic: sync_service.SyncSemantic = @enumFromInt(try reader.readByte());
+    const encrypted = (try reader.readByte()) != 0;
+    const workspace_generation = try reader.readU32();
+    const path_len = try reader.readByte();
+    if (path_len > path_buffer.len or reader.remaining() != path_len) return error.InvalidSyncFrame;
     @memset(path_buffer[0..], 0);
-    @memcpy(path_buffer[0..path_len], payload[index..][0..path_len]);
+    @memcpy(path_buffer[0..path_len], try reader.readSlice(path_len));
 
     return .{
         .workspace_id = workspace_id,
@@ -901,15 +884,4 @@ fn decodeSyncFrame(payload: []const u8, path_buffer: *[workspace.MAX_ENTRY_PATH_
         .workspace_generation = workspace_generation,
         .path = path_buffer[0..path_len],
     };
-}
-
-fn writeU64(buffer: []u8, index: *usize, value: u64) void {
-    std.mem.writeInt(u64, buffer[index.*..][0..@sizeOf(u64)], value, .little);
-    index.* += @sizeOf(u64);
-}
-
-fn readU64(buffer: []const u8, index: *usize) u64 {
-    const value = std.mem.readInt(u64, buffer[index.*..][0..@sizeOf(u64)], .little);
-    index.* += @sizeOf(u64);
-    return value;
 }

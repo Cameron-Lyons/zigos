@@ -8,6 +8,25 @@ pub const DEFAULT_PAGE_SIZE: u64 = 4096;
 pub const DOORBELL_REGISTER_BYTES: u32 = 4;
 pub const SECTOR_BYTES: usize = 512;
 
+const CAP_MQES_MASK: u64 = 0xFFFF;
+const CAP_CQR_SHIFT = 16;
+const CAP_CQR_MASK: u64 = 0x1;
+const CAP_TO_SHIFT = 24;
+const CAP_TO_MASK: u64 = 0xFF;
+const CAP_TIMEOUT_UNIT_MS: u32 = 500;
+const CAP_DSTRD_SHIFT = 32;
+const CAP_DSTRD_MASK: u64 = 0xF;
+const CAP_CSS_NVM_SHIFT = 37;
+const CAP_MPSMIN_SHIFT = 48;
+const CAP_MPSMAX_SHIFT = 52;
+const CAP_MPS_MASK: u64 = 0xF;
+const NVME_BASE_PAGE_SHIFT = 12;
+const MIN_QUEUE_ENTRIES: u32 = 2;
+const ZERO_BASED_FIELD_INCREMENT: u32 = 1;
+const TEST_SUBMISSION_QUEUE_ADDRESS: u64 = 0x1000;
+const TEST_COMPLETION_QUEUE_ADDRESS: u64 = 0x2000;
+const TEST_UNALIGNED_QUEUE_ADDRESS: u64 = TEST_SUBMISSION_QUEUE_ADDRESS + 1;
+
 pub const Error = error{
     KernelStorageDataPlaneDisabled,
     UnsupportedCommandSet,
@@ -32,34 +51,34 @@ pub const ControllerCapabilities = struct {
     raw: u64,
 
     pub fn maxQueueEntries(self: ControllerCapabilities) u32 {
-        return @as(u32, @intCast(self.raw & 0xFFFF)) + 1;
+        return @as(u32, @intCast(self.raw & CAP_MQES_MASK)) + ZERO_BASED_FIELD_INCREMENT;
     }
 
     pub fn contiguousQueuesRequired(self: ControllerCapabilities) bool {
-        return ((self.raw >> 16) & 0x1) != 0;
+        return ((self.raw >> CAP_CQR_SHIFT) & CAP_CQR_MASK) != 0;
     }
 
     pub fn timeoutMilliseconds(self: ControllerCapabilities) u32 {
-        return @as(u32, @intCast((self.raw >> 24) & 0xFF)) * 500;
+        return @as(u32, @intCast((self.raw >> CAP_TO_SHIFT) & CAP_TO_MASK)) * CAP_TIMEOUT_UNIT_MS;
     }
 
     pub fn doorbellStrideBytes(self: ControllerCapabilities) u32 {
-        const dstrd: u5 = @intCast((self.raw >> 32) & 0xF);
+        const dstrd: u5 = @intCast((self.raw >> CAP_DSTRD_SHIFT) & CAP_DSTRD_MASK);
         return DOORBELL_REGISTER_BYTES << dstrd;
     }
 
     pub fn supportsNvmCommandSet(self: ControllerCapabilities) bool {
-        return ((self.raw >> 37) & 0x1) != 0;
+        return ((self.raw >> CAP_CSS_NVM_SHIFT) & CAP_CQR_MASK) != 0;
     }
 
     pub fn minPageSizeBytes(self: ControllerCapabilities) u64 {
-        const mpsmin: u6 = @intCast((self.raw >> 48) & 0xF);
-        return @as(u64, 1) << (12 + mpsmin);
+        const mpsmin: u6 = @intCast((self.raw >> CAP_MPSMIN_SHIFT) & CAP_MPS_MASK);
+        return @as(u64, 1) << (NVME_BASE_PAGE_SHIFT + mpsmin);
     }
 
     pub fn maxPageSizeBytes(self: ControllerCapabilities) u64 {
-        const mpsmax: u6 = @intCast((self.raw >> 52) & 0xF);
-        return @as(u64, 1) << (12 + mpsmax);
+        const mpsmax: u6 = @intCast((self.raw >> CAP_MPSMAX_SHIFT) & CAP_MPS_MASK);
+        return @as(u64, 1) << (NVME_BASE_PAGE_SHIFT + mpsmax);
     }
 };
 
@@ -170,7 +189,7 @@ pub fn rejectKernelDataPlaneTransfer(_: DataPlaneTransferRequest) Error!void {
 }
 
 fn validateQueueEntries(capabilities: ControllerCapabilities, entries: u32) Error!void {
-    if (entries < 2) return error.QueueTooSmall;
+    if (entries < MIN_QUEUE_ENTRIES) return error.QueueTooSmall;
     if (entries > capabilities.maxQueueEntries()) return error.QueueTooLarge;
 }
 
@@ -207,12 +226,12 @@ fn makeCapabilities(
     mpsmax: u4,
 ) ControllerCapabilities {
     var raw: u64 = mqes_zero_based;
-    raw |= @as(u64, 1) << 16;
-    raw |= @as(u64, 10) << 24;
-    raw |= @as(u64, dstrd) << 32;
-    if (nvm_command_set) raw |= @as(u64, 1) << 37;
-    raw |= @as(u64, mpsmin) << 48;
-    raw |= @as(u64, mpsmax) << 52;
+    raw |= @as(u64, 1) << CAP_CQR_SHIFT;
+    raw |= @as(u64, 10) << CAP_TO_SHIFT;
+    raw |= @as(u64, dstrd) << CAP_DSTRD_SHIFT;
+    if (nvm_command_set) raw |= @as(u64, 1) << CAP_CSS_NVM_SHIFT;
+    raw |= @as(u64, mpsmin) << CAP_MPSMIN_SHIFT;
+    raw |= @as(u64, mpsmax) << CAP_MPSMAX_SHIFT;
     return .{ .raw = raw };
 }
 
@@ -223,7 +242,7 @@ test "NVMe capabilities expose queue and doorbell geometry" {
     try std.testing.expectEqual(@as(u32, 5000), cap.timeoutMilliseconds());
     try std.testing.expectEqual(@as(u32, 16), cap.doorbellStrideBytes());
     try std.testing.expect(cap.supportsNvmCommandSet());
-    try std.testing.expectEqual(@as(u64, 4096), cap.minPageSizeBytes());
+    try std.testing.expectEqual(DEFAULT_PAGE_SIZE, cap.minPageSizeBytes());
     try std.testing.expectEqual(@as(u64, 65536), cap.maxPageSizeBytes());
 }
 
@@ -232,22 +251,22 @@ test "NVMe admin queue plan validates command set page and alignment" {
     try validateAdminQueuePlan(cap, .{
         .submission_queue_entries = 32,
         .completion_queue_entries = 32,
-        .submission_queue_address = 0x1000,
-        .completion_queue_address = 0x2000,
+        .submission_queue_address = TEST_SUBMISSION_QUEUE_ADDRESS,
+        .completion_queue_address = TEST_COMPLETION_QUEUE_ADDRESS,
     });
 
     try std.testing.expectError(error.QueueAddressUnaligned, validateAdminQueuePlan(cap, .{
         .submission_queue_entries = 32,
         .completion_queue_entries = 32,
-        .submission_queue_address = 0x1001,
-        .completion_queue_address = 0x2000,
+        .submission_queue_address = TEST_UNALIGNED_QUEUE_ADDRESS,
+        .completion_queue_address = TEST_COMPLETION_QUEUE_ADDRESS,
     }));
 
     try std.testing.expectError(error.QueueTooLarge, validateAdminQueuePlan(cap, .{
         .submission_queue_entries = 65,
         .completion_queue_entries = 32,
-        .submission_queue_address = 0x1000,
-        .completion_queue_address = 0x2000,
+        .submission_queue_address = TEST_SUBMISSION_QUEUE_ADDRESS,
+        .completion_queue_address = TEST_COMPLETION_QUEUE_ADDRESS,
     }));
 }
 
@@ -256,8 +275,8 @@ test "NVMe admin queue plan rejects unsupported command sets" {
     try std.testing.expectError(error.UnsupportedCommandSet, validateAdminQueuePlan(cap, .{
         .submission_queue_entries = 32,
         .completion_queue_entries = 32,
-        .submission_queue_address = 0x1000,
-        .completion_queue_address = 0x2000,
+        .submission_queue_address = TEST_SUBMISSION_QUEUE_ADDRESS,
+        .completion_queue_address = TEST_COMPLETION_QUEUE_ADDRESS,
     }));
 }
 

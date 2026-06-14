@@ -1,4 +1,5 @@
 const std = @import("std");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const copyText = native_util.copyText;
@@ -132,10 +133,11 @@ fn documentSlotKey(slot: *const DocumentSlot) u64 {
 }
 
 fn documentKey(workspace_id: u64, object_id: u64) u64 {
-    var bytes: [16]u8 = undefined;
+    const DOCUMENT_KEY_BYTES: usize = 16;
+    var bytes: [DOCUMENT_KEY_BYTES]u8 = undefined;
     std.mem.writeInt(u64, bytes[0..8], workspace_id, .little);
     std.mem.writeInt(u64, bytes[8..16], object_id, .little);
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x5A47_494E_4458, &bytes));
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.document_index_key, &bytes));
 }
 
 fn compareResults(_: void, left: SearchResult, right: SearchResult) bool {

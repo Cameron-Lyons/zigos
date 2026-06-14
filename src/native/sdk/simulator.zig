@@ -3,6 +3,7 @@ const app_platform = @import("app_platform.zig");
 const capability = @import("../kernel_api/capability.zig");
 const debugger = @import("debugger.zig");
 const example_apps = @import("example_apps.zig");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const idl = @import("idl.zig");
 const manifest_linter = @import("manifest_linter.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -15,6 +16,7 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const sync_api = @import("sync_api.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 const ui = @import("ui.zig");
 
 pub const SDK_PACKAGE_SERVICE_ID: u64 = 60_001;
@@ -23,7 +25,7 @@ pub const SDK_ACTOR = principal.PrincipalId{ .kind = .service, .serial = 60_003 
 pub const SDK_POLICY_AUTHORITY = principal.PrincipalId{ .kind = .policy_authority, .serial = 60_004 };
 pub const SDK_PACKAGE_OWNER = principal.PrincipalId{ .kind = .service, .serial = 60_005 };
 pub const SDK_FIRST_APP_SURFACE_ID: u64 = 61_000;
-pub const MAX_PERMISSION_REVIEW_TEXT: usize = 4096;
+pub const MAX_PERMISSION_REVIEW_TEXT: usize = permissions.MAX_REVIEW_TEXT_BYTES;
 
 pub const DevPackage = struct {
     bundle: manifest.BundleManifest,
@@ -137,7 +139,7 @@ pub const Simulator = struct {
         self.authority_capability_id = package_authority.id;
 
         var port = self.packagePort();
-        _ = try port.trustPolicyAuthorityRoot(self.authority(), SDK_POLICY_AUTHORITY, [_]u8{0xC1} ** 32);
+        _ = try port.trustPolicyAuthorityRoot(self.authority(), SDK_POLICY_AUTHORITY, signing.publicKeyFromByte(0xC1));
         self.bootstrapped = true;
     }
 
@@ -392,7 +394,7 @@ pub const Simulator = struct {
         var port = self.packagePort();
         _ = try port.trustPublisher(
             self.authority(),
-            .{ .kind = .app, .serial = std.hash.Wyhash.hash(0x5A47_5344_4B50, publisher) },
+            .{ .kind = .app, .serial = std.hash.Wyhash.hash(hash_seeds.package_sdk_publisher, publisher) },
             SDK_POLICY_AUTHORITY,
             publisher,
             try signing.publicKey(signer),
@@ -434,12 +436,12 @@ fn emptyResolvedManifest() package_service.ResolvedManifest {
 fn appPrincipal(bundle_id: []const u8) principal.PrincipalId {
     return .{
         .kind = .app,
-        .serial = std.hash.Wyhash.hash(0x5A47_4150_505F_4944, bundle_id),
+        .serial = std.hash.Wyhash.hash(hash_seeds.sdk_app_principal, bundle_id),
     };
 }
 
 fn appImageId(bundle: manifest.BundleManifest) u64 {
-    var hasher = std.hash.Wyhash.init(0x5A47_4150_505F_494D);
+    var hasher = std.hash.Wyhash.init(hash_seeds.sdk_app_image);
     hasher.update(bundle.bundle_id);
     hasher.update(bundle.display_name);
     var version_bytes: [4]u8 = undefined;
@@ -463,8 +465,8 @@ fn componentSpec(component: package_service.StoredComponent) task_runtime.Execut
 
 fn budgetForBundle(bundle: manifest.BundleManifest) task_runtime.ResourceBudget {
     var cpu_time_ticks: u64 = 12_000;
-    var memory_bytes: usize = 2 * 1024 * 1024 + bundle.components.len * 128 * 1024;
-    var shared_memory_bytes: usize = 256 * 1024;
+    var memory_bytes: usize = units.mebibytes(2) + bundle.components.len * units.kibibytes(128);
+    var shared_memory_bytes: usize = units.kibibytes(256);
     for (bundle.background_tasks) |task| {
         cpu_time_ticks += task.budget.cpu_time_ticks;
         memory_bytes += task.budget.memory_bytes;

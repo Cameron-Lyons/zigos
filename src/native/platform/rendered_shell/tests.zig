@@ -16,6 +16,7 @@ const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
+const units = @import("../../core/units.zig");
 const booted_system = @import("booted_system.zig");
 const humane_shell = @import("humane_shell.zig");
 const humane_shell_wire = @import("humane_shell_wire.zig");
@@ -25,6 +26,13 @@ const production_journey = @import("production_journey.zig");
 const shell_mod = @import("shell.zig");
 const task_shell_service = @import("task_shell_service.zig");
 const task_shell_wire = @import("task_shell_wire.zig");
+
+const FULL_RENDER_BUFFER_BYTES: usize = units.kibibytes(8);
+const EXPORT_BUFFER_BYTES: usize = units.kibibytes(4);
+const RENDER_BUFFER_BYTES: usize = units.kibibytes(2);
+const COMPACT_RENDER_BUFFER_BYTES: usize = 768;
+const SMALL_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1);
+const WIRE_BUFFER_BYTES: usize = 128;
 
 const Config = model.Config;
 const Control = model.Control;
@@ -53,7 +61,7 @@ fn expectContains(haystack: []const u8, needle: []const u8) !void {
 fn seedShellWorkspace(storage: *storage_service.Service, owner: principal.PrincipalId, path: []const u8) !u64 {
     const signer_identity = signing.SignerIdentity{
         .label = "rendered-shell-object",
-        .seed = [_]u8{0x9a} ** 32,
+        .seed = signing.seedFromByte(0x9a),
     };
     const document = try storage.putVersion(.{
         .preferred_object_id = object_store.ids.object(92_001),
@@ -163,19 +171,19 @@ test "rendered demo journey drives install sync permission update recovery and r
     const document_path = "documents/plan.md";
     const bundle_signer = signing.SignerIdentity{
         .label = "rendered-journey-bundle",
-        .seed = [_]u8{0x9c} ** 32,
+        .seed = signing.seedFromByte(0x9c),
     };
     const user_signer = signing.SignerIdentity{
         .label = "rendered-journey-user",
-        .seed = [_]u8{0x9d} ** 32,
+        .seed = signing.seedFromByte(0x9d),
     };
     const primary_signer = signing.SignerIdentity{
         .label = "rendered-journey-primary",
-        .seed = [_]u8{0x9e} ** 32,
+        .seed = signing.seedFromByte(0x9e),
     };
     const paired_signer = signing.SignerIdentity{
         .label = "rendered-journey-paired",
-        .seed = [_]u8{0x9f} ** 32,
+        .seed = signing.seedFromByte(0x9f),
     };
 
     const provided_interfaces = [_]manifest.InterfaceDecl{
@@ -239,7 +247,7 @@ test "rendered demo journey drives install sync permission update recovery and r
         .capability_id = package_capability.id,
         .now_ticks = 10,
     };
-    _ = try package_port.trustPolicyAuthorityRoot(package_authority, .{ .kind = .policy_authority, .serial = 1 }, [_]u8{0x5A} ** 32);
+    _ = try package_port.trustPolicyAuthorityRoot(package_authority, .{ .kind = .policy_authority, .serial = 1 }, signing.publicKeyFromByte(0x5A));
     _ = try package_port.trustPublisher(
         package_authority,
         .{ .kind = .app, .serial = 9_502 },
@@ -316,7 +324,7 @@ test "rendered demo journey drives install sync permission update recovery and r
         },
     );
 
-    var render_buffer: [2048]u8 = undefined;
+    var render_buffer: [RENDER_BUFFER_BYTES]u8 = undefined;
     const initial = try journey.render(&render_buffer);
     try expectContains(initial, "control=install-app state=ready");
     try expectContains(initial, "control=remove-app state=ready");
@@ -346,7 +354,7 @@ test "rendered demo journey drives install sync permission update recovery and r
     try expectContains(rendered, "package installed=yes updated=yes rolled_back=yes removed=yes");
     try expectContains(rendered, "task_flow_events=13");
 
-    var export_buffer: [4096]u8 = undefined;
+    var export_buffer: [EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try expectContains(exported, "flow_kind=install_app");
     try expectContains(exported, "flow_kind=start_task");
@@ -379,23 +387,23 @@ test "production journey service rejects premature controls then routes lifecycl
     const document_path = "documents/notes.md";
     const bundle_signer = signing.SignerIdentity{
         .label = "production-journey-bundle",
-        .seed = [_]u8{0xa1} ** 32,
+        .seed = signing.seedFromByte(0xa1),
     };
     const policy_signer = signing.SignerIdentity{
         .label = "production-journey-policy",
-        .seed = [_]u8{0xa2} ** 32,
+        .seed = signing.seedFromByte(0xa2),
     };
     const user_signer = signing.SignerIdentity{
         .label = "production-journey-user",
-        .seed = [_]u8{0xa3} ** 32,
+        .seed = signing.seedFromByte(0xa3),
     };
     const primary_signer = signing.SignerIdentity{
         .label = "production-journey-primary",
-        .seed = [_]u8{0xa4} ** 32,
+        .seed = signing.seedFromByte(0xa4),
     };
     const paired_signer = signing.SignerIdentity{
         .label = "production-journey-paired",
-        .seed = [_]u8{0xa5} ** 32,
+        .seed = signing.seedFromByte(0xa5),
     };
 
     const provided_interfaces = [_]manifest.InterfaceDecl{
@@ -459,7 +467,7 @@ test "production journey service rejects premature controls then routes lifecycl
         .capability_id = package_capability.id,
         .now_ticks = 10,
     };
-    _ = try package_port.trustPolicyAuthorityRoot(package_authority, .{ .kind = .policy_authority, .serial = 1 }, [_]u8{0x5A} ** 32);
+    _ = try package_port.trustPolicyAuthorityRoot(package_authority, .{ .kind = .policy_authority, .serial = 1 }, signing.publicKeyFromByte(0x5A));
     _ = try package_port.trustPublisher(
         package_authority,
         .{ .kind = .app, .serial = 9_702 },
@@ -623,7 +631,7 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expect(runtime_checkpoint_store.has_checkpoint);
     try std.testing.expect(compositor_checkpoint_store.valid);
 
-    var render_buffer: [2048]u8 = undefined;
+    var render_buffer: [RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try journey.render(&render_buffer);
     try expectContains(rendered, "control=apply-policy state=done");
     try expectContains(rendered, "control=edit-document state=done");
@@ -636,7 +644,7 @@ test "production journey service rejects premature controls then routes lifecycl
     try expectContains(rendered, "visible_windows=0");
     try expectContains(rendered, "task_flow_events=13");
 
-    var export_buffer: [4096]u8 = undefined;
+    var export_buffer: [EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try expectContains(exported, "kind=policy_change");
     try expectContains(exported, "kind=device_trust_change");
@@ -663,7 +671,7 @@ test "rendered task shell drives task workspace document panel and focus control
     var ledger = event_ledger.Ledger.init();
     var shell = Shell.init(&runtime, &ux, &compositor, &storage, &ledger, shellConfig(user, workspace_id, document_path));
 
-    var render_buffer: [768]u8 = undefined;
+    var render_buffer: [COMPACT_RENDER_BUFFER_BYTES]u8 = undefined;
     const initial = try shell.render(&render_buffer);
     try expectContains(initial, "control=start-task");
     try expectContains(initial, "task=0");
@@ -689,7 +697,7 @@ test "rendered task shell drives task workspace document panel and focus control
     try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .task_flow, .task_id = task.id }));
     try std.testing.expectEqual(@as(usize, 3), ledger.countMatching(.{ .kind = .task_flow, .workspace_id = workspace_id }));
 
-    var export_buffer: [1024]u8 = undefined;
+    var export_buffer: [SMALL_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try expectContains(exported, "flow_kind=start_task");
     try expectContains(exported, "flow_kind=open_workspace");
@@ -786,7 +794,7 @@ test "task shell service routes controls through compositor service and recovers
     try std.testing.expectEqual(@as(usize, 4), restarted_compositor.window_count);
     try std.testing.expectEqual(restarted_compositor.windowAtOrder(3).?.id, restarted_compositor.active_window_id);
 
-    var render_buffer: [768]u8 = undefined;
+    var render_buffer: [COMPACT_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try restarted_shell_service.render(&render_buffer);
     try expectContains(rendered, "control=focus-full-screen state=done");
     try expectContains(rendered, "active_type=full_screen_task_view");
@@ -806,15 +814,15 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
     const document_path = "documents/plan.md";
     const user_signer = signing.SignerIdentity{
         .label = "humane-shell-user",
-        .seed = [_]u8{0xb1} ** 32,
+        .seed = signing.seedFromByte(0xb1),
     };
     const device_signer = signing.SignerIdentity{
         .label = "humane-shell-device",
-        .seed = [_]u8{0xb2} ** 32,
+        .seed = signing.seedFromByte(0xb2),
     };
     const snapshot_signer = signing.SignerIdentity{
         .label = "humane-shell-snapshot",
-        .seed = [_]u8{0xb3} ** 32,
+        .seed = signing.seedFromByte(0xb3),
     };
 
     var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
@@ -888,7 +896,7 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
         &shell_checkpoint_store,
     );
 
-    var render_buffer: [8192]u8 = undefined;
+    var render_buffer: [FULL_RENDER_BUFFER_BYTES]u8 = undefined;
     const initial = try shell.render(&render_buffer);
     try expectContains(initial, "task_first=yes");
     try expectContains(initial, "accessibility keyboard=yes screen_reader=yes visible_focus=yes reduce_motion=yes high_contrast=yes");
@@ -907,8 +915,8 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
     try std.testing.expectEqual(HumaneShellStatus.invalid_order, blocked_workspace.status);
     try std.testing.expectEqual(@as(u64, 0), blocked_workspace.task_id);
 
-    var request_buffer: [128]u8 = undefined;
-    var response_buffer: [128]u8 = undefined;
+    var request_buffer: [WIRE_BUFFER_BYTES]u8 = undefined;
+    var response_buffer: [WIRE_BUFFER_BYTES]u8 = undefined;
     try std.testing.expectError(error.MalformedRequest, humane_shell_wire.decodeRequest("bad"));
     try std.testing.expectError(error.RequestTooLarge, humane_shell_wire.encodeRequest(request_buffer[0..4], .{}));
     const next_payload = try humane_shell_wire.encodeRequest(&request_buffer, .{ .operation = .keyboard, .keyboard = .next, .tick = 20 });
@@ -1024,15 +1032,15 @@ test "humane shell exposes object-native query history sharing capabilities and 
     const document_path = "exports/plan.md";
     const user_signer = signing.SignerIdentity{
         .label = "object-shell-user",
-        .seed = [_]u8{0xd1} ** 32,
+        .seed = signing.seedFromByte(0xd1),
     };
     const device_signer = signing.SignerIdentity{
         .label = "object-shell-device",
-        .seed = [_]u8{0xd2} ** 32,
+        .seed = signing.seedFromByte(0xd2),
     };
     const snapshot_signer = signing.SignerIdentity{
         .label = "object-shell-snapshot",
-        .seed = [_]u8{0xd3} ** 32,
+        .seed = signing.seedFromByte(0xd3),
     };
 
     var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
@@ -1139,7 +1147,7 @@ test "humane shell exposes object-native query history sharing capabilities and 
     try std.testing.expect(sync.findConflictForObject(workspace_id, paired_device, 92_001) == null);
     try std.testing.expectEqual(compositor_session.ViewType.sync_conflict_review, compositor.windowAtOrder(1).?.view_type);
 
-    var render_buffer: [8192]u8 = undefined;
+    var render_buffer: [FULL_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try shell.render(&render_buffer);
     try expectContains(rendered, "object_model first_class=yes file_bridge=export-import-only");
     try expectContains(rendered, "object_query count=1 selected=92001 opened=yes capability=");
@@ -1160,15 +1168,15 @@ test "booted rendered system runs input loop compositor prompts task switching r
     const document_path = "documents/plan.md";
     const user_signer = signing.SignerIdentity{
         .label = "booted-shell-user",
-        .seed = [_]u8{0xc1} ** 32,
+        .seed = signing.seedFromByte(0xc1),
     };
     const device_signer = signing.SignerIdentity{
         .label = "booted-shell-device",
-        .seed = [_]u8{0xc2} ** 32,
+        .seed = signing.seedFromByte(0xc2),
     };
     const snapshot_signer = signing.SignerIdentity{
         .label = "booted-shell-snapshot",
-        .seed = [_]u8{0xc3} ** 32,
+        .seed = signing.seedFromByte(0xc3),
     };
 
     var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
@@ -1245,7 +1253,7 @@ test "booted rendered system runs input loop compositor prompts task switching r
     );
     var system = BootedSystem.init(&shell);
 
-    var render_buffer: [8192]u8 = undefined;
+    var render_buffer: [FULL_RENDER_BUFFER_BYTES]u8 = undefined;
     const cold = try system.render(&render_buffer);
     try expectContains(cold, "boot_phase=cold input_loop=stopped");
 
@@ -1332,23 +1340,23 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
     const document_path = "documents/notes.md";
     const notes_signer = signing.SignerIdentity{
         .label = "booted-notes-bundle",
-        .seed = [_]u8{0xe1} ** 32,
+        .seed = signing.seedFromByte(0xe1),
     };
     const user_signer = signing.SignerIdentity{
         .label = "booted-notes-user",
-        .seed = [_]u8{0xe2} ** 32,
+        .seed = signing.seedFromByte(0xe2),
     };
     const primary_signer = signing.SignerIdentity{
         .label = "booted-notes-primary",
-        .seed = [_]u8{0xe3} ** 32,
+        .seed = signing.seedFromByte(0xe3),
     };
     const paired_signer = signing.SignerIdentity{
         .label = "booted-notes-paired",
-        .seed = [_]u8{0xe4} ** 32,
+        .seed = signing.seedFromByte(0xe4),
     };
     const snapshot_signer = signing.SignerIdentity{
         .label = "booted-notes-snapshot",
-        .seed = [_]u8{0xe5} ** 32,
+        .seed = signing.seedFromByte(0xe5),
     };
 
     var package_capabilities = capability.CapabilityTable.init();
@@ -1362,7 +1370,7 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
         .capability_id = package_capability.id,
         .now_ticks = 10,
     };
-    _ = try package_port.trustPolicyAuthorityRoot(package_authority, .{ .kind = .policy_authority, .serial = 1 }, [_]u8{0x5A} ** 32);
+    _ = try package_port.trustPolicyAuthorityRoot(package_authority, .{ .kind = .policy_authority, .serial = 1 }, signing.publicKeyFromByte(0x5A));
     _ = try package_port.trustPublisher(
         package_authority,
         .{ .kind = .app, .serial = 11_102 },
@@ -1531,20 +1539,20 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
     try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(task_id).?.state);
     try std.testing.expectEqual(@as(usize, 0), compositor.visibleWindowCount());
 
-    var render_buffer: [8192]u8 = undefined;
+    var render_buffer: [FULL_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try system.render(&render_buffer);
     try expectContains(rendered, "document_loop opened=no edited=no version=");
     try expectContains(rendered, "synced=no sync_selected=1 frames=1 conflicts=0 object_shared=yes conflict_reviewed=yes package_removed=yes");
     try expectContains(rendered, "recovery_ui visible=yes checkpoint=yes recovered=yes");
     try expectContains(rendered, "compositor active_window=0");
 
-    var shell_render_buffer: [8192]u8 = undefined;
+    var shell_render_buffer: [FULL_RENDER_BUFFER_BYTES]u8 = undefined;
     const shell_rendered = try shell.render(&shell_render_buffer);
     try expectContains(shell_rendered, "package bundle=app.notes removed=yes removed_revisions=1");
     try expectContains(shell_rendered, "snapshot id=");
     try expectContains(shell_rendered, "label=before-notes-edit restored=yes");
 
-    var export_buffer: [4096]u8 = undefined;
+    var export_buffer: [EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try expectContains(exported, "flow_kind=edit_document");
     try expectContains(exported, "flow_kind=share_document");

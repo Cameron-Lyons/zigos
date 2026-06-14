@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const fixed_table = @import("../core/fixed_table.zig");
 const id_index = @import("../core/id_index.zig");
 const native_util = @import("../core/util.zig");
@@ -9,6 +10,7 @@ const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
+const units = @import("../core/units.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 
 pub const MAX_IMAGES: usize = 24;
@@ -18,7 +20,16 @@ const MAX_DISPLAY_NAME_BYTES: usize = 48;
 const MAX_PUBLISHER_BYTES: usize = 48;
 const MAX_LABEL_BYTES: usize = 48;
 const MAX_ENTRY_BYTES: usize = 64;
-const MAX_IMAGE_HASH_BYTES: usize = 32;
+const MAX_IMAGE_HASH_BYTES: usize = task_runtime.MAX_IMAGE_HASH_BYTES;
+const SYNTHETIC_ELF_PROGRAM_HEADERS: usize = 3;
+const SYNTHETIC_ELF_SEGMENT_FILE_BYTES: usize = 64;
+const SYNTHETIC_ELF_SEGMENT_MEMORY_BYTES: usize = 128;
+const SYNTHETIC_ELF_SEGMENT_ALIGNMENT: u32 = 0x1000;
+const SYNTHETIC_ELF_BYTES: usize = @sizeOf(std.elf.Elf32_Ehdr) +
+    SYNTHETIC_ELF_PROGRAM_HEADERS * @sizeOf(std.elf.Elf32_Phdr) +
+    SYNTHETIC_ELF_PROGRAM_HEADERS * SYNTHETIC_ELF_SEGMENT_MEMORY_BYTES;
+const TEST_TASK_MEMORY_BYTES: usize = units.kibibytes(4);
+const TEST_TASK_SHARED_MEMORY_BYTES: usize = units.kibibytes(2);
 const copyTextExact = native_util.copyTextExact;
 
 pub const Error = manifest.ValidationError || component_port.Error || task_runtime.Error || elf_image_inspector.Error || error{
@@ -101,7 +112,7 @@ pub const ImageRecord = struct {
     loadable_segment_count: u16,
     byte_len: usize,
     bootstrap_mailbox_address: u64,
-    file_sha256: [MAX_IMAGE_HASH_BYTES]u8,
+    file_sha256: crypto_hash.Digest,
     executable_image: task_runtime.ExecutableImageSpec,
     elf_bytes: []const u8,
     bundle_id_len: usize,
@@ -395,7 +406,7 @@ fn zeroImage() ImageRecord {
         .loadable_segment_count = 0,
         .byte_len = 0,
         .bootstrap_mailbox_address = 0,
-        .file_sha256 = [_]u8{0} ** MAX_IMAGE_HASH_BYTES,
+        .file_sha256 = crypto_hash.zero_digest,
         .executable_image = .{},
         .elf_bytes = &.{},
         .bundle_id_len = 0,
@@ -475,8 +486,8 @@ fn syntheticExecutableImage(request: ImageRegisterRequest) task_runtime.Executab
     return task_runtime.syntheticUserspaceImage(request.bundle.bundle_id, request.initial_component.entry);
 }
 
-pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments: u16) [@sizeOf(std.elf.Elf32_Ehdr) + 3 * @sizeOf(std.elf.Elf32_Phdr) + 3 * 128]u8 {
-    var bytes = [_]u8{0} ** (@sizeOf(std.elf.Elf32_Ehdr) + 3 * @sizeOf(std.elf.Elf32_Phdr) + 3 * 128);
+pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments: u16) [SYNTHETIC_ELF_BYTES]u8 {
+    var bytes = [_]u8{0} ** SYNTHETIC_ELF_BYTES;
     bytes[0] = 0x7F;
     bytes[1] = 'E';
     bytes[2] = 'L';
@@ -500,8 +511,8 @@ pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments
         const p_type: u32 = if (index < loadable_segments) std.elf.PT_LOAD else 0;
         std.mem.writeInt(u32, bytes[program_offset..][0..4], p_type, .little);
         if (p_type == std.elf.PT_LOAD) {
-            const file_offset = @sizeOf(std.elf.Elf32_Ehdr) + 3 * @sizeOf(std.elf.Elf32_Phdr) + index * 128;
-            const virtual_address = entry_point + @as(u32, @intCast(index)) * 0x1000;
+            const file_offset = @sizeOf(std.elf.Elf32_Ehdr) + SYNTHETIC_ELF_PROGRAM_HEADERS * @sizeOf(std.elf.Elf32_Phdr) + index * SYNTHETIC_ELF_SEGMENT_MEMORY_BYTES;
+            const virtual_address = entry_point + @as(u32, @intCast(index)) * SYNTHETIC_ELF_SEGMENT_ALIGNMENT;
             const flags: u32 = if (index == 0)
                 std.elf.PF_R | std.elf.PF_X
             else
@@ -509,12 +520,12 @@ pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments
 
             std.mem.writeInt(u32, bytes[program_offset + 4 ..][0..4], @intCast(file_offset), .little);
             std.mem.writeInt(u32, bytes[program_offset + 8 ..][0..4], virtual_address, .little);
-            std.mem.writeInt(u32, bytes[program_offset + 16 ..][0..4], 64, .little);
-            std.mem.writeInt(u32, bytes[program_offset + 20 ..][0..4], 128, .little);
+            std.mem.writeInt(u32, bytes[program_offset + 16 ..][0..4], @intCast(SYNTHETIC_ELF_SEGMENT_FILE_BYTES), .little);
+            std.mem.writeInt(u32, bytes[program_offset + 20 ..][0..4], @intCast(SYNTHETIC_ELF_SEGMENT_MEMORY_BYTES), .little);
             std.mem.writeInt(u32, bytes[program_offset + 24 ..][0..4], flags, .little);
-            std.mem.writeInt(u32, bytes[program_offset + 28 ..][0..4], 0x1000, .little);
+            std.mem.writeInt(u32, bytes[program_offset + 28 ..][0..4], SYNTHETIC_ELF_SEGMENT_ALIGNMENT, .little);
 
-            @memset(bytes[file_offset..][0..64], @intCast(index + 1));
+            @memset(bytes[file_offset..][0..SYNTHETIC_ELF_SEGMENT_FILE_BYTES], @intCast(index + 1));
         }
     }
 
@@ -559,9 +570,9 @@ test "userspace image launch records bundle provenance and isolated process stat
         .owner = .{ .kind = .user, .serial = 1 },
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 4096,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = TEST_TASK_SHARED_MEMORY_BYTES,
         },
         .ui_surface_id = 3,
         .local_only = true,
@@ -616,9 +627,9 @@ test "kernel-launched userspace images surface a userspace task flag" {
         .component_class = .session_manager,
         .budget = .{
             .cpu_time_ticks = 10_000,
-            .memory_bytes = 4096,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = 8,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = TEST_TASK_SHARED_MEMORY_BYTES,
         },
         .local_only = true,
     });
@@ -649,9 +660,9 @@ test "kernel-launched userspace images surface a userspace task flag" {
         .owner = .{ .kind = .service, .serial = 4 },
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
     });
@@ -671,7 +682,7 @@ test "embedded elf inspection records entry points loadable segments and measure
     try std.testing.expectEqual(@as(u64, 0x401000), info.entry_point);
     try std.testing.expectEqual(@as(u16, 2), info.loadable_segment_count);
     try std.testing.expectEqual(bytes.len, info.byte_len);
-    try std.testing.expect(!std.mem.eql(u8, &info.file_sha256, &([_]u8{0} ** MAX_IMAGE_HASH_BYTES)));
+    try std.testing.expect(!std.mem.eql(u8, &info.file_sha256, &crypto_hash.zero_digest));
     try std.testing.expectEqual(@as(usize, 2), info.executable_image.segment_count);
     try std.testing.expectEqual(@as(u64, 0x401000), info.executable_image.segments[0].virtual_address);
     try std.testing.expect(info.executable_image.segments[0].access.execute);
