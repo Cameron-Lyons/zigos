@@ -22,6 +22,8 @@ pub const MAX_MODEL_SOURCE_BYTES: usize = manifest.MAX_AI_MODEL_SOURCE_BYTES;
 pub const MAX_DATA_RIGHTS_FORMAT_BYTES: usize = manifest.MAX_DATA_RIGHTS_FORMAT_BYTES;
 pub const MAX_SUPPLY_CHAIN_DIGEST_BYTES: usize = manifest.MAX_SUPPLY_CHAIN_DIGEST_BYTES;
 pub const MAX_BUILD_PROVENANCE_IDENTITY_BYTES: usize = manifest.MAX_BUILD_PROVENANCE_IDENTITY_BYTES;
+pub const MAX_AGENT_PURPOSE_BYTES: usize = manifest.MAX_AGENT_PURPOSE_BYTES;
+pub const MAX_ACCESSIBILITY_PROFILE_BYTES: usize = manifest.MAX_ACCESSIBILITY_PROFILE_BYTES;
 pub const MAX_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_SIGNATURE_SIGNER_BYTES: usize = 64;
 pub const MAX_INSTALL_SOURCE_BYTES: usize = 96;
@@ -233,6 +235,34 @@ pub const StoredSupplyChain = struct {
     }
 };
 
+pub const StoredAgentDelegation = struct {
+    enabled: bool = false,
+    purpose_len: usize = 0,
+    purpose: [MAX_AGENT_PURPOSE_BYTES]u8 = [_]u8{0} ** MAX_AGENT_PURPOSE_BYTES,
+    max_autonomous_actions: u16 = 0,
+    max_remote_calls: u16 = 0,
+    user_confirmation_required: bool = true,
+    audit_required: bool = true,
+
+    pub fn purposeSlice(self: *const StoredAgentDelegation) []const u8 {
+        return self.purpose[0..self.purpose_len];
+    }
+};
+
+pub const StoredAccessibility = struct {
+    adaptive_ui: bool = false,
+    supports_screen_reader: bool = false,
+    supports_keyboard_navigation: bool = false,
+    supports_reduced_motion: bool = false,
+    supports_high_contrast: bool = false,
+    profile_notes_len: usize = 0,
+    profile_notes: [MAX_ACCESSIBILITY_PROFILE_BYTES]u8 = [_]u8{0} ** MAX_ACCESSIBILITY_PROFILE_BYTES,
+
+    pub fn profileNotesSlice(self: *const StoredAccessibility) []const u8 {
+        return self.profile_notes[0..self.profile_notes_len];
+    }
+};
+
 pub const StoredSignature = struct {
     format_len: usize = 0,
     format: [MAX_SIGNATURE_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_FORMAT_BYTES,
@@ -273,6 +303,8 @@ pub const ResolvedManifest = struct {
     ai_metadata: manifest.AiMetadata,
     data_rights: manifest.DataRightsDecl,
     supply_chain: manifest.SupplyChainDecl,
+    agent_delegation: manifest.AgentDelegationDecl,
+    accessibility: manifest.AccessibilityDecl,
     signature: manifest.Signature,
 };
 
@@ -304,6 +336,8 @@ pub const BundleRevision = struct {
     ai_metadata: StoredAiMetadata = zeroStoredAiMetadata(),
     data_rights: StoredDataRights = zeroStoredDataRights(),
     supply_chain: StoredSupplyChain = zeroStoredSupplyChain(),
+    agent_delegation: StoredAgentDelegation = zeroStoredAgentDelegation(),
+    accessibility: StoredAccessibility = zeroStoredAccessibility(),
     signature: StoredSignature = zeroStoredSignature(),
 
     pub fn displayNameSlice(self: *const BundleRevision) []const u8 {
@@ -436,6 +470,14 @@ fn zeroStoredDataRights() StoredDataRights {
 }
 
 fn zeroStoredSupplyChain() StoredSupplyChain {
+    return .{};
+}
+
+fn zeroStoredAgentDelegation() StoredAgentDelegation {
+    return .{};
+}
+
+fn zeroStoredAccessibility() StoredAccessibility {
     return .{};
 }
 

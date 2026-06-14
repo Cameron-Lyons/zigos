@@ -3,8 +3,10 @@ const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const event_ledger = @import("event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
 const os_identity = @import("os_identity.zig");
+const notification_center = @import("../services/notification_center.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
+const humane_shell = @import("rendered_shell/humane_shell.zig");
 const signing = @import("../core/signing.zig");
 const manifest_linter = @import("../sdk/manifest_linter.zig");
 const package_digest = @import("../services/package_service_digest.zig");
@@ -207,6 +209,77 @@ pub const SeventhFeature = enum(u8) {
 
 pub const seventh_feature_count = std.meta.fields(SeventhFeature).len;
 
+pub const EighthFeature = enum(u8) {
+    agent_delegation_manifest,
+    agent_purpose_validation,
+    agent_action_budget_validation,
+    agent_remote_confirmation_validation,
+    agent_digest_covers_purpose,
+    package_preserves_agent_delegation,
+    package_resolves_agent_delegation,
+    policy_agent_allowed_gate,
+    policy_agent_action_budget,
+    policy_agent_remote_budget,
+    policy_agent_confirmation_gate,
+    policy_agent_audit_gate,
+    agent_delegation_request,
+    agent_delegation_policy_decision,
+    typed_agent_delegation_service,
+    agent_authorize_operation,
+    agent_record_action_operation,
+    agent_revoke_operation,
+    agent_delegation_ledger,
+    agent_delegation_diagnostics,
+};
+
+pub const eighth_feature_count = std.meta.fields(EighthFeature).len;
+
+pub const NinthFeature = enum(u8) {
+    attention_policy_create_request,
+    quiet_hours_policy,
+    visible_notification_budget_policy,
+    interruptive_notification_budget_policy,
+    critical_interruption_policy,
+    attention_policy_request,
+    attention_policy_decision,
+    notification_center_attention_policy,
+    notification_center_quiet_mode,
+    notification_center_interruption_budget,
+    attention_policy_ledger,
+    attention_policy_diagnostics,
+    attention_policy_redaction,
+    policy_digest_covers_attention,
+    structured_urgency_classification,
+    suppression_replacement_preserved,
+};
+
+pub const ninth_feature_count = std.meta.fields(NinthFeature).len;
+
+pub const TenthFeature = enum(u8) {
+    accessibility_manifest,
+    accessibility_profile_validation,
+    accessibility_keyboard_validation,
+    accessibility_digest_covers_profile,
+    package_preserves_accessibility,
+    package_resolves_accessibility,
+    policy_adaptive_ui_gate,
+    policy_screen_reader_gate,
+    policy_keyboard_navigation_gate,
+    policy_reduced_motion_gate,
+    policy_high_contrast_gate,
+    accessibility_policy_request,
+    typed_accessibility_profile_service,
+    accessibility_profile_get_operation,
+    accessibility_profile_apply_operation,
+    native_registry_accessibility_discovery,
+    accessibility_profile_ledger,
+    accessibility_profile_diagnostics,
+    accessibility_redaction,
+    rendered_shell_accessibility_profile,
+};
+
+pub const tenth_feature_count = std.meta.fields(TenthFeature).len;
+
 pub const Checklist = struct {
     native_only_apps: bool,
     no_compatibility_namespace: bool,
@@ -319,112 +392,46 @@ pub const ExtraChecklist = struct {
     }
 };
 
-pub const ThirdChecklist = struct {
-    satisfied_features: [third_feature_count]bool,
+fn FeatureChecklist(comptime FeatureEnum: type) type {
+    const count = std.meta.fields(FeatureEnum).len;
+    return struct {
+        const Self = @This();
 
-    pub fn complete(self: ThirdChecklist) bool {
-        return self.satisfiedCount() == third_feature_count;
-    }
+        satisfied_features: [count]bool,
 
-    pub fn satisfiedCount(self: ThirdChecklist) usize {
-        var count: usize = 0;
-        for (self.satisfied_features) |satisfied_feature| {
-            if (satisfied_feature) count += 1;
+        pub fn complete(self: Self) bool {
+            return self.satisfiedCount() == count;
         }
-        return count;
-    }
 
-    pub fn satisfied(self: ThirdChecklist, feature: ThirdFeature) bool {
-        return self.satisfied_features[@intFromEnum(feature)];
-    }
-};
-
-pub const FourthChecklist = struct {
-    satisfied_features: [fourth_feature_count]bool,
-
-    pub fn complete(self: FourthChecklist) bool {
-        return self.satisfiedCount() == fourth_feature_count;
-    }
-
-    pub fn satisfiedCount(self: FourthChecklist) usize {
-        var count: usize = 0;
-        for (self.satisfied_features) |satisfied_feature| {
-            if (satisfied_feature) count += 1;
+        pub fn satisfiedCount(self: Self) usize {
+            var count_satisfied: usize = 0;
+            for (self.satisfied_features) |satisfied_feature| {
+                if (satisfied_feature) count_satisfied += 1;
+            }
+            return count_satisfied;
         }
-        return count;
-    }
 
-    pub fn satisfied(self: FourthChecklist, feature: FourthFeature) bool {
-        return self.satisfied_features[@intFromEnum(feature)];
-    }
-};
-
-pub const FifthChecklist = struct {
-    satisfied_features: [fifth_feature_count]bool,
-
-    pub fn complete(self: FifthChecklist) bool {
-        return self.satisfiedCount() == fifth_feature_count;
-    }
-
-    pub fn satisfiedCount(self: FifthChecklist) usize {
-        var count: usize = 0;
-        for (self.satisfied_features) |satisfied_feature| {
-            if (satisfied_feature) count += 1;
+        pub fn satisfied(self: Self, feature: FeatureEnum) bool {
+            return self.satisfied_features[@intFromEnum(feature)];
         }
-        return count;
-    }
+    };
+}
 
-    pub fn satisfied(self: FifthChecklist, feature: FifthFeature) bool {
-        return self.satisfied_features[@intFromEnum(feature)];
-    }
-};
-
-pub const SixthChecklist = struct {
-    satisfied_features: [sixth_feature_count]bool,
-
-    pub fn complete(self: SixthChecklist) bool {
-        return self.satisfiedCount() == sixth_feature_count;
-    }
-
-    pub fn satisfiedCount(self: SixthChecklist) usize {
-        var count: usize = 0;
-        for (self.satisfied_features) |satisfied_feature| {
-            if (satisfied_feature) count += 1;
-        }
-        return count;
-    }
-
-    pub fn satisfied(self: SixthChecklist, feature: SixthFeature) bool {
-        return self.satisfied_features[@intFromEnum(feature)];
-    }
-};
-
-pub const SeventhChecklist = struct {
-    satisfied_features: [seventh_feature_count]bool,
-
-    pub fn complete(self: SeventhChecklist) bool {
-        return self.satisfiedCount() == seventh_feature_count;
-    }
-
-    pub fn satisfiedCount(self: SeventhChecklist) usize {
-        var count: usize = 0;
-        for (self.satisfied_features) |satisfied_feature| {
-            if (satisfied_feature) count += 1;
-        }
-        return count;
-    }
-
-    pub fn satisfied(self: SeventhChecklist, feature: SeventhFeature) bool {
-        return self.satisfied_features[@intFromEnum(feature)];
-    }
-};
+pub const ThirdChecklist = FeatureChecklist(ThirdFeature);
+pub const FourthChecklist = FeatureChecklist(FourthFeature);
+pub const FifthChecklist = FeatureChecklist(FifthFeature);
+pub const SixthChecklist = FeatureChecklist(SixthFeature);
+pub const SeventhChecklist = FeatureChecklist(SeventhFeature);
+pub const EighthChecklist = FeatureChecklist(EighthFeature);
+pub const NinthChecklist = FeatureChecklist(NinthFeature);
+pub const TenthChecklist = FeatureChecklist(TenthFeature);
 
 pub fn currentRepositoryContract() Checklist {
     const default_ai = manifest.AiMetadata{};
     return .{
         .native_only_apps = manifest.requiresApplicationPackaging("app.notes"),
         .no_compatibility_namespace = !manifest.isReservedPlatformBundle("compat.posix"),
-        .typed_component_services = typed_component_abi.contractFor("zigos.service.registry") != null,
+        .typed_component_services = contractPresent("zigos.service.registry"),
         .explicit_capability_grants = true,
         .object_native_storage = true,
         .local_first_sync = true,
@@ -436,7 +443,7 @@ pub fn currentRepositoryContract() Checklist {
         .restartable_userspace_drivers = true,
         .redacted_diagnostics = true,
         .private_local_ai = !default_ai.training_allowed and default_ai.locality == .inherit_task,
-        .typed_ai_inference_service = typed_component_abi.contractFor("zigos.ai.inference") != null,
+        .typed_ai_inference_service = contractPresent("zigos.ai.inference"),
         .carbon_aware_scheduling = carbonAwareSchedulingBackedByPlanner(),
     };
 }
@@ -563,8 +570,8 @@ pub fn currentRepositoryExtraContract() ExtraChecklist {
                 .sensitivity = .private_user_data,
             }},
         }).count(.warning) != 0,
-        .typed_privacy_budget_service = typed_component_abi.contractFor("zigos.privacy.budget") != null,
-        .typed_diagnostics_export_service = typed_component_abi.contractFor("zigos.diagnostics.export") != null,
+        .typed_privacy_budget_service = contractPresent("zigos.privacy.budget"),
+        .typed_diagnostics_export_service = contractPresent("zigos.diagnostics.export"),
         .privacy_budget_policy = @hasField(policy_object.SensitiveEgressRequest, "remote_bytes"),
         .camera_policy_gate = @hasField(policy_object.CreateRequest, "camera_allowed"),
         .microphone_policy_gate = @hasField(policy_object.CreateRequest, "microphone_allowed"),
@@ -621,7 +628,7 @@ pub fn currentRepositoryExtraContract() ExtraChecklist {
                 .sensitivity = .private_user_data,
             }},
         }, error.SensitivePermissionRequiresReason),
-        .typed_diagnostics_share_validation = typed_component_abi.contractFor("zigos.diagnostics.export").?.operation(.diagnostics_share_remote) != null,
+        .typed_diagnostics_share_validation = contractOperationPresent("zigos.diagnostics.export", .diagnostics_share_remote),
         .local_first_sensitive_defaults = !manifest.isSensitive(default_permission.sensitivity) and default_permission.local_only,
     };
 }
@@ -629,6 +636,15 @@ pub fn currentRepositoryExtraContract() ExtraChecklist {
 fn validationFailsWith(bundle: manifest.BundleManifest, expected: anyerror) bool {
     manifest.validate(bundle) catch |err| return err == expected;
     return false;
+}
+
+fn contractPresent(interface_name: []const u8) bool {
+    return typed_component_abi.contractFor(interface_name) != null;
+}
+
+fn contractOperationPresent(interface_name: []const u8, operation_id: typed_component_abi.OperationId) bool {
+    const interface_contract = typed_component_abi.contractFor(interface_name) orelse return false;
+    return interface_contract.operation(operation_id) != null;
 }
 
 pub fn currentRepositoryThirdContract() ThirdChecklist {
@@ -756,10 +772,10 @@ pub fn currentRepositoryThirdContract() ThirdChecklist {
     features[@intFromEnum(ThirdFeature.permission_lease_expiration_summary)] = @hasField(event_ledger.DiagnosticSummary, "permission_lease_expirations");
     features[@intFromEnum(ThirdFeature.consent_receipt_ledger)] = event_ledger.EventKind.consent_receipt == .consent_receipt;
     features[@intFromEnum(ThirdFeature.consent_revocation_summary)] = @hasField(event_ledger.DiagnosticSummary, "consent_receipt_revocations");
-    features[@intFromEnum(ThirdFeature.typed_consent_receipts_service)] = typed_component_abi.contractFor("zigos.consent.receipts") != null;
-    features[@intFromEnum(ThirdFeature.typed_permission_lease_service)] = typed_component_abi.contractFor("zigos.permission.lease") != null;
-    features[@intFromEnum(ThirdFeature.consent_record_wire_validation)] = typed_component_abi.contractFor("zigos.consent.receipts").?.operation(.consent_record) != null;
-    features[@intFromEnum(ThirdFeature.permission_lease_expire_wire_validation)] = typed_component_abi.contractFor("zigos.permission.lease").?.operation(.permission_lease_expire) != null;
+    features[@intFromEnum(ThirdFeature.typed_consent_receipts_service)] = contractPresent("zigos.consent.receipts");
+    features[@intFromEnum(ThirdFeature.typed_permission_lease_service)] = contractPresent("zigos.permission.lease");
+    features[@intFromEnum(ThirdFeature.consent_record_wire_validation)] = contractOperationPresent("zigos.consent.receipts", .consent_record);
+    features[@intFromEnum(ThirdFeature.permission_lease_expire_wire_validation)] = contractOperationPresent("zigos.permission.lease", .permission_lease_expire);
     features[@intFromEnum(ThirdFeature.native_registry_consent_discovery)] = typed_component_abi.interfaceId(.consent_receipts) == .consent_receipts;
     features[@intFromEnum(ThirdFeature.native_registry_lease_discovery)] = typed_component_abi.interfaceId(.permission_lease) == .permission_lease;
     features[@intFromEnum(ThirdFeature.retention_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "retention_policy_events");
@@ -802,7 +818,6 @@ pub fn currentRepositoryFourthContract() FourthChecklist {
     };
     const digest_a = package_digest.digestBundle(data_rights_a);
     const digest_b = package_digest.digestBundle(data_rights_b);
-    const data_rights_contract = typed_component_abi.contractFor("zigos.data.rights");
 
     features[@intFromEnum(FourthFeature.data_rights_manifest)] = @hasField(manifest.BundleManifest, "data_rights") and @hasField(manifest.DataRightsDecl, "portable_export");
     features[@intFromEnum(FourthFeature.private_object_data_rights_validation)] = validationFailsWith(.{
@@ -824,10 +839,10 @@ pub fn currentRepositoryFourthContract() FourthChecklist {
     }, error.DataDeletionReceiptRequired);
     features[@intFromEnum(FourthFeature.data_rights_digest_covers_export_format)] = !std.mem.eql(u8, &digest_a, &digest_b);
     features[@intFromEnum(FourthFeature.package_preserves_data_rights)] = @hasField(package_model.BundleRevision, "data_rights") and @hasField(package_model.ResolvedManifest, "data_rights");
-    features[@intFromEnum(FourthFeature.typed_data_rights_service)] = data_rights_contract != null;
-    features[@intFromEnum(FourthFeature.data_export_prepare_operation)] = data_rights_contract.?.operation(.data_export_prepare) != null;
-    features[@intFromEnum(FourthFeature.data_delete_request_operation)] = data_rights_contract.?.operation(.data_delete_request) != null;
-    features[@intFromEnum(FourthFeature.data_delete_receipt_operation)] = data_rights_contract.?.operation(.data_delete_receipt) != null;
+    features[@intFromEnum(FourthFeature.typed_data_rights_service)] = contractPresent("zigos.data.rights");
+    features[@intFromEnum(FourthFeature.data_export_prepare_operation)] = contractOperationPresent("zigos.data.rights", .data_export_prepare);
+    features[@intFromEnum(FourthFeature.data_delete_request_operation)] = contractOperationPresent("zigos.data.rights", .data_delete_request);
+    features[@intFromEnum(FourthFeature.data_delete_receipt_operation)] = contractOperationPresent("zigos.data.rights", .data_delete_receipt);
     features[@intFromEnum(FourthFeature.native_registry_data_rights_discovery)] = typed_component_abi.interfaceId(.data_rights) == .data_rights;
     features[@intFromEnum(FourthFeature.policy_data_export_gate)] = @hasField(policy_object.CreateRequest, "data_export_allowed");
     features[@intFromEnum(FourthFeature.policy_data_delete_gate)] = @hasField(policy_object.CreateRequest, "data_deletion_allowed");
@@ -867,7 +882,6 @@ pub fn currentRepositoryFifthContract() FifthChecklist {
     };
     const digest_v1 = package_digest.digestBundle(measured_local_ai);
     const digest_v2 = package_digest.digestBundle(measured_local_ai_v2);
-    const model_registry_contract = typed_component_abi.contractFor("zigos.ai.model.registry");
 
     features[@intFromEnum(FifthFeature.ai_model_digest_manifest)] = @hasField(manifest.AiMetadata, "model_digest");
     features[@intFromEnum(FifthFeature.ai_model_source_manifest)] = @hasField(manifest.AiMetadata, "model_source_identity");
@@ -903,10 +917,10 @@ pub fn currentRepositoryFifthContract() FifthChecklist {
     features[@intFromEnum(FifthFeature.ai_digest_covers_model_provenance)] = !std.mem.eql(u8, &digest_v1, &digest_v2);
     features[@intFromEnum(FifthFeature.package_preserves_model_digest)] = @hasField(package_model.StoredAiMetadata, "model_digest");
     features[@intFromEnum(FifthFeature.package_preserves_model_source)] = @hasField(package_model.StoredAiMetadata, "model_source_identity");
-    features[@intFromEnum(FifthFeature.typed_ai_model_registry_service)] = model_registry_contract != null;
-    features[@intFromEnum(FifthFeature.ai_model_register_operation)] = model_registry_contract.?.operation(.ai_model_register) != null;
-    features[@intFromEnum(FifthFeature.ai_model_attest_operation)] = model_registry_contract.?.operation(.ai_model_attest) != null;
-    features[@intFromEnum(FifthFeature.ai_model_revoke_operation)] = model_registry_contract.?.operation(.ai_model_revoke) != null;
+    features[@intFromEnum(FifthFeature.typed_ai_model_registry_service)] = contractPresent("zigos.ai.model.registry");
+    features[@intFromEnum(FifthFeature.ai_model_register_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_register);
+    features[@intFromEnum(FifthFeature.ai_model_attest_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_attest);
+    features[@intFromEnum(FifthFeature.ai_model_revoke_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_revoke);
     features[@intFromEnum(FifthFeature.native_registry_ai_model_discovery)] = typed_component_abi.interfaceId(.ai_model_registry) == .ai_model_registry;
     features[@intFromEnum(FifthFeature.policy_ai_model_measurement_gate)] = @hasField(policy_object.CreateRequest, "require_ai_model_measurement");
     features[@intFromEnum(FifthFeature.policy_ai_model_source_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_ai_model_source");
@@ -921,8 +935,6 @@ pub fn currentRepositoryFifthContract() FifthChecklist {
 
 pub fn currentRepositorySixthContract() SixthChecklist {
     var features = [_]bool{false} ** sixth_feature_count;
-    const identity_contract = typed_component_abi.contractFor("zigos.identity.session");
-
     features[@intFromEnum(SixthFeature.credential_assertion_hardware_backed)] = @hasField(os_identity.Assertion, "hardware_backed_credential");
     features[@intFromEnum(SixthFeature.credential_assertion_platform_device)] = @hasField(os_identity.Assertion, "device_platform_backed");
     features[@intFromEnum(SixthFeature.credential_assertion_primary_device)] = @hasField(os_identity.Assertion, "primary_device_assertion");
@@ -935,19 +947,10 @@ pub fn currentRepositorySixthContract() SixthChecklist {
     features[@intFromEnum(SixthFeature.session_trust_request)] = @hasField(policy_object.SessionTrustRequest, "hardware_backed_credential") and
         @hasField(policy_object.SessionTrustRequest, "unlock_age_ticks") and
         @hasDecl(policy_object.Directory, "sessionTrustDecision");
-    features[@intFromEnum(SixthFeature.typed_identity_session_service)] = identity_contract != null;
-    features[@intFromEnum(SixthFeature.identity_session_authorize_operation)] = if (identity_contract) |contract|
-        contract.operation(.identity_session_authorize) != null
-    else
-        false;
-    features[@intFromEnum(SixthFeature.identity_session_step_up_operation)] = if (identity_contract) |contract|
-        contract.operation(.identity_session_step_up) != null
-    else
-        false;
-    features[@intFromEnum(SixthFeature.identity_session_revoke_operation)] = if (identity_contract) |contract|
-        contract.operation(.identity_session_revoke) != null
-    else
-        false;
+    features[@intFromEnum(SixthFeature.typed_identity_session_service)] = contractPresent("zigos.identity.session");
+    features[@intFromEnum(SixthFeature.identity_session_authorize_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_authorize);
+    features[@intFromEnum(SixthFeature.identity_session_step_up_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_step_up);
+    features[@intFromEnum(SixthFeature.identity_session_revoke_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_revoke);
     features[@intFromEnum(SixthFeature.native_registry_identity_session_discovery)] = typed_component_abi.interfaceId(.identity_session) == .identity_session;
     features[@intFromEnum(SixthFeature.session_posture_ledger)] = event_ledger.EventKind.session_posture == .session_posture and @hasDecl(event_ledger.Ledger, "recordSessionPosture");
     features[@intFromEnum(SixthFeature.session_posture_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_events");
@@ -1065,6 +1068,406 @@ fn packageProvenanceInstallErrorPresent() bool {
     return package_provenance_error == error.PackageProvenanceDenied;
 }
 
+pub fn currentRepositoryEighthContract() EighthChecklist {
+    var features = [_]bool{false} ** eighth_feature_count;
+    const base_agent = manifest.BundleManifest{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize private notes locally",
+            .max_autonomous_actions = 4,
+            .max_remote_calls = 0,
+            .user_confirmation_required = true,
+            .audit_required = true,
+        },
+    };
+    var purpose_b = base_agent;
+    purpose_b.agent_delegation = .{
+        .enabled = true,
+        .purpose = "Summarize shared workspace",
+        .max_autonomous_actions = 4,
+        .max_remote_calls = 0,
+        .user_confirmation_required = true,
+        .audit_required = true,
+    };
+    const digest_a = package_digest.digestBundle(base_agent);
+    const digest_b = package_digest.digestBundle(purpose_b);
+
+    features[@intFromEnum(EighthFeature.agent_delegation_manifest)] = @hasField(manifest.BundleManifest, "agent_delegation") and @hasField(manifest.AgentDelegationDecl, "max_autonomous_actions");
+    features[@intFromEnum(EighthFeature.agent_purpose_validation)] = validationFailsWith(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .max_autonomous_actions = 4,
+        },
+    }, error.AgentDelegationPurposeMissing);
+    features[@intFromEnum(EighthFeature.agent_action_budget_validation)] = validationFailsWith(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize private notes locally",
+        },
+    }, error.AgentDelegationActionBudgetMissing);
+    features[@intFromEnum(EighthFeature.agent_remote_confirmation_validation)] = validationFailsWith(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Summarize remote research",
+            .max_autonomous_actions = 4,
+            .max_remote_calls = 1,
+            .user_confirmation_required = false,
+        },
+    }, error.AgentDelegationNeedsConfirmation);
+    features[@intFromEnum(EighthFeature.agent_digest_covers_purpose)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@intFromEnum(EighthFeature.package_preserves_agent_delegation)] = @hasField(package_model.BundleRevision, "agent_delegation");
+    features[@intFromEnum(EighthFeature.package_resolves_agent_delegation)] = @hasField(package_model.ResolvedManifest, "agent_delegation");
+    features[@intFromEnum(EighthFeature.policy_agent_allowed_gate)] = @hasField(policy_object.CreateRequest, "agent_delegation_allowed");
+    features[@intFromEnum(EighthFeature.policy_agent_action_budget)] = @hasField(policy_object.CreateRequest, "max_agent_actions_per_session");
+    features[@intFromEnum(EighthFeature.policy_agent_remote_budget)] = @hasField(policy_object.CreateRequest, "max_agent_remote_calls_per_session");
+    features[@intFromEnum(EighthFeature.policy_agent_confirmation_gate)] = @hasField(policy_object.CreateRequest, "require_agent_user_confirmation");
+    features[@intFromEnum(EighthFeature.policy_agent_audit_gate)] = @hasField(policy_object.CreateRequest, "require_agent_audit");
+    features[@intFromEnum(EighthFeature.agent_delegation_request)] = @hasField(policy_object.AgentDelegationRequest, "autonomous_actions") and @hasField(policy_object.AgentDelegationRequest, "audit_enabled");
+    features[@intFromEnum(EighthFeature.agent_delegation_policy_decision)] = @hasDecl(policy_object.Directory, "agentDelegationDecision");
+    features[@intFromEnum(EighthFeature.typed_agent_delegation_service)] = contractPresent("zigos.agent.delegation");
+    features[@intFromEnum(EighthFeature.agent_authorize_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_authorize);
+    features[@intFromEnum(EighthFeature.agent_record_action_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_record_action);
+    features[@intFromEnum(EighthFeature.agent_revoke_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_revoke);
+    features[@intFromEnum(EighthFeature.agent_delegation_ledger)] = event_ledger.EventKind.agent_delegation == .agent_delegation and @hasDecl(event_ledger.Ledger, "recordAgentDelegation");
+    features[@intFromEnum(EighthFeature.agent_delegation_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "agent_delegation_events") and @hasField(event_ledger.DiagnosticSummary, "agent_remote_call_events");
+
+    return .{ .satisfied_features = features };
+}
+
+pub fn currentRepositoryNinthContract() NinthChecklist {
+    var features = [_]bool{false} ** ninth_feature_count;
+
+    features[@intFromEnum(NinthFeature.attention_policy_create_request)] =
+        @hasField(policy_object.CreateRequest, "quiet_until_tick") and
+        @hasField(policy_object.CreateRequest, "max_visible_notifications") and
+        @hasField(policy_object.CreateRequest, "max_interruptive_notifications") and
+        @hasField(policy_object.CreateRequest, "allow_critical_interruption");
+    features[@intFromEnum(NinthFeature.quiet_hours_policy)] = attentionPolicyDenies(.attention_quiet_denied);
+    features[@intFromEnum(NinthFeature.visible_notification_budget_policy)] = attentionPolicyDenies(.attention_visible_budget_denied);
+    features[@intFromEnum(NinthFeature.interruptive_notification_budget_policy)] = attentionPolicyDenies(.attention_interruption_budget_denied);
+    features[@intFromEnum(NinthFeature.critical_interruption_policy)] = attentionPolicyDenies(.attention_critical_denied);
+    features[@intFromEnum(NinthFeature.attention_policy_request)] = @hasField(policy_object.AttentionRequest, "requests_interruption") and
+        @hasField(policy_object.AttentionRequest, "critical");
+    features[@intFromEnum(NinthFeature.attention_policy_decision)] = @hasDecl(policy_object.Directory, "attentionDecision");
+    features[@intFromEnum(NinthFeature.notification_center_attention_policy)] = @hasDecl(notification_center.Center, "postWithAttentionPolicy") and
+        @hasDecl(notification_center.Center, "attentionDecision");
+    features[@intFromEnum(NinthFeature.notification_center_quiet_mode)] = notificationQuietModeCheck();
+    features[@intFromEnum(NinthFeature.notification_center_interruption_budget)] = notificationInterruptionBudgetCheck();
+    features[@intFromEnum(NinthFeature.attention_policy_ledger)] = event_ledger.EventKind.attention_policy == .attention_policy and
+        @hasDecl(event_ledger.Ledger, "recordAttentionDecision");
+    features[@intFromEnum(NinthFeature.attention_policy_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "attention_policy_events") and
+        @hasField(event_ledger.DiagnosticSummary, "attention_interruptions_denied");
+    features[@intFromEnum(NinthFeature.attention_policy_redaction)] = attentionRedactionCheck();
+    features[@intFromEnum(NinthFeature.policy_digest_covers_attention)] = attentionPolicyDigestCheck();
+    features[@intFromEnum(NinthFeature.structured_urgency_classification)] = notification_center.isInterruptive(.high) and
+        notification_center.isInterruptive(.critical) and
+        !notification_center.isInterruptive(.normal);
+    features[@intFromEnum(NinthFeature.suppression_replacement_preserved)] = @hasField(notification_center.PostRequest, "suppression_policy") and
+        notification_center.SuppressionPolicy.replace_same_source_reason_task == .replace_same_source_reason_task;
+
+    return .{ .satisfied_features = features };
+}
+
+fn attentionPolicyDenies(expected: policy_object.DecisionReason) bool {
+    var directory = policy_object.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "attention-contract-policy",
+        .seed = signing.seedFromByte(0xC9),
+    };
+    _ = directory.create(.{
+        .scope = .organization,
+        .subject_id = 2026,
+        .issuer = .{ .kind = .policy_authority, .serial = 2026 },
+        .label = "attention-contract",
+        .quiet_until_tick = 500,
+        .max_visible_notifications = 2,
+        .max_interruptive_notifications = 1,
+        .allow_critical_interruption = false,
+    }, signer) catch return false;
+    const subjects = policy_object.SubjectSet{
+        .organization_id = 2026,
+    };
+    const request = switch (expected) {
+        .attention_quiet_denied => policy_object.AttentionRequest{
+            .now_tick = 300,
+            .visible_notifications = 0,
+            .requests_interruption = true,
+        },
+        .attention_visible_budget_denied => policy_object.AttentionRequest{
+            .now_tick = 600,
+            .visible_notifications = 2,
+        },
+        .attention_interruption_budget_denied => policy_object.AttentionRequest{
+            .now_tick = 600,
+            .visible_notifications = 1,
+            .interruptive_notifications = 1,
+            .requests_interruption = true,
+        },
+        .attention_critical_denied => policy_object.AttentionRequest{
+            .now_tick = 600,
+            .visible_notifications = 1,
+            .requests_interruption = true,
+            .critical = true,
+        },
+        else => return false,
+    };
+    const decision = directory.attentionDecision(subjects, request);
+    return !decision.allowed and decision.reason == expected;
+}
+
+fn notificationQuietModeCheck() bool {
+    var center = notification_center.Center.init();
+    const result = center.postWithAttentionPolicy(.{
+        .source = .{ .kind = .app, .serial = 2026 },
+        .reason = .policy_notice,
+        .urgency = .high,
+        .detail = "attention contract quiet check",
+    }, .{
+        .quiet_until_ticks = 100,
+    }, 10) catch return false;
+    return !result.decision.allowed and result.decision.reason == .quiet_mode;
+}
+
+fn notificationInterruptionBudgetCheck() bool {
+    var center = notification_center.Center.init();
+    const source = principal.PrincipalId{ .kind = .app, .serial = 2027 };
+    const first = center.postWithAttentionPolicy(.{
+        .source = source,
+        .reason = .driver_restart,
+        .urgency = .high,
+        .detail = "first interruption",
+    }, .{
+        .max_interruptions_per_window = 1,
+    }, 10) catch return false;
+    if (!first.decision.allowed) return false;
+    const second = center.postWithAttentionPolicy(.{
+        .source = source,
+        .reason = .sync_conflict,
+        .urgency = .high,
+        .detail = "second interruption",
+    }, .{
+        .max_interruptions_per_window = 1,
+    }, 11) catch return false;
+    return !second.decision.allowed and second.decision.reason == .interruption_budget_exhausted;
+}
+
+fn attentionRedactionCheck() bool {
+    var ledger = event_ledger.Ledger.init();
+    ledger.recordAttentionDecision(
+        principal.PrincipalId{ .kind = .user, .serial = 2026 },
+        2607,
+        false,
+        true,
+        3,
+        1,
+        88,
+        "private attention detail",
+    ) catch return false;
+    var buffer: [512]u8 = undefined;
+    const exported = ledger.exportText(&buffer, .{}) catch return false;
+    const summary = ledger.userVisibleDiagnosticSummary();
+    return summary.attention_policy_events == 1 and
+        summary.attention_interruptions_denied == 1 and
+        summary.protected_details_redacted == 1 and
+        std.mem.indexOf(u8, exported, "private attention detail") == null and
+        std.mem.indexOf(u8, exported, "kind=attention_policy") != null;
+}
+
+fn attentionPolicyDigestCheck() bool {
+    var directory = policy_object.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "attention-digest-policy",
+        .seed = signing.seedFromByte(0xCA),
+    };
+    const policy = directory.create(.{
+        .scope = .organization,
+        .subject_id = 2027,
+        .issuer = .{ .kind = .policy_authority, .serial = 2027 },
+        .label = "attention-digest",
+        .quiet_until_tick = 200,
+        .max_visible_notifications = 4,
+        .max_interruptive_notifications = 1,
+        .allow_critical_interruption = true,
+    }, signer) catch return false;
+    if (!directory.verify(policy.id)) return false;
+    policy.max_visible_notifications += 1;
+    return !directory.verify(policy.id);
+}
+
+pub fn currentRepositoryTenthContract() TenthChecklist {
+    var features = [_]bool{false} ** tenth_feature_count;
+    const accessible_reader = manifest.BundleManifest{
+        .bundle_id = "app.reader",
+        .display_name = "Reader",
+        .publisher = "zigos.dev",
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_screen_reader = true,
+            .supports_keyboard_navigation = true,
+            .supports_reduced_motion = true,
+            .supports_high_contrast = true,
+            .profile_notes = "honors user accessibility profile",
+        },
+    };
+    var accessible_reader_v2 = accessible_reader;
+    accessible_reader_v2.accessibility = .{
+        .adaptive_ui = true,
+        .supports_screen_reader = true,
+        .supports_keyboard_navigation = true,
+        .supports_reduced_motion = true,
+        .supports_high_contrast = false,
+        .profile_notes = "honors user accessibility profile",
+    };
+    const digest_a = package_digest.digestBundle(accessible_reader);
+    const digest_b = package_digest.digestBundle(accessible_reader_v2);
+    const shell_profile = humane_shell.AccessibilityProfile{};
+
+    features[@intFromEnum(TenthFeature.accessibility_manifest)] = @hasField(manifest.BundleManifest, "accessibility") and
+        @hasField(manifest.AccessibilityDecl, "supports_reduced_motion");
+    features[@intFromEnum(TenthFeature.accessibility_profile_validation)] = validationFailsWith(.{
+        .bundle_id = "app.reader",
+        .display_name = "Reader",
+        .publisher = "zigos.dev",
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_keyboard_navigation = true,
+            .supports_screen_reader = true,
+        },
+    }, error.AccessibilityReducedMotionMissing);
+    features[@intFromEnum(TenthFeature.accessibility_keyboard_validation)] = validationFailsWith(.{
+        .bundle_id = "app.reader",
+        .display_name = "Reader",
+        .publisher = "zigos.dev",
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_screen_reader = true,
+            .supports_reduced_motion = true,
+        },
+    }, error.AccessibilityKeyboardNavigationMissing);
+    features[@intFromEnum(TenthFeature.accessibility_digest_covers_profile)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@intFromEnum(TenthFeature.package_preserves_accessibility)] = @hasField(package_model.BundleRevision, "accessibility");
+    features[@intFromEnum(TenthFeature.package_resolves_accessibility)] = @hasField(package_model.ResolvedManifest, "accessibility") and
+        @hasField(package_model.StoredAccessibility, "supports_keyboard_navigation");
+    features[@intFromEnum(TenthFeature.policy_adaptive_ui_gate)] = accessibilityPolicyDenies(.accessibility_adaptive_ui_denied);
+    features[@intFromEnum(TenthFeature.policy_screen_reader_gate)] = accessibilityPolicyDenies(.accessibility_screen_reader_denied);
+    features[@intFromEnum(TenthFeature.policy_keyboard_navigation_gate)] = accessibilityPolicyDenies(.accessibility_keyboard_navigation_denied);
+    features[@intFromEnum(TenthFeature.policy_reduced_motion_gate)] = accessibilityPolicyDenies(.accessibility_reduced_motion_denied);
+    features[@intFromEnum(TenthFeature.policy_high_contrast_gate)] = accessibilityPolicyDenies(.accessibility_high_contrast_denied);
+    features[@intFromEnum(TenthFeature.accessibility_policy_request)] = @hasField(policy_object.AccessibilityRequest, "reduced_motion_supported") and
+        @hasDecl(policy_object.Directory, "accessibilityDecision");
+    features[@intFromEnum(TenthFeature.typed_accessibility_profile_service)] = contractPresent("zigos.accessibility.profile");
+    features[@intFromEnum(TenthFeature.accessibility_profile_get_operation)] = contractOperationPresent("zigos.accessibility.profile", .accessibility_profile_get);
+    features[@intFromEnum(TenthFeature.accessibility_profile_apply_operation)] = contractOperationPresent("zigos.accessibility.profile", .accessibility_profile_apply);
+    features[@intFromEnum(TenthFeature.native_registry_accessibility_discovery)] =
+        typed_component_abi.interfaceId(.accessibility_profile) == .accessibility_profile;
+    features[@intFromEnum(TenthFeature.accessibility_profile_ledger)] = event_ledger.EventKind.accessibility_profile == .accessibility_profile and
+        @hasDecl(event_ledger.Ledger, "recordAccessibilityProfile");
+    features[@intFromEnum(TenthFeature.accessibility_profile_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "accessibility_profile_events") and
+        @hasField(event_ledger.DiagnosticSummary, "accessibility_denials");
+    features[@intFromEnum(TenthFeature.accessibility_redaction)] = accessibilityRedactionCheck();
+    features[@intFromEnum(TenthFeature.rendered_shell_accessibility_profile)] =
+        @hasField(humane_shell.AccessibilityProfile, "keyboard_navigation") and
+        @hasField(humane_shell.AccessibilityProfile, "screen_reader_labels") and
+        @hasField(humane_shell.AccessibilityProfile, "visible_focus") and
+        shell_profile.keyboard_navigation and
+        shell_profile.screen_reader_labels and
+        shell_profile.reduce_motion;
+
+    return .{ .satisfied_features = features };
+}
+
+fn accessibilityPolicyDenies(expected: policy_object.DecisionReason) bool {
+    var directory = policy_object.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "accessibility-contract-policy",
+        .seed = signing.seedFromByte(0xCB),
+    };
+    _ = directory.create(.{
+        .scope = .organization,
+        .subject_id = 2028,
+        .issuer = .{ .kind = .policy_authority, .serial = 2028 },
+        .label = "accessibility-contract",
+        .require_adaptive_ui = true,
+        .require_screen_reader_support = true,
+        .require_keyboard_navigation = true,
+        .require_reduced_motion_support = true,
+        .require_high_contrast_support = true,
+    }, signer) catch return false;
+    const subjects = policy_object.SubjectSet{
+        .organization_id = 2028,
+    };
+    const request = switch (expected) {
+        .accessibility_adaptive_ui_denied => policy_object.AccessibilityRequest{
+            .screen_reader_supported = true,
+            .keyboard_navigation = true,
+            .reduced_motion_supported = true,
+            .high_contrast_supported = true,
+        },
+        .accessibility_screen_reader_denied => policy_object.AccessibilityRequest{
+            .adaptive_ui = true,
+            .keyboard_navigation = true,
+            .reduced_motion_supported = true,
+            .high_contrast_supported = true,
+        },
+        .accessibility_keyboard_navigation_denied => policy_object.AccessibilityRequest{
+            .adaptive_ui = true,
+            .screen_reader_supported = true,
+            .reduced_motion_supported = true,
+            .high_contrast_supported = true,
+        },
+        .accessibility_reduced_motion_denied => policy_object.AccessibilityRequest{
+            .adaptive_ui = true,
+            .screen_reader_supported = true,
+            .keyboard_navigation = true,
+            .high_contrast_supported = true,
+        },
+        .accessibility_high_contrast_denied => policy_object.AccessibilityRequest{
+            .adaptive_ui = true,
+            .screen_reader_supported = true,
+            .keyboard_navigation = true,
+            .reduced_motion_supported = true,
+        },
+        else => return false,
+    };
+    const decision = directory.accessibilityDecision(subjects, request);
+    return !decision.allowed and decision.reason == expected;
+}
+
+fn accessibilityRedactionCheck() bool {
+    var ledger = event_ledger.Ledger.init();
+    ledger.recordAccessibilityProfile(
+        principal.PrincipalId{ .kind = .user, .serial = 2028 },
+        2807,
+        false,
+        true,
+        false,
+        true,
+        true,
+        89,
+        "private accessibility profile detail",
+    ) catch return false;
+    var buffer: [512]u8 = undefined;
+    const exported = ledger.exportText(&buffer, .{}) catch return false;
+    const summary = ledger.userVisibleDiagnosticSummary();
+    return summary.accessibility_profile_events == 1 and
+        summary.accessibility_denials == 1 and
+        summary.protected_details_redacted == 1 and
+        std.mem.indexOf(u8, exported, "private accessibility profile detail") == null and
+        std.mem.indexOf(u8, exported, "kind=accessibility_profile") != null;
+}
+
 test "2026 OS contract keeps sixteen modernization features satisfied" {
     const checklist = currentRepositoryContract();
     try std.testing.expectEqual(@as(usize, 16), feature_count);
@@ -1132,6 +1535,36 @@ test "2026 OS contract keeps twenty seventh-loop supply chain passes satisfied" 
     try std.testing.expect(checklist.satisfied(.supply_chain_manifest));
     try std.testing.expect(checklist.satisfied(.policy_package_sbom_gate));
     try std.testing.expect(checklist.satisfied(.package_install_provenance_error));
+}
+
+test "2026 OS contract keeps twenty eighth-loop agent delegation passes satisfied" {
+    const checklist = currentRepositoryEighthContract();
+    try std.testing.expectEqual(@as(usize, 20), eighth_feature_count);
+    try std.testing.expectEqual(eighth_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.agent_delegation_manifest));
+    try std.testing.expect(checklist.satisfied(.typed_agent_delegation_service));
+    try std.testing.expect(checklist.satisfied(.agent_delegation_diagnostics));
+}
+
+test "2026 OS contract keeps sixteen ninth-loop attention sovereignty passes satisfied" {
+    const checklist = currentRepositoryNinthContract();
+    try std.testing.expectEqual(@as(usize, 16), ninth_feature_count);
+    try std.testing.expectEqual(ninth_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.notification_center_quiet_mode));
+    try std.testing.expect(checklist.satisfied(.attention_policy_redaction));
+    try std.testing.expect(checklist.satisfied(.policy_digest_covers_attention));
+}
+
+test "2026 OS contract keeps twenty tenth-loop accessibility profile passes satisfied" {
+    const checklist = currentRepositoryTenthContract();
+    try std.testing.expectEqual(@as(usize, 20), tenth_feature_count);
+    try std.testing.expectEqual(tenth_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.typed_accessibility_profile_service));
+    try std.testing.expect(checklist.satisfied(.policy_keyboard_navigation_gate));
+    try std.testing.expect(checklist.satisfied(.accessibility_redaction));
 }
 
 test "2026 OS contract proves AI policy and diagnostics stay private by default" {

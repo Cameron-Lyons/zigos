@@ -128,7 +128,7 @@ pub const Service = struct {
         try validateInstallRequestShape(request);
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
-        try bundle_ops.validateInstallTarget(InstalledBundle, request.bundle);
+        try bundle_ops.validateInstallStorageShape(InstalledBundle, request.bundle);
         const digest = bundle_digest.digestBundle(request.bundle);
         if (!signing.verifyWithDefaultRegistry(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
@@ -171,7 +171,7 @@ pub const Service = struct {
                 return error.UpdateSourceChanged;
             }
 
-            try bundle_ops.installRevision(
+            try bundle_ops.installRevisionValidated(
                 bundle,
                 request.bundle,
                 request.source_identity,
@@ -192,7 +192,7 @@ pub const Service = struct {
         slot.in_use = true;
         errdefer slot.* = .{};
         slot.bundle = zeroBundle();
-        try bundle_ops.installNew(
+        try bundle_ops.installNewValidated(
             &slot.bundle,
             request.bundle,
             request.source_identity,
@@ -1378,6 +1378,22 @@ test "package service resolves installed manifests with stable slices" {
             .reproducible_build = true,
             .trusted_builder = true,
         },
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize notes locally",
+            .max_autonomous_actions = 4,
+            .max_remote_calls = 0,
+            .user_confirmation_required = true,
+            .audit_required = true,
+        },
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_screen_reader = true,
+            .supports_keyboard_navigation = true,
+            .supports_reduced_motion = true,
+            .supports_high_contrast = true,
+            .profile_notes = "first-party notes honors user accessibility profile",
+        },
     };
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
@@ -1410,6 +1426,16 @@ test "package service resolves installed manifests with stable slices" {
     try std.testing.expectEqualStrings("builder:zigos/release", current.supply_chain.build_provenance_identity);
     try std.testing.expect(current.supply_chain.reproducible_build);
     try std.testing.expect(current.supply_chain.trusted_builder);
+    try std.testing.expect(current.agent_delegation.enabled);
+    try std.testing.expectEqualStrings("Organize notes locally", current.agent_delegation.purpose);
+    try std.testing.expectEqual(@as(u16, 4), current.agent_delegation.max_autonomous_actions);
+    try std.testing.expect(current.agent_delegation.audit_required);
+    try std.testing.expect(current.accessibility.adaptive_ui);
+    try std.testing.expect(current.accessibility.supports_screen_reader);
+    try std.testing.expect(current.accessibility.supports_keyboard_navigation);
+    try std.testing.expect(current.accessibility.supports_reduced_motion);
+    try std.testing.expect(current.accessibility.supports_high_contrast);
+    try std.testing.expectEqualStrings("first-party notes honors user accessibility profile", current.accessibility.profile_notes);
 }
 
 test "package service enforces package supply chain policy before install" {

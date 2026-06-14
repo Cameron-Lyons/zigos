@@ -29,6 +29,38 @@ pub const SuppressionPolicy = enum(u8) {
     replace_same_source_reason_task,
 };
 
+pub const AttentionDecisionReason = enum(u8) {
+    allowed,
+    quiet_mode,
+    visible_budget_exhausted,
+    interruption_budget_exhausted,
+    critical_interruption_denied,
+};
+
+pub const AttentionPolicy = struct {
+    quiet_until_ticks: u64 = 0,
+    max_visible_notifications: usize = 0,
+    max_interruptions_per_window: u16 = 0,
+    allow_critical_interruptions: bool = true,
+};
+
+pub const AttentionDecision = struct {
+    allowed: bool,
+    reason: AttentionDecisionReason = .allowed,
+    active_visible: usize = 0,
+    active_interruptions: usize = 0,
+};
+
+const AttentionCounts = struct {
+    active_visible: usize = 0,
+    active_interruptions: usize = 0,
+};
+
+pub const AttentionPostResult = struct {
+    decision: AttentionDecision,
+    notification: ?*Notification = null,
+};
+
 pub const PostRequest = struct {
     source: principal.PrincipalId,
     reason: Reason,
@@ -99,6 +131,55 @@ pub const Center = struct {
         return error.NotificationTableFull;
     }
 
+    pub fn postWithAttentionPolicy(
+        self: *Center,
+        request: PostRequest,
+        policy: AttentionPolicy,
+        now_ticks: u64,
+    ) Error!AttentionPostResult {
+        const decision = self.attentionDecision(request, policy, now_ticks);
+        if (!decision.allowed) {
+            return .{ .decision = decision };
+        }
+        return .{
+            .decision = decision,
+            .notification = try self.post(request),
+        };
+    }
+
+    pub fn attentionDecision(
+        self: *const Center,
+        request: PostRequest,
+        policy: AttentionPolicy,
+        now_ticks: u64,
+    ) AttentionDecision {
+        const counts = self.activeAttentionCounts(now_ticks);
+        if (request.urgency == .critical and !policy.allow_critical_interruptions) {
+            return deny(.critical_interruption_denied, counts);
+        }
+        if (isInterruptive(request.urgency) and
+            request.urgency != .critical and
+            policy.quiet_until_ticks != 0 and
+            now_ticks < policy.quiet_until_ticks)
+        {
+            return deny(.quiet_mode, counts);
+        }
+        if (policy.max_visible_notifications != 0 and counts.active_visible >= policy.max_visible_notifications) {
+            return deny(.visible_budget_exhausted, counts);
+        }
+        if (isInterruptive(request.urgency) and
+            policy.max_interruptions_per_window != 0 and
+            counts.active_interruptions >= policy.max_interruptions_per_window)
+        {
+            return deny(.interruption_budget_exhausted, counts);
+        }
+        return .{
+            .allowed = true,
+            .active_visible = counts.active_visible,
+            .active_interruptions = counts.active_interruptions,
+        };
+    }
+
     pub fn suppressBySourceReason(self: *Center, source: principal.PrincipalId, reason: Reason) usize {
         var count: usize = 0;
         for (&self.notifications) |*slot| {
@@ -112,13 +193,23 @@ pub const Center = struct {
         return count;
     }
 
+    pub fn activeInterruptionCount(self: *const Center, now_ticks: u64) usize {
+        return self.activeAttentionCounts(now_ticks).active_interruptions;
+    }
+
     pub fn activeCount(self: *const Center, now_ticks: u64) usize {
-        var count: usize = 0;
+        return self.activeAttentionCounts(now_ticks).active_visible;
+    }
+
+    fn activeAttentionCounts(self: *const Center, now_ticks: u64) AttentionCounts {
+        var counts = AttentionCounts{};
         for (self.notifications) |slot| {
             if (!slot.in_use) continue;
-            if (slot.notification.isActive(now_ticks)) count += 1;
+            if (!slot.notification.isActive(now_ticks)) continue;
+            counts.active_visible += 1;
+            if (isInterruptive(slot.notification.urgency)) counts.active_interruptions += 1;
         }
-        return count;
+        return counts;
     }
 
     pub fn latestVisible(self: *const Center, now_ticks: u64) ?Notification {
@@ -150,6 +241,25 @@ pub const Center = struct {
         }
     }
 };
+
+fn deny(
+    reason: AttentionDecisionReason,
+    counts: AttentionCounts,
+) AttentionDecision {
+    return .{
+        .allowed = false,
+        .reason = reason,
+        .active_visible = counts.active_visible,
+        .active_interruptions = counts.active_interruptions,
+    };
+}
+
+pub fn isInterruptive(urgency: Urgency) bool {
+    return switch (urgency) {
+        .passive, .normal => false,
+        .high, .critical => true,
+    };
+}
 
 fn zeroNotification() Notification {
     return .{
@@ -243,4 +353,45 @@ test "notification center applies structured suppression policies before posting
     try std.testing.expectEqualStrings("other task survives", center.latestVisible(1).?.detailSlice());
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason, replacement.suppression_policy);
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason_task, task_replacement.suppression_policy);
+}
+
+test "notification center enforces quiet mode and interruption budgets" {
+    var center = Center.init();
+    const source = principal.PrincipalId{ .kind = .app, .serial = 26 };
+    const quiet_policy = AttentionPolicy{
+        .quiet_until_ticks = 100,
+        .max_visible_notifications = 3,
+        .max_interruptions_per_window = 1,
+    };
+
+    const quiet_denied = try center.postWithAttentionPolicy(.{
+        .source = source,
+        .reason = .policy_notice,
+        .urgency = .high,
+        .detail = "background agent wants attention",
+    }, quiet_policy, 40);
+    try std.testing.expect(!quiet_denied.decision.allowed);
+    try std.testing.expectEqual(AttentionDecisionReason.quiet_mode, quiet_denied.decision.reason);
+    try std.testing.expectEqual(@as(usize, 0), center.activeCount(40));
+
+    const critical = try center.postWithAttentionPolicy(.{
+        .source = source,
+        .reason = .driver_restart,
+        .urgency = .critical,
+        .detail = "storage path needs recovery",
+    }, quiet_policy, 40);
+    try std.testing.expect(critical.decision.allowed);
+    try std.testing.expect(critical.notification != null);
+    try std.testing.expectEqual(@as(usize, 1), center.activeInterruptionCount(40));
+
+    const budget_denied = try center.postWithAttentionPolicy(.{
+        .source = source,
+        .reason = .sync_conflict,
+        .urgency = .high,
+        .detail = "second interruptive notice",
+    }, .{
+        .max_interruptions_per_window = 1,
+    }, 120);
+    try std.testing.expect(!budget_denied.decision.allowed);
+    try std.testing.expectEqual(AttentionDecisionReason.interruption_budget_exhausted, budget_denied.decision.reason);
 }

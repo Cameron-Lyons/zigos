@@ -431,6 +431,8 @@ fn emptyResolvedManifest() package_service.ResolvedManifest {
         .ai_metadata = .{},
         .data_rights = .{},
         .supply_chain = .{},
+        .agent_delegation = .{},
+        .accessibility = .{},
         .signature = .{},
     };
 }

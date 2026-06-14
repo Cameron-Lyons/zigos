@@ -48,6 +48,12 @@ pub const DataDeleteReceiptRequest = schema.requestType(.data_delete_receipt);
 pub const IdentitySessionAuthorizeRequest = schema.requestType(.identity_session_authorize);
 pub const IdentitySessionStepUpRequest = schema.requestType(.identity_session_step_up);
 pub const IdentitySessionRevokeRequest = schema.requestType(.identity_session_revoke);
+pub const AgentAuthorizeRequest = schema.requestType(.agent_authorize);
+pub const AgentRecordActionRequest = schema.requestType(.agent_record_action);
+pub const AgentRevokeRequest = schema.requestType(.agent_revoke);
+pub const AccessibilityProfileGetRequest = schema.requestType(.accessibility_profile_get);
+pub const AccessibilityProfileApplyRequest = schema.requestType(.accessibility_profile_apply);
+pub const AccessibilityProfileAuditRequest = schema.requestType(.accessibility_profile_audit);
 
 pub const ServiceRegisterResponse = schema.responseType(.service_register);
 pub const ServiceConnectionResponse = schema.responseType(.service_connect);
@@ -79,6 +85,12 @@ pub const DataDeleteReceiptResponse = schema.responseType(.data_delete_receipt);
 pub const IdentitySessionAuthorizeResponse = schema.responseType(.identity_session_authorize);
 pub const IdentitySessionStepUpResponse = schema.responseType(.identity_session_step_up);
 pub const IdentitySessionRevokeResponse = schema.responseType(.identity_session_revoke);
+pub const AgentAuthorizeResponse = schema.responseType(.agent_authorize);
+pub const AgentRecordActionResponse = schema.responseType(.agent_record_action);
+pub const AgentRevokeResponse = schema.responseType(.agent_revoke);
+pub const AccessibilityProfileGetResponse = schema.responseType(.accessibility_profile_get);
+pub const AccessibilityProfileApplyResponse = schema.responseType(.accessibility_profile_apply);
+pub const AccessibilityProfileAuditResponse = schema.responseType(.accessibility_profile_audit);
 
 pub const contracts = schema.contracts;
 pub const manifest_interfaces = schema.manifest_interfaces;
@@ -162,6 +174,8 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(u16, 0x0B03), @intFromEnum(OperationId.permission_lease_expire));
     try std.testing.expectEqual(@as(u16, 0x0C03), @intFromEnum(OperationId.data_delete_receipt));
     try std.testing.expectEqual(@as(u16, 0x0E01), @intFromEnum(OperationId.identity_session_authorize));
+    try std.testing.expectEqual(@as(u16, 0x0F01), @intFromEnum(OperationId.agent_authorize));
+    try std.testing.expectEqual(@as(u16, 0x1001), @intFromEnum(OperationId.accessibility_profile_get));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionRequest), @sizeOf(Request(.service_connect)));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionResponse), @sizeOf(Response(.service_connect)));
     try std.testing.expectEqual(@sizeOf(PackageRollbackRequest), @sizeOf(Request(.package_rollback)));
@@ -182,6 +196,10 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@sizeOf(DataDeleteReceiptResponse), @sizeOf(Response(.data_delete_receipt)));
     try std.testing.expectEqual(@sizeOf(IdentitySessionAuthorizeRequest), @sizeOf(Request(.identity_session_authorize)));
     try std.testing.expectEqual(@sizeOf(IdentitySessionAuthorizeResponse), @sizeOf(Response(.identity_session_authorize)));
+    try std.testing.expectEqual(@sizeOf(AgentAuthorizeRequest), @sizeOf(Request(.agent_authorize)));
+    try std.testing.expectEqual(@sizeOf(AgentAuthorizeResponse), @sizeOf(Response(.agent_authorize)));
+    try std.testing.expectEqual(@sizeOf(AccessibilityProfileApplyRequest), @sizeOf(Request(.accessibility_profile_apply)));
+    try std.testing.expectEqual(@sizeOf(AccessibilityProfileApplyResponse), @sizeOf(Response(.accessibility_profile_apply)));
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(WorkspacePutVersionRequest))), contractFor("zigos.object.workspace").?.operation(.workspace_put_version).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PackageUpdateRequest))), contractFor("zigos.package.install").?.operation(.package_update).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AiAuthorizeRequest))), contractFor("zigos.ai.inference").?.operation(.ai_authorize).?.request_size);
@@ -192,6 +210,8 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PermissionLeaseRenewRequest))), contractFor("zigos.permission.lease").?.operation(.permission_lease_renew).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(DataDeleteRequest))), contractFor("zigos.data.rights").?.operation(.data_delete_request).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(IdentitySessionStepUpRequest))), contractFor("zigos.identity.session").?.operation(.identity_session_step_up).?.request_size);
+    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AgentRecordActionRequest))), contractFor("zigos.agent.delegation").?.operation(.agent_record_action).?.request_size);
+    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AccessibilityProfileAuditRequest))), contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_audit).?.request_size);
 }
 
 test "typed component ABI rejects incompatible interfaces and malformed messages" {

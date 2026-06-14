@@ -12,6 +12,14 @@ pub fn validateInstallTarget(
     comptime InstalledBundleType: type,
     bundle: manifest.BundleManifest,
 ) Error!void {
+    try manifest.validate(bundle);
+    try validateInstallStorageShape(InstalledBundleType, bundle);
+}
+
+pub fn validateInstallStorageShape(
+    comptime InstalledBundleType: type,
+    bundle: manifest.BundleManifest,
+) Error!void {
     const RevisionType = arrayFieldChildType(InstalledBundleType, "revisions");
     const StoredComponentType = arrayFieldChildType(RevisionType, "components");
     const StoredAssetType = arrayFieldChildType(RevisionType, "assets");
@@ -21,9 +29,10 @@ pub fn validateInstallTarget(
     const StoredAiMetadataType = @FieldType(RevisionType, "ai_metadata");
     const StoredDataRightsType = @FieldType(RevisionType, "data_rights");
     const StoredSupplyChainType = @FieldType(RevisionType, "supply_chain");
+    const StoredAgentDelegationType = @FieldType(RevisionType, "agent_delegation");
+    const StoredAccessibilityType = @FieldType(RevisionType, "accessibility");
     const StoredSignatureType = @FieldType(RevisionType, "signature");
 
-    try manifest.validate(bundle);
     try validateTextLen(bundle.bundle_id, arrayFieldLen(InstalledBundleType, "bundle_id"), error.BundleIdTooLong);
     try validateTextLen(bundle.display_name, arrayFieldLen(RevisionType, "display_name"), error.DisplayNameTooLong);
     try validateTextLen(bundle.publisher, arrayFieldLen(RevisionType, "publisher"), error.PublisherTooLong);
@@ -42,6 +51,8 @@ pub fn validateInstallTarget(
     try validateTextLen(bundle.supply_chain.build_recipe_digest, arrayFieldLen(StoredSupplyChainType, "build_recipe_digest"), error.SupplyChainDigestTooLong);
     try validateTextLen(bundle.supply_chain.vulnerability_scan_digest, arrayFieldLen(StoredSupplyChainType, "vulnerability_scan_digest"), error.SupplyChainDigestTooLong);
     try validateTextLen(bundle.supply_chain.build_provenance_identity, arrayFieldLen(StoredSupplyChainType, "build_provenance_identity"), error.BuildProvenanceIdentityTooLong);
+    try validateTextLen(bundle.agent_delegation.purpose, arrayFieldLen(StoredAgentDelegationType, "purpose"), error.AgentDelegationPurposeTooLong);
+    try validateTextLen(bundle.accessibility.profile_notes, arrayFieldLen(StoredAccessibilityType, "profile_notes"), error.AccessibilityProfileTooLong);
     try validateTextLen(bundle.signature.format, arrayFieldLen(StoredSignatureType, "format"), error.SignatureFormatTooLong);
     try validateTextLen(bundle.signature.signer, arrayFieldLen(StoredSignatureType, "signer"), error.SignatureSignerTooLong);
 
@@ -81,7 +92,16 @@ pub fn installNew(
 ) Error!void {
     const BundleType = storageType(@TypeOf(bundle));
     try validateInstallTarget(BundleType, source);
+    try installNewValidated(bundle, source, source_identity, data_schema_version, permission_digest);
+}
 
+pub fn installNewValidated(
+    bundle: anytype,
+    source: manifest.BundleManifest,
+    source_identity: []const u8,
+    data_schema_version: u32,
+    permission_digest: crypto_hash.Digest,
+) Error!void {
     bundle.bundle_id_len = copyTextExact(&bundle.bundle_id, source.bundle_id) catch return error.BundleIdTooLong;
     bundle.revision_count = 1;
     bundle.next_revision_id = 2;
@@ -99,7 +119,16 @@ pub fn installRevision(
 ) Error!void {
     const BundleType = storageType(@TypeOf(bundle));
     try validateInstallTarget(BundleType, source);
+    try installRevisionValidated(bundle, source, source_identity, data_schema_version, permission_digest);
+}
 
+pub fn installRevisionValidated(
+    bundle: anytype,
+    source: manifest.BundleManifest,
+    source_identity: []const u8,
+    data_schema_version: u32,
+    permission_digest: crypto_hash.Digest,
+) Error!void {
     const target_slot = bundle.inactiveRevisionSlot();
     try writeRevision(&bundle.revisions[target_slot], source, source_identity, data_schema_version, permission_digest, bundle.next_revision_id);
     bundle.next_revision_id += 1;
@@ -227,6 +256,22 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .reproducible_build = revision.supply_chain.reproducible_build,
         .trusted_builder = revision.supply_chain.trusted_builder,
     };
+    resolved.agent_delegation = .{
+        .enabled = revision.agent_delegation.enabled,
+        .purpose = revision.agent_delegation.purposeSlice(),
+        .max_autonomous_actions = revision.agent_delegation.max_autonomous_actions,
+        .max_remote_calls = revision.agent_delegation.max_remote_calls,
+        .user_confirmation_required = revision.agent_delegation.user_confirmation_required,
+        .audit_required = revision.agent_delegation.audit_required,
+    };
+    resolved.accessibility = .{
+        .adaptive_ui = revision.accessibility.adaptive_ui,
+        .supports_screen_reader = revision.accessibility.supports_screen_reader,
+        .supports_keyboard_navigation = revision.accessibility.supports_keyboard_navigation,
+        .supports_reduced_motion = revision.accessibility.supports_reduced_motion,
+        .supports_high_contrast = revision.accessibility.supports_high_contrast,
+        .profile_notes = revision.accessibility.profileNotesSlice(),
+    };
     resolved.signature = .{
         .format = revision.signature.formatSlice(),
         .signer = revision.signature.signerSlice(),
@@ -251,6 +296,8 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .ai_metadata = resolved.ai_metadata,
         .data_rights = resolved.data_rights,
         .supply_chain = resolved.supply_chain,
+        .agent_delegation = resolved.agent_delegation,
+        .accessibility = resolved.accessibility,
         .update_channel = revision.channel,
         .signature = resolved.signature,
     };
@@ -274,6 +321,8 @@ fn clearResolvedManifest(resolved: anytype) void {
     resolved.ai_metadata = .{};
     resolved.data_rights = .{};
     resolved.supply_chain = .{};
+    resolved.agent_delegation = .{};
+    resolved.accessibility = .{};
     resolved.signature = .{};
 }
 
@@ -390,6 +439,22 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.supply_chain.build_provenance_identity_len = copyTextExact(&revision.supply_chain.build_provenance_identity, source.supply_chain.build_provenance_identity) catch return error.BuildProvenanceIdentityTooLong;
     revision.supply_chain.reproducible_build = source.supply_chain.reproducible_build;
     revision.supply_chain.trusted_builder = source.supply_chain.trusted_builder;
+
+    revision.agent_delegation = .{};
+    revision.agent_delegation.enabled = source.agent_delegation.enabled;
+    revision.agent_delegation.purpose_len = copyTextExact(&revision.agent_delegation.purpose, source.agent_delegation.purpose) catch return error.AgentDelegationPurposeTooLong;
+    revision.agent_delegation.max_autonomous_actions = source.agent_delegation.max_autonomous_actions;
+    revision.agent_delegation.max_remote_calls = source.agent_delegation.max_remote_calls;
+    revision.agent_delegation.user_confirmation_required = source.agent_delegation.user_confirmation_required;
+    revision.agent_delegation.audit_required = source.agent_delegation.audit_required;
+
+    revision.accessibility = .{};
+    revision.accessibility.adaptive_ui = source.accessibility.adaptive_ui;
+    revision.accessibility.supports_screen_reader = source.accessibility.supports_screen_reader;
+    revision.accessibility.supports_keyboard_navigation = source.accessibility.supports_keyboard_navigation;
+    revision.accessibility.supports_reduced_motion = source.accessibility.supports_reduced_motion;
+    revision.accessibility.supports_high_contrast = source.accessibility.supports_high_contrast;
+    revision.accessibility.profile_notes_len = copyTextExact(&revision.accessibility.profile_notes, source.accessibility.profile_notes) catch return error.AccessibilityProfileTooLong;
 
     revision.signature = .{};
     revision.signature.format_len = copyTextExact(&revision.signature.format, source.signature.format) catch return error.SignatureFormatTooLong;
