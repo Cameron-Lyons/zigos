@@ -294,6 +294,9 @@ pub const ValidationError = error{
     DuplicateBackgroundTaskId,
     MissingDataEgressIntent,
     IncompleteDataEgressIntent,
+    PermissionRightsTargetMismatch,
+    LocalOnlyPermissionRequestsRemoteNetwork,
+    DuplicatePermissionRequest,
     AiModelFamilyTooLong,
     LocalOnlyAiRequiresLocalNetwork,
     SignatureFormatTooLong,
@@ -312,6 +315,8 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
         return error.MissingBackgroundTask;
     }
     try validateComponents(bundle);
+    try validatePermissionRights(bundle);
+    try validateDuplicatePermissions(bundle);
     try validateBackgroundTasks(bundle);
     try validateDataEgressRequests(bundle);
 
@@ -333,6 +338,41 @@ fn validateDataEgressRequests(bundle: BundleManifest) ValidationError!void {
         if (!request.egress_intent.declared()) return error.MissingDataEgressIntent;
         if (!request.egress_intent.complete()) return error.IncompleteDataEgressIntent;
     }
+}
+
+fn validatePermissionRights(bundle: BundleManifest) ValidationError!void {
+    for (bundle.requested_permissions) |request| {
+        if (!permissionRightsTargetCompatible(request)) return error.PermissionRightsTargetMismatch;
+        if (request.local_only and request.rights.has(.network_remote)) {
+            return error.LocalOnlyPermissionRequestsRemoteNetwork;
+        }
+    }
+}
+
+fn validateDuplicatePermissions(bundle: BundleManifest) ValidationError!void {
+    for (bundle.requested_permissions, 0..) |request, index| {
+        var previous_index: usize = 0;
+        while (previous_index < index) : (previous_index += 1) {
+            const previous = bundle.requested_permissions[previous_index];
+            if (previous.kind == request.kind and std.mem.eql(u8, previous.resource, request.resource)) {
+                return error.DuplicatePermissionRequest;
+            }
+        }
+    }
+}
+
+fn permissionRightsTargetCompatible(request: PermissionRequest) bool {
+    const target_kind = std.meta.activeTag(request.rights);
+    return switch (request.kind) {
+        .object_access, .contacts => target_kind == .object,
+        .network_egress => target_kind == .network_policy,
+        .device_access, .camera, .mic, .sensor, .location => target_kind == .device,
+        .clipboard => target_kind == .service or target_kind == .workspace or target_kind == .policy,
+        .screen_capture => target_kind == .service or target_kind == .workspace or target_kind == .policy or target_kind == .device,
+        .notification_post => target_kind == .service or target_kind == .workspace or target_kind == .policy or target_kind == .task,
+        .background_execution => target_kind == .task or target_kind == .policy,
+        .peer_ipc => target_kind == .endpoint or target_kind == .service,
+    };
 }
 
 pub fn validateApplicationPackaging(bundle: BundleManifest) ValidationError!void {
@@ -516,6 +556,87 @@ test "validate requires app data egress to declare sync call or publish intent" 
         .display_name = "Incomplete Sync",
         .publisher = "zigos.dev",
         .requested_permissions = &incomplete_sync_requests,
+    }));
+}
+
+test "validate rejects permission rights with incompatible target kinds" {
+    const camera_with_object_rights = [_]PermissionRequest{
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .object = .{ .object_read = true } },
+            .required = false,
+        },
+    };
+    try std.testing.expectError(error.PermissionRightsTargetMismatch, validate(.{
+        .bundle_id = "app.bad-camera-rights",
+        .display_name = "Bad Camera Rights",
+        .publisher = "zigos.dev",
+        .requested_permissions = &camera_with_object_rights,
+    }));
+
+    const object_with_network_rights = [_]PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .required = false,
+        },
+    };
+    try std.testing.expectError(error.PermissionRightsTargetMismatch, validate(.{
+        .bundle_id = "app.bad-object-rights",
+        .display_name = "Bad Object Rights",
+        .publisher = "zigos.dev",
+        .requested_permissions = &object_with_network_rights,
+    }));
+}
+
+test "validate rejects local-only requests that ask for remote network authority" {
+    const requests = [_]PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "internet",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .required = false,
+            .local_only = true,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "remote.sync",
+            },
+        },
+    };
+
+    try std.testing.expectError(error.LocalOnlyPermissionRequestsRemoteNetwork, validate(.{
+        .bundle_id = "app.local-remote-smuggle",
+        .display_name = "Local Remote Smuggle",
+        .publisher = "zigos.dev",
+        .requested_permissions = &requests,
+    }));
+}
+
+test "validate rejects duplicate permission requests" {
+    const requests = [_]PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_read = true } },
+            .required = false,
+            .local_only = true,
+        },
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_write = true } },
+            .required = false,
+            .local_only = true,
+        },
+    };
+
+    try std.testing.expectError(error.DuplicatePermissionRequest, validate(.{
+        .bundle_id = "app.duplicate-permissions",
+        .display_name = "Duplicate Permissions",
+        .publisher = "zigos.dev",
+        .requested_permissions = &requests,
     }));
 }
 

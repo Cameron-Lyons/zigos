@@ -210,6 +210,64 @@ pub fn malformedManifestsStayRejected() !void {
         .requested_permissions = &remote_ai_permissions,
         .ai_metadata = .{ .model_family = "spec-local", .locality = .local_only },
     }));
+
+    const smuggled_rights_permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .object = .{ .object_read = true } },
+            .required = false,
+        },
+    };
+    try std.testing.expectError(error.PermissionRightsTargetMismatch, manifest.validate(.{
+        .bundle_id = "app.bad.permission-rights",
+        .display_name = "Bad Permission Rights",
+        .publisher = "zigos.spec",
+        .requested_permissions = &smuggled_rights_permissions,
+    }));
+
+    const local_only_remote_permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "remote.sync",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .required = false,
+            .local_only = true,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "remote.sync",
+            },
+        },
+    };
+    try std.testing.expectError(error.LocalOnlyPermissionRequestsRemoteNetwork, manifest.validate(.{
+        .bundle_id = "app.bad.local-only-remote",
+        .display_name = "Bad Local Remote",
+        .publisher = "zigos.spec",
+        .requested_permissions = &local_only_remote_permissions,
+    }));
+
+    const duplicate_permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_read = true } },
+            .required = false,
+            .local_only = true,
+        },
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_write = true } },
+            .required = false,
+            .local_only = true,
+        },
+    };
+    try std.testing.expectError(error.DuplicatePermissionRequest, manifest.validate(.{
+        .bundle_id = "app.bad.duplicate-permissions",
+        .display_name = "Bad Duplicate Permissions",
+        .publisher = "zigos.spec",
+        .requested_permissions = &duplicate_permissions,
+    }));
 }
 
 pub fn corruptedStorageLogsDoNotReplay() !void {

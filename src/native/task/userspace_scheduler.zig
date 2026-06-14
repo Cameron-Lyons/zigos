@@ -199,6 +199,11 @@ pub const Scheduler = struct {
     }
 
     pub fn configureResourceTelemetry(self: *Scheduler, sample: accelerator_scheduler.TelemetrySample) void {
+        if (!accelerator_scheduler.telemetrySampleIsFresh(
+            self.resource_telemetry_source,
+            self.resource_telemetry_observed_tick,
+            sample,
+        )) return;
         self.resource_state = sample.toSystemState();
         self.resource_telemetry_source = sample.source;
         self.resource_telemetry_observed_tick = sample.observed_tick;
@@ -323,6 +328,9 @@ pub const Scheduler = struct {
     pub fn enqueueAcceleratorClaim(self: *Scheduler, request: AcceleratorClaimRequest) ?u64 {
         if (!self.initialized or request.engine == .cpu) return null;
         const task_slot = self.slots.get(request.task_id) orelse return null;
+        if (self.findAcceleratorClaimForTaskEngine(request.task_id, request.engine)) |claim_id| {
+            return claim_id;
+        }
 
         const claim_id = self.nextAcceleratorClaimId();
         const claim_index = self.accelerator_claims.reserveIndex(claim_id) orelse return null;
@@ -419,7 +427,7 @@ pub const Scheduler = struct {
             slot.last_dispatch_degraded = decision.degraded;
             slot.last_dispatch_zero_copy = decision.zero_copy_allowed;
             if (decision.delayed) {
-                self.accountDispatchDelayed(slot, decision);
+                self.accountDispatchDelayedAt(slot, decision, now_ticks);
                 _ = self.enqueueReadyIndex(index, slot.resource_class);
                 self.last_dispatch_tick = now_ticks;
                 return false;
@@ -584,8 +592,7 @@ pub const Scheduler = struct {
             const slot = &self.slots.slots[slot_index];
             if (!slot.in_use or slot.last_policy_delay_tick == now_ticks) continue;
 
-            self.accountDispatchDelayed(slot, self.blockedResourceDecision(class));
-            slot.last_policy_delay_tick = now_ticks;
+            self.accountDispatchDelayedAt(slot, self.blockedResourceDecision(class), now_ticks);
             accounted = true;
         }
         return accounted;
@@ -662,6 +669,17 @@ pub const Scheduler = struct {
         slot.last_dispatch_reason = decision.reason;
         slot.last_dispatch_degraded = decision.degraded;
         slot.last_dispatch_zero_copy = decision.zero_copy_allowed;
+    }
+
+    fn accountDispatchDelayedAt(
+        self: *Scheduler,
+        slot: *Slot,
+        decision: accelerator_scheduler.Decision,
+        now_ticks: u64,
+    ) void {
+        if (slot.last_policy_delay_tick == now_ticks) return;
+        self.accountDispatchDelayed(slot, decision);
+        slot.last_policy_delay_tick = now_ticks;
     }
 
     fn accountDispatchDenied(
@@ -811,6 +829,22 @@ pub const Scheduler = struct {
         }
     }
 
+    fn findAcceleratorClaimForTaskEngine(
+        self: *const Scheduler,
+        task_id: u64,
+        engine: accelerator_scheduler.Engine,
+    ) ?u64 {
+        const queue_index = engineIndex(engine);
+        var current = self.accelerator_claim_heads[queue_index];
+        while (current != no_index) {
+            if (current >= self.accelerator_claims.slots.len) return null;
+            const record = self.accelerator_claims.slots[current].record;
+            if (record.task_id == task_id and record.engine == engine) return record.id;
+            current = self.accelerator_claims.slots[current].next_claim_index;
+        }
+        return null;
+    }
+
     fn nextAcceleratorClaimId(self: *Scheduler) u64 {
         const claim_id = self.next_accelerator_claim_id;
         self.next_accelerator_claim_id +%= 1;
@@ -853,14 +887,26 @@ fn deriveDispatchRequest(task: *const task_runtime.TaskRecord) accelerator_sched
     switch (class) {
         .emergency_system_critical => {},
         .foreground_interactive => request.wants_gpu = task.ui_surface_id != null,
-        .background_light => {},
+        .background_light => {
+            request.estimated_energy_milliwatt_hours = estimatedDispatchEnergyMilliwattHours(task);
+            request.defer_for_low_carbon_power = true;
+        },
         .media_export => {
             request.wants_gpu = true;
             request.wants_media_engine = true;
         },
-        .batch_compute => request.wants_npu = true,
+        .batch_compute => {
+            request.wants_npu = true;
+            request.estimated_energy_milliwatt_hours = estimatedDispatchEnergyMilliwattHours(task);
+            request.defer_for_low_carbon_power = true;
+        },
     }
     return request;
+}
+
+fn estimatedDispatchEnergyMilliwattHours(task: *const task_runtime.TaskRecord) u32 {
+    const budget_units = @min(memoryBandwidthUnitsFor(task), std.math.maxInt(u32) - 1);
+    return @as(u32, 1) + @as(u32, @intCast(budget_units));
 }
 
 fn memoryBandwidthUnitsFor(task: *const task_runtime.TaskRecord) usize {
@@ -1219,7 +1265,15 @@ test "userspace scheduler separates accelerator claim queues from cpu ready queu
         .deadline_tick = TEST_ACCELERATOR_DEADLINE_TICKS,
         .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
     }).?;
-    _ = gpu_claim;
+    const duplicate_gpu_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = task.id,
+        .engine = .gpu,
+        .resource_class = .media_export,
+        .requested_at_tick = 8,
+        .deadline_tick = TEST_ACCELERATOR_DEADLINE_TICKS,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+    try std.testing.expectEqual(gpu_claim, duplicate_gpu_claim);
     const media_claim = scheduler.enqueueAcceleratorClaim(.{
         .task_id = task.id,
         .engine = .media,
@@ -1323,6 +1377,49 @@ test "userspace scheduler requires observed platform telemetry before waking har
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDispatchCount(.media));
 }
 
+test "userspace scheduler ignores stale observed telemetry samples" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 10,
+        .gpu_available = false,
+        .npu_available = false,
+        .media_available = false,
+        .grid_carbon_intensity_grams_per_kwh = 500,
+    });
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 9,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .grid_carbon_intensity_grams_per_kwh = 100,
+    });
+
+    try std.testing.expectEqual(@as(u64, 10), scheduler.resource_telemetry_observed_tick);
+    try std.testing.expect(!scheduler.resource_state.gpu_available);
+    try std.testing.expect(!scheduler.resource_state.npu_available);
+    try std.testing.expectEqual(@as(u16, 500), scheduler.resource_state.grid_carbon_intensity_grams_per_kwh);
+
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 11,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .grid_carbon_intensity_grams_per_kwh = 100,
+    });
+    try std.testing.expectEqual(@as(u64, 11), scheduler.resource_telemetry_observed_tick);
+    try std.testing.expect(scheduler.resource_state.gpu_available);
+    try std.testing.expectEqual(@as(u16, 100), scheduler.resource_state.grid_carbon_intensity_grams_per_kwh);
+}
+
 test "userspace scheduler delays on memory bandwidth before npu dispatch" {
     var executor = userspace_executor.Executor{};
     var scheduler = Scheduler.init(&executor);
@@ -1382,6 +1479,57 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
+    try std.testing.expect(!scheduler.runNext(2));
+    const dispatched_slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, dispatched_slot.last_dispatch_engine);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.engineDispatchCount(.npu));
+}
+
+test "userspace scheduler derives low-carbon deferral for batch tasks" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceState(.{
+        .npu_available = true,
+        .grid_carbon_intensity_grams_per_kwh = 620,
+    });
+
+    const task = try createRunnableSchedulerTask(
+        &runtime,
+        221,
+        .batch_compute,
+        "carbon-batch",
+        "app.example.carbon-batch",
+        null,
+    );
+    try std.testing.expect(scheduler.registerTask(task.id));
+    const initial_slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expect(initial_slot.dispatch_request.defer_for_low_carbon_power);
+    try std.testing.expect(initial_slot.dispatch_request.estimated_energy_milliwatt_hours != 0);
+
+    try std.testing.expect(!scheduler.runNext(1));
+    const delayed_slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expectEqual(@as(u64, 0), delayed_slot.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 1), delayed_slot.delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.carbon_aware_delay, delayed_slot.last_dispatch_reason);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.batch_compute));
+
+    try std.testing.expect(!scheduler.runNext(1));
+    const same_tick_slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expectEqual(@as(u64, 0), same_tick_slot.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 1), same_tick_slot.delayed_dispatch_count);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.batch_compute));
+
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 2,
+        .grid_carbon_intensity_grams_per_kwh = 180,
+        .npu_available = true,
+    });
     try std.testing.expect(!scheduler.runNext(2));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);

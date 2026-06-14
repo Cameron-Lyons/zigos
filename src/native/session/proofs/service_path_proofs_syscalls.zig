@@ -297,6 +297,14 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
         93,
     );
     try runtime.grantCapability(caller.id, visible_data.id);
+    try std.testing.expectError(error.ActivePrivacyIndicatorRequired, broker.authorize(.{
+        .caller_task_id = caller.id,
+        .target_task_id = data_target.id,
+        .capability_id = visible_data.id,
+        .operation = .inspect_memory,
+        .user_visible = true,
+        .now_ticks = 94,
+    }));
     inline for (.{ process_isolation.Operation.inspect_memory, process_isolation.Operation.inject_code }) |operation| {
         const decision = try broker.authorize(.{
             .caller_task_id = caller.id,
@@ -304,10 +312,13 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
             .capability_id = visible_data.id,
             .operation = operation,
             .user_visible = true,
+            .privacy_indicator_id = 901,
+            .privacy_indicator_expires_at_ticks = 120,
             .now_ticks = 94 + @intFromEnum(operation),
         });
         try std.testing.expect(decision.allowed);
         try std.testing.expectEqual(data_target.id, decision.target_task_id);
+        try std.testing.expectEqual(@as(u64, 901), decision.privacy_indicator_id);
     }
 
     const visible_window = try mintProcessControlCapability(
@@ -324,6 +335,8 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
         .capability_id = visible_window.id,
         .operation = .scrape_window,
         .user_visible = true,
+        .privacy_indicator_id = 902,
+        .privacy_indicator_expires_at_ticks = 120,
         .now_ticks = 102,
     });
     try std.testing.expect(scrape_decision.allowed);
@@ -343,7 +356,19 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
         .operation = .watch_clipboard,
         .continuous = true,
         .user_visible = false,
+        .privacy_indicator_id = 903,
+        .privacy_indicator_expires_at_ticks = 120,
         .now_ticks = 104,
+    }));
+    try std.testing.expectError(error.ActivePrivacyIndicatorRequired, broker.authorize(.{
+        .caller_task_id = caller.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = true,
+        .privacy_indicator_id = 903,
+        .privacy_indicator_expires_at_ticks = 104,
+        .now_ticks = 105,
     }));
     const clipboard_decision = try broker.authorize(.{
         .caller_task_id = caller.id,
@@ -351,6 +376,8 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
         .operation = .watch_clipboard,
         .continuous = true,
         .user_visible = true,
+        .privacy_indicator_id = 903,
+        .privacy_indicator_expires_at_ticks = 120,
         .now_ticks = 105,
     });
     try std.testing.expect(clipboard_decision.allowed);
@@ -361,6 +388,8 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
         .operation = .register_global_hook,
         .hidden = true,
         .user_visible = true,
+        .privacy_indicator_id = 904,
+        .privacy_indicator_expires_at_ticks = 120,
         .now_ticks = 106,
     }));
     const hook_decision = try broker.authorize(.{
@@ -368,13 +397,15 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
         .capability_id = visible_self.id,
         .operation = .register_global_hook,
         .user_visible = true,
+        .privacy_indicator_id = 904,
+        .privacy_indicator_expires_at_ticks = 120,
         .now_ticks = 107,
     });
     try std.testing.expect(hook_decision.allowed);
 
     const latest = caller.latestAuditEvent() orelse return error.MissingProcessIsolationAudit;
     try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, latest.kind);
-    try std.testing.expectEqual(@as(u32, @intFromEnum(process_isolation.Operation.register_global_hook)), latest.detail);
+    try std.testing.expectEqual((@as(u32, 904) << 8) | @as(u32, @intFromEnum(process_isolation.Operation.register_global_hook)), latest.detail);
 }
 
 fn mintProcessControlCapability(

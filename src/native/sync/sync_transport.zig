@@ -286,8 +286,18 @@ pub const NativeTransportService = struct {
 
     pub fn acknowledge(self: *NativeTransportService, connection: *NativeConnection, sequence: u64) void {
         _ = self;
-        if (sequence > connection.highest_delivered_sequence) connection.highest_delivered_sequence = sequence;
-        if (connection.in_flight_frames != 0) connection.in_flight_frames -= 1;
+        if (sequence == 0 or sequence > connection.highest_sent_sequence) return;
+        if (sequence <= connection.highest_delivered_sequence) return;
+        const newly_delivered = sequence - connection.highest_delivered_sequence;
+        connection.highest_delivered_sequence = sequence;
+        const delivered_frames: usize = if (newly_delivered > @as(u64, @intCast(connection.in_flight_frames)))
+            connection.in_flight_frames
+        else
+            @intCast(newly_delivered);
+        connection.in_flight_frames = saturatingSubUsize(
+            connection.in_flight_frames,
+            delivered_frames,
+        );
     }
 
     pub fn sendSigned(
@@ -355,8 +365,10 @@ pub const NativeTransportService = struct {
     ) Error!NativeDelivery {
         const delivery = self.sendSigned(connection, plaintext, signer) catch |err| switch (err) {
             error.NativeTransportDisconnected, error.NativeTransportCongested => {
+                const sequence = connection.next_sequence;
                 const signed_frame = try self.harness.encryptSignedFrame(&connection.session, plaintext, signer);
                 try relay_service.submitSignedFrame(connection.session.task_id, &connection.session, signed_frame);
+                markSequenceSent(connection, sequence);
                 self.relay_fallback_count += 1;
                 return .{
                     .signed_frame = signed_frame,
@@ -364,7 +376,7 @@ pub const NativeTransportService = struct {
                     .network_delivered = false,
                     .relay_fallback = true,
                     .congested = err == error.NativeTransportCongested,
-                    .sequence = connection.next_sequence,
+                    .sequence = sequence,
                     .payload_len = plaintext.len,
                 };
             },
@@ -449,6 +461,14 @@ pub const NativeTransportService = struct {
     }
 };
 
+fn markSequenceSent(connection: *NativeConnection, sequence: u64) void {
+    if (sequence > connection.highest_sent_sequence) connection.highest_sent_sequence = sequence;
+    if (connection.next_sequence == sequence) {
+        connection.next_sequence +%= 1;
+        if (connection.next_sequence == 0) connection.next_sequence = 1;
+    }
+}
+
 pub fn assertLastCapturedNativeSyncFrame(
     capture: *const PacketCapture,
     expectation: CapturedFrameExpectation,
@@ -493,6 +513,8 @@ pub fn decodeNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
     const source_kind = try parsePrincipalKind(try reader.readByte());
     const target_kind = try parsePrincipalKind(try reader.readByte());
     const flags = try reader.readByte();
+    const known_flags: u8 = NativeTransportAbi.flag_encrypted | NativeTransportAbi.flag_egress_allowed;
+    if ((flags & ~known_flags) != 0) return error.NativeTransportMalformedFrame;
     const policy_id = try reader.readU64();
     const capability_id = try reader.readU64();
     const source_serial = try reader.readU64();
@@ -569,6 +591,11 @@ fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
         @intFromEnum(principal.PrincipalKind.team) => .team,
         else => error.NativeTransportMalformedFrame,
     };
+}
+
+fn saturatingSubUsize(value: usize, amount: usize) usize {
+    if (amount >= value) return 0;
+    return value - amount;
 }
 
 test "native sync transport uses endpoints and reconnects without the in-process relay queue" {
@@ -713,14 +740,27 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expect(view.egressAllowed());
     try std.testing.expect(!std.mem.eql(u8, view.ciphertext, "object delta"));
     try std.testing.expectEqualSlices(u8, delivered.signed_frame.packet_digest[0..], view.packet_digest);
+    var tampered_flags = captured;
+    const flags_offset = 4 + 2 + 2 + @sizeOf(u64) + @sizeOf(u64) + 3;
+    tampered_flags.bytes[flags_offset] |= 0x80;
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(tampered_flags.slice()));
 
     _ = try native_transport.sendSigned(&connection, "two", signer);
     _ = try native_transport.sendSigned(&connection, "three", signer);
     _ = try native_transport.sendSigned(&connection, "four", signer);
+    try std.testing.expectEqual(@as(usize, 4), connection.in_flight_frames);
     try std.testing.expectError(error.NativeTransportCongested, native_transport.sendSigned(&connection, "five", signer));
     try std.testing.expectEqual(@as(usize, 1), native_transport.congestion_drop_count);
 
+    native_transport.acknowledge(&connection, 2);
+    try std.testing.expectEqual(@as(u64, 2), connection.highest_delivered_sequence);
+    try std.testing.expectEqual(@as(usize, 2), connection.in_flight_frames);
+    native_transport.acknowledge(&connection, 2);
+    try std.testing.expectEqual(@as(usize, 2), connection.in_flight_frames);
+    native_transport.acknowledge(&connection, 99);
+    try std.testing.expectEqual(@as(usize, 2), connection.in_flight_frames);
     native_transport.acknowledge(&connection, 4);
+    try std.testing.expectEqual(@as(usize, 0), connection.in_flight_frames);
     connection.next_sequence = 3;
     try std.testing.expectError(error.NativeTransportReplayRejected, native_transport.sendSigned(&connection, "replay", signer));
     try std.testing.expectEqual(@as(usize, 1), native_transport.replay_rejection_count);
@@ -871,9 +911,16 @@ test "native sync transport falls back through booted relay and encrypts object 
     try std.testing.expect(fallback.relay_fallback);
     try std.testing.expect(!fallback.endpoint_delivered);
     try std.testing.expect(!fallback.network_delivered);
+    try std.testing.expectEqual(@as(u64, 1), fallback.sequence);
+    try std.testing.expectEqual(@as(u64, 2), connection.next_sequence);
+    try std.testing.expectEqual(@as(u64, 1), connection.highest_sent_sequence);
     try std.testing.expectEqual(@as(usize, 1), native_transport.relay_fallback_count);
 
     var plaintext_buffer: [MAX_PACKET_BYTES]u8 = undefined;
     const delivered = (try relay_service.deliverNext(105, &connection.session, plaintext_buffer[0..])).?;
     try std.testing.expectEqualStrings("offline delta", delivered);
+
+    native_transport.reconnect(&connection);
+    const after_fallback = try native_transport.sendSigned(&connection, "after fallback", signer);
+    try std.testing.expectEqual(@as(u64, 2), after_fallback.sequence);
 }

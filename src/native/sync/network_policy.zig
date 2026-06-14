@@ -122,9 +122,11 @@ pub const EgressDecision = struct {
 };
 
 pub const Error = error{
+    DomainTargetInvalid,
     LabelTooLong,
     TargetRequired,
     TargetTooLong,
+    UnexpectedTarget,
     PolicyNotFound,
     PolicyTableFull,
 };
@@ -152,16 +154,7 @@ pub const Directory = struct {
     }
 
     pub fn create(self: *Directory, request: CreateRequest) Error!*PolicyRecord {
-        switch (request.mode) {
-            .local_subnet_discovery,
-            .named_service_identity,
-            .named_domain,
-            .inbound_collaborative_session,
-            => {
-                if (request.target.len == 0) return error.TargetRequired;
-            },
-            else => {},
-        }
+        try validateCreateRequest(request);
 
         const request_key = policyRequestKey(request);
         if (self.findByRequestKey(request_key, request)) |policy| return policy;
@@ -563,6 +556,42 @@ fn policyModeIsLocal(mode: PolicyMode) bool {
     };
 }
 
+fn validateCreateRequest(request: CreateRequest) Error!void {
+    switch (request.mode) {
+        .local_subnet_discovery,
+        .named_service_identity,
+        .named_domain,
+        .inbound_collaborative_session,
+        => {
+            if (request.target.len == 0) return error.TargetRequired;
+        },
+        .none, .local_network, .unrestricted_internet => {
+            if (request.target.len != 0) return error.UnexpectedTarget;
+        },
+    }
+
+    if (request.mode == .named_domain and !validDomainTarget(request.target)) {
+        return error.DomainTargetInvalid;
+    }
+}
+
+fn validDomainTarget(target: []const u8) bool {
+    if (target.len == 0) return false;
+    if (target[0] == '.' or target[target.len - 1] == '.') return false;
+
+    var previous_dot = false;
+    for (target) |byte| {
+        const is_lower = byte >= 'a' and byte <= 'z';
+        const is_digit = byte >= '0' and byte <= '9';
+        const is_dash = byte == '-';
+        const is_dot = byte == '.';
+        if (!is_lower and !is_digit and !is_dash and !is_dot) return false;
+        if (is_dot and previous_dot) return false;
+        previous_dot = is_dot;
+    }
+    return std.mem.indexOfScalar(u8, target, '.') != null;
+}
+
 test "network policy objects enforce discovery inbound service domain and explicit internet grants" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 8 };
@@ -650,6 +679,24 @@ test "network policy objects require explicit targets for scoped discovery and i
         .owner = owner,
         .label = "missing-session-target",
         .mode = .inbound_collaborative_session,
+    }));
+}
+
+test "network policy creation rejects misleading and malformed targets" {
+    var directory = Directory.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 90 };
+
+    try std.testing.expectError(error.UnexpectedTarget, directory.create(.{
+        .owner = owner,
+        .label = "local-with-target",
+        .mode = .local_network,
+        .target = "printer",
+    }));
+    try std.testing.expectError(error.DomainTargetInvalid, directory.create(.{
+        .owner = owner,
+        .label = "bad-domain",
+        .mode = .named_domain,
+        .target = "HTTPS://Relay.Zigos.Dev/path",
     }));
 }
 

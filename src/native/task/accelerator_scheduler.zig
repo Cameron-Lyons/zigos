@@ -34,6 +34,7 @@ pub const DecisionReason = enum(u8) {
     accelerator_unavailable,
     cpu_budget,
     memory_bandwidth,
+    carbon_aware_delay,
 };
 
 pub const SystemState = struct {
@@ -45,6 +46,7 @@ pub const SystemState = struct {
     media_available: bool = true,
     cpu_budget_ticks: u64 = std.math.maxInt(u64),
     memory_bandwidth_units: usize = std.math.maxInt(usize),
+    grid_carbon_intensity_grams_per_kwh: u16 = 0,
 };
 
 pub const TelemetrySource = enum(u8) {
@@ -104,6 +106,7 @@ pub const PlatformTelemetrySignals = struct {
     media_available: bool = true,
     cpu_budget_ticks: u64 = std.math.maxInt(u64),
     memory_bandwidth_units: usize = std.math.maxInt(usize),
+    grid_carbon_intensity_grams_per_kwh: u16 = 0,
 };
 
 pub const LivePlatformCounters = struct {
@@ -119,6 +122,7 @@ pub const LivePlatformCounters = struct {
     battery_percent: u8 = 100,
     battery_charging: bool = true,
     privacy_sensitive_task_count: usize = 0,
+    grid_carbon_intensity_grams_per_kwh: u16 = 0,
 };
 
 pub const TelemetrySample = struct {
@@ -132,6 +136,7 @@ pub const TelemetrySample = struct {
     media_available: bool = true,
     cpu_budget_ticks: u64 = std.math.maxInt(u64),
     memory_bandwidth_units: usize = std.math.maxInt(usize),
+    grid_carbon_intensity_grams_per_kwh: u16 = 0,
 
     pub fn toSystemState(self: TelemetrySample) SystemState {
         return .{
@@ -143,6 +148,7 @@ pub const TelemetrySample = struct {
             .media_available = self.media_available,
             .cpu_budget_ticks = self.cpu_budget_ticks,
             .memory_bandwidth_units = self.memory_bandwidth_units,
+            .grid_carbon_intensity_grams_per_kwh = self.grid_carbon_intensity_grams_per_kwh,
         };
     }
 
@@ -223,6 +229,10 @@ pub const BootedPlatformTelemetryProvider = struct {
             self.rejected_observation_count += 1;
             return error.TelemetryProviderUnauthorized;
         }
+        if (observed_tick < self.current.observed_tick) {
+            self.rejected_observation_count += 1;
+            return error.TelemetryObservationStale;
+        }
         self.current = sampleFromPlatformSignals(.boot_provider, observed_tick, signals);
     }
 
@@ -240,6 +250,10 @@ pub const BootedPlatformTelemetryProvider = struct {
             self.rejected_observation_count += 1;
             return error.TelemetryProviderUnauthorized;
         }
+        if (observed_tick < self.current.observed_tick) {
+            self.rejected_observation_count += 1;
+            return error.TelemetryObservationStale;
+        }
         self.current = sampleFromLivePlatformCounters(observed_tick, counters);
         self.live_observation_count += 1;
     }
@@ -255,6 +269,7 @@ pub const BootedPlatformTelemetryProvider = struct {
 };
 
 pub const TelemetryError = error{
+    TelemetryObservationStale,
     TelemetryProviderUnauthorized,
 };
 
@@ -267,6 +282,8 @@ pub const Request = struct {
     shared_memory_bytes: usize = 0,
     expected_cpu_ticks: u64 = 0,
     memory_bandwidth_units: usize = 0,
+    estimated_energy_milliwatt_hours: u32 = 0,
+    defer_for_low_carbon_power: bool = false,
 };
 
 pub const Decision = struct {
@@ -281,6 +298,7 @@ pub const Decision = struct {
 pub const MAX_ENGINE_CLAIMS: usize = 16;
 const ENGINE_COUNT: usize = std.meta.fields(Engine).len;
 const CLAIM_INDEX_CAPACITY: usize = MAX_ENGINE_CLAIMS * 2;
+const HIGH_CARBON_GRID_GRAMS_PER_KWH: u16 = 450;
 
 pub const EngineAvailability = struct {
     gpu: bool = true,
@@ -355,6 +373,7 @@ pub const Controller = struct {
     }
 
     pub fn configureFromTelemetry(self: *Controller, sample: TelemetrySample) void {
+        if (!telemetrySampleIsFresh(self.last_telemetry_source, self.last_telemetry_observed_tick, sample)) return;
         self.state = sample.toSystemState();
         self.last_telemetry_source = sample.source;
         self.last_telemetry_observed_tick = sample.observed_tick;
@@ -570,6 +589,12 @@ pub fn planWithState(state: SystemState, availability: EngineAvailability, reque
             decision.reason = .memory_bandwidth;
             return decision;
         }
+        if (shouldDelayForLowCarbonPower(state, request)) {
+            decision.delayed = true;
+            decision.degraded = true;
+            decision.reason = .carbon_aware_delay;
+            return decision;
+        }
     }
 
     switch (request.class) {
@@ -688,7 +713,17 @@ fn sampleFromPlatformSignals(source: TelemetrySource, observed_tick: u64, signal
         .media_available = signals.media_available,
         .cpu_budget_ticks = signals.cpu_budget_ticks,
         .memory_bandwidth_units = signals.memory_bandwidth_units,
+        .grid_carbon_intensity_grams_per_kwh = signals.grid_carbon_intensity_grams_per_kwh,
     };
+}
+
+pub fn telemetrySampleIsFresh(
+    current_source: TelemetrySource,
+    current_observed_tick: u64,
+    sample: TelemetrySample,
+) bool {
+    if (sample.source == .synthetic or current_source == .synthetic) return true;
+    return sample.observed_tick >= current_observed_tick;
 }
 
 fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCounters) TelemetrySample {
@@ -705,7 +740,16 @@ fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCoun
         .media_available = counters.media_driver_online,
         .cpu_budget_ticks = saturatingSubTicks(counters.total_cpu_budget_ticks, counters.consumed_cpu_ticks),
         .memory_bandwidth_units = available_memory_bytes / units.bytes_per_kib,
+        .grid_carbon_intensity_grams_per_kwh = counters.grid_carbon_intensity_grams_per_kwh,
     };
+}
+
+fn shouldDelayForLowCarbonPower(state: SystemState, request: Request) bool {
+    if (!request.defer_for_low_carbon_power) return false;
+    if (request.class == .foreground_interactive) return false;
+    if (request.estimated_energy_milliwatt_hours == 0) return false;
+    if (state.grid_carbon_intensity_grams_per_kwh == 0) return false;
+    return state.grid_carbon_intensity_grams_per_kwh >= HIGH_CARBON_GRID_GRAMS_PER_KWH;
 }
 
 fn thermalPressureFromMilliCelsius(value: u32) ThermalPressure {
@@ -827,6 +871,50 @@ test "accelerator scheduler uses cpu and memory bandwidth accounting signals" {
     try std.testing.expect(!emergency.degraded);
 }
 
+test "accelerator scheduler delays deferrable work for lower carbon power windows" {
+    var controller = Controller.init();
+    controller.configure(.{
+        .grid_carbon_intensity_grams_per_kwh = 620,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+    });
+
+    const deferrable_batch = controller.plan(.{
+        .class = .batch_compute,
+        .wants_npu = true,
+        .estimated_energy_milliwatt_hours = 2_000,
+        .defer_for_low_carbon_power = true,
+    });
+    try std.testing.expect(deferrable_batch.delayed);
+    try std.testing.expect(deferrable_batch.degraded);
+    try std.testing.expectEqual(DecisionReason.carbon_aware_delay, deferrable_batch.reason);
+    try std.testing.expectEqual(Engine.cpu, deferrable_batch.engine);
+
+    const foreground = controller.plan(.{
+        .class = .foreground_interactive,
+        .wants_gpu = true,
+        .shared_memory_bytes = units.kibibytes(4),
+        .estimated_energy_milliwatt_hours = 2_000,
+        .defer_for_low_carbon_power = true,
+    });
+    try std.testing.expect(!foreground.delayed);
+    try std.testing.expectEqual(Engine.gpu, foreground.engine);
+
+    controller.configure(.{
+        .grid_carbon_intensity_grams_per_kwh = 200,
+        .npu_available = true,
+    });
+    const low_carbon_batch = controller.plan(.{
+        .class = .batch_compute,
+        .wants_npu = true,
+        .estimated_energy_milliwatt_hours = 2_000,
+        .defer_for_low_carbon_power = true,
+    });
+    try std.testing.expect(!low_carbon_batch.delayed);
+    try std.testing.expectEqual(Engine.npu, low_carbon_batch.engine);
+}
+
 test "accelerator scheduler consumes emulator telemetry samples" {
     var controller = Controller.init();
     var telemetry = EmulatedTelemetryDevice.init(.{
@@ -840,6 +928,7 @@ test "accelerator scheduler consumes emulator telemetry samples" {
         .media_available = true,
         .cpu_budget_ticks = 500,
         .memory_bandwidth_units = 128,
+        .grid_carbon_intensity_grams_per_kwh = 610,
     });
     const telemetry_provider = telemetry.telemetryProvider();
     try std.testing.expect(telemetry_provider.testOnly());
@@ -850,6 +939,7 @@ test "accelerator scheduler consumes emulator telemetry samples" {
     try std.testing.expect(controller.observedTelemetry());
     try std.testing.expectEqual(TelemetrySource.emulator, controller.last_telemetry_source);
     try std.testing.expectEqual(@as(u64, 42), controller.last_telemetry_observed_tick);
+    try std.testing.expectEqual(@as(u16, 610), controller.state.grid_carbon_intensity_grams_per_kwh);
     try std.testing.expectEqual(@as(u32, 1), telemetry.read_count);
 
     const interactive = controller.plan(.{
@@ -953,6 +1043,39 @@ test "accelerator scheduler consumes booted platform provider samples" {
     try std.testing.expectEqual(@as(u32, 2), provider.read_count);
 }
 
+test "accelerator scheduler rejects stale production telemetry observations" {
+    var provider = try BootedPlatformTelemetryProvider.initForBootedService(8, 80, 10, .{
+        .total_cpu_budget_ticks = 1_000,
+        .memory_capacity_bytes = units.kibibytes(256),
+        .gpu_driver_online = true,
+        .npu_driver_online = false,
+        .media_driver_online = true,
+    });
+
+    try std.testing.expectError(error.TelemetryObservationStale, provider.observeLive(80, 9, .{
+        .total_cpu_budget_ticks = 1_000,
+        .memory_capacity_bytes = units.kibibytes(256),
+        .gpu_driver_online = false,
+        .npu_driver_online = true,
+        .media_driver_online = false,
+    }));
+    try std.testing.expectEqual(@as(u32, 1), provider.rejected_observation_count);
+    try std.testing.expectEqual(@as(u64, 10), provider.current.observed_tick);
+    try std.testing.expect(provider.current.gpu_available);
+    try std.testing.expect(!provider.current.npu_available);
+
+    try provider.observeLive(80, 11, .{
+        .total_cpu_budget_ticks = 1_000,
+        .memory_capacity_bytes = units.kibibytes(256),
+        .gpu_driver_online = false,
+        .npu_driver_online = true,
+        .media_driver_online = false,
+    });
+    try std.testing.expectEqual(@as(u64, 11), provider.current.observed_tick);
+    try std.testing.expect(!provider.current.gpu_available);
+    try std.testing.expect(provider.current.npu_available);
+}
+
 test "accelerator scheduler derives hardware telemetry from booted live counters" {
     try std.testing.expectError(error.TelemetryProviderUnauthorized, BootedPlatformTelemetryProvider.initForBootedService(0, 70, 99, .{
         .total_cpu_budget_ticks = 10_000,
@@ -971,6 +1094,7 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
         .battery_percent = 15,
         .battery_charging = false,
         .privacy_sensitive_task_count = 1,
+        .grid_carbon_intensity_grams_per_kwh = 590,
     });
     var controller = Controller.init();
     controller.configureFromProvider(provider.telemetryProvider());
@@ -985,6 +1109,7 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
     try std.testing.expect(controller.state.media_available);
     try std.testing.expectEqual(@as(u64, 7_000), controller.state.cpu_budget_ticks);
     try std.testing.expectEqual(@as(usize, 48), controller.state.memory_bandwidth_units);
+    try std.testing.expectEqual(@as(u16, 590), controller.state.grid_carbon_intensity_grams_per_kwh);
     try std.testing.expectEqual(@as(u32, 1), provider.live_observation_count);
     try std.testing.expectEqual(@as(u32, 1), provider.read_count);
 

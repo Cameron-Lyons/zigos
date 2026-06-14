@@ -755,10 +755,29 @@ test "review service refuses partial grants when visible decisions exceed capaci
     var runtime = task_runtime.Runtime.init();
     const task = try createReviewTestTask(&runtime, 46, null);
     var permissions: [MAX_REVIEW_DECISIONS + 1]manifest.PermissionRequest = undefined;
-    for (&permissions) |*request| {
+    const resources = [_][]const u8{
+        "workspace:too-many-00",
+        "workspace:too-many-01",
+        "workspace:too-many-02",
+        "workspace:too-many-03",
+        "workspace:too-many-04",
+        "workspace:too-many-05",
+        "workspace:too-many-06",
+        "workspace:too-many-07",
+        "workspace:too-many-08",
+        "workspace:too-many-09",
+        "workspace:too-many-10",
+        "workspace:too-many-11",
+        "workspace:too-many-12",
+        "workspace:too-many-13",
+        "workspace:too-many-14",
+        "workspace:too-many-15",
+        "workspace:too-many-16",
+    };
+    for (&permissions, 0..) |*request, index| {
         request.* = .{
             .kind = .object_access,
-            .resource = "workspace:too-many",
+            .resource = resources[index],
             .rights = .{ .object = .{ .object_read = true } },
             .local_only = true,
         };

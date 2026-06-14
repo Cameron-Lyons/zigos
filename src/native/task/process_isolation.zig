@@ -21,6 +21,8 @@ pub const Request = struct {
     capability_id: u64,
     operation: Operation,
     user_visible: bool,
+    privacy_indicator_id: u64 = 0,
+    privacy_indicator_expires_at_ticks: u64 = 0,
     hidden: bool = false,
     continuous: bool = false,
     now_ticks: u64,
@@ -32,10 +34,12 @@ pub const Decision = struct {
     caller_task_id: u64,
     target_task_id: u64,
     capability_id: u64,
+    privacy_indicator_id: u64 = 0,
     reason: abi.DenialReason = .none,
 };
 
 pub const Error = task_runtime.Error || capability.Error || error{
+    ActivePrivacyIndicatorRequired,
     HiddenGlobalHookDenied,
     InvalidIsolationTarget,
     PermissionDenied,
@@ -109,11 +113,15 @@ pub const Broker = struct {
             try self.auditDenied(request, owned.id, .policy_denied);
             return error.VisibleEntitlementRequired;
         }
+        if (!privacyIndicatorActive(request)) {
+            try self.auditDenied(request, owned.id, .policy_denied);
+            return error.ActivePrivacyIndicatorRequired;
+        }
 
         try self.runtime.audit(request.caller_task_id, .{
             .kind = .policy_allowed,
             .capability_id = owned.id,
-            .detail = @intFromEnum(request.operation),
+            .detail = allowedAuditDetail(request),
             .tick = request.now_ticks,
         });
         return .{
@@ -122,6 +130,7 @@ pub const Broker = struct {
             .caller_task_id = request.caller_task_id,
             .target_task_id = target_task_id,
             .capability_id = owned.id,
+            .privacy_indicator_id = request.privacy_indicator_id,
         };
     }
 
@@ -134,6 +143,14 @@ pub const Broker = struct {
         });
     }
 };
+
+fn privacyIndicatorActive(request: Request) bool {
+    return request.privacy_indicator_id != 0 and request.privacy_indicator_expires_at_ticks >= request.now_ticks;
+}
+
+fn allowedAuditDetail(request: Request) u32 {
+    return (@as(u32, @truncate(request.privacy_indicator_id)) << 8) | @as(u32, @intFromEnum(request.operation));
+}
 
 fn requiredTargetTaskId(request: Request) Error!u64 {
     return switch (request.operation) {
@@ -266,10 +283,13 @@ test "process isolation denies memory injection window clipboard and hook bypass
             .capability_id = visible_cross_task.id,
             .operation = operation,
             .user_visible = true,
+            .privacy_indicator_id = 44,
+            .privacy_indicator_expires_at_ticks = 100,
             .now_ticks = 20 + @intFromEnum(operation),
         });
         try std.testing.expect(decision.allowed);
         try std.testing.expectEqual(victim.id, decision.target_task_id);
+        try std.testing.expectEqual(@as(u64, 44), decision.privacy_indicator_id);
     }
 
     const visible_self = try visibleProcessControlCapability(&capabilities, attacker.owner, attacker.id, attacker.id, true, 30);
@@ -280,7 +300,27 @@ test "process isolation denies memory injection window clipboard and hook bypass
         .operation = .watch_clipboard,
         .continuous = true,
         .user_visible = false,
+        .privacy_indicator_id = 55,
+        .privacy_indicator_expires_at_ticks = 100,
         .now_ticks = 31,
+    }));
+    try std.testing.expectError(error.ActivePrivacyIndicatorRequired, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = true,
+        .now_ticks = 31,
+    }));
+    try std.testing.expectError(error.ActivePrivacyIndicatorRequired, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = true,
+        .privacy_indicator_id = 55,
+        .privacy_indicator_expires_at_ticks = 31,
+        .now_ticks = 32,
     }));
     try std.testing.expect((try broker.authorize(.{
         .caller_task_id = attacker.id,
@@ -288,6 +328,8 @@ test "process isolation denies memory injection window clipboard and hook bypass
         .operation = .watch_clipboard,
         .continuous = true,
         .user_visible = true,
+        .privacy_indicator_id = 55,
+        .privacy_indicator_expires_at_ticks = 100,
         .now_ticks = 32,
     })).allowed);
     try std.testing.expectError(error.HiddenGlobalHookDenied, broker.authorize(.{
@@ -295,6 +337,8 @@ test "process isolation denies memory injection window clipboard and hook bypass
         .capability_id = visible_self.id,
         .operation = .register_global_hook,
         .user_visible = true,
+        .privacy_indicator_id = 55,
+        .privacy_indicator_expires_at_ticks = 100,
         .hidden = true,
         .now_ticks = 33,
     }));
@@ -303,10 +347,12 @@ test "process isolation denies memory injection window clipboard and hook bypass
         .capability_id = visible_self.id,
         .operation = .register_global_hook,
         .user_visible = true,
+        .privacy_indicator_id = 55,
+        .privacy_indicator_expires_at_ticks = 100,
         .now_ticks = 34,
     })).allowed);
 
     const latest = attacker.latestAuditEvent().?;
     try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, latest.kind);
-    try std.testing.expectEqual(@as(u32, @intFromEnum(Operation.register_global_hook)), latest.detail);
+    try std.testing.expectEqual((@as(u32, 55) << 8) | @as(u32, @intFromEnum(Operation.register_global_hook)), latest.detail);
 }

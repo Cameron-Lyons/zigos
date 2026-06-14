@@ -6,6 +6,7 @@ const binary_cursor = @import("binary_cursor");
 const capability = @import("native/kernel_api/capability.zig");
 const crash_record = @import("kernel/platform/crash_record.zig");
 const elf_image_inspector = @import("native/task/elf_image_inspector.zig");
+const manifest = @import("native/policy/manifest.zig");
 const object_store = @import("native/storage/object_store.zig");
 const request_header = @import("native/core/request_header.zig");
 const storage_volume = @import("native/storage/storage_volume.zig");
@@ -31,6 +32,7 @@ const REQUIRED_HARNESS_IDS = [_][]const u8{
     "sync-record",
     "capability-message",
     "syscall-abi",
+    "manifest-permissions",
 };
 
 const REQUIRED_THREAT_DOMAINS = [_][]const u8{
@@ -231,6 +233,7 @@ fn runFuzzHarness(id: []const u8, input: []const u8) void {
     if (std.mem.eql(u8, id, "sync-record")) return fuzzSyncRecord(input);
     if (std.mem.eql(u8, id, "capability-message")) return fuzzCapabilityMessage(input);
     if (std.mem.eql(u8, id, "syscall-abi")) return fuzzSyscallAbi(input);
+    if (std.mem.eql(u8, id, "manifest-permissions")) return fuzzManifestPermissions(input);
 }
 
 fn fuzzBinaryCursor(input: []const u8) void {
@@ -303,6 +306,46 @@ fn fuzzSyscallAbi(input: []const u8) void {
     _ = syscall_dispatch.validateUserRange(memory, @intCast(raw_addr), @intCast(raw_len), alignment, .read);
     _ = syscall_dispatch.validateUserRange(memory, @intCast(raw_addr), @intCast(raw_len), alignment, .write);
     _ = syscall_dispatch.mapError(error.PermissionDenied);
+}
+
+fn fuzzManifestPermissions(input: []const u8) void {
+    const remote_network = input.len > 0 and (input[0] & 1) != 0;
+    const local_only = input.len > 1 and (input[1] & 1) != 0;
+    const duplicate = input.len > 2 and (input[2] & 1) != 0;
+    const include_second = input.len <= 3 or (input[3] & 1) != 0;
+
+    const network_permission = manifest.PermissionRequest{
+        .kind = .network_egress,
+        .resource = "sync.example",
+        .rights = .{ .network_policy = .{
+            .network_local = !remote_network,
+            .network_remote = remote_network,
+        } },
+        .required = false,
+        .local_only = local_only,
+        .egress_intent = .{
+            .kind = .call_service,
+            .service = "sync.example",
+        },
+    };
+    const object_permission = manifest.PermissionRequest{
+        .kind = .object_access,
+        .resource = "workspace:notes",
+        .rights = .{ .object = .{ .object_read = true } },
+        .required = false,
+        .local_only = true,
+    };
+    const permissions = [_]manifest.PermissionRequest{
+        network_permission,
+        if (duplicate) network_permission else object_permission,
+    };
+
+    _ = manifest.validate(.{
+        .bundle_id = "app.fuzz.permissions",
+        .display_name = "Fuzz Permissions",
+        .publisher = "zigos.release",
+        .requested_permissions = permissions[0..if (include_second) 2 else 1],
+    }) catch {};
 }
 
 fn validateReleaseArtifacts(

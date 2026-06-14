@@ -311,6 +311,10 @@ const package_v2_permissions = [_]manifest.PermissionRequest{
         .resource = "relay.notes.example",
         .rights = .{ .network_policy = .{ .network_remote = true } },
         .required = false,
+        .egress_intent = .{
+            .kind = .call_service,
+            .service = "relay.notes.example",
+        },
     },
 };
 

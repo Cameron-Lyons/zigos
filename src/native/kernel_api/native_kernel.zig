@@ -622,7 +622,7 @@ pub const Kernel = struct {
         for (task.capabilityIds()) |capability_id| {
             if (count >= output.len) break;
             const owned = self.capability_table.query(capability_id) orelse continue;
-            output[count] = debug_contract.authorityGraphEdge(task_id, owned, now_ticks);
+            output[count] = debug_contract.authorityGraphEdge(task_id, owned, self.capability_table.isUsable(owned, now_ticks));
             count += 1;
         }
         return output[0..count];
@@ -1222,6 +1222,59 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try kernel.capabilityRevoke(testContext(.capability_revoke, minted.capability_id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
     try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
+}
+
+test "task authority graph marks target-revoked capabilities unusable" {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var kernel = Kernel.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &runtime,
+        &capabilities,
+        &endpoints,
+        &shared,
+    );
+
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 77 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(1),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = units.kibibytes(1),
+        },
+        .local_only = true,
+    });
+    const authority = try capabilities.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .object, .id = 900 },
+        .rights = .{ .object = .{
+            .capability_derive = true,
+            .object_read = true,
+        } },
+        .scope = .{ .task_id = task.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
+    });
+    const derived = try capabilities.derive(.{
+        .parent_capability_id = authority.id,
+        .holder = task.owner,
+        .rights = .{ .object = .{ .object_read = true } },
+        .scope = authority.scope,
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 90, .renewable = false },
+    });
+    try runtime.grantCapability(task.id, derived.id);
+    try capabilities.revokeTargetAuthority(authority.id);
+    try std.testing.expectError(error.CapabilityRevoked, kernel.requireTaskCapability(task.id, derived.id, 10));
+
+    var graph_edges: [2]AuthorityGraphEdge = undefined;
+    const graph = try kernel.taskAuthorityGraph(task.id, 10, &graph_edges);
+    try std.testing.expectEqual(@as(usize, 1), graph.len);
+    try std.testing.expectEqual(derived.id, graph[0].capability_id);
+    try std.testing.expect(!graph[0].usable);
 }
 
 test "capability grant plan does not mint when runtime attachment cannot fit" {
