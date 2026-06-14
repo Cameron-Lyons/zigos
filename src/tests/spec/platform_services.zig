@@ -116,6 +116,11 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expect(passkey.isRecoverableThroughDeviceGraph());
     try std.testing.expect(passkey_assertion.local_unlock_verified);
     try std.testing.expect(passkey_assertion.phishing_resistant);
+    try std.testing.expect(passkey_assertion.hardware_backed_credential);
+    try std.testing.expect(!passkey_assertion.device_platform_backed);
+    try std.testing.expect(passkey_assertion.primary_device_assertion);
+    try std.testing.expectEqual(@as(u32, 1), passkey_assertion.device_trust_generation);
+    try std.testing.expectEqual(@as(u64, 1), passkey_assertion.unlock_age_ticks);
     try std.testing.expectError(error.PhishingOriginRejected, identities.assertCredential(&graph, .{
         .credential_id = passkey.id,
         .device = passkey_device,

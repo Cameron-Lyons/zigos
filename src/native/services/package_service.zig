@@ -43,6 +43,8 @@ pub const StoredInterface = model.StoredInterface;
 pub const StoredPermission = model.StoredPermission;
 pub const StoredBackgroundTask = model.StoredBackgroundTask;
 pub const StoredAiMetadata = model.StoredAiMetadata;
+pub const StoredDataRights = model.StoredDataRights;
+pub const StoredSupplyChain = model.StoredSupplyChain;
 pub const StoredSignature = model.StoredSignature;
 pub const ResolvedManifest = model.ResolvedManifest;
 pub const BundleRevision = model.BundleRevision;
@@ -61,6 +63,7 @@ pub const Error = bundle_ops.Error || error{
     InvalidManifestSignature,
     UntrustedManifestSigner,
     PublisherKeyRevoked,
+    PackageProvenanceDenied,
     NoRollbackVersion,
     PermissionChangeUndeclared,
     PublisherChanged,
@@ -141,6 +144,14 @@ pub const Service = struct {
             if (!active_policy.allowsInstallSource(request.source_identity)) {
                 return error.InstallSourceDenied;
             }
+            if (!active_policy.allowsPackageProvenance(.{
+                .sbom_present = request.bundle.supply_chain.sbom_digest.len != 0,
+                .source_archive_present = request.bundle.supply_chain.source_archive_digest.len != 0,
+                .build_recipe_present = request.bundle.supply_chain.build_recipe_digest.len != 0,
+                .reproducible_build = request.bundle.supply_chain.reproducible_build,
+                .trusted_builder = request.bundle.supply_chain.trusted_builder,
+                .vulnerability_scan_present = request.bundle.supply_chain.vulnerability_scan_digest.len != 0,
+            })) return error.PackageProvenanceDenied;
         }
 
         const permission_digest = bundle_digest.permissionDigest(request.bundle.requested_permissions);
@@ -715,6 +726,13 @@ test "package service enforces signed manifests policy gated sources updates rol
         .components = &v2_components,
         .assets = &v2_assets,
         .requested_permissions = &v2_permissions,
+        .data_rights = .{
+            .user_data_present = true,
+            .portable_export = true,
+            .deletion_supported = true,
+            .deletion_receipt_required = true,
+            .export_format = "application/zigos-object-archive",
+        },
         .update_channel = .stable,
     };
     v2.signature = try signTestReleaseBundle(bundle_key, v2);
@@ -750,6 +768,11 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqualStrings("Sync notes through the user's chosen relay", resolved_v2.requested_permissions[1].user_visible_reason);
     try std.testing.expectEqual(manifest.DataEgressIntentKind.call_service, resolved_v2.requested_permissions[1].egress_intent.kind);
     try std.testing.expectEqualStrings("notes.relay.sync", resolved_v2.requested_permissions[1].egress_intent.service);
+    try std.testing.expect(resolved_v2.data_rights.user_data_present);
+    try std.testing.expect(resolved_v2.data_rights.portable_export);
+    try std.testing.expect(resolved_v2.data_rights.deletion_supported);
+    try std.testing.expect(resolved_v2.data_rights.deletion_receipt_required);
+    try std.testing.expectEqualStrings("application/zigos-object-archive", resolved_v2.data_rights.export_format);
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
     try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);
@@ -1334,8 +1357,26 @@ test "package service resolves installed manifests with stable slices" {
         .background_tasks = &background_tasks,
         .ai_metadata = .{
             .model_family = "tiny-embed",
+            .model_digest = "sha256:tiny-embed-notes",
+            .model_source_identity = "store:zigos/local-models",
             .locality = .local_only,
             .offline_required = true,
+        },
+        .data_rights = .{
+            .user_data_present = true,
+            .portable_export = true,
+            .deletion_supported = true,
+            .deletion_receipt_required = true,
+            .export_format = "application/zigos-object-archive",
+        },
+        .supply_chain = .{
+            .sbom_digest = "sha256:notes-sbom",
+            .source_archive_digest = "sha256:notes-source",
+            .build_recipe_digest = "sha256:notes-build-recipe",
+            .vulnerability_scan_digest = "sha256:notes-vuln-scan",
+            .build_provenance_identity = "builder:zigos/release",
+            .reproducible_build = true,
+            .trusted_builder = true,
         },
     };
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
@@ -1358,6 +1399,75 @@ test "package service resolves installed manifests with stable slices" {
     try std.testing.expectEqualStrings("sync", current.requested_permissions[1].resource);
     try std.testing.expectEqualStrings("sync", current.background_tasks[0].id);
     try std.testing.expectEqualStrings("tiny-embed", current.ai_metadata.model_family);
+    try std.testing.expectEqualStrings("sha256:tiny-embed-notes", current.ai_metadata.model_digest);
+    try std.testing.expectEqualStrings("store:zigos/local-models", current.ai_metadata.model_source_identity);
+    try std.testing.expect(current.data_rights.deletion_receipt_required);
+    try std.testing.expectEqualStrings("application/zigos-object-archive", current.data_rights.export_format);
+    try std.testing.expectEqualStrings("sha256:notes-sbom", current.supply_chain.sbom_digest);
+    try std.testing.expectEqualStrings("sha256:notes-source", current.supply_chain.source_archive_digest);
+    try std.testing.expectEqualStrings("sha256:notes-build-recipe", current.supply_chain.build_recipe_digest);
+    try std.testing.expectEqualStrings("sha256:notes-vuln-scan", current.supply_chain.vulnerability_scan_digest);
+    try std.testing.expectEqualStrings("builder:zigos/release", current.supply_chain.build_provenance_identity);
+    try std.testing.expect(current.supply_chain.reproducible_build);
+    try std.testing.expect(current.supply_chain.trusted_builder);
+}
+
+test "package service enforces package supply chain policy before install" {
+    var policies = policy_object.Directory.init();
+    const policy = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 94,
+        .issuer = .{ .kind = .policy_authority, .serial = 97 },
+        .label = "trusted-package-provenance",
+        .install_source_mode = .platform_store_only,
+        .require_package_sbom = true,
+        .require_reproducible_package_build = true,
+        .require_trusted_package_builder = true,
+        .require_vulnerability_scan = true,
+    }, .{
+        .label = "package-provenance-policy-key",
+        .seed = signing.seedFromByte(0x3A),
+    });
+
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-supply-chain",
+        .seed = signing.seedFromByte(0x3B),
+    };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
+
+    var bundle = manifest.BundleManifest{
+        .bundle_id = "app.supply",
+        .display_name = "Supply",
+        .publisher = "Example Software",
+        .provided_interfaces = &.{.{ .name = "zigos.supply.example" }},
+        .components = &.{.{
+            .id = "supply",
+            .entry = "app.supply",
+        }},
+        .assets = &.{.{ .path = "assets/icon.svg", .content_type = "image/svg+xml" }},
+    };
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
+    try std.testing.expectError(error.PackageProvenanceDenied, service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+    }, policy));
+
+    bundle.supply_chain = .{
+        .sbom_digest = "sha256:supply-sbom",
+        .source_archive_digest = "sha256:supply-source",
+        .build_recipe_digest = "sha256:supply-build-recipe",
+        .vulnerability_scan_digest = "sha256:supply-vuln-scan",
+        .build_provenance_identity = "builder:zigos/release",
+        .reproducible_build = true,
+        .trusted_builder = true,
+    };
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
+    const installed = try service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+    }, policy);
+    try std.testing.expect(installed.installed_new);
 }
 
 test "package service indexes rebuild after persisted slots are loaded" {

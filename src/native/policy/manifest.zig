@@ -2,6 +2,12 @@ const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const units = @import("../core/units.zig");
 
+pub const MAX_DATA_RIGHTS_FORMAT_BYTES: usize = 64;
+pub const MAX_AI_MODEL_DIGEST_BYTES: usize = 96;
+pub const MAX_AI_MODEL_SOURCE_BYTES: usize = 96;
+pub const MAX_SUPPLY_CHAIN_DIGEST_BYTES: usize = 96;
+pub const MAX_BUILD_PROVENANCE_IDENTITY_BYTES: usize = 96;
+
 pub const InterfaceDecl = struct {
     name: []const u8,
     version_major: u16 = 1,
@@ -49,6 +55,24 @@ pub const PermissionPurpose = enum(u8) {
     finance,
     security,
     development,
+};
+
+pub const DataRightsDecl = struct {
+    user_data_present: bool = false,
+    portable_export: bool = false,
+    deletion_supported: bool = false,
+    deletion_receipt_required: bool = false,
+    export_format: []const u8 = "",
+};
+
+pub const SupplyChainDecl = struct {
+    sbom_digest: []const u8 = "",
+    source_archive_digest: []const u8 = "",
+    build_recipe_digest: []const u8 = "",
+    vulnerability_scan_digest: []const u8 = "",
+    build_provenance_identity: []const u8 = "",
+    reproducible_build: bool = false,
+    trusted_builder: bool = false,
 };
 
 pub const DataEgressIntent = struct {
@@ -144,6 +168,8 @@ pub const AiLocality = enum(u8) {
 
 pub const AiMetadata = struct {
     model_family: []const u8 = "",
+    model_digest: []const u8 = "",
+    model_source_identity: []const u8 = "",
     locality: AiLocality = .inherit_task,
     offline_required: bool = false,
     private_context: bool = false,
@@ -278,6 +304,8 @@ pub const BundleManifest = struct {
     requested_permissions: []const PermissionRequest = &.{},
     background_tasks: []const BackgroundTaskDecl = &.{},
     ai_metadata: AiMetadata = .{},
+    data_rights: DataRightsDecl = .{},
+    supply_chain: SupplyChainDecl = .{},
     update_channel: UpdateChannel = .stable,
     signature: Signature = .{},
 };
@@ -334,7 +362,22 @@ pub const ValidationError = error{
     SensitiveRetentionTooLong,
     SecretRetentionTooLong,
     SensitivePermissionRequiresLease,
+    DataRightsExportMissing,
+    DataRightsDeletionMissing,
+    DataRightsExportFormatMissing,
+    DataRightsExportFormatTooLong,
+    DataDeletionReceiptRequired,
+    SupplyChainDigestTooLong,
+    BuildProvenanceIdentityTooLong,
+    ReproducibleBuildRequiresSourceArchive,
+    ReproducibleBuildRequiresBuildRecipe,
+    TrustedBuilderRequiresIdentity,
     AiModelFamilyTooLong,
+    AiModelDigestMissing,
+    AiModelDigestTooLong,
+    AiModelSourceMissing,
+    AiModelSourceTooLong,
+    PrivateAiRequiresLocalModel,
     LocalOnlyAiRequiresLocalNetwork,
     OfflineAiRequiresLocalModel,
     AiTrainingRequiresAudit,
@@ -358,12 +401,42 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
     try validatePermissionRights(bundle);
     try validateDuplicatePermissions(bundle);
     try validatePermissionPrivacy(bundle);
+    try validateDataRights(bundle);
+    try validateSupplyChain(bundle);
     try validateBackgroundTasks(bundle);
     try validateDataEgressRequests(bundle);
     try validateAiMetadata(bundle);
 }
 
+fn validateDataRights(bundle: BundleManifest) ValidationError!void {
+    if (bundle.data_rights.export_format.len > MAX_DATA_RIGHTS_FORMAT_BYTES) return error.DataRightsExportFormatTooLong;
+    if (!bundle.data_rights.user_data_present and !bundleContainsSensitiveObjectData(bundle)) return;
+    if (!bundle.data_rights.portable_export) return error.DataRightsExportMissing;
+    if (bundle.data_rights.export_format.len == 0) return error.DataRightsExportFormatMissing;
+    if (!bundle.data_rights.deletion_supported) return error.DataRightsDeletionMissing;
+    if (!bundle.data_rights.deletion_receipt_required) return error.DataDeletionReceiptRequired;
+}
+
+fn validateSupplyChain(bundle: BundleManifest) ValidationError!void {
+    if (bundle.supply_chain.sbom_digest.len > MAX_SUPPLY_CHAIN_DIGEST_BYTES) return error.SupplyChainDigestTooLong;
+    if (bundle.supply_chain.source_archive_digest.len > MAX_SUPPLY_CHAIN_DIGEST_BYTES) return error.SupplyChainDigestTooLong;
+    if (bundle.supply_chain.build_recipe_digest.len > MAX_SUPPLY_CHAIN_DIGEST_BYTES) return error.SupplyChainDigestTooLong;
+    if (bundle.supply_chain.vulnerability_scan_digest.len > MAX_SUPPLY_CHAIN_DIGEST_BYTES) return error.SupplyChainDigestTooLong;
+    if (bundle.supply_chain.build_provenance_identity.len > MAX_BUILD_PROVENANCE_IDENTITY_BYTES) return error.BuildProvenanceIdentityTooLong;
+    if (bundle.supply_chain.reproducible_build and bundle.supply_chain.source_archive_digest.len == 0) {
+        return error.ReproducibleBuildRequiresSourceArchive;
+    }
+    if (bundle.supply_chain.reproducible_build and bundle.supply_chain.build_recipe_digest.len == 0) {
+        return error.ReproducibleBuildRequiresBuildRecipe;
+    }
+    if (bundle.supply_chain.trusted_builder and bundle.supply_chain.build_provenance_identity.len == 0) {
+        return error.TrustedBuilderRequiresIdentity;
+    }
+}
+
 fn validateAiMetadata(bundle: BundleManifest) ValidationError!void {
+    if (bundle.ai_metadata.model_digest.len > MAX_AI_MODEL_DIGEST_BYTES) return error.AiModelDigestTooLong;
+    if (bundle.ai_metadata.model_source_identity.len > MAX_AI_MODEL_SOURCE_BYTES) return error.AiModelSourceTooLong;
     if (bundle.ai_metadata.locality == .local_only) {
         for (bundle.requested_permissions) |request| {
             if (request.kind != .network_egress) continue;
@@ -372,10 +445,19 @@ fn validateAiMetadata(bundle: BundleManifest) ValidationError!void {
             }
         }
     }
+    if (bundle.ai_metadata.private_context and bundle.ai_metadata.locality != .local_only) {
+        return error.PrivateAiRequiresLocalModel;
+    }
     if (bundle.ai_metadata.offline_required and
         (bundle.ai_metadata.model_family.len == 0 or bundle.ai_metadata.locality != .local_only))
     {
         return error.OfflineAiRequiresLocalModel;
+    }
+    if (requiresMeasuredLocalAi(bundle.ai_metadata) and bundle.ai_metadata.model_digest.len == 0) {
+        return error.AiModelDigestMissing;
+    }
+    if (requiresMeasuredLocalAi(bundle.ai_metadata) and bundle.ai_metadata.model_source_identity.len == 0) {
+        return error.AiModelSourceMissing;
     }
     if (bundle.ai_metadata.training_allowed and !bundle.ai_metadata.audit_prompt_use) {
         return error.AiTrainingRequiresAudit;
@@ -383,6 +465,11 @@ fn validateAiMetadata(bundle: BundleManifest) ValidationError!void {
     if (bundle.ai_metadata.max_context_bytes > units.mebibytes(64)) {
         return error.AiContextTooLarge;
     }
+}
+
+fn requiresMeasuredLocalAi(ai_metadata: AiMetadata) bool {
+    return ai_metadata.locality == .local_only and
+        (ai_metadata.model_family.len != 0 or ai_metadata.offline_required or ai_metadata.private_context);
 }
 
 fn validateDataEgressRequests(bundle: BundleManifest) ValidationError!void {
@@ -447,6 +534,13 @@ fn validatePermissionPrivacy(bundle: BundleManifest) ValidationError!void {
             return error.SensitivePermissionRequiresLease;
         }
     }
+}
+
+fn bundleContainsSensitiveObjectData(bundle: BundleManifest) bool {
+    for (bundle.requested_permissions) |request| {
+        if (request.kind == .object_access and isSensitive(request.sensitivity)) return true;
+    }
+    return false;
 }
 
 fn permissionRightsTargetCompatible(request: PermissionRequest) bool {
@@ -654,6 +748,53 @@ test "validate requires offline AI manifests to name a local model" {
     }));
 }
 
+test "validate requires local AI model provenance and private AI locality" {
+    try std.testing.expectError(error.AiModelDigestMissing, validate(.{
+        .bundle_id = "app.local-ai",
+        .display_name = "Local AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .locality = .local_only,
+        },
+    }));
+
+    try std.testing.expectError(error.AiModelSourceMissing, validate(.{
+        .bundle_id = "app.local-ai",
+        .display_name = "Local AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .model_digest = "sha256:tiny-local",
+            .locality = .local_only,
+        },
+    }));
+
+    try std.testing.expectError(error.PrivateAiRequiresLocalModel, validate(.{
+        .bundle_id = "app.remote-private-ai",
+        .display_name = "Remote Private AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "remote-private",
+            .locality = .remote_allowed,
+            .private_context = true,
+        },
+    }));
+
+    try validate(.{
+        .bundle_id = "app.local-ai",
+        .display_name = "Local AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .model_digest = "sha256:tiny-local",
+            .model_source_identity = "store:zigos/local-models",
+            .locality = .local_only,
+            .private_context = true,
+        },
+    });
+}
+
 test "validate requires AI training audit and bounded context" {
     try std.testing.expectError(error.AiTrainingRequiresAudit, validate(.{
         .bundle_id = "app.training-ai",
@@ -661,6 +802,8 @@ test "validate requires AI training audit and bounded context" {
         .publisher = "zigos.dev",
         .ai_metadata = .{
             .model_family = "tiny-local",
+            .model_digest = "sha256:tiny-local-training",
+            .model_source_identity = "store:zigos/local-models",
             .locality = .local_only,
             .training_allowed = true,
         },
@@ -672,6 +815,8 @@ test "validate requires AI training audit and bounded context" {
         .publisher = "zigos.dev",
         .ai_metadata = .{
             .model_family = "tiny-local",
+            .model_digest = "sha256:tiny-local-context",
+            .model_source_identity = "store:zigos/local-models",
             .locality = .local_only,
             .private_context = true,
             .max_context_bytes = units.mebibytes(65),
@@ -941,6 +1086,75 @@ test "validate requires sensitive permission purpose retention and bounded lease
     }));
 }
 
+test "validate requires sensitive object data to declare export delete and deletion receipts" {
+    const sensitive_object = [_]PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:private-notes",
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+            .local_only = true,
+            .sensitivity = .private_user_data,
+            .purpose = .document_editing,
+            .retention_days = 30,
+        },
+    };
+
+    try std.testing.expectError(error.DataRightsExportMissing, validate(.{
+        .bundle_id = "app.private-notes",
+        .display_name = "Private Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &sensitive_object,
+    }));
+
+    try std.testing.expectError(error.DataRightsExportFormatMissing, validate(.{
+        .bundle_id = "app.private-notes",
+        .display_name = "Private Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &sensitive_object,
+        .data_rights = .{
+            .portable_export = true,
+            .deletion_supported = true,
+            .deletion_receipt_required = true,
+        },
+    }));
+
+    try std.testing.expectError(error.DataRightsDeletionMissing, validate(.{
+        .bundle_id = "app.private-notes",
+        .display_name = "Private Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &sensitive_object,
+        .data_rights = .{
+            .portable_export = true,
+            .export_format = "application/zigos-object-archive",
+        },
+    }));
+
+    try std.testing.expectError(error.DataDeletionReceiptRequired, validate(.{
+        .bundle_id = "app.private-notes",
+        .display_name = "Private Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &sensitive_object,
+        .data_rights = .{
+            .portable_export = true,
+            .deletion_supported = true,
+            .export_format = "application/zigos-object-archive",
+        },
+    }));
+
+    try validate(.{
+        .bundle_id = "app.private-notes",
+        .display_name = "Private Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &sensitive_object,
+        .data_rights = .{
+            .portable_export = true,
+            .deletion_supported = true,
+            .deletion_receipt_required = true,
+            .export_format = "application/zigos-object-archive",
+        },
+    });
+}
+
 test "validate rejects duplicate permission requests" {
     const requests = [_]PermissionRequest{
         .{
@@ -1028,6 +1242,8 @@ test "validate accepts a signed local-first bundle manifest" {
         .background_tasks = &background_tasks,
         .ai_metadata = .{
             .model_family = "tiny-embed",
+            .model_digest = "sha256:tiny-embed-notes",
+            .model_source_identity = "store:zigos/local-models",
             .locality = .local_only,
             .offline_required = true,
             .private_context = true,
@@ -1044,6 +1260,49 @@ test "validate accepts a signed local-first bundle manifest" {
     try validate(bundle);
     try std.testing.expectEqual(@as(usize, 1), requiredPermissionCount(bundle));
     try validateApplicationPackaging(bundle);
+}
+
+test "validate gates package supply chain reproducibility metadata" {
+    try std.testing.expectError(error.ReproducibleBuildRequiresSourceArchive, validate(.{
+        .bundle_id = "app.repro",
+        .display_name = "Repro",
+        .publisher = "zigos.dev",
+        .supply_chain = .{
+            .reproducible_build = true,
+            .build_recipe_digest = "sha256:recipe",
+        },
+    }));
+    try std.testing.expectError(error.ReproducibleBuildRequiresBuildRecipe, validate(.{
+        .bundle_id = "app.repro",
+        .display_name = "Repro",
+        .publisher = "zigos.dev",
+        .supply_chain = .{
+            .reproducible_build = true,
+            .source_archive_digest = "sha256:source",
+        },
+    }));
+    try std.testing.expectError(error.TrustedBuilderRequiresIdentity, validate(.{
+        .bundle_id = "app.builder",
+        .display_name = "Builder",
+        .publisher = "zigos.dev",
+        .supply_chain = .{
+            .trusted_builder = true,
+        },
+    }));
+    try validate(.{
+        .bundle_id = "app.builder",
+        .display_name = "Builder",
+        .publisher = "zigos.dev",
+        .supply_chain = .{
+            .sbom_digest = "sha256:sbom",
+            .source_archive_digest = "sha256:source",
+            .build_recipe_digest = "sha256:recipe",
+            .vulnerability_scan_digest = "sha256:vuln-scan",
+            .build_provenance_identity = "builder:zigos/release",
+            .reproducible_build = true,
+            .trusted_builder = true,
+        },
+    });
 }
 
 test "compatibility namespaces are not reserved platform packages" {

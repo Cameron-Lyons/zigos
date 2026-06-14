@@ -527,6 +527,8 @@ pub fn firstPartyWriter() ExamplePackage {
             .background_tasks = &first_party_writer_background_tasks,
             .ai_metadata = .{
                 .model_family = "zigos-local-writing",
+                .model_digest = "sha256:zigos-local-writing-v1",
+                .model_source_identity = "store:zigos/local-models",
                 .locality = .local_only,
                 .offline_required = true,
             },

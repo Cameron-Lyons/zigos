@@ -24,7 +24,7 @@ const units = @import("../../native/core/units.zig");
 const REVIEW_FLOW_BUFFER_BYTES: usize = 512;
 const BACKGROUND_ACTIVITY_BUFFER_BYTES: usize = 384;
 const DIAGNOSTIC_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1) + 512;
-const DIAGNOSTIC_SUMMARY_BUFFER_BYTES: usize = 768;
+const DIAGNOSTIC_SUMMARY_BUFFER_BYTES: usize = 4096;
 
 const PackageHarness = struct {
     port: package_service.PackagePort,

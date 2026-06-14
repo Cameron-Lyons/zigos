@@ -228,6 +228,8 @@ pub fn notesBundle() manifest.BundleManifest {
         .requested_permissions = &notes_permissions,
         .ai_metadata = .{
             .model_family = "tiny-embed",
+            .model_digest = "sha256:tiny-embed-notes",
+            .model_source_identity = "store:zigos/local-models",
             .locality = .local_only,
             .offline_required = true,
         },

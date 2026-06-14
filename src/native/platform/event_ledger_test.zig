@@ -12,7 +12,7 @@ const EventKind = event_ledger.EventKind;
 const Ledger = event_ledger.Ledger;
 const DIAGNOSTIC_EXPORT_BUFFER_BYTES = units.kibibytes(2);
 const REMOTE_SHARE_BUFFER_BYTES = units.kibibytes(1);
-const USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES: usize = 1024;
+const USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES: usize = 4096;
 const DOCUMENT_KNOWLEDGE_BUFFER_BYTES: usize = 512;
 const DETAIL_PAYLOAD_BUFFER_BYTES: usize = 96;
 const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
@@ -113,6 +113,62 @@ test "event ledger records AI inference as protected diagnostic evidence" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "ai_remote_denials=1") != null);
 }
 
+test "event ledger records AI model attestations as protected diagnostic evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 25 };
+
+    try ledger.recordAiModelAttestation(user, 2501, true, true, true, 75, "sha256:local-model trusted source");
+    try ledger.recordAiModelAttestation(user, 2501, false, false, true, 76, "unmeasured local model rejected");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=ai_model_attestation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "sha256:local-model") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "sha256:local-model") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "unmeasured local model rejected") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.ai_model_attestations);
+    try std.testing.expectEqual(@as(usize, 1), summary.ai_model_rejections);
+    try std.testing.expectEqual(@as(usize, 2), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "ai_model_attestations=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "ai_model_rejections=1") != null);
+}
+
+test "event ledger records session posture as protected diagnostic evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 26 };
+
+    try ledger.recordSessionPosture(user, 2601, true, true, true, true, 2, 77, "fresh hardware-backed platform session");
+    try ledger.recordSessionPosture(user, 2601, false, false, true, true, 9, 78, "software credential rejected");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=session_posture") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "software credential") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "hardware-backed platform session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "software credential rejected") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.session_posture_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.session_posture_denials);
+    try std.testing.expectEqual(@as(usize, 2), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "session_posture_events=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "session_posture_denials=1") != null);
+}
+
 test "event ledger records private egress and privacy budgets as redacted evidence" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 22 };
@@ -142,6 +198,42 @@ test "event ledger records private egress and privacy budgets as redacted eviden
     try std.testing.expect(std.mem.indexOf(u8, rendered, "data_egress_events=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "private_egress_denials=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "privacy_budget_events=1") != null);
+}
+
+test "event ledger records data export deletion and receipts as redacted evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 24 };
+
+    try ledger.recordDataExport(user, 2401, .private_user_data, 1024, true, 100, "export workspace://notes/private.md");
+    try ledger.recordDataExport(user, 2401, .private_user_data, 8192, false, 101, "export denied for private archive");
+    try ledger.recordDataDeletion(user, 2401, 9101, true, 102, "deleted private note versions", true);
+    try ledger.recordDataDeletion(user, 2401, 0, false, 103, "deletion denied without receipt", true);
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=data_export") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=data_deletion") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "private.md") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "private.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "deleted private note versions") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.data_export_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.data_export_denials);
+    try std.testing.expectEqual(@as(usize, 2), summary.data_deletion_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.data_deletion_denials);
+    try std.testing.expectEqual(@as(usize, 1), summary.data_deletion_receipts);
+    try std.testing.expectEqual(@as(usize, 4), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "data_export_events=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "data_export_denials=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "data_deletion_events=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "data_deletion_receipts=1") != null);
 }
 
 test "event ledger records retention leases and consent receipts as redacted evidence" {

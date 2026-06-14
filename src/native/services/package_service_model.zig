@@ -17,6 +17,11 @@ pub const MAX_PERMISSION_REASON_BYTES: usize = 128;
 pub const MAX_BACKGROUND_TASKS_PER_BUNDLE: usize = 8;
 pub const MAX_BACKGROUND_TASK_ID_BYTES: usize = 48;
 pub const MAX_MODEL_FAMILY_BYTES: usize = 48;
+pub const MAX_MODEL_DIGEST_BYTES: usize = manifest.MAX_AI_MODEL_DIGEST_BYTES;
+pub const MAX_MODEL_SOURCE_BYTES: usize = manifest.MAX_AI_MODEL_SOURCE_BYTES;
+pub const MAX_DATA_RIGHTS_FORMAT_BYTES: usize = manifest.MAX_DATA_RIGHTS_FORMAT_BYTES;
+pub const MAX_SUPPLY_CHAIN_DIGEST_BYTES: usize = manifest.MAX_SUPPLY_CHAIN_DIGEST_BYTES;
+pub const MAX_BUILD_PROVENANCE_IDENTITY_BYTES: usize = manifest.MAX_BUILD_PROVENANCE_IDENTITY_BYTES;
 pub const MAX_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_SIGNATURE_SIGNER_BYTES: usize = 64;
 pub const MAX_INSTALL_SOURCE_BYTES: usize = 96;
@@ -156,6 +161,10 @@ pub const StoredBackgroundTask = struct {
 pub const StoredAiMetadata = struct {
     model_family_len: usize = 0,
     model_family: [MAX_MODEL_FAMILY_BYTES]u8 = [_]u8{0} ** MAX_MODEL_FAMILY_BYTES,
+    model_digest_len: usize = 0,
+    model_digest: [MAX_MODEL_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_MODEL_DIGEST_BYTES,
+    model_source_identity_len: usize = 0,
+    model_source_identity: [MAX_MODEL_SOURCE_BYTES]u8 = [_]u8{0} ** MAX_MODEL_SOURCE_BYTES,
     locality: manifest.AiLocality = .inherit_task,
     offline_required: bool = false,
     private_context: bool = false,
@@ -165,6 +174,62 @@ pub const StoredAiMetadata = struct {
 
     pub fn modelFamilySlice(self: *const StoredAiMetadata) []const u8 {
         return self.model_family[0..self.model_family_len];
+    }
+
+    pub fn modelDigestSlice(self: *const StoredAiMetadata) []const u8 {
+        return self.model_digest[0..self.model_digest_len];
+    }
+
+    pub fn modelSourceIdentitySlice(self: *const StoredAiMetadata) []const u8 {
+        return self.model_source_identity[0..self.model_source_identity_len];
+    }
+};
+
+pub const StoredDataRights = struct {
+    user_data_present: bool = false,
+    portable_export: bool = false,
+    deletion_supported: bool = false,
+    deletion_receipt_required: bool = false,
+    export_format_len: usize = 0,
+    export_format: [MAX_DATA_RIGHTS_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_DATA_RIGHTS_FORMAT_BYTES,
+
+    pub fn exportFormatSlice(self: *const StoredDataRights) []const u8 {
+        return self.export_format[0..self.export_format_len];
+    }
+};
+
+pub const StoredSupplyChain = struct {
+    sbom_digest_len: usize = 0,
+    sbom_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SUPPLY_CHAIN_DIGEST_BYTES,
+    source_archive_digest_len: usize = 0,
+    source_archive_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SUPPLY_CHAIN_DIGEST_BYTES,
+    build_recipe_digest_len: usize = 0,
+    build_recipe_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SUPPLY_CHAIN_DIGEST_BYTES,
+    vulnerability_scan_digest_len: usize = 0,
+    vulnerability_scan_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SUPPLY_CHAIN_DIGEST_BYTES,
+    build_provenance_identity_len: usize = 0,
+    build_provenance_identity: [MAX_BUILD_PROVENANCE_IDENTITY_BYTES]u8 = [_]u8{0} ** MAX_BUILD_PROVENANCE_IDENTITY_BYTES,
+    reproducible_build: bool = false,
+    trusted_builder: bool = false,
+
+    pub fn sbomDigestSlice(self: *const StoredSupplyChain) []const u8 {
+        return self.sbom_digest[0..self.sbom_digest_len];
+    }
+
+    pub fn sourceArchiveDigestSlice(self: *const StoredSupplyChain) []const u8 {
+        return self.source_archive_digest[0..self.source_archive_digest_len];
+    }
+
+    pub fn buildRecipeDigestSlice(self: *const StoredSupplyChain) []const u8 {
+        return self.build_recipe_digest[0..self.build_recipe_digest_len];
+    }
+
+    pub fn vulnerabilityScanDigestSlice(self: *const StoredSupplyChain) []const u8 {
+        return self.vulnerability_scan_digest[0..self.vulnerability_scan_digest_len];
+    }
+
+    pub fn buildProvenanceIdentitySlice(self: *const StoredSupplyChain) []const u8 {
+        return self.build_provenance_identity[0..self.build_provenance_identity_len];
     }
 };
 
@@ -206,6 +271,8 @@ pub const ResolvedManifest = struct {
     requested_permissions: [MAX_PERMISSIONS_PER_BUNDLE]manifest.PermissionRequest,
     background_tasks: [MAX_BACKGROUND_TASKS_PER_BUNDLE]manifest.BackgroundTaskDecl,
     ai_metadata: manifest.AiMetadata,
+    data_rights: manifest.DataRightsDecl,
+    supply_chain: manifest.SupplyChainDecl,
     signature: manifest.Signature,
 };
 
@@ -235,6 +302,8 @@ pub const BundleRevision = struct {
     background_task_count: usize = 0,
     background_tasks: [MAX_BACKGROUND_TASKS_PER_BUNDLE]StoredBackgroundTask = [_]StoredBackgroundTask{zeroStoredBackgroundTask()} ** MAX_BACKGROUND_TASKS_PER_BUNDLE,
     ai_metadata: StoredAiMetadata = zeroStoredAiMetadata(),
+    data_rights: StoredDataRights = zeroStoredDataRights(),
+    supply_chain: StoredSupplyChain = zeroStoredSupplyChain(),
     signature: StoredSignature = zeroStoredSignature(),
 
     pub fn displayNameSlice(self: *const BundleRevision) []const u8 {
@@ -359,6 +428,14 @@ fn zeroStoredBackgroundTask() StoredBackgroundTask {
 }
 
 fn zeroStoredAiMetadata() StoredAiMetadata {
+    return .{};
+}
+
+fn zeroStoredDataRights() StoredDataRights {
+    return .{};
+}
+
+fn zeroStoredSupplyChain() StoredSupplyChain {
     return .{};
 }
 

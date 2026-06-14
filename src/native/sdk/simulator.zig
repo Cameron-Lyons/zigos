@@ -429,6 +429,8 @@ fn emptyResolvedManifest() package_service.ResolvedManifest {
         .requested_permissions = undefined,
         .background_tasks = undefined,
         .ai_metadata = .{},
+        .data_rights = .{},
+        .supply_chain = .{},
         .signature = .{},
     };
 }
