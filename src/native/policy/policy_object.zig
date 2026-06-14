@@ -58,7 +58,21 @@ pub const DecisionReason = enum(u8) {
     remote_ai_denied,
     ai_training_denied,
     ai_context_denied,
+    ai_model_measurement_denied,
+    ai_model_source_denied,
+    ai_model_staleness_denied,
+    session_hardware_denied,
+    session_device_posture_denied,
+    session_unlock_stale,
+    session_primary_device_denied,
+    package_sbom_denied,
+    package_reproducibility_denied,
+    package_builder_denied,
+    package_vulnerability_scan_denied,
     private_egress_budget_denied,
+    data_export_denied,
+    data_deletion_denied,
+    data_deletion_receipt_denied,
     permission_retention_denied,
     permission_lease_denied,
     retention_denied,
@@ -95,7 +109,22 @@ pub const CreateRequest = struct {
     remote_ai_allowed: bool = false,
     ai_training_allowed: bool = false,
     max_ai_context_bytes: usize = 0,
+    require_ai_model_measurement: bool = false,
+    require_trusted_ai_model_source: bool = false,
+    max_ai_model_age_days: u16 = 0,
+    require_hardware_backed_session: bool = false,
+    require_platform_backed_device_session: bool = false,
+    require_primary_device_session: bool = false,
+    max_session_unlock_age_ticks: u64 = 0,
+    require_package_sbom: bool = false,
+    require_reproducible_package_build: bool = false,
+    require_trusted_package_builder: bool = false,
+    require_vulnerability_scan: bool = false,
     max_remote_private_egress_bytes: usize = 0,
+    data_export_allowed: bool = false,
+    data_deletion_allowed: bool = false,
+    require_data_deletion_receipt: bool = false,
+    max_data_export_bytes: usize = 0,
     max_sensitive_retention_days: u16 = 0,
     max_permission_lease_ticks: u64 = 0,
     require_sensitive_permission_lease: bool = false,
@@ -112,11 +141,42 @@ pub const AiUseRequest = struct {
     remote_model: bool = false,
     training_user_content: bool = false,
     context_bytes: usize = 0,
+    local_model_measured: bool = true,
+    model_source_trusted: bool = true,
+    model_age_days: u16 = 0,
+};
+
+pub const SessionTrustRequest = struct {
+    hardware_backed_credential: bool = false,
+    device_platform_backed: bool = false,
+    primary_device_assertion: bool = false,
+    unlock_age_ticks: u64 = 0,
 };
 
 pub const SensitiveEgressRequest = struct {
     sensitivity: manifest.DataSensitivity = .internal_data,
     remote_bytes: usize = 0,
+};
+
+pub const DataRightsOperation = enum(u8) {
+    portable_export,
+    delete,
+};
+
+pub const PackageProvenanceRequest = struct {
+    sbom_present: bool = false,
+    source_archive_present: bool = false,
+    build_recipe_present: bool = false,
+    reproducible_build: bool = false,
+    trusted_builder: bool = false,
+    vulnerability_scan_present: bool = false,
+};
+
+pub const DataRightsRequest = struct {
+    operation: DataRightsOperation,
+    sensitivity: manifest.DataSensitivity = .internal_data,
+    bytes: usize = 0,
+    deletion_receipt_present: bool = false,
 };
 
 pub const PermissionUseRequest = struct {
@@ -158,7 +218,22 @@ pub const PolicyObject = struct {
     remote_ai_allowed: bool,
     ai_training_allowed: bool,
     max_ai_context_bytes: usize,
+    require_ai_model_measurement: bool,
+    require_trusted_ai_model_source: bool,
+    max_ai_model_age_days: u16,
+    require_hardware_backed_session: bool,
+    require_platform_backed_device_session: bool,
+    require_primary_device_session: bool,
+    max_session_unlock_age_ticks: u64,
+    require_package_sbom: bool,
+    require_reproducible_package_build: bool,
+    require_trusted_package_builder: bool,
+    require_vulnerability_scan: bool,
     max_remote_private_egress_bytes: usize,
+    data_export_allowed: bool,
+    data_deletion_allowed: bool,
+    require_data_deletion_receipt: bool,
+    max_data_export_bytes: usize,
     max_sensitive_retention_days: u16,
     max_permission_lease_ticks: u64,
     require_sensitive_permission_lease: bool,
@@ -184,6 +259,22 @@ pub const PolicyObject = struct {
                 source_identity,
             ),
         };
+    }
+
+    pub fn packageProvenanceDenial(self: *const PolicyObject, request: PackageProvenanceRequest) ?DecisionReason {
+        if (self.require_package_sbom and !request.sbom_present) return .package_sbom_denied;
+        if (self.require_reproducible_package_build and
+            (!request.reproducible_build or !request.source_archive_present or !request.build_recipe_present))
+        {
+            return .package_reproducibility_denied;
+        }
+        if (self.require_trusted_package_builder and !request.trusted_builder) return .package_builder_denied;
+        if (self.require_vulnerability_scan and !request.vulnerability_scan_present) return .package_vulnerability_scan_denied;
+        return null;
+    }
+
+    pub fn allowsPackageProvenance(self: *const PolicyObject, request: PackageProvenanceRequest) bool {
+        return self.packageProvenanceDenial(request) == null;
     }
 
     pub fn allowsNetworkDestination(self: *const PolicyObject, destination: []const u8) bool {
@@ -281,7 +372,22 @@ pub const Directory = struct {
         slot.policy.remote_ai_allowed = request.remote_ai_allowed;
         slot.policy.ai_training_allowed = request.ai_training_allowed;
         slot.policy.max_ai_context_bytes = request.max_ai_context_bytes;
+        slot.policy.require_ai_model_measurement = request.require_ai_model_measurement;
+        slot.policy.require_trusted_ai_model_source = request.require_trusted_ai_model_source;
+        slot.policy.max_ai_model_age_days = request.max_ai_model_age_days;
+        slot.policy.require_hardware_backed_session = request.require_hardware_backed_session;
+        slot.policy.require_platform_backed_device_session = request.require_platform_backed_device_session;
+        slot.policy.require_primary_device_session = request.require_primary_device_session;
+        slot.policy.max_session_unlock_age_ticks = request.max_session_unlock_age_ticks;
+        slot.policy.require_package_sbom = request.require_package_sbom;
+        slot.policy.require_reproducible_package_build = request.require_reproducible_package_build;
+        slot.policy.require_trusted_package_builder = request.require_trusted_package_builder;
+        slot.policy.require_vulnerability_scan = request.require_vulnerability_scan;
         slot.policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
+        slot.policy.data_export_allowed = request.data_export_allowed;
+        slot.policy.data_deletion_allowed = request.data_deletion_allowed;
+        slot.policy.require_data_deletion_receipt = request.require_data_deletion_receipt;
+        slot.policy.max_data_export_bytes = request.max_data_export_bytes;
         slot.policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
         slot.policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
         slot.policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
@@ -392,6 +498,20 @@ pub const Directory = struct {
         return allow();
     }
 
+    pub fn packageProvenanceDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: PackageProvenanceRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (policy.packageProvenanceDenial(request)) |reason| return block(policy, reason);
+        }
+        return allow();
+    }
+
     pub fn syncDestinationDecision(
         self: *const Directory,
         subjects: SubjectSet,
@@ -474,6 +594,40 @@ pub const Directory = struct {
             if (policy.max_ai_context_bytes != 0 and request.context_bytes > policy.max_ai_context_bytes) {
                 return block(policy, .ai_context_denied);
             }
+            if (!request.remote_model and policy.require_ai_model_measurement and !request.local_model_measured) {
+                return block(policy, .ai_model_measurement_denied);
+            }
+            if (!request.remote_model and policy.require_trusted_ai_model_source and !request.model_source_trusted) {
+                return block(policy, .ai_model_source_denied);
+            }
+            if (!request.remote_model and policy.max_ai_model_age_days != 0 and request.model_age_days > policy.max_ai_model_age_days) {
+                return block(policy, .ai_model_staleness_denied);
+            }
+        }
+        return allow();
+    }
+
+    pub fn sessionTrustDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: SessionTrustRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (policy.require_hardware_backed_session and !request.hardware_backed_credential) {
+                return block(policy, .session_hardware_denied);
+            }
+            if (policy.require_platform_backed_device_session and !request.device_platform_backed) {
+                return block(policy, .session_device_posture_denied);
+            }
+            if (policy.require_primary_device_session and !request.primary_device_assertion) {
+                return block(policy, .session_primary_device_denied);
+            }
+            if (policy.max_session_unlock_age_ticks != 0 and request.unlock_age_ticks > policy.max_session_unlock_age_ticks) {
+                return block(policy, .session_unlock_stale);
+            }
         }
         return allow();
     }
@@ -490,6 +644,34 @@ pub const Directory = struct {
             if (!signature_decision.allowed) return signature_decision;
             if (policy.max_remote_private_egress_bytes != 0 and request.remote_bytes > policy.max_remote_private_egress_bytes) {
                 return block(policy, .private_egress_budget_denied);
+            }
+        }
+        return allow();
+    }
+
+    pub fn dataRightsDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: DataRightsRequest,
+    ) PolicyDecision {
+        if (!manifest.isSensitive(request.sensitivity)) return allow();
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            switch (request.operation) {
+                .portable_export => {
+                    if (!policy.data_export_allowed) return block(policy, .data_export_denied);
+                    if (policy.max_data_export_bytes != 0 and request.bytes > policy.max_data_export_bytes) {
+                        return block(policy, .data_export_denied);
+                    }
+                },
+                .delete => {
+                    if (!policy.data_deletion_allowed) return block(policy, .data_deletion_denied);
+                    if (policy.require_data_deletion_receipt and !request.deletion_receipt_present) {
+                        return block(policy, .data_deletion_receipt_denied);
+                    }
+                },
             }
         }
         return allow();
@@ -703,7 +885,22 @@ fn zeroPolicy() PolicyObject {
         .remote_ai_allowed = false,
         .ai_training_allowed = false,
         .max_ai_context_bytes = 0,
+        .require_ai_model_measurement = false,
+        .require_trusted_ai_model_source = false,
+        .max_ai_model_age_days = 0,
+        .require_hardware_backed_session = false,
+        .require_platform_backed_device_session = false,
+        .require_primary_device_session = false,
+        .max_session_unlock_age_ticks = 0,
+        .require_package_sbom = false,
+        .require_reproducible_package_build = false,
+        .require_trusted_package_builder = false,
+        .require_vulnerability_scan = false,
         .max_remote_private_egress_bytes = 0,
+        .data_export_allowed = false,
+        .data_deletion_allowed = false,
+        .require_data_deletion_receipt = false,
+        .max_data_export_bytes = 0,
         .max_sensitive_retention_days = 0,
         .max_permission_lease_ticks = 0,
         .require_sensitive_permission_lease = false,
@@ -760,7 +957,22 @@ fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     crypto_hash.updateBool(&hasher, "remote-ai-allowed", policy.remote_ai_allowed);
     crypto_hash.updateBool(&hasher, "ai-training-allowed", policy.ai_training_allowed);
     crypto_hash.updateInt(&hasher, "max-ai-context-bytes", policy.max_ai_context_bytes);
+    crypto_hash.updateBool(&hasher, "require-ai-model-measurement", policy.require_ai_model_measurement);
+    crypto_hash.updateBool(&hasher, "require-trusted-ai-model-source", policy.require_trusted_ai_model_source);
+    crypto_hash.updateInt(&hasher, "max-ai-model-age-days", policy.max_ai_model_age_days);
+    crypto_hash.updateBool(&hasher, "require-hardware-backed-session", policy.require_hardware_backed_session);
+    crypto_hash.updateBool(&hasher, "require-platform-backed-device-session", policy.require_platform_backed_device_session);
+    crypto_hash.updateBool(&hasher, "require-primary-device-session", policy.require_primary_device_session);
+    crypto_hash.updateInt(&hasher, "max-session-unlock-age-ticks", policy.max_session_unlock_age_ticks);
+    crypto_hash.updateBool(&hasher, "require-package-sbom", policy.require_package_sbom);
+    crypto_hash.updateBool(&hasher, "require-reproducible-package-build", policy.require_reproducible_package_build);
+    crypto_hash.updateBool(&hasher, "require-trusted-package-builder", policy.require_trusted_package_builder);
+    crypto_hash.updateBool(&hasher, "require-vulnerability-scan", policy.require_vulnerability_scan);
     crypto_hash.updateInt(&hasher, "max-remote-private-egress-bytes", policy.max_remote_private_egress_bytes);
+    crypto_hash.updateBool(&hasher, "data-export-allowed", policy.data_export_allowed);
+    crypto_hash.updateBool(&hasher, "data-deletion-allowed", policy.data_deletion_allowed);
+    crypto_hash.updateBool(&hasher, "require-data-deletion-receipt", policy.require_data_deletion_receipt);
+    crypto_hash.updateInt(&hasher, "max-data-export-bytes", policy.max_data_export_bytes);
     crypto_hash.updateInt(&hasher, "max-sensitive-retention-days", policy.max_sensitive_retention_days);
     crypto_hash.updateInt(&hasher, "max-permission-lease-ticks", policy.max_permission_lease_ticks);
     crypto_hash.updateBool(&hasher, "require-sensitive-permission-lease", policy.require_sensitive_permission_lease);
@@ -1055,6 +1267,280 @@ test "policy directory gates sensitive device permissions and private egress bud
         .remote_bytes = 65_536,
     });
     try std.testing.expect(large_internal.allowed);
+}
+
+test "policy directory gates local AI model provenance" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "ai-model-policy-key",
+        .seed = signing.seedFromByte(0x87),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 91,
+        .issuer = .{ .kind = .policy_authority, .serial = 94 },
+        .label = "ai-model-provenance",
+        .remote_ai_allowed = false,
+        .require_ai_model_measurement = true,
+        .require_trusted_ai_model_source = true,
+        .max_ai_model_age_days = 30,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .organization_id = 91,
+    };
+    const measured = directory.aiUseDecision(subjects, .{
+        .context_bytes = 512,
+        .local_model_measured = true,
+        .model_source_trusted = true,
+        .model_age_days = 7,
+    });
+    try std.testing.expect(measured.allowed);
+
+    const unmeasured = directory.aiUseDecision(subjects, .{
+        .context_bytes = 512,
+        .local_model_measured = false,
+        .model_source_trusted = true,
+        .model_age_days = 7,
+    });
+    try std.testing.expect(!unmeasured.allowed);
+    try std.testing.expectEqual(DecisionReason.ai_model_measurement_denied, unmeasured.reason);
+    try std.testing.expectEqual(org_policy.id, unmeasured.blocking_policy_id);
+
+    const untrusted_source = directory.aiUseDecision(subjects, .{
+        .context_bytes = 512,
+        .local_model_measured = true,
+        .model_source_trusted = false,
+        .model_age_days = 7,
+    });
+    try std.testing.expect(!untrusted_source.allowed);
+    try std.testing.expectEqual(DecisionReason.ai_model_source_denied, untrusted_source.reason);
+
+    const stale = directory.aiUseDecision(subjects, .{
+        .context_bytes = 512,
+        .local_model_measured = true,
+        .model_source_trusted = true,
+        .model_age_days = 45,
+    });
+    try std.testing.expect(!stale.allowed);
+    try std.testing.expectEqual(DecisionReason.ai_model_staleness_denied, stale.reason);
+
+    const remote = directory.aiUseDecision(subjects, .{
+        .remote_model = true,
+        .context_bytes = 512,
+        .local_model_measured = false,
+        .model_source_trusted = false,
+        .model_age_days = 365,
+    });
+    try std.testing.expect(!remote.allowed);
+    try std.testing.expectEqual(DecisionReason.remote_ai_denied, remote.reason);
+}
+
+test "policy directory gates trusted session posture" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "session-trust-policy-key",
+        .seed = signing.seedFromByte(0x88),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 92,
+        .issuer = .{ .kind = .policy_authority, .serial = 95 },
+        .label = "trusted-session",
+        .require_hardware_backed_session = true,
+        .require_platform_backed_device_session = true,
+        .require_primary_device_session = true,
+        .max_session_unlock_age_ticks = 5,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .organization_id = 92,
+    };
+    const trusted = directory.sessionTrustDecision(subjects, .{
+        .hardware_backed_credential = true,
+        .device_platform_backed = true,
+        .primary_device_assertion = true,
+        .unlock_age_ticks = 2,
+    });
+    try std.testing.expect(trusted.allowed);
+
+    const software_secret = directory.sessionTrustDecision(subjects, .{
+        .hardware_backed_credential = false,
+        .device_platform_backed = true,
+        .primary_device_assertion = true,
+        .unlock_age_ticks = 2,
+    });
+    try std.testing.expect(!software_secret.allowed);
+    try std.testing.expectEqual(DecisionReason.session_hardware_denied, software_secret.reason);
+    try std.testing.expectEqual(org_policy.id, software_secret.blocking_policy_id);
+
+    const software_device = directory.sessionTrustDecision(subjects, .{
+        .hardware_backed_credential = true,
+        .device_platform_backed = false,
+        .primary_device_assertion = true,
+        .unlock_age_ticks = 2,
+    });
+    try std.testing.expect(!software_device.allowed);
+    try std.testing.expectEqual(DecisionReason.session_device_posture_denied, software_device.reason);
+
+    const stale_unlock = directory.sessionTrustDecision(subjects, .{
+        .hardware_backed_credential = true,
+        .device_platform_backed = true,
+        .primary_device_assertion = true,
+        .unlock_age_ticks = 9,
+    });
+    try std.testing.expect(!stale_unlock.allowed);
+    try std.testing.expectEqual(DecisionReason.session_unlock_stale, stale_unlock.reason);
+
+    const secondary_device = directory.sessionTrustDecision(subjects, .{
+        .hardware_backed_credential = true,
+        .device_platform_backed = true,
+        .primary_device_assertion = false,
+        .unlock_age_ticks = 2,
+    });
+    try std.testing.expect(!secondary_device.allowed);
+    try std.testing.expectEqual(DecisionReason.session_primary_device_denied, secondary_device.reason);
+}
+
+test "policy directory gates package supply chain posture" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "package-provenance-policy-key",
+        .seed = signing.seedFromByte(0x89),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 93,
+        .issuer = .{ .kind = .policy_authority, .serial = 96 },
+        .label = "package-provenance",
+        .require_package_sbom = true,
+        .require_reproducible_package_build = true,
+        .require_trusted_package_builder = true,
+        .require_vulnerability_scan = true,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .organization_id = 93,
+    };
+    const trusted = directory.packageProvenanceDecision(subjects, .{
+        .sbom_present = true,
+        .source_archive_present = true,
+        .build_recipe_present = true,
+        .reproducible_build = true,
+        .trusted_builder = true,
+        .vulnerability_scan_present = true,
+    });
+    try std.testing.expect(trusted.allowed);
+
+    const missing_sbom = directory.packageProvenanceDecision(subjects, .{
+        .source_archive_present = true,
+        .build_recipe_present = true,
+        .reproducible_build = true,
+        .trusted_builder = true,
+        .vulnerability_scan_present = true,
+    });
+    try std.testing.expect(!missing_sbom.allowed);
+    try std.testing.expectEqual(DecisionReason.package_sbom_denied, missing_sbom.reason);
+    try std.testing.expectEqual(org_policy.id, missing_sbom.blocking_policy_id);
+
+    const missing_recipe = directory.packageProvenanceDecision(subjects, .{
+        .sbom_present = true,
+        .source_archive_present = true,
+        .reproducible_build = true,
+        .trusted_builder = true,
+        .vulnerability_scan_present = true,
+    });
+    try std.testing.expect(!missing_recipe.allowed);
+    try std.testing.expectEqual(DecisionReason.package_reproducibility_denied, missing_recipe.reason);
+
+    const untrusted_builder = directory.packageProvenanceDecision(subjects, .{
+        .sbom_present = true,
+        .source_archive_present = true,
+        .build_recipe_present = true,
+        .reproducible_build = true,
+        .vulnerability_scan_present = true,
+    });
+    try std.testing.expect(!untrusted_builder.allowed);
+    try std.testing.expectEqual(DecisionReason.package_builder_denied, untrusted_builder.reason);
+
+    const missing_scan = directory.packageProvenanceDecision(subjects, .{
+        .sbom_present = true,
+        .source_archive_present = true,
+        .build_recipe_present = true,
+        .reproducible_build = true,
+        .trusted_builder = true,
+    });
+    try std.testing.expect(!missing_scan.allowed);
+    try std.testing.expectEqual(DecisionReason.package_vulnerability_scan_denied, missing_scan.reason);
+}
+
+test "policy directory gates sensitive data export deletion and receipts" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "data-rights-policy-key",
+        .seed = signing.seedFromByte(0x86),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 90,
+        .issuer = .{ .kind = .policy_authority, .serial = 92 },
+        .label = "data-rights-baseline",
+        .data_export_allowed = true,
+        .data_deletion_allowed = true,
+        .require_data_deletion_receipt = true,
+        .max_data_export_bytes = 4096,
+    }, signer);
+    _ = try directory.create(.{
+        .scope = .user,
+        .subject_id = 901,
+        .issuer = .{ .kind = .policy_authority, .serial = 93 },
+        .label = "user-data-rights",
+        .data_export_allowed = true,
+        .data_deletion_allowed = true,
+        .require_data_deletion_receipt = false,
+        .max_data_export_bytes = 8192,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .user_id = 901,
+        .organization_id = 90,
+    };
+    const small_export = directory.dataRightsDecision(subjects, .{
+        .operation = .portable_export,
+        .sensitivity = .private_user_data,
+        .bytes = 2048,
+    });
+    try std.testing.expect(small_export.allowed);
+
+    const large_export = directory.dataRightsDecision(subjects, .{
+        .operation = .portable_export,
+        .sensitivity = .private_user_data,
+        .bytes = 8192,
+    });
+    try std.testing.expect(!large_export.allowed);
+    try std.testing.expectEqual(DecisionReason.data_export_denied, large_export.reason);
+    try std.testing.expectEqual(org_policy.id, large_export.blocking_policy_id);
+
+    const delete_without_receipt = directory.dataRightsDecision(subjects, .{
+        .operation = .delete,
+        .sensitivity = .private_user_data,
+    });
+    try std.testing.expect(!delete_without_receipt.allowed);
+    try std.testing.expectEqual(DecisionReason.data_deletion_receipt_denied, delete_without_receipt.reason);
+
+    const delete_with_receipt = directory.dataRightsDecision(subjects, .{
+        .operation = .delete,
+        .sensitivity = .private_user_data,
+        .deletion_receipt_present = true,
+    });
+    try std.testing.expect(delete_with_receipt.allowed);
+
+    const public_export = directory.dataRightsDecision(subjects, .{
+        .operation = .portable_export,
+        .sensitivity = .public_data,
+        .bytes = 1_000_000,
+    });
+    try std.testing.expect(public_export.allowed);
 }
 
 test "policy directory gates sensitive permission retention and leases" {

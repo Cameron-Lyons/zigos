@@ -19,6 +19,8 @@ pub fn validateInstallTarget(
     const StoredPermissionType = arrayFieldChildType(RevisionType, "requested_permissions");
     const StoredBackgroundTaskType = arrayFieldChildType(RevisionType, "background_tasks");
     const StoredAiMetadataType = @FieldType(RevisionType, "ai_metadata");
+    const StoredDataRightsType = @FieldType(RevisionType, "data_rights");
+    const StoredSupplyChainType = @FieldType(RevisionType, "supply_chain");
     const StoredSignatureType = @FieldType(RevisionType, "signature");
 
     try manifest.validate(bundle);
@@ -32,6 +34,14 @@ pub fn validateInstallTarget(
     try validateCount(bundle.requested_permissions.len, arrayFieldLen(RevisionType, "requested_permissions"), error.TooManyPermissions);
     try validateCount(bundle.background_tasks.len, arrayFieldLen(RevisionType, "background_tasks"), error.TooManyBackgroundTasks);
     try validateTextLen(bundle.ai_metadata.model_family, arrayFieldLen(StoredAiMetadataType, "model_family"), error.AiModelFamilyTooLong);
+    try validateTextLen(bundle.ai_metadata.model_digest, arrayFieldLen(StoredAiMetadataType, "model_digest"), error.AiModelDigestTooLong);
+    try validateTextLen(bundle.ai_metadata.model_source_identity, arrayFieldLen(StoredAiMetadataType, "model_source_identity"), error.AiModelSourceTooLong);
+    try validateTextLen(bundle.data_rights.export_format, arrayFieldLen(StoredDataRightsType, "export_format"), error.DataRightsExportFormatTooLong);
+    try validateTextLen(bundle.supply_chain.sbom_digest, arrayFieldLen(StoredSupplyChainType, "sbom_digest"), error.SupplyChainDigestTooLong);
+    try validateTextLen(bundle.supply_chain.source_archive_digest, arrayFieldLen(StoredSupplyChainType, "source_archive_digest"), error.SupplyChainDigestTooLong);
+    try validateTextLen(bundle.supply_chain.build_recipe_digest, arrayFieldLen(StoredSupplyChainType, "build_recipe_digest"), error.SupplyChainDigestTooLong);
+    try validateTextLen(bundle.supply_chain.vulnerability_scan_digest, arrayFieldLen(StoredSupplyChainType, "vulnerability_scan_digest"), error.SupplyChainDigestTooLong);
+    try validateTextLen(bundle.supply_chain.build_provenance_identity, arrayFieldLen(StoredSupplyChainType, "build_provenance_identity"), error.BuildProvenanceIdentityTooLong);
     try validateTextLen(bundle.signature.format, arrayFieldLen(StoredSignatureType, "format"), error.SignatureFormatTooLong);
     try validateTextLen(bundle.signature.signer, arrayFieldLen(StoredSignatureType, "signer"), error.SignatureSignerTooLong);
 
@@ -192,12 +202,30 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
 
     resolved.ai_metadata = .{
         .model_family = revision.ai_metadata.modelFamilySlice(),
+        .model_digest = revision.ai_metadata.modelDigestSlice(),
+        .model_source_identity = revision.ai_metadata.modelSourceIdentitySlice(),
         .locality = revision.ai_metadata.locality,
         .offline_required = revision.ai_metadata.offline_required,
         .private_context = revision.ai_metadata.private_context,
         .training_allowed = revision.ai_metadata.training_allowed,
         .max_context_bytes = revision.ai_metadata.max_context_bytes,
         .audit_prompt_use = revision.ai_metadata.audit_prompt_use,
+    };
+    resolved.data_rights = .{
+        .user_data_present = revision.data_rights.user_data_present,
+        .portable_export = revision.data_rights.portable_export,
+        .deletion_supported = revision.data_rights.deletion_supported,
+        .deletion_receipt_required = revision.data_rights.deletion_receipt_required,
+        .export_format = revision.data_rights.exportFormatSlice(),
+    };
+    resolved.supply_chain = .{
+        .sbom_digest = revision.supply_chain.sbomDigestSlice(),
+        .source_archive_digest = revision.supply_chain.sourceArchiveDigestSlice(),
+        .build_recipe_digest = revision.supply_chain.buildRecipeDigestSlice(),
+        .vulnerability_scan_digest = revision.supply_chain.vulnerabilityScanDigestSlice(),
+        .build_provenance_identity = revision.supply_chain.buildProvenanceIdentitySlice(),
+        .reproducible_build = revision.supply_chain.reproducible_build,
+        .trusted_builder = revision.supply_chain.trusted_builder,
     };
     resolved.signature = .{
         .format = revision.signature.formatSlice(),
@@ -221,6 +249,8 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .requested_permissions = resolved.requested_permissions[0..revision.requested_permission_count],
         .background_tasks = resolved.background_tasks[0..revision.background_task_count],
         .ai_metadata = resolved.ai_metadata,
+        .data_rights = resolved.data_rights,
+        .supply_chain = resolved.supply_chain,
         .update_channel = revision.channel,
         .signature = resolved.signature,
     };
@@ -242,6 +272,8 @@ fn clearResolvedManifest(resolved: anytype) void {
         .expected_duration_seconds = 0,
     }} ** resolved.background_tasks.len;
     resolved.ai_metadata = .{};
+    resolved.data_rights = .{};
+    resolved.supply_chain = .{};
     resolved.signature = .{};
 }
 
@@ -334,12 +366,30 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
 
     revision.ai_metadata = .{};
     revision.ai_metadata.model_family_len = copyTextExact(&revision.ai_metadata.model_family, source.ai_metadata.model_family) catch return error.AiModelFamilyTooLong;
+    revision.ai_metadata.model_digest_len = copyTextExact(&revision.ai_metadata.model_digest, source.ai_metadata.model_digest) catch return error.AiModelDigestTooLong;
+    revision.ai_metadata.model_source_identity_len = copyTextExact(&revision.ai_metadata.model_source_identity, source.ai_metadata.model_source_identity) catch return error.AiModelSourceTooLong;
     revision.ai_metadata.locality = source.ai_metadata.locality;
     revision.ai_metadata.offline_required = source.ai_metadata.offline_required;
     revision.ai_metadata.private_context = source.ai_metadata.private_context;
     revision.ai_metadata.training_allowed = source.ai_metadata.training_allowed;
     revision.ai_metadata.max_context_bytes = source.ai_metadata.max_context_bytes;
     revision.ai_metadata.audit_prompt_use = source.ai_metadata.audit_prompt_use;
+
+    revision.data_rights = .{};
+    revision.data_rights.user_data_present = source.data_rights.user_data_present;
+    revision.data_rights.portable_export = source.data_rights.portable_export;
+    revision.data_rights.deletion_supported = source.data_rights.deletion_supported;
+    revision.data_rights.deletion_receipt_required = source.data_rights.deletion_receipt_required;
+    revision.data_rights.export_format_len = copyTextExact(&revision.data_rights.export_format, source.data_rights.export_format) catch return error.DataRightsExportFormatTooLong;
+
+    revision.supply_chain = .{};
+    revision.supply_chain.sbom_digest_len = copyTextExact(&revision.supply_chain.sbom_digest, source.supply_chain.sbom_digest) catch return error.SupplyChainDigestTooLong;
+    revision.supply_chain.source_archive_digest_len = copyTextExact(&revision.supply_chain.source_archive_digest, source.supply_chain.source_archive_digest) catch return error.SupplyChainDigestTooLong;
+    revision.supply_chain.build_recipe_digest_len = copyTextExact(&revision.supply_chain.build_recipe_digest, source.supply_chain.build_recipe_digest) catch return error.SupplyChainDigestTooLong;
+    revision.supply_chain.vulnerability_scan_digest_len = copyTextExact(&revision.supply_chain.vulnerability_scan_digest, source.supply_chain.vulnerability_scan_digest) catch return error.SupplyChainDigestTooLong;
+    revision.supply_chain.build_provenance_identity_len = copyTextExact(&revision.supply_chain.build_provenance_identity, source.supply_chain.build_provenance_identity) catch return error.BuildProvenanceIdentityTooLong;
+    revision.supply_chain.reproducible_build = source.supply_chain.reproducible_build;
+    revision.supply_chain.trusted_builder = source.supply_chain.trusted_builder;
 
     revision.signature = .{};
     revision.signature.format_len = copyTextExact(&revision.signature.format, source.signature.format) catch return error.SignatureFormatTooLong;

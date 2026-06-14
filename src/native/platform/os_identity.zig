@@ -97,6 +97,8 @@ pub const CredentialRecord = struct {
     local_unlock_required: bool = true,
     phishing_resistant: bool = true,
     synced_to_device_graph: bool = false,
+    hardware_backed_credential: bool = false,
+    sealed_credential_secret: bool = false,
     relying_party_id_len: usize,
     relying_party_id: [MAX_RP_ID_BYTES]u8,
     label_len: usize,
@@ -144,6 +146,11 @@ pub const Assertion = struct {
     signature: manifest.Signature,
     local_unlock_verified: bool,
     phishing_resistant: bool,
+    hardware_backed_credential: bool,
+    device_platform_backed: bool,
+    primary_device_assertion: bool,
+    device_trust_generation: u32,
+    unlock_age_ticks: u64,
 
     pub fn relyingPartySlice(self: *const Assertion) []const u8 {
         return self.relying_party_id[0..self.relying_party_id_len];
@@ -221,6 +228,8 @@ pub const Store = struct {
             false,
         );
         credential.secret_id = secret.id;
+        credential.hardware_backed_credential = secret.hardware_backed;
+        credential.sealed_credential_secret = secret.sealed_digest_present;
         credential.sealed_secret_digest = secret.sealed_digest;
         credential.credential_digest = credentialDigest(
             credential.owner,
@@ -246,7 +255,7 @@ pub const Store = struct {
         if (request.challenge.len > MAX_CHALLENGE_BYTES) return error.ChallengeTooLong;
         const credential = self.findCredential(request.credential_id) orelse return error.CredentialNotFound;
         try requireActiveCredential(credential);
-        try requireCredentialDevice(graph, credential, request.device);
+        const device_record = try requireCredentialDevice(graph, credential, request.device);
         if (!std.mem.eql(u8, credential.relyingPartySlice(), request.relying_party_id)) return error.PhishingOriginRejected;
         if (!originMatchesRelyingParty(request.origin, credential.relyingPartySlice())) return error.PhishingOriginRejected;
 
@@ -284,6 +293,11 @@ pub const Store = struct {
             .signature = signature,
             .local_unlock_verified = true,
             .phishing_resistant = true,
+            .hardware_backed_credential = credential.hardware_backed_credential and credential.sealed_credential_secret,
+            .device_platform_backed = device_record.usesPlatformBackedKey(),
+            .primary_device_assertion = credential.primary_device.eql(request.device),
+            .device_trust_generation = device_record.trust_generation,
+            .unlock_age_ticks = request.tick - unlock.issued_at_ticks,
         };
         assertion.relying_party_id_len = native_util.copyTextExact(&assertion.relying_party_id, credential.relyingPartySlice()) catch unreachable;
         assertion.origin_len = native_util.copyTextExact(&assertion.origin, request.origin) catch return error.OriginTooLong;
@@ -427,11 +441,12 @@ fn requireCredentialDevice(
     graph: *const device_graph.Graph,
     credential: *const CredentialRecord,
     device: principal.PrincipalId,
-) Error!void {
-    _ = try requireTrustedDeviceForOwner(graph, credential.owner, device);
+) Error!*const device_graph.DeviceRecord {
+    const device_record = try requireTrustedDeviceForOwner(graph, credential.owner, device);
     if (credential.scope == .device_bound and !credential.primary_device.eql(device)) {
         return error.DeviceBoundCredentialWrongDevice;
     }
+    return device_record;
 }
 
 fn verifyRecoveryThreshold(
@@ -517,6 +532,8 @@ fn zeroCredential() CredentialRecord {
         .local_unlock_required = true,
         .phishing_resistant = true,
         .synced_to_device_graph = false,
+        .hardware_backed_credential = false,
+        .sealed_credential_secret = false,
         .relying_party_id_len = 0,
         .relying_party_id = [_]u8{0} ** MAX_RP_ID_BYTES,
         .label_len = 0,
@@ -673,6 +690,11 @@ test "os identity creates passkey credentials and rejects phishing origins" {
     });
     try std.testing.expect(assertion.local_unlock_verified);
     try std.testing.expect(assertion.phishing_resistant);
+    try std.testing.expect(assertion.hardware_backed_credential);
+    try std.testing.expect(!assertion.device_platform_backed);
+    try std.testing.expect(assertion.primary_device_assertion);
+    try std.testing.expectEqual(@as(u32, 1), assertion.device_trust_generation);
+    try std.testing.expectEqual(@as(u64, 1), assertion.unlock_age_ticks);
     try std.testing.expectEqual(@as(u64, 1), assertion.assertion_counter);
     try std.testing.expectEqualStrings("accounts.example", assertion.relyingPartySlice());
 
@@ -795,6 +817,9 @@ test "os identity recovers synced credentials through trusted device graph" {
         .tick = 8,
     });
     try std.testing.expectEqual(@as(u32, 2), assertion.credential_generation);
+    try std.testing.expect(assertion.hardware_backed_credential);
+    try std.testing.expect(assertion.primary_device_assertion);
+    try std.testing.expectEqual(@as(u64, 1), assertion.unlock_age_ticks);
 
     const bound_recovery_unlock = try createLocalUnlockProof(user, phone, "admin.zigos.dev", "recover-bound", .recovery_key, 9, 12, phone_identity);
     try std.testing.expectError(error.DeviceBoundRecoveryDenied, identities.recoverCredential(&graph, &secrets, .{

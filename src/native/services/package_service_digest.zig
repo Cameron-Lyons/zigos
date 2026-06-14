@@ -12,12 +12,26 @@ pub fn digestBundle(bundle: manifest.BundleManifest) Digest {
     crypto_hash.updateInt(&hasher, "version-minor", bundle.version_minor);
     crypto_hash.updateEnum(&hasher, "update-channel", bundle.update_channel);
     crypto_hash.updateBytes(&hasher, "ai-model-family", bundle.ai_metadata.model_family);
+    crypto_hash.updateBytes(&hasher, "ai-model-digest", bundle.ai_metadata.model_digest);
+    crypto_hash.updateBytes(&hasher, "ai-model-source-identity", bundle.ai_metadata.model_source_identity);
     crypto_hash.updateEnum(&hasher, "ai-locality", bundle.ai_metadata.locality);
     crypto_hash.updateBool(&hasher, "ai-offline-required", bundle.ai_metadata.offline_required);
     crypto_hash.updateBool(&hasher, "ai-private-context", bundle.ai_metadata.private_context);
     crypto_hash.updateBool(&hasher, "ai-training-allowed", bundle.ai_metadata.training_allowed);
     crypto_hash.updateInt(&hasher, "ai-max-context-bytes", bundle.ai_metadata.max_context_bytes);
     crypto_hash.updateBool(&hasher, "ai-audit-prompt-use", bundle.ai_metadata.audit_prompt_use);
+    crypto_hash.updateBool(&hasher, "data-rights-user-data-present", bundle.data_rights.user_data_present);
+    crypto_hash.updateBool(&hasher, "data-rights-portable-export", bundle.data_rights.portable_export);
+    crypto_hash.updateBool(&hasher, "data-rights-deletion-supported", bundle.data_rights.deletion_supported);
+    crypto_hash.updateBool(&hasher, "data-rights-deletion-receipt-required", bundle.data_rights.deletion_receipt_required);
+    crypto_hash.updateBytes(&hasher, "data-rights-export-format", bundle.data_rights.export_format);
+    crypto_hash.updateBytes(&hasher, "supply-chain-sbom-digest", bundle.supply_chain.sbom_digest);
+    crypto_hash.updateBytes(&hasher, "supply-chain-source-archive-digest", bundle.supply_chain.source_archive_digest);
+    crypto_hash.updateBytes(&hasher, "supply-chain-build-recipe-digest", bundle.supply_chain.build_recipe_digest);
+    crypto_hash.updateBytes(&hasher, "supply-chain-vulnerability-scan-digest", bundle.supply_chain.vulnerability_scan_digest);
+    crypto_hash.updateBytes(&hasher, "supply-chain-build-provenance-identity", bundle.supply_chain.build_provenance_identity);
+    crypto_hash.updateBool(&hasher, "supply-chain-reproducible-build", bundle.supply_chain.reproducible_build);
+    crypto_hash.updateBool(&hasher, "supply-chain-trusted-builder", bundle.supply_chain.trusted_builder);
 
     for (bundle.provided_interfaces, 0..) |interface, index| {
         crypto_hash.updateInt(&hasher, "provided-index", index);

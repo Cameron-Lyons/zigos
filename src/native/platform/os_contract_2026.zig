@@ -2,11 +2,13 @@ const std = @import("std");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const event_ledger = @import("event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
+const os_identity = @import("os_identity.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const manifest_linter = @import("../sdk/manifest_linter.zig");
 const package_digest = @import("../services/package_service_digest.zig");
+const package_service = @import("../services/package_service.zig");
 const package_model = @import("../services/package_service_model.zig");
 const typed_component_abi = @import("../services/typed_component_abi.zig");
 
@@ -104,6 +106,106 @@ pub const ThirdFeature = enum(u8) {
 };
 
 pub const third_feature_count = std.meta.fields(ThirdFeature).len;
+
+pub const FourthFeature = enum(u8) {
+    data_rights_manifest,
+    private_object_data_rights_validation,
+    deletion_receipt_manifest_validation,
+    data_rights_digest_covers_export_format,
+    package_preserves_data_rights,
+    typed_data_rights_service,
+    data_export_prepare_operation,
+    data_delete_request_operation,
+    data_delete_receipt_operation,
+    native_registry_data_rights_discovery,
+    policy_data_export_gate,
+    policy_data_delete_gate,
+    policy_export_byte_budget,
+    policy_deletion_receipt_required,
+    policy_data_rights_request,
+    data_export_ledger,
+    data_deletion_ledger,
+    data_rights_diagnostics,
+    data_export_redaction,
+    data_deletion_receipt_summary,
+};
+
+pub const fourth_feature_count = std.meta.fields(FourthFeature).len;
+
+pub const FifthFeature = enum(u8) {
+    ai_model_digest_manifest,
+    ai_model_source_manifest,
+    local_ai_digest_validation,
+    local_ai_source_validation,
+    private_ai_locality_validation,
+    ai_digest_covers_model_provenance,
+    package_preserves_model_digest,
+    package_preserves_model_source,
+    typed_ai_model_registry_service,
+    ai_model_register_operation,
+    ai_model_attest_operation,
+    ai_model_revoke_operation,
+    native_registry_ai_model_discovery,
+    policy_ai_model_measurement_gate,
+    policy_ai_model_source_gate,
+    policy_ai_model_age_gate,
+    ai_use_provenance_request,
+    ai_model_attestation_ledger,
+    ai_model_attestation_diagnostics,
+    ai_model_rejection_summary,
+};
+
+pub const fifth_feature_count = std.meta.fields(FifthFeature).len;
+
+pub const SixthFeature = enum(u8) {
+    credential_assertion_hardware_backed,
+    credential_assertion_platform_device,
+    credential_assertion_primary_device,
+    credential_assertion_trust_generation,
+    credential_assertion_unlock_age,
+    policy_hardware_session_gate,
+    policy_platform_device_session_gate,
+    policy_primary_device_session_gate,
+    policy_unlock_age_gate,
+    session_trust_request,
+    typed_identity_session_service,
+    identity_session_authorize_operation,
+    identity_session_step_up_operation,
+    identity_session_revoke_operation,
+    native_registry_identity_session_discovery,
+    session_posture_ledger,
+    session_posture_diagnostics,
+    session_posture_denial_summary,
+    identity_session_redaction,
+    policy_digest_covers_session_gates,
+};
+
+pub const sixth_feature_count = std.meta.fields(SixthFeature).len;
+
+pub const SeventhFeature = enum(u8) {
+    supply_chain_manifest,
+    sbom_digest_manifest,
+    source_archive_digest_manifest,
+    build_recipe_digest_manifest,
+    vulnerability_scan_digest_manifest,
+    builder_identity_manifest,
+    reproducible_build_validation,
+    trusted_builder_validation,
+    supply_chain_digest_covers_sbom,
+    supply_chain_digest_covers_builder,
+    package_preserves_supply_chain,
+    package_resolves_supply_chain,
+    policy_package_sbom_gate,
+    policy_package_reproducible_gate,
+    policy_package_builder_gate,
+    policy_vulnerability_scan_gate,
+    package_provenance_request,
+    package_provenance_policy_decision,
+    package_install_provenance_error,
+    install_source_policy_still_present,
+};
+
+pub const seventh_feature_count = std.meta.fields(SeventhFeature).len;
 
 pub const Checklist = struct {
     native_only_apps: bool,
@@ -233,6 +335,86 @@ pub const ThirdChecklist = struct {
     }
 
     pub fn satisfied(self: ThirdChecklist, feature: ThirdFeature) bool {
+        return self.satisfied_features[@intFromEnum(feature)];
+    }
+};
+
+pub const FourthChecklist = struct {
+    satisfied_features: [fourth_feature_count]bool,
+
+    pub fn complete(self: FourthChecklist) bool {
+        return self.satisfiedCount() == fourth_feature_count;
+    }
+
+    pub fn satisfiedCount(self: FourthChecklist) usize {
+        var count: usize = 0;
+        for (self.satisfied_features) |satisfied_feature| {
+            if (satisfied_feature) count += 1;
+        }
+        return count;
+    }
+
+    pub fn satisfied(self: FourthChecklist, feature: FourthFeature) bool {
+        return self.satisfied_features[@intFromEnum(feature)];
+    }
+};
+
+pub const FifthChecklist = struct {
+    satisfied_features: [fifth_feature_count]bool,
+
+    pub fn complete(self: FifthChecklist) bool {
+        return self.satisfiedCount() == fifth_feature_count;
+    }
+
+    pub fn satisfiedCount(self: FifthChecklist) usize {
+        var count: usize = 0;
+        for (self.satisfied_features) |satisfied_feature| {
+            if (satisfied_feature) count += 1;
+        }
+        return count;
+    }
+
+    pub fn satisfied(self: FifthChecklist, feature: FifthFeature) bool {
+        return self.satisfied_features[@intFromEnum(feature)];
+    }
+};
+
+pub const SixthChecklist = struct {
+    satisfied_features: [sixth_feature_count]bool,
+
+    pub fn complete(self: SixthChecklist) bool {
+        return self.satisfiedCount() == sixth_feature_count;
+    }
+
+    pub fn satisfiedCount(self: SixthChecklist) usize {
+        var count: usize = 0;
+        for (self.satisfied_features) |satisfied_feature| {
+            if (satisfied_feature) count += 1;
+        }
+        return count;
+    }
+
+    pub fn satisfied(self: SixthChecklist, feature: SixthFeature) bool {
+        return self.satisfied_features[@intFromEnum(feature)];
+    }
+};
+
+pub const SeventhChecklist = struct {
+    satisfied_features: [seventh_feature_count]bool,
+
+    pub fn complete(self: SeventhChecklist) bool {
+        return self.satisfiedCount() == seventh_feature_count;
+    }
+
+    pub fn satisfiedCount(self: SeventhChecklist) usize {
+        var count: usize = 0;
+        for (self.satisfied_features) |satisfied_feature| {
+            if (satisfied_feature) count += 1;
+        }
+        return count;
+    }
+
+    pub fn satisfied(self: SeventhChecklist, feature: SeventhFeature) bool {
         return self.satisfied_features[@intFromEnum(feature)];
     }
 };
@@ -587,6 +769,302 @@ pub fn currentRepositoryThirdContract() ThirdChecklist {
     return .{ .satisfied_features = features };
 }
 
+pub fn currentRepositoryFourthContract() FourthChecklist {
+    var features = [_]bool{false} ** fourth_feature_count;
+    const private_object = manifest.PermissionRequest{
+        .kind = .object_access,
+        .resource = "workspace:private-notes",
+        .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+        .local_only = true,
+        .sensitivity = .private_user_data,
+        .purpose = .document_editing,
+        .retention_days = 30,
+    };
+    const private_object_requests = [_]manifest.PermissionRequest{private_object};
+    const data_rights_a = manifest.BundleManifest{
+        .bundle_id = "app.private-notes",
+        .display_name = "Private Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &private_object_requests,
+        .data_rights = .{
+            .portable_export = true,
+            .deletion_supported = true,
+            .deletion_receipt_required = true,
+            .export_format = "application/zigos-object-archive",
+        },
+    };
+    var data_rights_b = data_rights_a;
+    data_rights_b.data_rights = .{
+        .portable_export = true,
+        .deletion_supported = true,
+        .deletion_receipt_required = true,
+        .export_format = "application/json",
+    };
+    const digest_a = package_digest.digestBundle(data_rights_a);
+    const digest_b = package_digest.digestBundle(data_rights_b);
+    const data_rights_contract = typed_component_abi.contractFor("zigos.data.rights");
+
+    features[@intFromEnum(FourthFeature.data_rights_manifest)] = @hasField(manifest.BundleManifest, "data_rights") and @hasField(manifest.DataRightsDecl, "portable_export");
+    features[@intFromEnum(FourthFeature.private_object_data_rights_validation)] = validationFailsWith(.{
+        .bundle_id = "app.private-notes",
+        .display_name = "Private Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &private_object_requests,
+    }, error.DataRightsExportMissing);
+    features[@intFromEnum(FourthFeature.deletion_receipt_manifest_validation)] = validationFailsWith(.{
+        .bundle_id = "app.private-notes",
+        .display_name = "Private Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &private_object_requests,
+        .data_rights = .{
+            .portable_export = true,
+            .deletion_supported = true,
+            .export_format = "application/zigos-object-archive",
+        },
+    }, error.DataDeletionReceiptRequired);
+    features[@intFromEnum(FourthFeature.data_rights_digest_covers_export_format)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@intFromEnum(FourthFeature.package_preserves_data_rights)] = @hasField(package_model.BundleRevision, "data_rights") and @hasField(package_model.ResolvedManifest, "data_rights");
+    features[@intFromEnum(FourthFeature.typed_data_rights_service)] = data_rights_contract != null;
+    features[@intFromEnum(FourthFeature.data_export_prepare_operation)] = data_rights_contract.?.operation(.data_export_prepare) != null;
+    features[@intFromEnum(FourthFeature.data_delete_request_operation)] = data_rights_contract.?.operation(.data_delete_request) != null;
+    features[@intFromEnum(FourthFeature.data_delete_receipt_operation)] = data_rights_contract.?.operation(.data_delete_receipt) != null;
+    features[@intFromEnum(FourthFeature.native_registry_data_rights_discovery)] = typed_component_abi.interfaceId(.data_rights) == .data_rights;
+    features[@intFromEnum(FourthFeature.policy_data_export_gate)] = @hasField(policy_object.CreateRequest, "data_export_allowed");
+    features[@intFromEnum(FourthFeature.policy_data_delete_gate)] = @hasField(policy_object.CreateRequest, "data_deletion_allowed");
+    features[@intFromEnum(FourthFeature.policy_export_byte_budget)] = @hasField(policy_object.CreateRequest, "max_data_export_bytes");
+    features[@intFromEnum(FourthFeature.policy_deletion_receipt_required)] = @hasField(policy_object.CreateRequest, "require_data_deletion_receipt");
+    features[@intFromEnum(FourthFeature.policy_data_rights_request)] = @hasField(policy_object.DataRightsRequest, "deletion_receipt_present");
+    features[@intFromEnum(FourthFeature.data_export_ledger)] = event_ledger.EventKind.data_export == .data_export;
+    features[@intFromEnum(FourthFeature.data_deletion_ledger)] = event_ledger.EventKind.data_deletion == .data_deletion;
+    features[@intFromEnum(FourthFeature.data_rights_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "data_export_events");
+    features[@intFromEnum(FourthFeature.data_export_redaction)] = @hasField(event_ledger.DiagnosticSummary, "data_export_denials");
+    features[@intFromEnum(FourthFeature.data_deletion_receipt_summary)] = @hasField(event_ledger.DiagnosticSummary, "data_deletion_receipts");
+
+    return .{ .satisfied_features = features };
+}
+
+pub fn currentRepositoryFifthContract() FifthChecklist {
+    var features = [_]bool{false} ** fifth_feature_count;
+    const measured_local_ai = manifest.BundleManifest{
+        .bundle_id = "app.local-ai",
+        .display_name = "Local AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .model_digest = "sha256:tiny-local-v1",
+            .model_source_identity = "store:zigos/local-models",
+            .locality = .local_only,
+            .private_context = true,
+        },
+    };
+    var measured_local_ai_v2 = measured_local_ai;
+    measured_local_ai_v2.ai_metadata = .{
+        .model_family = "tiny-local",
+        .model_digest = "sha256:tiny-local-v2",
+        .model_source_identity = "store:zigos/local-models",
+        .locality = .local_only,
+        .private_context = true,
+    };
+    const digest_v1 = package_digest.digestBundle(measured_local_ai);
+    const digest_v2 = package_digest.digestBundle(measured_local_ai_v2);
+    const model_registry_contract = typed_component_abi.contractFor("zigos.ai.model.registry");
+
+    features[@intFromEnum(FifthFeature.ai_model_digest_manifest)] = @hasField(manifest.AiMetadata, "model_digest");
+    features[@intFromEnum(FifthFeature.ai_model_source_manifest)] = @hasField(manifest.AiMetadata, "model_source_identity");
+    features[@intFromEnum(FifthFeature.local_ai_digest_validation)] = validationFailsWith(.{
+        .bundle_id = "app.local-ai",
+        .display_name = "Local AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .locality = .local_only,
+        },
+    }, error.AiModelDigestMissing);
+    features[@intFromEnum(FifthFeature.local_ai_source_validation)] = validationFailsWith(.{
+        .bundle_id = "app.local-ai",
+        .display_name = "Local AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .model_digest = "sha256:tiny-local",
+            .locality = .local_only,
+        },
+    }, error.AiModelSourceMissing);
+    features[@intFromEnum(FifthFeature.private_ai_locality_validation)] = validationFailsWith(.{
+        .bundle_id = "app.remote-private-ai",
+        .display_name = "Remote Private AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "remote-private",
+            .locality = .remote_allowed,
+            .private_context = true,
+        },
+    }, error.PrivateAiRequiresLocalModel);
+    features[@intFromEnum(FifthFeature.ai_digest_covers_model_provenance)] = !std.mem.eql(u8, &digest_v1, &digest_v2);
+    features[@intFromEnum(FifthFeature.package_preserves_model_digest)] = @hasField(package_model.StoredAiMetadata, "model_digest");
+    features[@intFromEnum(FifthFeature.package_preserves_model_source)] = @hasField(package_model.StoredAiMetadata, "model_source_identity");
+    features[@intFromEnum(FifthFeature.typed_ai_model_registry_service)] = model_registry_contract != null;
+    features[@intFromEnum(FifthFeature.ai_model_register_operation)] = model_registry_contract.?.operation(.ai_model_register) != null;
+    features[@intFromEnum(FifthFeature.ai_model_attest_operation)] = model_registry_contract.?.operation(.ai_model_attest) != null;
+    features[@intFromEnum(FifthFeature.ai_model_revoke_operation)] = model_registry_contract.?.operation(.ai_model_revoke) != null;
+    features[@intFromEnum(FifthFeature.native_registry_ai_model_discovery)] = typed_component_abi.interfaceId(.ai_model_registry) == .ai_model_registry;
+    features[@intFromEnum(FifthFeature.policy_ai_model_measurement_gate)] = @hasField(policy_object.CreateRequest, "require_ai_model_measurement");
+    features[@intFromEnum(FifthFeature.policy_ai_model_source_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_ai_model_source");
+    features[@intFromEnum(FifthFeature.policy_ai_model_age_gate)] = @hasField(policy_object.CreateRequest, "max_ai_model_age_days");
+    features[@intFromEnum(FifthFeature.ai_use_provenance_request)] = @hasField(policy_object.AiUseRequest, "local_model_measured") and @hasField(policy_object.AiUseRequest, "model_source_trusted");
+    features[@intFromEnum(FifthFeature.ai_model_attestation_ledger)] = event_ledger.EventKind.ai_model_attestation == .ai_model_attestation;
+    features[@intFromEnum(FifthFeature.ai_model_attestation_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "ai_model_attestations");
+    features[@intFromEnum(FifthFeature.ai_model_rejection_summary)] = @hasField(event_ledger.DiagnosticSummary, "ai_model_rejections");
+
+    return .{ .satisfied_features = features };
+}
+
+pub fn currentRepositorySixthContract() SixthChecklist {
+    var features = [_]bool{false} ** sixth_feature_count;
+    const identity_contract = typed_component_abi.contractFor("zigos.identity.session");
+
+    features[@intFromEnum(SixthFeature.credential_assertion_hardware_backed)] = @hasField(os_identity.Assertion, "hardware_backed_credential");
+    features[@intFromEnum(SixthFeature.credential_assertion_platform_device)] = @hasField(os_identity.Assertion, "device_platform_backed");
+    features[@intFromEnum(SixthFeature.credential_assertion_primary_device)] = @hasField(os_identity.Assertion, "primary_device_assertion");
+    features[@intFromEnum(SixthFeature.credential_assertion_trust_generation)] = @hasField(os_identity.Assertion, "device_trust_generation");
+    features[@intFromEnum(SixthFeature.credential_assertion_unlock_age)] = @hasField(os_identity.Assertion, "unlock_age_ticks");
+    features[@intFromEnum(SixthFeature.policy_hardware_session_gate)] = @hasField(policy_object.CreateRequest, "require_hardware_backed_session");
+    features[@intFromEnum(SixthFeature.policy_platform_device_session_gate)] = @hasField(policy_object.CreateRequest, "require_platform_backed_device_session");
+    features[@intFromEnum(SixthFeature.policy_primary_device_session_gate)] = @hasField(policy_object.CreateRequest, "require_primary_device_session");
+    features[@intFromEnum(SixthFeature.policy_unlock_age_gate)] = @hasField(policy_object.CreateRequest, "max_session_unlock_age_ticks");
+    features[@intFromEnum(SixthFeature.session_trust_request)] = @hasField(policy_object.SessionTrustRequest, "hardware_backed_credential") and
+        @hasField(policy_object.SessionTrustRequest, "unlock_age_ticks") and
+        @hasDecl(policy_object.Directory, "sessionTrustDecision");
+    features[@intFromEnum(SixthFeature.typed_identity_session_service)] = identity_contract != null;
+    features[@intFromEnum(SixthFeature.identity_session_authorize_operation)] = if (identity_contract) |contract|
+        contract.operation(.identity_session_authorize) != null
+    else
+        false;
+    features[@intFromEnum(SixthFeature.identity_session_step_up_operation)] = if (identity_contract) |contract|
+        contract.operation(.identity_session_step_up) != null
+    else
+        false;
+    features[@intFromEnum(SixthFeature.identity_session_revoke_operation)] = if (identity_contract) |contract|
+        contract.operation(.identity_session_revoke) != null
+    else
+        false;
+    features[@intFromEnum(SixthFeature.native_registry_identity_session_discovery)] = typed_component_abi.interfaceId(.identity_session) == .identity_session;
+    features[@intFromEnum(SixthFeature.session_posture_ledger)] = event_ledger.EventKind.session_posture == .session_posture and @hasDecl(event_ledger.Ledger, "recordSessionPosture");
+    features[@intFromEnum(SixthFeature.session_posture_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_events");
+    features[@intFromEnum(SixthFeature.session_posture_denial_summary)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_denials");
+    features[@intFromEnum(SixthFeature.identity_session_redaction)] = sessionPostureRedactionCheck();
+    features[@intFromEnum(SixthFeature.policy_digest_covers_session_gates)] = @hasField(policy_object.PolicyObject, "require_hardware_backed_session") and
+        @hasField(policy_object.PolicyObject, "require_platform_backed_device_session") and
+        @hasField(policy_object.PolicyObject, "require_primary_device_session") and
+        @hasField(policy_object.PolicyObject, "max_session_unlock_age_ticks");
+
+    return .{ .satisfied_features = features };
+}
+
+fn sessionPostureRedactionCheck() bool {
+    var ledger = event_ledger.Ledger.init();
+    ledger.recordSessionPosture(
+        principal.PrincipalId{ .kind = .user, .serial = 2026 },
+        2606,
+        false,
+        true,
+        true,
+        true,
+        9,
+        77,
+        "protected session posture evidence",
+    ) catch return false;
+    const summary = ledger.userVisibleDiagnosticSummary();
+    return summary.session_posture_events == 1 and
+        summary.session_posture_denials == 1 and
+        summary.protected_details_redacted == 1;
+}
+
+pub fn currentRepositorySeventhContract() SeventhChecklist {
+    var features = [_]bool{false} ** seventh_feature_count;
+    const base_bundle = manifest.BundleManifest{
+        .bundle_id = "app.supply",
+        .display_name = "Supply",
+        .publisher = "zigos.dev",
+        .supply_chain = .{
+            .sbom_digest = "sha256:supply-sbom",
+            .source_archive_digest = "sha256:supply-source",
+            .build_recipe_digest = "sha256:supply-build",
+            .vulnerability_scan_digest = "sha256:supply-vuln",
+            .build_provenance_identity = "builder:zigos/release",
+            .reproducible_build = true,
+            .trusted_builder = true,
+        },
+    };
+    var builder_b = base_bundle;
+    builder_b.supply_chain = .{
+        .sbom_digest = "sha256:supply-sbom",
+        .source_archive_digest = "sha256:supply-source",
+        .build_recipe_digest = "sha256:supply-build",
+        .vulnerability_scan_digest = "sha256:supply-vuln",
+        .build_provenance_identity = "builder:zigos/nightly",
+        .reproducible_build = true,
+        .trusted_builder = true,
+    };
+    var sbom_b = base_bundle;
+    sbom_b.supply_chain = .{
+        .sbom_digest = "sha256:supply-sbom-v2",
+        .source_archive_digest = "sha256:supply-source",
+        .build_recipe_digest = "sha256:supply-build",
+        .vulnerability_scan_digest = "sha256:supply-vuln",
+        .build_provenance_identity = "builder:zigos/release",
+        .reproducible_build = true,
+        .trusted_builder = true,
+    };
+    const digest_a = package_digest.digestBundle(base_bundle);
+    const digest_builder_b = package_digest.digestBundle(builder_b);
+    const digest_sbom_b = package_digest.digestBundle(sbom_b);
+
+    features[@intFromEnum(SeventhFeature.supply_chain_manifest)] = @hasField(manifest.BundleManifest, "supply_chain");
+    features[@intFromEnum(SeventhFeature.sbom_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "sbom_digest");
+    features[@intFromEnum(SeventhFeature.source_archive_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "source_archive_digest");
+    features[@intFromEnum(SeventhFeature.build_recipe_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "build_recipe_digest");
+    features[@intFromEnum(SeventhFeature.vulnerability_scan_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "vulnerability_scan_digest");
+    features[@intFromEnum(SeventhFeature.builder_identity_manifest)] = @hasField(manifest.SupplyChainDecl, "build_provenance_identity");
+    features[@intFromEnum(SeventhFeature.reproducible_build_validation)] = validationFailsWith(.{
+        .bundle_id = "app.repro",
+        .display_name = "Repro",
+        .publisher = "zigos.dev",
+        .supply_chain = .{
+            .reproducible_build = true,
+            .build_recipe_digest = "sha256:recipe",
+        },
+    }, error.ReproducibleBuildRequiresSourceArchive);
+    features[@intFromEnum(SeventhFeature.trusted_builder_validation)] = validationFailsWith(.{
+        .bundle_id = "app.builder",
+        .display_name = "Builder",
+        .publisher = "zigos.dev",
+        .supply_chain = .{
+            .trusted_builder = true,
+        },
+    }, error.TrustedBuilderRequiresIdentity);
+    features[@intFromEnum(SeventhFeature.supply_chain_digest_covers_sbom)] = !std.mem.eql(u8, &digest_a, &digest_sbom_b);
+    features[@intFromEnum(SeventhFeature.supply_chain_digest_covers_builder)] = !std.mem.eql(u8, &digest_a, &digest_builder_b);
+    features[@intFromEnum(SeventhFeature.package_preserves_supply_chain)] = @hasField(package_model.BundleRevision, "supply_chain");
+    features[@intFromEnum(SeventhFeature.package_resolves_supply_chain)] = @hasField(package_model.ResolvedManifest, "supply_chain");
+    features[@intFromEnum(SeventhFeature.policy_package_sbom_gate)] = @hasField(policy_object.CreateRequest, "require_package_sbom");
+    features[@intFromEnum(SeventhFeature.policy_package_reproducible_gate)] = @hasField(policy_object.CreateRequest, "require_reproducible_package_build");
+    features[@intFromEnum(SeventhFeature.policy_package_builder_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_package_builder");
+    features[@intFromEnum(SeventhFeature.policy_vulnerability_scan_gate)] = @hasField(policy_object.CreateRequest, "require_vulnerability_scan");
+    features[@intFromEnum(SeventhFeature.package_provenance_request)] = @hasField(policy_object.PackageProvenanceRequest, "reproducible_build");
+    features[@intFromEnum(SeventhFeature.package_provenance_policy_decision)] = @hasDecl(policy_object.Directory, "packageProvenanceDecision");
+    features[@intFromEnum(SeventhFeature.package_install_provenance_error)] = packageProvenanceInstallErrorPresent();
+    features[@intFromEnum(SeventhFeature.install_source_policy_still_present)] = @hasField(policy_object.CreateRequest, "install_source_mode") and
+        @hasDecl(policy_object.Directory, "installSourceDecision");
+
+    return .{ .satisfied_features = features };
+}
+
+fn packageProvenanceInstallErrorPresent() bool {
+    const package_provenance_error: package_service.Error = error.PackageProvenanceDenied;
+    return package_provenance_error == error.PackageProvenanceDenied;
+}
+
 test "2026 OS contract keeps sixteen modernization features satisfied" {
     const checklist = currentRepositoryContract();
     try std.testing.expectEqual(@as(usize, 16), feature_count);
@@ -614,6 +1092,46 @@ test "2026 OS contract keeps thirty two third-loop lifecycle passes satisfied" {
     try std.testing.expect(checklist.satisfied(.typed_consent_receipts_service));
     try std.testing.expect(checklist.satisfied(.typed_permission_lease_service));
     try std.testing.expect(checklist.satisfied(.permission_use_policy_request));
+}
+
+test "2026 OS contract keeps twenty fourth-loop data-rights passes satisfied" {
+    const checklist = currentRepositoryFourthContract();
+    try std.testing.expectEqual(@as(usize, 20), fourth_feature_count);
+    try std.testing.expectEqual(fourth_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.typed_data_rights_service));
+    try std.testing.expect(checklist.satisfied(.policy_deletion_receipt_required));
+    try std.testing.expect(checklist.satisfied(.data_deletion_receipt_summary));
+}
+
+test "2026 OS contract keeps twenty fifth-loop AI model provenance passes satisfied" {
+    const checklist = currentRepositoryFifthContract();
+    try std.testing.expectEqual(@as(usize, 20), fifth_feature_count);
+    try std.testing.expectEqual(fifth_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.typed_ai_model_registry_service));
+    try std.testing.expect(checklist.satisfied(.policy_ai_model_measurement_gate));
+    try std.testing.expect(checklist.satisfied(.ai_model_rejection_summary));
+}
+
+test "2026 OS contract keeps twenty sixth-loop trusted session passes satisfied" {
+    const checklist = currentRepositorySixthContract();
+    try std.testing.expectEqual(@as(usize, 20), sixth_feature_count);
+    try std.testing.expectEqual(sixth_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.typed_identity_session_service));
+    try std.testing.expect(checklist.satisfied(.policy_unlock_age_gate));
+    try std.testing.expect(checklist.satisfied(.identity_session_redaction));
+}
+
+test "2026 OS contract keeps twenty seventh-loop supply chain passes satisfied" {
+    const checklist = currentRepositorySeventhContract();
+    try std.testing.expectEqual(@as(usize, 20), seventh_feature_count);
+    try std.testing.expectEqual(seventh_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.supply_chain_manifest));
+    try std.testing.expect(checklist.satisfied(.policy_package_sbom_gate));
+    try std.testing.expect(checklist.satisfied(.package_install_provenance_error));
 }
 
 test "2026 OS contract proves AI policy and diagnostics stay private by default" {
