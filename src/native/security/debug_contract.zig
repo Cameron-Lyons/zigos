@@ -137,6 +137,8 @@ pub const AuthorityGraphEdge = struct {
     broker_service_id: u64 = 0,
     trace_id: u64 = 0,
     parent_trace_id: u64 = 0,
+    delegation_depth: u8 = 0,
+    max_delegation_depth: u8 = 0,
     expires_at_ticks: u64 = 0,
     revocation_generation: u32 = 0,
     usable: bool = false,
@@ -144,7 +146,7 @@ pub const AuthorityGraphEdge = struct {
     pub fn render(self: *const AuthorityGraphEdge, buffer: []u8) []const u8 {
         return std.fmt.bufPrint(
             buffer,
-            "task={d} capability={d} holder={s}:{d} issuer={s}:{d} target={s}:{d} rights=0x{x} scope_task={d} scope_workspace={d} policy_generation={d} source_task={d} broker_service={d} trace=0x{x} parent=0x{x} expires={d} generation={d} usable={s}",
+            "task={d} capability={d} holder={s}:{d} issuer={s}:{d} target={s}:{d} rights=0x{x} scope_task={d} scope_workspace={d} policy_generation={d} source_task={d} broker_service={d} trace=0x{x} parent=0x{x} delegation_depth={d}/{d} expires={d} generation={d} usable={s}",
             .{
                 self.task_id,
                 self.capability_id,
@@ -162,6 +164,8 @@ pub const AuthorityGraphEdge = struct {
                 self.broker_service_id,
                 self.trace_id,
                 self.parent_trace_id,
+                self.delegation_depth,
+                self.max_delegation_depth,
                 self.expires_at_ticks,
                 self.revocation_generation,
                 native_util.yesNo(self.usable),
@@ -385,7 +389,7 @@ pub fn syscallProvenance(
 pub fn authorityGraphEdge(
     task_id: u64,
     owned: capability.Capability,
-    now_ticks: u64,
+    usable: bool,
 ) AuthorityGraphEdge {
     return .{
         .task_id = task_id,
@@ -402,9 +406,11 @@ pub fn authorityGraphEdge(
         .broker_service_id = owned.audit.broker_service_id,
         .trace_id = owned.traceId(),
         .parent_trace_id = owned.audit.parent_trace_id,
+        .delegation_depth = owned.audit.delegation_depth,
+        .max_delegation_depth = owned.audit.max_delegation_depth,
         .expires_at_ticks = owned.lease.expires_at_ticks,
         .revocation_generation = owned.revocation_generation,
-        .usable = owned.lease.isActive(now_ticks),
+        .usable = usable,
     };
 }
 
@@ -502,10 +508,11 @@ test "provenance records have stable trace ids and graph edges expose capability
         .revocation_generation = 1,
         .audit = .{ .policy_generation = 2, .source_task_id = 3, .broker_service_id = 9 },
     };
-    const edge = authorityGraphEdge(3, cap, 10);
+    const edge = authorityGraphEdge(3, cap, cap.lease.isActive(10));
     try std.testing.expectEqual(@as(u64, 44), edge.capability_id);
     try std.testing.expect(edge.usable);
     try std.testing.expect(edge.trace_id != 0);
+    try std.testing.expectEqual(@as(u8, capability.DEFAULT_MAX_DELEGATION_DEPTH), edge.max_delegation_depth);
 }
 
 test "crash provenance carries deterministic redaction metadata without raw reason text" {

@@ -172,14 +172,18 @@ fn resolveDecisionExpiry(
 ) ?u64 {
     const requested_lease = decision.lease_ticks orelse {
         if (request.max_lease_ticks == 0) return null;
-        return now_ticks + request.max_lease_ticks;
+        return leaseEndFromTicks(now_ticks, request.max_lease_ticks);
     };
 
     const clamped_lease = if (request.max_lease_ticks != 0)
         @min(requested_lease, request.max_lease_ticks)
     else
         requested_lease;
-    return now_ticks + clamped_lease;
+    return leaseEndFromTicks(now_ticks, clamped_lease);
+}
+
+fn leaseEndFromTicks(now_ticks: u64, lease_ticks: u64) u64 {
+    return std.math.add(u64, now_ticks, lease_ticks) catch std.math.maxInt(u64);
 }
 
 fn findDecision(
@@ -435,6 +439,33 @@ test "decisionsToGrants clamps lease duration to the manifest request" {
     try std.testing.expectEqual(@as(usize, 1), grants.len);
     try std.testing.expect(grants[0].local_only);
     try std.testing.expectEqual(@as(?u64, 60), grants[0].expires_at_ticks);
+}
+
+test "decisionsToGrants saturates lease expiry instead of wrapping" {
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_read = true } },
+            .required = false,
+            .local_only = true,
+        },
+    };
+    const bundle = manifest_fixtures.basicNotesBundle(&permissions);
+    const decisions = [_]ReviewDecision{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .allow = true,
+            .local_only = true,
+            .lease_ticks = 20,
+        },
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+    const grants = decisionsToGrants(&bundle, &decisions, std.math.maxInt(u64) - 5, &grants_buffer);
+
+    try std.testing.expectEqual(@as(usize, 1), grants.len);
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), grants[0].expires_at_ticks);
 }
 
 test "renderToBuffer includes bundle name, permission labels, and decisions" {

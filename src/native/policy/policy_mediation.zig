@@ -135,7 +135,7 @@ pub const PolicyMediator = struct {
         now_ticks: u64,
     ) Error!Decision {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        const matched_grant = self.matchGrant(request, grants) orelse {
+        const matched_grant = self.matchGrant(request, grants, now_ticks) orelse {
             return self.denialDecision(task, request, .policy_denied);
         };
         if (!matched_grant.allow) {
@@ -156,6 +156,9 @@ pub const PolicyMediator = struct {
         const lease_end = self.resolveLeaseEnd(request, matched_grant, now_ticks);
         if (lease_end < now_ticks) {
             return self.denialDecision(task, request, .capability_expired);
+        }
+        if (finiteLeaseRequired(request.kind) and lease_end == std.math.maxInt(u64)) {
+            return self.denialDecision(task, request, .policy_denied);
         }
 
         const granted_local_only = request.local_only or matched_grant.local_only;
@@ -315,6 +318,7 @@ pub const PolicyMediator = struct {
                 .policy_generation = self.policy_generation,
                 .source_task_id = task.id,
                 .broker_service_id = self.service_targets.policy_service_id,
+                .max_delegation_depth = maxDelegationDepthForRequest(request),
             },
         });
         return plan;
@@ -364,6 +368,9 @@ pub const PolicyMediator = struct {
             summary.addDecision(decision, request.required);
         }
 
+        if (summary.required_denials != 0) {
+            try self.rollbackActivationGrants(task.id, &summary, now_ticks);
+        }
         task.state = if (summary.required_denials == 0) .active else .suspended;
         return summary;
     }
@@ -372,14 +379,23 @@ pub const PolicyMediator = struct {
         self: *const PolicyMediator,
         request: manifest.PermissionRequest,
         grants: []const UserGrant,
+        now_ticks: u64,
     ) ?UserGrant {
         _ = self;
+        var expired_allow: ?UserGrant = null;
         for (grants) |grant| {
             if (grant.kind != request.kind) continue;
             if (grant.resource.len != 0 and !std.mem.eql(u8, grant.resource, request.resource)) continue;
+            if (!grant.allow) return grant;
+            if (grant.expires_at_ticks) |expiry| {
+                if (now_ticks > expiry) {
+                    if (expired_allow == null) expired_allow = grant;
+                    continue;
+                }
+            }
             return grant;
         }
-        return null;
+        return expired_allow;
     }
 
     fn resolveLeaseEnd(
@@ -392,12 +408,33 @@ pub const PolicyMediator = struct {
 
         var lease_end: u64 = std.math.maxInt(u64);
         if (request.max_lease_ticks != 0) {
-            lease_end = now_ticks + request.max_lease_ticks;
+            lease_end = std.math.add(u64, now_ticks, request.max_lease_ticks) catch std.math.maxInt(u64);
         }
         if (grant.expires_at_ticks) |expiry| {
             lease_end = @min(lease_end, expiry);
         }
         return lease_end;
+    }
+
+    fn rollbackActivationGrants(
+        self: *PolicyMediator,
+        task_id: u64,
+        summary: *const ActivationSummary,
+        now_ticks: u64,
+    ) Error!void {
+        var index: usize = 0;
+        while (index < summary.decision_count) : (index += 1) {
+            const decision = summary.decisions[index];
+            if (!decision.allowed) continue;
+            const capability_id = decision.capability_id orelse continue;
+            _ = try self.revokeGrantedCapability(
+                task_id,
+                capability_id,
+                decision.kind,
+                now_ticks,
+                "activation rolled back after required permission denial",
+            );
+        }
     }
 
     fn resolveTarget(self: *const PolicyMediator, request: manifest.PermissionRequest) capability.CapabilityTarget {
@@ -488,6 +525,38 @@ fn taskDisplayName(task: *const task_runtime.TaskRecord) []const u8 {
     if (components.len != 0 and components[0].labelSlice().len != 0) return components[0].labelSlice();
     if (task.launchBundleIdSlice().len != 0) return task.launchBundleIdSlice();
     return "app";
+}
+
+fn maxDelegationDepthForRequest(request: manifest.PermissionRequest) u8 {
+    return switch (request.kind) {
+        .device_access,
+        .clipboard,
+        .camera,
+        .mic,
+        .sensor,
+        .location,
+        .contacts,
+        .screen_capture,
+        .notification_post,
+        => 0,
+        .peer_ipc => 1,
+        .object_access, .network_egress, .background_execution => capability.DEFAULT_MAX_DELEGATION_DEPTH,
+    };
+}
+
+fn finiteLeaseRequired(kind: manifest.PermissionKind) bool {
+    return switch (kind) {
+        .device_access,
+        .clipboard,
+        .camera,
+        .mic,
+        .sensor,
+        .location,
+        .contacts,
+        .screen_capture,
+        => true,
+        .object_access, .network_egress, .notification_post, .background_execution, .peer_ipc => false,
+    };
 }
 
 fn createMediationTestTask(
@@ -764,6 +833,38 @@ test "policy mediation reports expired grants" {
     try std.testing.expectEqual(abi.DenialReason.capability_expired, decision.reason);
 }
 
+test "policy mediation ignores expired allow grants when a later valid grant matches" {
+    var capability_table = capability.CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try createMediationTestTask(&runtime, 45, true);
+    var mediator = PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 41,
+            .compositor_service_id = 42,
+            .policy_service_id = 43,
+            .service_registry_id = 44,
+        },
+    );
+
+    const decision = try mediator.authorizeRequest(task.id, .{
+        .kind = .object_access,
+        .resource = "workspace:notes",
+        .rights = .{ .object = .{ .object_read = true } },
+        .local_only = true,
+        .max_lease_ticks = 20,
+    }, &.{
+        .{ .kind = .object_access, .resource = "workspace:notes", .local_only = true, .expires_at_ticks = 5 },
+        .{ .kind = .object_access, .resource = "workspace:notes", .local_only = true, .expires_at_ticks = 40 },
+    }, 10);
+
+    try std.testing.expect(decision.allowed);
+    try std.testing.expectEqual(@as(u64, 30), decision.expires_at_ticks);
+    try std.testing.expectEqual(@as(usize, 1), task.capability_count);
+}
+
 test "policy mediation validates manifests before granting capabilities" {
     var capability_table = capability.CapabilityTable.init();
     var runtime = task_runtime.Runtime.init();
@@ -800,6 +901,81 @@ test "policy mediation validates manifests before granting capabilities" {
 
     try std.testing.expectError(error.MissingBackgroundPermission, mediator.applyManifest(task.id, bundle, &.{}, 10));
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
+}
+
+test "policy mediation rolls back activation grants when a required permission fails" {
+    var capability_table = capability.CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 46 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(2),
+            .endpoint_slots = 4,
+            .shared_memory_bytes = units.kibibytes(2),
+            .background_allowed = false,
+        },
+        .local_only = true,
+    });
+    var mediator = PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 51,
+            .compositor_service_id = 52,
+            .policy_service_id = 53,
+            .service_registry_id = 54,
+        },
+    );
+
+    const requests = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_read = true } },
+            .required = false,
+            .local_only = true,
+            .max_lease_ticks = 20,
+        },
+        .{
+            .kind = .background_execution,
+            .resource = "sync",
+            .rights = .{ .task = .{ .background_run = true } },
+        },
+    };
+    const background_tasks = [_]manifest.BackgroundTaskDecl{
+        .{
+            .id = "sync",
+            .trigger = .sync_completion,
+            .expected_duration_seconds = 30,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = units.kibibytes(1),
+            },
+            .network = .local_network_only,
+            .visibility = .status_only,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.rollback",
+        .display_name = "Rollback",
+        .publisher = "zigos.dev",
+        .requested_permissions = &requests,
+        .background_tasks = &background_tasks,
+    };
+
+    const summary = try mediator.applyManifest(task.id, bundle, &.{
+        .{ .kind = .object_access, .resource = "workspace:notes", .local_only = true, .expires_at_ticks = 30 },
+        .{ .kind = .background_execution, .resource = "sync", .expires_at_ticks = 30 },
+    }, 10);
+
+    try std.testing.expectEqual(@as(usize, 1), summary.granted_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.required_denials);
+    try std.testing.expectEqual(task_runtime.TaskState.suspended, task.state);
+    try std.testing.expectEqual(@as(usize, 0), task.capability_count);
+    try std.testing.expect(capability_table.query(summary.decisionForKind(.object_access).?.capability_id.?) == null);
 }
 
 test "policy mediation covers device camera mic sensor and peer ipc permissions" {
@@ -856,9 +1032,13 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
     try std.testing.expectEqual(capability.CapabilityTargetKind.device, device_capability.target.kind);
     try std.testing.expectEqual(@as(u64, 700), device_capability.target.id);
     try std.testing.expectEqual(@as(u64, 701), camera_capability.target.id);
+    try std.testing.expectEqual(@as(u8, 0), device_capability.audit.max_delegation_depth);
+    try std.testing.expectEqual(@as(u8, 0), camera_capability.audit.max_delegation_depth);
     try std.testing.expectEqual(@as(u64, 703), sensor_capability.target.id);
+    try std.testing.expectEqual(@as(u8, 0), sensor_capability.audit.max_delegation_depth);
     try std.testing.expectEqual(capability.CapabilityTargetKind.service, peer_capability.target.kind);
     try std.testing.expectEqual(@as(u64, 64), peer_capability.target.id);
+    try std.testing.expectEqual(@as(u8, 1), peer_capability.audit.max_delegation_depth);
 }
 
 test "policy mediation maps location contacts screen capture and notification capabilities" {
@@ -940,14 +1120,107 @@ test "policy mediation maps location contacts screen capture and notification ca
 
     try std.testing.expectEqual(capability.CapabilityTargetKind.device, location_capability.target.kind);
     try std.testing.expect(location_capability.rights.has(.location_read));
+    try std.testing.expectEqual(@as(u8, 0), location_capability.audit.max_delegation_depth);
     try std.testing.expectEqual(capability.CapabilityTargetKind.object, contacts_capability.target.kind);
     try std.testing.expectEqual(@as(u64, 3_001), contacts_capability.target.id);
     try std.testing.expect(contacts_capability.rights.has(.contacts_read));
+    try std.testing.expectEqual(@as(u8, 0), contacts_capability.audit.max_delegation_depth);
     try std.testing.expectEqual(capability.CapabilityTargetKind.service, capture_capability.target.kind);
     try std.testing.expectEqual(@as(u64, 89), capture_capability.target.id);
     try std.testing.expect(capture_capability.rights.has(.screen_capture));
+    try std.testing.expectEqual(@as(u8, 0), capture_capability.audit.max_delegation_depth);
     try std.testing.expectEqual(capability.CapabilityTargetKind.service, notification_capability.target.kind);
     try std.testing.expect(notification_capability.rights.has(.notification_post));
+    try std.testing.expectEqual(@as(u8, 0), notification_capability.audit.max_delegation_depth);
+}
+
+test "policy mediation seals sensory grants against transitive delegation" {
+    var capability_table = capability.CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try createMediationTestTask(&runtime, 42, true);
+    var mediator = PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 43 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 88,
+            .compositor_service_id = 89,
+            .policy_service_id = 90,
+            .service_registry_id = 91,
+        },
+    );
+
+    const requests = [_]manifest.PermissionRequest{
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{
+                .capability_derive = true,
+                .device_use = true,
+            } },
+            .local_only = true,
+            .target_id = 4_200,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.camera-delegation-attempt",
+        .display_name = "Camera Delegation Attempt",
+        .publisher = "zigos.dev",
+        .requested_permissions = &requests,
+    };
+    const grants = [_]UserGrant{
+        .{ .kind = .camera, .resource = "camera.front", .local_only = true, .expires_at_ticks = 50 },
+    };
+
+    const summary = try mediator.applyManifest(task.id, bundle, &grants, 10);
+    const camera_capability = capability_table.query(summary.decisionForKind(.camera).?.capability_id.?).?;
+    try std.testing.expect(camera_capability.rights.has(.capability_derive));
+    try std.testing.expectEqual(@as(u8, 0), camera_capability.audit.max_delegation_depth);
+    try std.testing.expectError(error.DelegationDepthExceeded, capability_table.derive(.{
+        .parent_capability_id = camera_capability.id,
+        .holder = .{ .kind = .app, .serial = 4201 },
+        .rights = .{ .device = .{ .device_use = true } },
+        .scope = camera_capability.scope,
+        .lease = .{ .issued_at_ticks = 11, .expires_at_ticks = 40, .renewable = false },
+    }));
+}
+
+test "policy mediation requires finite leases for sensory grants" {
+    var capability_table = capability.CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try createMediationTestTask(&runtime, 43, true);
+    var mediator = PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 44 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 88,
+            .compositor_service_id = 89,
+            .policy_service_id = 90,
+            .service_registry_id = 91,
+        },
+    );
+
+    const camera_request = manifest.PermissionRequest{
+        .kind = .camera,
+        .resource = "camera.front",
+        .rights = .{ .device = .{ .device_use = true } },
+        .local_only = true,
+        .target_id = 4_300,
+    };
+    const unbounded = try mediator.authorizeRequest(task.id, camera_request, &.{
+        .{ .kind = .camera, .resource = "camera.front", .local_only = true },
+    }, 10);
+    try std.testing.expect(!unbounded.allowed);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, unbounded.reason);
+    try std.testing.expectEqual(@as(usize, 0), task.capability_count);
+
+    const bounded = try mediator.authorizeRequest(task.id, camera_request, &.{
+        .{ .kind = .camera, .resource = "camera.front", .local_only = true, .expires_at_ticks = 30 },
+    }, 10);
+    try std.testing.expect(bounded.allowed);
+    try std.testing.expectEqual(@as(u64, 30), bounded.expires_at_ticks);
+    try std.testing.expectEqual(@as(usize, 1), task.capability_count);
 }
 
 test "policy mediation denies clipboard and screen capture without explicit grants" {

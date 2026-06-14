@@ -19,6 +19,7 @@ pub fn validateInstallTarget(
     const StoredAiMetadataType = @FieldType(RevisionType, "ai_metadata");
     const StoredSignatureType = @FieldType(RevisionType, "signature");
 
+    try manifest.validate(bundle);
     try validateTextLen(bundle.bundle_id, arrayFieldLen(InstalledBundleType, "bundle_id"), error.BundleIdTooLong);
     try validateTextLen(bundle.display_name, arrayFieldLen(RevisionType, "display_name"), error.DisplayNameTooLong);
     try validateTextLen(bundle.publisher, arrayFieldLen(RevisionType, "publisher"), error.PublisherTooLong);

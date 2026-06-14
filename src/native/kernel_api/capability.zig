@@ -33,6 +33,7 @@ pub const CapabilityScope = capability_record.CapabilityScope;
 pub const CapabilityLease = capability_record.CapabilityLease;
 pub const AuditMetadata = capability_record.AuditMetadata;
 pub const Capability = capability_record.Capability;
+pub const DEFAULT_MAX_DELEGATION_DEPTH = capability_record.DEFAULT_MAX_DELEGATION_DEPTH;
 
 pub fn rightsAreValidForTarget(target: CapabilityTarget, rights: CapabilityRights) bool {
     return std.meta.activeTag(rights) == target.kind;
@@ -98,6 +99,7 @@ pub const Error = error{
     RightsEscalation,
     ScopeEscalation,
     TableFull,
+    DelegationDepthExceeded,
     GrantPlanFull,
     TargetTableFull,
 };
@@ -208,6 +210,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         fn mintFromGrantPlan(self: *Self, request: MintRequest) Error!Capability {
             if (!rightsAreValidForTarget(request.target, request.rights)) return error.InvalidCapabilityRights;
+            if (request.audit.delegation_depth > request.audit.max_delegation_depth) return error.DelegationDepthExceeded;
             const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
             const record = Capability{
                 .id = self.allocateCapabilityId(),
@@ -233,8 +236,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             if (!request.scope.isSubsetOf(parent.scope)) return error.ScopeEscalation;
             if (!request.lease.isSubsetOf(parent.lease)) return error.LeaseEscalation;
 
-            var audit = request.audit;
-            if (audit.parent_trace_id == 0) audit.parent_trace_id = parent.traceId();
+            const audit = try delegatedAudit(parent, request.audit);
             const record = Capability{
                 .id = self.allocateCapabilityId(),
                 .holder = request.holder,
@@ -257,8 +259,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             const next_scope = request.scope orelse original.scope;
             if (!scopeIsPassCompatible(next_scope, original.scope, request.allow_task_retarget)) return error.ScopeEscalation;
 
-            var audit = request.audit;
-            if (audit.parent_trace_id == 0) audit.parent_trace_id = original.traceId();
+            const audit = try delegatedAudit(original, request.audit);
             const record = Capability{
                 .id = self.allocateCapabilityId(),
                 .holder = request.new_holder,
@@ -813,6 +814,18 @@ fn scopeIsPassCompatible(next_scope: CapabilityScope, original_scope: Capability
     return true;
 }
 
+fn delegatedAudit(parent: *const Capability, requested: AuditMetadata) Error!AuditMetadata {
+    if (parent.audit.delegation_depth >= parent.audit.max_delegation_depth) return error.DelegationDepthExceeded;
+
+    const next_depth = parent.audit.delegation_depth + 1;
+    var audit = requested;
+    if (audit.parent_trace_id == 0) audit.parent_trace_id = parent.traceId();
+    audit.delegation_depth = next_depth;
+    audit.max_delegation_depth = @min(parent.audit.max_delegation_depth, requested.max_delegation_depth);
+    if (audit.delegation_depth > audit.max_delegation_depth) return error.DelegationDepthExceeded;
+    return audit;
+}
+
 fn fullSessionRights() CapabilityRights {
     return .{ .service = .{
         .endpoint_create = true,
@@ -864,6 +877,72 @@ test "capabilities derive narrower rights and grant revocation leaves sibling au
     try table.revokeGrant(parent.id);
     try std.testing.expect(table.query(parent.id) == null);
     try std.testing.expect(table.isUsable(derived, 10));
+}
+
+test "capability delegation depth budget stops transitive derive and pass chains" {
+    var table = CapabilityTable.init();
+    const policy = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
+    const session = principal.PrincipalId{ .kind = .service, .serial = 2 };
+    const first_holder = principal.PrincipalId{ .kind = .app, .serial = 10 };
+    const second_holder = principal.PrincipalId{ .kind = .app, .serial = 11 };
+
+    const parent = try table.mintBootRoot(.{
+        .holder = session,
+        .issuer = policy,
+        .target = .{ .kind = .service, .id = 77 },
+        .rights = .{ .service = .{
+            .capability_derive = true,
+            .capability_pass = true,
+            .capability_query = true,
+            .endpoint_connect = true,
+        } },
+        .scope = .{ .task_id = 200, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
+        .audit = .{
+            .policy_generation = 1,
+            .source_task_id = 200,
+            .broker_service_id = 77,
+            .max_delegation_depth = 1,
+        },
+    });
+
+    const first = try table.derive(.{
+        .parent_capability_id = parent.id,
+        .holder = first_holder,
+        .rights = .{ .service = .{
+            .capability_derive = true,
+            .capability_pass = true,
+            .capability_query = true,
+        } },
+        .scope = .{ .task_id = 200, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 900, .renewable = false },
+    });
+    try std.testing.expectEqual(@as(u8, 1), first.audit.delegation_depth);
+    try std.testing.expectEqual(@as(u8, 1), first.audit.max_delegation_depth);
+    try std.testing.expectEqual(parent.traceId(), first.audit.parent_trace_id);
+
+    try std.testing.expectError(error.DelegationDepthExceeded, table.derive(.{
+        .parent_capability_id = first.id,
+        .holder = second_holder,
+        .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{ .task_id = 200, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 2, .expires_at_ticks = 800, .renewable = false },
+    }));
+    try std.testing.expectError(error.DelegationDepthExceeded, table.pass(.{
+        .capability_id = first.id,
+        .new_holder = second_holder,
+        .now_ticks = 2,
+        .scope = .{ .task_id = 200, .local_only = true, .broker_only = true },
+    }));
+
+    const direct_pass = try table.pass(.{
+        .capability_id = parent.id,
+        .new_holder = second_holder,
+        .now_ticks = 3,
+        .scope = .{ .task_id = 200, .local_only = true, .broker_only = true },
+    });
+    try std.testing.expectEqual(@as(u8, 1), direct_pass.audit.delegation_depth);
+    try std.testing.expectEqual(parent.traceId(), direct_pass.audit.parent_trace_id);
 }
 
 test "target authority revocation invalidates sibling and derived capabilities" {

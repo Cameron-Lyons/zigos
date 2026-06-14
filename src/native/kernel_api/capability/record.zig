@@ -2,6 +2,8 @@ const native_util = @import("../../core/util.zig");
 const principal = @import("../../core/principal.zig");
 const rights = @import("rights.zig");
 
+pub const DEFAULT_MAX_DELEGATION_DEPTH: u8 = 4;
+
 pub const CapabilityScope = struct {
     task_id: ?u64 = null,
     workspace_id: ?u64 = null,
@@ -42,6 +44,8 @@ pub const AuditMetadata = struct {
     trace_id: u64 = 0,
     parent_trace_id: u64 = 0,
     user_visible_entitlement: bool = false,
+    delegation_depth: u8 = 0,
+    max_delegation_depth: u8 = DEFAULT_MAX_DELEGATION_DEPTH,
 };
 
 pub const Capability = struct {
@@ -81,5 +85,7 @@ fn computeCapabilityTraceId(record: Capability) u64 {
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.audit.source_task_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.audit.broker_service_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.audit.parent_trace_id);
+    hash = native_util.fnv1a64AppendByte(hash, record.audit.delegation_depth);
+    hash = native_util.fnv1a64AppendByte(hash, record.audit.max_delegation_depth);
     return hash;
 }

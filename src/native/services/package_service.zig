@@ -1139,6 +1139,23 @@ test "package service round-trips the example writer manifest fields without wid
     }
 }
 
+test "package bundle ops reject semantically invalid manifests before storage" {
+    var service = Service.init();
+    const duplicate_permissions = [_]manifest.PermissionRequest{
+        manifest_fixtures.example_writer_permissions[0],
+        manifest_fixtures.example_writer_permissions[0],
+        manifest_fixtures.example_writer_permissions[2],
+    };
+    var bundle = manifest_fixtures.exampleWriterBundle();
+    bundle.requested_permissions = &duplicate_permissions;
+
+    try std.testing.expectError(
+        error.DuplicatePermissionRequest,
+        bundle_ops.installNew(&service.slots[0].bundle, bundle, 1, crypto_hash.digestFromByte(0x66)),
+    );
+    try std.testing.expectEqual(@as(u32, 0), service.slots[0].bundle.revision_count);
+}
+
 test "package service rejects example writer manifest updates that widen permissions without declaration" {
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
