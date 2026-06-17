@@ -9,6 +9,7 @@ const principal = @import("../core/principal.zig");
 const humane_shell = @import("rendered_shell/humane_shell.zig");
 const signing = @import("../core/signing.zig");
 const manifest_linter = @import("../sdk/manifest_linter.zig");
+const agent_delegation_service = @import("../services/agent_delegation_service.zig");
 const package_digest = @import("../services/package_service_digest.zig");
 const package_service = @import("../services/package_service.zig");
 const package_model = @import("../services/package_service_model.zig");
@@ -280,6 +281,33 @@ pub const TenthFeature = enum(u8) {
 
 pub const tenth_feature_count = std.meta.fields(TenthFeature).len;
 
+pub const EleventhFeature = enum(u8) {
+    agent_manifest_session_binding,
+    agent_manifest_local_context,
+    agent_manifest_context_budget,
+    agent_manifest_kill_switch,
+    agent_session_binding_validation,
+    agent_context_budget_validation,
+    agent_kill_switch_validation,
+    agent_digest_covers_session_scope,
+    package_preserves_agent_session_scope,
+    package_resolves_agent_session_scope,
+    policy_agent_session_binding_gate,
+    policy_agent_local_context_gate,
+    policy_agent_context_budget_gate,
+    policy_agent_kill_switch_gate,
+    policy_agent_visible_plan_gate,
+    agent_session_policy_request,
+    typed_agent_session_bind_operation,
+    typed_agent_kill_switch_operation,
+    agent_session_service_model,
+    agent_session_service_kill_switch,
+    agent_session_ledger,
+    agent_session_redaction,
+};
+
+pub const eleventh_feature_count = std.meta.fields(EleventhFeature).len;
+
 pub const Checklist = struct {
     native_only_apps: bool,
     no_compatibility_namespace: bool,
@@ -425,6 +453,7 @@ pub const SeventhChecklist = FeatureChecklist(SeventhFeature);
 pub const EighthChecklist = FeatureChecklist(EighthFeature);
 pub const NinthChecklist = FeatureChecklist(NinthFeature);
 pub const TenthChecklist = FeatureChecklist(TenthFeature);
+pub const EleventhChecklist = FeatureChecklist(EleventhFeature);
 
 pub fn currentRepositoryContract() Checklist {
     const default_ai = manifest.AiMetadata{};
@@ -1081,6 +1110,10 @@ pub fn currentRepositoryEighthContract() EighthChecklist {
             .max_remote_calls = 0,
             .user_confirmation_required = true,
             .audit_required = true,
+            .session_bound = true,
+            .local_context_only = true,
+            .max_context_bytes = 4096,
+            .kill_switch_supported = true,
         },
     };
     var purpose_b = base_agent;
@@ -1091,6 +1124,10 @@ pub fn currentRepositoryEighthContract() EighthChecklist {
         .max_remote_calls = 0,
         .user_confirmation_required = true,
         .audit_required = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .max_context_bytes = 4096,
+        .kill_switch_supported = true,
     };
     const digest_a = package_digest.digestBundle(base_agent);
     const digest_b = package_digest.digestBundle(purpose_b);
@@ -1468,6 +1505,239 @@ fn accessibilityRedactionCheck() bool {
         std.mem.indexOf(u8, exported, "kind=accessibility_profile") != null;
 }
 
+pub fn currentRepositoryEleventhContract() EleventhChecklist {
+    var features = [_]bool{false} ** eleventh_feature_count;
+    const session_bound_agent = manifest.BundleManifest{
+        .bundle_id = "app.agent-session",
+        .display_name = "Agent Session",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize private notes inside the active session",
+            .max_autonomous_actions = 4,
+            .max_remote_calls = 0,
+            .user_confirmation_required = true,
+            .audit_required = true,
+            .session_bound = true,
+            .local_context_only = true,
+            .max_context_bytes = 4096,
+            .kill_switch_supported = true,
+        },
+    };
+    var larger_context_agent = session_bound_agent;
+    larger_context_agent.agent_delegation = .{
+        .enabled = true,
+        .purpose = "Organize private notes inside the active session",
+        .max_autonomous_actions = 4,
+        .max_remote_calls = 0,
+        .user_confirmation_required = true,
+        .audit_required = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .max_context_bytes = 8192,
+        .kill_switch_supported = true,
+    };
+    const digest_a = package_digest.digestBundle(session_bound_agent);
+    const digest_b = package_digest.digestBundle(larger_context_agent);
+
+    features[@intFromEnum(EleventhFeature.agent_manifest_session_binding)] =
+        @hasField(manifest.AgentDelegationDecl, "session_bound");
+    features[@intFromEnum(EleventhFeature.agent_manifest_local_context)] =
+        @hasField(manifest.AgentDelegationDecl, "local_context_only");
+    features[@intFromEnum(EleventhFeature.agent_manifest_context_budget)] =
+        @hasField(manifest.AgentDelegationDecl, "max_context_bytes");
+    features[@intFromEnum(EleventhFeature.agent_manifest_kill_switch)] =
+        @hasField(manifest.AgentDelegationDecl, "kill_switch_supported");
+    features[@intFromEnum(EleventhFeature.agent_session_binding_validation)] = validationFailsWith(.{
+        .bundle_id = "app.agent-session",
+        .display_name = "Agent Session",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize private notes inside the active session",
+            .max_autonomous_actions = 4,
+            .user_confirmation_required = true,
+            .audit_required = true,
+            .max_context_bytes = 4096,
+            .kill_switch_supported = true,
+        },
+    }, error.AgentDelegationSessionBindingRequired);
+    features[@intFromEnum(EleventhFeature.agent_context_budget_validation)] = validationFailsWith(.{
+        .bundle_id = "app.agent-session",
+        .display_name = "Agent Session",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize private notes inside the active session",
+            .max_autonomous_actions = 4,
+            .user_confirmation_required = true,
+            .audit_required = true,
+            .session_bound = true,
+            .kill_switch_supported = true,
+        },
+    }, error.AgentDelegationContextBudgetMissing);
+    features[@intFromEnum(EleventhFeature.agent_kill_switch_validation)] = validationFailsWith(.{
+        .bundle_id = "app.agent-session",
+        .display_name = "Agent Session",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize private notes inside the active session",
+            .max_autonomous_actions = 4,
+            .user_confirmation_required = true,
+            .audit_required = true,
+            .session_bound = true,
+            .max_context_bytes = 4096,
+        },
+    }, error.AgentDelegationKillSwitchRequired);
+    features[@intFromEnum(EleventhFeature.agent_digest_covers_session_scope)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@intFromEnum(EleventhFeature.package_preserves_agent_session_scope)] =
+        @hasField(package_model.StoredAgentDelegation, "session_bound") and
+        @hasField(package_model.StoredAgentDelegation, "local_context_only") and
+        @hasField(package_model.StoredAgentDelegation, "max_context_bytes") and
+        @hasField(package_model.StoredAgentDelegation, "kill_switch_supported");
+    features[@intFromEnum(EleventhFeature.package_resolves_agent_session_scope)] =
+        @hasField(package_model.ResolvedManifest, "agent_delegation") and
+        @hasField(manifest.AgentDelegationDecl, "kill_switch_supported");
+    features[@intFromEnum(EleventhFeature.policy_agent_session_binding_gate)] = agentSessionPolicyDenies(.agent_session_binding_denied);
+    features[@intFromEnum(EleventhFeature.policy_agent_local_context_gate)] = agentSessionPolicyDenies(.agent_context_scope_denied);
+    features[@intFromEnum(EleventhFeature.policy_agent_context_budget_gate)] = agentSessionPolicyDenies(.agent_context_budget_denied);
+    features[@intFromEnum(EleventhFeature.policy_agent_kill_switch_gate)] = agentSessionPolicyDenies(.agent_kill_switch_denied);
+    features[@intFromEnum(EleventhFeature.policy_agent_visible_plan_gate)] = agentSessionPolicyDenies(.agent_plan_visibility_required);
+    features[@intFromEnum(EleventhFeature.agent_session_policy_request)] =
+        @hasField(policy_object.AgentDelegationRequest, "session_bound") and
+        @hasField(policy_object.AgentDelegationRequest, "local_context_only") and
+        @hasField(policy_object.AgentDelegationRequest, "context_bytes") and
+        @hasField(policy_object.AgentDelegationRequest, "delegation_generation") and
+        @hasField(policy_object.AgentDelegationRequest, "user_visible_plan");
+    features[@intFromEnum(EleventhFeature.typed_agent_session_bind_operation)] =
+        contractOperationPresent("zigos.agent.delegation", .agent_bind_session);
+    features[@intFromEnum(EleventhFeature.typed_agent_kill_switch_operation)] =
+        contractOperationPresent("zigos.agent.delegation", .agent_kill_switch);
+    features[@intFromEnum(EleventhFeature.agent_session_service_model)] =
+        @hasDecl(agent_delegation_service.Service, "authorize") and
+        @hasDecl(agent_delegation_service.Service, "recordAction") and
+        @hasField(agent_delegation_service.AuthorizeRequest, "session_id");
+    features[@intFromEnum(EleventhFeature.agent_session_service_kill_switch)] =
+        @hasDecl(agent_delegation_service.Service, "killSwitch") and
+        @hasField(agent_delegation_service.Service, "minimum_generation");
+    features[@intFromEnum(EleventhFeature.agent_session_ledger)] =
+        event_ledger.EventKind.agent_session == .agent_session and
+        @hasDecl(event_ledger.Ledger, "recordAgentSessionBoundary");
+    features[@intFromEnum(EleventhFeature.agent_session_redaction)] = agentSessionRedactionCheck();
+
+    return .{ .satisfied_features = features };
+}
+
+fn agentSessionPolicyDenies(expected: policy_object.DecisionReason) bool {
+    var directory = policy_object.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "agent-session-contract-policy",
+        .seed = signing.seedFromByte(0xCC),
+    };
+    _ = directory.create(.{
+        .scope = .organization,
+        .subject_id = 2029,
+        .issuer = .{ .kind = .policy_authority, .serial = 2029 },
+        .label = "agent-session-contract",
+        .agent_delegation_allowed = true,
+        .max_agent_actions_per_session = 8,
+        .max_agent_remote_calls_per_session = 1,
+        .require_agent_user_confirmation = true,
+        .require_agent_audit = true,
+        .require_agent_session_binding = true,
+        .require_agent_local_context = true,
+        .max_agent_context_bytes = 4096,
+        .min_agent_delegation_generation = 3,
+        .require_agent_visible_plan = true,
+    }, signer) catch return false;
+    const subjects = policy_object.SubjectSet{
+        .organization_id = 2029,
+    };
+    const request = switch (expected) {
+        .agent_session_binding_denied => policy_object.AgentDelegationRequest{
+            .enabled = true,
+            .autonomous_actions = 1,
+            .user_confirmed = true,
+            .audit_enabled = true,
+            .local_context_only = true,
+            .context_bytes = 1024,
+            .delegation_generation = 3,
+            .user_visible_plan = true,
+        },
+        .agent_context_scope_denied => policy_object.AgentDelegationRequest{
+            .enabled = true,
+            .autonomous_actions = 1,
+            .user_confirmed = true,
+            .audit_enabled = true,
+            .session_bound = true,
+            .local_context_only = false,
+            .context_bytes = 1024,
+            .delegation_generation = 3,
+            .user_visible_plan = true,
+        },
+        .agent_context_budget_denied => policy_object.AgentDelegationRequest{
+            .enabled = true,
+            .autonomous_actions = 1,
+            .user_confirmed = true,
+            .audit_enabled = true,
+            .session_bound = true,
+            .local_context_only = true,
+            .context_bytes = 8192,
+            .delegation_generation = 3,
+            .user_visible_plan = true,
+        },
+        .agent_kill_switch_denied => policy_object.AgentDelegationRequest{
+            .enabled = true,
+            .autonomous_actions = 1,
+            .user_confirmed = true,
+            .audit_enabled = true,
+            .session_bound = true,
+            .local_context_only = true,
+            .context_bytes = 1024,
+            .delegation_generation = 2,
+            .user_visible_plan = true,
+        },
+        .agent_plan_visibility_required => policy_object.AgentDelegationRequest{
+            .enabled = true,
+            .autonomous_actions = 1,
+            .user_confirmed = true,
+            .audit_enabled = true,
+            .session_bound = true,
+            .local_context_only = true,
+            .context_bytes = 1024,
+            .delegation_generation = 3,
+        },
+        else => return false,
+    };
+    const decision = directory.agentDelegationDecision(subjects, request);
+    return !decision.allowed and decision.reason == expected;
+}
+
+fn agentSessionRedactionCheck() bool {
+    var ledger = event_ledger.Ledger.init();
+    ledger.recordAgentSessionBoundary(
+        principal.PrincipalId{ .kind = .user, .serial = 2029 },
+        2907,
+        false,
+        true,
+        true,
+        true,
+        2,
+        90,
+        "private agent session context",
+    ) catch return false;
+    var buffer: [512]u8 = undefined;
+    const exported = ledger.exportText(&buffer, .{}) catch return false;
+    const summary = ledger.userVisibleDiagnosticSummary();
+    return summary.agent_session_events == 1 and
+        summary.agent_session_denials == 1 and
+        summary.agent_kill_switch_denials == 1 and
+        summary.protected_details_redacted == 1 and
+        std.mem.indexOf(u8, exported, "private agent session context") == null and
+        std.mem.indexOf(u8, exported, "kind=agent_session") != null;
+}
+
 test "2026 OS contract keeps sixteen modernization features satisfied" {
     const checklist = currentRepositoryContract();
     try std.testing.expectEqual(@as(usize, 16), feature_count);
@@ -1565,6 +1835,17 @@ test "2026 OS contract keeps twenty tenth-loop accessibility profile passes sati
     try std.testing.expect(checklist.satisfied(.typed_accessibility_profile_service));
     try std.testing.expect(checklist.satisfied(.policy_keyboard_navigation_gate));
     try std.testing.expect(checklist.satisfied(.accessibility_redaction));
+}
+
+test "2026 OS contract keeps twenty two eleventh-loop agent session passes satisfied" {
+    const checklist = currentRepositoryEleventhContract();
+    try std.testing.expectEqual(@as(usize, 22), eleventh_feature_count);
+    try std.testing.expectEqual(eleventh_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.agent_manifest_session_binding));
+    try std.testing.expect(checklist.satisfied(.agent_session_service_model));
+    try std.testing.expect(checklist.satisfied(.policy_agent_kill_switch_gate));
+    try std.testing.expect(checklist.satisfied(.agent_session_redaction));
 }
 
 test "2026 OS contract proves AI policy and diagnostics stay private by default" {

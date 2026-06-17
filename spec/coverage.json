@@ -1951,6 +1951,10 @@
       "negative_tests": [
         {
           "file": "src/native/platform/event_ledger_test.zig",
+          "name": "event ledger records agent session boundaries as redacted diagnostic evidence"
+        },
+        {
+          "file": "src/native/platform/event_ledger_test.zig",
           "name": "event ledger requires explicit opt-in before remote sharing personal device diagnostics"
         }
       ]
@@ -1976,6 +1980,10 @@
       "negative_tests": [
         {
           "file": "src/native/platform/event_ledger_test.zig",
+          "name": "event ledger records agent session boundaries as redacted diagnostic evidence"
+        },
+        {
+          "file": "src/native/platform/event_ledger_test.zig",
           "name": "event ledger requires explicit opt-in before remote sharing personal device diagnostics"
         },
         {
@@ -1987,9 +1995,18 @@
     "REQ-POLICY-OBJECTS": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/policy_object.zig"
+        "src/native/policy/policy_object.zig",
+        "src/native/services/agent_delegation_service.zig"
       ],
       "negative_tests": [
+        {
+          "file": "src/native/services/agent_delegation_service.zig",
+          "name": "agent delegation service kill switch revokes stale generations and blocks reuse"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 7.2 11.3 and 16 keep agent sessions bounded audited and revocable"
+        },
         {
           "file": "src/native/policy/policy_object.zig",
           "name": "policy objects reject oversized lists and refuse authorization after tampering"

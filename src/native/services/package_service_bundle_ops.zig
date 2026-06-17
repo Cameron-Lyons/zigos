@@ -263,6 +263,10 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .max_remote_calls = revision.agent_delegation.max_remote_calls,
         .user_confirmation_required = revision.agent_delegation.user_confirmation_required,
         .audit_required = revision.agent_delegation.audit_required,
+        .session_bound = revision.agent_delegation.session_bound,
+        .local_context_only = revision.agent_delegation.local_context_only,
+        .max_context_bytes = revision.agent_delegation.max_context_bytes,
+        .kill_switch_supported = revision.agent_delegation.kill_switch_supported,
     };
     resolved.accessibility = .{
         .adaptive_ui = revision.accessibility.adaptive_ui,
@@ -447,6 +451,10 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.agent_delegation.max_remote_calls = source.agent_delegation.max_remote_calls;
     revision.agent_delegation.user_confirmation_required = source.agent_delegation.user_confirmation_required;
     revision.agent_delegation.audit_required = source.agent_delegation.audit_required;
+    revision.agent_delegation.session_bound = source.agent_delegation.session_bound;
+    revision.agent_delegation.local_context_only = source.agent_delegation.local_context_only;
+    revision.agent_delegation.max_context_bytes = source.agent_delegation.max_context_bytes;
+    revision.agent_delegation.kill_switch_supported = source.agent_delegation.kill_switch_supported;
 
     revision.accessibility = .{};
     revision.accessibility.adaptive_ui = source.accessibility.adaptive_ui;

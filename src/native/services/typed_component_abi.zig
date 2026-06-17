@@ -51,6 +51,8 @@ pub const IdentitySessionRevokeRequest = schema.requestType(.identity_session_re
 pub const AgentAuthorizeRequest = schema.requestType(.agent_authorize);
 pub const AgentRecordActionRequest = schema.requestType(.agent_record_action);
 pub const AgentRevokeRequest = schema.requestType(.agent_revoke);
+pub const AgentBindSessionRequest = schema.requestType(.agent_bind_session);
+pub const AgentKillSwitchRequest = schema.requestType(.agent_kill_switch);
 pub const AccessibilityProfileGetRequest = schema.requestType(.accessibility_profile_get);
 pub const AccessibilityProfileApplyRequest = schema.requestType(.accessibility_profile_apply);
 pub const AccessibilityProfileAuditRequest = schema.requestType(.accessibility_profile_audit);
@@ -88,6 +90,8 @@ pub const IdentitySessionRevokeResponse = schema.responseType(.identity_session_
 pub const AgentAuthorizeResponse = schema.responseType(.agent_authorize);
 pub const AgentRecordActionResponse = schema.responseType(.agent_record_action);
 pub const AgentRevokeResponse = schema.responseType(.agent_revoke);
+pub const AgentBindSessionResponse = schema.responseType(.agent_bind_session);
+pub const AgentKillSwitchResponse = schema.responseType(.agent_kill_switch);
 pub const AccessibilityProfileGetResponse = schema.responseType(.accessibility_profile_get);
 pub const AccessibilityProfileApplyResponse = schema.responseType(.accessibility_profile_apply);
 pub const AccessibilityProfileAuditResponse = schema.responseType(.accessibility_profile_audit);
@@ -175,6 +179,7 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(u16, 0x0C03), @intFromEnum(OperationId.data_delete_receipt));
     try std.testing.expectEqual(@as(u16, 0x0E01), @intFromEnum(OperationId.identity_session_authorize));
     try std.testing.expectEqual(@as(u16, 0x0F01), @intFromEnum(OperationId.agent_authorize));
+    try std.testing.expectEqual(@as(u16, 0x0F04), @intFromEnum(OperationId.agent_bind_session));
     try std.testing.expectEqual(@as(u16, 0x1001), @intFromEnum(OperationId.accessibility_profile_get));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionRequest), @sizeOf(Request(.service_connect)));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionResponse), @sizeOf(Response(.service_connect)));
@@ -198,6 +203,8 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@sizeOf(IdentitySessionAuthorizeResponse), @sizeOf(Response(.identity_session_authorize)));
     try std.testing.expectEqual(@sizeOf(AgentAuthorizeRequest), @sizeOf(Request(.agent_authorize)));
     try std.testing.expectEqual(@sizeOf(AgentAuthorizeResponse), @sizeOf(Response(.agent_authorize)));
+    try std.testing.expectEqual(@sizeOf(AgentBindSessionRequest), @sizeOf(Request(.agent_bind_session)));
+    try std.testing.expectEqual(@sizeOf(AgentBindSessionResponse), @sizeOf(Response(.agent_bind_session)));
     try std.testing.expectEqual(@sizeOf(AccessibilityProfileApplyRequest), @sizeOf(Request(.accessibility_profile_apply)));
     try std.testing.expectEqual(@sizeOf(AccessibilityProfileApplyResponse), @sizeOf(Response(.accessibility_profile_apply)));
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(WorkspacePutVersionRequest))), contractFor("zigos.object.workspace").?.operation(.workspace_put_version).?.request_size);
@@ -211,6 +218,7 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(DataDeleteRequest))), contractFor("zigos.data.rights").?.operation(.data_delete_request).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(IdentitySessionStepUpRequest))), contractFor("zigos.identity.session").?.operation(.identity_session_step_up).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AgentRecordActionRequest))), contractFor("zigos.agent.delegation").?.operation(.agent_record_action).?.request_size);
+    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AgentKillSwitchRequest))), contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AccessibilityProfileAuditRequest))), contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_audit).?.request_size);
 }
 

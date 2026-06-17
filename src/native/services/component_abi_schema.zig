@@ -124,6 +124,8 @@ pub const OperationId = enum(u16) {
     agent_authorize = 0x0F01,
     agent_record_action = 0x0F02,
     agent_revoke = 0x0F03,
+    agent_bind_session = 0x0F04,
+    agent_kill_switch = 0x0F05,
     accessibility_profile_get = 0x1001,
     accessibility_profile_apply = 0x1002,
     accessibility_profile_audit = 0x1003,
@@ -395,6 +397,21 @@ const AgentRevokeRequestWire = extern struct {
     _reserved: u16 = 0,
 };
 
+const AgentBindSessionRequestWire = extern struct {
+    header: WireHeader,
+    session_id: u64,
+    delegation_generation: u32,
+    max_context_bytes: u32,
+    flags: u32,
+};
+
+const AgentKillSwitchRequestWire = extern struct {
+    header: WireHeader,
+    minimum_generation: u32,
+    reason: u16,
+    _reserved: u16 = 0,
+};
+
 const AccessibilityProfileGetRequestWire = extern struct {
     header: WireHeader,
     subject_id: u64,
@@ -635,6 +652,8 @@ pub const operation_specs = [_]OperationSpec{
     op(.agent_delegation, .agent_authorize, "authorize", AgentAuthorizeRequestWire, AgentDelegationResponseWire),
     op(.agent_delegation, .agent_record_action, "record_action", AgentRecordActionRequestWire, AgentDelegationResponseWire),
     op(.agent_delegation, .agent_revoke, "revoke", AgentRevokeRequestWire, AgentDelegationResponseWire),
+    op(.agent_delegation, .agent_bind_session, "bind_session", AgentBindSessionRequestWire, AgentDelegationResponseWire),
+    op(.agent_delegation, .agent_kill_switch, "kill_switch", AgentKillSwitchRequestWire, AgentDelegationResponseWire),
     op(.accessibility_profile, .accessibility_profile_get, "get_profile", AccessibilityProfileGetRequestWire, AccessibilityProfileResponseWire),
     op(.accessibility_profile, .accessibility_profile_apply, "apply_profile", AccessibilityProfileApplyRequestWire, AccessibilityProfileResponseWire),
     op(.accessibility_profile, .accessibility_profile_audit, "audit_profile", AccessibilityProfileAuditRequestWire, AccessibilityProfileResponseWire),
@@ -1022,6 +1041,8 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expect(contractFor("zigos.data.rights").?.operation(.data_delete_receipt) != null);
     try std.testing.expect(contractFor("zigos.identity.session").?.operation(.identity_session_authorize) != null);
     try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_authorize) != null);
+    try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_bind_session) != null);
+    try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch) != null);
     try std.testing.expect(contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_apply) != null);
     try std.testing.expect(contractFor(interfaceForService(.service_registry).name).?.contract_hash != 0);
     try std.testing.expect(contractFor(interfaceForService(.sync_replication).name).?.contract_hash != 0);

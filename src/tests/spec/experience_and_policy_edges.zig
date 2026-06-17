@@ -5,12 +5,15 @@ const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const manifest = @import("../../native/policy/manifest.zig");
+const agent_delegation_service = @import("../../native/services/agent_delegation_service.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
+const policy_object = @import("../../native/policy/policy_object.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const signing = @import("../../native/core/signing.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
+const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
 const workspace = @import("../../native/storage/workspace.zig");
 
 const REVIEW_SUMMARY_BUFFER_BYTES: usize = 4096;
@@ -300,6 +303,109 @@ pub fn taskViewsAndNativeComponentsStayExplicit() !void {
     try std.testing.expectEqual(task_runtime.ExecutionSubstrate.typed_component_abi, renderer.substrate);
     try std.testing.expectEqual(task_runtime.ExecutionSubstrate.typed_component_abi, indexer.substrate);
     try std.testing.expectEqual(@as(usize, 3), task.execution_component_count);
+}
+
+pub fn agentSessionsStayBoundedAuditedAndRevocable() !void {
+    try std.testing.expect(typed_component_abi.contractFor("zigos.agent.delegation").?.operation(.agent_bind_session) != null);
+    try std.testing.expect(typed_component_abi.contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch) != null);
+
+    var policies = policy_object.Directory.init();
+    _ = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 313,
+        .issuer = spec_support.policyAuthority(313),
+        .label = "spec-agent-session",
+        .agent_delegation_allowed = true,
+        .max_agent_actions_per_session = 3,
+        .max_agent_remote_calls_per_session = 1,
+        .require_agent_user_confirmation = true,
+        .require_agent_audit = true,
+        .require_agent_session_binding = true,
+        .require_agent_local_context = true,
+        .max_agent_context_bytes = 2048,
+        .min_agent_delegation_generation = 7,
+        .require_agent_visible_plan = true,
+    }, spec_support.signer("spec.agent.session.policy", 0xB7));
+    const subjects = policy_object.SubjectSet{ .organization_id = 313 };
+    const app = spec_support.app(3130);
+
+    const hidden_plan = policies.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .context_bytes = 1024,
+        .delegation_generation = 7,
+    });
+    try std.testing.expect(!hidden_plan.allowed);
+    try std.testing.expectEqual(policy_object.DecisionReason.agent_plan_visibility_required, hidden_plan.reason);
+
+    var service = agent_delegation_service.Service.init();
+    var ledger = event_ledger.Ledger.init();
+    const delegation = try service.authorize(&policies, subjects, .{
+        .subject = app,
+        .task_id = 3131,
+        .session_id = 8080,
+        .autonomous_actions = 3,
+        .remote_calls = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 1024,
+        .delegation_generation = 7,
+        .user_visible_plan = true,
+        .now_tick = 30,
+        .detail = "private agent workspace plan",
+    }, &ledger);
+    try std.testing.expectEqual(@as(usize, 1), service.activeCount());
+
+    _ = try service.recordAction(.{
+        .delegation_id = delegation.id,
+        .session_id = 8080,
+        .action_count = 2,
+        .remote_call_count = 1,
+        .context_bytes = 512,
+        .now_tick = 31,
+        .detail = "private agent workspace action",
+    }, &ledger);
+    try std.testing.expectError(error.RemoteCallBudgetExceeded, service.recordAction(.{
+        .delegation_id = delegation.id,
+        .session_id = 8080,
+        .remote_call_count = 1,
+    }, null));
+
+    try std.testing.expectEqual(@as(usize, 1), try service.killSwitch(8, &ledger, app, 32, "private agent kill switch"));
+    try std.testing.expectEqual(@as(usize, 0), service.activeCount());
+    try std.testing.expectError(error.DelegationRevoked, service.recordAction(.{
+        .delegation_id = delegation.id,
+        .session_id = 8080,
+    }, null));
+    try std.testing.expectError(error.KillSwitchGenerationStale, service.authorize(&policies, subjects, .{
+        .subject = app,
+        .task_id = 3132,
+        .session_id = 8081,
+        .autonomous_actions = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 512,
+        .delegation_generation = 7,
+        .user_visible_plan = true,
+        .now_tick = 33,
+        .detail = "private stale agent plan",
+    }, &ledger));
+
+    var diagnostics_buffer: [REVIEW_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const diagnostics = try ledger.exportText(&diagnostics_buffer, .{});
+    try expectContains(diagnostics, "kind=agent_session");
+    try expectContains(diagnostics, "kill_switch_block=yes");
+    try std.testing.expect(std.mem.indexOf(u8, diagnostics, "private agent") == null);
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 3), summary.agent_session_events);
+    try std.testing.expectEqual(@as(usize, 2), summary.agent_session_denials);
+    try std.testing.expectEqual(@as(usize, 2), summary.agent_kill_switch_denials);
 }
 
 pub fn thermalPowerAndAppUpdatesStayExplicit() !void {

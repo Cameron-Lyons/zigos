@@ -74,6 +74,11 @@ pub const DecisionReason = enum(u8) {
     agent_remote_call_denied,
     agent_confirmation_required,
     agent_audit_required,
+    agent_session_binding_denied,
+    agent_context_scope_denied,
+    agent_context_budget_denied,
+    agent_kill_switch_denied,
+    agent_plan_visibility_required,
     private_egress_budget_denied,
     data_export_denied,
     data_deletion_denied,
@@ -139,6 +144,11 @@ pub const CreateRequest = struct {
     max_agent_remote_calls_per_session: u16 = 0,
     require_agent_user_confirmation: bool = true,
     require_agent_audit: bool = true,
+    require_agent_session_binding: bool = false,
+    require_agent_local_context: bool = false,
+    max_agent_context_bytes: usize = 0,
+    min_agent_delegation_generation: u32 = 0,
+    require_agent_visible_plan: bool = false,
     max_remote_private_egress_bytes: usize = 0,
     data_export_allowed: bool = false,
     data_deletion_allowed: bool = false,
@@ -229,6 +239,11 @@ pub const AgentDelegationRequest = struct {
     remote_calls: u16 = 0,
     user_confirmed: bool = false,
     audit_enabled: bool = false,
+    session_bound: bool = false,
+    local_context_only: bool = true,
+    context_bytes: usize = 0,
+    delegation_generation: u32 = 0,
+    user_visible_plan: bool = false,
 };
 
 pub const PermissionUseRequest = struct {
@@ -286,6 +301,11 @@ pub const PolicyObject = struct {
     max_agent_remote_calls_per_session: u16,
     require_agent_user_confirmation: bool,
     require_agent_audit: bool,
+    require_agent_session_binding: bool,
+    require_agent_local_context: bool,
+    max_agent_context_bytes: usize,
+    min_agent_delegation_generation: u32,
+    require_agent_visible_plan: bool,
     max_remote_private_egress_bytes: usize,
     data_export_allowed: bool,
     data_deletion_allowed: bool,
@@ -454,6 +474,11 @@ pub const Directory = struct {
         slot.policy.max_agent_remote_calls_per_session = request.max_agent_remote_calls_per_session;
         slot.policy.require_agent_user_confirmation = request.require_agent_user_confirmation;
         slot.policy.require_agent_audit = request.require_agent_audit;
+        slot.policy.require_agent_session_binding = request.require_agent_session_binding;
+        slot.policy.require_agent_local_context = request.require_agent_local_context;
+        slot.policy.max_agent_context_bytes = request.max_agent_context_bytes;
+        slot.policy.min_agent_delegation_generation = request.min_agent_delegation_generation;
+        slot.policy.require_agent_visible_plan = request.require_agent_visible_plan;
         slot.policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
         slot.policy.data_export_allowed = request.data_export_allowed;
         slot.policy.data_deletion_allowed = request.data_deletion_allowed;
@@ -614,6 +639,21 @@ pub const Directory = struct {
             }
             if (policy.require_agent_audit and !request.audit_enabled) {
                 return block(policy, .agent_audit_required);
+            }
+            if (policy.require_agent_session_binding and !request.session_bound) {
+                return block(policy, .agent_session_binding_denied);
+            }
+            if (policy.require_agent_local_context and !request.local_context_only) {
+                return block(policy, .agent_context_scope_denied);
+            }
+            if (policy.max_agent_context_bytes != 0 and request.context_bytes > policy.max_agent_context_bytes) {
+                return block(policy, .agent_context_budget_denied);
+            }
+            if (request.delegation_generation < policy.min_agent_delegation_generation) {
+                return block(policy, .agent_kill_switch_denied);
+            }
+            if (policy.require_agent_visible_plan and !request.user_visible_plan) {
+                return block(policy, .agent_plan_visibility_required);
             }
         }
         return allow();
@@ -1060,6 +1100,11 @@ fn zeroPolicy() PolicyObject {
         .max_agent_remote_calls_per_session = 0,
         .require_agent_user_confirmation = true,
         .require_agent_audit = true,
+        .require_agent_session_binding = false,
+        .require_agent_local_context = false,
+        .max_agent_context_bytes = 0,
+        .min_agent_delegation_generation = 0,
+        .require_agent_visible_plan = false,
         .max_remote_private_egress_bytes = 0,
         .data_export_allowed = false,
         .data_deletion_allowed = false,
@@ -1146,6 +1191,11 @@ fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     crypto_hash.updateInt(&hasher, "max-agent-remote-calls-per-session", policy.max_agent_remote_calls_per_session);
     crypto_hash.updateBool(&hasher, "require-agent-user-confirmation", policy.require_agent_user_confirmation);
     crypto_hash.updateBool(&hasher, "require-agent-audit", policy.require_agent_audit);
+    crypto_hash.updateBool(&hasher, "require-agent-session-binding", policy.require_agent_session_binding);
+    crypto_hash.updateBool(&hasher, "require-agent-local-context", policy.require_agent_local_context);
+    crypto_hash.updateInt(&hasher, "max-agent-context-bytes", policy.max_agent_context_bytes);
+    crypto_hash.updateInt(&hasher, "min-agent-delegation-generation", policy.min_agent_delegation_generation);
+    crypto_hash.updateBool(&hasher, "require-agent-visible-plan", policy.require_agent_visible_plan);
     crypto_hash.updateInt(&hasher, "max-remote-private-egress-bytes", policy.max_remote_private_egress_bytes);
     crypto_hash.updateBool(&hasher, "data-export-allowed", policy.data_export_allowed);
     crypto_hash.updateBool(&hasher, "data-deletion-allowed", policy.data_deletion_allowed);
@@ -1677,6 +1727,11 @@ test "policy directory gates agent delegation budgets confirmation and audit" {
         .max_agent_remote_calls_per_session = 1,
         .require_agent_user_confirmation = true,
         .require_agent_audit = true,
+        .require_agent_session_binding = true,
+        .require_agent_local_context = true,
+        .max_agent_context_bytes = 4096,
+        .min_agent_delegation_generation = 4,
+        .require_agent_visible_plan = true,
     }, signer);
 
     const subjects = SubjectSet{
@@ -1688,6 +1743,11 @@ test "policy directory gates agent delegation budgets confirmation and audit" {
         .remote_calls = 1,
         .user_confirmed = true,
         .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .context_bytes = 2048,
+        .delegation_generation = 4,
+        .user_visible_plan = true,
     });
     try std.testing.expect(allowed.allowed);
 
@@ -1697,6 +1757,11 @@ test "policy directory gates agent delegation budgets confirmation and audit" {
         .remote_calls = 1,
         .user_confirmed = true,
         .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .context_bytes = 2048,
+        .delegation_generation = 4,
+        .user_visible_plan = true,
     });
     try std.testing.expect(!too_many_actions.allowed);
     try std.testing.expectEqual(DecisionReason.agent_action_budget_denied, too_many_actions.reason);
@@ -1708,6 +1773,11 @@ test "policy directory gates agent delegation budgets confirmation and audit" {
         .remote_calls = 2,
         .user_confirmed = true,
         .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .context_bytes = 2048,
+        .delegation_generation = 4,
+        .user_visible_plan = true,
     });
     try std.testing.expect(!too_many_remote_calls.allowed);
     try std.testing.expectEqual(DecisionReason.agent_remote_call_denied, too_many_remote_calls.reason);
@@ -1729,6 +1799,79 @@ test "policy directory gates agent delegation budgets confirmation and audit" {
     });
     try std.testing.expect(!missing_audit.allowed);
     try std.testing.expectEqual(DecisionReason.agent_audit_required, missing_audit.reason);
+
+    const missing_session_binding = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 0,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 2048,
+        .delegation_generation = 4,
+        .user_visible_plan = true,
+    });
+    try std.testing.expect(!missing_session_binding.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_session_binding_denied, missing_session_binding.reason);
+
+    const remote_context = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 0,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = false,
+        .context_bytes = 2048,
+        .delegation_generation = 4,
+        .user_visible_plan = true,
+    });
+    try std.testing.expect(!remote_context.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_context_scope_denied, remote_context.reason);
+
+    const oversized_context = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 0,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .context_bytes = 8192,
+        .delegation_generation = 4,
+        .user_visible_plan = true,
+    });
+    try std.testing.expect(!oversized_context.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_context_budget_denied, oversized_context.reason);
+
+    const stale_generation = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 0,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .context_bytes = 2048,
+        .delegation_generation = 3,
+        .user_visible_plan = true,
+    });
+    try std.testing.expect(!stale_generation.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_kill_switch_denied, stale_generation.reason);
+
+    const hidden_plan = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 0,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .context_bytes = 2048,
+        .delegation_generation = 4,
+    });
+    try std.testing.expect(!hidden_plan.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_plan_visibility_required, hidden_plan.reason);
 
     var locked_directory = Directory.init();
     _ = try locked_directory.create(.{
