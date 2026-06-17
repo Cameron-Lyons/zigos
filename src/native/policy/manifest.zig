@@ -84,6 +84,10 @@ pub const AgentDelegationDecl = struct {
     max_remote_calls: u16 = 0,
     user_confirmation_required: bool = true,
     audit_required: bool = true,
+    session_bound: bool = false,
+    local_context_only: bool = true,
+    max_context_bytes: usize = 0,
+    kill_switch_supported: bool = false,
 };
 
 pub const AccessibilityDecl = struct {
@@ -399,6 +403,10 @@ pub const ValidationError = error{
     AgentDelegationActionBudgetMissing,
     AgentDelegationAuditRequired,
     AgentDelegationNeedsConfirmation,
+    AgentDelegationSessionBindingRequired,
+    AgentDelegationLocalContextRequired,
+    AgentDelegationContextBudgetMissing,
+    AgentDelegationKillSwitchRequired,
     AccessibilityProfileTooLong,
     AccessibilityKeyboardNavigationMissing,
     AccessibilityScreenReaderMissing,
@@ -476,6 +484,10 @@ fn validateAgentDelegation(bundle: BundleManifest) ValidationError!void {
     if (!bundle.agent_delegation.user_confirmation_required and bundle.agent_delegation.max_remote_calls != 0) {
         return error.AgentDelegationNeedsConfirmation;
     }
+    if (!bundle.agent_delegation.session_bound) return error.AgentDelegationSessionBindingRequired;
+    if (!bundle.agent_delegation.local_context_only) return error.AgentDelegationLocalContextRequired;
+    if (bundle.agent_delegation.max_context_bytes == 0) return error.AgentDelegationContextBudgetMissing;
+    if (!bundle.agent_delegation.kill_switch_supported) return error.AgentDelegationKillSwitchRequired;
 }
 
 fn validateAccessibility(bundle: BundleManifest) ValidationError!void {
@@ -1399,6 +1411,64 @@ test "validate gates agent delegation behind bounded audited consent" {
             .user_confirmation_required = false,
         },
     }));
+    try std.testing.expectError(error.AgentDelegationSessionBindingRequired, validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize incoming notes",
+            .max_autonomous_actions = 4,
+            .user_confirmation_required = true,
+            .audit_required = true,
+            .max_context_bytes = 4096,
+            .kill_switch_supported = true,
+        },
+    }));
+    try std.testing.expectError(error.AgentDelegationLocalContextRequired, validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize incoming notes",
+            .max_autonomous_actions = 4,
+            .user_confirmation_required = true,
+            .audit_required = true,
+            .session_bound = true,
+            .local_context_only = false,
+            .max_context_bytes = 4096,
+            .kill_switch_supported = true,
+        },
+    }));
+    try std.testing.expectError(error.AgentDelegationContextBudgetMissing, validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize incoming notes",
+            .max_autonomous_actions = 4,
+            .user_confirmation_required = true,
+            .audit_required = true,
+            .session_bound = true,
+            .kill_switch_supported = true,
+        },
+    }));
+    try std.testing.expectError(error.AgentDelegationKillSwitchRequired, validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize incoming notes",
+            .max_autonomous_actions = 4,
+            .user_confirmation_required = true,
+            .audit_required = true,
+            .session_bound = true,
+            .max_context_bytes = 4096,
+        },
+    }));
     try validate(.{
         .bundle_id = "app.agent",
         .display_name = "Agent",
@@ -1410,6 +1480,10 @@ test "validate gates agent delegation behind bounded audited consent" {
             .max_remote_calls = 0,
             .user_confirmation_required = true,
             .audit_required = true,
+            .session_bound = true,
+            .local_context_only = true,
+            .max_context_bytes = 4096,
+            .kill_switch_supported = true,
         },
     });
 }

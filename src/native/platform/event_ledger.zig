@@ -65,6 +65,7 @@ pub const EventKind = enum(u8) {
     permission_lease,
     consent_receipt,
     agent_delegation,
+    agent_session,
     attention_policy,
     accessibility_profile,
 };
@@ -138,6 +139,9 @@ pub const DiagnosticSummary = struct {
     agent_delegation_events: usize = 0,
     agent_delegation_denials: usize = 0,
     agent_remote_call_events: usize = 0,
+    agent_session_events: usize = 0,
+    agent_session_denials: usize = 0,
+    agent_kill_switch_denials: usize = 0,
     attention_policy_events: usize = 0,
     attention_interruptions_denied: usize = 0,
     accessibility_profile_events: usize = 0,
@@ -163,6 +167,7 @@ pub const DiagnosticSummary = struct {
             self.permission_lease_events +
             self.consent_receipt_events +
             self.agent_delegation_events +
+            self.agent_session_events +
             self.attention_policy_events +
             self.accessibility_profile_events;
     }
@@ -855,6 +860,35 @@ pub const Ledger = struct {
         });
     }
 
+    pub fn recordAgentSessionBoundary(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        allowed: bool,
+        session_bound: bool,
+        local_context_only: bool,
+        generation_blocked: bool,
+        delegation_generation: u32,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = delegation_generation & 0x1fff_ffff;
+        if (session_bound) code |= @as(u32, 1) << @as(u5, 31);
+        if (local_context_only) code |= @as(u32, 1) << @as(u5, 30);
+        if (generation_blocked) code |= @as(u32, 1) << @as(u5, 29);
+        try self.append(.{
+            .kind = .agent_session,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
     pub fn recordAttentionDecision(
         self: *Ledger,
         subject: principal.PrincipalId,
@@ -1025,6 +1059,13 @@ pub const Ledger = struct {
                     if (!event.allowed) summary.agent_delegation_denials += 1;
                     if (event.related_id != 0) summary.agent_remote_call_events += 1;
                 },
+                .agent_session => {
+                    summary.agent_session_events += 1;
+                    if (!event.allowed) summary.agent_session_denials += 1;
+                    if (!event.allowed and (event.detail_code & (@as(u32, 1) << @as(u5, 29))) != 0) {
+                        summary.agent_kill_switch_denials += 1;
+                    }
+                },
                 .attention_policy => {
                     summary.attention_policy_events += 1;
                     if (!event.allowed and (event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0) {
@@ -1052,7 +1093,7 @@ pub const Ledger = struct {
             summary.protected_details_redacted,
             summary.latest_tick,
         });
-        try appendFmt(buffer, &used, "diagnostic_evidence capability_denials={d} crashes={d} driver_restarts={d} suspicious_app_behavior={d} session_posture_events={d} session_posture_denials={d} sync_conflicts={d} device_trust_changes={d} device_trust_revocations={d} update_health_events={d} update_rollbacks={d} ai_inference_events={d} ai_remote_denials={d} ai_model_attestations={d} ai_model_rejections={d} data_egress_events={d} private_egress_denials={d} privacy_budget_events={d} data_export_events={d} data_export_denials={d} data_deletion_events={d} data_deletion_denials={d} data_deletion_receipts={d} retention_policy_events={d} permission_lease_events={d} permission_lease_expirations={d} consent_receipt_events={d} consent_receipt_revocations={d} agent_delegation_events={d} agent_delegation_denials={d} agent_remote_call_events={d}", .{
+        try appendFmt(buffer, &used, "diagnostic_evidence capability_denials={d} crashes={d} driver_restarts={d} suspicious_app_behavior={d} session_posture_events={d} session_posture_denials={d} sync_conflicts={d} device_trust_changes={d} device_trust_revocations={d} update_health_events={d} update_rollbacks={d} ai_inference_events={d} ai_remote_denials={d} ai_model_attestations={d} ai_model_rejections={d} data_egress_events={d} private_egress_denials={d} privacy_budget_events={d} data_export_events={d} data_export_denials={d} data_deletion_events={d} data_deletion_denials={d} data_deletion_receipts={d}", .{
             summary.capability_denials,
             summary.crashes,
             summary.driver_restarts,
@@ -1076,6 +1117,8 @@ pub const Ledger = struct {
             summary.data_deletion_events,
             summary.data_deletion_denials,
             summary.data_deletion_receipts,
+        });
+        try appendFmt(buffer, &used, " retention_policy_events={d} permission_lease_events={d} permission_lease_expirations={d} consent_receipt_events={d} consent_receipt_revocations={d} agent_delegation_events={d} agent_delegation_denials={d} agent_remote_call_events={d} agent_session_events={d} agent_session_denials={d} agent_kill_switch_denials={d}", .{
             summary.retention_policy_events,
             summary.permission_lease_events,
             summary.permission_lease_expirations,
@@ -1084,6 +1127,9 @@ pub const Ledger = struct {
             summary.agent_delegation_events,
             summary.agent_delegation_denials,
             summary.agent_remote_call_events,
+            summary.agent_session_events,
+            summary.agent_session_denials,
+            summary.agent_kill_switch_denials,
         });
         try appendFmt(buffer, &used, " attention_policy_events={d} attention_interruptions_denied={d}", .{
             summary.attention_policy_events,
@@ -1779,6 +1825,15 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
                 yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0),
                 (event.detail_code >> @as(u5, 16)) & 0x7fff,
                 event.detail_code & 0xffff,
+                yesNo(event.allowed),
+            });
+        },
+        .agent_session => {
+            try appendFmt(buffer, used, " agent_session session_bound={s} local_context={s} kill_switch_block={s} generation={d} allowed={s}", .{
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0),
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 30))) != 0),
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 29))) != 0),
+                event.detail_code & 0x1fff_ffff,
                 yesNo(event.allowed),
             });
         },

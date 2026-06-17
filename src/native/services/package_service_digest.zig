@@ -38,6 +38,10 @@ pub fn digestBundle(bundle: manifest.BundleManifest) Digest {
     crypto_hash.updateInt(&hasher, "agent-delegation-max-remote-calls", bundle.agent_delegation.max_remote_calls);
     crypto_hash.updateBool(&hasher, "agent-delegation-user-confirmation", bundle.agent_delegation.user_confirmation_required);
     crypto_hash.updateBool(&hasher, "agent-delegation-audit-required", bundle.agent_delegation.audit_required);
+    crypto_hash.updateBool(&hasher, "agent-delegation-session-bound", bundle.agent_delegation.session_bound);
+    crypto_hash.updateBool(&hasher, "agent-delegation-local-context-only", bundle.agent_delegation.local_context_only);
+    crypto_hash.updateInt(&hasher, "agent-delegation-max-context-bytes", bundle.agent_delegation.max_context_bytes);
+    crypto_hash.updateBool(&hasher, "agent-delegation-kill-switch-supported", bundle.agent_delegation.kill_switch_supported);
     crypto_hash.updateBool(&hasher, "accessibility-adaptive-ui", bundle.accessibility.adaptive_ui);
     crypto_hash.updateBool(&hasher, "accessibility-screen-reader", bundle.accessibility.supports_screen_reader);
     crypto_hash.updateBool(&hasher, "accessibility-keyboard-navigation", bundle.accessibility.supports_keyboard_navigation);

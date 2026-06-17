@@ -301,6 +301,37 @@ test "event ledger records agent delegation as redacted diagnostic evidence" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "agent_remote_call_events=1") != null);
 }
 
+test "event ledger records agent session boundaries as redacted diagnostic evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 29 };
+
+    try ledger.recordAgentSessionBoundary(user, 2901, true, true, true, false, 5, 112, "agent session bound locally");
+    try ledger.recordAgentSessionBoundary(user, 2901, false, true, true, true, 4, 113, "agent session killed for stale generation");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=agent_session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kill_switch_block=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "stale generation") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "agent session bound locally") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "agent session killed") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.agent_session_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.agent_session_denials);
+    try std.testing.expectEqual(@as(usize, 1), summary.agent_kill_switch_denials);
+    try std.testing.expectEqual(@as(usize, 2), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "agent_session_events=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "agent_session_denials=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "agent_kill_switch_denials=1") != null);
+}
+
 test "event ledger records attention policy as redacted diagnostic evidence" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 28 };

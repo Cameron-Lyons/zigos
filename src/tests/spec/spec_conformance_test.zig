@@ -43,6 +43,7 @@ const spec_cases = [_]SpecCase{
     .{ .run = architecture_security.principalIdentityAndAdministrativeScopeStaySplit },
     .{ .run = platform_services.failuresStayExplainableRestartableAndRedacted },
     .{ .run = ux_and_lifecycle.userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive },
+    .{ .run = experience_and_policy_edges.agentSessionsStayBoundedAuditedAndRevocable },
 };
 
 fn runSpecCase(index: usize) !void {
@@ -139,6 +140,10 @@ test "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted
 
 test "spec 19 user journeys keep installs sync permissions updates and recovery cohesive" {
     try runSpecCase(22);
+}
+
+test "spec 7.2 11.3 and 16 keep agent sessions bounded audited and revocable" {
+    try runSpecCase(23);
 }
 
 test "adversarial spec rejects revoked capabilities during ipc" {

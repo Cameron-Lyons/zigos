@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const agent_delegation_service = @import("../../native/services/agent_delegation_service.zig");
 const component_abi_schema = @import("../../native/services/component_abi_schema.zig");
 const indexing_service = @import("../../native/services/indexing_service.zig");
 const media_print_service = @import("../../native/services/media_print_service.zig");
@@ -12,6 +13,7 @@ const userspace_service_ipc = @import("../../native/services/userspace_service_i
 
 test "service host tests import native service modules" {
     std.testing.refAllDecls(component_abi_schema);
+    std.testing.refAllDecls(agent_delegation_service);
     std.testing.refAllDecls(indexing_service);
     std.testing.refAllDecls(media_print_service);
     std.testing.refAllDecls(notification_center);

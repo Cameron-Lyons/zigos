@@ -1385,6 +1385,10 @@ test "package service resolves installed manifests with stable slices" {
             .max_remote_calls = 0,
             .user_confirmation_required = true,
             .audit_required = true,
+            .session_bound = true,
+            .local_context_only = true,
+            .max_context_bytes = 4096,
+            .kill_switch_supported = true,
         },
         .accessibility = .{
             .adaptive_ui = true,
@@ -1430,6 +1434,10 @@ test "package service resolves installed manifests with stable slices" {
     try std.testing.expectEqualStrings("Organize notes locally", current.agent_delegation.purpose);
     try std.testing.expectEqual(@as(u16, 4), current.agent_delegation.max_autonomous_actions);
     try std.testing.expect(current.agent_delegation.audit_required);
+    try std.testing.expect(current.agent_delegation.session_bound);
+    try std.testing.expect(current.agent_delegation.local_context_only);
+    try std.testing.expectEqual(@as(usize, 4096), current.agent_delegation.max_context_bytes);
+    try std.testing.expect(current.agent_delegation.kill_switch_supported);
     try std.testing.expect(current.accessibility.adaptive_ui);
     try std.testing.expect(current.accessibility.supports_screen_reader);
     try std.testing.expect(current.accessibility.supports_keyboard_navigation);

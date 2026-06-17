@@ -243,6 +243,10 @@ pub const StoredAgentDelegation = struct {
     max_remote_calls: u16 = 0,
     user_confirmation_required: bool = true,
     audit_required: bool = true,
+    session_bound: bool = false,
+    local_context_only: bool = true,
+    max_context_bytes: usize = 0,
+    kill_switch_supported: bool = false,
 
     pub fn purposeSlice(self: *const StoredAgentDelegation) []const u8 {
         return self.purpose[0..self.purpose_len];
