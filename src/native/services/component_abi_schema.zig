@@ -63,7 +63,13 @@ pub const InterfaceKey = enum(u8) {
     agent_delegation,
     accessibility_profile,
     background_activity,
+    attention_broker,
+    task_lifecycle,
     secure_pasteboard,
+    object_resilience,
+    sensitive_capture,
+    secret_vault,
+    personal_context,
 };
 
 pub const InterfaceId = enum(u16) {
@@ -92,6 +98,12 @@ pub const InterfaceId = enum(u16) {
     accessibility_profile = 0x1017,
     background_activity = 0x1018,
     secure_pasteboard = 0x1019,
+    object_resilience = 0x101A,
+    sensitive_capture = 0x101B,
+    secret_vault = 0x101C,
+    attention_broker = 0x101D,
+    task_lifecycle = 0x101E,
+    personal_context = 0x101F,
 };
 
 pub const OperationId = enum(u16) {
@@ -101,10 +113,14 @@ pub const OperationId = enum(u16) {
     workspace_put_version = 0x0301,
     workspace_resolve = 0x0302,
     network_authorize = 0x0401,
+    network_open_session = 0x0402,
+    network_record_transfer = 0x0403,
+    network_revoke_session = 0x0404,
     policy_authorize = 0x0501,
     package_install = 0x0601,
     package_update = 0x0602,
     package_rollback = 0x0603,
+    package_remove = 0x0604,
     ai_authorize = 0x0701,
     ai_run_local = 0x0702,
     ai_model_register = 0x0D01,
@@ -125,6 +141,10 @@ pub const OperationId = enum(u16) {
     identity_session_authorize = 0x0E01,
     identity_session_step_up = 0x0E02,
     identity_session_revoke = 0x0E03,
+    identity_credential_register = 0x0E04,
+    identity_credential_assert = 0x0E05,
+    identity_credential_recover = 0x0E06,
+    identity_credential_revoke = 0x0E07,
     agent_authorize = 0x0F01,
     agent_record_action = 0x0F02,
     agent_revoke = 0x0F03,
@@ -139,6 +159,33 @@ pub const OperationId = enum(u16) {
     pasteboard_offer = 0x1201,
     pasteboard_read = 0x1202,
     pasteboard_revoke = 0x1203,
+    object_backup_prepare = 0x1301,
+    object_restore_authorize = 0x1302,
+    object_backup_revoke = 0x1303,
+    index_upsert = 0x1401,
+    index_query = 0x1402,
+    semantic_index_query = 0x1403,
+    sync_device_enroll = 0x1501,
+    sync_workspace_replicate = 0x1502,
+    sync_conflict_review = 0x1503,
+    sync_conflict_resolve = 0x1504,
+    sync_transport_frame = 0x1505,
+    capture_start = 0x1601,
+    capture_sample = 0x1602,
+    capture_stop = 0x1603,
+    secret_import = 0x1701,
+    secret_lend = 0x1702,
+    secret_rotate = 0x1703,
+    secret_revoke = 0x1704,
+    attention_post = 0x1801,
+    attention_dismiss = 0x1802,
+    attention_query = 0x1803,
+    lifecycle_suspend = 0x1901,
+    lifecycle_resume = 0x1902,
+    lifecycle_terminate = 0x1903,
+    personal_context_lease = 0x1A01,
+    personal_context_query = 0x1A02,
+    personal_context_revoke = 0x1A03,
 };
 
 pub const ServiceBinding = enum(u8) {
@@ -154,7 +201,13 @@ pub const ServiceBinding = enum(u8) {
     indexing_search,
     sync_replication,
     media_print_helpers,
+    attention_broker,
+    task_lifecycle,
     secure_pasteboard,
+    object_resilience,
+    sensitive_capture,
+    secret_vault,
+    personal_context,
 };
 
 const ServiceRegisterRequestWire = extern struct {
@@ -197,10 +250,110 @@ const WorkspaceResolveRequestWire = extern struct {
     _reserved: u16 = 0,
 };
 
+const IndexUpsertRequestWire = extern struct {
+    header: WireHeader,
+    workspace_id: u64,
+    object_id: u64,
+    version_id: u64,
+    title_len: u16,
+    body_len: u16,
+    sensitivity: u16,
+    flags: u16,
+};
+
+const IndexQueryRequestWire = extern struct {
+    header: WireHeader,
+    workspace_id: u64,
+    query_len: u16,
+    max_results: u16,
+};
+
+const SemanticIndexQueryRequestWire = extern struct {
+    header: WireHeader,
+    workspace_id: u64,
+    query_len: u16,
+    max_results: u16,
+    flags: u16,
+};
+
+const SyncDeviceEnrollRequestWire = extern struct {
+    header: WireHeader,
+    user_id: u64,
+    device_id: u64,
+    label_len: u16,
+    flags: u16,
+};
+
+const SyncWorkspaceReplicateRequestWire = extern struct {
+    header: WireHeader,
+    workspace_id: u64,
+    from_device_id: u64,
+    to_device_id: u64,
+    transport_mode: u16,
+    flags: u16,
+};
+
+const SyncConflictReviewRequestWire = extern struct {
+    header: WireHeader,
+    workspace_id: u64,
+    device_id: u64,
+    object_id: u64,
+};
+
+const SyncConflictResolveRequestWire = extern struct {
+    header: WireHeader,
+    workspace_id: u64,
+    device_id: u64,
+    object_id: u64,
+    decision: u16,
+    _reserved: u16 = 0,
+};
+
+const SyncTransportFrameRequestWire = extern struct {
+    header: WireHeader,
+    frame_id: u64,
+    workspace_id: u64,
+    object_id: u64,
+    version_id: u64,
+    semantic: u16,
+    flags: u16,
+};
+
 const NetworkAuthorizeRequestWire = extern struct {
     header: WireHeader,
     policy_id: u64,
     destination_len: u16,
+    flags: u16,
+};
+
+const NetworkOpenSessionRequestWire = extern struct {
+    header: WireHeader,
+    policy_id: u64,
+    capability_id: u64,
+    remote_bytes: u64,
+    expires_at_tick: u64,
+    destination_len: u16,
+    sensitivity: u16,
+    flags: u16,
+    _reserved: u16 = 0,
+};
+
+const NetworkRecordTransferRequestWire = extern struct {
+    header: WireHeader,
+    session_id: u64,
+    expected_policy_id: u64,
+    expected_capability_id: u64,
+    bytes: u64,
+    flags: u16,
+    _reserved: u16 = 0,
+};
+
+const NetworkRevokeSessionRequestWire = extern struct {
+    header: WireHeader,
+    session_id: u64,
+    expected_policy_id: u64,
+    expected_capability_id: u64,
+    reason: u16,
     flags: u16,
 };
 
@@ -232,8 +385,18 @@ const PackageUpdateRequestWire = extern struct {
 
 const PackageRollbackRequestWire = extern struct {
     header: WireHeader,
+    expected_active_digest: crypto_hash.Digest,
     bundle_id_len: u16,
     _reserved: u16 = 0,
+};
+
+const PackageRemoveRequestWire = extern struct {
+    header: WireHeader,
+    expected_active_digest: crypto_hash.Digest,
+    bundle_id_len: u16,
+    reason: u16,
+    flags: u32,
+    receipt_id: u64,
 };
 
 const AiAuthorizeRequestWire = extern struct {
@@ -384,6 +547,43 @@ const IdentitySessionRevokeRequestWire = extern struct {
     _reserved: u16 = 0,
 };
 
+const IdentityCredentialRegisterRequestWire = extern struct {
+    header: WireHeader,
+    owner_id: u64,
+    device_id: u64,
+    relying_party_id_len: u16,
+    label_len: u16,
+    flags: u16,
+    _reserved: u16 = 0,
+};
+
+const IdentityCredentialAssertRequestWire = extern struct {
+    header: WireHeader,
+    credential_id: u64,
+    device_id: u64,
+    relying_party_id_len: u16,
+    origin_len: u16,
+    challenge_len: u16,
+    flags: u16,
+};
+
+const IdentityCredentialRecoverRequestWire = extern struct {
+    header: WireHeader,
+    credential_id: u64,
+    recovery_device_id: u64,
+    relying_party_id_len: u16,
+    challenge_len: u16,
+    approval_count: u16,
+    flags: u16,
+};
+
+const IdentityCredentialRevokeRequestWire = extern struct {
+    header: WireHeader,
+    credential_id: u64,
+    reason: u16,
+    _reserved: u16 = 0,
+};
+
 const AgentAuthorizeRequestWire = extern struct {
     header: WireHeader,
     autonomous_actions: u16,
@@ -395,10 +595,15 @@ const AgentAuthorizeRequestWire = extern struct {
 const AgentRecordActionRequestWire = extern struct {
     header: WireHeader,
     delegation_id: u64,
+    expected_subject_serial: u64,
+    expected_task_id: u64,
+    expected_generation: u32,
     action_count: u16,
     remote_call_count: u16,
+    expected_subject_kind: u16,
     flags: u16,
     detail_len: u16,
+    _reserved: u16 = 0,
 };
 
 const AgentRevokeRequestWire = extern struct {
@@ -466,10 +671,13 @@ const BackgroundRecordRequestWire = extern struct {
 
 const BackgroundCompleteRequestWire = extern struct {
     header: WireHeader,
-    task_id: u64,
     record_id: u64,
+    expected_task_id: u64,
+    completed_tick: u64,
+    expected_background_task_len: u16,
+    expected_trigger: u16,
     result_code: u16,
-    _reserved: u16 = 0,
+    flags: u16 = 0,
 };
 
 const ServiceRegisterResponseWire = extern struct {
@@ -487,9 +695,37 @@ const WorkspaceResolveResponseWire = extern struct {
     object_type: u16,
 };
 
+const IndexResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    result_count: u16,
+    top_object_id: u64,
+    top_version_id: u64,
+    index_generation: u64,
+};
+
+const SyncResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    selected_entry_count: u16,
+    conflict_count: u16,
+    transport_frame_count: u16,
+    flags: u16,
+    latest_frame_id: u64,
+};
+
 const NetworkAuthorizeResponseWire = extern struct {
     allowed: u32,
     reason: u16,
+};
+
+const NetworkSessionResponseWire = extern struct {
+    allowed: u32,
+    reason: u16,
+    flags: u16,
+    session_id: u64,
+    remaining_bytes: u64,
+    expires_at_tick: u64,
 };
 
 const PolicyAuthorizeResponseWire = extern struct {
@@ -502,6 +738,10 @@ const PackageLifecycleResponseWire = extern struct {
     updated_existing: u32,
     permissions_changed: u32,
     rollback_available: u32,
+    removed_existing: u32,
+    removed_revision_count: u32,
+    deletion_receipt_id: u64,
+    removed_bundle_digest: crypto_hash.Digest,
 };
 
 const AiAuthorizeResponseWire = extern struct {
@@ -569,6 +809,14 @@ const IdentitySessionResponseWire = extern struct {
     expires_at_tick: u64,
 };
 
+const IdentityCredentialResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    flags: u16,
+    credential_id: u64,
+    credential_generation: u32,
+};
+
 const AgentDelegationResponseWire = extern struct {
     accepted: u32,
     reason: u16,
@@ -595,11 +843,13 @@ const BackgroundActivityResponseWire = extern struct {
 
 const PasteboardOfferRequestWire = extern struct {
     header: WireHeader,
+    destination_subject_serial: u64,
     destination_task_id: u64,
     user_gesture_id: u64,
     foreground_session_id: u64,
     expires_at_ticks: u64,
     payload_len: u32,
+    destination_subject_kind: u16,
     purpose_len: u16,
     flags: u16,
 };
@@ -627,6 +877,237 @@ const PasteboardResponseWire = extern struct {
     _reserved: u16 = 0,
     token_id: u64,
     payload_len: u32,
+    flags: u32,
+};
+
+const ObjectBackupPrepareRequestWire = extern struct {
+    header: WireHeader,
+    workspace_id: u64,
+    object_id: u64,
+    restore_device_id: u64,
+    bytes: u64,
+    sensitivity: u16,
+    flags: u16,
+};
+
+const ObjectRestoreAuthorizeRequestWire = extern struct {
+    header: WireHeader,
+    snapshot_id: u64,
+    destination_device_id: u64,
+    restore_age_days: u16,
+    flags: u16,
+};
+
+const ObjectBackupRevokeRequestWire = extern struct {
+    header: WireHeader,
+    snapshot_id: u64,
+    reason: u16,
+    _reserved: u16 = 0,
+};
+
+const ObjectResilienceResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    _reserved: u16 = 0,
+    snapshot_id: u64,
+    bytes: u64,
+    flags: u32,
+};
+
+const CaptureStartRequestWire = extern struct {
+    header: WireHeader,
+    device_id: u64,
+    foreground_session_id: u64,
+    user_gesture_id: u64,
+    lease_ticks: u64,
+    sample_budget: u32,
+    kind: u16,
+    flags: u16,
+};
+
+const CaptureSampleRequestWire = extern struct {
+    header: WireHeader,
+    session_id: u64,
+    expected_device_id: u64,
+    expected_foreground_session_id: u64,
+    bytes: u64,
+    expected_kind: u16,
+    flags: u16,
+};
+
+const CaptureStopRequestWire = extern struct {
+    header: WireHeader,
+    session_id: u64,
+    expected_device_id: u64,
+    expected_foreground_session_id: u64,
+    reason: u16,
+    expected_kind: u16,
+    flags: u16,
+    _reserved: u16 = 0,
+};
+
+const CaptureResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    _reserved: u16 = 0,
+    session_id: u64,
+    samples_remaining: u32,
+    flags: u32,
+};
+
+const AttentionPostRequestWire = extern struct {
+    header: WireHeader,
+    notification_task_id: u64,
+    expires_at_ticks: u64,
+    detail_len: u16,
+    reason: u16,
+    urgency: u16,
+    suppression_policy: u16,
+    flags: u32,
+};
+
+const AttentionDismissRequestWire = extern struct {
+    header: WireHeader,
+    notification_id: u64,
+    expected_source_serial: u64,
+    expected_notification_task_id: u64,
+    expected_source_kind: u16,
+    reason: u16,
+    flags: u16 = 0,
+};
+
+const AttentionQueryRequestWire = extern struct {
+    header: WireHeader,
+    now_ticks: u64,
+    flags: u32,
+};
+
+const AttentionResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    active_visible: u16,
+    active_interruptions: u16,
+    _reserved: u16 = 0,
+    notification_id: u64,
+    flags: u32,
+};
+
+const LifecycleControlRequestWire = extern struct {
+    header: WireHeader,
+    target_task_id: u64,
+    target_owner_serial: u64,
+    checkpoint_id: u64,
+    target_owner_kind: u16,
+    reason: u16,
+    flags: u16,
+    _reserved: u16 = 0,
+};
+
+const LifecycleControlResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    state: u16,
+    task_id: u64,
+    flags: u32,
+};
+
+const PersonalContextLeaseRequestWire = extern struct {
+    header: WireHeader,
+    workspace_id: u64,
+    max_query_bytes: u64,
+    expires_at_tick: u64,
+    sensitivity: u16,
+    flags: u16,
+};
+
+const PersonalContextQueryRequestWire = extern struct {
+    header: WireHeader,
+    lease_id: u64,
+    workspace_id: u64,
+    query_bytes: u64,
+    flags: u32,
+};
+
+const PersonalContextRevokeRequestWire = extern struct {
+    header: WireHeader,
+    lease_id: u64,
+    reason: u16,
+    _reserved: u16 = 0,
+};
+
+const PersonalContextResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    flags: u16,
+    result_count: u16,
+    receipt_privacy_flags: u16,
+    receipt_max_pack_sensitivity: u16,
+    lease_revocation_generation: u32,
+    top_score: u16,
+    top_title_hits: u16,
+    top_body_hits: u16,
+    top_sensitivity: u16,
+    lease_id: u64,
+    receipt_id: u64,
+    receipt_index_generation: u64,
+    remaining_bytes: u64,
+    receipt_issued_at_tick: u64,
+    expires_at_tick: u64,
+    top_object_id: u64,
+    top_version_id: u64,
+    top_title_fingerprint: u64,
+    request_fingerprint: crypto_hash.Digest,
+    query_fingerprint: crypto_hash.Digest,
+    pack_digest: crypto_hash.Digest,
+    receipt_digest: crypto_hash.Digest,
+};
+
+const SecretImportRequestWire = extern struct {
+    header: WireHeader,
+    owner_serial: u64,
+    label_len: u16,
+    raw_len: u16,
+    flags: u16,
+    _reserved: u16 = 0,
+};
+
+const SecretLendRequestWire = extern struct {
+    header: WireHeader,
+    secret_id: u64,
+    holder_serial: u64,
+    lease_ticks: u64,
+    flags: u16,
+    _reserved: u16 = 0,
+};
+
+const SecretRotateRequestWire = extern struct {
+    header: WireHeader,
+    old_secret_id: u64,
+    label_len: u16,
+    raw_len: u16,
+    flags: u16,
+    _reserved: u16 = 0,
+};
+
+const SecretRevokeRequestWire = extern struct {
+    header: WireHeader,
+    secret_id: u64,
+    handle_id: u64,
+    subject_serial: u64,
+    expected_holder_serial: u64,
+    expected_holder_task_id: u64,
+    subject_kind: u16,
+    expected_holder_kind: u16,
+    reason: u16,
+    flags: u16 = 0,
+};
+
+const SecretVaultResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    _reserved: u16 = 0,
+    secret_id: u64,
+    handle_id: u64,
     flags: u32,
 };
 
@@ -674,7 +1155,13 @@ pub const interface_specs = [_]InterfaceSpec{
     iface(.agent_delegation, "zigos.agent.delegation"),
     iface(.accessibility_profile, "zigos.accessibility.profile"),
     iface(.background_activity, "zigos.background.activity"),
+    iface(.attention_broker, "zigos.attention.broker"),
+    iface(.task_lifecycle, "zigos.task.lifecycle"),
     iface(.secure_pasteboard, "zigos.secure.pasteboard"),
+    iface(.object_resilience, "zigos.object.resilience"),
+    iface(.sensitive_capture, "zigos.sensitive.capture"),
+    iface(.secret_vault, "zigos.secret.vault"),
+    iface(.personal_context, "zigos.personal.context"),
 };
 
 const OperationSpec = struct {
@@ -710,11 +1197,23 @@ pub const operation_specs = [_]OperationSpec{
     op(.task_runtime, .task_describe, "describe", TaskDescribeRequestWire, abi.TaskDescriptor),
     op(.object_workspace, .workspace_put_version, "put_version", WorkspacePutVersionRequestWire, WorkspacePutVersionResponseWire),
     op(.object_workspace, .workspace_resolve, "resolve", WorkspaceResolveRequestWire, WorkspaceResolveResponseWire),
+    op(.index_search, .index_upsert, "upsert", IndexUpsertRequestWire, IndexResponseWire),
+    op(.index_search, .index_query, "query", IndexQueryRequestWire, IndexResponseWire),
+    op(.index_search, .semantic_index_query, "semantic_query", SemanticIndexQueryRequestWire, IndexResponseWire),
+    op(.sync_replication, .sync_device_enroll, "device_enroll", SyncDeviceEnrollRequestWire, SyncResponseWire),
+    op(.sync_replication, .sync_workspace_replicate, "workspace_replicate", SyncWorkspaceReplicateRequestWire, SyncResponseWire),
+    op(.sync_replication, .sync_conflict_review, "conflict_review", SyncConflictReviewRequestWire, SyncResponseWire),
+    op(.sync_replication, .sync_conflict_resolve, "conflict_resolve", SyncConflictResolveRequestWire, SyncResponseWire),
+    op(.sync_replication, .sync_transport_frame, "transport_frame", SyncTransportFrameRequestWire, SyncResponseWire),
     op(.network_policy, .network_authorize, "authorize", NetworkAuthorizeRequestWire, NetworkAuthorizeResponseWire),
+    op(.network_policy, .network_open_session, "open_session", NetworkOpenSessionRequestWire, NetworkSessionResponseWire),
+    op(.network_policy, .network_record_transfer, "record_transfer", NetworkRecordTransferRequestWire, NetworkSessionResponseWire),
+    op(.network_policy, .network_revoke_session, "revoke_session", NetworkRevokeSessionRequestWire, NetworkSessionResponseWire),
     op(.policy_mediation, .policy_authorize, "authorize", PolicyAuthorizeRequestWire, PolicyAuthorizeResponseWire),
     op(.package_install, .package_install, "install", PackageInstallRequestWire, PackageLifecycleResponseWire),
     op(.package_install, .package_update, "update", PackageUpdateRequestWire, PackageLifecycleResponseWire),
     op(.package_install, .package_rollback, "rollback", PackageRollbackRequestWire, PackageLifecycleResponseWire),
+    op(.package_install, .package_remove, "remove", PackageRemoveRequestWire, PackageLifecycleResponseWire),
     op(.ai_inference, .ai_authorize, "authorize", AiAuthorizeRequestWire, AiAuthorizeResponseWire),
     op(.ai_inference, .ai_run_local, "run_local", AiRunLocalRequestWire, AiRunLocalResponseWire),
     op(.ai_model_registry, .ai_model_register, "register", AiModelRegisterRequestWire, AiModelRegistryResponseWire),
@@ -735,6 +1234,10 @@ pub const operation_specs = [_]OperationSpec{
     op(.identity_session, .identity_session_authorize, "authorize", IdentitySessionAuthorizeRequestWire, IdentitySessionResponseWire),
     op(.identity_session, .identity_session_step_up, "step_up", IdentitySessionStepUpRequestWire, IdentitySessionResponseWire),
     op(.identity_session, .identity_session_revoke, "revoke", IdentitySessionRevokeRequestWire, IdentitySessionResponseWire),
+    op(.identity_session, .identity_credential_register, "credential_register", IdentityCredentialRegisterRequestWire, IdentityCredentialResponseWire),
+    op(.identity_session, .identity_credential_assert, "credential_assert", IdentityCredentialAssertRequestWire, IdentityCredentialResponseWire),
+    op(.identity_session, .identity_credential_recover, "credential_recover", IdentityCredentialRecoverRequestWire, IdentityCredentialResponseWire),
+    op(.identity_session, .identity_credential_revoke, "credential_revoke", IdentityCredentialRevokeRequestWire, IdentityCredentialResponseWire),
     op(.agent_delegation, .agent_authorize, "authorize", AgentAuthorizeRequestWire, AgentDelegationResponseWire),
     op(.agent_delegation, .agent_record_action, "record_action", AgentRecordActionRequestWire, AgentDelegationResponseWire),
     op(.agent_delegation, .agent_revoke, "revoke", AgentRevokeRequestWire, AgentDelegationResponseWire),
@@ -746,9 +1249,28 @@ pub const operation_specs = [_]OperationSpec{
     op(.background_activity, .background_authorize, "authorize", BackgroundAuthorizeRequestWire, BackgroundActivityResponseWire),
     op(.background_activity, .background_record, "record", BackgroundRecordRequestWire, BackgroundActivityResponseWire),
     op(.background_activity, .background_complete, "complete", BackgroundCompleteRequestWire, BackgroundActivityResponseWire),
+    op(.attention_broker, .attention_post, "post", AttentionPostRequestWire, AttentionResponseWire),
+    op(.attention_broker, .attention_dismiss, "dismiss", AttentionDismissRequestWire, AttentionResponseWire),
+    op(.attention_broker, .attention_query, "query", AttentionQueryRequestWire, AttentionResponseWire),
+    op(.task_lifecycle, .lifecycle_suspend, "suspend", LifecycleControlRequestWire, LifecycleControlResponseWire),
+    op(.task_lifecycle, .lifecycle_resume, "resume", LifecycleControlRequestWire, LifecycleControlResponseWire),
+    op(.task_lifecycle, .lifecycle_terminate, "terminate", LifecycleControlRequestWire, LifecycleControlResponseWire),
+    op(.personal_context, .personal_context_lease, "lease", PersonalContextLeaseRequestWire, PersonalContextResponseWire),
+    op(.personal_context, .personal_context_query, "query", PersonalContextQueryRequestWire, PersonalContextResponseWire),
+    op(.personal_context, .personal_context_revoke, "revoke", PersonalContextRevokeRequestWire, PersonalContextResponseWire),
     op(.secure_pasteboard, .pasteboard_offer, "offer", PasteboardOfferRequestWire, PasteboardResponseWire),
     op(.secure_pasteboard, .pasteboard_read, "read", PasteboardReadRequestWire, PasteboardResponseWire),
     op(.secure_pasteboard, .pasteboard_revoke, "revoke", PasteboardRevokeRequestWire, PasteboardResponseWire),
+    op(.object_resilience, .object_backup_prepare, "backup_prepare", ObjectBackupPrepareRequestWire, ObjectResilienceResponseWire),
+    op(.object_resilience, .object_restore_authorize, "restore_authorize", ObjectRestoreAuthorizeRequestWire, ObjectResilienceResponseWire),
+    op(.object_resilience, .object_backup_revoke, "backup_revoke", ObjectBackupRevokeRequestWire, ObjectResilienceResponseWire),
+    op(.sensitive_capture, .capture_start, "start", CaptureStartRequestWire, CaptureResponseWire),
+    op(.sensitive_capture, .capture_sample, "sample", CaptureSampleRequestWire, CaptureResponseWire),
+    op(.sensitive_capture, .capture_stop, "stop", CaptureStopRequestWire, CaptureResponseWire),
+    op(.secret_vault, .secret_import, "import", SecretImportRequestWire, SecretVaultResponseWire),
+    op(.secret_vault, .secret_lend, "lend", SecretLendRequestWire, SecretVaultResponseWire),
+    op(.secret_vault, .secret_rotate, "rotate", SecretRotateRequestWire, SecretVaultResponseWire),
+    op(.secret_vault, .secret_revoke, "revoke", SecretRevokeRequestWire, SecretVaultResponseWire),
 };
 
 const ServiceBindingSpec = struct {
@@ -776,7 +1298,13 @@ pub const service_binding_specs = [_]ServiceBindingSpec{
     binding(.indexing_search, .index_search),
     binding(.sync_replication, .sync_replication),
     binding(.media_print_helpers, .media_print),
+    binding(.attention_broker, .attention_broker),
+    binding(.task_lifecycle, .task_lifecycle),
     binding(.secure_pasteboard, .secure_pasteboard),
+    binding(.object_resilience, .object_resilience),
+    binding(.sensitive_capture, .sensitive_capture),
+    binding(.secret_vault, .secret_vault),
+    binding(.personal_context, .personal_context),
 };
 
 pub const OperationDecl = struct {
@@ -937,6 +1465,7 @@ pub fn coverageReferenceCountForRequirement(requirement_id: []const u8) usize {
 }
 
 fn interfaceSpec(comptime key: InterfaceKey) InterfaceSpec {
+    @setEvalBranchQuota(8192);
     inline for (interface_specs) |spec| {
         if (spec.key == key) return spec;
     }
@@ -944,6 +1473,7 @@ fn interfaceSpec(comptime key: InterfaceKey) InterfaceSpec {
 }
 
 fn serviceBindingSpec(comptime service: ServiceBinding) ServiceBindingSpec {
+    @setEvalBranchQuota(2048);
     inline for (service_binding_specs) |spec| {
         if (spec.service == service) return spec;
     }
@@ -951,6 +1481,7 @@ fn serviceBindingSpec(comptime service: ServiceBinding) ServiceBindingSpec {
 }
 
 fn operationSpec(comptime operation_id: OperationId) OperationSpec {
+    @setEvalBranchQuota(4096);
     inline for (operation_specs) |spec| {
         if (spec.id == operation_id) return spec;
     }
@@ -968,6 +1499,7 @@ fn operationDecl(comptime spec: OperationSpec) OperationDecl {
 }
 
 fn buildManifestInterfaces() [interface_specs.len]manifest.InterfaceDecl {
+    @setEvalBranchQuota(4096);
     var entries: [interface_specs.len]manifest.InterfaceDecl = undefined;
     inline for (interface_specs, 0..) |spec, index| {
         entries[index] = .{
@@ -1002,7 +1534,7 @@ fn buildServiceCatalogBindings() [service_binding_specs.len]ServiceCatalogBindin
 }
 
 fn buildContracts() [interface_specs.len]InterfaceContract {
-    @setEvalBranchQuota(32768);
+    @setEvalBranchQuota(65536);
     var result: [interface_specs.len]InterfaceContract = undefined;
     inline for (interface_specs, 0..) |spec, index| {
         result[index] = buildContract(spec);
@@ -1034,7 +1566,7 @@ fn buildContract(comptime spec: InterfaceSpec) InterfaceContract {
 }
 
 fn hashContract(comptime spec: InterfaceSpec) u64 {
-    @setEvalBranchQuota(32768);
+    @setEvalBranchQuota(65536);
     var hash = native_util.fnv1a64(spec.name);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, spec.version_major);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, spec.version_minor);
@@ -1061,7 +1593,7 @@ fn emptyOperation() OperationDecl {
 }
 
 fn maxOperationsPerInterface() usize {
-    @setEvalBranchQuota(32768);
+    @setEvalBranchQuota(65536);
     comptime var max_count: usize = 0;
     inline for (interface_specs) |interface_spec| {
         comptime var count: usize = 0;
@@ -1125,7 +1657,11 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expectEqual(InterfaceId.package_install, interfaceIdForService(.package_install_update));
     try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceForService(.storage_object)).?);
     try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceForService(.service_registry).name).?.interface_id);
+    try std.testing.expect(contractFor("zigos.service.network.policy").?.operation(.network_open_session) != null);
+    try std.testing.expect(contractFor("zigos.index.search").?.operation(.semantic_index_query) != null);
+    try std.testing.expect(contractFor("zigos.sync.replication").?.operation(.sync_workspace_replicate) != null);
     try std.testing.expect(contractFor(interfaceForService(.package_install_update).name).?.operation(.package_rollback) != null);
+    try std.testing.expect(contractFor(interfaceForService(.package_install_update).name).?.operation(.package_remove) != null);
     try std.testing.expect(contractFor("zigos.ai.inference").?.operation(.ai_run_local) != null);
     try std.testing.expect(contractFor("zigos.ai.model.registry").?.operation(.ai_model_attest) != null);
     try std.testing.expect(contractFor("zigos.privacy.budget").?.operation(.privacy_authorize_egress) != null);
@@ -1134,14 +1670,30 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expect(contractFor("zigos.permission.lease").?.operation(.permission_lease_issue) != null);
     try std.testing.expect(contractFor("zigos.data.rights").?.operation(.data_delete_receipt) != null);
     try std.testing.expect(contractFor("zigos.identity.session").?.operation(.identity_session_authorize) != null);
+    try std.testing.expect(contractFor("zigos.identity.session").?.operation(.identity_credential_assert) != null);
     try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_authorize) != null);
     try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_bind_session) != null);
     try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch) != null);
     try std.testing.expect(contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_apply) != null);
     try std.testing.expect(contractFor("zigos.background.activity").?.operation(.background_authorize) != null);
+    try std.testing.expect(contractFor("zigos.attention.broker").?.operation(.attention_post) != null);
+    try std.testing.expect(contractFor("zigos.task.lifecycle").?.operation(.lifecycle_suspend) != null);
     try std.testing.expect(contractFor("zigos.secure.pasteboard").?.operation(.pasteboard_offer) != null);
+    try std.testing.expect(contractFor("zigos.object.resilience").?.operation(.object_backup_prepare) != null);
+    try std.testing.expect(contractFor("zigos.sensitive.capture").?.operation(.capture_start) != null);
+    try std.testing.expect(contractFor("zigos.secret.vault").?.operation(.secret_import) != null);
     try std.testing.expectEqual(InterfaceId.secure_pasteboard, interfaceId(.secure_pasteboard));
     try std.testing.expectEqual(InterfaceId.secure_pasteboard, interfaceIdForService(.secure_pasteboard));
+    try std.testing.expectEqual(InterfaceId.object_resilience, interfaceId(.object_resilience));
+    try std.testing.expectEqual(InterfaceId.object_resilience, interfaceIdForService(.object_resilience));
+    try std.testing.expectEqual(InterfaceId.sensitive_capture, interfaceId(.sensitive_capture));
+    try std.testing.expectEqual(InterfaceId.sensitive_capture, interfaceIdForService(.sensitive_capture));
+    try std.testing.expectEqual(InterfaceId.secret_vault, interfaceId(.secret_vault));
+    try std.testing.expectEqual(InterfaceId.secret_vault, interfaceIdForService(.secret_vault));
+    try std.testing.expectEqual(InterfaceId.attention_broker, interfaceId(.attention_broker));
+    try std.testing.expectEqual(InterfaceId.attention_broker, interfaceIdForService(.attention_broker));
+    try std.testing.expectEqual(InterfaceId.task_lifecycle, interfaceId(.task_lifecycle));
+    try std.testing.expectEqual(InterfaceId.task_lifecycle, interfaceIdForService(.task_lifecycle));
     try std.testing.expect(contractFor(interfaceForService(.service_registry).name).?.contract_hash != 0);
     try std.testing.expect(contractFor(interfaceForService(.sync_replication).name).?.contract_hash != 0);
     try std.testing.expectEqual(

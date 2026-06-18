@@ -55,6 +55,11 @@ pub const DecisionReason = enum(u8) {
     contacts_denied,
     sensor_denied,
     peer_ipc_denied,
+    capture_foreground_denied,
+    capture_indicator_denied,
+    capture_background_denied,
+    capture_lease_denied,
+    capture_sample_budget_denied,
     remote_ai_denied,
     ai_training_denied,
     ai_context_denied,
@@ -83,6 +88,30 @@ pub const DecisionReason = enum(u8) {
     data_export_denied,
     data_deletion_denied,
     data_deletion_receipt_denied,
+    object_backup_denied,
+    object_restore_denied,
+    object_backup_encryption_denied,
+    object_backup_recovery_key_denied,
+    object_restore_device_trust_denied,
+    object_backup_size_denied,
+    object_restore_staleness_denied,
+    semantic_memory_denied,
+    semantic_memory_remote_model_denied,
+    semantic_memory_encryption_denied,
+    semantic_memory_redaction_denied,
+    semantic_query_budget_denied,
+    credential_assertion_denied,
+    credential_password_fallback_denied,
+    credential_phishing_resistance_denied,
+    credential_hardware_denied,
+    credential_unlock_denied,
+    credential_unlock_stale,
+    secret_vault_denied,
+    secret_hardware_denied,
+    secret_raw_export_denied,
+    secret_lease_denied,
+    task_lifecycle_denied,
+    task_lifecycle_checkpoint_required,
     attention_quiet_denied,
     attention_visible_budget_denied,
     attention_interruption_budget_denied,
@@ -159,6 +188,30 @@ pub const CreateRequest = struct {
     data_deletion_allowed: bool = false,
     require_data_deletion_receipt: bool = false,
     max_data_export_bytes: usize = 0,
+    object_backup_allowed: bool = false,
+    object_restore_allowed: bool = false,
+    require_encrypted_object_backup: bool = true,
+    require_backup_recovery_key: bool = true,
+    require_restore_device_trust: bool = true,
+    max_object_backup_bytes: usize = 0,
+    max_object_restore_age_days: u16 = 0,
+    semantic_memory_allowed: bool = false,
+    require_local_semantic_model: bool = true,
+    require_encrypted_semantic_index: bool = true,
+    require_redacted_semantic_snippets: bool = true,
+    max_semantic_query_bytes: usize = 0,
+    credential_assertions_allowed: bool = false,
+    deny_credential_password_fallback: bool = true,
+    require_phishing_resistant_credential: bool = true,
+    require_hardware_backed_credential: bool = false,
+    require_local_credential_unlock: bool = true,
+    max_credential_unlock_age_ticks: u64 = 0,
+    secret_vault_allowed: bool = false,
+    require_hardware_backed_secrets: bool = true,
+    deny_secret_raw_export: bool = true,
+    max_secret_handle_lease_ticks: u64 = 0,
+    task_lifecycle_allowed: bool = false,
+    require_lifecycle_checkpoint_before_terminate: bool = true,
     quiet_until_tick: u64 = 0,
     max_visible_notifications: u16 = 0,
     max_interruptive_notifications: u16 = 0,
@@ -177,6 +230,11 @@ pub const CreateRequest = struct {
     max_sensitive_retention_days: u16 = 0,
     max_permission_lease_ticks: u64 = 0,
     require_sensitive_permission_lease: bool = false,
+    require_sensitive_capture_foreground: bool = true,
+    require_capture_indicator: bool = true,
+    allow_background_capture: bool = false,
+    max_sensitive_capture_lease_ticks: u64 = 0,
+    max_sensitive_capture_samples: u32 = 0,
     retention_days: u16 = 0,
     audit_export_required: bool = false,
 };
@@ -228,12 +286,70 @@ pub const DataRightsRequest = struct {
     deletion_receipt_present: bool = false,
 };
 
+pub const ObjectResilienceOperation = enum(u8) {
+    backup,
+    restore,
+    migrate,
+};
+
+pub const ObjectResilienceRequest = struct {
+    operation: ObjectResilienceOperation,
+    sensitivity: manifest.DataSensitivity = .internal_data,
+    bytes: usize = 0,
+    encrypted: bool = false,
+    recovery_key_present: bool = false,
+    device_trust_verified: bool = false,
+    restore_age_days: u16 = 0,
+};
+
+pub const SemanticMemoryRequest = struct {
+    sensitivity: manifest.DataSensitivity = .internal_data,
+    query_bytes: usize = 0,
+    local_model: bool = false,
+    encrypted_index: bool = false,
+    redacted_snippets: bool = false,
+};
+
+pub const CredentialAssertionRequest = struct {
+    password_fallback: bool = false,
+    phishing_resistant: bool = false,
+    hardware_backed: bool = false,
+    local_unlock_verified: bool = false,
+    unlock_age_ticks: u64 = 0,
+};
+
+pub const SecretVaultOperation = enum(u8) {
+    import,
+    lend,
+    export_raw,
+    rotate,
+    revoke,
+};
+
+pub const SecretVaultRequest = struct {
+    operation: SecretVaultOperation,
+    hardware_backed: bool = false,
+    raw_export: bool = false,
+    lease_ticks: u64 = 0,
+};
+
 pub const AttentionRequest = struct {
     now_tick: u64 = 0,
     visible_notifications: u16 = 0,
     interruptive_notifications: u16 = 0,
     requests_interruption: bool = false,
     critical: bool = false,
+};
+
+pub const LifecycleOperation = enum(u8) {
+    suspend_task,
+    resume_task,
+    terminate_task,
+};
+
+pub const LifecycleRequest = struct {
+    operation: LifecycleOperation,
+    checkpoint_present: bool = false,
 };
 
 pub const AccessibilityRequest = struct {
@@ -271,6 +387,15 @@ pub const PermissionUseRequest = struct {
     sensitivity: manifest.DataSensitivity = .internal_data,
     retention_days: u16 = 0,
     lease_ticks: u64 = 0,
+};
+
+pub const SensitiveCaptureRequest = struct {
+    kind: manifest.PermissionKind,
+    lease_ticks: u64 = 0,
+    sample_budget: u32 = 0,
+    foreground_session: bool = false,
+    visible_indicator: bool = false,
+    background: bool = false,
 };
 
 pub const PolicyObject = struct {
@@ -331,6 +456,30 @@ pub const PolicyObject = struct {
     data_deletion_allowed: bool,
     require_data_deletion_receipt: bool,
     max_data_export_bytes: usize,
+    object_backup_allowed: bool,
+    object_restore_allowed: bool,
+    require_encrypted_object_backup: bool,
+    require_backup_recovery_key: bool,
+    require_restore_device_trust: bool,
+    max_object_backup_bytes: usize,
+    max_object_restore_age_days: u16,
+    semantic_memory_allowed: bool,
+    require_local_semantic_model: bool,
+    require_encrypted_semantic_index: bool,
+    require_redacted_semantic_snippets: bool,
+    max_semantic_query_bytes: usize,
+    credential_assertions_allowed: bool,
+    deny_credential_password_fallback: bool,
+    require_phishing_resistant_credential: bool,
+    require_hardware_backed_credential: bool,
+    require_local_credential_unlock: bool,
+    max_credential_unlock_age_ticks: u64,
+    secret_vault_allowed: bool,
+    require_hardware_backed_secrets: bool,
+    deny_secret_raw_export: bool,
+    max_secret_handle_lease_ticks: u64,
+    task_lifecycle_allowed: bool,
+    require_lifecycle_checkpoint_before_terminate: bool,
     quiet_until_tick: u64,
     max_visible_notifications: u16,
     max_interruptive_notifications: u16,
@@ -349,6 +498,11 @@ pub const PolicyObject = struct {
     max_sensitive_retention_days: u16,
     max_permission_lease_ticks: u64,
     require_sensitive_permission_lease: bool,
+    require_sensitive_capture_foreground: bool,
+    require_capture_indicator: bool,
+    allow_background_capture: bool,
+    max_sensitive_capture_lease_ticks: u64,
+    max_sensitive_capture_samples: u32,
     retention_days: u16,
     audit_export_required: bool,
     signature: manifest.Signature,
@@ -510,6 +664,30 @@ pub const Directory = struct {
         slot.policy.data_deletion_allowed = request.data_deletion_allowed;
         slot.policy.require_data_deletion_receipt = request.require_data_deletion_receipt;
         slot.policy.max_data_export_bytes = request.max_data_export_bytes;
+        slot.policy.object_backup_allowed = request.object_backup_allowed;
+        slot.policy.object_restore_allowed = request.object_restore_allowed;
+        slot.policy.require_encrypted_object_backup = request.require_encrypted_object_backup;
+        slot.policy.require_backup_recovery_key = request.require_backup_recovery_key;
+        slot.policy.require_restore_device_trust = request.require_restore_device_trust;
+        slot.policy.max_object_backup_bytes = request.max_object_backup_bytes;
+        slot.policy.max_object_restore_age_days = request.max_object_restore_age_days;
+        slot.policy.semantic_memory_allowed = request.semantic_memory_allowed;
+        slot.policy.require_local_semantic_model = request.require_local_semantic_model;
+        slot.policy.require_encrypted_semantic_index = request.require_encrypted_semantic_index;
+        slot.policy.require_redacted_semantic_snippets = request.require_redacted_semantic_snippets;
+        slot.policy.max_semantic_query_bytes = request.max_semantic_query_bytes;
+        slot.policy.credential_assertions_allowed = request.credential_assertions_allowed;
+        slot.policy.deny_credential_password_fallback = request.deny_credential_password_fallback;
+        slot.policy.require_phishing_resistant_credential = request.require_phishing_resistant_credential;
+        slot.policy.require_hardware_backed_credential = request.require_hardware_backed_credential;
+        slot.policy.require_local_credential_unlock = request.require_local_credential_unlock;
+        slot.policy.max_credential_unlock_age_ticks = request.max_credential_unlock_age_ticks;
+        slot.policy.secret_vault_allowed = request.secret_vault_allowed;
+        slot.policy.require_hardware_backed_secrets = request.require_hardware_backed_secrets;
+        slot.policy.deny_secret_raw_export = request.deny_secret_raw_export;
+        slot.policy.max_secret_handle_lease_ticks = request.max_secret_handle_lease_ticks;
+        slot.policy.task_lifecycle_allowed = request.task_lifecycle_allowed;
+        slot.policy.require_lifecycle_checkpoint_before_terminate = request.require_lifecycle_checkpoint_before_terminate;
         slot.policy.quiet_until_tick = request.quiet_until_tick;
         slot.policy.max_visible_notifications = request.max_visible_notifications;
         slot.policy.max_interruptive_notifications = request.max_interruptive_notifications;
@@ -528,6 +706,11 @@ pub const Directory = struct {
         slot.policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
         slot.policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
         slot.policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
+        slot.policy.require_sensitive_capture_foreground = request.require_sensitive_capture_foreground;
+        slot.policy.require_capture_indicator = request.require_capture_indicator;
+        slot.policy.allow_background_capture = request.allow_background_capture;
+        slot.policy.max_sensitive_capture_lease_ticks = request.max_sensitive_capture_lease_ticks;
+        slot.policy.max_sensitive_capture_samples = request.max_sensitive_capture_samples;
         slot.policy.retention_days = request.retention_days;
         slot.policy.audit_export_required = request.audit_export_required;
 
@@ -856,6 +1039,143 @@ pub const Directory = struct {
         return allow();
     }
 
+    pub fn objectResilienceDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: ObjectResilienceRequest,
+    ) PolicyDecision {
+        if (!manifest.isSensitive(request.sensitivity)) return allow();
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            switch (request.operation) {
+                .backup => {
+                    if (!policy.object_backup_allowed) return block(policy, .object_backup_denied);
+                    if (policy.require_encrypted_object_backup and !request.encrypted) {
+                        return block(policy, .object_backup_encryption_denied);
+                    }
+                    if (policy.require_backup_recovery_key and !request.recovery_key_present) {
+                        return block(policy, .object_backup_recovery_key_denied);
+                    }
+                    if (policy.max_object_backup_bytes != 0 and request.bytes > policy.max_object_backup_bytes) {
+                        return block(policy, .object_backup_size_denied);
+                    }
+                },
+                .restore, .migrate => {
+                    if (!policy.object_restore_allowed) return block(policy, .object_restore_denied);
+                    if (policy.require_restore_device_trust and !request.device_trust_verified) {
+                        return block(policy, .object_restore_device_trust_denied);
+                    }
+                    if (policy.max_object_restore_age_days != 0 and request.restore_age_days > policy.max_object_restore_age_days) {
+                        return block(policy, .object_restore_staleness_denied);
+                    }
+                },
+            }
+        }
+        return allow();
+    }
+
+    pub fn semanticMemoryDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: SemanticMemoryRequest,
+    ) PolicyDecision {
+        if (!manifest.isSensitive(request.sensitivity)) return allow();
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (!policy.semantic_memory_allowed) return block(policy, .semantic_memory_denied);
+            if (policy.require_local_semantic_model and !request.local_model) {
+                return block(policy, .semantic_memory_remote_model_denied);
+            }
+            if (policy.require_encrypted_semantic_index and !request.encrypted_index) {
+                return block(policy, .semantic_memory_encryption_denied);
+            }
+            if (policy.require_redacted_semantic_snippets and !request.redacted_snippets) {
+                return block(policy, .semantic_memory_redaction_denied);
+            }
+            if (policy.max_semantic_query_bytes != 0 and request.query_bytes > policy.max_semantic_query_bytes) {
+                return block(policy, .semantic_query_budget_denied);
+            }
+        }
+        return allow();
+    }
+
+    pub fn credentialAssertionDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: CredentialAssertionRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (!policy.credential_assertions_allowed) return block(policy, .credential_assertion_denied);
+            if (policy.deny_credential_password_fallback and request.password_fallback) {
+                return block(policy, .credential_password_fallback_denied);
+            }
+            if (policy.require_phishing_resistant_credential and !request.phishing_resistant) {
+                return block(policy, .credential_phishing_resistance_denied);
+            }
+            if (policy.require_hardware_backed_credential and !request.hardware_backed) {
+                return block(policy, .credential_hardware_denied);
+            }
+            if (policy.require_local_credential_unlock and !request.local_unlock_verified) {
+                return block(policy, .credential_unlock_denied);
+            }
+            if (policy.max_credential_unlock_age_ticks != 0 and request.unlock_age_ticks > policy.max_credential_unlock_age_ticks) {
+                return block(policy, .credential_unlock_stale);
+            }
+        }
+        return allow();
+    }
+
+    pub fn secretVaultDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: SecretVaultRequest,
+    ) PolicyDecision {
+        if (request.operation == .revoke) return allow();
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (!policy.secret_vault_allowed) return block(policy, .secret_vault_denied);
+            if (policy.require_hardware_backed_secrets and !request.hardware_backed) {
+                return block(policy, .secret_hardware_denied);
+            }
+            if (policy.deny_secret_raw_export and request.raw_export) {
+                return block(policy, .secret_raw_export_denied);
+            }
+            if (policy.max_secret_handle_lease_ticks != 0 and request.lease_ticks > policy.max_secret_handle_lease_ticks) {
+                return block(policy, .secret_lease_denied);
+            }
+        }
+        return allow();
+    }
+
+    pub fn lifecycleDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: LifecycleRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (!policy.task_lifecycle_allowed) return block(policy, .task_lifecycle_denied);
+            if (request.operation == .terminate_task and
+                policy.require_lifecycle_checkpoint_before_terminate and
+                !request.checkpoint_present)
+            {
+                return block(policy, .task_lifecycle_checkpoint_required);
+            }
+        }
+        return allow();
+    }
+
     pub fn attentionDecision(
         self: *const Directory,
         subjects: SubjectSet,
@@ -966,6 +1286,37 @@ pub const Directory = struct {
                 request.lease_ticks > policy.max_permission_lease_ticks)
             {
                 return block(policy, .permission_lease_denied);
+            }
+        }
+        return allow();
+    }
+
+    pub fn sensitiveCaptureDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: SensitiveCaptureRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (!policyAllowsPermissionKind(policy, request.kind)) {
+                return block(policy, permissionKindDenialReason(request.kind));
+            }
+            if (policy.require_sensitive_capture_foreground and !request.foreground_session) {
+                return block(policy, .capture_foreground_denied);
+            }
+            if (policy.require_capture_indicator and !request.visible_indicator) {
+                return block(policy, .capture_indicator_denied);
+            }
+            if (!policy.allow_background_capture and request.background) {
+                return block(policy, .capture_background_denied);
+            }
+            if (policy.max_sensitive_capture_lease_ticks != 0 and request.lease_ticks > policy.max_sensitive_capture_lease_ticks) {
+                return block(policy, .capture_lease_denied);
+            }
+            if (policy.max_sensitive_capture_samples != 0 and request.sample_budget > policy.max_sensitive_capture_samples) {
+                return block(policy, .capture_sample_budget_denied);
             }
         }
         return allow();
@@ -1176,6 +1527,30 @@ fn zeroPolicy() PolicyObject {
         .data_deletion_allowed = false,
         .require_data_deletion_receipt = false,
         .max_data_export_bytes = 0,
+        .object_backup_allowed = false,
+        .object_restore_allowed = false,
+        .require_encrypted_object_backup = true,
+        .require_backup_recovery_key = true,
+        .require_restore_device_trust = true,
+        .max_object_backup_bytes = 0,
+        .max_object_restore_age_days = 0,
+        .semantic_memory_allowed = false,
+        .require_local_semantic_model = true,
+        .require_encrypted_semantic_index = true,
+        .require_redacted_semantic_snippets = true,
+        .max_semantic_query_bytes = 0,
+        .credential_assertions_allowed = false,
+        .deny_credential_password_fallback = true,
+        .require_phishing_resistant_credential = true,
+        .require_hardware_backed_credential = false,
+        .require_local_credential_unlock = true,
+        .max_credential_unlock_age_ticks = 0,
+        .secret_vault_allowed = false,
+        .require_hardware_backed_secrets = true,
+        .deny_secret_raw_export = true,
+        .max_secret_handle_lease_ticks = 0,
+        .task_lifecycle_allowed = false,
+        .require_lifecycle_checkpoint_before_terminate = true,
         .quiet_until_tick = 0,
         .max_visible_notifications = 0,
         .max_interruptive_notifications = 0,
@@ -1194,6 +1569,11 @@ fn zeroPolicy() PolicyObject {
         .max_sensitive_retention_days = 0,
         .max_permission_lease_ticks = 0,
         .require_sensitive_permission_lease = false,
+        .require_sensitive_capture_foreground = true,
+        .require_capture_indicator = true,
+        .allow_background_capture = false,
+        .max_sensitive_capture_lease_ticks = 0,
+        .max_sensitive_capture_samples = 0,
         .retention_days = 0,
         .audit_export_required = false,
         .signature = .{},
@@ -1273,6 +1653,30 @@ fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     crypto_hash.updateBool(&hasher, "data-deletion-allowed", policy.data_deletion_allowed);
     crypto_hash.updateBool(&hasher, "require-data-deletion-receipt", policy.require_data_deletion_receipt);
     crypto_hash.updateInt(&hasher, "max-data-export-bytes", policy.max_data_export_bytes);
+    crypto_hash.updateBool(&hasher, "object-backup-allowed", policy.object_backup_allowed);
+    crypto_hash.updateBool(&hasher, "object-restore-allowed", policy.object_restore_allowed);
+    crypto_hash.updateBool(&hasher, "require-encrypted-object-backup", policy.require_encrypted_object_backup);
+    crypto_hash.updateBool(&hasher, "require-backup-recovery-key", policy.require_backup_recovery_key);
+    crypto_hash.updateBool(&hasher, "require-restore-device-trust", policy.require_restore_device_trust);
+    crypto_hash.updateInt(&hasher, "max-object-backup-bytes", policy.max_object_backup_bytes);
+    crypto_hash.updateInt(&hasher, "max-object-restore-age-days", policy.max_object_restore_age_days);
+    crypto_hash.updateBool(&hasher, "semantic-memory-allowed", policy.semantic_memory_allowed);
+    crypto_hash.updateBool(&hasher, "require-local-semantic-model", policy.require_local_semantic_model);
+    crypto_hash.updateBool(&hasher, "require-encrypted-semantic-index", policy.require_encrypted_semantic_index);
+    crypto_hash.updateBool(&hasher, "require-redacted-semantic-snippets", policy.require_redacted_semantic_snippets);
+    crypto_hash.updateInt(&hasher, "max-semantic-query-bytes", policy.max_semantic_query_bytes);
+    crypto_hash.updateBool(&hasher, "credential-assertions-allowed", policy.credential_assertions_allowed);
+    crypto_hash.updateBool(&hasher, "deny-credential-password-fallback", policy.deny_credential_password_fallback);
+    crypto_hash.updateBool(&hasher, "require-phishing-resistant-credential", policy.require_phishing_resistant_credential);
+    crypto_hash.updateBool(&hasher, "require-hardware-backed-credential", policy.require_hardware_backed_credential);
+    crypto_hash.updateBool(&hasher, "require-local-credential-unlock", policy.require_local_credential_unlock);
+    crypto_hash.updateInt(&hasher, "max-credential-unlock-age-ticks", policy.max_credential_unlock_age_ticks);
+    crypto_hash.updateBool(&hasher, "secret-vault-allowed", policy.secret_vault_allowed);
+    crypto_hash.updateBool(&hasher, "require-hardware-backed-secrets", policy.require_hardware_backed_secrets);
+    crypto_hash.updateBool(&hasher, "deny-secret-raw-export", policy.deny_secret_raw_export);
+    crypto_hash.updateInt(&hasher, "max-secret-handle-lease-ticks", policy.max_secret_handle_lease_ticks);
+    crypto_hash.updateBool(&hasher, "task-lifecycle-allowed", policy.task_lifecycle_allowed);
+    crypto_hash.updateBool(&hasher, "require-lifecycle-checkpoint-before-terminate", policy.require_lifecycle_checkpoint_before_terminate);
     crypto_hash.updateInt(&hasher, "quiet-until-tick", policy.quiet_until_tick);
     crypto_hash.updateInt(&hasher, "max-visible-notifications", policy.max_visible_notifications);
     crypto_hash.updateInt(&hasher, "max-interruptive-notifications", policy.max_interruptive_notifications);
@@ -1291,6 +1695,11 @@ fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     crypto_hash.updateInt(&hasher, "max-sensitive-retention-days", policy.max_sensitive_retention_days);
     crypto_hash.updateInt(&hasher, "max-permission-lease-ticks", policy.max_permission_lease_ticks);
     crypto_hash.updateBool(&hasher, "require-sensitive-permission-lease", policy.require_sensitive_permission_lease);
+    crypto_hash.updateBool(&hasher, "require-sensitive-capture-foreground", policy.require_sensitive_capture_foreground);
+    crypto_hash.updateBool(&hasher, "require-capture-indicator", policy.require_capture_indicator);
+    crypto_hash.updateBool(&hasher, "allow-background-capture", policy.allow_background_capture);
+    crypto_hash.updateInt(&hasher, "max-sensitive-capture-lease-ticks", policy.max_sensitive_capture_lease_ticks);
+    crypto_hash.updateInt(&hasher, "max-sensitive-capture-samples", policy.max_sensitive_capture_samples);
     crypto_hash.updateInt(&hasher, "retention-days", policy.retention_days);
     crypto_hash.updateBool(&hasher, "audit-export-required", policy.audit_export_required);
 

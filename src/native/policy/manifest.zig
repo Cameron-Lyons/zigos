@@ -9,6 +9,8 @@ pub const MAX_SUPPLY_CHAIN_DIGEST_BYTES: usize = 96;
 pub const MAX_BUILD_PROVENANCE_IDENTITY_BYTES: usize = 96;
 pub const MAX_AGENT_PURPOSE_BYTES: usize = 128;
 pub const MAX_ACCESSIBILITY_PROFILE_BYTES: usize = 128;
+pub const MAX_OBJECT_BACKUP_FORMAT_BYTES: usize = 64;
+pub const MAX_SEMANTIC_MODEL_DIGEST_BYTES: usize = 96;
 
 pub const InterfaceDecl = struct {
     name: []const u8,
@@ -97,6 +99,25 @@ pub const AccessibilityDecl = struct {
     supports_reduced_motion: bool = false,
     supports_high_contrast: bool = false,
     profile_notes: []const u8 = "",
+};
+
+pub const ObjectResilienceDecl = struct {
+    backup_enabled: bool = false,
+    encrypted_snapshots: bool = false,
+    recovery_key_required: bool = false,
+    portable_restore: bool = false,
+    device_trust_required: bool = false,
+    max_restore_age_days: u16 = 0,
+    backup_format: []const u8 = "",
+};
+
+pub const SemanticIndexDecl = struct {
+    enabled: bool = false,
+    local_only: bool = true,
+    encrypted_index: bool = false,
+    redacted_snippets: bool = false,
+    max_query_bytes: usize = 0,
+    model_digest: []const u8 = "",
 };
 
 pub const DataEgressIntent = struct {
@@ -332,6 +353,8 @@ pub const BundleManifest = struct {
     supply_chain: SupplyChainDecl = .{},
     agent_delegation: AgentDelegationDecl = .{},
     accessibility: AccessibilityDecl = .{},
+    object_resilience: ObjectResilienceDecl = .{},
+    semantic_index: SemanticIndexDecl = .{},
     update_channel: UpdateChannel = .stable,
     signature: Signature = .{},
 };
@@ -411,6 +434,18 @@ pub const ValidationError = error{
     AccessibilityKeyboardNavigationMissing,
     AccessibilityScreenReaderMissing,
     AccessibilityReducedMotionMissing,
+    ObjectBackupFormatMissing,
+    ObjectBackupFormatTooLong,
+    ObjectEncryptedBackupRequired,
+    ObjectBackupRecoveryKeyRequired,
+    ObjectBackupRestoreRequired,
+    ObjectBackupDeviceTrustRequired,
+    SemanticIndexRequiresLocal,
+    SemanticIndexRequiresEncryption,
+    SemanticIndexRequiresRedaction,
+    SemanticIndexQueryBudgetMissing,
+    SemanticIndexModelDigestMissing,
+    SemanticIndexModelDigestTooLong,
     AiModelFamilyTooLong,
     AiModelDigestMissing,
     AiModelDigestTooLong,
@@ -444,6 +479,8 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
     try validateSupplyChain(bundle);
     try validateAgentDelegation(bundle);
     try validateAccessibility(bundle);
+    try validateObjectResilience(bundle);
+    try validateSemanticIndex(bundle);
     try validateBackgroundTasks(bundle);
     try validateDataEgressRequests(bundle);
     try validateAiMetadata(bundle);
@@ -496,6 +533,26 @@ fn validateAccessibility(bundle: BundleManifest) ValidationError!void {
     if (!bundle.accessibility.supports_keyboard_navigation) return error.AccessibilityKeyboardNavigationMissing;
     if (!bundle.accessibility.supports_screen_reader) return error.AccessibilityScreenReaderMissing;
     if (!bundle.accessibility.supports_reduced_motion) return error.AccessibilityReducedMotionMissing;
+}
+
+fn validateObjectResilience(bundle: BundleManifest) ValidationError!void {
+    if (bundle.object_resilience.backup_format.len > MAX_OBJECT_BACKUP_FORMAT_BYTES) return error.ObjectBackupFormatTooLong;
+    if (!bundle.object_resilience.backup_enabled) return;
+    if (bundle.object_resilience.backup_format.len == 0) return error.ObjectBackupFormatMissing;
+    if (!bundle.object_resilience.encrypted_snapshots) return error.ObjectEncryptedBackupRequired;
+    if (!bundle.object_resilience.recovery_key_required) return error.ObjectBackupRecoveryKeyRequired;
+    if (!bundle.object_resilience.portable_restore) return error.ObjectBackupRestoreRequired;
+    if (!bundle.object_resilience.device_trust_required) return error.ObjectBackupDeviceTrustRequired;
+}
+
+fn validateSemanticIndex(bundle: BundleManifest) ValidationError!void {
+    if (bundle.semantic_index.model_digest.len > MAX_SEMANTIC_MODEL_DIGEST_BYTES) return error.SemanticIndexModelDigestTooLong;
+    if (!bundle.semantic_index.enabled) return;
+    if (!bundle.semantic_index.local_only) return error.SemanticIndexRequiresLocal;
+    if (!bundle.semantic_index.encrypted_index) return error.SemanticIndexRequiresEncryption;
+    if (!bundle.semantic_index.redacted_snippets) return error.SemanticIndexRequiresRedaction;
+    if (bundle.semantic_index.max_query_bytes == 0) return error.SemanticIndexQueryBudgetMissing;
+    if (bundle.semantic_index.model_digest.len == 0) return error.SemanticIndexModelDigestMissing;
 }
 
 fn validateAiMetadata(bundle: BundleManifest) ValidationError!void {

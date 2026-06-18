@@ -1011,7 +1011,11 @@ pub const HumaneShell = struct {
     fn removePackage(self: *HumaneShell, tick: u64) !void {
         if (self.state.package_removed) return error.AppNotInstalled;
         const port = self.config.package_port orelse return error.PackageServiceRequired;
-        const removed = try port.remove(self.config.package_authority, self.config.bundle_id);
+        const bundle = port.service.find(self.config.bundle_id) orelse return error.AppNotInstalled;
+        const removed = try port.remove(
+            self.config.package_authority,
+            package_service.removeRequestForActive(bundle),
+        );
         if (!removed.removed_existing) return error.AppNotInstalled;
         const removed_task_id = self.state.task_id;
         if (removed_task_id != 0) {

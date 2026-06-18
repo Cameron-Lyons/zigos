@@ -668,7 +668,11 @@ pub const ProductionJourneyService = struct {
 
     fn rollbackUpdate(self: *ProductionJourneyService, tick: u64) !void {
         if (!self.updated) return error.NoRollbackVersion;
-        const rolled_back_result = try self.packages.rollback(self.package_authority, self.config.bundle_id);
+        const bundle = self.packages.service.find(self.config.bundle_id) orelse return error.AppNotInstalled;
+        const rolled_back_result = try self.packages.rollback(
+            self.package_authority,
+            package_service.rollbackRequestForActive(bundle),
+        );
         if (!rolled_back_result.updated_existing) return error.NoRollbackVersion;
         _ = try self.ux.rollbackAppUpdate(self.task_id, self.config.user, self.config.bundle_id);
         self.rolled_back = true;
@@ -689,7 +693,11 @@ pub const ProductionJourneyService = struct {
 
     fn removeApp(self: *ProductionJourneyService, tick: u64) !void {
         if (!self.installed or self.removed) return error.AppNotInstalled;
-        const removed_result = try self.packages.remove(self.package_authority, self.config.bundle_id);
+        const bundle = self.packages.service.find(self.config.bundle_id) orelse return error.AppNotInstalled;
+        const removed_result = try self.packages.remove(
+            self.package_authority,
+            package_service.removeRequestForActive(bundle),
+        );
         if (!removed_result.removed_existing) return error.AppNotInstalled;
         if (self.task_id != 0) {
             const removed_task_id = self.task_id;

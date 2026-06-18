@@ -4,7 +4,7 @@ const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 
-pub const MAX_ENDPOINTS: usize = 32;
+pub const MAX_ENDPOINTS: usize = 64;
 pub const MAX_ENDPOINT_QUEUE: usize = 8;
 pub const MAX_MESSAGE_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 pub const MAX_ENDPOINT_LABEL_BYTES: usize = 48;

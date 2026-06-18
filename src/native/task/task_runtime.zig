@@ -660,6 +660,30 @@ pub const Runtime = struct {
         });
         return true;
     }
+
+    pub fn suspendTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
+        const task = self.find(task_id) orelse return error.TaskNotFound;
+        if (task.state != .active) return false;
+
+        task.state = .suspended;
+        try self.audit(task_id, .{
+            .kind = .suspended,
+            .tick = tick,
+        });
+        return true;
+    }
+
+    pub fn resumeTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
+        const task = self.find(task_id) orelse return error.TaskNotFound;
+        if (task.state != .suspended) return false;
+
+        task.state = .active;
+        try self.audit(task_id, .{
+            .kind = .resumed,
+            .tick = tick,
+        });
+        return true;
+    }
 };
 
 fn debugIndexChecksEnabled() bool {

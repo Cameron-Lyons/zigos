@@ -236,7 +236,13 @@ fn runSyncPermissionFlow(
                 21,
             ) catch unreachable;
             if (dispatch.allowed and !dispatch.delayed) {
-                _ = env.background_dispatcher.complete(env.runtime, dispatch.record_id.?) catch unreachable;
+                _ = env.background_dispatcher.complete(env.runtime, .{
+                    .record_id = dispatch.record_id.?,
+                    .expected_task_id = sync_task.id,
+                    .expected_background_task_id = "sync",
+                    .expected_trigger = .sync_completion,
+                    .tick = 22,
+                }) catch unreachable;
                 common.printBootMarker("ZIGOS:PERMISSION:BACKGROUND:SYNC_DISPATCHED");
             } else if (dispatch.delayed) {
                 common.printBootMarker("ZIGOS:PERMISSION:BACKGROUND:SYNC_DELAYED");

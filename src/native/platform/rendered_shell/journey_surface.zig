@@ -252,7 +252,11 @@ pub const JourneySurface = struct {
     }
 
     fn rollbackUpdate(self: *JourneySurface, tick: u64) !void {
-        const rolled_back = try self.packages.rollback(self.package_authority, self.config.bundle_id);
+        const bundle = self.packages.service.find(self.config.bundle_id) orelse return error.AppNotInstalled;
+        const rolled_back = try self.packages.rollback(
+            self.package_authority,
+            package_service.rollbackRequestForActive(bundle),
+        );
         if (!rolled_back.updated_existing) return error.NoRollbackVersion;
         _ = try self.ux.rollbackAppUpdate(self.task_id, self.config.user, self.config.bundle_id);
         self.rolled_back = true;
@@ -291,7 +295,11 @@ pub const JourneySurface = struct {
 
     fn removeApp(self: *JourneySurface, tick: u64) !void {
         if (!self.installed or self.removed) return error.AppNotInstalled;
-        const removed = try self.packages.remove(self.package_authority, self.config.bundle_id);
+        const bundle = self.packages.service.find(self.config.bundle_id) orelse return error.AppNotInstalled;
+        const removed = try self.packages.remove(
+            self.package_authority,
+            package_service.removeRequestForActive(bundle),
+        );
         if (!removed.removed_existing) return error.AppNotInstalled;
         _ = try self.ux.removeApp(self.config.user, self.config.bundle_id);
         self.removed = true;

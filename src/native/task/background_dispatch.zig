@@ -89,9 +89,18 @@ pub const DispatchDecision = struct {
     blocking_policy_generation: u32 = 0,
 };
 
+pub const CompleteRequest = struct {
+    record_id: u64,
+    expected_task_id: u64,
+    expected_background_task_id: []const u8,
+    expected_trigger: manifest.BackgroundTrigger,
+    tick: u64 = 0,
+};
+
 pub const Error = task_runtime.Error || error{
     DispatchTableFull,
     DispatchRecordNotFound,
+    DispatchRecordBindingMismatch,
 };
 
 const RecordSlot = struct {
@@ -203,14 +212,21 @@ pub const Controller = struct {
         return decision;
     }
 
-    pub fn complete(self: *Controller, runtime: *task_runtime.Runtime, record_id: u64) Error!bool {
+    pub fn complete(self: *Controller, runtime: *task_runtime.Runtime, request: CompleteRequest) Error!bool {
         for (&self.records) |*slot| {
-            if (!slot.in_use or slot.record.id != record_id) continue;
+            if (!slot.in_use or slot.record.id != request.record_id) continue;
             if (slot.record.state != .running) return false;
+            if (slot.record.task_id != request.expected_task_id or
+                slot.record.trigger != request.expected_trigger or
+                !std.mem.eql(u8, slot.record.backgroundTaskIdSlice(), request.expected_background_task_id))
+            {
+                return error.DispatchRecordBindingMismatch;
+            }
             if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) {
                 return false;
             }
             slot.record.state = .completed;
+            slot.record.completed_tick = request.tick;
             return true;
         }
         return error.DispatchRecordNotFound;
@@ -514,7 +530,13 @@ test "background dispatch accepts declared triggers and preserves task metadata"
         try std.testing.expectEqual(background_task.network, decision.network);
         try std.testing.expectEqual(background_task.visibility, decision.visibility);
         try std.testing.expectEqual(background_task.budget.cpu_time_ticks, decision.budget.cpu_time_ticks);
-        try std.testing.expect(try controller.complete(&runtime, decision.record_id.?));
+        try std.testing.expect(try controller.complete(&runtime, .{
+            .record_id = decision.record_id.?,
+            .expected_task_id = task.id,
+            .expected_background_task_id = background_task.id,
+            .expected_trigger = background_task.trigger,
+            .tick = 11 + decision.record_id.?,
+        }));
     }
 
     try std.testing.expectEqual(@as(u16, 0), task.background_active_count);
@@ -557,6 +579,14 @@ test "background dispatch throttles delayed work and denies abusive budgets" {
     try std.testing.expectEqual(DecisionReason.throttled, third.reason);
     try std.testing.expect(!heavy.allowed);
     try std.testing.expectEqual(DecisionReason.budget_exceeded, heavy.reason);
+    try std.testing.expectError(error.DispatchRecordBindingMismatch, controller.complete(&runtime, .{
+        .record_id = first.record_id.?,
+        .expected_task_id = task.id + 1,
+        .expected_background_task_id = TEST_SYNC_BACKGROUND_ID,
+        .expected_trigger = .sync_completion,
+        .tick = 24,
+    }));
+    try std.testing.expectEqual(@as(u16, 2), task.background_active_count);
 
     const no_background_task = try createActiveTestTask(&runtime, .{
         .serial = 302,
@@ -647,7 +677,13 @@ test "background dispatch enforces signed background activity policy before rese
 
     const safe = try controller.dispatch(&runtime, task.id, bundle, "safe", .sync_completion, 27);
     try std.testing.expect(safe.allowed);
-    try std.testing.expect(try controller.complete(&runtime, safe.record_id.?));
+    try std.testing.expect(try controller.complete(&runtime, .{
+        .record_id = safe.record_id.?,
+        .expected_task_id = task.id,
+        .expected_background_task_id = "safe",
+        .expected_trigger = .sync_completion,
+        .tick = 42,
+    }));
 
     const remote = try controller.dispatch(&runtime, task.id, bundle, "remote", .push_event, 28);
     try std.testing.expectEqual(DecisionReason.policy_denied, remote.reason);
@@ -708,7 +744,13 @@ test "background dispatch reuses completed and denied record slots" {
     while (iteration < MAX_RECORDS + 4) : (iteration += 1) {
         const decision = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 40 + iteration);
         try std.testing.expect(decision.allowed);
-        try std.testing.expect(try controller.complete(&runtime, decision.record_id.?));
+        try std.testing.expect(try controller.complete(&runtime, .{
+            .record_id = decision.record_id.?,
+            .expected_task_id = task.id,
+            .expected_background_task_id = TEST_SYNC_BACKGROUND_ID,
+            .expected_trigger = .sync_completion,
+            .tick = 50 + iteration,
+        }));
     }
     try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
     try std.testing.expectEqual(task.budget.cpu_time_ticks, task.background_cpu_consumed_ticks);
@@ -748,5 +790,11 @@ test "background dispatch expires overdue work and releases reservations" {
     try std.testing.expectEqual(RecordState.expired, latest.state);
     try std.testing.expectEqual(DecisionReason.expired, latest.reason);
     try std.testing.expectEqual(@as(u64, 130), latest.completed_tick);
-    try std.testing.expect(!try controller.complete(&runtime, decision.record_id.?));
+    try std.testing.expect(!try controller.complete(&runtime, .{
+        .record_id = decision.record_id.?,
+        .expected_task_id = task.id,
+        .expected_background_task_id = TEST_SYNC_BACKGROUND_ID,
+        .expected_trigger = .sync_completion,
+        .tick = 131,
+    }));
 }

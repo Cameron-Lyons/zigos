@@ -316,11 +316,17 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     }, org_policy);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.rollback_available);
-    _ = try packages_entry.port.rollback(packages_entry.authority, "app.trip");
+    _ = try packages_entry.port.rollback(
+        packages_entry.authority,
+        package_service.rollbackRequestForActive(packages.find("app.trip").?),
+    );
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.trip").?.versionMinor());
 
     try controller.recoverSystem(task.id, person, "restored previous trip planner version");
-    const removed = try packages_entry.port.remove(packages_entry.authority, "app.trip");
+    const removed = try packages_entry.port.remove(
+        packages_entry.authority,
+        package_service.removeRequestForActive(packages.find("app.trip").?),
+    );
     try std.testing.expect(removed.removed_existing);
     try std.testing.expect(packages.find("app.trip") == null);
     _ = try controller.removeApp(person, "app.trip");
@@ -504,10 +510,16 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     try std.testing.expect(std.mem.indexOf(u8, diagnostics, "kind=accessibility_profile") != null);
     try std.testing.expect(std.mem.indexOf(u8, diagnostics, "profile applied") == null);
 
-    _ = try packages_entry.port.rollback(packages_entry.authority, "app.notes");
+    _ = try packages_entry.port.rollback(
+        packages_entry.authority,
+        package_service.rollbackRequestForActive(packages.find("app.notes").?),
+    );
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.versionMinor());
     try std.testing.expectEqual(@as(usize, 1), packages.find("app.notes").?.componentCount());
-    const removed = try packages_entry.port.remove(packages_entry.authority, "app.notes");
+    const removed = try packages_entry.port.remove(
+        packages_entry.authority,
+        package_service.removeRequestForActive(packages.find("app.notes").?),
+    );
     try std.testing.expect(removed.removed_existing);
     try std.testing.expect(packages.find("app.notes") == null);
     try std.testing.expectError(error.BundleNotFound, packages.buildLaunchPlan("app.notes"));
@@ -603,7 +615,13 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
         try std.testing.expectEqual(background_task.expected_duration_seconds, decision.expected_duration_seconds);
         try std.testing.expectEqual(background_task.network, decision.network);
         try std.testing.expectEqual(background_task.visibility, decision.visibility);
-        try std.testing.expect(try dispatcher.complete(&runtime, decision.record_id.?));
+        try std.testing.expect(try dispatcher.complete(&runtime, .{
+            .record_id = decision.record_id.?,
+            .expected_task_id = task.id,
+            .expected_background_task_id = background_task.id,
+            .expected_trigger = background_task.trigger,
+            .tick = 41 + decision.record_id.?,
+        }));
     }
 
     const first = try dispatcher.dispatch(&runtime, task.id, installed_bundle, "sync", .sync_completion, 50);

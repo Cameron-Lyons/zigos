@@ -26,6 +26,8 @@ pub const ServiceClass = enum(u8) {
     task_runtime,
     session_manager,
     policy_mediation,
+    attention_broker,
+    task_lifecycle,
     permission_review_ui,
     service_registry,
     network_stack,
@@ -33,9 +35,13 @@ pub const ServiceClass = enum(u8) {
     package_install_update,
     compositor_ui_session,
     indexing_search,
+    personal_context,
     sync_replication,
     media_print_helpers,
     secure_pasteboard,
+    object_resilience,
+    sensitive_capture,
+    secret_vault,
 };
 
 pub const ServiceBoundary = enum(u8) {
@@ -131,9 +137,15 @@ pub const BootstrapOwnerKey = enum(u8) {
     review_service,
     package_service,
     indexing_service,
+    personal_context_service,
     sync_service,
     media_service,
+    attention_broker_service,
+    task_lifecycle_service,
     pasteboard_service,
+    object_resilience_service,
+    sensitive_capture_service,
+    secret_vault_service,
     task_runtime_service,
 };
 
@@ -148,9 +160,15 @@ pub const BootstrapServiceRecordKey = enum(u8) {
     storage_service,
     package_service,
     indexing_service,
+    personal_context_service,
     sync_service,
     media_service,
+    attention_broker_service,
+    task_lifecycle_service,
     pasteboard_service,
+    object_resilience_service,
+    sensitive_capture_service,
+    secret_vault_service,
 };
 
 pub const BootstrapLaunch = struct {
@@ -304,6 +322,68 @@ pub const catalog = [_]ServiceCatalogEntry{
             .budget = defaultServiceBudget(.policy_mediation),
             .correlation_base = 301,
             .tick = 31,
+            .grants = &.{.service_task_authority},
+        },
+        .published_native_service = true,
+    },
+    .{
+        .class = .attention_broker,
+        .owner_key = .attention_broker_service,
+        .service_record_key = .attention_broker_service,
+        .boundary = .userspace_service,
+        .interface = catalogInterface(.attention_broker),
+        .required_capabilities = &.{ .service_bootstrap, .policy_authority },
+        .dependencies = &.{.policy_mediation},
+        .restart_policy = .supervised_restart,
+        .isolation = .{ .namespace_isolated = true },
+        .userspace_image = .{
+            .bundle_id = "zigos.system.attention-broker",
+            .artifact_name = "userspace-attention-broker.elf",
+            .source_path = "src/userspace/service_main.zig",
+            .display_name = "Attention Broker",
+            .label = "attention-broker",
+            .entry = "zigos.attention.broker",
+            .role_tag = 0xA11A,
+            .heartbeat_increment = 24,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
+        },
+        .description = "policy-gated notification posting, dismissal, query, and attention audit broker",
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.attention_broker),
+            .correlation_base = 303,
+            .tick = 33,
+            .grants = &.{.service_task_authority},
+        },
+        .published_native_service = true,
+    },
+    .{
+        .class = .task_lifecycle,
+        .owner_key = .task_lifecycle_service,
+        .service_record_key = .task_lifecycle_service,
+        .boundary = .userspace_service,
+        .interface = catalogInterface(.task_lifecycle),
+        .required_capabilities = &.{ .service_bootstrap, .policy_authority },
+        .dependencies = &.{ .policy_mediation, .task_runtime },
+        .restart_policy = .supervised_restart,
+        .isolation = .{ .namespace_isolated = true },
+        .userspace_image = .{
+            .bundle_id = "zigos.system.task-lifecycle",
+            .artifact_name = "userspace-task-lifecycle.elf",
+            .source_path = "src/userspace/service_main.zig",
+            .display_name = "Task Lifecycle",
+            .label = "task-lifecycle",
+            .entry = "zigos.task.lifecycle",
+            .role_tag = 0xA11B,
+            .heartbeat_increment = 25,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
+        },
+        .description = "policy-gated suspend, resume, terminate, checkpoint-aware lifecycle audit broker",
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.task_lifecycle),
+            .correlation_base = 305,
+            .tick = 36,
             .grants = &.{.service_task_authority},
         },
         .published_native_service = true,
@@ -539,6 +619,37 @@ pub const catalog = [_]ServiceCatalogEntry{
         .published_native_service = true,
     },
     .{
+        .class = .personal_context,
+        .owner_key = .personal_context_service,
+        .service_record_key = .personal_context_service,
+        .boundary = .userspace_service,
+        .interface = catalogInterface(.personal_context),
+        .required_capabilities = &.{ .service_bootstrap, .metadata_storage },
+        .dependencies = &.{ .policy_mediation, .indexing_search },
+        .restart_policy = .supervised_restart,
+        .isolation = .{ .namespace_isolated = true, .storage = .metadata_only },
+        .userspace_image = .{
+            .bundle_id = "zigos.system.personal-context",
+            .artifact_name = "userspace-personal-context.elf",
+            .source_path = "src/userspace/service_main.zig",
+            .display_name = "Personal Context",
+            .label = "personal-context",
+            .entry = "zigos.personal.context",
+            .role_tag = 0xA11C,
+            .heartbeat_increment = 26,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_STORAGE_BOUNDARY,
+        },
+        .description = "lease-scoped local semantic memory and agent context retrieval service",
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.personal_context),
+            .correlation_base = 337,
+            .tick = 65,
+            .grants = &.{.service_task_authority},
+        },
+        .published_native_service = true,
+    },
+    .{
         .class = .sync_replication,
         .owner_key = .sync_service,
         .service_record_key = .sync_service,
@@ -602,6 +713,37 @@ pub const catalog = [_]ServiceCatalogEntry{
         .published_native_service = true,
     },
     .{
+        .class = .sensitive_capture,
+        .owner_key = .sensitive_capture_service,
+        .service_record_key = .sensitive_capture_service,
+        .boundary = .userspace_service,
+        .interface = catalogInterface(.sensitive_capture),
+        .required_capabilities = &.{ .service_bootstrap, .device_authority, .ui_session_surface },
+        .dependencies = &.{ .policy_mediation, .compositor_ui_session },
+        .restart_policy = .supervised_restart,
+        .isolation = .{ .namespace_isolated = true },
+        .userspace_image = .{
+            .bundle_id = "zigos.system.sensitive-capture",
+            .artifact_name = "userspace-sensitive-capture.elf",
+            .source_path = "src/userspace/service_main.zig",
+            .display_name = "Sensitive Capture",
+            .label = "sensitive-capture",
+            .entry = "zigos.sensitive.capture",
+            .role_tag = 0xA118,
+            .heartbeat_increment = 22,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
+        },
+        .description = "foreground-only camera, microphone, location, sensor, and screen capture broker",
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.sensitive_capture),
+            .correlation_base = 331,
+            .tick = 59,
+            .grants = &.{.service_task_authority},
+        },
+        .published_native_service = true,
+    },
+    .{
         .class = .secure_pasteboard,
         .owner_key = .pasteboard_service,
         .service_record_key = .pasteboard_service,
@@ -628,6 +770,68 @@ pub const catalog = [_]ServiceCatalogEntry{
             .budget = defaultServiceBudget(.secure_pasteboard),
             .correlation_base = 325,
             .tick = 53,
+            .grants = &.{.service_task_authority},
+        },
+        .published_native_service = true,
+    },
+    .{
+        .class = .object_resilience,
+        .owner_key = .object_resilience_service,
+        .service_record_key = .object_resilience_service,
+        .boundary = .userspace_service,
+        .interface = catalogInterface(.object_resilience),
+        .required_capabilities = &.{ .service_bootstrap, .object_store_authority, .metadata_storage },
+        .dependencies = &.{ .policy_mediation, .storage_object },
+        .restart_policy = .supervised_restart,
+        .isolation = .{ .namespace_isolated = true, .storage = .object_store_authority },
+        .userspace_image = .{
+            .bundle_id = "zigos.system.object-resilience",
+            .artifact_name = "userspace-object-resilience.elf",
+            .source_path = "src/userspace/service_main.zig",
+            .display_name = "Object Resilience",
+            .label = "object-resilience",
+            .entry = "zigos.object.resilience",
+            .role_tag = 0xA117,
+            .heartbeat_increment = 21,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE | userspace_flags.FLAG_STORAGE_BOUNDARY,
+        },
+        .description = "encrypted object backup, restore, and trusted-device migration service",
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.object_resilience),
+            .correlation_base = 328,
+            .tick = 56,
+            .grants = &.{.service_task_authority},
+        },
+        .published_native_service = true,
+    },
+    .{
+        .class = .secret_vault,
+        .owner_key = .secret_vault_service,
+        .service_record_key = .secret_vault_service,
+        .boundary = .userspace_service,
+        .interface = catalogInterface(.secret_vault),
+        .required_capabilities = &.{ .service_bootstrap, .policy_authority },
+        .dependencies = &.{.policy_mediation},
+        .restart_policy = .supervised_restart,
+        .isolation = .{ .namespace_isolated = true },
+        .userspace_image = .{
+            .bundle_id = "zigos.system.secret-vault",
+            .artifact_name = "userspace-secret-vault.elf",
+            .source_path = "src/userspace/service_main.zig",
+            .display_name = "Secret Vault",
+            .label = "secret-vault",
+            .entry = "zigos.secret.vault",
+            .role_tag = 0xA119,
+            .heartbeat_increment = 23,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
+        },
+        .description = "hardware-sealed secret import, handle lending, rotation, and revocation service",
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.secret_vault),
+            .correlation_base = 334,
+            .tick = 62,
             .grants = &.{.service_task_authority},
         },
         .published_native_service = true,
@@ -822,6 +1026,8 @@ pub fn serviceName(class: ServiceClass) []const u8 {
         .task_runtime => "task_runtime",
         .session_manager => "session_manager",
         .policy_mediation => "policy_mediation",
+        .attention_broker => "attention_broker",
+        .task_lifecycle => "task_lifecycle",
         .permission_review_ui => "permission_review_ui",
         .service_registry => "service_registry",
         .network_stack => "network_stack",
@@ -829,9 +1035,13 @@ pub fn serviceName(class: ServiceClass) []const u8 {
         .package_install_update => "package_install_update",
         .compositor_ui_session => "compositor_ui_session",
         .indexing_search => "indexing_search",
+        .personal_context => "personal_context",
         .sync_replication => "sync_replication",
         .media_print_helpers => "media_print_helpers",
         .secure_pasteboard => "secure_pasteboard",
+        .object_resilience => "object_resilience",
+        .sensitive_capture => "sensitive_capture",
+        .secret_vault => "secret_vault",
     };
 }
 
@@ -905,13 +1115,25 @@ fn publishedNativeServiceCount() usize {
 
 test "service catalog derives descriptors and bootstrap contracts from one source" {
     try std.testing.expectEqual(@as(usize, catalog.len), default_services.len);
-    try std.testing.expectEqual(@as(usize, 10), ordered_service_contracts.len);
-    try std.testing.expectEqual(@as(usize, 9), ordered_published_native_service_contracts.len);
+    try std.testing.expectEqual(@as(usize, 16), ordered_service_contracts.len);
+    try std.testing.expectEqual(@as(usize, 15), ordered_published_native_service_contracts.len);
     try std.testing.expectEqual(component_abi_schema.service_catalog_bindings.len, catalog.len);
     try std.testing.expectEqual(ServiceClass.service_registry, ordered_service_contracts[0].class);
     try std.testing.expectEqual(ServiceClass.policy_mediation, ordered_service_contracts[1].class);
-    try std.testing.expectEqual(ServiceClass.secure_pasteboard, ordered_service_contracts[9].class);
-    try std.testing.expectEqual(ServiceClass.secure_pasteboard, ordered_published_native_service_contracts[8].class);
+    try std.testing.expectEqual(ServiceClass.attention_broker, ordered_service_contracts[2].class);
+    try std.testing.expectEqual(ServiceClass.task_lifecycle, ordered_service_contracts[3].class);
+    try std.testing.expectEqual(ServiceClass.personal_context, ordered_service_contracts[9].class);
+    try std.testing.expectEqual(ServiceClass.sensitive_capture, ordered_service_contracts[12].class);
+    try std.testing.expectEqual(ServiceClass.secure_pasteboard, ordered_service_contracts[13].class);
+    try std.testing.expectEqual(ServiceClass.object_resilience, ordered_service_contracts[14].class);
+    try std.testing.expectEqual(ServiceClass.secret_vault, ordered_service_contracts[15].class);
+    try std.testing.expectEqual(ServiceClass.attention_broker, ordered_published_native_service_contracts[1].class);
+    try std.testing.expectEqual(ServiceClass.task_lifecycle, ordered_published_native_service_contracts[2].class);
+    try std.testing.expectEqual(ServiceClass.personal_context, ordered_published_native_service_contracts[8].class);
+    try std.testing.expectEqual(ServiceClass.sensitive_capture, ordered_published_native_service_contracts[11].class);
+    try std.testing.expectEqual(ServiceClass.secure_pasteboard, ordered_published_native_service_contracts[12].class);
+    try std.testing.expectEqual(ServiceClass.object_resilience, ordered_published_native_service_contracts[13].class);
+    try std.testing.expectEqual(ServiceClass.secret_vault, ordered_published_native_service_contracts[14].class);
     try std.testing.expectEqualStrings(component_abi_schema.interfaceForService(.storage_object).name, entryForClass(.storage_object).?.interface.name);
     try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));

@@ -992,7 +992,13 @@ fn benchmarkBackgroundDispatch(iteration: u32) u64 {
         .sync_completion,
         40 + iteration,
     ) catch unreachable;
-    _ = background_context.dispatcher.complete(&background_context.runtime, decision.record_id.?) catch unreachable;
+    _ = background_context.dispatcher.complete(&background_context.runtime, .{
+        .record_id = decision.record_id.?,
+        .expected_task_id = background_context.task_id,
+        .expected_background_task_id = "sync",
+        .expected_trigger = .sync_completion,
+        .tick = 45 + iteration,
+    }) catch unreachable;
     const task = background_context.runtime.find(background_context.task_id) orelse unreachable;
     return @intFromBool(decision.allowed) +
         decision.expected_duration_seconds +
@@ -1234,14 +1240,20 @@ fn benchmarkSecretStoreImportHandleExport(iteration: u32) u64 {
     ) catch unreachable;
     const described = secret_store_context.store.describeHandle(handle.id) orelse unreachable;
     if (exportable) {
-        const exported = secret_store_context.store.exportRaw(handle.id) catch unreachable;
+        const exported = secret_store_context.store.exportRaw(handle.id, .{
+            .holder = secret_store_context.holder,
+            .task_id = 700 + iteration,
+        }) catch unreachable;
         return secret.id +
             handle.id +
             described.task_id +
             exported.len +
             @as(u64, @intFromBool(described.export_allowed));
     }
-    _ = secret_store_context.store.exportRaw(handle.id) catch |err| switch (err) {
+    _ = secret_store_context.store.exportRaw(handle.id, .{
+        .holder = secret_store_context.holder,
+        .task_id = 700 + iteration,
+    }) catch |err| switch (err) {
         error.RawExportDenied => {},
         else => unreachable,
     };

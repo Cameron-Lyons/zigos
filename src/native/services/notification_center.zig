@@ -89,7 +89,7 @@ pub const Notification = struct {
 
     pub fn isActive(self: *const Notification, now_ticks: u64) bool {
         if (self.suppressed) return false;
-        return self.expires_at_ticks == 0 or now_ticks <= self.expires_at_ticks;
+        return self.expires_at_ticks == 0 or now_ticks < self.expires_at_ticks;
     }
 };
 
@@ -191,6 +191,20 @@ pub const Center = struct {
             }
         }
         return count;
+    }
+
+    pub fn find(self: *Center, notification_id: u64) ?*Notification {
+        for (&self.notifications) |*slot| {
+            if (!slot.in_use) continue;
+            if (slot.notification.id == notification_id) return &slot.notification;
+        }
+        return null;
+    }
+
+    pub fn dismiss(self: *Center, notification_id: u64) Error!*Notification {
+        const notification = self.find(notification_id) orelse return error.NotificationNotFound;
+        notification.suppressed = true;
+        return notification;
     }
 
     pub fn activeInterruptionCount(self: *const Center, now_ticks: u64) usize {
@@ -296,12 +310,19 @@ test "notification center keeps structured objects task links expiry and suppres
         .detail = "notes update ready",
     });
     try std.testing.expectEqual(@as(usize, 2), center.activeCount(20));
+    try std.testing.expectEqual(@as(usize, 2), center.activeCount(49));
+    try std.testing.expectEqual(@as(usize, 1), center.activeCount(50));
     try std.testing.expectEqualStrings("notes update ready", update_notification.detailSlice());
     try std.testing.expectEqual(SuppressionPolicy.allow_repeat, update_notification.suppression_policy);
 
     try std.testing.expectEqual(@as(usize, 1), center.suppressBySourceReason(sync_source, .sync_conflict));
     try std.testing.expectEqual(@as(usize, 1), center.activeCount(20));
     try std.testing.expectEqual(update_notification.id, center.latestVisible(60).?.id);
+
+    const dismissed = try center.dismiss(update_notification.id);
+    try std.testing.expect(dismissed.suppressed);
+    try std.testing.expect(center.latestVisible(60) == null);
+    try std.testing.expectError(error.NotificationNotFound, center.dismiss(update_notification.id + 100));
 }
 
 test "notification center applies structured suppression policies before posting replacements" {
