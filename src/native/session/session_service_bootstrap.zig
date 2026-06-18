@@ -8,6 +8,7 @@ const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const storage_driver_task_mod = @import("../drivers/storage_driver_task.zig");
 const native_util = @import("../core/util.zig");
+const principal = @import("../core/principal.zig");
 const std = @import("std");
 const service_bootstrap = @import("service_bootstrap.zig");
 const service_contract = @import("service_contracts.zig");
@@ -280,7 +281,7 @@ pub fn bootRegistryService(
     if (service_bindings.bindings[index].task_id != 0) return true;
     const entry = service_contract.contractForClass(.service_registry).?;
     service_bindings.bindings[index] = launchService(env, state, kernel_port, entry) catch |err| {
-        _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
+        recordBootFailure(env, support.serviceId(state, entry.class), entry.boot_tick, err);
         return false;
     };
     return true;
@@ -295,7 +296,7 @@ fn launchServices(
     for (service_contract.ordered_service_contracts, 0..) |entry, index| {
         if (service_bindings.bindings[index].task_id != 0) continue;
         service_bindings.bindings[index] = launchService(env, state, kernel_port, entry) catch |err| {
-            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
+            recordBootFailure(env, support.serviceId(state, entry.class), entry.boot_tick, err);
             return false;
         };
     }
@@ -341,18 +342,14 @@ fn activateDrivers(
         328,
         52,
     ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 52, bootFailureCode(err));
+        recordBootFailure(env, state.services.storage_service.id, 52, err);
         return false;
     };
 
-    const network_driver = service_bootstrap.attachDriver(
+    const network_driver = attachBootstrapDriver(
+        env,
+        state,
         kernel_port,
-        env.capability_table,
-        env.driver_directory,
-        env.supervisor,
-        state.ids.policy_authority,
-        state.policy_capability.id,
-        0,
         state.services.network_service.id,
         service_bindings.bindingFor(.network_stack).task_id,
         state.ids.network_service,
@@ -360,18 +357,11 @@ fn activateDrivers(
         .none,
         "zigos.system.network-stack",
         53,
-    ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.network_service.id, 53, bootFailureCode(err));
-        return false;
-    };
-    const storage_driver = service_bootstrap.attachDriver(
+    ) orelse return false;
+    const storage_driver = attachBootstrapDriver(
+        env,
+        state,
         kernel_port,
-        env.capability_table,
-        env.driver_directory,
-        env.supervisor,
-        state.ids.policy_authority,
-        state.policy_capability.id,
-        0,
         state.services.storage_service.id,
         storage_driver_task.task_id,
         state.ids.storage_service,
@@ -379,10 +369,7 @@ fn activateDrivers(
         .kernel_bootstrap_broker,
         "zigos.system.storage-driver",
         54,
-    ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(err));
-        return false;
-    };
+    ) orelse return false;
     const storage_inventory = device_inventory.recordForClass(.storage_controller);
     if (bootstrap_driver_port.storagePublication() == null and
         storage_inventory.detected and
@@ -393,7 +380,7 @@ fn activateDrivers(
             "zigos.system.storage-driver",
         ) catch false;
         if (!claimed_storage_bootstrap) {
-            _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(error.InvalidBootstrapTransport));
+            recordBootFailure(env, state.services.storage_service.id, 54, error.InvalidBootstrapTransport);
             return false;
         }
     }
@@ -405,18 +392,14 @@ fn activateDrivers(
             false,
         ) catch false;
         if (!published_storage) {
-            _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(error.InvalidBootstrapTransport));
+            recordBootFailure(env, state.services.storage_service.id, 54, error.InvalidBootstrapTransport);
             return false;
         }
     }
-    const graphics_driver = service_bootstrap.attachDriver(
+    const graphics_driver = attachBootstrapDriver(
+        env,
+        state,
         kernel_port,
-        env.capability_table,
-        env.driver_directory,
-        env.supervisor,
-        state.ids.policy_authority,
-        state.policy_capability.id,
-        0,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         state.ids.compositor_service,
@@ -424,18 +407,11 @@ fn activateDrivers(
         .none,
         "zigos.system.compositor",
         55,
-    ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 55, bootFailureCode(err));
-        return false;
-    };
-    const usb_driver = service_bootstrap.attachDriver(
+    ) orelse return false;
+    const usb_driver = attachBootstrapDriver(
+        env,
+        state,
         kernel_port,
-        env.capability_table,
-        env.driver_directory,
-        env.supervisor,
-        state.ids.policy_authority,
-        state.policy_capability.id,
-        0,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         state.ids.compositor_service,
@@ -443,18 +419,11 @@ fn activateDrivers(
         .none,
         "zigos.system.compositor",
         56,
-    ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 56, bootFailureCode(err));
-        return false;
-    };
-    const input_driver = service_bootstrap.attachDriver(
+    ) orelse return false;
+    const input_driver = attachBootstrapDriver(
+        env,
+        state,
         kernel_port,
-        env.capability_table,
-        env.driver_directory,
-        env.supervisor,
-        state.ids.policy_authority,
-        state.policy_capability.id,
-        0,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         state.ids.compositor_service,
@@ -462,18 +431,11 @@ fn activateDrivers(
         .none,
         "zigos.system.compositor",
         57,
-    ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 57, bootFailureCode(err));
-        return false;
-    };
-    const audio_driver = service_bootstrap.attachDriver(
+    ) orelse return false;
+    const audio_driver = attachBootstrapDriver(
+        env,
+        state,
         kernel_port,
-        env.capability_table,
-        env.driver_directory,
-        env.supervisor,
-        state.ids.policy_authority,
-        state.policy_capability.id,
-        0,
         state.services.media_service.id,
         service_bindings.bindingFor(.media_print_helpers).task_id,
         state.ids.media_service,
@@ -481,18 +443,11 @@ fn activateDrivers(
         .none,
         "zigos.system.media-print",
         58,
-    ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.media_service.id, 58, bootFailureCode(err));
-        return false;
-    };
-    const compositor_policy_driver = service_bootstrap.attachDriver(
+    ) orelse return false;
+    const compositor_policy_driver = attachBootstrapDriver(
+        env,
+        state,
         kernel_port,
-        env.capability_table,
-        env.driver_directory,
-        env.supervisor,
-        state.ids.policy_authority,
-        state.policy_capability.id,
-        0,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         state.ids.compositor_service,
@@ -500,10 +455,7 @@ fn activateDrivers(
         .none,
         "zigos.system.compositor",
         59,
-    ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 59, bootFailureCode(err));
-        return false;
-    };
+    ) orelse return false;
 
     if (bootstrap_driver_port.networkPublication() == null) {
         const published_network = bootstrap_driver_port.publishNetworkActivator(
@@ -513,7 +465,7 @@ fn activateDrivers(
             false,
         ) catch false;
         if (!published_network) {
-            _ = env.supervisor.recordCrash(state.services.network_service.id, 53, bootFailureCode(error.InvalidBootstrapTransport));
+            recordBootFailure(env, state.services.network_service.id, 53, error.InvalidBootstrapTransport);
             return false;
         }
     }
@@ -523,34 +475,13 @@ fn activateDrivers(
     if (!publishBootedDeviceDataPlane(env, state.services.media_service.id, audio_driver, "zigos.system.media-print", 58)) return false;
     if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, compositor_policy_driver, "zigos.system.compositor", 59)) return false;
 
-    const network_activation_mode = env.driver_runtime.activateModeAt(network_driver, 53) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.network_service.id, 53, bootFailureCode(err));
-        return false;
-    };
-    const storage_activation_mode = env.driver_runtime.activateModeAt(storage_driver, 54) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(err));
-        return false;
-    };
-    _ = env.driver_runtime.activateModeAt(graphics_driver, 55) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 55, bootFailureCode(err));
-        return false;
-    };
-    _ = env.driver_runtime.activateModeAt(usb_driver, 56) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 56, bootFailureCode(err));
-        return false;
-    };
-    _ = env.driver_runtime.activateModeAt(input_driver, 57) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 57, bootFailureCode(err));
-        return false;
-    };
-    _ = env.driver_runtime.activateModeAt(audio_driver, 58) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.media_service.id, 58, bootFailureCode(err));
-        return false;
-    };
-    _ = env.driver_runtime.activateModeAt(compositor_policy_driver, 59) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 59, bootFailureCode(err));
-        return false;
-    };
+    const network_activation_mode = activateBootstrapDriver(env, state.services.network_service.id, network_driver, 53) orelse return false;
+    const storage_activation_mode = activateBootstrapDriver(env, state.services.storage_service.id, storage_driver, 54) orelse return false;
+    _ = activateBootstrapDriver(env, state.services.compositor_service.id, graphics_driver, 55) orelse return false;
+    _ = activateBootstrapDriver(env, state.services.compositor_service.id, usb_driver, 56) orelse return false;
+    _ = activateBootstrapDriver(env, state.services.compositor_service.id, input_driver, 57) orelse return false;
+    _ = activateBootstrapDriver(env, state.services.media_service.id, audio_driver, 58) orelse return false;
+    _ = activateBootstrapDriver(env, state.services.compositor_service.id, compositor_policy_driver, 59) orelse return false;
     if (network_activation_mode == .published_data_plane and
         (storage_activation_mode == .published_data_plane or
             storage_activation_mode == .userspace_brokered_data_plane))
@@ -570,6 +501,51 @@ fn activateDrivers(
     return true;
 }
 
+fn attachBootstrapDriver(
+    env: *const support.Environment,
+    state: *const support.BootstrapState,
+    kernel_port: *component_port.KernelPort,
+    service_id: u64,
+    task_id: u64,
+    owner: principal.PrincipalId,
+    device_class: driver_service.DeviceClass,
+    bootstrap_transport: driver_service.BootstrapTransport,
+    driver_bundle_id: []const u8,
+    tick: u64,
+) ?*driver_service.DriverRecord {
+    return service_bootstrap.attachDriver(
+        kernel_port,
+        env.capability_table,
+        env.driver_directory,
+        env.supervisor,
+        state.ids.policy_authority,
+        state.policy_capability.id,
+        0,
+        service_id,
+        task_id,
+        owner,
+        device_class,
+        bootstrap_transport,
+        driver_bundle_id,
+        tick,
+    ) catch |err| {
+        recordBootFailure(env, service_id, tick, err);
+        return null;
+    };
+}
+
+fn activateBootstrapDriver(
+    env: *const support.Environment,
+    service_id: u64,
+    driver: *const driver_service.DriverRecord,
+    tick: u64,
+) ?driver_runtime_mod.ActivationMode {
+    return env.driver_runtime.activateModeAt(driver, tick) catch |err| {
+        recordBootFailure(env, service_id, tick, err);
+        return null;
+    };
+}
+
 fn publishBootedDeviceDataPlane(
     env: *const support.Environment,
     service_id: u64,
@@ -585,7 +561,7 @@ fn publishBootedDeviceDataPlane(
     ) catch false;
     if (published) return true;
 
-    _ = env.supervisor.recordCrash(service_id, tick, bootFailureCode(error.InvalidBootstrapTransport));
+    recordBootFailure(env, service_id, tick, error.InvalidBootstrapTransport);
     return false;
 }
 
@@ -612,7 +588,7 @@ fn connectClient(
         },
         env.userspace_scheduler,
     ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.service_registry.id, 56, bootFailureCode(err));
+        recordBootFailure(env, state.services.service_registry.id, 56, err);
         return false;
     };
     const service_client_authority = env.capability_table.mintBootRoot(.{
@@ -636,11 +612,11 @@ fn connectClient(
             .broker_service_id = state.services.service_registry.id,
         },
     }) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.service_registry.id, 56, bootFailureCode(err));
+        recordBootFailure(env, state.services.service_registry.id, 56, err);
         return false;
     };
     env.runtime.grantCapability(service_client_task.id, service_client_authority.id) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.service_registry.id, 56, bootFailureCode(err));
+        recordBootFailure(env, state.services.service_registry.id, 56, err);
         return false;
     };
 
@@ -655,11 +631,11 @@ fn connectClient(
             .label = entry.interface.name,
             .flags = .{ .local_only = true },
         }, 57 + @as(u64, @intCast(index))) catch |err| {
-            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
+            recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };
         const registry_connection = env.service_directory.connect(entry.interface) catch |err| {
-            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
+            recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };
         _ = kernel_port.endpointConnect(.{
@@ -668,7 +644,7 @@ fn connectClient(
             .peer_endpoint_capability_id = registry_connection.endpoint_capability_id,
             .peer_endpoint_id = binding.endpoint_id,
         }, 57 + @as(u64, @intCast(index))) catch |err| {
-            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
+            recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };
         env.runtime.audit(service_client_task.id, .{
@@ -676,7 +652,7 @@ fn connectClient(
             .detail = @truncate(registry_connection.service_id),
             .tick = 57 + @as(u64, @intCast(index)),
         }) catch |err| {
-            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
+            recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };
         const service = env.supervisor.findByClass(entry.class) orelse return false;
@@ -710,7 +686,7 @@ pub fn proveDriverCrashRestart(
         0x4E,
         "network driver restarted",
     ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.network_service.id, 70, bootFailureCode(err));
+        recordBootFailure(env, state.services.network_service.id, 70, err);
         return false;
     };
     if (env.supervisor.hasDiagnostic(state.services.network_service.id, .crash)) {
@@ -721,7 +697,7 @@ pub fn proveDriverCrashRestart(
         .detail = @truncate(state.services.network_service.id),
         .tick = 72,
     }) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.network_service.id, 72, bootFailureCode(err));
+        recordBootFailure(env, state.services.network_service.id, 72, err);
         return false;
     };
     if (recovery_runtime.rehost_count == 1 and
@@ -731,7 +707,7 @@ pub fn proveDriverCrashRestart(
     {
         common.printBootMarker(boot_markers.service_boot_driver_rehost_ok);
     } else {
-        _ = env.supervisor.recordCrash(state.services.network_service.id, 72, bootFailureCode(error.MissingBootstrapLaunch));
+        recordBootFailure(env, state.services.network_service.id, 72, error.MissingBootstrapLaunch);
         return false;
     }
     if (env.supervisor.hasDiagnostic(state.services.network_service.id, .restart_completed) and
@@ -750,7 +726,7 @@ pub fn proveStorageDriverRestartIo(
 ) bool {
     var storage_probe = StorageRestartProbe{};
     if (!storage_probe.verifyBeforeRestart(state.services.storage_service.id)) {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 80, bootFailureCode(error.MissingBootstrapLaunch));
+        recordBootFailure(env, state.services.storage_service.id, 80, error.MissingBootstrapLaunch);
         return false;
     }
     common.printBootMarker(boot_markers.service_boot_storage_io_before_restart_ok);
@@ -770,7 +746,7 @@ pub fn proveStorageDriverRestartIo(
         0x57,
         "storage driver restarted",
     ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 81, bootFailureCode(err));
+        recordBootFailure(env, state.services.storage_service.id, 81, err);
         return false;
     };
 
@@ -788,7 +764,7 @@ pub fn proveStorageDriverRestartIo(
         recovery_runtime.last_process_generation < 2 or
         storage_driver.restart_generation != 2)
     {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 83, bootFailureCode(error.MissingBootstrapLaunch));
+        recordBootFailure(env, state.services.storage_service.id, 83, error.MissingBootstrapLaunch);
         return false;
     }
     common.printBootMarker(boot_markers.service_boot_storage_dma_domain_programmed);
@@ -801,13 +777,13 @@ pub fn proveStorageDriverRestartIo(
         !storage_probe.rebound_dma_domain_programmed or
         !storage_probe.rebound_brokered_dma_buffer_ready)
     {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 84, bootFailureCode(error.MissingBootstrapLaunch));
+        recordBootFailure(env, state.services.storage_service.id, 84, error.MissingBootstrapLaunch);
         return false;
     }
     common.printBootMarker(boot_markers.service_boot_storage_rebind_ok);
 
     if (!storage_probe.verifyAfterRestart(state.services.storage_service.id)) {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 85, bootFailureCode(error.MissingBootstrapLaunch));
+        recordBootFailure(env, state.services.storage_service.id, 85, error.MissingBootstrapLaunch);
         return false;
     }
     common.printBootMarker(boot_markers.service_boot_storage_io_after_restart_ok);
@@ -816,4 +792,8 @@ pub fn proveStorageDriverRestartIo(
 
 fn bootFailureCode(err: anyerror) u32 {
     return @truncate(native_util.fnv1a64(@errorName(err)));
+}
+
+fn recordBootFailure(env: *const support.Environment, service_id: u64, tick: u64, err: anyerror) void {
+    _ = env.supervisor.recordCrash(service_id, tick, bootFailureCode(err));
 }

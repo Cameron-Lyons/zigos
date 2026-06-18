@@ -62,24 +62,7 @@ pub fn launchDirectBundle(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!*task_runtime.TaskRecord {
-    if (catalog.findByBundleId(bundle.bundle_id) == null) registered: {
-        const contract = contractFor(bundle.bundle_id);
-        _ = catalog.register(.{
-            .bundle = bundle,
-            .component_class = component_class,
-            .initial_component = initial_component,
-            .role_tag = contract.role_tag,
-            .heartbeat_increment = contract.heartbeat_increment,
-            .contract_flags = contract.contract_flags,
-        }) catch |err| {
-            if (builtin.target.os.tag == .freestanding and err == error.EmbeddedArtifactRequired) {
-                try userspace_boot_registry.registerAll(catalog);
-                if (catalog.findByBundleId(bundle.bundle_id) != null) break :registered;
-            }
-            logLaunchFailure(bundle.bundle_id, "register-direct", err);
-            return err;
-        };
-    }
+    try ensureRegisteredBundle(catalog, bundle, component_class, initial_component, "register-direct");
     const task = catalog.launchDirect(runtime_ptr, bundle.bundle_id, request) catch |err| {
         logLaunchFailure(bundle.bundle_id, "launch-direct", err);
         return err;
@@ -97,30 +80,40 @@ pub fn launchKernelBundle(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!abi.TaskDescriptor {
-    if (catalog.findByBundleId(bundle.bundle_id) == null) registered: {
-        const contract = contractFor(bundle.bundle_id);
-        _ = catalog.register(.{
-            .bundle = bundle,
-            .component_class = component_class,
-            .initial_component = initial_component,
-            .role_tag = contract.role_tag,
-            .heartbeat_increment = contract.heartbeat_increment,
-            .contract_flags = contract.contract_flags,
-        }) catch |err| {
-            if (builtin.target.os.tag == .freestanding and err == error.EmbeddedArtifactRequired) {
-                try userspace_boot_registry.registerAll(catalog);
-                if (catalog.findByBundleId(bundle.bundle_id) != null) break :registered;
-            }
-            logLaunchFailure(bundle.bundle_id, "register-kernel", err);
-            return err;
-        };
-    }
+    try ensureRegisteredBundle(catalog, bundle, component_class, initial_component, "register-kernel");
     const task = catalog.launchViaKernel(authority, bundle.bundle_id, request) catch |err| {
         logLaunchFailure(bundle.bundle_id, "launch-kernel", err);
         return err;
     };
     scheduleTask(schedule_task, task.task_id);
     return task;
+}
+
+fn ensureRegisteredBundle(
+    catalog: *userspace_loader.Catalog,
+    bundle: manifest.BundleManifest,
+    component_class: task_runtime.ComponentClass,
+    initial_component: task_runtime.ExecutionComponentSpec,
+    failure_phase: []const u8,
+) Error!void {
+    if (catalog.findByBundleId(bundle.bundle_id) != null) return;
+
+    const contract = contractFor(bundle.bundle_id);
+    _ = catalog.register(.{
+        .bundle = bundle,
+        .component_class = component_class,
+        .initial_component = initial_component,
+        .role_tag = contract.role_tag,
+        .heartbeat_increment = contract.heartbeat_increment,
+        .contract_flags = contract.contract_flags,
+    }) catch |err| {
+        if (builtin.target.os.tag == .freestanding and err == error.EmbeddedArtifactRequired) {
+            try userspace_boot_registry.registerAll(catalog);
+            if (catalog.findByBundleId(bundle.bundle_id) != null) return;
+        }
+        logLaunchFailure(bundle.bundle_id, failure_phase, err);
+        return err;
+    };
 }
 
 fn contractFor(bundle_id: []const u8) registry.ContractSpec {

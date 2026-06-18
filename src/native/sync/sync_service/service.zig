@@ -161,23 +161,30 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         database_sync_adapter: DatabaseSyncAdapter = sync_adapters.default_database_sync_adapter,
         transport_queue: TransportQueue = TransportQueue.init(),
 
-        pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Self {
-            var service = Self{
+        fn initDefault(service_id: u64, task_id: u64, owner: principal.PrincipalId) Self {
+            return .{
                 .service_id = service_id,
                 .task_id = task_id,
                 .owner = owner,
-                .storage = null,
-                .state_workspace_id = 0,
-                .next_overlay_session_id = 1,
-                .overlay_sessions = OverlaySessionArena.init(),
-                .closed_overlay_sessions = ClosedOverlaySessionIndex.init(),
-                .active_overlay_session_count = 0,
-                .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
-                .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
-                .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
-                .database_sync_adapter = sync_adapters.default_database_sync_adapter,
-                .transport_queue = TransportQueue.init(),
             };
+        }
+
+        fn initWithPreparedResidentState(
+            service_id: u64,
+            task_id: u64,
+            owner: principal.PrincipalId,
+            resident_state: *ResidentState,
+            loaded_existing_state: bool,
+        ) Self {
+            var service = initDefault(service_id, task_id, owner);
+            service.loaded_existing_state = loaded_existing_state;
+            service.resident_store = resident_state;
+            service.rebuildReplicaIndex();
+            return service;
+        }
+
+        pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Self {
+            var service = initDefault(service_id, task_id, owner);
             service.owned_resident_state.resetForServiceInit();
             return service;
         }
@@ -189,29 +196,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             resident_state: *ResidentState,
         ) Self {
             const loaded_existing_state = resident_state.has_persisted_state;
-            if (!resident_state.has_persisted_state) {
+            if (!loaded_existing_state) {
                 resident_state.resetForServiceInit();
             }
-            var service = Self{
-                .service_id = service_id,
-                .task_id = task_id,
-                .owner = owner,
-                .loaded_existing_state = loaded_existing_state,
-                .storage = null,
-                .state_workspace_id = 0,
-                .resident_store = resident_state,
-                .next_overlay_session_id = 1,
-                .overlay_sessions = OverlaySessionArena.init(),
-                .closed_overlay_sessions = ClosedOverlaySessionIndex.init(),
-                .active_overlay_session_count = 0,
-                .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
-                .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
-                .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
-                .database_sync_adapter = sync_adapters.default_database_sync_adapter,
-                .transport_queue = TransportQueue.init(),
-            };
-            service.rebuildReplicaIndex();
-            return service;
+            return initWithPreparedResidentState(service_id, task_id, owner, resident_state, loaded_existing_state);
         }
 
         pub fn initWithStorage(
@@ -231,25 +219,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 resident_state.resetForServiceInit();
             }
 
-            var service = Self{
-                .service_id = service_id,
-                .task_id = task_id,
-                .owner = owner,
-                .loaded_existing_state = loaded_existing_state,
-                .storage = storage,
-                .state_workspace_id = workspace_id,
-                .resident_store = resident_state,
-                .next_overlay_session_id = 1,
-                .overlay_sessions = OverlaySessionArena.init(),
-                .closed_overlay_sessions = ClosedOverlaySessionIndex.init(),
-                .active_overlay_session_count = 0,
-                .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
-                .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
-                .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
-                .database_sync_adapter = sync_adapters.default_database_sync_adapter,
-                .transport_queue = TransportQueue.init(),
-            };
-            service.rebuildReplicaIndex();
+            var service = initWithPreparedResidentState(service_id, task_id, owner, resident_state, loaded_existing_state);
+            service.storage = storage;
+            service.state_workspace_id = workspace_id;
             return service;
         }
 

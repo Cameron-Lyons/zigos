@@ -64,9 +64,7 @@ pub fn dispatchResourceQuery(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.ResourceQueryRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = component_port.invokeGenerated(.resource_query, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
+    return dispatch.invokeAndWriteResponse(.resource_query, port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
 pub fn dispatchAccountingQuery(
@@ -77,9 +75,7 @@ pub fn dispatchAccountingQuery(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.AccountingQueryRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = component_port.invokeGenerated(.accounting_query, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
+    return dispatch.invokeAndWriteResponse(.accounting_query, port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
 fn sanitizeTaskCreateRequest(
