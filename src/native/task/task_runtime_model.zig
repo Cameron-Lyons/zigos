@@ -180,6 +180,8 @@ pub const ResourceBudget = struct {
 
 pub const AuditEventKind = enum(u8) {
     created,
+    suspended,
+    resumed,
     terminated,
     capability_granted,
     capability_revoked,

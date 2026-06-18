@@ -8,7 +8,7 @@ const manifest = @import("../policy/manifest.zig");
 const notification_center = @import("../services/notification_center.zig");
 const principal = @import("../core/principal.zig");
 
-pub const MAX_SERVICES: usize = 16;
+pub const MAX_SERVICES: usize = 24;
 pub const MAX_DIAGNOSTICS: usize = 64;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
 

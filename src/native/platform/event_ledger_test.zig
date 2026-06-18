@@ -113,6 +113,38 @@ test "event ledger records AI inference as protected diagnostic evidence" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "ai_remote_denials=1") != null);
 }
 
+test "event ledger records semantic memory receipt spends and replay denials" {
+    var ledger = Ledger.init();
+    const app = principal.PrincipalId{ .kind = .app, .serial = 31 };
+
+    try ledger.recordSemanticMemoryReceipt(app, 3101, 42, 9001, true, true, true, true, 91, "private receipt consumed");
+    try ledger.recordSemanticMemoryReceipt(app, 3101, 42, 9001, false, true, true, true, 92, "private receipt replay");
+    try ledger.recordSemanticMemoryReceipt(app, 3101, 42, 0, false, true, true, true, 93, "private malformed receipt");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=semantic_memory") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "workspace=42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "related=9001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "receipt_audit=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "receipt replay") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "malformed receipt") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "detail=redacted") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 3), summary.semantic_memory_events);
+    try std.testing.expectEqual(@as(usize, 2), summary.semantic_memory_denials);
+    try std.testing.expectEqual(@as(usize, 0), summary.semantic_memory_remote_denials);
+    try std.testing.expectEqual(@as(usize, 3), summary.semantic_memory_receipt_events);
+    try std.testing.expectEqual(@as(usize, 2), summary.semantic_memory_receipt_denials);
+    try std.testing.expectEqual(@as(usize, 3), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "semantic_memory_receipt_events=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "semantic_memory_receipt_denials=2") != null);
+}
+
 test "event ledger records AI model attestations as protected diagnostic evidence" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 25 };

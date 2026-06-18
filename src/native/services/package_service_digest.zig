@@ -48,6 +48,19 @@ pub fn digestBundle(bundle: manifest.BundleManifest) Digest {
     crypto_hash.updateBool(&hasher, "accessibility-reduced-motion", bundle.accessibility.supports_reduced_motion);
     crypto_hash.updateBool(&hasher, "accessibility-high-contrast", bundle.accessibility.supports_high_contrast);
     crypto_hash.updateBytes(&hasher, "accessibility-profile-notes", bundle.accessibility.profile_notes);
+    crypto_hash.updateBool(&hasher, "object-resilience-backup-enabled", bundle.object_resilience.backup_enabled);
+    crypto_hash.updateBool(&hasher, "object-resilience-encrypted-snapshots", bundle.object_resilience.encrypted_snapshots);
+    crypto_hash.updateBool(&hasher, "object-resilience-recovery-key-required", bundle.object_resilience.recovery_key_required);
+    crypto_hash.updateBool(&hasher, "object-resilience-portable-restore", bundle.object_resilience.portable_restore);
+    crypto_hash.updateBool(&hasher, "object-resilience-device-trust-required", bundle.object_resilience.device_trust_required);
+    crypto_hash.updateInt(&hasher, "object-resilience-max-restore-age-days", bundle.object_resilience.max_restore_age_days);
+    crypto_hash.updateBytes(&hasher, "object-resilience-backup-format", bundle.object_resilience.backup_format);
+    crypto_hash.updateBool(&hasher, "semantic-index-enabled", bundle.semantic_index.enabled);
+    crypto_hash.updateBool(&hasher, "semantic-index-local-only", bundle.semantic_index.local_only);
+    crypto_hash.updateBool(&hasher, "semantic-index-encrypted-index", bundle.semantic_index.encrypted_index);
+    crypto_hash.updateBool(&hasher, "semantic-index-redacted-snippets", bundle.semantic_index.redacted_snippets);
+    crypto_hash.updateInt(&hasher, "semantic-index-max-query-bytes", bundle.semantic_index.max_query_bytes);
+    crypto_hash.updateBytes(&hasher, "semantic-index-model-digest", bundle.semantic_index.model_digest);
 
     for (bundle.provided_interfaces, 0..) |interface, index| {
         crypto_hash.updateInt(&hasher, "provided-index", index);

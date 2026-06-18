@@ -335,18 +335,16 @@ pub const Simulator = struct {
 
     pub fn suspendNativeApp(self: *Simulator, task_id: u64) !bool {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        if (task.state != .active) return false;
-        task.state = .suspended;
-        try self.debug.record(.native_app_suspended, self.advanceClock(), task.launchBundleIdSlice(), "suspend", true);
-        return true;
+        const suspended = try self.runtime.suspendTask(task_id, self.advanceClock());
+        try self.debug.record(.native_app_suspended, self.advanceClock(), task.launchBundleIdSlice(), "suspend", suspended);
+        return suspended;
     }
 
     pub fn resumeNativeApp(self: *Simulator, task_id: u64) !bool {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        if (task.state != .suspended) return false;
-        task.state = .active;
-        try self.debug.record(.native_app_resumed, self.advanceClock(), task.launchBundleIdSlice(), "resume", true);
-        return true;
+        const resumed = try self.runtime.resumeTask(task_id, self.advanceClock());
+        try self.debug.record(.native_app_resumed, self.advanceClock(), task.launchBundleIdSlice(), "resume", resumed);
+        return resumed;
     }
 
     pub fn stopNativeApp(self: *Simulator, task_id: u64) !bool {
@@ -360,7 +358,8 @@ pub const Simulator = struct {
     pub fn rollback(self: *Simulator, bundle_id: []const u8) !package_service.InstallResult {
         try self.bootstrap();
         var port = self.packagePort();
-        const result = try port.rollback(self.authority(), bundle_id);
+        const bundle = self.packages.find(bundle_id) orelse return error.BundleNotFound;
+        const result = try port.rollback(self.authority(), package_service.rollbackRequestForActive(bundle));
         try self.debug.record(.package_rolled_back, self.advanceClock(), bundle_id, "rollback", true);
         return result;
     }
@@ -368,7 +367,8 @@ pub const Simulator = struct {
     pub fn remove(self: *Simulator, bundle_id: []const u8) !package_service.RemoveResult {
         try self.bootstrap();
         var port = self.packagePort();
-        const result = try port.remove(self.authority(), bundle_id);
+        const bundle = self.packages.find(bundle_id) orelse return error.BundleNotFound;
+        const result = try port.remove(self.authority(), package_service.removeRequestForActive(bundle));
         try self.debug.record(.package_removed, self.advanceClock(), bundle_id, "remove", true);
         return result;
     }
@@ -437,6 +437,8 @@ fn emptyResolvedManifest() package_service.ResolvedManifest {
         .supply_chain = .{},
         .agent_delegation = .{},
         .accessibility = .{},
+        .object_resilience = .{},
+        .semantic_index = .{},
         .signature = .{},
     };
 }

@@ -362,8 +362,11 @@ pub fn agentSessionsStayBoundedAuditedAndRevocable() !void {
     try std.testing.expectEqual(@as(usize, 1), service.activeCount());
 
     _ = try service.recordAction(.{
+        .subject = app,
+        .task_id = 3131,
         .delegation_id = delegation.id,
         .session_id = 8080,
+        .expected_generation = 7,
         .action_count = 2,
         .remote_call_count = 1,
         .context_bytes = 512,
@@ -371,16 +374,22 @@ pub fn agentSessionsStayBoundedAuditedAndRevocable() !void {
         .detail = "private agent workspace action",
     }, &ledger);
     try std.testing.expectError(error.RemoteCallBudgetExceeded, service.recordAction(.{
+        .subject = app,
+        .task_id = 3131,
         .delegation_id = delegation.id,
         .session_id = 8080,
+        .expected_generation = 7,
         .remote_call_count = 1,
     }, null));
 
     try std.testing.expectEqual(@as(usize, 1), try service.killSwitch(8, &ledger, app, 32, "private agent kill switch"));
     try std.testing.expectEqual(@as(usize, 0), service.activeCount());
     try std.testing.expectError(error.DelegationRevoked, service.recordAction(.{
+        .subject = app,
+        .task_id = 3131,
         .delegation_id = delegation.id,
         .session_id = 8080,
+        .expected_generation = 7,
     }, null));
     try std.testing.expectError(error.KillSwitchGenerationStale, service.authorize(&policies, subjects, .{
         .subject = app,
@@ -582,7 +591,10 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
     try std.testing.expect(compatible.updated_existing);
     try std.testing.expectEqual(@as(u32, 2), packages.find("app.notes").?.schemaVersion());
 
-    _ = try package_port.rollback(package_authority, "app.notes");
+    _ = try package_port.rollback(
+        package_authority,
+        package_service.rollbackRequestForActive(packages.find("app.notes").?),
+    );
     try std.testing.expectEqual(@as(u16, 1), packages.find("app.notes").?.versionMinor());
     try std.testing.expectEqual(@as(u32, 1), packages.find("app.notes").?.schemaVersion());
 }

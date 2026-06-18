@@ -16,13 +16,21 @@ pub fn orderedIndex(class: contract.ServiceClass) ?usize {
 test "service contract order follows declared dependencies" {
     try std.testing.expectEqual(contract.ServiceClass.service_registry, ordered_service_contracts[0].class);
     try std.testing.expect(orderedIndex(.service_registry).? < orderedIndex(.policy_mediation).?);
+    try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.attention_broker).?);
+    try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.task_lifecycle).?);
     try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.network_stack).?);
     try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.storage_object).?);
+    try std.testing.expect(orderedIndex(.storage_object).? < orderedIndex(.indexing_search).?);
+    try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.personal_context).?);
+    try std.testing.expect(orderedIndex(.indexing_search).? < orderedIndex(.personal_context).?);
     try std.testing.expect(orderedIndex(.storage_object).? < orderedIndex(.package_install_update).?);
     try std.testing.expect(orderedIndex(.network_stack).? < orderedIndex(.package_install_update).?);
     try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.compositor_ui_session).?);
+    try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.sensitive_capture).?);
+    try std.testing.expect(orderedIndex(.compositor_ui_session).? < orderedIndex(.sensitive_capture).?);
     try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.secure_pasteboard).?);
     try std.testing.expect(orderedIndex(.compositor_ui_session).? < orderedIndex(.secure_pasteboard).?);
+    try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.secret_vault).?);
 }
 
 test "service contract interfaces remain unique and discoverable" {

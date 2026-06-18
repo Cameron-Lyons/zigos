@@ -31,6 +31,8 @@ pub fn validateInstallStorageShape(
     const StoredSupplyChainType = @FieldType(RevisionType, "supply_chain");
     const StoredAgentDelegationType = @FieldType(RevisionType, "agent_delegation");
     const StoredAccessibilityType = @FieldType(RevisionType, "accessibility");
+    const StoredObjectResilienceType = @FieldType(RevisionType, "object_resilience");
+    const StoredSemanticIndexType = @FieldType(RevisionType, "semantic_index");
     const StoredSignatureType = @FieldType(RevisionType, "signature");
 
     try validateTextLen(bundle.bundle_id, arrayFieldLen(InstalledBundleType, "bundle_id"), error.BundleIdTooLong);
@@ -53,6 +55,8 @@ pub fn validateInstallStorageShape(
     try validateTextLen(bundle.supply_chain.build_provenance_identity, arrayFieldLen(StoredSupplyChainType, "build_provenance_identity"), error.BuildProvenanceIdentityTooLong);
     try validateTextLen(bundle.agent_delegation.purpose, arrayFieldLen(StoredAgentDelegationType, "purpose"), error.AgentDelegationPurposeTooLong);
     try validateTextLen(bundle.accessibility.profile_notes, arrayFieldLen(StoredAccessibilityType, "profile_notes"), error.AccessibilityProfileTooLong);
+    try validateTextLen(bundle.object_resilience.backup_format, arrayFieldLen(StoredObjectResilienceType, "backup_format"), error.ObjectBackupFormatTooLong);
+    try validateTextLen(bundle.semantic_index.model_digest, arrayFieldLen(StoredSemanticIndexType, "model_digest"), error.SemanticIndexModelDigestTooLong);
     try validateTextLen(bundle.signature.format, arrayFieldLen(StoredSignatureType, "format"), error.SignatureFormatTooLong);
     try validateTextLen(bundle.signature.signer, arrayFieldLen(StoredSignatureType, "signer"), error.SignatureSignerTooLong);
 
@@ -276,6 +280,23 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .supports_high_contrast = revision.accessibility.supports_high_contrast,
         .profile_notes = revision.accessibility.profileNotesSlice(),
     };
+    resolved.object_resilience = .{
+        .backup_enabled = revision.object_resilience.backup_enabled,
+        .encrypted_snapshots = revision.object_resilience.encrypted_snapshots,
+        .recovery_key_required = revision.object_resilience.recovery_key_required,
+        .portable_restore = revision.object_resilience.portable_restore,
+        .device_trust_required = revision.object_resilience.device_trust_required,
+        .max_restore_age_days = revision.object_resilience.max_restore_age_days,
+        .backup_format = revision.object_resilience.backupFormatSlice(),
+    };
+    resolved.semantic_index = .{
+        .enabled = revision.semantic_index.enabled,
+        .local_only = revision.semantic_index.local_only,
+        .encrypted_index = revision.semantic_index.encrypted_index,
+        .redacted_snippets = revision.semantic_index.redacted_snippets,
+        .max_query_bytes = revision.semantic_index.max_query_bytes,
+        .model_digest = revision.semantic_index.modelDigestSlice(),
+    };
     resolved.signature = .{
         .format = revision.signature.formatSlice(),
         .signer = revision.signature.signerSlice(),
@@ -302,6 +323,8 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .supply_chain = resolved.supply_chain,
         .agent_delegation = resolved.agent_delegation,
         .accessibility = resolved.accessibility,
+        .object_resilience = resolved.object_resilience,
+        .semantic_index = resolved.semantic_index,
         .update_channel = revision.channel,
         .signature = resolved.signature,
     };
@@ -327,6 +350,8 @@ fn clearResolvedManifest(resolved: anytype) void {
     resolved.supply_chain = .{};
     resolved.agent_delegation = .{};
     resolved.accessibility = .{};
+    resolved.object_resilience = .{};
+    resolved.semantic_index = .{};
     resolved.signature = .{};
 }
 
@@ -466,6 +491,23 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.accessibility.supports_reduced_motion = source.accessibility.supports_reduced_motion;
     revision.accessibility.supports_high_contrast = source.accessibility.supports_high_contrast;
     revision.accessibility.profile_notes_len = copyTextExact(&revision.accessibility.profile_notes, source.accessibility.profile_notes) catch return error.AccessibilityProfileTooLong;
+
+    revision.object_resilience = .{};
+    revision.object_resilience.backup_enabled = source.object_resilience.backup_enabled;
+    revision.object_resilience.encrypted_snapshots = source.object_resilience.encrypted_snapshots;
+    revision.object_resilience.recovery_key_required = source.object_resilience.recovery_key_required;
+    revision.object_resilience.portable_restore = source.object_resilience.portable_restore;
+    revision.object_resilience.device_trust_required = source.object_resilience.device_trust_required;
+    revision.object_resilience.max_restore_age_days = source.object_resilience.max_restore_age_days;
+    revision.object_resilience.backup_format_len = copyTextExact(&revision.object_resilience.backup_format, source.object_resilience.backup_format) catch return error.ObjectBackupFormatTooLong;
+
+    revision.semantic_index = .{};
+    revision.semantic_index.enabled = source.semantic_index.enabled;
+    revision.semantic_index.local_only = source.semantic_index.local_only;
+    revision.semantic_index.encrypted_index = source.semantic_index.encrypted_index;
+    revision.semantic_index.redacted_snippets = source.semantic_index.redacted_snippets;
+    revision.semantic_index.max_query_bytes = source.semantic_index.max_query_bytes;
+    revision.semantic_index.model_digest_len = copyTextExact(&revision.semantic_index.model_digest, source.semantic_index.model_digest) catch return error.SemanticIndexModelDigestTooLong;
 
     revision.signature = .{};
     revision.signature.format_len = copyTextExact(&revision.signature.format, source.signature.format) catch return error.SignatureFormatTooLong;

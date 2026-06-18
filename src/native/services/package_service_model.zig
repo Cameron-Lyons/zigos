@@ -24,6 +24,8 @@ pub const MAX_SUPPLY_CHAIN_DIGEST_BYTES: usize = manifest.MAX_SUPPLY_CHAIN_DIGES
 pub const MAX_BUILD_PROVENANCE_IDENTITY_BYTES: usize = manifest.MAX_BUILD_PROVENANCE_IDENTITY_BYTES;
 pub const MAX_AGENT_PURPOSE_BYTES: usize = manifest.MAX_AGENT_PURPOSE_BYTES;
 pub const MAX_ACCESSIBILITY_PROFILE_BYTES: usize = manifest.MAX_ACCESSIBILITY_PROFILE_BYTES;
+pub const MAX_OBJECT_BACKUP_FORMAT_BYTES: usize = manifest.MAX_OBJECT_BACKUP_FORMAT_BYTES;
+pub const MAX_SEMANTIC_MODEL_DIGEST_BYTES: usize = manifest.MAX_SEMANTIC_MODEL_DIGEST_BYTES;
 pub const MAX_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_SIGNATURE_SIGNER_BYTES: usize = 64;
 pub const MAX_INSTALL_SOURCE_BYTES: usize = 96;
@@ -59,6 +61,13 @@ pub const InstallResult = struct {
 pub const RemoveResult = struct {
     removed_existing: bool,
     removed_revision_count: usize,
+};
+
+pub const OffboardResult = struct {
+    removed_existing: bool,
+    removed_revision_count: usize,
+    deletion_receipt_id: u64,
+    removed_bundle_digest: crypto_hash.Digest,
 };
 
 pub const StoredComponent = struct {
@@ -298,6 +307,35 @@ pub const StoredAccessibility = struct {
     }
 };
 
+pub const StoredObjectResilience = struct {
+    backup_enabled: bool = false,
+    encrypted_snapshots: bool = false,
+    recovery_key_required: bool = false,
+    portable_restore: bool = false,
+    device_trust_required: bool = false,
+    max_restore_age_days: u16 = 0,
+    backup_format_len: usize = 0,
+    backup_format: [MAX_OBJECT_BACKUP_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_OBJECT_BACKUP_FORMAT_BYTES,
+
+    pub fn backupFormatSlice(self: *const StoredObjectResilience) []const u8 {
+        return self.backup_format[0..self.backup_format_len];
+    }
+};
+
+pub const StoredSemanticIndex = struct {
+    enabled: bool = false,
+    local_only: bool = true,
+    encrypted_index: bool = false,
+    redacted_snippets: bool = false,
+    max_query_bytes: usize = 0,
+    model_digest_len: usize = 0,
+    model_digest: [MAX_SEMANTIC_MODEL_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SEMANTIC_MODEL_DIGEST_BYTES,
+
+    pub fn modelDigestSlice(self: *const StoredSemanticIndex) []const u8 {
+        return self.model_digest[0..self.model_digest_len];
+    }
+};
+
 pub const StoredSignature = struct {
     format_len: usize = 0,
     format: [MAX_SIGNATURE_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_FORMAT_BYTES,
@@ -340,6 +378,8 @@ pub const ResolvedManifest = struct {
     supply_chain: manifest.SupplyChainDecl,
     agent_delegation: manifest.AgentDelegationDecl,
     accessibility: manifest.AccessibilityDecl,
+    object_resilience: manifest.ObjectResilienceDecl,
+    semantic_index: manifest.SemanticIndexDecl,
     signature: manifest.Signature,
 };
 
@@ -374,6 +414,8 @@ pub const BundleRevision = struct {
     supply_chain: StoredSupplyChain = zeroStoredSupplyChain(),
     agent_delegation: StoredAgentDelegation = zeroStoredAgentDelegation(),
     accessibility: StoredAccessibility = zeroStoredAccessibility(),
+    object_resilience: StoredObjectResilience = zeroStoredObjectResilience(),
+    semantic_index: StoredSemanticIndex = zeroStoredSemanticIndex(),
     signature: StoredSignature = zeroStoredSignature(),
 
     pub fn displayNameSlice(self: *const BundleRevision) []const u8 {
@@ -521,6 +563,14 @@ fn zeroStoredAgentDelegation() StoredAgentDelegation {
 }
 
 fn zeroStoredAccessibility() StoredAccessibility {
+    return .{};
+}
+
+fn zeroStoredObjectResilience() StoredObjectResilience {
+    return .{};
+}
+
+fn zeroStoredSemanticIndex() StoredSemanticIndex {
     return .{};
 }
 

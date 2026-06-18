@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const contract = @import("../session/contract.zig");
 const denial_explanation = @import("../policy/denial_explanation.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
@@ -34,6 +35,8 @@ const persistent_event_flag_allowed: u8 = 1 << 0;
 const persistent_event_flag_user_approval_can_resolve: u8 = 1 << 1;
 const persistent_event_flag_retry_safe: u8 = 1 << 2;
 const persistent_event_flag_detail_protected: u8 = 1 << 3;
+const semantic_memory_flag_receipt_audit: u32 = @as(u32, 1) << @as(u5, 28);
+const semantic_memory_query_byte_mask: usize = 0x0fff_ffff;
 
 const PersistentHeader = extern struct {
     magic: u32 = persistent_header_magic,
@@ -52,6 +55,7 @@ pub const EventKind = enum(u8) {
     capability_revocation,
     notification,
     task_flow,
+    task_lifecycle,
     policy_change,
     suspicious_app_behavior,
     session_posture,
@@ -69,7 +73,14 @@ pub const EventKind = enum(u8) {
     attention_policy,
     accessibility_profile,
     background_activity,
+    resource_governance,
+    network_session,
     pasteboard_access,
+    object_resilience,
+    semantic_memory,
+    identity_credential,
+    sensitive_capture,
+    secret_vault,
 };
 
 pub const PolicyChangeAction = enum(u8) {
@@ -87,6 +98,32 @@ pub const PermissionLeaseAction = enum(u8) {
 pub const ConsentReceiptAction = enum(u8) {
     recorded,
     revoked,
+};
+
+pub const TaskLifecycleOperation = enum(u8) {
+    suspend_task,
+    resume_task,
+    terminate_task,
+};
+
+pub const NetworkSessionAction = enum(u8) {
+    open,
+    transfer,
+    revoke,
+    complete,
+};
+
+pub const NetworkSessionReason = enum(u8) {
+    none,
+    policy_denied,
+    capability_denied,
+    destination_mismatch,
+    attestation_required,
+    byte_limit_exceeded,
+    session_expired,
+    session_revoked,
+    session_completed,
+    source_mismatch,
 };
 
 pub const ExportOptions = struct {
@@ -144,14 +181,48 @@ pub const DiagnosticSummary = struct {
     agent_session_events: usize = 0,
     agent_session_denials: usize = 0,
     agent_kill_switch_denials: usize = 0,
+    task_lifecycle_events: usize = 0,
+    task_lifecycle_denials: usize = 0,
+    task_lifecycle_terminations: usize = 0,
     attention_policy_events: usize = 0,
     attention_interruptions_denied: usize = 0,
     accessibility_profile_events: usize = 0,
     accessibility_denials: usize = 0,
     background_activity_events: usize = 0,
     background_activity_denials: usize = 0,
+    resource_governance_events: usize = 0,
+    resource_governance_delays: usize = 0,
+    resource_governance_thermal_throttles: usize = 0,
+    resource_governance_battery_preserves: usize = 0,
+    resource_governance_hardware_evidence: usize = 0,
+    network_session_events: usize = 0,
+    network_session_denials: usize = 0,
+    network_session_revocations: usize = 0,
+    network_session_byte_denials: usize = 0,
+    network_session_attested: usize = 0,
     pasteboard_events: usize = 0,
     pasteboard_denials: usize = 0,
+    object_resilience_events: usize = 0,
+    object_resilience_denials: usize = 0,
+    object_restore_events: usize = 0,
+    semantic_memory_events: usize = 0,
+    semantic_memory_denials: usize = 0,
+    semantic_memory_remote_denials: usize = 0,
+    semantic_memory_receipt_events: usize = 0,
+    semantic_memory_receipt_denials: usize = 0,
+    identity_credential_events: usize = 0,
+    identity_credential_denials: usize = 0,
+    identity_credential_recoveries: usize = 0,
+    identity_credential_revocations: usize = 0,
+    identity_credential_phishing_denials: usize = 0,
+    sensitive_capture_events: usize = 0,
+    sensitive_capture_denials: usize = 0,
+    sensitive_capture_background_denials: usize = 0,
+    secret_vault_events: usize = 0,
+    secret_vault_denials: usize = 0,
+    secret_vault_raw_export_denials: usize = 0,
+    secret_vault_rotations: usize = 0,
+    secret_vault_revocations: usize = 0,
     latest_tick: u64 = 0,
 
     pub fn evidenceEventCount(self: DiagnosticSummary) usize {
@@ -174,10 +245,18 @@ pub const DiagnosticSummary = struct {
             self.consent_receipt_events +
             self.agent_delegation_events +
             self.agent_session_events +
+            self.task_lifecycle_events +
             self.attention_policy_events +
             self.accessibility_profile_events +
             self.background_activity_events +
-            self.pasteboard_events;
+            self.resource_governance_events +
+            self.network_session_events +
+            self.pasteboard_events +
+            self.object_resilience_events +
+            self.semantic_memory_events +
+            self.identity_credential_events +
+            self.sensitive_capture_events +
+            self.secret_vault_events;
     }
 };
 
@@ -455,6 +534,31 @@ pub const Ledger = struct {
             .allowed = flow.approved,
             .detail_len = clampedDetailLen(flow.detailSlice()),
             .detail = copyTextInto(flow.detailSlice()),
+        });
+    }
+
+    pub fn recordTaskLifecycle(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        operation: TaskLifecycleOperation,
+        allowed: bool,
+        checkpoint_present: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = @intFromEnum(operation);
+        if (checkpoint_present) code |= @as(u32, 1) << @as(u5, 31);
+        try self.append(.{
+            .kind = .task_lifecycle,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
         });
     }
 
@@ -982,6 +1086,70 @@ pub const Ledger = struct {
         });
     }
 
+    pub fn recordResourceGovernance(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        class: accelerator_scheduler.ResourceClass,
+        reason: accelerator_scheduler.DecisionReason,
+        delayed: bool,
+        degraded: bool,
+        observed_telemetry: bool,
+        hardware_evidence: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = @intFromEnum(reason);
+        code |= @as(u32, @intFromEnum(class)) << @as(u5, 8);
+        if (degraded) code |= @as(u32, 1) << @as(u5, 29);
+        if (observed_telemetry) code |= @as(u32, 1) << @as(u5, 30);
+        if (hardware_evidence) code |= @as(u32, 1) << @as(u5, 31);
+        try self.append(.{
+            .kind = .resource_governance,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .allowed = !delayed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordNetworkSession(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        session_id: u64,
+        action: NetworkSessionAction,
+        reason: NetworkSessionReason,
+        allowed: bool,
+        attested: bool,
+        identity_pinned: bool,
+        private_data: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = @intFromEnum(action);
+        code |= @as(u32, @intFromEnum(reason)) << @as(u5, 8);
+        if (attested) code |= @as(u32, 1) << @as(u5, 29);
+        if (identity_pinned) code |= @as(u32, 1) << @as(u5, 30);
+        if (private_data) code |= @as(u32, 1) << @as(u5, 31);
+        try self.append(.{
+            .kind = .network_session,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = session_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
     pub fn recordPasteboardAccess(
         self: *Ledger,
         subject: principal.PrincipalId,
@@ -1004,6 +1172,204 @@ pub const Ledger = struct {
             .subject = subject,
             .task_id = task_id,
             .related_id = token_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordObjectResilience(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        snapshot_id: u64,
+        allowed: bool,
+        restore: bool,
+        encrypted: bool,
+        device_trust_verified: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = 0;
+        if (restore) code |= 1;
+        if (encrypted) code |= 2;
+        if (device_trust_verified) code |= 4;
+        try self.append(.{
+            .kind = .object_resilience,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = snapshot_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordSemanticMemory(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        allowed: bool,
+        local_model: bool,
+        encrypted_index: bool,
+        redacted_snippets: bool,
+        query_bytes: usize,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        const capped_query_bytes = @min(query_bytes, semantic_memory_query_byte_mask);
+        const query_code: u32 = @intCast(capped_query_bytes);
+        var code: u32 = query_code;
+        if (local_model) code |= @as(u32, 1) << @as(u5, 31);
+        if (encrypted_index) code |= @as(u32, 1) << @as(u5, 30);
+        if (redacted_snippets) code |= @as(u32, 1) << @as(u5, 29);
+        try self.append(.{
+            .kind = .semantic_memory,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordSemanticMemoryReceipt(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        workspace_id: u64,
+        receipt_id: u64,
+        allowed: bool,
+        local_model: bool,
+        encrypted_index: bool,
+        redacted_snippets: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = semantic_memory_flag_receipt_audit;
+        if (local_model) code |= @as(u32, 1) << @as(u5, 31);
+        if (encrypted_index) code |= @as(u32, 1) << @as(u5, 30);
+        if (redacted_snippets) code |= @as(u32, 1) << @as(u5, 29);
+        try self.append(.{
+            .kind = .semantic_memory,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .workspace_id = workspace_id,
+            .related_id = receipt_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordIdentityCredential(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        credential_id: u64,
+        allowed: bool,
+        origin_bound: bool,
+        hardware_backed: bool,
+        local_unlock_verified: bool,
+        recovery: bool,
+        revocation: bool,
+        password_fallback: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = 0;
+        if (origin_bound) code |= 1;
+        if (hardware_backed) code |= 2;
+        if (local_unlock_verified) code |= 4;
+        if (recovery) code |= 8;
+        if (revocation) code |= 16;
+        if (password_fallback) code |= 32;
+        try self.append(.{
+            .kind = .identity_credential,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = credential_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordSensitiveCapture(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        session_id: u64,
+        allowed: bool,
+        permission_kind: ?manifest.PermissionKind,
+        foreground_session_present: bool,
+        indicator_visible: bool,
+        background: bool,
+        sample: bool,
+        stopped: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = 0;
+        if (foreground_session_present) code |= 1;
+        if (indicator_visible) code |= 2;
+        if (background) code |= 4;
+        if (sample) code |= 8;
+        if (stopped) code |= 16;
+        try self.append(.{
+            .kind = .sensitive_capture,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = session_id,
+            .permission_kind = permission_kind,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordSecretVault(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        secret_id: u64,
+        handle_id: u64,
+        allowed: bool,
+        hardware_backed: bool,
+        raw_export: bool,
+        rotation: bool,
+        revocation: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = 0;
+        if (hardware_backed) code |= 1;
+        if (raw_export) code |= 2;
+        if (rotation) code |= 4;
+        if (revocation) code |= 8;
+        try self.append(.{
+            .kind = .secret_vault,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = if (handle_id != 0) handle_id else secret_id,
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
@@ -1131,6 +1497,13 @@ pub const Ledger = struct {
                         summary.agent_kill_switch_denials += 1;
                     }
                 },
+                .task_lifecycle => {
+                    summary.task_lifecycle_events += 1;
+                    if (!event.allowed) summary.task_lifecycle_denials += 1;
+                    if (event.allowed and taskLifecycleOperation(event.detail_code) == .terminate_task) {
+                        summary.task_lifecycle_terminations += 1;
+                    }
+                },
                 .attention_policy => {
                     summary.attention_policy_events += 1;
                     if (!event.allowed and (event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0) {
@@ -1145,9 +1518,65 @@ pub const Ledger = struct {
                     summary.background_activity_events += 1;
                     if (!event.allowed) summary.background_activity_denials += 1;
                 },
+                .resource_governance => {
+                    summary.resource_governance_events += 1;
+                    if (!event.allowed) summary.resource_governance_delays += 1;
+                    switch (resourceGovernanceReason(event.detail_code)) {
+                        .thermal_throttle => summary.resource_governance_thermal_throttles += 1,
+                        .battery_preserve => summary.resource_governance_battery_preserves += 1,
+                        else => {},
+                    }
+                    if (resourceGovernanceHardwareEvidence(event.detail_code)) {
+                        summary.resource_governance_hardware_evidence += 1;
+                    }
+                },
+                .network_session => {
+                    summary.network_session_events += 1;
+                    if (!event.allowed) summary.network_session_denials += 1;
+                    if (networkSessionAction(event.detail_code) == .revoke) summary.network_session_revocations += 1;
+                    if (networkSessionReason(event.detail_code) == .byte_limit_exceeded) summary.network_session_byte_denials += 1;
+                    if (networkSessionAttested(event.detail_code)) summary.network_session_attested += 1;
+                },
                 .pasteboard_access => {
                     summary.pasteboard_events += 1;
                     if (!event.allowed) summary.pasteboard_denials += 1;
+                },
+                .object_resilience => {
+                    summary.object_resilience_events += 1;
+                    if (!event.allowed) summary.object_resilience_denials += 1;
+                    if ((event.detail_code & 1) != 0) summary.object_restore_events += 1;
+                },
+                .semantic_memory => {
+                    summary.semantic_memory_events += 1;
+                    if (!event.allowed) summary.semantic_memory_denials += 1;
+                    if (semanticMemoryReceiptAudit(event.detail_code)) {
+                        summary.semantic_memory_receipt_events += 1;
+                        if (!event.allowed) summary.semantic_memory_receipt_denials += 1;
+                    }
+                    if (!event.allowed and (event.detail_code & (@as(u32, 1) << @as(u5, 31))) == 0) {
+                        summary.semantic_memory_remote_denials += 1;
+                    }
+                },
+                .identity_credential => {
+                    summary.identity_credential_events += 1;
+                    if (!event.allowed) summary.identity_credential_denials += 1;
+                    if ((event.detail_code & 8) != 0) summary.identity_credential_recoveries += 1;
+                    if ((event.detail_code & 16) != 0) summary.identity_credential_revocations += 1;
+                    if (!event.allowed and (event.detail_code & 1) == 0) {
+                        summary.identity_credential_phishing_denials += 1;
+                    }
+                },
+                .sensitive_capture => {
+                    summary.sensitive_capture_events += 1;
+                    if (!event.allowed) summary.sensitive_capture_denials += 1;
+                    if (!event.allowed and (event.detail_code & 4) != 0) summary.sensitive_capture_background_denials += 1;
+                },
+                .secret_vault => {
+                    summary.secret_vault_events += 1;
+                    if (!event.allowed) summary.secret_vault_denials += 1;
+                    if (!event.allowed and (event.detail_code & 2) != 0) summary.secret_vault_raw_export_denials += 1;
+                    if ((event.detail_code & 4) != 0) summary.secret_vault_rotations += 1;
+                    if ((event.detail_code & 8) != 0) summary.secret_vault_revocations += 1;
                 },
                 else => {},
             }
@@ -1204,6 +1633,11 @@ pub const Ledger = struct {
             summary.agent_session_denials,
             summary.agent_kill_switch_denials,
         });
+        try appendFmt(buffer, &used, " task_lifecycle_events={d} task_lifecycle_denials={d} task_lifecycle_terminations={d}", .{
+            summary.task_lifecycle_events,
+            summary.task_lifecycle_denials,
+            summary.task_lifecycle_terminations,
+        });
         try appendFmt(buffer, &used, " attention_policy_events={d} attention_interruptions_denied={d}", .{
             summary.attention_policy_events,
             summary.attention_interruptions_denied,
@@ -1216,9 +1650,54 @@ pub const Ledger = struct {
             summary.background_activity_events,
             summary.background_activity_denials,
         });
+        try appendFmt(buffer, &used, " resource_governance_events={d} resource_governance_delays={d} resource_governance_thermal_throttles={d} resource_governance_battery_preserves={d} resource_governance_hardware_evidence={d}", .{
+            summary.resource_governance_events,
+            summary.resource_governance_delays,
+            summary.resource_governance_thermal_throttles,
+            summary.resource_governance_battery_preserves,
+            summary.resource_governance_hardware_evidence,
+        });
+        try appendFmt(buffer, &used, " network_session_events={d} network_session_denials={d} network_session_revocations={d} network_session_byte_denials={d} network_session_attested={d}", .{
+            summary.network_session_events,
+            summary.network_session_denials,
+            summary.network_session_revocations,
+            summary.network_session_byte_denials,
+            summary.network_session_attested,
+        });
         try appendFmt(buffer, &used, " pasteboard_events={d} pasteboard_denials={d}", .{
             summary.pasteboard_events,
             summary.pasteboard_denials,
+        });
+        try appendFmt(buffer, &used, " object_resilience_events={d} object_resilience_denials={d} object_restore_events={d}", .{
+            summary.object_resilience_events,
+            summary.object_resilience_denials,
+            summary.object_restore_events,
+        });
+        try appendFmt(buffer, &used, " semantic_memory_events={d} semantic_memory_denials={d} semantic_memory_remote_denials={d} semantic_memory_receipt_events={d} semantic_memory_receipt_denials={d}", .{
+            summary.semantic_memory_events,
+            summary.semantic_memory_denials,
+            summary.semantic_memory_remote_denials,
+            summary.semantic_memory_receipt_events,
+            summary.semantic_memory_receipt_denials,
+        });
+        try appendFmt(buffer, &used, " identity_credential_events={d} identity_credential_denials={d} identity_credential_recoveries={d} identity_credential_revocations={d} identity_credential_phishing_denials={d}", .{
+            summary.identity_credential_events,
+            summary.identity_credential_denials,
+            summary.identity_credential_recoveries,
+            summary.identity_credential_revocations,
+            summary.identity_credential_phishing_denials,
+        });
+        try appendFmt(buffer, &used, " sensitive_capture_events={d} sensitive_capture_denials={d} sensitive_capture_background_denials={d}", .{
+            summary.sensitive_capture_events,
+            summary.sensitive_capture_denials,
+            summary.sensitive_capture_background_denials,
+        });
+        try appendFmt(buffer, &used, " secret_vault_events={d} secret_vault_denials={d} secret_vault_raw_export_denials={d} secret_vault_rotations={d} secret_vault_revocations={d}", .{
+            summary.secret_vault_events,
+            summary.secret_vault_denials,
+            summary.secret_vault_raw_export_denials,
+            summary.secret_vault_rotations,
+            summary.secret_vault_revocations,
         });
         return buffer[0..used];
     }
@@ -1778,6 +2257,54 @@ fn policyChangeActionLabel(code: u32) []const u8 {
     return @tagName(action);
 }
 
+fn taskLifecycleOperation(code: u32) TaskLifecycleOperation {
+    return std.enums.fromInt(TaskLifecycleOperation, @as(u8, @intCast(code & 0xff))) orelse .terminate_task;
+}
+
+fn networkSessionAction(code: u32) NetworkSessionAction {
+    return std.enums.fromInt(NetworkSessionAction, @as(u8, @intCast(code & 0xff))) orelse .open;
+}
+
+fn networkSessionReason(code: u32) NetworkSessionReason {
+    return std.enums.fromInt(NetworkSessionReason, @as(u8, @intCast((code >> @as(u5, 8)) & 0xff))) orelse .none;
+}
+
+fn networkSessionAttested(code: u32) bool {
+    return (code & (@as(u32, 1) << @as(u5, 29))) != 0;
+}
+
+fn networkSessionIdentityPinned(code: u32) bool {
+    return (code & (@as(u32, 1) << @as(u5, 30))) != 0;
+}
+
+fn networkSessionPrivateData(code: u32) bool {
+    return (code & (@as(u32, 1) << @as(u5, 31))) != 0;
+}
+
+fn semanticMemoryReceiptAudit(code: u32) bool {
+    return (code & semantic_memory_flag_receipt_audit) != 0;
+}
+
+fn resourceGovernanceReason(code: u32) accelerator_scheduler.DecisionReason {
+    return std.enums.fromInt(accelerator_scheduler.DecisionReason, @as(u8, @intCast(code & 0xff))) orelse .normal;
+}
+
+fn resourceGovernanceClass(code: u32) accelerator_scheduler.ResourceClass {
+    return std.enums.fromInt(accelerator_scheduler.ResourceClass, @as(u8, @intCast((code >> @as(u5, 8)) & 0xff))) orelse .foreground_interactive;
+}
+
+fn resourceGovernanceDegraded(code: u32) bool {
+    return (code & (@as(u32, 1) << @as(u5, 29))) != 0;
+}
+
+fn resourceGovernanceObservedTelemetry(code: u32) bool {
+    return (code & (@as(u32, 1) << @as(u5, 30))) != 0;
+}
+
+fn resourceGovernanceHardwareEvidence(code: u32) bool {
+    return (code & (@as(u32, 1) << @as(u5, 31))) != 0;
+}
+
 fn kindKey(kind: EventKind) u64 {
     return @as(u64, @intFromEnum(kind)) + 1;
 }
@@ -1901,6 +2428,13 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
                 policyChangeActionLabel(event.detail_code),
             });
         },
+        .task_lifecycle => {
+            try appendFmt(buffer, used, " task_lifecycle operation={s} checkpoint={s} allowed={s}", .{
+                @tagName(taskLifecycleOperation(event.detail_code)),
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0),
+                yesNo(event.allowed),
+            });
+        },
         .attention_policy => {
             try appendFmt(buffer, used, " attention_policy interruptive={s} active_visible={d} active_interruptions={d} allowed={s}", .{
                 yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0),
@@ -1932,6 +2466,36 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
                 yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0),
                 yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 30))) != 0),
                 event.detail_code & 0x3fff_ffff,
+                yesNo(event.allowed),
+            });
+        },
+        .resource_governance => {
+            try appendFmt(buffer, used, " resource_governance class={s} reason={s} delayed={s} degraded={s} observed_telemetry={s} hardware_evidence={s}", .{
+                @tagName(resourceGovernanceClass(event.detail_code)),
+                @tagName(resourceGovernanceReason(event.detail_code)),
+                yesNo(!event.allowed),
+                yesNo(resourceGovernanceDegraded(event.detail_code)),
+                yesNo(resourceGovernanceObservedTelemetry(event.detail_code)),
+                yesNo(resourceGovernanceHardwareEvidence(event.detail_code)),
+            });
+        },
+        .network_session => {
+            try appendFmt(buffer, used, " network_session action={s} reason={s} allowed={s} attested={s} identity_pinned={s} private_data={s}", .{
+                @tagName(networkSessionAction(event.detail_code)),
+                @tagName(networkSessionReason(event.detail_code)),
+                yesNo(event.allowed),
+                yesNo(networkSessionAttested(event.detail_code)),
+                yesNo(networkSessionIdentityPinned(event.detail_code)),
+                yesNo(networkSessionPrivateData(event.detail_code)),
+            });
+        },
+        .semantic_memory => {
+            try appendFmt(buffer, used, " semantic_memory receipt_audit={s} local_model={s} encrypted_index={s} redacted_snippets={s} query_bytes={d} allowed={s}", .{
+                yesNo(semanticMemoryReceiptAudit(event.detail_code)),
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0),
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 30))) != 0),
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 29))) != 0),
+                event.detail_code & @as(u32, @intCast(semantic_memory_query_byte_mask)),
                 yesNo(event.allowed),
             });
         },

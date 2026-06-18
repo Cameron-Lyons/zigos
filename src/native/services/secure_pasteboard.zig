@@ -13,6 +13,7 @@ pub const MAX_PURPOSE_BYTES: usize = 96;
 pub const Error = event_ledger.Error || error{
     EmptyPayload,
     ExpiredGrant,
+    DestinationSubjectMismatch,
     ForegroundSessionMismatch,
     GrantAlreadyConsumed,
     GrantNotFound,
@@ -30,6 +31,7 @@ pub const Error = event_ledger.Error || error{
 
 pub const OfferRequest = struct {
     subject: principal.PrincipalId,
+    destination: principal.PrincipalId,
     source_task_id: u64,
     destination_task_id: u64,
     user_gesture_id: u64,
@@ -65,6 +67,7 @@ pub const RevokeRequest = struct {
 pub const Grant = struct {
     token_id: u64 = 0,
     subject: principal.PrincipalId = .{ .kind = .app, .serial = 0 },
+    destination: principal.PrincipalId = .{ .kind = .app, .serial = 0 },
     source_task_id: u64 = 0,
     destination_task_id: u64 = 0,
     user_gesture_id: u64 = 0,
@@ -139,6 +142,7 @@ pub const Service = struct {
         slot.grant = .{
             .token_id = self.next_token_id,
             .subject = request.subject,
+            .destination = request.destination,
             .source_task_id = request.source_task_id,
             .destination_task_id = request.destination_task_id,
             .user_gesture_id = request.user_gesture_id,
@@ -181,6 +185,10 @@ pub const Service = struct {
         if (grant.destination_task_id != request.destination_task_id) {
             try recordRead(ledger, request, false, request.detail);
             return error.InvalidDestination;
+        }
+        if (!grant.destination.eql(request.subject)) {
+            try recordRead(ledger, request, false, request.detail);
+            return error.DestinationSubjectMismatch;
         }
         if (grant.foreground_session_id != request.foreground_session_id) {
             try recordRead(ledger, request, false, request.detail);
@@ -303,9 +311,11 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
     var ledger = event_ledger.Ledger.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 7001 };
     const destination = principal.PrincipalId{ .kind = .app, .serial = 7002 };
+    const imposter = principal.PrincipalId{ .kind = .app, .serial = 7003 };
 
     try std.testing.expectError(error.MissingUserGesture, service.offer(.{
         .subject = source,
+        .destination = destination,
         .source_task_id = 71,
         .destination_task_id = 72,
         .user_gesture_id = 0,
@@ -317,6 +327,7 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
     }, &ledger));
     try std.testing.expectError(error.MissingForegroundSession, service.offer(.{
         .subject = source,
+        .destination = destination,
         .source_task_id = 71,
         .destination_task_id = 72,
         .user_gesture_id = 5,
@@ -329,6 +340,7 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
 
     const grant = try service.offer(.{
         .subject = source,
+        .destination = destination,
         .source_task_id = 71,
         .destination_task_id = 72,
         .user_gesture_id = 5,
@@ -349,6 +361,16 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
         .now_ticks = 12,
         .expected_purpose = "paste into note",
         .detail = "wrong destination tried private pasteboard payload",
+    }, &.{}, &ledger));
+    try std.testing.expectError(error.DestinationSubjectMismatch, service.read(.{
+        .subject = imposter,
+        .destination_task_id = 72,
+        .token_id = grant.token_id,
+        .user_gesture_id = 6,
+        .foreground_session_id = 8,
+        .now_ticks = 12,
+        .expected_purpose = "paste into note",
+        .detail = "wrong principal tried private pasteboard payload",
     }, &.{}, &ledger));
     try std.testing.expectError(error.ExpiredGrant, service.read(.{
         .subject = destination,
@@ -386,6 +408,7 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
 
     const revoked = try service.offer(.{
         .subject = source,
+        .destination = destination,
         .source_task_id = 71,
         .destination_task_id = 72,
         .user_gesture_id = 9,

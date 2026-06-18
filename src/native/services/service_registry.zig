@@ -5,7 +5,7 @@ const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const typed_component_abi = @import("typed_component_abi.zig");
 
-pub const MAX_BINDINGS: usize = 24;
+pub const MAX_BINDINGS: usize = 32;
 pub const MAX_INTERFACE_NAME_BYTES: usize = 64;
 
 pub const BootstrapEndpoint = struct {

@@ -13,7 +13,7 @@ const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 
-pub const MAX_IMAGES: usize = 24;
+pub const MAX_IMAGES: usize = 32;
 const BUNDLE_INDEX_CAPACITY: usize = MAX_IMAGES * 2;
 const MAX_BUNDLE_ID_BYTES: usize = 64;
 const MAX_DISPLAY_NAME_BYTES: usize = 48;

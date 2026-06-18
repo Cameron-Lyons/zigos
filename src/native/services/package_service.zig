@@ -1,4 +1,5 @@
 const std = @import("std");
+const event_ledger = @import("../platform/event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
 const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
 const capability = @import("../kernel_api/capability.zig");
@@ -36,6 +37,7 @@ pub const MAX_INSTALL_SOURCE_BYTES = model.MAX_INSTALL_SOURCE_BYTES;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
 pub const RemoveResult = model.RemoveResult;
+pub const OffboardResult = model.OffboardResult;
 pub const ReleaseTransparencyEvidence = model.ReleaseTransparencyEvidence;
 pub const StoredComponent = model.StoredComponent;
 pub const StoredAsset = model.StoredAsset;
@@ -48,6 +50,8 @@ pub const StoredAiMetadata = model.StoredAiMetadata;
 pub const StoredDataRights = model.StoredDataRights;
 pub const StoredSupplyChain = model.StoredSupplyChain;
 pub const StoredSignature = model.StoredSignature;
+pub const StoredObjectResilience = model.StoredObjectResilience;
+pub const StoredSemanticIndex = model.StoredSemanticIndex;
 pub const ResolvedManifest = model.ResolvedManifest;
 pub const BundleRevision = model.BundleRevision;
 pub const InstalledBundle = model.InstalledBundle;
@@ -66,6 +70,8 @@ pub const Error = bundle_ops.Error || error{
     UntrustedManifestSigner,
     PublisherKeyRevoked,
     PackageProvenanceDenied,
+    PolicyDenied,
+    PackageActiveRevisionMismatch,
     NoRollbackVersion,
     PermissionChangeUndeclared,
     PublisherChanged,
@@ -80,6 +86,27 @@ pub const Error = bundle_ops.Error || error{
 };
 
 pub const digestBundle = bundle_digest.digestBundle;
+
+pub const OffboardRequest = struct {
+    subject: principal.PrincipalId,
+    task_id: u64,
+    bundle_id: []const u8,
+    sensitivity: manifest.DataSensitivity = .private_user_data,
+    bytes: usize = 0,
+    deletion_receipt_id: u64 = 0,
+    now_ticks: u64,
+    detail: []const u8 = "",
+};
+
+pub const RollbackRequest = struct {
+    bundle_id: []const u8,
+    expected_active_digest: Digest,
+};
+
+pub const RemoveRequest = struct {
+    bundle_id: []const u8,
+    expected_active_digest: Digest,
+};
 
 const BundleSlot = model.BundleSlot;
 const BUNDLE_INDEX_CAPACITY: usize = MAX_INSTALLED_BUNDLES * 2;
@@ -124,7 +151,7 @@ pub const Service = struct {
         return self.trust_store.revokePrincipal(publisher_principal);
     }
 
-    fn install(
+    pub fn install(
         self: *Service,
         request: InstallRequest,
         policy: ?*const policy_object.PolicyObject,
@@ -215,8 +242,9 @@ pub const Service = struct {
         };
     }
 
-    fn rollback(self: *Service, bundle_id: []const u8) Error!InstallResult {
-        const bundle = self.find(bundle_id) orelse return error.BundleNotFound;
+    fn rollback(self: *Service, request: RollbackRequest) Error!InstallResult {
+        const bundle = self.find(request.bundle_id) orelse return error.BundleNotFound;
+        try requireActiveRevisionDigest(bundle, request.expected_active_digest);
         const rollback_revision = bundle.rollbackRevision() orelse return error.NoRollbackVersion;
         try self.validateRollbackRevisionTrusted(rollback_revision);
         const active_revision = bundle.activeRevision();
@@ -248,16 +276,51 @@ pub const Service = struct {
         }
     }
 
-    fn remove(self: *Service, bundle_id: []const u8) Error!RemoveResult {
-        const slot_index = self.findSlotIndex(bundle_id) orelse return error.BundleNotFound;
+    fn remove(self: *Service, request: RemoveRequest) Error!RemoveResult {
+        const slot_index = self.findSlotIndex(request.bundle_id) orelse return error.BundleNotFound;
         const slot = &self.slots[slot_index];
+        try requireActiveRevisionDigest(&slot.bundle, request.expected_active_digest);
         const removed_revision_count = slot.bundle.revision_count;
-        _ = self.bundle_index.remove(bundleKey(bundle_id), slot_index);
+        _ = self.bundle_index.remove(bundleKey(request.bundle_id), slot_index);
         slot.in_use = false;
         slot.bundle = zeroBundle();
         return .{
             .removed_existing = true,
             .removed_revision_count = removed_revision_count,
+        };
+    }
+
+    pub fn offboard(
+        self: *Service,
+        policies: *const policy_object.Directory,
+        subjects: policy_object.SubjectSet,
+        request: OffboardRequest,
+        ledger: ?*event_ledger.Ledger,
+    ) (Error || event_ledger.Error)!OffboardResult {
+        const target = self.find(request.bundle_id) orelse return error.BundleNotFound;
+        const expected_active_digest = activeRevisionDigest(target);
+        const removed_bundle_digest = offboardRemovedBundleDigest(target);
+        const decision = policies.dataRightsDecision(subjects, .{
+            .operation = .delete,
+            .sensitivity = request.sensitivity,
+            .bytes = request.bytes,
+            .deletion_receipt_present = request.deletion_receipt_id != 0,
+        });
+        if (!decision.allowed) {
+            try recordOffboard(ledger, request, false);
+            return error.PolicyDenied;
+        }
+
+        const removed = try self.remove(.{
+            .bundle_id = request.bundle_id,
+            .expected_active_digest = expected_active_digest,
+        });
+        try recordOffboard(ledger, request, true);
+        return .{
+            .removed_existing = removed.removed_existing,
+            .removed_revision_count = removed.removed_revision_count,
+            .deletion_receipt_id = request.deletion_receipt_id,
+            .removed_bundle_digest = removed_bundle_digest,
         };
     }
 
@@ -336,6 +399,24 @@ pub const Service = struct {
     }
 };
 
+fn recordOffboard(
+    ledger: ?*event_ledger.Ledger,
+    request: OffboardRequest,
+    allowed: bool,
+) event_ledger.Error!void {
+    if (ledger) |active| {
+        try active.recordDataDeletion(
+            request.subject,
+            request.task_id,
+            request.deletion_receipt_id,
+            allowed,
+            request.now_ticks,
+            request.detail,
+            manifest.isSensitive(request.sensitivity),
+        );
+    }
+}
+
 pub const PackagePort = struct {
     service: *Service,
     capability_table: *const capability.CapabilityTable,
@@ -391,19 +472,31 @@ pub const PackagePort = struct {
     pub fn rollback(
         self: *PackagePort,
         authority: AuthorityContext,
-        bundle_id: []const u8,
+        request: RollbackRequest,
     ) (AuthorityError || Error)!InstallResult {
         _ = try self.requirePackageAuthority(authority, .endpoint_connect);
-        return self.service.rollback(bundle_id);
+        return self.service.rollback(request);
     }
 
     pub fn remove(
         self: *PackagePort,
         authority: AuthorityContext,
-        bundle_id: []const u8,
+        request: RemoveRequest,
     ) (AuthorityError || Error)!RemoveResult {
         _ = try self.requirePackageAuthority(authority, .endpoint_connect);
-        return self.service.remove(bundle_id);
+        return self.service.remove(request);
+    }
+
+    pub fn offboard(
+        self: *PackagePort,
+        authority: AuthorityContext,
+        policies: *const policy_object.Directory,
+        subjects: policy_object.SubjectSet,
+        request: OffboardRequest,
+        ledger: ?*event_ledger.Ledger,
+    ) (AuthorityError || Error || event_ledger.Error)!OffboardResult {
+        _ = try self.requirePackageAuthority(authority, .endpoint_connect);
+        return self.service.offboard(policies, subjects, request, ledger);
     }
 
     fn requirePackageAuthority(
@@ -497,6 +590,170 @@ fn launchProvenance(
     };
 }
 
+pub fn activeRevisionDigest(bundle: *const InstalledBundle) Digest {
+    return installedBundleRevisionDigest(bundle, "zigos.package.active-revision.v1");
+}
+
+pub fn rollbackRequestForActive(bundle: *const InstalledBundle) RollbackRequest {
+    return .{
+        .bundle_id = bundle.bundleIdSlice(),
+        .expected_active_digest = activeRevisionDigest(bundle),
+    };
+}
+
+pub fn removeRequestForActive(bundle: *const InstalledBundle) RemoveRequest {
+    return .{
+        .bundle_id = bundle.bundleIdSlice(),
+        .expected_active_digest = activeRevisionDigest(bundle),
+    };
+}
+
+pub fn offboardRemovedBundleDigest(bundle: *const InstalledBundle) Digest {
+    return installedBundleRevisionDigest(bundle, "zigos.package.offboard.removed-bundle.v2");
+}
+
+fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const u8) Digest {
+    const revision = bundle.activeRevision();
+    const signature = revision.signature.toManifest();
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "schema", schema);
+    crypto_hash.updateBytes(&hasher, "bundle-id", bundle.bundleIdSlice());
+    crypto_hash.updateInt(&hasher, "revision-id", revision.revision_id);
+    crypto_hash.updateBytes(&hasher, "display-name", revision.displayNameSlice());
+    crypto_hash.updateBytes(&hasher, "publisher", revision.publisherSlice());
+    crypto_hash.updateBytes(&hasher, "source-identity", revision.sourceIdentitySlice());
+    crypto_hash.updateInt(&hasher, "version-major", revision.version_major);
+    crypto_hash.updateInt(&hasher, "version-minor", revision.version_minor);
+    crypto_hash.updateEnum(&hasher, "update-channel", revision.channel);
+    crypto_hash.updateInt(&hasher, "schema-version", revision.schema_version);
+    crypto_hash.updateBytes(&hasher, "permission-digest", &revision.permission_digest);
+    crypto_hash.updateInt(&hasher, "release-transparency-sequence", revision.release_transparency.sequence);
+    crypto_hash.updateBytes(&hasher, "release-transparency-root", &revision.release_transparency.root);
+    crypto_hash.updateBytes(&hasher, "release-transparency-log-head", &revision.release_transparency.log_head);
+    crypto_hash.updateBytes(&hasher, "signature-format", signature.format);
+    crypto_hash.updateBytes(&hasher, "signature-signer", signature.signer);
+    crypto_hash.updateInt(&hasher, "signature-public-key-len", signature.public_key_len);
+    crypto_hash.updateBytes(&hasher, "signature-public-key", signature.publicKeySlice());
+    crypto_hash.updateInt(&hasher, "signature-value-len", signature.value_len);
+    crypto_hash.updateBytes(&hasher, "signature-value", signature.valueSlice());
+    crypto_hash.updateInt(&hasher, "component-count", revision.component_count);
+    for (revision.components[0..revision.component_count], 0..) |component, index| {
+        crypto_hash.updateInt(&hasher, "component-index", index);
+        crypto_hash.updateBytes(&hasher, "component-id", component.idSlice());
+        crypto_hash.updateBytes(&hasher, "component-entry", component.entrySlice());
+        crypto_hash.updateEnum(&hasher, "component-abi", component.abi);
+    }
+    crypto_hash.updateInt(&hasher, "asset-count", revision.asset_count);
+    for (revision.assets[0..revision.asset_count], 0..) |asset, index| {
+        crypto_hash.updateInt(&hasher, "asset-index", index);
+        crypto_hash.updateBytes(&hasher, "asset-path", asset.pathSlice());
+        crypto_hash.updateBytes(&hasher, "asset-content-type", asset.contentTypeSlice());
+    }
+    crypto_hash.updateInt(&hasher, "provided-interface-count", revision.provided_interface_count);
+    for (revision.provided_interfaces[0..revision.provided_interface_count], 0..) |interface, index| {
+        crypto_hash.updateInt(&hasher, "provided-interface-index", index);
+        crypto_hash.updateBytes(&hasher, "provided-interface-name", interface.nameSlice());
+        crypto_hash.updateInt(&hasher, "provided-interface-major", interface.version_major);
+        crypto_hash.updateInt(&hasher, "provided-interface-minor", interface.version_minor);
+    }
+    crypto_hash.updateInt(&hasher, "consumed-interface-count", revision.consumed_interface_count);
+    for (revision.consumed_interfaces[0..revision.consumed_interface_count], 0..) |interface, index| {
+        crypto_hash.updateInt(&hasher, "consumed-interface-index", index);
+        crypto_hash.updateBytes(&hasher, "consumed-interface-name", interface.nameSlice());
+        crypto_hash.updateInt(&hasher, "consumed-interface-major", interface.version_major);
+        crypto_hash.updateInt(&hasher, "consumed-interface-minor", interface.version_minor);
+    }
+    crypto_hash.updateInt(&hasher, "requested-permission-count", revision.requested_permission_count);
+    for (revision.requested_permissions[0..revision.requested_permission_count], 0..) |permission, index| {
+        crypto_hash.updateInt(&hasher, "permission-index", index);
+        crypto_hash.updateEnum(&hasher, "permission-kind", permission.kind);
+        crypto_hash.updateBytes(&hasher, "permission-resource", permission.resourceSlice());
+        crypto_hash.updateEnum(&hasher, "permission-rights-target", std.meta.activeTag(permission.rights));
+        crypto_hash.updateInt(&hasher, "permission-rights-bits", permission.rights.toBits());
+        crypto_hash.updateBool(&hasher, "permission-required", permission.required);
+        crypto_hash.updateBool(&hasher, "permission-local-only", permission.local_only);
+        crypto_hash.updateInt(&hasher, "permission-max-lease-ticks", permission.max_lease_ticks);
+        crypto_hash.updateInt(&hasher, "permission-target-id", permission.target_id);
+        crypto_hash.updateEnum(&hasher, "permission-egress-intent-kind", permission.egress_intent_kind);
+        crypto_hash.updateEnum(&hasher, "permission-sensitivity", permission.sensitivity);
+        crypto_hash.updateEnum(&hasher, "permission-purpose", permission.purpose);
+        crypto_hash.updateInt(&hasher, "permission-retention-days", permission.retention_days);
+        crypto_hash.updateBytes(&hasher, "permission-user-visible-reason", permission.userVisibleReasonSlice());
+        crypto_hash.updateBytes(&hasher, "permission-egress-object", permission.egressObjectSlice());
+        crypto_hash.updateBytes(&hasher, "permission-egress-principal", permission.egressPrincipalSlice());
+        crypto_hash.updateBytes(&hasher, "permission-egress-service", permission.egressServiceSlice());
+        crypto_hash.updateBytes(&hasher, "permission-egress-event-type", permission.egressEventTypeSlice());
+    }
+    crypto_hash.updateInt(&hasher, "background-task-count", revision.background_task_count);
+    for (revision.background_tasks[0..revision.background_task_count], 0..) |task, index| {
+        crypto_hash.updateInt(&hasher, "background-task-index", index);
+        crypto_hash.updateBytes(&hasher, "background-task-id", task.idSlice());
+        crypto_hash.updateEnum(&hasher, "background-task-trigger", task.trigger);
+        crypto_hash.updateInt(&hasher, "background-task-duration", task.expected_duration_seconds);
+        crypto_hash.updateInt(&hasher, "background-task-cpu", task.budget.cpu_time_ticks);
+        crypto_hash.updateInt(&hasher, "background-task-memory", task.budget.memory_bytes);
+        crypto_hash.updateInt(&hasher, "background-task-shared-memory", task.budget.shared_memory_bytes);
+        crypto_hash.updateEnum(&hasher, "background-task-network", task.network);
+        crypto_hash.updateEnum(&hasher, "background-task-visibility", task.visibility);
+    }
+    crypto_hash.updateBytes(&hasher, "ai-model-family", revision.ai_metadata.modelFamilySlice());
+    crypto_hash.updateBytes(&hasher, "ai-model-digest", revision.ai_metadata.modelDigestSlice());
+    crypto_hash.updateBytes(&hasher, "ai-model-source-identity", revision.ai_metadata.modelSourceIdentitySlice());
+    crypto_hash.updateEnum(&hasher, "ai-locality", revision.ai_metadata.locality);
+    crypto_hash.updateBool(&hasher, "ai-offline-required", revision.ai_metadata.offline_required);
+    crypto_hash.updateBool(&hasher, "ai-private-context", revision.ai_metadata.private_context);
+    crypto_hash.updateBool(&hasher, "ai-training-allowed", revision.ai_metadata.training_allowed);
+    crypto_hash.updateInt(&hasher, "ai-max-context-bytes", revision.ai_metadata.max_context_bytes);
+    crypto_hash.updateBool(&hasher, "ai-audit-prompt-use", revision.ai_metadata.audit_prompt_use);
+    crypto_hash.updateBool(&hasher, "data-rights-user-data-present", revision.data_rights.user_data_present);
+    crypto_hash.updateBool(&hasher, "data-rights-portable-export", revision.data_rights.portable_export);
+    crypto_hash.updateBool(&hasher, "data-rights-deletion-supported", revision.data_rights.deletion_supported);
+    crypto_hash.updateBool(&hasher, "data-rights-deletion-receipt-required", revision.data_rights.deletion_receipt_required);
+    crypto_hash.updateBytes(&hasher, "data-rights-export-format", revision.data_rights.exportFormatSlice());
+    crypto_hash.updateBytes(&hasher, "supply-chain-sbom-digest", revision.supply_chain.sbomDigestSlice());
+    crypto_hash.updateBytes(&hasher, "supply-chain-source-archive-digest", revision.supply_chain.sourceArchiveDigestSlice());
+    crypto_hash.updateBytes(&hasher, "supply-chain-build-recipe-digest", revision.supply_chain.buildRecipeDigestSlice());
+    crypto_hash.updateBytes(&hasher, "supply-chain-vulnerability-scan-digest", revision.supply_chain.vulnerabilityScanDigestSlice());
+    crypto_hash.updateBytes(&hasher, "supply-chain-build-provenance", revision.supply_chain.buildProvenanceIdentitySlice());
+    crypto_hash.updateBool(&hasher, "supply-chain-reproducible-build", revision.supply_chain.reproducible_build);
+    crypto_hash.updateBool(&hasher, "supply-chain-trusted-builder", revision.supply_chain.trusted_builder);
+    crypto_hash.updateBool(&hasher, "agent-enabled", revision.agent_delegation.enabled);
+    crypto_hash.updateBytes(&hasher, "agent-purpose", revision.agent_delegation.purposeSlice());
+    crypto_hash.updateInt(&hasher, "agent-max-actions", revision.agent_delegation.max_autonomous_actions);
+    crypto_hash.updateInt(&hasher, "agent-max-remote-calls", revision.agent_delegation.max_remote_calls);
+    crypto_hash.updateBool(&hasher, "agent-user-confirmation", revision.agent_delegation.user_confirmation_required);
+    crypto_hash.updateBool(&hasher, "agent-audit-required", revision.agent_delegation.audit_required);
+    crypto_hash.updateBool(&hasher, "agent-session-bound", revision.agent_delegation.session_bound);
+    crypto_hash.updateBool(&hasher, "agent-local-context-only", revision.agent_delegation.local_context_only);
+    crypto_hash.updateInt(&hasher, "agent-max-context-bytes", revision.agent_delegation.max_context_bytes);
+    crypto_hash.updateBool(&hasher, "agent-kill-switch", revision.agent_delegation.kill_switch_supported);
+    crypto_hash.updateBool(&hasher, "accessibility-adaptive-ui", revision.accessibility.adaptive_ui);
+    crypto_hash.updateBool(&hasher, "accessibility-screen-reader", revision.accessibility.supports_screen_reader);
+    crypto_hash.updateBool(&hasher, "accessibility-keyboard-navigation", revision.accessibility.supports_keyboard_navigation);
+    crypto_hash.updateBool(&hasher, "accessibility-reduced-motion", revision.accessibility.supports_reduced_motion);
+    crypto_hash.updateBool(&hasher, "accessibility-high-contrast", revision.accessibility.supports_high_contrast);
+    crypto_hash.updateBytes(&hasher, "accessibility-profile-notes", revision.accessibility.profileNotesSlice());
+    crypto_hash.updateBool(&hasher, "object-resilience-backup-enabled", revision.object_resilience.backup_enabled);
+    crypto_hash.updateBool(&hasher, "object-resilience-encrypted-snapshots", revision.object_resilience.encrypted_snapshots);
+    crypto_hash.updateBool(&hasher, "object-resilience-recovery-key-required", revision.object_resilience.recovery_key_required);
+    crypto_hash.updateBool(&hasher, "object-resilience-portable-restore", revision.object_resilience.portable_restore);
+    crypto_hash.updateBool(&hasher, "object-resilience-device-trust-required", revision.object_resilience.device_trust_required);
+    crypto_hash.updateInt(&hasher, "object-resilience-max-restore-age-days", revision.object_resilience.max_restore_age_days);
+    crypto_hash.updateBytes(&hasher, "object-resilience-backup-format", revision.object_resilience.backupFormatSlice());
+    crypto_hash.updateBool(&hasher, "semantic-index-enabled", revision.semantic_index.enabled);
+    crypto_hash.updateBool(&hasher, "semantic-index-local-only", revision.semantic_index.local_only);
+    crypto_hash.updateBool(&hasher, "semantic-index-encrypted-index", revision.semantic_index.encrypted_index);
+    crypto_hash.updateBool(&hasher, "semantic-index-redacted-snippets", revision.semantic_index.redacted_snippets);
+    crypto_hash.updateInt(&hasher, "semantic-index-max-query-bytes", revision.semantic_index.max_query_bytes);
+    crypto_hash.updateBytes(&hasher, "semantic-index-model-digest", revision.semantic_index.modelDigestSlice());
+    return crypto_hash.finalize(&hasher);
+}
+
+fn requireActiveRevisionDigest(bundle: *const InstalledBundle, expected: Digest) Error!void {
+    const actual = activeRevisionDigest(bundle);
+    if (!std.mem.eql(u8, &actual, &expected)) return error.PackageActiveRevisionMismatch;
+}
+
 fn publicStoreSource(source_identity: []const u8) bool {
     return std.mem.startsWith(u8, source_identity, "store:zigos/public");
 }
@@ -541,6 +798,14 @@ fn trustTestPublisher(
         publisher,
         try signing.publicKey(signer_identity),
     );
+}
+
+pub fn testingTrustPublisher(
+    service: *Service,
+    signer_identity: signing.SignerIdentity,
+    publisher: []const u8,
+) !void {
+    return trustTestPublisher(service, signer_identity, publisher);
 }
 
 fn mintPackageServiceAuthority(
@@ -649,6 +914,7 @@ test "package port requires service authority before install update rollback and
         .data_schema_version = 1,
     }, null);
     try std.testing.expect(installed.installed_new);
+    const stale_rollback_request = rollbackRequestForActive(service.find(bundle.bundle_id).?);
 
     var updated_bundle = bundle;
     updated_bundle.version_minor = 1;
@@ -659,9 +925,12 @@ test "package port requires service authority before install update rollback and
         .data_schema_version = 1,
     }, null);
     try std.testing.expect(updated.rollback_available);
-    const rollback = try port.rollback(install_authority, bundle.bundle_id);
+    const stale_remove_request = removeRequestForActive(service.find(bundle.bundle_id).?);
+    try std.testing.expectError(error.PackageActiveRevisionMismatch, port.rollback(install_authority, stale_rollback_request));
+    const rollback = try port.rollback(install_authority, rollbackRequestForActive(service.find(bundle.bundle_id).?));
     try std.testing.expect(rollback.updated_existing);
-    const removed = try port.remove(install_authority, bundle.bundle_id);
+    try std.testing.expectError(error.PackageActiveRevisionMismatch, port.remove(install_authority, stale_remove_request));
+    const removed = try port.remove(install_authority, removeRequestForActive(service.find(bundle.bundle_id).?));
     try std.testing.expect(removed.removed_existing);
     try std.testing.expect(removed.removed_revision_count >= 1);
     try std.testing.expect(service.find(bundle.bundle_id) == null);
@@ -674,7 +943,10 @@ test "package port requires service authority before install update rollback and
         .principal = actor,
         .capability_id = wrong_target.id,
         .now_ticks = 12,
-    }, bundle.bundle_id));
+    }, .{
+        .bundle_id = bundle.bundle_id,
+        .expected_active_digest = crypto_hash.zero_digest,
+    }));
 }
 
 test "package service enforces signed manifests policy gated sources updates rollback and remove" {
@@ -852,7 +1124,7 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519, launch_plan.provenance.signature_format);
     try std.testing.expectEqual(@as(usize, signing.PUBLIC_KEY_BYTES), launch_plan.provenance.signature_public_key_len);
 
-    _ = try service.rollback("app.notes");
+    _ = try service.rollback(rollbackRequestForActive(service.find("app.notes").?));
     const rolled_back = service.find("app.notes").?;
     try std.testing.expectEqual(@as(u16, 1), rolled_back.versionMajor());
     try std.testing.expectEqual(@as(u16, 0), rolled_back.versionMinor());
@@ -860,12 +1132,96 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqualStrings("store:zigos", rolled_back.sourceIdentitySlice());
     try std.testing.expectEqual(@as(usize, 1), rolled_back.componentCount());
 
-    const removed = try service.remove("app.notes");
+    const removed = try service.remove(removeRequestForActive(service.find("app.notes").?));
     try std.testing.expect(removed.removed_existing);
     try std.testing.expectEqual(@as(usize, 2), removed.removed_revision_count);
     try std.testing.expect(service.find("app.notes") == null);
     try std.testing.expectError(error.BundleNotFound, service.buildLaunchPlan("app.notes"));
-    try std.testing.expectError(error.BundleNotFound, service.remove("app.notes"));
+    try std.testing.expectError(error.BundleNotFound, service.remove(.{
+        .bundle_id = "app.notes",
+        .expected_active_digest = crypto_hash.zero_digest,
+    }));
+}
+
+test "package service offboarding requires deletion receipt removes bundle and redacts audit" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-offboard",
+        .seed = signing.seedFromByte(0x39),
+    };
+    try trustTestPublisher(&service, signer_identity, "zigos.dev");
+    var bundle = manifest_fixtures.notesBundle();
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
+    const installed = try service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+    try std.testing.expect(installed.installed_new);
+
+    var policies = policy_object.Directory.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 840 };
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = user.serial,
+        .issuer = .{ .kind = .policy_authority, .serial = 840 },
+        .label = "offboarding-policy",
+        .data_deletion_allowed = true,
+        .require_data_deletion_receipt = true,
+    }, signing.SignerIdentity{
+        .label = "offboard-policy-key",
+        .seed = signing.seedFromByte(0x94),
+    });
+    const subjects = policy_object.SubjectSet{ .user_id = user.serial };
+    var ledger = event_ledger.Ledger.init();
+
+    try std.testing.expectError(error.PolicyDenied, service.offboard(&policies, subjects, .{
+        .subject = user,
+        .task_id = 404,
+        .bundle_id = "app.notes",
+        .sensitivity = .private_user_data,
+        .bytes = units.kibibytes(64),
+        .now_ticks = 50,
+        .detail = "private app offboarding denied detail",
+    }, &ledger));
+    try std.testing.expect(service.find("app.notes") != null);
+    const expected_removed_digest = offboardRemovedBundleDigest(service.find("app.notes").?);
+    var altered_bundle = service.find("app.notes").?.*;
+    const altered_revision = altered_bundle.activeRevisionMut();
+    if (altered_revision.component_count != 0 and altered_revision.components[0].entry_len != 0) {
+        altered_revision.components[0].entry[0] +%= 1;
+    } else {
+        altered_revision.data_rights.deletion_supported = !altered_revision.data_rights.deletion_supported;
+    }
+    const altered_digest = offboardRemovedBundleDigest(&altered_bundle);
+    try std.testing.expect(!std.mem.eql(u8, &expected_removed_digest, &altered_digest));
+
+    const offboarded = try service.offboard(&policies, subjects, .{
+        .subject = user,
+        .task_id = 404,
+        .bundle_id = "app.notes",
+        .sensitivity = .private_user_data,
+        .bytes = units.kibibytes(64),
+        .deletion_receipt_id = 7001,
+        .now_ticks = 51,
+        .detail = "private app offboarding receipt detail",
+    }, &ledger);
+    try std.testing.expect(offboarded.removed_existing);
+    try std.testing.expectEqual(@as(u64, 7001), offboarded.deletion_receipt_id);
+    try std.testing.expect(!std.mem.eql(u8, &offboarded.removed_bundle_digest, &crypto_hash.zero_digest));
+    try std.testing.expectEqualSlices(u8, &expected_removed_digest, &offboarded.removed_bundle_digest);
+    try std.testing.expect(service.find("app.notes") == null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.data_deletion_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.data_deletion_denials);
+    try std.testing.expectEqual(@as(usize, 1), summary.data_deletion_receipts);
+    try std.testing.expect(summary.protected_details_redacted >= 2);
+
+    var buffer: [2048]u8 = undefined;
+    const exported = try ledger.exportText(&buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, exported, "private app offboarding") == null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=data_deletion") != null);
 }
 
 test "package service rejects invalid signatures and rollback before any update" {
@@ -915,7 +1271,7 @@ test "package service rejects invalid signatures and rollback before any update"
         .bundle = bundle,
         .source_identity = "store:zigos",
     }, null);
-    try std.testing.expectError(error.NoRollbackVersion, service.rollback("app.notes"));
+    try std.testing.expectError(error.NoRollbackVersion, service.rollback(rollbackRequestForActive(service.find("app.notes").?)));
 }
 
 test "package service rejects stale update metadata publisher drift and channel drift" {
@@ -1067,7 +1423,7 @@ test "package service rejects stale update metadata publisher drift and channel 
         .data_schema_version = 1,
     }, null));
 
-    const rollback = try service.rollback("app.notes");
+    const rollback = try service.rollback(rollbackRequestForActive(service.find("app.notes").?));
     try std.testing.expect(!rollback.permissions_changed);
     try std.testing.expectEqual(@as(u16, 1), service.find("app.notes").?.versionMajor());
     try std.testing.expectEqual(@as(u16, 1), service.find("app.notes").?.versionMinor());
@@ -1130,7 +1486,7 @@ test "package service preserves and advances public store transparency evidence"
     try std.testing.expectEqualStrings("store:zigos/public", v11_launch_plan.provenance.source_identity);
     try std.testing.expectEqual(@as(u64, 2), v11_launch_plan.provenance.release_transparency.sequence);
 
-    _ = try service.rollback("app.notes");
+    _ = try service.rollback(rollbackRequestForActive(service.find("app.notes").?));
     try std.testing.expectEqual(
         @as(u64, 1),
         service.find("app.notes").?.activeRevision().release_transparency.sequence,
@@ -1202,7 +1558,7 @@ test "package service refuses runtime use of public store revisions with strippe
 
     const rollback_slot = service.find("app.notes").?.rollback_revision_slot.?;
     service.find("app.notes").?.revisions[rollback_slot].release_transparency = .{};
-    try std.testing.expectError(error.StoreTransparencyMissing, service.rollback("app.notes"));
+    try std.testing.expectError(error.StoreTransparencyMissing, service.rollback(rollbackRequestForActive(service.find("app.notes").?)));
     try std.testing.expectEqual(@as(u16, 1), service.find("app.notes").?.versionMinor());
 }
 
@@ -1245,8 +1601,8 @@ test "package service refuses rollback to a revision whose publisher key was rev
     try std.testing.expectError(error.PublisherKeyRevoked, service.buildLaunchPlan("app.notes"));
     var resolved: ResolvedManifest = undefined;
     try std.testing.expectError(error.PublisherKeyRevoked, service.resolveCurrentManifest("app.notes", &resolved));
-    try std.testing.expectError(error.PublisherKeyRevoked, service.rollback("app.notes"));
-    const removed = try service.remove("app.notes");
+    try std.testing.expectError(error.PublisherKeyRevoked, service.rollback(rollbackRequestForActive(service.find("app.notes").?)));
+    const removed = try service.remove(removeRequestForActive(service.find("app.notes").?));
     try std.testing.expect(removed.removed_existing);
 }
 

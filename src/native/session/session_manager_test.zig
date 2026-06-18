@@ -33,8 +33,8 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(contract.default_services.len, session_manager.testing.countServices());
     try std.testing.expectEqual(service_contract.ordered_service_contracts.len, service_directory.bindingCount());
-    try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countTasks());
-    try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 19), session_manager.testing.countTasks());
+    try std.testing.expectEqual(@as(usize, 19), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.terminated));
     try std.testing.expectEqual(@as(usize, 0), compositor.window_count);
@@ -142,8 +142,8 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(contract.default_services.len, session_manager.testing.countServices());
     try std.testing.expectEqual(service_contract.ordered_service_contracts.len + 1, service_directory.bindingCount());
-    try std.testing.expectEqual(@as(usize, 22), session_manager.testing.countTasks());
-    try std.testing.expectEqual(@as(usize, 21), session_manager.testing.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 28), session_manager.testing.countTasks());
+    try std.testing.expectEqual(@as(usize, 27), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.terminated));
     try std.testing.expectEqual(@as(usize, 6), compositor.window_count);
@@ -188,6 +188,10 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
         .package_install_update,
         .indexing_search,
         .media_print_helpers,
+        .attention_broker,
+        .task_lifecycle,
+        .sensitive_capture,
+        .secret_vault,
     };
     for (service_classes) |class| {
         const descriptor = service_contract.contractForClass(class).?;

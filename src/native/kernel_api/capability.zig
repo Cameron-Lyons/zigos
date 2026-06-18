@@ -8,7 +8,7 @@ const native_util = @import("../core/util.zig");
 
 pub const MAX_CAPABILITIES: usize = 128;
 pub const CAPABILITY_INDEX_CAPACITY: usize = MAX_CAPABILITIES * 2;
-pub const MAX_TARGET_GENERATIONS: usize = 64;
+pub const MAX_TARGET_GENERATIONS: usize = 128;
 pub const MAX_GRANT_PLAN_ENTRIES: usize = 16;
 
 pub const TableConfig = struct {

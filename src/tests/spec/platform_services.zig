@@ -139,7 +139,10 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expect(handle.hardware_backed);
     try std.testing.expect(!imported.resident_material);
     try std.testing.expect(imported.sealed_digest_present);
-    try std.testing.expectError(secure_secret_store.Error.RawExportDenied, secrets.exportRaw(handle.id));
+    try std.testing.expectError(secure_secret_store.Error.RawExportDenied, secrets.exportRaw(handle.id, .{
+        .holder = spec_support.app(90),
+        .task_id = 700,
+    }));
 
     var graph = device_graph.Graph.init();
     const passkey_user = spec_support.user(19);

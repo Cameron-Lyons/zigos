@@ -9,6 +9,7 @@ pub const MAX_DELEGATIONS: usize = 16;
 pub const Error = event_ledger.Error || error{
     ActionBudgetExceeded,
     ContextBudgetExceeded,
+    DelegationBindingMismatch,
     DelegationNotFound,
     DelegationRevoked,
     DelegationTableFull,
@@ -35,8 +36,11 @@ pub const AuthorizeRequest = struct {
 };
 
 pub const RecordActionRequest = struct {
+    subject: principal.PrincipalId,
+    task_id: u64,
     delegation_id: u64,
     session_id: u64,
+    expected_generation: u32,
     action_count: u16 = 1,
     remote_call_count: u16 = 0,
     context_bytes: usize = 0,
@@ -150,6 +154,13 @@ pub const Service = struct {
         ledger: ?*event_ledger.Ledger,
     ) Error!*Delegation {
         const delegation = self.find(request.delegation_id) orelse return error.DelegationNotFound;
+        if (!delegation.subject.eql(request.subject) or
+            delegation.task_id != request.task_id or
+            delegation.delegation_generation != request.expected_generation)
+        {
+            try recordDeniedActionBinding(ledger, request, delegation.local_context_only, delegation.delegation_generation);
+            return error.DelegationBindingMismatch;
+        }
         if (delegation.revoked) {
             try recordDeniedSessionAction(ledger, delegation, request, true);
             return error.DelegationRevoked;
@@ -314,6 +325,27 @@ fn recordDeniedSessionAction(
     }
 }
 
+fn recordDeniedActionBinding(
+    ledger: ?*event_ledger.Ledger,
+    request: RecordActionRequest,
+    local_context_only: bool,
+    delegation_generation: u32,
+) event_ledger.Error!void {
+    if (ledger) |active_ledger| {
+        try active_ledger.recordAgentSessionBoundary(
+            request.subject,
+            request.task_id,
+            false,
+            request.session_id != 0,
+            local_context_only,
+            false,
+            delegation_generation,
+            request.now_tick,
+            request.detail,
+        );
+    }
+}
+
 test "agent delegation service authorizes session-bound local agents and audits actions" {
     var policies = policy_object.Directory.init();
     _ = try policies.create(.{
@@ -358,9 +390,24 @@ test "agent delegation service authorizes session-bound local agents and audits 
 
     try std.testing.expectEqual(@as(usize, 1), service.activeCount());
     try std.testing.expectEqual(@as(u16, 3), delegation.authorized_actions);
-    const after_action = try service.recordAction(.{
+    try std.testing.expectError(error.DelegationBindingMismatch, service.recordAction(.{
+        .subject = .{ .kind = .app, .serial = 3031 },
+        .task_id = 3031,
         .delegation_id = delegation.id,
         .session_id = 4040,
+        .expected_generation = 2,
+        .action_count = 1,
+        .now_tick = 13,
+        .detail = "private wrong agent subject",
+    }, &ledger));
+    try std.testing.expectEqual(@as(u16, 0), delegation.used_actions);
+
+    const after_action = try service.recordAction(.{
+        .subject = subject,
+        .task_id = 3031,
+        .delegation_id = delegation.id,
+        .session_id = 4040,
+        .expected_generation = 2,
         .action_count = 2,
         .remote_call_count = 1,
         .context_bytes = 1024,
@@ -372,15 +419,18 @@ test "agent delegation service authorizes session-bound local agents and audits 
     try std.testing.expectEqual(@as(usize, 1024), after_action.used_context_bytes);
     try std.testing.expectEqual(@as(usize, 1024), after_action.remainingContextBytes());
     try std.testing.expectError(error.ActionBudgetExceeded, service.recordAction(.{
+        .subject = subject,
+        .task_id = 3031,
         .delegation_id = delegation.id,
         .session_id = 4040,
+        .expected_generation = 2,
         .action_count = 2,
     }, null));
 
     const summary = ledger.userVisibleDiagnosticSummary();
-    try std.testing.expectEqual(@as(usize, 1), summary.agent_session_events);
+    try std.testing.expectEqual(@as(usize, 2), summary.agent_session_events);
     try std.testing.expectEqual(@as(usize, 2), summary.agent_delegation_events);
-    try std.testing.expectEqual(@as(usize, 0), summary.agent_session_denials);
+    try std.testing.expectEqual(@as(usize, 1), summary.agent_session_denials);
 }
 
 test "agent delegation service kill switch revokes stale generations and blocks reuse" {
@@ -426,8 +476,11 @@ test "agent delegation service kill switch revokes stale generations and blocks 
     try std.testing.expectEqual(@as(usize, 1), try service.killSwitch(2, &ledger, subject, 21, "private kill switch"));
     try std.testing.expectEqual(@as(usize, 0), service.activeCount());
     try std.testing.expectError(error.DelegationRevoked, service.recordAction(.{
+        .subject = subject,
+        .task_id = 3033,
         .delegation_id = delegation.id,
         .session_id = 5050,
+        .expected_generation = 1,
     }, null));
     try std.testing.expectError(error.KillSwitchGenerationStale, service.authorize(&policies, subjects, .{
         .subject = subject,
@@ -493,8 +546,11 @@ test "agent delegation service audits denied actions and enforces cumulative con
     }, &ledger);
 
     _ = try service.recordAction(.{
+        .subject = subject,
+        .task_id = 3036,
         .delegation_id = delegation.id,
         .session_id = 6060,
+        .expected_generation = 1,
         .action_count = 1,
         .context_bytes = 1024,
         .now_tick = 31,
@@ -503,8 +559,11 @@ test "agent delegation service audits denied actions and enforces cumulative con
     try std.testing.expectEqual(@as(usize, 512), delegation.remainingContextBytes());
 
     try std.testing.expectError(error.ContextBudgetExceeded, service.recordAction(.{
+        .subject = subject,
+        .task_id = 3036,
         .delegation_id = delegation.id,
         .session_id = 6060,
+        .expected_generation = 1,
         .action_count = 1,
         .context_bytes = 600,
         .now_tick = 32,
@@ -513,16 +572,22 @@ test "agent delegation service audits denied actions and enforces cumulative con
     try std.testing.expectEqual(@as(usize, 1024), delegation.used_context_bytes);
 
     try std.testing.expectError(error.RemoteCallBudgetExceeded, service.recordAction(.{
+        .subject = subject,
+        .task_id = 3036,
         .delegation_id = delegation.id,
         .session_id = 6060,
+        .expected_generation = 1,
         .action_count = 1,
         .remote_call_count = 2,
         .now_tick = 33,
         .detail = "private remote overrun",
     }, &ledger));
     try std.testing.expectError(error.SessionMismatch, service.recordAction(.{
+        .subject = subject,
+        .task_id = 3036,
         .delegation_id = delegation.id,
         .session_id = 6061,
+        .expected_generation = 1,
         .action_count = 1,
         .now_tick = 34,
         .detail = "private wrong session",

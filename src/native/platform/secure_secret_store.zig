@@ -36,6 +36,11 @@ pub const SecretHandle = struct {
     export_allowed: bool,
 };
 
+pub const ExportContext = struct {
+    holder: principal.PrincipalId,
+    task_id: u64,
+};
+
 pub const HardwareSealProvider = struct {
     available: bool = false,
     sealFn: *const fn (label: []const u8, raw: []const u8) crypto_hash.Digest = defaultSeal,
@@ -47,6 +52,7 @@ pub const HardwareSealProvider = struct {
 };
 
 pub const Error = error{
+    HandleHolderMismatch,
     HandleNotFound,
     HandleTableFull,
     LabelTooLong,
@@ -159,8 +165,13 @@ pub const Store = struct {
         return null;
     }
 
-    pub fn exportRaw(self: *const Store, handle_id: u64) Error![]const u8 {
+    pub fn describeSecret(self: *const Store, secret_id: u64) ?*const SecretRecord {
+        return self.findSecretConst(secret_id);
+    }
+
+    pub fn exportRaw(self: *const Store, handle_id: u64, context: ExportContext) Error![]const u8 {
         const handle = self.describeHandle(handle_id) orelse return error.HandleNotFound;
+        if (!handle.holder.eql(context.holder) or handle.task_id != context.task_id) return error.HandleHolderMismatch;
         if (!handle.export_allowed) return error.RawExportDenied;
         const secret = self.findSecretConst(handle.secret_id) orelse return error.SecretNotFound;
         return secret.value[0..secret.value_len];
@@ -224,11 +235,25 @@ test "secure secret store returns handles by default and only exports raw when a
     try std.testing.expect(api_key.sealed_digest_present);
     try std.testing.expect(!api_key.hardware_provider_used);
     try std.testing.expectEqual(@as(usize, 0), api_key.value_len);
-    try std.testing.expectError(error.RawExportDenied, store.exportRaw(handle.id));
+    try std.testing.expectError(error.RawExportDenied, store.exportRaw(handle.id, .{
+        .holder = app_holder,
+        .task_id = 90,
+    }));
 
     const exportable = try store.importSecret(owner, "backup-code", "abcd-efgh", false, true);
     const export_handle = try store.lendHandle(exportable.id, app_holder, 91, true);
-    try std.testing.expectEqualStrings("abcd-efgh", try store.exportRaw(export_handle.id));
+    try std.testing.expectError(error.HandleHolderMismatch, store.exportRaw(export_handle.id, .{
+        .holder = owner,
+        .task_id = 91,
+    }));
+    try std.testing.expectError(error.HandleHolderMismatch, store.exportRaw(export_handle.id, .{
+        .holder = app_holder,
+        .task_id = 92,
+    }));
+    try std.testing.expectEqualStrings("abcd-efgh", try store.exportRaw(export_handle.id, .{
+        .holder = app_holder,
+        .task_id = 91,
+    }));
 }
 
 test "secure secret store uses hardware seal provider when available" {
@@ -265,5 +290,8 @@ test "secure secret store reports missing handles and oversized secrets" {
 
     try std.testing.expectError(error.SecretTooLarge, store.importSecret(owner, "too-large", &oversized, true, false));
     try std.testing.expectError(error.SecretNotFound, store.lendHandle(999, holder, 1, false));
-    try std.testing.expectError(error.HandleNotFound, store.exportRaw(999));
+    try std.testing.expectError(error.HandleNotFound, store.exportRaw(999, .{
+        .holder = holder,
+        .task_id = 1,
+    }));
 }

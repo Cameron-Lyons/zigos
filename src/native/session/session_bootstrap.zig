@@ -28,9 +28,15 @@ pub const Principals = struct {
     review_service: principal.PrincipalId,
     package_service: principal.PrincipalId,
     indexing_service: principal.PrincipalId,
+    personal_context_service: principal.PrincipalId,
     sync_service: principal.PrincipalId,
     media_service: principal.PrincipalId,
+    attention_broker_service: principal.PrincipalId,
+    task_lifecycle_service: principal.PrincipalId,
     pasteboard_service: principal.PrincipalId,
+    object_resilience_service: principal.PrincipalId,
+    sensitive_capture_service: principal.PrincipalId,
+    secret_vault_service: principal.PrincipalId,
     task_runtime_service: principal.PrincipalId,
 };
 
@@ -45,9 +51,15 @@ pub const CoreServices = struct {
     storage_service: *supervisor_mod.ServiceRecord,
     package_service: *supervisor_mod.ServiceRecord,
     indexing_service: *supervisor_mod.ServiceRecord,
+    personal_context_service: *supervisor_mod.ServiceRecord,
     sync_service: *supervisor_mod.ServiceRecord,
     media_service: *supervisor_mod.ServiceRecord,
+    attention_broker_service: *supervisor_mod.ServiceRecord,
+    task_lifecycle_service: *supervisor_mod.ServiceRecord,
     pasteboard_service: *supervisor_mod.ServiceRecord,
+    object_resilience_service: *supervisor_mod.ServiceRecord,
+    sensitive_capture_service: *supervisor_mod.ServiceRecord,
+    secret_vault_service: *supervisor_mod.ServiceRecord,
 };
 
 pub const Error = userspace_boot_registry.Error || supervisor_mod.Error;
@@ -65,9 +77,15 @@ pub fn principals() Principals {
         .review_service = .{ .kind = .service, .serial = 5 },
         .package_service = .{ .kind = .service, .serial = 6 },
         .indexing_service = .{ .kind = .service, .serial = 7 },
+        .personal_context_service = .{ .kind = .service, .serial = 17 },
         .sync_service = .{ .kind = .service, .serial = 8 },
         .media_service = .{ .kind = .service, .serial = 9 },
+        .attention_broker_service = .{ .kind = .service, .serial = 15 },
+        .task_lifecycle_service = .{ .kind = .service, .serial = 16 },
         .pasteboard_service = .{ .kind = .service, .serial = 11 },
+        .object_resilience_service = .{ .kind = .service, .serial = 12 },
+        .sensitive_capture_service = .{ .kind = .service, .serial = 13 },
+        .secret_vault_service = .{ .kind = .service, .serial = 14 },
         .task_runtime_service = .{ .kind = .service, .serial = 10 },
     };
 }
@@ -103,9 +121,15 @@ pub fn registerCoreServices(
         .storage_service = try supervisor.register(.storage_object, ids.storage_service),
         .package_service = try supervisor.register(.package_install_update, ids.package_service),
         .indexing_service = try supervisor.register(.indexing_search, ids.indexing_service),
+        .personal_context_service = try supervisor.register(.personal_context, ids.personal_context_service),
         .sync_service = try supervisor.register(.sync_replication, ids.sync_service),
         .media_service = try supervisor.register(.media_print_helpers, ids.media_service),
+        .attention_broker_service = try supervisor.register(.attention_broker, ids.attention_broker_service),
+        .task_lifecycle_service = try supervisor.register(.task_lifecycle, ids.task_lifecycle_service),
         .pasteboard_service = try supervisor.register(.secure_pasteboard, ids.pasteboard_service),
+        .object_resilience_service = try supervisor.register(.object_resilience, ids.object_resilience_service),
+        .sensitive_capture_service = try supervisor.register(.sensitive_capture, ids.sensitive_capture_service),
+        .secret_vault_service = try supervisor.register(.secret_vault, ids.secret_vault_service),
     };
 
     runtime_service.bind(services.runtime_service_record.id, ids.task_runtime_service);
@@ -151,9 +175,15 @@ fn principalForOwnerKey(ids: Principals, owner_key: service_catalog.BootstrapOwn
         .review_service => ids.review_service,
         .package_service => ids.package_service,
         .indexing_service => ids.indexing_service,
+        .personal_context_service => ids.personal_context_service,
         .sync_service => ids.sync_service,
         .media_service => ids.media_service,
+        .attention_broker_service => ids.attention_broker_service,
+        .task_lifecycle_service => ids.task_lifecycle_service,
         .pasteboard_service => ids.pasteboard_service,
+        .object_resilience_service => ids.object_resilience_service,
+        .sensitive_capture_service => ids.sensitive_capture_service,
+        .secret_vault_service => ids.secret_vault_service,
         .task_runtime_service => ids.task_runtime_service,
     };
 }
@@ -170,9 +200,15 @@ fn serviceRecordForKey(services: CoreServices, record_key: service_catalog.Boots
         .storage_service => services.storage_service,
         .package_service => services.package_service,
         .indexing_service => services.indexing_service,
+        .personal_context_service => services.personal_context_service,
         .sync_service => services.sync_service,
         .media_service => services.media_service,
+        .attention_broker_service => services.attention_broker_service,
+        .task_lifecycle_service => services.task_lifecycle_service,
         .pasteboard_service => services.pasteboard_service,
+        .object_resilience_service => services.object_resilience_service,
+        .sensitive_capture_service => services.sensitive_capture_service,
+        .secret_vault_service => services.secret_vault_service,
     };
 }
 
