@@ -223,6 +223,8 @@ const quality_gates = benchmark_cases.qualityGateCases(.{
     .memory_pressure_batch_delay = qualityMemoryPressureBatchDelay,
     .scheduler_fairness_ratio_percent = qualitySchedulerFairnessRatioPercent,
     .starvation_resistance_after_pressure = qualityStarvationResistanceAfterPressure,
+    .lower_class_service_debt_batch_tie_dispatch = qualityLowerClassServiceDebtBatchTieDispatch,
+    .brokered_accelerator_queue_completion_release = qualityBrokeredAcceleratorQueueCompletionRelease,
     .background_throttling_delayed_dispatches = qualityBackgroundThrottlingDelayedDispatches,
     .latency_under_load_max_wait_ticks = qualityLatencyUnderLoadMaxWaitTicks,
 });
@@ -1647,6 +1649,123 @@ fn qualityStarvationResistanceAfterPressure() u64 {
     return @min(background_stats.dispatch_count, batch_stats.dispatch_count);
 }
 
+fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
+    var executor = userspace_executor.Executor{};
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    configureLoadTelemetry(&scheduler, 7_007, 707, 1, .{
+        .total_cpu_budget_ticks = 200_000,
+        .memory_capacity_bytes = mebibytes(8),
+        .npu_driver_online = true,
+    });
+
+    const background = createLoadTask(
+        &runtime,
+        770,
+        .background_light,
+        "quality-debt-background",
+        "app.quality.debt-background",
+        load_dispatch_cpu_tick_cost * 2,
+        kibibytes(64),
+        null,
+    );
+    const batch = createLoadTask(
+        &runtime,
+        771,
+        .batch_compute,
+        "quality-debt-batch",
+        "app.quality.debt-batch",
+        load_dispatch_cpu_tick_cost * 2,
+        kibibytes(64),
+        null,
+    );
+    if (!scheduler.registerTask(background.id)) return 0;
+    if (!scheduler.registerTask(batch.id)) return 0;
+    if (!scheduler.wakeTask(background.id, .timer, 10, 20)) return 0;
+    if (!scheduler.wakeTask(batch.id, .timer, 10, 100)) return 0;
+
+    _ = scheduler.runNext(20);
+    const background_after_first = scheduler.taskDispatchStats(background.id) orelse return 0;
+    const batch_after_first = scheduler.taskDispatchStats(batch.id) orelse return 0;
+    if (background_after_first.dispatch_count != 1 or batch_after_first.dispatch_count != 0) return 0;
+
+    if (!scheduler.wakeTask(background.id, .timer, 21, 30)) return 0;
+    if (!scheduler.wakeTask(batch.id, .timer, 21, 30)) return 0;
+    _ = scheduler.runNext(30);
+
+    const background_stats = scheduler.taskDispatchStats(background.id) orelse return 0;
+    const batch_stats = scheduler.taskDispatchStats(batch.id) orelse return 0;
+    return @intFromBool(background_stats.dispatch_count == 1 and
+        batch_stats.dispatch_count == 1 and
+        batch_stats.missed_deadline_count == 0 and
+        batch_stats.last_dispatch_engine == .npu);
+}
+
+fn qualityBrokeredAcceleratorQueueCompletionRelease() u64 {
+    var controller = accelerator_scheduler.Controller.init();
+    controller.configure(.{
+        .npu_available = true,
+    });
+    controller.requireBrokeredEngineQueues();
+
+    const rejected_without_queue = if (controller.claim(.{
+        .task_id = 780,
+        .request = .{
+            .class = .batch_compute,
+            .wants_npu = true,
+        },
+        .require_accelerator = true,
+    })) |unexpected_claim| blk: {
+        _ = unexpected_claim;
+        break :blk false;
+    } else |err| err == error.AcceleratorRequired;
+
+    controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .npu,
+        .broker_task_id = 7_080,
+        .owner_task_id = 780,
+        .generation = 3,
+        .completion_sequence = 30,
+        .completion_interrupts_observed = 3,
+        .accepts_work = true,
+    }) catch return 0;
+
+    const claim = controller.claim(.{
+        .task_id = 780,
+        .request = .{
+            .class = .batch_compute,
+            .wants_npu = true,
+        },
+        .require_accelerator = true,
+    }) catch return 0;
+
+    const release_without_completion = if (controller.releaseClaim(claim.id, null)) |unexpected_release| blk: {
+        _ = unexpected_release;
+        break :blk false;
+    } else |err| err == error.QueueCompletionMissing;
+    controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .npu,
+        .broker_task_id = 7_080,
+        .owner_task_id = 780,
+        .generation = 3,
+        .completion_sequence = 31,
+        .completion_interrupts_observed = 4,
+        .accepts_work = true,
+    }) catch return 0;
+    const released = controller.releaseClaim(claim.id, null) catch return 0;
+
+    return @intFromBool(rejected_without_queue and
+        claim.engine == .npu and
+        claim.queue_generation == 3 and
+        claim.queue_completion_sequence == 30 and
+        release_without_completion and
+        released and
+        controller.activeClaimCount() == 0);
+}
+
 fn qualityBackgroundThrottlingDelayedDispatches() u64 {
     var runtime = task_runtime.Runtime.init();
     const task = runtime.createTask(.{
@@ -1756,11 +1875,23 @@ fn configureLoadTelemetry(
     observed_tick: u64,
     counters: accelerator_scheduler.LivePlatformCounters,
 ) void {
+    var telemetry_counters = counters;
+    if (!telemetry_counters.hardware_evidence.complete()) {
+        telemetry_counters.hardware_evidence = .{
+            .target_id = "benchmark-hardware-telemetry",
+            .reader_generation = 1,
+            .acpi_observed = true,
+            .thermal_observed = true,
+            .battery_observed = true,
+            .accelerator_observed = true,
+            .grid_carbon_observed = true,
+        };
+    }
     var provider = accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(
         boot_id,
         task_id,
         observed_tick,
-        counters,
+        telemetry_counters,
     ) catch unreachable;
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
 }

@@ -36,6 +36,14 @@ pub const Error = error{
     BadChecksum,
     InvalidLength,
     InvalidEntryLength,
+    InvalidTimerDivideValue,
+    InvalidTimerVector,
+    MissingEnabledProcessor,
+    MissingLocalApic,
+    TimerCountDidNotAdvance,
+    TimerEoiMissing,
+    TimerInterruptMissing,
+    TimerMasked,
 };
 
 pub const EntryType = enum(u8) {
@@ -73,6 +81,92 @@ pub const Summary = struct {
     x2apic_count: u16 = 0,
 };
 
+pub const TIMER_VECTOR_MIN: u8 = 0x20;
+pub const TIMER_VECTOR_MAX: u8 = 0xEF;
+
+pub const TimerMode = enum(u8) {
+    one_shot,
+    periodic,
+};
+
+pub const TimerInterruptObservation = struct {
+    local_apic_address: u64,
+    vector: u8,
+    initial_count: u32,
+    current_count_before: u32,
+    current_count_after: u32,
+    divide_value: u8,
+    mode: TimerMode,
+    masked: bool = false,
+    delivered_interrupts: u16,
+    eoi_count_before: u32,
+    eoi_count_after: u32,
+};
+
+pub const TimerEvidenceSource = enum(u8) {
+    modeled_lapic,
+    hardware_lapic_timer,
+};
+
+pub const HardwareTimerInterruptEvidence = struct {
+    source: TimerEvidenceSource = .modeled_lapic,
+    initial_count_register_writes: u32 = 0,
+    divide_register_writes: u32 = 0,
+    lvt_timer_register_writes: u32 = 0,
+    current_count_register_reads: u32 = 0,
+    isr_vector_observations: u32 = 0,
+    interrupt_handler_entries: u32 = 0,
+    eoi_register_writes: u32 = 0,
+    tsc_delta_ticks: u64 = 0,
+
+    pub fn verified(
+        self: HardwareTimerInterruptEvidence,
+        delivered_interrupts: u16,
+        eoi_count: u32,
+    ) bool {
+        const expected_interrupts = @as(u32, delivered_interrupts);
+        return self.source == .hardware_lapic_timer and
+            expected_interrupts > 0 and
+            self.initial_count_register_writes != 0 and
+            self.divide_register_writes != 0 and
+            self.lvt_timer_register_writes != 0 and
+            self.current_count_register_reads >= 2 and
+            self.isr_vector_observations >= expected_interrupts and
+            self.interrupt_handler_entries >= expected_interrupts and
+            self.eoi_register_writes >= eoi_count and
+            self.tsc_delta_ticks != 0;
+    }
+};
+
+pub const TimerInterruptProof = struct {
+    local_apic_address: u64,
+    enabled_processor_count: u16,
+    vector: u8,
+    initial_count: u32,
+    current_count_before: u32,
+    current_count_after: u32,
+    divide_value: u8,
+    mode: TimerMode,
+    delivered_interrupts: u16,
+    eoi_count: u32,
+    hardware_timer: HardwareTimerInterruptEvidence = .{},
+
+    pub fn verified(self: TimerInterruptProof) bool {
+        return self.local_apic_address != 0 and
+            self.enabled_processor_count > 0 and
+            timerVectorAllowed(self.vector) and
+            self.initial_count > 0 and
+            self.current_count_before > self.current_count_after and
+            self.divide_value != 0 and
+            self.delivered_interrupts > 0 and
+            self.eoi_count >= self.delivered_interrupts;
+    }
+
+    pub fn productionHardwareVerified(self: TimerInterruptProof) bool {
+        return self.verified() and self.hardware_timer.verified(self.delivered_interrupts, self.eoi_count);
+    }
+};
+
 pub fn parseMadt(table: []const u8) Error!Summary {
     if (table.len < MADT_HEADER_LENGTH) return error.TooSmall;
     if (!std.mem.eql(u8, table[0..MADT_SIGNATURE.len], MADT_SIGNATURE)) return error.BadSignature;
@@ -98,6 +192,53 @@ pub fn parseMadt(table: []const u8) Error!Summary {
     }
 
     return summary;
+}
+
+pub fn proveTimerInterrupt(
+    summary: Summary,
+    observation: TimerInterruptObservation,
+) Error!TimerInterruptProof {
+    if (summary.local_apic_address == 0 or observation.local_apic_address != summary.local_apic_address) {
+        return error.MissingLocalApic;
+    }
+    if (summary.enabled_processor_count == 0) return error.MissingEnabledProcessor;
+    if (!timerVectorAllowed(observation.vector)) return error.InvalidTimerVector;
+    if (observation.masked) return error.TimerMasked;
+    if (observation.divide_value == 0) return error.InvalidTimerDivideValue;
+    if (observation.initial_count == 0 or observation.current_count_before <= observation.current_count_after) {
+        return error.TimerCountDidNotAdvance;
+    }
+    if (observation.delivered_interrupts == 0) return error.TimerInterruptMissing;
+    if (observation.eoi_count_after <= observation.eoi_count_before) return error.TimerEoiMissing;
+
+    const eoi_count = observation.eoi_count_after - observation.eoi_count_before;
+    const proof = TimerInterruptProof{
+        .local_apic_address = summary.local_apic_address,
+        .enabled_processor_count = summary.enabled_processor_count,
+        .vector = observation.vector,
+        .initial_count = observation.initial_count,
+        .current_count_before = observation.current_count_before,
+        .current_count_after = observation.current_count_after,
+        .divide_value = observation.divide_value,
+        .mode = observation.mode,
+        .delivered_interrupts = observation.delivered_interrupts,
+        .eoi_count = eoi_count,
+    };
+    if (!proof.verified()) return error.TimerEoiMissing;
+    return proof;
+}
+
+fn timerVectorAllowed(vector: u8) bool {
+    return vector >= TIMER_VECTOR_MIN and vector <= TIMER_VECTOR_MAX;
+}
+
+pub fn withHardwareTimerEvidence(
+    proof: TimerInterruptProof,
+    evidence: HardwareTimerInterruptEvidence,
+) TimerInterruptProof {
+    var upgraded = proof;
+    upgraded.hardware_timer = evidence;
+    return upgraded;
 }
 
 fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) void {
@@ -198,4 +339,58 @@ test "APIC MADT parser rejects truncated entries" {
     table[45] = 1;
     finishChecksum(table[0..], 9, table.len);
     try std.testing.expectError(error.InvalidEntryLength, parseMadt(table[0..]));
+}
+
+test "APIC timer interrupt proof requires count delivery and EOI" {
+    const table = validMadt();
+    const summary = try parseMadt(table[0..]);
+    const observation = TimerInterruptObservation{
+        .local_apic_address = summary.local_apic_address,
+        .vector = 0x40,
+        .initial_count = 10_000,
+        .current_count_before = 8_000,
+        .current_count_after = 6_000,
+        .divide_value = 16,
+        .mode = .periodic,
+        .delivered_interrupts = 2,
+        .eoi_count_before = 7,
+        .eoi_count_after = 9,
+    };
+    const proof = try proveTimerInterrupt(summary, observation);
+    try std.testing.expect(proof.verified());
+    try std.testing.expect(!proof.productionHardwareVerified());
+    try std.testing.expectEqual(@as(u32, 2), proof.eoi_count);
+
+    const hardware_proof = withHardwareTimerEvidence(proof, .{
+        .source = .hardware_lapic_timer,
+        .initial_count_register_writes = 1,
+        .divide_register_writes = 1,
+        .lvt_timer_register_writes = 1,
+        .current_count_register_reads = 2,
+        .isr_vector_observations = 2,
+        .interrupt_handler_entries = 2,
+        .eoi_register_writes = 2,
+        .tsc_delta_ticks = 100,
+    });
+    try std.testing.expect(hardware_proof.productionHardwareVerified());
+
+    var missing_eoi_write = hardware_proof;
+    missing_eoi_write.hardware_timer.eoi_register_writes = 0;
+    try std.testing.expect(!missing_eoi_write.productionHardwareVerified());
+
+    var missing_interrupt = observation;
+    missing_interrupt.delivered_interrupts = 0;
+    try std.testing.expectError(error.TimerInterruptMissing, proveTimerInterrupt(summary, missing_interrupt));
+
+    var missing_eoi = observation;
+    missing_eoi.eoi_count_after = missing_eoi.eoi_count_before;
+    try std.testing.expectError(error.TimerEoiMissing, proveTimerInterrupt(summary, missing_eoi));
+
+    var masked = observation;
+    masked.masked = true;
+    try std.testing.expectError(error.TimerMasked, proveTimerInterrupt(summary, masked));
+
+    var invalid_vector = observation;
+    invalid_vector.vector = 0x1F;
+    try std.testing.expectError(error.InvalidTimerVector, proveTimerInterrupt(summary, invalid_vector));
 }

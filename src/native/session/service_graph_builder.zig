@@ -78,6 +78,7 @@ pub const Builder = struct {
             break :blk session_service_bootstrap.proveDriverCrashRestart(
                 &env_snapshot,
                 &state_snapshot,
+                graph.kernel_port,
                 &self.service_bindings,
             );
         };

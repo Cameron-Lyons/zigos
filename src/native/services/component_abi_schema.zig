@@ -62,6 +62,8 @@ pub const InterfaceKey = enum(u8) {
     identity_session,
     agent_delegation,
     accessibility_profile,
+    background_activity,
+    secure_pasteboard,
 };
 
 pub const InterfaceId = enum(u16) {
@@ -88,6 +90,8 @@ pub const InterfaceId = enum(u16) {
     identity_session = 0x1015,
     agent_delegation = 0x1016,
     accessibility_profile = 0x1017,
+    background_activity = 0x1018,
+    secure_pasteboard = 0x1019,
 };
 
 pub const OperationId = enum(u16) {
@@ -129,6 +133,12 @@ pub const OperationId = enum(u16) {
     accessibility_profile_get = 0x1001,
     accessibility_profile_apply = 0x1002,
     accessibility_profile_audit = 0x1003,
+    background_authorize = 0x1101,
+    background_record = 0x1102,
+    background_complete = 0x1103,
+    pasteboard_offer = 0x1201,
+    pasteboard_read = 0x1202,
+    pasteboard_revoke = 0x1203,
 };
 
 pub const ServiceBinding = enum(u8) {
@@ -144,6 +154,7 @@ pub const ServiceBinding = enum(u8) {
     indexing_search,
     sync_replication,
     media_print_helpers,
+    secure_pasteboard,
 };
 
 const ServiceRegisterRequestWire = extern struct {
@@ -433,6 +444,34 @@ const AccessibilityProfileAuditRequestWire = extern struct {
     _reserved: u16 = 0,
 };
 
+const BackgroundAuthorizeRequestWire = extern struct {
+    header: WireHeader,
+    task_id: u64,
+    duration_seconds: u32,
+    cpu_time_ticks: u32,
+    memory_bytes: u32,
+    shared_memory_bytes: u32,
+    network_mode: u16,
+    visibility: u16,
+};
+
+const BackgroundRecordRequestWire = extern struct {
+    header: WireHeader,
+    task_id: u64,
+    record_id: u64,
+    duration_seconds: u32,
+    decision_reason: u16,
+    flags: u16,
+};
+
+const BackgroundCompleteRequestWire = extern struct {
+    header: WireHeader,
+    task_id: u64,
+    record_id: u64,
+    result_code: u16,
+    _reserved: u16 = 0,
+};
+
 const ServiceRegisterResponseWire = extern struct {
     accepted: u32,
 };
@@ -546,6 +585,51 @@ const AccessibilityProfileResponseWire = extern struct {
     profile_generation: u64,
 };
 
+const BackgroundActivityResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    _reserved: u16 = 0,
+    record_id: u64,
+    reserved_until_tick: u64,
+};
+
+const PasteboardOfferRequestWire = extern struct {
+    header: WireHeader,
+    destination_task_id: u64,
+    user_gesture_id: u64,
+    foreground_session_id: u64,
+    expires_at_ticks: u64,
+    payload_len: u32,
+    purpose_len: u16,
+    flags: u16,
+};
+
+const PasteboardReadRequestWire = extern struct {
+    header: WireHeader,
+    token_id: u64,
+    destination_task_id: u64,
+    user_gesture_id: u64,
+    foreground_session_id: u64,
+    expected_purpose_len: u16,
+    flags: u16,
+};
+
+const PasteboardRevokeRequestWire = extern struct {
+    header: WireHeader,
+    token_id: u64,
+    reason: u16,
+    _reserved: u16 = 0,
+};
+
+const PasteboardResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    _reserved: u16 = 0,
+    token_id: u64,
+    payload_len: u32,
+    flags: u32,
+};
+
 const InterfaceSpec = struct {
     id: InterfaceId,
     key: InterfaceKey,
@@ -589,6 +673,8 @@ pub const interface_specs = [_]InterfaceSpec{
     iface(.identity_session, "zigos.identity.session"),
     iface(.agent_delegation, "zigos.agent.delegation"),
     iface(.accessibility_profile, "zigos.accessibility.profile"),
+    iface(.background_activity, "zigos.background.activity"),
+    iface(.secure_pasteboard, "zigos.secure.pasteboard"),
 };
 
 const OperationSpec = struct {
@@ -657,6 +743,12 @@ pub const operation_specs = [_]OperationSpec{
     op(.accessibility_profile, .accessibility_profile_get, "get_profile", AccessibilityProfileGetRequestWire, AccessibilityProfileResponseWire),
     op(.accessibility_profile, .accessibility_profile_apply, "apply_profile", AccessibilityProfileApplyRequestWire, AccessibilityProfileResponseWire),
     op(.accessibility_profile, .accessibility_profile_audit, "audit_profile", AccessibilityProfileAuditRequestWire, AccessibilityProfileResponseWire),
+    op(.background_activity, .background_authorize, "authorize", BackgroundAuthorizeRequestWire, BackgroundActivityResponseWire),
+    op(.background_activity, .background_record, "record", BackgroundRecordRequestWire, BackgroundActivityResponseWire),
+    op(.background_activity, .background_complete, "complete", BackgroundCompleteRequestWire, BackgroundActivityResponseWire),
+    op(.secure_pasteboard, .pasteboard_offer, "offer", PasteboardOfferRequestWire, PasteboardResponseWire),
+    op(.secure_pasteboard, .pasteboard_read, "read", PasteboardReadRequestWire, PasteboardResponseWire),
+    op(.secure_pasteboard, .pasteboard_revoke, "revoke", PasteboardRevokeRequestWire, PasteboardResponseWire),
 };
 
 const ServiceBindingSpec = struct {
@@ -684,6 +776,7 @@ pub const service_binding_specs = [_]ServiceBindingSpec{
     binding(.indexing_search, .index_search),
     binding(.sync_replication, .sync_replication),
     binding(.media_print_helpers, .media_print),
+    binding(.secure_pasteboard, .secure_pasteboard),
 };
 
 pub const OperationDecl = struct {
@@ -968,6 +1061,7 @@ fn emptyOperation() OperationDecl {
 }
 
 fn maxOperationsPerInterface() usize {
+    @setEvalBranchQuota(32768);
     comptime var max_count: usize = 0;
     inline for (interface_specs) |interface_spec| {
         comptime var count: usize = 0;
@@ -1044,6 +1138,10 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_bind_session) != null);
     try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch) != null);
     try std.testing.expect(contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_apply) != null);
+    try std.testing.expect(contractFor("zigos.background.activity").?.operation(.background_authorize) != null);
+    try std.testing.expect(contractFor("zigos.secure.pasteboard").?.operation(.pasteboard_offer) != null);
+    try std.testing.expectEqual(InterfaceId.secure_pasteboard, interfaceId(.secure_pasteboard));
+    try std.testing.expectEqual(InterfaceId.secure_pasteboard, interfaceIdForService(.secure_pasteboard));
     try std.testing.expect(contractFor(interfaceForService(.service_registry).name).?.contract_hash != 0);
     try std.testing.expect(contractFor(interfaceForService(.sync_replication).name).?.contract_hash != 0);
     try std.testing.expectEqual(

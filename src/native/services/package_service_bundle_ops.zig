@@ -346,6 +346,9 @@ fn writeRevision(
     revision.version_minor = source.version_minor;
     revision.channel = source.update_channel;
     revision.permission_digest = permission_digest;
+    if (@hasField(@TypeOf(revision.*), "release_transparency")) {
+        revision.release_transparency = .{};
+    }
     revision.schema_version = data_schema_version;
     try writeLaunchMetadata(revision, source);
     try writeManifestMetadata(revision, source);

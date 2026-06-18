@@ -109,6 +109,26 @@ pub const PlatformTelemetrySignals = struct {
     grid_carbon_intensity_grams_per_kwh: u16 = 0,
 };
 
+pub const HardwareTelemetryEvidence = struct {
+    target_id: []const u8 = "",
+    reader_generation: u32 = 0,
+    acpi_observed: bool = false,
+    thermal_observed: bool = false,
+    battery_observed: bool = false,
+    accelerator_observed: bool = false,
+    grid_carbon_observed: bool = false,
+
+    pub fn complete(self: HardwareTelemetryEvidence) bool {
+        return self.target_id.len != 0 and
+            self.reader_generation != 0 and
+            self.acpi_observed and
+            self.thermal_observed and
+            self.battery_observed and
+            self.accelerator_observed and
+            self.grid_carbon_observed;
+    }
+};
+
 pub const LivePlatformCounters = struct {
     total_cpu_budget_ticks: u64 = std.math.maxInt(u64),
     consumed_cpu_ticks: u64 = 0,
@@ -123,6 +143,7 @@ pub const LivePlatformCounters = struct {
     battery_charging: bool = true,
     privacy_sensitive_task_count: usize = 0,
     grid_carbon_intensity_grams_per_kwh: u16 = 0,
+    hardware_evidence: HardwareTelemetryEvidence = .{},
 };
 
 pub const TelemetrySample = struct {
@@ -137,6 +158,7 @@ pub const TelemetrySample = struct {
     cpu_budget_ticks: u64 = std.math.maxInt(u64),
     memory_bandwidth_units: usize = std.math.maxInt(usize),
     grid_carbon_intensity_grams_per_kwh: u16 = 0,
+    hardware_evidence: HardwareTelemetryEvidence = .{},
 
     pub fn toSystemState(self: TelemetrySample) SystemState {
         return .{
@@ -154,6 +176,10 @@ pub const TelemetrySample = struct {
 
     pub fn observed(self: TelemetrySample) bool {
         return self.source != .synthetic;
+    }
+
+    pub fn hardwareReaderEvidenceComplete(self: TelemetrySample) bool {
+        return self.source != .hardware or self.hardware_evidence.complete();
     }
 };
 
@@ -333,6 +359,55 @@ pub const ClaimRecord = struct {
     reason: DecisionReason,
     shared_memory_object_id: ?ids.SharedMemoryId,
     active: bool,
+    queue_generation: u32,
+    queue_completion_sequence: u64,
+};
+
+pub const BrokeredEngineQueue = struct {
+    broker_task_id: u64 = 0,
+    owner_task_id: u64 = 0,
+    generation: u32 = 0,
+    completion_sequence: u64 = 0,
+    completion_interrupts_observed: u32 = 0,
+    accepts_work: bool = false,
+
+    pub fn readyFor(self: BrokeredEngineQueue, task_id: u64) bool {
+        return self.accepts_work and
+            self.broker_task_id != 0 and
+            self.owner_task_id == task_id and
+            self.generation != 0 and
+            self.completion_interrupts_observed != 0;
+    }
+};
+
+pub const BrokeredEngineQueueEvent = struct {
+    engine: Engine,
+    broker_task_id: u64,
+    owner_task_id: u64,
+    generation: u32,
+    completion_sequence: u64,
+    completion_interrupts_observed: u32,
+    accepts_work: bool,
+
+    pub fn verified(self: BrokeredEngineQueueEvent) bool {
+        return self.engine != .cpu and
+            self.broker_task_id != 0 and
+            self.owner_task_id != 0 and
+            self.generation != 0 and
+            self.completion_interrupts_observed != 0 and
+            self.accepts_work;
+    }
+
+    pub fn toQueue(self: BrokeredEngineQueueEvent) BrokeredEngineQueue {
+        return .{
+            .broker_task_id = self.broker_task_id,
+            .owner_task_id = self.owner_task_id,
+            .generation = self.generation,
+            .completion_sequence = self.completion_sequence,
+            .completion_interrupts_observed = self.completion_interrupts_observed,
+            .accepts_work = self.accepts_work,
+        };
+    }
 };
 
 pub const Error = shared_memory.Error || error{
@@ -340,6 +415,11 @@ pub const Error = shared_memory.Error || error{
     ClaimNotFound,
     ClaimTableFull,
     EngineBusy,
+    EngineQueueNotOwned,
+    EngineQueueGenerationMismatch,
+    InvalidEngineQueueEvent,
+    QueueCompletionMissing,
+    QueueCompletionStale,
     SharedMemoryTableRequired,
     ZeroCopyUnavailable,
 };
@@ -356,11 +436,14 @@ pub const Controller = struct {
     state: SystemState = .{},
     last_telemetry_source: TelemetrySource = .synthetic,
     last_telemetry_observed_tick: u64 = 0,
+    last_hardware_evidence_complete: bool = false,
     next_claim_id: u64 = 1,
     claims: ClaimArena = ClaimArena.init(),
     claim_task_index: ClaimTaskIndex = ClaimTaskIndex.init(),
     active_engine_claims: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
     active_claim_count: u16 = 0,
+    brokered_engine_queues_required: bool = false,
+    brokered_engine_queues: [ENGINE_COUNT]BrokeredEngineQueue = [_]BrokeredEngineQueue{.{}} ** ENGINE_COUNT,
 
     pub fn init() Controller {
         return .{};
@@ -370,6 +453,7 @@ pub const Controller = struct {
         self.state = state;
         self.last_telemetry_source = .synthetic;
         self.last_telemetry_observed_tick = 0;
+        self.last_hardware_evidence_complete = false;
     }
 
     pub fn configureFromTelemetry(self: *Controller, sample: TelemetrySample) void {
@@ -377,6 +461,7 @@ pub const Controller = struct {
         self.state = sample.toSystemState();
         self.last_telemetry_source = sample.source;
         self.last_telemetry_observed_tick = sample.observed_tick;
+        self.last_hardware_evidence_complete = sample.hardwareReaderEvidenceComplete();
     }
 
     pub fn configureFromProvider(self: *Controller, provider: TelemetryProvider) void {
@@ -385,6 +470,71 @@ pub const Controller = struct {
 
     pub fn observedTelemetry(self: *const Controller) bool {
         return self.last_telemetry_source != .synthetic;
+    }
+
+    pub fn requireBrokeredEngineQueues(self: *Controller) void {
+        self.brokered_engine_queues_required = true;
+    }
+
+    pub fn configureBrokeredEngineQueue(
+        self: *Controller,
+        engine: Engine,
+        queue: BrokeredEngineQueue,
+    ) bool {
+        if (engine == .cpu) return false;
+        if (!queue.readyFor(queue.owner_task_id)) return false;
+        self.brokered_engine_queues_required = true;
+        self.brokered_engine_queues[engineIndex(engine)] = queue;
+        return true;
+    }
+
+    pub fn brokeredQueueFor(self: *const Controller, engine: Engine) BrokeredEngineQueue {
+        return if (engine == .cpu) .{} else self.brokered_engine_queues[engineIndex(engine)];
+    }
+
+    pub fn observeBrokeredEngineQueueEvent(
+        self: *Controller,
+        event: BrokeredEngineQueueEvent,
+    ) Error!void {
+        if (!event.verified()) return error.InvalidEngineQueueEvent;
+        const active_claim_id = self.activeEngineClaimId(event.engine);
+        if (active_claim_id != 0) {
+            const active_claim = self.findActiveClaim(active_claim_id) orelse return error.ClaimNotFound;
+            if (active_claim.task_id != event.owner_task_id) return error.EngineQueueNotOwned;
+            if (active_claim.queue_generation != event.generation) return error.EngineQueueGenerationMismatch;
+            if (event.completion_sequence <= active_claim.queue_completion_sequence) return error.QueueCompletionStale;
+        }
+
+        const queue = &self.brokered_engine_queues[engineIndex(event.engine)];
+        if (event.generation == queue.generation and
+            event.completion_sequence < queue.completion_sequence)
+        {
+            return error.QueueCompletionStale;
+        }
+        if (event.generation == queue.generation and
+            event.completion_interrupts_observed < queue.completion_interrupts_observed)
+        {
+            return error.QueueCompletionStale;
+        }
+
+        self.brokered_engine_queues_required = true;
+        queue.* = event.toQueue();
+    }
+
+    pub fn completeBrokeredEngineQueue(
+        self: *Controller,
+        engine: Engine,
+        owner_task_id: u64,
+        generation: u32,
+        completion_sequence: u64,
+    ) Error!void {
+        if (engine == .cpu) return error.EngineQueueNotOwned;
+        const queue = &self.brokered_engine_queues[engineIndex(engine)];
+        if (!queue.readyFor(owner_task_id)) return error.EngineQueueNotOwned;
+        if (queue.generation != generation) return error.EngineQueueGenerationMismatch;
+        if (completion_sequence <= queue.completion_sequence) return error.QueueCompletionStale;
+        queue.completion_sequence = completion_sequence;
+        queue.completion_interrupts_observed +|= 1;
     }
 
     pub fn claim(self: *Controller, request: ClaimRequest) Error!ClaimRecord {
@@ -415,6 +565,13 @@ pub const Controller = struct {
             return record_claim;
         }
         var decision = self.plan(request.request);
+        if (decision.engine != .cpu and !self.engineQueueReadyFor(decision.engine, request.task_id)) {
+            if (request.require_accelerator) return error.AcceleratorRequired;
+            decision.engine = .cpu;
+            decision.degraded = true;
+            decision.zero_copy_allowed = false;
+            decision.reason = .accelerator_unavailable;
+        }
         if (request.require_accelerator and decision.engine == .cpu) return error.AcceleratorRequired;
 
         if (decision.engine != .cpu and self.activeEngineClaimId(decision.engine) != 0) {
@@ -442,6 +599,11 @@ pub const Controller = struct {
         record.reason = decision.reason;
         record.shared_memory_object_id = request.shared_memory_object_id;
         record.active = true;
+        if (record.engine != .cpu and self.brokered_engine_queues_required) {
+            const queue = self.brokeredQueueFor(record.engine);
+            record.queue_generation = queue.generation;
+            record.queue_completion_sequence = queue.completion_sequence;
+        }
         const record_claim = try self.upsertClaim(record);
         self.markClaimActive(record_claim);
         return record_claim;
@@ -457,6 +619,7 @@ pub const Controller = struct {
         if (!slot.claim.active) return false;
 
         const record = slot.claim;
+        try self.requireCompletionBeforeRelease(record);
         if (record.shared_memory_object_id) |object_id| {
             const shared_table = shared orelse return error.SharedMemoryTableRequired;
             _ = try shared_table.detachAccelerator(object_id, computeTargetFor(record.engine));
@@ -538,11 +701,31 @@ pub const Controller = struct {
     }
 
     fn availableEngines(self: *const Controller) EngineAvailability {
+        const hardware_ready = self.hardwareQueueTelemetryReady();
         return .{
-            .gpu = self.state.gpu_available and self.activeEngineClaimId(.gpu) == 0,
-            .npu = self.state.npu_available and self.activeEngineClaimId(.npu) == 0,
-            .media = self.state.media_available and self.activeEngineClaimId(.media) == 0,
+            .gpu = hardware_ready and self.state.gpu_available and self.activeEngineClaimId(.gpu) == 0 and self.engineQueueReadyFor(.gpu, null),
+            .npu = hardware_ready and self.state.npu_available and self.activeEngineClaimId(.npu) == 0 and self.engineQueueReadyFor(.npu, null),
+            .media = hardware_ready and self.state.media_available and self.activeEngineClaimId(.media) == 0 and self.engineQueueReadyFor(.media, null),
         };
+    }
+
+    fn engineQueueReadyFor(self: *const Controller, engine: Engine, task_id: ?u64) bool {
+        if (engine == .cpu or !self.brokered_engine_queues_required) return true;
+        const queue = self.brokeredQueueFor(engine);
+        if (task_id) |owner_task_id| return queue.readyFor(owner_task_id);
+        return queue.accepts_work and queue.broker_task_id != 0 and queue.owner_task_id != 0 and queue.generation != 0;
+    }
+
+    fn requireCompletionBeforeRelease(self: *const Controller, record: ClaimRecord) Error!void {
+        if (!self.brokered_engine_queues_required or record.engine == .cpu) return;
+        const queue = self.brokeredQueueFor(record.engine);
+        if (queue.owner_task_id != record.task_id) return error.EngineQueueNotOwned;
+        if (queue.generation != record.queue_generation) return error.EngineQueueGenerationMismatch;
+        if (queue.completion_sequence <= record.queue_completion_sequence) return error.QueueCompletionMissing;
+    }
+
+    fn hardwareQueueTelemetryReady(self: *const Controller) bool {
+        return self.last_telemetry_source != .hardware or self.last_hardware_evidence_complete;
     }
 
     fn activeEngineClaimId(self: *const Controller, engine: Engine) u64 {
@@ -741,6 +924,7 @@ fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCoun
         .cpu_budget_ticks = saturatingSubTicks(counters.total_cpu_budget_ticks, counters.consumed_cpu_ticks),
         .memory_bandwidth_units = available_memory_bytes / units.bytes_per_kib,
         .grid_carbon_intensity_grams_per_kwh = counters.grid_carbon_intensity_grams_per_kwh,
+        .hardware_evidence = counters.hardware_evidence,
     };
 }
 
@@ -780,6 +964,8 @@ fn zeroClaim() ClaimRecord {
         .reason = .normal,
         .shared_memory_object_id = null,
         .active = false,
+        .queue_generation = 0,
+        .queue_completion_sequence = 0,
     };
 }
 
@@ -1207,6 +1393,158 @@ test "accelerator scheduler tracks exclusive engine claims and zero-copy attachm
     try std.testing.expectError(error.AcceleratorNotAttached, shared.validateAcceleratorMappingDescriptor(media_mapping, .media));
     try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
     try std.testing.expect(try controller.releaseClaim(degraded.id, null));
+    try std.testing.expectEqual(@as(u16, 0), controller.activeClaimCount());
+}
+
+test "accelerator scheduler gates brokered engine queues on ownership and completion" {
+    var controller = Controller.init();
+    controller.configure(.{
+        .npu_available = true,
+    });
+    controller.requireBrokeredEngineQueues();
+
+    try std.testing.expectError(error.AcceleratorRequired, controller.claim(.{
+        .task_id = 44,
+        .request = .{
+            .class = .batch_compute,
+            .wants_npu = true,
+        },
+        .require_accelerator = true,
+    }));
+
+    try std.testing.expect(!controller.configureBrokeredEngineQueue(.npu, .{
+        .broker_task_id = 700,
+        .owner_task_id = 44,
+        .generation = 1,
+        .completion_sequence = 9,
+        .accepts_work = true,
+    }));
+
+    try std.testing.expect(controller.configureBrokeredEngineQueue(.npu, .{
+        .broker_task_id = 700,
+        .owner_task_id = 45,
+        .generation = 1,
+        .completion_sequence = 10,
+        .completion_interrupts_observed = 1,
+        .accepts_work = true,
+    }));
+    try std.testing.expectError(error.AcceleratorRequired, controller.claim(.{
+        .task_id = 44,
+        .request = .{
+            .class = .batch_compute,
+            .wants_npu = true,
+        },
+        .require_accelerator = true,
+    }));
+
+    try std.testing.expect(controller.configureBrokeredEngineQueue(.npu, .{
+        .broker_task_id = 700,
+        .owner_task_id = 44,
+        .generation = 2,
+        .completion_sequence = 20,
+        .completion_interrupts_observed = 2,
+        .accepts_work = true,
+    }));
+    const claim = try controller.claim(.{
+        .task_id = 44,
+        .request = .{
+            .class = .batch_compute,
+            .wants_npu = true,
+        },
+        .require_accelerator = true,
+    });
+    try std.testing.expectEqual(Engine.npu, claim.engine);
+    try std.testing.expectEqual(@as(u32, 2), claim.queue_generation);
+    try std.testing.expectEqual(@as(u64, 20), claim.queue_completion_sequence);
+    try std.testing.expectError(error.QueueCompletionMissing, controller.releaseClaim(claim.id, null));
+    try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
+    try std.testing.expectError(error.EngineQueueNotOwned, controller.completeBrokeredEngineQueue(.npu, 45, 2, 21));
+    try std.testing.expectError(error.EngineQueueGenerationMismatch, controller.completeBrokeredEngineQueue(.npu, 44, 3, 21));
+    try std.testing.expectError(error.QueueCompletionStale, controller.completeBrokeredEngineQueue(.npu, 44, 2, 20));
+    try controller.completeBrokeredEngineQueue(.npu, 44, 2, 21);
+    try std.testing.expect(try controller.releaseClaim(claim.id, null));
+    try std.testing.expectEqual(@as(u16, 0), controller.activeClaimCount());
+}
+
+test "accelerator scheduler consumes brokered driver queue events" {
+    var controller = Controller.init();
+    controller.configure(.{
+        .gpu_available = true,
+    });
+    controller.requireBrokeredEngineQueues();
+
+    try std.testing.expectError(error.InvalidEngineQueueEvent, controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .gpu,
+        .broker_task_id = 810,
+        .owner_task_id = 81,
+        .generation = 1,
+        .completion_sequence = 30,
+        .completion_interrupts_observed = 0,
+        .accepts_work = true,
+    }));
+
+    try controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .gpu,
+        .broker_task_id = 810,
+        .owner_task_id = 81,
+        .generation = 3,
+        .completion_sequence = 40,
+        .completion_interrupts_observed = 4,
+        .accepts_work = true,
+    });
+    try std.testing.expectEqual(@as(u32, 4), controller.brokeredQueueFor(.gpu).completion_interrupts_observed);
+
+    const claim = try controller.claim(.{
+        .task_id = 81,
+        .request = .{
+            .class = .foreground_interactive,
+            .wants_gpu = true,
+        },
+        .require_accelerator = true,
+    });
+    try std.testing.expectEqual(Engine.gpu, claim.engine);
+    try std.testing.expectEqual(@as(u32, 3), claim.queue_generation);
+    try std.testing.expectEqual(@as(u64, 40), claim.queue_completion_sequence);
+    try std.testing.expectError(error.QueueCompletionMissing, controller.releaseClaim(claim.id, null));
+
+    try std.testing.expectError(error.EngineQueueNotOwned, controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .gpu,
+        .broker_task_id = 810,
+        .owner_task_id = 82,
+        .generation = 3,
+        .completion_sequence = 41,
+        .completion_interrupts_observed = 5,
+        .accepts_work = true,
+    }));
+    try std.testing.expectError(error.EngineQueueGenerationMismatch, controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .gpu,
+        .broker_task_id = 810,
+        .owner_task_id = 81,
+        .generation = 4,
+        .completion_sequence = 41,
+        .completion_interrupts_observed = 5,
+        .accepts_work = true,
+    }));
+    try std.testing.expectError(error.QueueCompletionStale, controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .gpu,
+        .broker_task_id = 810,
+        .owner_task_id = 81,
+        .generation = 3,
+        .completion_sequence = 40,
+        .completion_interrupts_observed = 5,
+        .accepts_work = true,
+    }));
+
+    try controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .gpu,
+        .broker_task_id = 810,
+        .owner_task_id = 81,
+        .generation = 3,
+        .completion_sequence = 41,
+        .completion_interrupts_observed = 5,
+        .accepts_work = true,
+    });
+    try std.testing.expect(try controller.releaseClaim(claim.id, null));
     try std.testing.expectEqual(@as(u16, 0), controller.activeClaimCount());
 }
 

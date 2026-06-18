@@ -25,6 +25,7 @@ const MIN_QUEUE_ENTRIES: u32 = 2;
 const ZERO_BASED_FIELD_INCREMENT: u32 = 1;
 const TEST_SUBMISSION_QUEUE_ADDRESS: u64 = 0x1000;
 const TEST_COMPLETION_QUEUE_ADDRESS: u64 = 0x2000;
+const TEST_PRP1_ADDRESS: u64 = 0x3000;
 const TEST_UNALIGNED_QUEUE_ADDRESS: u64 = TEST_SUBMISSION_QUEUE_ADDRESS + 1;
 
 pub const Error = error{
@@ -38,6 +39,10 @@ pub const Error = error{
     NamespaceNotFound,
     TransferOutOfRange,
     BufferSizeInvalid,
+    ProofCycleCountInvalid,
+    ProofMismatch,
+    MissingDmaBuffer,
+    PrpAddressUnaligned,
 };
 
 pub const DataPlaneTransferRequest = struct {
@@ -94,6 +99,31 @@ pub const CompletionStatus = enum(u8) {
     success,
 };
 
+pub const CompletionEvidenceSource = enum(u8) {
+    modeled_mmio,
+    hardware_dma,
+};
+
+pub const HardwareCompletionEvidence = struct {
+    source: CompletionEvidenceSource = .modeled_mmio,
+    controller_completion_writes: u32 = 0,
+    dma_read_bytes: u64 = 0,
+    dma_write_bytes: u64 = 0,
+    interrupt_count: u32 = 0,
+    phase_tag_observations: u32 = 0,
+
+    pub fn verified(self: HardwareCompletionEvidence, expected_commands: u32, bytes_per_direction: u64) bool {
+        return self.source == .hardware_dma and
+            expected_commands > 0 and
+            bytes_per_direction > 0 and
+            self.controller_completion_writes >= expected_commands and
+            self.dma_read_bytes >= bytes_per_direction and
+            self.dma_write_bytes >= bytes_per_direction and
+            self.interrupt_count != 0 and
+            self.phase_tag_observations >= expected_commands;
+    }
+};
+
 pub const IoCompletion = struct {
     command_id: u16,
     namespace_id: u32,
@@ -102,6 +132,85 @@ pub const IoCompletion = struct {
     status: CompletionStatus,
     submission_tail: u16,
     completion_head: u16,
+};
+
+pub const IoProof = struct {
+    namespace_id: u32,
+    namespace_sector_count: u64,
+    start_lba: u64,
+    final_lba: u64,
+    sector_count: u16,
+    write_read_cycles: u16,
+    write_completions: u16,
+    read_completions: u16,
+    last_write_completion: IoCompletion,
+    last_read_completion: IoCompletion,
+    mmio: MmioIoProof,
+
+    pub fn verified(self: IoProof) bool {
+        const expected_commands = @as(u32, self.write_completions) + @as(u32, self.read_completions);
+        return self.namespace_id != 0 and
+            self.namespace_sector_count > 0 and
+            self.sector_count > 0 and
+            self.write_read_cycles > 0 and
+            self.write_completions == self.write_read_cycles and
+            self.read_completions == self.write_read_cycles and
+            self.final_lba >= self.start_lba and
+            self.last_write_completion.status == .success and
+            self.last_read_completion.status == .success and
+            self.last_write_completion.namespace_id == self.namespace_id and
+            self.last_read_completion.namespace_id == self.namespace_id and
+            self.last_write_completion.lba == self.final_lba and
+            self.last_read_completion.lba == self.final_lba and
+            self.last_write_completion.sector_count == self.sector_count and
+            self.last_read_completion.sector_count == self.sector_count and
+            self.last_write_completion.command_id != self.last_read_completion.command_id and
+            self.mmio.verified(expected_commands);
+    }
+
+    pub fn productionHardwareVerified(self: IoProof) bool {
+        const expected_commands = @as(u32, self.write_completions) + @as(u32, self.read_completions);
+        const bytes_per_direction = self.bytesPerDirection() orelse return false;
+        return self.verified() and self.mmio.hardwareVerified(expected_commands, bytes_per_direction);
+    }
+
+    fn bytesPerDirection(self: IoProof) ?u64 {
+        const sectors = std.math.mul(u64, @as(u64, self.write_read_cycles), @as(u64, self.sector_count)) catch return null;
+        return std.math.mul(u64, sectors, SECTOR_BYTES) catch null;
+    }
+};
+
+pub const MmioIoProof = struct {
+    doorbell_stride_bytes: u32,
+    submission_queue_address: u64,
+    completion_queue_address: u64,
+    prp1_address: u64,
+    dma_buffer_bytes: u64,
+    page_size_bytes: u64,
+    queue_depth: u16,
+    submission_doorbell_writes: u32,
+    completion_head_updates: u32,
+    completed_commands: u32,
+    hardware_completion: HardwareCompletionEvidence = .{},
+
+    pub fn verified(self: MmioIoProof, expected_commands: u32) bool {
+        return expected_commands > 0 and
+            self.doorbell_stride_bytes >= DOORBELL_REGISTER_BYTES and
+            self.page_size_bytes >= DEFAULT_PAGE_SIZE and
+            aligned(self.submission_queue_address, self.page_size_bytes) and
+            aligned(self.completion_queue_address, self.page_size_bytes) and
+            aligned(self.prp1_address, self.page_size_bytes) and
+            self.dma_buffer_bytes >= SECTOR_BYTES and
+            self.queue_depth >= MIN_QUEUE_ENTRIES and
+            self.submission_doorbell_writes >= expected_commands and
+            self.completion_head_updates >= expected_commands and
+            self.completed_commands == expected_commands;
+    }
+
+    pub fn hardwareVerified(self: MmioIoProof, expected_commands: u32, bytes_per_direction: u64) bool {
+        return self.verified(expected_commands) and
+            self.hardware_completion.verified(expected_commands, bytes_per_direction);
+    }
 };
 
 pub const Namespace = struct {
@@ -117,6 +226,7 @@ pub const Controller = struct {
     next_command_id: u16 = 1,
     submission_tail: u16 = 0,
     completion_head: u16 = 0,
+    mmio: ?MmioState = null,
 
     pub fn init(capabilities: ControllerCapabilities, namespaces: []Namespace, queue_depth: u16) Error!Controller {
         try validateQueueEntries(capabilities, queue_depth);
@@ -126,6 +236,26 @@ pub const Controller = struct {
             .namespaces = namespaces,
             .queue_depth = queue_depth,
         };
+    }
+
+    pub fn initWithMmio(
+        capabilities: ControllerCapabilities,
+        namespaces: []Namespace,
+        queue_depth: u16,
+        plan: AdminQueuePlan,
+        prp1_address: u64,
+        dma_buffer_bytes: u64,
+    ) Error!Controller {
+        try validateAdminQueuePlan(capabilities, plan);
+        if (prp1_address == 0 or !aligned(prp1_address, plan.page_size_bytes)) return error.PrpAddressUnaligned;
+        if (dma_buffer_bytes < SECTOR_BYTES) return error.MissingDmaBuffer;
+        var controller = try Controller.init(capabilities, namespaces, queue_depth);
+        controller.mmio = .{
+            .plan = plan,
+            .prp1_address = prp1_address,
+            .dma_buffer_bytes = dma_buffer_bytes,
+        };
+        return controller;
     }
 
     pub fn read(self: *Controller, namespace_id: u32, lba: u64, buffer: []u8) Error!IoCompletion {
@@ -144,6 +274,42 @@ pub const Controller = struct {
         return self.completeIo(namespace_id, lba, sectors);
     }
 
+    pub fn proveWriteReadCycles(self: *Controller, namespace_id: u32, start_lba: u64, cycles: u16) Error!IoProof {
+        if (cycles == 0) return error.ProofCycleCountInvalid;
+        const namespace_sector_count = (try self.namespace(namespace_id)).sector_count;
+        const final_lba = std.math.add(u64, start_lba, @as(u64, cycles) - 1) catch return error.TransferOutOfRange;
+        if (start_lba >= namespace_sector_count or final_lba >= namespace_sector_count) return error.TransferOutOfRange;
+
+        var write_buffer: [SECTOR_BYTES]u8 = undefined;
+        var read_buffer: [SECTOR_BYTES]u8 = undefined;
+        var last_write_completion: IoCompletion = undefined;
+        var last_read_completion: IoCompletion = undefined;
+        const mmio_start = self.mmioCounters();
+        var completed: u16 = 0;
+        while (completed < cycles) : (completed += 1) {
+            const lba = std.math.add(u64, start_lba, completed) catch return error.TransferOutOfRange;
+            fillProofPattern(write_buffer[0..], namespace_id, lba, completed);
+            last_write_completion = try self.write(namespace_id, lba, write_buffer[0..]);
+            @memset(read_buffer[0..], 0);
+            last_read_completion = try self.read(namespace_id, lba, read_buffer[0..]);
+            if (!std.mem.eql(u8, write_buffer[0..], read_buffer[0..])) return error.ProofMismatch;
+        }
+
+        return .{
+            .namespace_id = namespace_id,
+            .namespace_sector_count = namespace_sector_count,
+            .start_lba = start_lba,
+            .final_lba = final_lba,
+            .sector_count = 1,
+            .write_read_cycles = completed,
+            .write_completions = completed,
+            .read_completions = completed,
+            .last_write_completion = last_write_completion,
+            .last_read_completion = last_read_completion,
+            .mmio = self.mmioProofSince(mmio_start),
+        };
+    }
+
     fn namespace(self: *Controller, namespace_id: u32) Error!*Namespace {
         for (self.namespaces) |*candidate| {
             if (candidate.id == namespace_id) return candidate;
@@ -158,6 +324,11 @@ pub const Controller = struct {
         if (self.next_command_id == 0) self.next_command_id = 1;
         self.submission_tail = nextQueueIndex(self.submission_tail, self.queue_depth);
         self.completion_head = nextQueueIndex(self.completion_head, self.queue_depth);
+        if (self.mmio) |*mmio| {
+            mmio.submission_doorbell_writes += 1;
+            mmio.completion_head_updates += 1;
+            mmio.completed_commands += 1;
+        }
         return .{
             .command_id = command_id,
             .namespace_id = namespace_id,
@@ -168,7 +339,72 @@ pub const Controller = struct {
             .completion_head = self.completion_head,
         };
     }
+
+    fn mmioProof(self: *const Controller) MmioIoProof {
+        const mmio = self.mmio orelse return emptyMmioIoProof();
+        return mmio.proof(self.capabilities, self.queue_depth);
+    }
+
+    fn mmioCounters(self: *const Controller) MmioCounters {
+        const mmio = self.mmio orelse return .{};
+        return .{
+            .submission_doorbell_writes = mmio.submission_doorbell_writes,
+            .completion_head_updates = mmio.completion_head_updates,
+            .completed_commands = mmio.completed_commands,
+        };
+    }
+
+    fn mmioProofSince(self: *const Controller, start: MmioCounters) MmioIoProof {
+        var proof = self.mmioProof();
+        proof.submission_doorbell_writes = saturatedDelta(proof.submission_doorbell_writes, start.submission_doorbell_writes);
+        proof.completion_head_updates = saturatedDelta(proof.completion_head_updates, start.completion_head_updates);
+        proof.completed_commands = saturatedDelta(proof.completed_commands, start.completed_commands);
+        return proof;
+    }
 };
+
+const MmioCounters = struct {
+    submission_doorbell_writes: u32 = 0,
+    completion_head_updates: u32 = 0,
+    completed_commands: u32 = 0,
+};
+
+const MmioState = struct {
+    plan: AdminQueuePlan,
+    prp1_address: u64,
+    dma_buffer_bytes: u64,
+    submission_doorbell_writes: u32 = 0,
+    completion_head_updates: u32 = 0,
+    completed_commands: u32 = 0,
+
+    fn proof(self: MmioState, capabilities: ControllerCapabilities, queue_depth: u16) MmioIoProof {
+        return .{
+            .doorbell_stride_bytes = capabilities.doorbellStrideBytes(),
+            .submission_queue_address = self.plan.submission_queue_address,
+            .completion_queue_address = self.plan.completion_queue_address,
+            .prp1_address = self.prp1_address,
+            .dma_buffer_bytes = self.dma_buffer_bytes,
+            .page_size_bytes = self.plan.page_size_bytes,
+            .queue_depth = queue_depth,
+            .submission_doorbell_writes = self.submission_doorbell_writes,
+            .completion_head_updates = self.completion_head_updates,
+            .completed_commands = self.completed_commands,
+        };
+    }
+};
+
+pub fn defaultAdminQueuePlan() AdminQueuePlan {
+    return .{
+        .submission_queue_entries = 32,
+        .completion_queue_entries = 32,
+        .submission_queue_address = TEST_SUBMISSION_QUEUE_ADDRESS,
+        .completion_queue_address = TEST_COMPLETION_QUEUE_ADDRESS,
+    };
+}
+
+pub fn defaultProofPrp1Address() u64 {
+    return TEST_PRP1_ADDRESS;
+}
 
 pub fn validateAdminQueuePlan(capabilities: ControllerCapabilities, plan: AdminQueuePlan) Error!void {
     if (!capabilities.supportsNvmCommandSet()) return error.UnsupportedCommandSet;
@@ -186,6 +422,12 @@ pub fn validateAdminQueuePlan(capabilities: ControllerCapabilities, plan: AdminQ
 
 pub fn rejectKernelDataPlaneTransfer(_: DataPlaneTransferRequest) Error!void {
     return error.KernelStorageDataPlaneDisabled;
+}
+
+pub fn withHardwareCompletionEvidence(proof: IoProof, evidence: HardwareCompletionEvidence) IoProof {
+    var upgraded = proof;
+    upgraded.mmio.hardware_completion = evidence;
+    return upgraded;
 }
 
 fn validateQueueEntries(capabilities: ControllerCapabilities, entries: u32) Error!void {
@@ -214,8 +456,38 @@ fn nextQueueIndex(index: u16, depth: u16) u16 {
     return @intCast((@as(u32, index) + 1) % @as(u32, depth));
 }
 
+fn fillProofPattern(buffer: []u8, namespace_id: u32, lba: u64, cycle: u16) void {
+    for (buffer, 0..) |*byte, index| {
+        const mixed = @as(u64, @intCast(index)) *% 131 +%
+            lba *% 17 +%
+            @as(u64, namespace_id) *% 7 +%
+            @as(u64, cycle) *% 31;
+        byte.* = @intCast(mixed & 0xFF);
+    }
+    @memcpy(buffer[0..4], "NVMe");
+}
+
 fn aligned(address: u64, alignment: u64) bool {
     return alignment != 0 and (address % alignment) == 0;
+}
+
+fn emptyMmioIoProof() MmioIoProof {
+    return .{
+        .doorbell_stride_bytes = 0,
+        .submission_queue_address = 0,
+        .completion_queue_address = 0,
+        .prp1_address = 0,
+        .dma_buffer_bytes = 0,
+        .page_size_bytes = 0,
+        .queue_depth = 0,
+        .submission_doorbell_writes = 0,
+        .completion_head_updates = 0,
+        .completed_commands = 0,
+    };
+}
+
+fn saturatedDelta(after: u32, before: u32) u32 {
+    return if (after >= before) after - before else 0;
 }
 
 fn makeCapabilities(
@@ -297,7 +569,15 @@ test "NVMe userspace controller path writes reads and completes queue entries" {
         .sector_count = 8,
         .image = image[0..],
     }};
-    var controller = try Controller.init(cap, namespaces[0..], 32);
+    try std.testing.expectError(error.PrpAddressUnaligned, Controller.initWithMmio(
+        cap,
+        namespaces[0..],
+        32,
+        defaultAdminQueuePlan(),
+        TEST_PRP1_ADDRESS + 1,
+        SECTOR_BYTES,
+    ));
+    var controller = try Controller.initWithMmio(cap, namespaces[0..], 32, defaultAdminQueuePlan(), TEST_PRP1_ADDRESS, SECTOR_BYTES);
     var write_buffer = [_]u8{0xA5} ** SECTOR_BYTES;
     @memcpy(write_buffer[0..4], "nvme");
     const write_completion = try controller.write(1, 3, write_buffer[0..]);
@@ -310,6 +590,34 @@ test "NVMe userspace controller path writes reads and completes queue entries" {
     try std.testing.expectEqual(@as(u16, 2), read_completion.command_id);
     try std.testing.expectEqual(@as(u16, 2), read_completion.completion_head);
     try std.testing.expect(std.mem.eql(u8, write_buffer[0..], read_buffer[0..]));
+
+    const proof = try controller.proveWriteReadCycles(1, 4, 3);
+    try std.testing.expect(proof.verified());
+    try std.testing.expect(!proof.productionHardwareVerified());
+    try std.testing.expectEqual(@as(u16, 3), proof.write_read_cycles);
+    try std.testing.expectEqual(@as(u64, 6), proof.final_lba);
+    try std.testing.expectEqual(@as(u16, 8), proof.last_read_completion.command_id);
+    try std.testing.expectEqual(@as(u32, 6), proof.mmio.submission_doorbell_writes);
+    try std.testing.expectEqual(@as(u32, 6), proof.mmio.completion_head_updates);
+    try std.testing.expectEqual(@as(u32, 6), proof.mmio.completed_commands);
+
+    var malformed = proof;
+    malformed.mmio.completed_commands = 0;
+    try std.testing.expect(!malformed.verified());
+
+    const hardware_proof = withHardwareCompletionEvidence(proof, .{
+        .source = .hardware_dma,
+        .controller_completion_writes = 6,
+        .dma_read_bytes = 3 * SECTOR_BYTES,
+        .dma_write_bytes = 3 * SECTOR_BYTES,
+        .interrupt_count = 1,
+        .phase_tag_observations = 6,
+    });
+    try std.testing.expect(hardware_proof.productionHardwareVerified());
+
+    var missing_dma = hardware_proof;
+    missing_dma.mmio.hardware_completion.dma_write_bytes = 0;
+    try std.testing.expect(!missing_dma.productionHardwareVerified());
 }
 
 test "NVMe userspace controller path rejects bad namespace geometry" {
@@ -325,4 +633,6 @@ test "NVMe userspace controller path rejects bad namespace geometry" {
     try std.testing.expectError(error.NamespaceNotFound, controller.read(8, 0, buffer[0..]));
     try std.testing.expectError(error.TransferOutOfRange, controller.read(7, 2, buffer[0..]));
     try std.testing.expectError(error.BufferSizeInvalid, controller.write(7, 0, buffer[0..17]));
+    try std.testing.expectError(error.ProofCycleCountInvalid, controller.proveWriteReadCycles(7, 0, 0));
+    try std.testing.expectError(error.TransferOutOfRange, controller.proveWriteReadCycles(7, 1, 2));
 }

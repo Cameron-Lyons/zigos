@@ -34,7 +34,7 @@ pub const CheckpointStore = struct {
     }
 
     pub fn loadPreparedStateFromAttachedVolume(self: *CheckpointStore) bool {
-        if (!self.volume.hasAttachedDevice() and storage_volume.hasAttachedDevice()) {
+        if (storage_volume.hasAttachedDevice()) {
             self.volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
         }
         if (!self.volume.hasAttachedDevice()) return false;
@@ -94,7 +94,7 @@ pub fn noteMutation(service: anytype, durable_boundary: bool) void {
 pub fn flushCheckpoint(service: anytype) void {
     service.checkpoint_store.has_persisted_state = true;
     if (!service.checkpoint_store.dirty) return;
-    if (!service.checkpoint_store.volume.hasAttachedDevice() and storage_volume.hasAttachedDevice()) {
+    if (storage_volume.hasAttachedDevice()) {
         service.checkpoint_store.volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
     }
     if (!service.checkpoint_store.volume.hasAttachedDevice()) return;

@@ -420,6 +420,20 @@ pub fn signArtifactManifest(
     };
 }
 
+pub fn signArtifactManifestWithProvider(
+    artifact_manifest: ArtifactManifest,
+    identity: signing.SignerIdentity,
+    provider: signing.SignatureProvider,
+) anyerror!SignedArtifactManifest {
+    if (!provider.releaseEligible()) return error.ReleaseProviderNotEligible;
+    var payload_buffer: [ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
+    const payload = try encodeArtifactManifest(artifact_manifest, &payload_buffer);
+    return .{
+        .manifest = artifact_manifest,
+        .signature = try provider.sign(identity, payload),
+    };
+}
+
 pub fn verifySignedArtifactManifest(
     signed_manifest: *const SignedArtifactManifest,
     expected_signer: signing.SignerIdentity,
@@ -1127,6 +1141,65 @@ test "signed artifact manifests bind required boot artifact classes before activ
     try std.testing.expect(bootRecordMatchesManifest(&boot, &artifact_manifest));
     boot.records[1].digest[0] ^= 0xAA;
     try std.testing.expect(!bootRecordMatchesManifest(&boot, &artifact_manifest));
+}
+
+test "artifact manifests can be signed through release provider boundaries" {
+    const SigningBackend = struct {
+        seed: signing.Seed,
+
+        fn sign(context: *anyopaque, key: signing.ReleaseRootKeyHandle, message: []const u8) ![signing.SIGNATURE_BYTES]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(self.seed);
+            try std.testing.expectEqualSlices(u8, &key.public_key, &key_pair.public_key.toBytes());
+            return (try key_pair.sign(message, null)).toBytes();
+        }
+    };
+
+    var artifact_manifest = ArtifactManifest.init(8);
+    try artifact_manifest.add(.kernel, "kernel-zigos-native", "kernel-bytes-v2");
+    try artifact_manifest.add(.base_image, "stable-a", "base-image-v2");
+    try artifact_manifest.add(.critical_service, "zigos.system.policy", "policy-service-elf");
+    try artifact_manifest.add(.critical_service, "zigos.system.storage", "storage-service-elf");
+    try artifact_manifest.add(.critical_service, "zigos.system.compositor", "compositor-service-elf");
+    try artifact_manifest.add(.critical_service, "zigos.system.network", "network-service-elf");
+    try artifact_manifest.add(.policy, "production-policy-set", "policy-v2");
+    try artifact_manifest.add(.driver_set, "production-driver-set", "drivers-v2");
+
+    const root_identity = production_artifact_manifest_signer;
+    var backend = SigningBackend{ .seed = root_identity.seed };
+    var provider_impl = try signing.ExternalReleaseProvider.init(
+        .{
+            .name = "release-kms-artifact-manifest",
+            .profile = .ed25519,
+            .role = .production,
+            .provider_boundary = .cloud_kms,
+            .custody = .cloud_kms,
+            .hardware_backed = true,
+            .rotation_supported = true,
+            .revocation_supported = true,
+            .customer_verifiable = true,
+            .verifier_protocol = .dsse_in_toto_slsa,
+        },
+        .{
+            .key_id = "kms://zigos/release/artifact-manifest/1",
+            .label = root_identity.label,
+            .public_key = try signing.publicKey(root_identity),
+            .generation = 1,
+            .provider_boundary = .cloud_kms,
+            .custody = .cloud_kms,
+        },
+        &backend,
+        SigningBackend.sign,
+    );
+    const provider = provider_impl.provider();
+    const signed_manifest = try signArtifactManifestWithProvider(artifact_manifest, root_identity, provider);
+    try std.testing.expect(verifySignedArtifactManifest(&signed_manifest, root_identity));
+
+    var software_provider_impl = signing.SoftwareEd25519Provider{};
+    try std.testing.expectError(
+        error.ReleaseProviderNotEligible,
+        signArtifactManifestWithProvider(artifact_manifest, root_identity, software_provider_impl.provider()),
+    );
 }
 
 test "build-generated artifact manifests reject tampered bootloader source measurement and authority" {

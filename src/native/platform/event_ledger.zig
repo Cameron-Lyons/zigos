@@ -68,6 +68,8 @@ pub const EventKind = enum(u8) {
     agent_session,
     attention_policy,
     accessibility_profile,
+    background_activity,
+    pasteboard_access,
 };
 
 pub const PolicyChangeAction = enum(u8) {
@@ -146,6 +148,10 @@ pub const DiagnosticSummary = struct {
     attention_interruptions_denied: usize = 0,
     accessibility_profile_events: usize = 0,
     accessibility_denials: usize = 0,
+    background_activity_events: usize = 0,
+    background_activity_denials: usize = 0,
+    pasteboard_events: usize = 0,
+    pasteboard_denials: usize = 0,
     latest_tick: u64 = 0,
 
     pub fn evidenceEventCount(self: DiagnosticSummary) usize {
@@ -169,7 +175,9 @@ pub const DiagnosticSummary = struct {
             self.agent_delegation_events +
             self.agent_session_events +
             self.attention_policy_events +
-            self.accessibility_profile_events;
+            self.accessibility_profile_events +
+            self.background_activity_events +
+            self.pasteboard_events;
     }
 };
 
@@ -947,6 +955,63 @@ pub const Ledger = struct {
         });
     }
 
+    pub fn recordBackgroundActivity(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        allowed: bool,
+        remote_network: bool,
+        user_visible: bool,
+        expected_duration_seconds: u32,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = @min(expected_duration_seconds, @as(u32, 0x3fff_ffff));
+        if (remote_network) code |= @as(u32, 1) << @as(u5, 31);
+        if (user_visible) code |= @as(u32, 1) << @as(u5, 30);
+        try self.append(.{
+            .kind = .background_activity,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordPasteboardAccess(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        token_id: u64,
+        allowed: bool,
+        user_gesture_present: bool,
+        foreground_session_present: bool,
+        read_once: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = 0;
+        if (user_gesture_present) code |= 1;
+        if (foreground_session_present) code |= 2;
+        if (read_once) code |= 4;
+        try self.append(.{
+            .kind = .pasteboard_access,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = token_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?Event {
         const event = self.latestKindPtr(kind) orelse return null;
         return event.*;
@@ -1076,6 +1141,14 @@ pub const Ledger = struct {
                     summary.accessibility_profile_events += 1;
                     if (!event.allowed) summary.accessibility_denials += 1;
                 },
+                .background_activity => {
+                    summary.background_activity_events += 1;
+                    if (!event.allowed) summary.background_activity_denials += 1;
+                },
+                .pasteboard_access => {
+                    summary.pasteboard_events += 1;
+                    if (!event.allowed) summary.pasteboard_denials += 1;
+                },
                 else => {},
             }
         }
@@ -1138,6 +1211,14 @@ pub const Ledger = struct {
         try appendFmt(buffer, &used, " accessibility_profile_events={d} accessibility_denials={d}", .{
             summary.accessibility_profile_events,
             summary.accessibility_denials,
+        });
+        try appendFmt(buffer, &used, " background_activity_events={d} background_activity_denials={d}", .{
+            summary.background_activity_events,
+            summary.background_activity_denials,
+        });
+        try appendFmt(buffer, &used, " pasteboard_events={d} pasteboard_denials={d}", .{
+            summary.pasteboard_events,
+            summary.pasteboard_denials,
         });
         return buffer[0..used];
     }
@@ -1843,6 +1924,14 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
                 yesNo((event.detail_code & 2) != 0),
                 yesNo((event.detail_code & 4) != 0),
                 yesNo((event.detail_code & 8) != 0),
+                yesNo(event.allowed),
+            });
+        },
+        .background_activity => {
+            try appendFmt(buffer, used, " background_activity remote_network={s} user_visible={s} duration={d}s allowed={s}", .{
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0),
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 30))) != 0),
+                event.detail_code & 0x3fff_ffff,
                 yesNo(event.allowed),
             });
         },

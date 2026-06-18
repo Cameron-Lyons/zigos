@@ -32,7 +32,7 @@ validation_marker_for_mode() {
     full)
       last_marker_for_group ready
       ;;
-    driver_restart | tampered_artifact_manifest | tampered_kernel | tampered_userspace_image | tampered_policy | tampered_driver_set | rollback_slot_failure)
+    driver_restart | tampered_artifact_manifest | tampered_bootloader_measurement | tampered_kernel | tampered_userspace_image | tampered_policy | tampered_driver_set | rollback_slot_failure)
       last_marker_for_group "$mode"
       ;;
     *)
@@ -239,6 +239,7 @@ smoke_mode_label() {
   local mode="$1"
   case "$mode" in
     tampered_artifact_manifest) printf 'tampered artifact manifest' ;;
+    tampered_bootloader_measurement) printf 'tampered bootloader measurement' ;;
     tampered_kernel) printf 'tampered kernel' ;;
     tampered_userspace_image) printf 'tampered userspace image' ;;
     tampered_policy) printf 'tampered policy' ;;
@@ -288,7 +289,7 @@ case "$MODE" in
     cat "$BOOT1_LOG" >"$LOG_PATH"
     echo "Zigos driver restart QEMU test passed. Logs: $LOG_PATH"
     ;;
-  tampered_artifact_manifest | tampered_kernel | tampered_userspace_image | tampered_policy | tampered_driver_set | rollback_slot_failure)
+  tampered_artifact_manifest | tampered_bootloader_measurement | tampered_kernel | tampered_userspace_image | tampered_policy | tampered_driver_set | rollback_slot_failure)
     run_negative_boot "$MODE"
     ;;
   *)

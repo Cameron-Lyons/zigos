@@ -305,6 +305,17 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
         .user_visible = true,
         .now_ticks = 94,
     }));
+    try std.testing.expectError(error.ContinuousOperationDenied, broker.authorize(.{
+        .caller_task_id = caller.id,
+        .target_task_id = data_target.id,
+        .capability_id = visible_data.id,
+        .operation = .inspect_memory,
+        .continuous = true,
+        .user_visible = true,
+        .privacy_indicator_id = 901,
+        .privacy_indicator_expires_at_ticks = 120,
+        .now_ticks = 96,
+    }));
     inline for (.{ process_isolation.Operation.inspect_memory, process_isolation.Operation.inject_code }) |operation| {
         const decision = try broker.authorize(.{
             .caller_task_id = caller.id,
@@ -367,6 +378,16 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
         .continuous = true,
         .user_visible = true,
         .privacy_indicator_id = 903,
+        .privacy_indicator_expires_at_ticks = 105,
+        .now_ticks = 105,
+    }));
+    try std.testing.expectError(error.ActivePrivacyIndicatorRequired, broker.authorize(.{
+        .caller_task_id = caller.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = true,
+        .privacy_indicator_id = 903,
         .privacy_indicator_expires_at_ticks = 104,
         .now_ticks = 105,
     }));
@@ -382,7 +403,7 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
     });
     try std.testing.expect(clipboard_decision.allowed);
     try std.testing.expectEqual(caller.id, clipboard_decision.target_task_id);
-    try std.testing.expectError(error.HiddenGlobalHookDenied, broker.authorize(.{
+    try std.testing.expectError(error.HiddenOperationDenied, broker.authorize(.{
         .caller_task_id = caller.id,
         .capability_id = visible_self.id,
         .operation = .register_global_hook,

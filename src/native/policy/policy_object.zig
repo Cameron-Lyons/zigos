@@ -92,6 +92,11 @@ pub const DecisionReason = enum(u8) {
     accessibility_keyboard_navigation_denied,
     accessibility_reduced_motion_denied,
     accessibility_high_contrast_denied,
+    background_duration_denied,
+    background_cpu_denied,
+    background_memory_denied,
+    background_network_denied,
+    background_visibility_denied,
     permission_retention_denied,
     permission_lease_denied,
     retention_denied,
@@ -163,6 +168,12 @@ pub const CreateRequest = struct {
     require_keyboard_navigation: bool = false,
     require_reduced_motion_support: bool = false,
     require_high_contrast_support: bool = false,
+    max_background_duration_seconds: u32 = 0,
+    max_background_cpu_time_ticks: u64 = 0,
+    max_background_memory_bytes: usize = 0,
+    max_background_shared_memory_bytes: usize = 0,
+    allow_remote_background_network: bool = false,
+    require_visible_background_activity: bool = false,
     max_sensitive_retention_days: u16 = 0,
     max_permission_lease_ticks: u64 = 0,
     require_sensitive_permission_lease: bool = false,
@@ -231,6 +242,15 @@ pub const AccessibilityRequest = struct {
     keyboard_navigation: bool = false,
     reduced_motion_supported: bool = false,
     high_contrast_supported: bool = false,
+};
+
+pub const BackgroundActivityRequest = struct {
+    expected_duration_seconds: u32 = 0,
+    cpu_time_ticks: u64 = 0,
+    memory_bytes: usize = 0,
+    shared_memory_bytes: usize = 0,
+    network: manifest.BackgroundNetworkMode = .none,
+    visibility: manifest.BackgroundVisibility = .status_only,
 };
 
 pub const AgentDelegationRequest = struct {
@@ -320,6 +340,12 @@ pub const PolicyObject = struct {
     require_keyboard_navigation: bool,
     require_reduced_motion_support: bool,
     require_high_contrast_support: bool,
+    max_background_duration_seconds: u32,
+    max_background_cpu_time_ticks: u64,
+    max_background_memory_bytes: usize,
+    max_background_shared_memory_bytes: usize,
+    allow_remote_background_network: bool,
+    require_visible_background_activity: bool,
     max_sensitive_retention_days: u16,
     max_permission_lease_ticks: u64,
     require_sensitive_permission_lease: bool,
@@ -493,6 +519,12 @@ pub const Directory = struct {
         slot.policy.require_keyboard_navigation = request.require_keyboard_navigation;
         slot.policy.require_reduced_motion_support = request.require_reduced_motion_support;
         slot.policy.require_high_contrast_support = request.require_high_contrast_support;
+        slot.policy.max_background_duration_seconds = request.max_background_duration_seconds;
+        slot.policy.max_background_cpu_time_ticks = request.max_background_cpu_time_ticks;
+        slot.policy.max_background_memory_bytes = request.max_background_memory_bytes;
+        slot.policy.max_background_shared_memory_bytes = request.max_background_shared_memory_bytes;
+        slot.policy.allow_remote_background_network = request.allow_remote_background_network;
+        slot.policy.require_visible_background_activity = request.require_visible_background_activity;
         slot.policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
         slot.policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
         slot.policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
@@ -876,6 +908,40 @@ pub const Directory = struct {
         return allow();
     }
 
+    pub fn backgroundActivityDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: BackgroundActivityRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (policy.max_background_duration_seconds != 0 and
+                request.expected_duration_seconds > policy.max_background_duration_seconds)
+            {
+                return block(policy, .background_duration_denied);
+            }
+            if (policy.max_background_cpu_time_ticks != 0 and
+                request.cpu_time_ticks > policy.max_background_cpu_time_ticks)
+            {
+                return block(policy, .background_cpu_denied);
+            }
+            if ((policy.max_background_memory_bytes != 0 and request.memory_bytes > policy.max_background_memory_bytes) or
+                (policy.max_background_shared_memory_bytes != 0 and request.shared_memory_bytes > policy.max_background_shared_memory_bytes))
+            {
+                return block(policy, .background_memory_denied);
+            }
+            if (!policy.allow_remote_background_network and backgroundNetworkIsRemote(request.network)) {
+                return block(policy, .background_network_denied);
+            }
+            if (policy.require_visible_background_activity and !backgroundActivityIsVisible(request.visibility)) {
+                return block(policy, .background_visibility_denied);
+            }
+        }
+        return allow();
+    }
+
     pub fn permissionUseDecision(
         self: *const Directory,
         subjects: SubjectSet,
@@ -1119,6 +1185,12 @@ fn zeroPolicy() PolicyObject {
         .require_keyboard_navigation = false,
         .require_reduced_motion_support = false,
         .require_high_contrast_support = false,
+        .max_background_duration_seconds = 0,
+        .max_background_cpu_time_ticks = 0,
+        .max_background_memory_bytes = 0,
+        .max_background_shared_memory_bytes = 0,
+        .allow_remote_background_network = false,
+        .require_visible_background_activity = false,
         .max_sensitive_retention_days = 0,
         .max_permission_lease_ticks = 0,
         .require_sensitive_permission_lease = false,
@@ -1210,6 +1282,12 @@ fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     crypto_hash.updateBool(&hasher, "require-keyboard-navigation", policy.require_keyboard_navigation);
     crypto_hash.updateBool(&hasher, "require-reduced-motion-support", policy.require_reduced_motion_support);
     crypto_hash.updateBool(&hasher, "require-high-contrast-support", policy.require_high_contrast_support);
+    crypto_hash.updateInt(&hasher, "max-background-duration-seconds", policy.max_background_duration_seconds);
+    crypto_hash.updateInt(&hasher, "max-background-cpu-time-ticks", policy.max_background_cpu_time_ticks);
+    crypto_hash.updateInt(&hasher, "max-background-memory-bytes", policy.max_background_memory_bytes);
+    crypto_hash.updateInt(&hasher, "max-background-shared-memory-bytes", policy.max_background_shared_memory_bytes);
+    crypto_hash.updateBool(&hasher, "allow-remote-background-network", policy.allow_remote_background_network);
+    crypto_hash.updateBool(&hasher, "require-visible-background-activity", policy.require_visible_background_activity);
     crypto_hash.updateInt(&hasher, "max-sensitive-retention-days", policy.max_sensitive_retention_days);
     crypto_hash.updateInt(&hasher, "max-permission-lease-ticks", policy.max_permission_lease_ticks);
     crypto_hash.updateBool(&hasher, "require-sensitive-permission-lease", policy.require_sensitive_permission_lease);
@@ -1245,6 +1323,20 @@ fn isLocalDestination(destination: []const u8) bool {
     return std.mem.startsWith(u8, destination, "local:") or
         std.mem.startsWith(u8, destination, "lan.") or
         std.mem.eql(u8, destination, "local-network");
+}
+
+fn backgroundNetworkIsRemote(network: manifest.BackgroundNetworkMode) bool {
+    return switch (network) {
+        .named_service_identities, .named_domains, .unrestricted_internet => true,
+        .unspecified, .none, .local_network_only => false,
+    };
+}
+
+fn backgroundActivityIsVisible(visibility: manifest.BackgroundVisibility) bool {
+    return switch (visibility) {
+        .status_only, .user_visible => true,
+        .unspecified, .hidden, .audit_only => false,
+    };
 }
 
 test "policy objects remain signed scoped and enforce enterprise controls" {

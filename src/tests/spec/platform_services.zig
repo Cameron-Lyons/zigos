@@ -17,6 +17,7 @@ const notification_center = @import("../../native/services/notification_center.z
 const os_identity = @import("../../native/platform/os_identity.zig");
 const secure_secret_store = @import("../../native/platform/secure_secret_store.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
+const signing = @import("../../native/core/signing.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
@@ -67,9 +68,65 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expect(restarted_journal.latestMatches(&boot));
 
     var attestation = attestation_service.Service.init(spec_support.device(99));
-    var attestation_root = attestation_service.FakeSecureEnclaveRootProvider.init(spec_support.signer("spec.attest.device", 0x91));
+    const attestation_root_signer = spec_support.signer("spec.attest.device", 0x91);
+    const attestation_root_identity = try signing.publicIdentity(attestation_root_signer);
+    const attestation_key = attestation_service.AttestationRootKeyHandle{
+        .key_id = "spec.attest.device",
+        .label = "spec.attest.device",
+        .public_identity = attestation_root_identity,
+        .generation = 1,
+        .origin = .secure_enclave,
+        .provider_boundary = .secure_enclave,
+        .custody = .secure_enclave,
+    };
+    const attestation_descriptor = attestation_service.RootProviderDescriptor{
+        .name = "spec-platform-secure-enclave-attestation-root",
+        .role = .production,
+        .origin = .secure_enclave,
+        .key_id = "spec.attest.device",
+        .key_generation = 1,
+        .provider_boundary = .secure_enclave,
+        .custody = .secure_enclave,
+        .customer_verifiable = true,
+    };
+    const AttestationSignerFixture = struct {
+        signer: signing.SignerIdentity,
+
+        fn sign(context: *anyopaque, handle: attestation_service.AttestationRootKeyHandle, digest: []const u8) !manifest.Signature {
+            const fixture: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, fixture.signer.label, handle.label)) return error.RootIdentityMismatch;
+            return signing.signWithDefaultRegistry(.ed25519, fixture.signer, digest);
+        }
+    };
+    var attestation_fixture = AttestationSignerFixture{ .signer = attestation_root_signer };
+    var attestation_root = try attestation_service.ExternalAttestationRootProvider.init(
+        attestation_descriptor,
+        attestation_key,
+        &attestation_fixture,
+        AttestationSignerFixture.sign,
+    );
+    const attestation_metadata_digest = attestation_root.verifierMetadataDigest();
     try attestation.provisionRootProvider(attestation_root.provider());
-    const statement = try attestation.attestWithProvisionedRoot(boot, "attest.example", "remote-nonce-0007", true);
+    const attestation_request = try attestation_service.RemoteAttestationRequest.init(.{
+        .remote_party = "overlay.notes.sync",
+        .nonce = "remote-nonce-0007",
+        .policy_label = "spec-platform-service-policy",
+        .expected_key_origin = .secure_enclave,
+        .root_key_id = "spec.attest.device",
+        .minimum_root_generation = 1,
+        .attestation_verifier_metadata_digest_required = true,
+        .attestation_verifier_metadata_digest = attestation_metadata_digest,
+    });
+    const attestation_response = try attestation.respondToRemoteAttestationRequest(boot, attestation_request);
+    try std.testing.expect(attestation_response.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(std.mem.eql(u8, &attestation_metadata_digest, &attestation_response.attestation_verifier_metadata_digest));
+    try std.testing.expect(attestation_service.Service.verifyRemoteAttestationResponse(
+        attestation_response,
+        attestation_request,
+        &boot,
+        attestation_root_identity,
+    ));
+    const statement = attestation_response.statement;
     try std.testing.expect(attestation_service.Service.verify(statement));
     try std.testing.expect(statement.user_visible);
     try std.testing.expectEqual(@as(usize, 1), attestation.visible_request_count);
@@ -144,12 +201,21 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expectEqual(network_policy.DecisionReason.attestation_required, (try policy_directory.authorizeConnection(peer_policy.id, .{
         .destination = .{ .service_identity = "overlay.notes.sync" },
     })).reason);
-    const peer_decision = try policy_directory.authorizeConnection(peer_policy.id, .{
-        .destination = .{ .service_identity = "overlay.notes.sync" },
-        .attested = true,
-        .peer_root_digest_present = true,
-        .peer_root_digest = statement.root_digest,
-    });
+    try std.testing.expect(network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
+        .{ .service_identity = "overlay.other" },
+        attestation_response,
+        attestation_request,
+        &boot,
+        attestation_root_identity,
+    ) == null);
+    const peer_evidence = network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
+        .{ .service_identity = "overlay.notes.sync" },
+        attestation_response,
+        attestation_request,
+        &boot,
+        attestation_root_identity,
+    ).?;
+    const peer_decision = try policy_directory.authorizeConnection(peer_policy.id, peer_evidence);
     try std.testing.expect(peer_decision.allowed);
     try std.testing.expect(peer_decision.identity_pinned);
 

@@ -52,6 +52,86 @@ pub const EvidenceSummary = struct {
     artifact_digests_captured: bool = false,
 };
 
+pub const UpdateRollbackEvidenceSource = enum(u8) {
+    modeled_selector,
+    hardware_power_cycle,
+};
+
+pub const HardwareUpdateRollbackEvidence = struct {
+    source: UpdateRollbackEvidenceSource = .modeled_selector,
+    candidate_activation_writes: u32 = 0,
+    selector_record_flushes: u32 = 0,
+    power_cycle_observations: u32 = 0,
+    failure_detector_observations: u32 = 0,
+    rollback_decision_records: u32 = 0,
+    stable_slot_boot_observations: u32 = 0,
+    recovered_slot_reads: u32 = 0,
+    persisted_state_verifications: u32 = 0,
+    service_start_suppression_observations: u32 = 0,
+
+    pub fn verified(self: HardwareUpdateRollbackEvidence, proof: UpdateRollbackProof) bool {
+        const expected_cycles = @as(u32, proof.cycles);
+        return self.source == .hardware_power_cycle and
+            expected_cycles > 0 and
+            self.candidate_activation_writes >= expected_cycles and
+            self.selector_record_flushes >= expected_cycles and
+            self.power_cycle_observations >= expected_cycles and
+            self.failure_detector_observations >= expected_cycles and
+            self.rollback_decision_records >= expected_cycles and
+            self.stable_slot_boot_observations >= expected_cycles and
+            self.recovered_slot_reads >= expected_cycles and
+            self.persisted_state_verifications >= expected_cycles and
+            self.service_start_suppression_observations >= expected_cycles;
+    }
+};
+
+pub const UpdateRollbackProof = struct {
+    cycles: u16,
+    stable_slot: usize,
+    candidate_slot: usize,
+    recovered_slot: usize,
+    activation_generation_before: u64,
+    activation_generation_after: u64,
+    rollback_generation_before: u64,
+    rollback_generation_after: u64,
+    failure_detected: bool,
+    rollback_decision: bool,
+    service_use_started: bool,
+    selector_record_persisted: bool,
+    post_power_cycle_verified: bool,
+    active_slot_verified: bool,
+    persisted_state_preserved: bool,
+    hardware_rollback: HardwareUpdateRollbackEvidence = .{},
+
+    pub fn verified(self: UpdateRollbackProof) bool {
+        return self.cycles > 0 and
+            self.stable_slot != self.candidate_slot and
+            self.recovered_slot == self.stable_slot and
+            self.activation_generation_after >= self.activation_generation_before and
+            self.rollback_generation_after > self.rollback_generation_before and
+            self.failure_detected and
+            self.rollback_decision and
+            !self.service_use_started and
+            self.selector_record_persisted and
+            self.post_power_cycle_verified and
+            self.active_slot_verified and
+            self.persisted_state_preserved;
+    }
+
+    pub fn productionHardwareVerified(self: UpdateRollbackProof) bool {
+        return self.verified() and self.hardware_rollback.verified(self);
+    }
+};
+
+pub fn withHardwareUpdateRollbackEvidence(
+    proof: UpdateRollbackProof,
+    evidence: HardwareUpdateRollbackEvidence,
+) UpdateRollbackProof {
+    var upgraded = proof;
+    upgraded.hardware_rollback = evidence;
+    return upgraded;
+}
+
 pub const Target = struct {
     id: []const u8,
     vendor: []const u8,
@@ -102,6 +182,23 @@ pub const nuc11tnki5_proof_metadata_markers = [_][]const u8{
     nuc11tnki5_marker_prefix ++ ":FIRMWARE_SETTINGS:RECORDED",
     nuc11tnki5_marker_prefix ++ ":POWER_CYCLE_NOTES:RECORDED",
     nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
+};
+
+pub const nuc11tnki5_hardware_fact_markers = [_][]const u8{
+    nuc11tnki5_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":MULTIBOOT_MEMORY_MAP:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":ACPI_RSDP:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":ACPI_MADT:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":ACPI_FADT:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":APIC_TIMER_INTERRUPT:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":NVME_WRITE_READ_COMPLETION:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":I225_LM_FRAME_INTERRUPT:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":SUSPEND_RESUME_POWER:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":ATTESTATION_ROOT_LIFECYCLE:OBSERVED",
 };
 
 pub const first_supported_target = Target{

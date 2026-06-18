@@ -298,6 +298,10 @@ pub const Simulator = struct {
                 .component_abi_version = 1,
                 .signed = bundle.signature.isComplete(),
                 .bundle_id = bundle.bundle_id,
+                .source_identity = launch_plan.provenance.source_identity,
+                .release_transparency_sequence = launch_plan.provenance.release_transparency.sequence,
+                .release_transparency_root = launch_plan.provenance.release_transparency.root,
+                .release_transparency_log_head = launch_plan.provenance.release_transparency.log_head,
             },
         });
 

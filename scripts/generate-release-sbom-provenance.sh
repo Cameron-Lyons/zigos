@@ -30,6 +30,10 @@ base64_no_wrap() {
   base64 | tr -d '\n'
 }
 
+is_sha256_hex() {
+  [[ "$1" =~ ^[0-9A-Fa-f]{64}$ ]]
+}
+
 dsse_payload_type="application/vnd.in-toto+json"
 
 sign_dsse_statement() {
@@ -54,6 +58,16 @@ sign_dsse_statement() {
 
 artifact_files=()
 
+require_artifact_path() {
+  local relative_path="${1:?artifact path required}"
+  local absolute_path="$ROOT_DIR/$relative_path"
+  if [ ! -e "$absolute_path" ]; then
+    printf 'missing required release artifact: %s\n' "$relative_path" >&2
+    return 1
+  fi
+  add_artifact_path "$relative_path"
+}
+
 add_artifact_path() {
   local relative_path="${1:?artifact path required}"
   local absolute_path="$ROOT_DIR/$relative_path"
@@ -68,15 +82,21 @@ add_artifact_path() {
   fi
 }
 
-add_artifact_path "zig-out/bin/kernel-zigos-native.elf"
-add_artifact_path "zig-out/bin/zigos-sign"
-add_artifact_path "zig-out/bin/zigos-verify-release"
-add_artifact_path "build/os.iso"
-add_artifact_path "zig-out/bin"
-add_artifact_path "spec/production_readiness.json"
-add_artifact_path "spec/release_security/release_artifacts.json"
-add_artifact_path "spec/release_security/release_keyring.json"
-add_artifact_path "spec/release_security/revoked_release_keys.json"
+missing_required_artifacts=0
+require_artifact_path "zig-out/bin/kernel-zigos-native.elf" || missing_required_artifacts=1
+require_artifact_path "zig-out/bin/zigos-sign" || missing_required_artifacts=1
+require_artifact_path "zig-out/bin/zigos-verify-release" || missing_required_artifacts=1
+require_artifact_path "build/os.iso" || missing_required_artifacts=1
+require_artifact_path "zig-out/bin" || missing_required_artifacts=1
+require_artifact_path "spec/production_readiness.json" || missing_required_artifacts=1
+require_artifact_path "spec/release_security/release_artifacts.json" || missing_required_artifacts=1
+require_artifact_path "spec/release_security/release_keyring.json" || missing_required_artifacts=1
+require_artifact_path "spec/release_security/revoked_release_keys.json" || missing_required_artifacts=1
+if [ "$missing_required_artifacts" -ne 0 ]; then
+  printf 'Build iso, signing-cli, verify-release-cli, userspace-images, and release policy artifacts before generating SBOM/provenance.\n' >&2
+  exit 1
+fi
+
 add_artifact_path "spec/release_security/fuzz_corpus.json"
 add_artifact_path "spec/release_security/memory_safety_inventory.json"
 add_artifact_path "spec/release_security/threat_model.json"
@@ -122,9 +142,16 @@ done
   printf '}\n'
 } > "$measurements_path"
 
-repo_url="$(git -C "$ROOT_DIR" config --get remote.origin.url 2>/dev/null || printf 'NOASSERTION')"
-commit_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'NOASSERTION')"
-dirty_count="$(git -C "$ROOT_DIR" status --short 2>/dev/null | wc -l | tr -d ' ')"
+if ! command -v jj >/dev/null 2>&1; then
+  printf 'Jujutsu (jj) is required to generate release source provenance.\n' >&2
+  exit 1
+fi
+
+repo_vcs="jj"
+repo_url="$(jj -R "$ROOT_DIR" git remote list 2>/dev/null | awk '$1 == "origin" { print $2; found = 1; exit } END { exit found ? 0 : 1 }' || printf 'NOASSERTION')"
+repo_change_id="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'change_id ++ "\n"')"
+commit_sha="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"')"
+dirty_count="$(jj -R "$ROOT_DIR" diff -r @ --name-only | wc -l | tr -d ' ')"
 zig_version="$("$ROOT_DIR/scripts/zig.sh" version 2>/dev/null || printf 'unknown')"
 created_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
@@ -178,7 +205,7 @@ release_key_id="${ZIGOS_RELEASE_SIGNING_KEY_ID:-zigos-release-signing-required}"
 for file in "${artifact_files[@]}"; do
   digest="$(sha256_file "$ROOT_DIR/$file")"
   escaped_file="$(json_escape "$file")"
-  statement="{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{\"name\":\"$escaped_file\",\"digest\":{\"sha256\":\"$digest\"}}],\"predicateType\":\"https://slsa.dev/provenance/v1\",\"predicate\":{\"buildDefinition\":{\"buildType\":\"https://github.com/Cameron-Lyons/zigos/release-security-gate\",\"externalParameters\":{\"repository\":\"$(json_escape "$repo_url")\",\"commit\":\"$(json_escape "$commit_sha")\",\"zigVersion\":\"$(json_escape "$zig_version")\"}},\"runDetails\":{\"builder\":{\"id\":\"zigos-local-release-security-gate\"},\"metadata\":{\"invocationId\":\"$created_utc\",\"startedOn\":\"$created_utc\",\"dirtyWorkspaceFileCount\":$dirty_count}}}}"
+  statement="{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{\"name\":\"$escaped_file\",\"digest\":{\"sha256\":\"$digest\"}}],\"predicateType\":\"https://slsa.dev/provenance/v1\",\"predicate\":{\"buildDefinition\":{\"buildType\":\"https://github.com/Cameron-Lyons/zigos/release-security-gate\",\"externalParameters\":{\"repository\":\"$(json_escape "$repo_url")\",\"sourceControl\":\"$repo_vcs\",\"changeId\":\"$(json_escape "$repo_change_id")\",\"commit\":\"$(json_escape "$commit_sha")\",\"zigVersion\":\"$(json_escape "$zig_version")\"}},\"runDetails\":{\"builder\":{\"id\":\"zigos-local-release-security-gate\"},\"metadata\":{\"invocationId\":\"$created_utc\",\"startedOn\":\"$created_utc\",\"dirtyWorkspaceFileCount\":$dirty_count}}}}"
   printf '%s\n' "$statement" >> "$provenance_path"
   payload_b64="$(printf '%s' "$statement" | base64_no_wrap)"
   release_signature_b64="$(sign_dsse_statement "$statement")"
@@ -191,8 +218,12 @@ public_release_allowed=false
 release_key_status="required-not-configured"
 release_public_key="${ZIGOS_RELEASE_SIGNING_PUBLIC_KEY:-TBD}"
 release_public_key_encoding="${ZIGOS_RELEASE_SIGNING_PUBLIC_KEY_ENCODING:-hex-ed25519-raw}"
+release_key_label="${ZIGOS_RELEASE_SIGNING_KEY_LABEL:-$release_key_id}"
 release_custody="${ZIGOS_RELEASE_SIGNING_CUSTODY:-tpm-secure-enclave-hsm-or-kms-required}"
 release_provider_boundary="${ZIGOS_RELEASE_SIGNING_PROVIDER_BOUNDARY:-hardware-backed TPM, secure enclave, offline HSM, or cloud KMS release signing provider}"
+release_key_provider_boundary="${ZIGOS_RELEASE_SIGNING_KEY_PROVIDER_BOUNDARY:-${ZIGOS_RELEASE_SIGNING_PROVIDER_BOUNDARY:-tpm-secure-enclave-hsm-or-kms-required}}"
+release_provider_name="${ZIGOS_RELEASE_SIGNING_PROVIDER_NAME:-TBD}"
+release_verifier_metadata_digest="${ZIGOS_RELEASE_SIGNING_VERIFIER_METADATA_DIGEST:-TBD}"
 release_generation="${ZIGOS_RELEASE_SIGNING_GENERATION:-1}"
 release_not_before="${ZIGOS_RELEASE_SIGNING_NOT_BEFORE:-TBD}"
 release_not_after="${ZIGOS_RELEASE_SIGNING_NOT_AFTER:-TBD}"
@@ -206,7 +237,13 @@ case "$release_pqc_mode" in
 esac
 if [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ] &&
    [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ] &&
-   [ "$release_public_key" != "TBD" ]; then
+   [ "$release_public_key" != "TBD" ] &&
+   [ "$release_not_before" != "TBD" ] &&
+   [ "$release_not_after" != "TBD" ] &&
+   [ "$release_custody" != "tpm-secure-enclave-hsm-or-kms-required" ] &&
+   [ "$release_key_provider_boundary" != "tpm-secure-enclave-hsm-or-kms-required" ] &&
+   [ "$release_provider_name" != "TBD" ] &&
+   is_sha256_hex "$release_verifier_metadata_digest"; then
   public_release_allowed=true
   release_key_status="active"
 fi
@@ -252,6 +289,7 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
   "keys": [
     {
       "key_id": "$(json_escape "$release_key_id")",
+      "label": "$(json_escape "$release_key_label")",
       "status": "$release_key_status",
       "algorithm": "ed25519",
       "custody": "$(json_escape "$release_custody")",
@@ -259,8 +297,16 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
       "generation": $release_generation,
       "not_before": "$(json_escape "$release_not_before")",
       "not_after": "$(json_escape "$release_not_after")",
+      "provider_name": "$(json_escape "$release_provider_name")",
+      "provider_boundary": "$(json_escape "$release_key_provider_boundary")",
+      "rotation_supported": true,
+      "revocation_supported": true,
+      "customer_verifiable": true,
+      "verifier_protocol": "dsse_in_toto_slsa",
       "public_key_encoding": "$(json_escape "$release_public_key_encoding")",
       "public_key": "$(json_escape "$release_public_key")",
+      "verifier_metadata_schema": "zigos.release-verifier-metadata.v1",
+      "verifier_metadata_digest": "$(json_escape "$release_verifier_metadata_digest")",
       "rotation_policy": "new release key generation before not_after or immediately after suspected exposure",
       "revocation_source": "$OUTPUT_DIR/revoked-release-keys.json"
     }
@@ -318,11 +364,14 @@ cat > "$OUTPUT_PATH/customer-verification-policy.json" <<EOF
   "verification_steps": [
     "Compare each downloaded artifact SHA-256 digest with artifact-digests.sha256.",
     "Verify every DSSE signature in provenance.dsse.intoto.jsonl against release-keyring.json before parsing payloads; signatures cover the DSSE v1 pre-authentication encoding.",
+    "Recompute each active release key verifier metadata digest from provider name, key id, label, generation, custody, provider boundary, public key, lifecycle controls, verifier protocol, and FIPS posture before trusting the key.",
     "Verify release-keyring.json post_quantum_policy covers FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements, hybrid transition, and measured rollout.",
     "Reject signatures from key ids or generations listed in revoked-release-keys.json.",
-    "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1 and subject digests matching artifact-digests.sha256.",
-    "Compare artifact-measurements.json size and digest measurements against downloaded artifacts.",
-    "Compare reproducible-build.json and reproducible-artifact-digests.sha256 against the release digest manifest.",
+    "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1, exactly one subject per signed DSSE envelope, and subject digests matching artifact-digests.sha256.",
+    "Require zigos-verify-release to fail closed unless each signed SLSA statement records buildDefinition.buildType=https://github.com/Cameron-Lyons/zigos/release-security-gate, runDetails.builder.id=zigos-local-release-security-gate, sourceControl=jj, the Jujutsu changeId, the commit id, repository, and Zig version used to generate the release, and runDetails.metadata records dirtyWorkspaceFileCount=0.",
+    "Require every active release key not_before/not_after window to cover the signed SLSA runDetails.metadata.startedOn date.",
+    "Compare artifact-measurements.json size and digest measurements against downloaded artifacts, requiring exact one-entry-per-artifact coverage without duplicates.",
+    "Compare reproducible-build.json and reproducible-artifact-digests.sha256 against the complete release digest manifest, including fail-closed repo_vcs=jj, repository, Jujutsu change ID, commit id, Zig version, dirty_workspace_file_count=0 evidence, and equality with the signed SLSA source identity.",
     "Run zig-out/bin/zigos-verify-release build/release-security . before trusting a downloaded release.",
     "Reject required ML-DSA rollout unless zigos-verify-release verifies a production ML-DSA signature from a validated provider.",
     "Reject ed25519+ml-dsa65 as a production FIPS 204 signal; it is preview-only until replaced by a validated ML-DSA provider."

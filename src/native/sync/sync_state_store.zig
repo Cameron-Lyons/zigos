@@ -17,8 +17,8 @@ const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 const record_magic = "ZGSYNCR";
-const record_version: u16 = 4;
-const record_prefix = "state/v4/";
+const record_version: u16 = 5;
+const record_prefix = "state/v5/";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
 const max_record_bytes: usize = 2048;
@@ -402,6 +402,10 @@ fn encodeNetworkPolicy(buffer: []u8, policy: *const network_policy.PolicyRecord)
     try writer.writeByte(@intFromBool(policy.require_remote_attestation));
     try writer.writeByte(@intFromBool(policy.pinned_root_digest_present));
     if (policy.pinned_root_digest_present) try writer.writeBytes(&policy.pinned_root_digest);
+    try writer.writeByte(@intFromBool(policy.pinned_attestation_verifier_metadata_digest_present));
+    if (policy.pinned_attestation_verifier_metadata_digest_present) {
+        try writer.writeBytes(&policy.pinned_attestation_verifier_metadata_digest);
+    }
     return buffer[0..writer.offset];
 }
 
@@ -557,6 +561,8 @@ fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorRe
         .require_remote_attestation = false,
         .pinned_root_digest_present = false,
         .pinned_root_digest = crypto_hash.zero_digest,
+        .pinned_attestation_verifier_metadata_digest_present = false,
+        .pinned_attestation_verifier_metadata_digest = crypto_hash.zero_digest,
     };
     const workspace_id = try reader.readU64();
     slot.policy.workspace_id = if (workspace_id == 0) null else workspace_id;
@@ -567,6 +573,10 @@ fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorRe
     slot.policy.require_remote_attestation = (try reader.readByte()) != 0;
     slot.policy.pinned_root_digest_present = (try reader.readByte()) != 0;
     if (slot.policy.pinned_root_digest_present) try reader.readBytes(&slot.policy.pinned_root_digest);
+    slot.policy.pinned_attestation_verifier_metadata_digest_present = (try reader.readByte()) != 0;
+    if (slot.policy.pinned_attestation_verifier_metadata_digest_present) {
+        try reader.readBytes(&slot.policy.pinned_attestation_verifier_metadata_digest);
+    }
 }
 
 fn decodeWorkspacePolicy(resident: *state_support.ResidentState, reader: *CursorReader, version: u16) Error!void {

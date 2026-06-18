@@ -20,6 +20,7 @@ pub const MAX_TASK_COMPONENTS: usize = 8;
 pub const MAX_AUDIT_EVENTS: usize = 16;
 pub const MAX_TASK_PROVENANCE_EVENTS: usize = 24;
 pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
+pub const MAX_TASK_SOURCE_IDENTITY_BYTES: usize = 96;
 pub const MAX_COMPONENT_LABEL_BYTES: usize = 48;
 pub const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
 pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
@@ -188,6 +189,7 @@ pub const AuditEventKind = enum(u8) {
     policy_allowed,
     policy_denied,
     background_dispatched,
+    background_expired,
     service_connected,
     service_restarted,
 };
@@ -207,6 +209,10 @@ pub const LaunchProvenanceSpec = struct {
     component_abi_version: u16 = 0,
     signed: bool = false,
     bundle_id: []const u8 = "",
+    source_identity: []const u8 = "",
+    release_transparency_sequence: u64 = 0,
+    release_transparency_root: crypto_hash.Digest = crypto_hash.zero_digest,
+    release_transparency_log_head: crypto_hash.Digest = crypto_hash.zero_digest,
 };
 
 pub const LaunchProvenanceRecord = struct {
@@ -216,9 +222,24 @@ pub const LaunchProvenanceRecord = struct {
     signed: bool,
     bundle_id_len: usize,
     bundle_id: [MAX_TASK_BUNDLE_ID_BYTES]u8,
+    source_identity_len: usize,
+    source_identity: [MAX_TASK_SOURCE_IDENTITY_BYTES]u8,
+    release_transparency_sequence: u64,
+    release_transparency_root: crypto_hash.Digest,
+    release_transparency_log_head: crypto_hash.Digest,
 
     pub fn bundleIdSlice(self: *const LaunchProvenanceRecord) []const u8 {
         return self.bundle_id[0..self.bundle_id_len];
+    }
+
+    pub fn sourceIdentitySlice(self: *const LaunchProvenanceRecord) []const u8 {
+        return self.source_identity[0..self.source_identity_len];
+    }
+
+    pub fn hasReleaseTransparency(self: *const LaunchProvenanceRecord) bool {
+        return self.release_transparency_sequence != 0 and
+            !std.mem.eql(u8, &self.release_transparency_root, &crypto_hash.zero_digest) and
+            !std.mem.eql(u8, &self.release_transparency_log_head, &crypto_hash.zero_digest);
     }
 };
 
@@ -294,6 +315,10 @@ pub const TaskRecord = struct {
 
     pub fn launchBundleIdSlice(self: *const TaskRecord) []const u8 {
         return self.launch.bundleIdSlice();
+    }
+
+    pub fn launchSourceIdentitySlice(self: *const TaskRecord) []const u8 {
+        return self.launch.sourceIdentitySlice();
     }
 
     pub fn executionComponents(self: *const TaskRecord) []const ExecutionComponentRecord {

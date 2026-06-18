@@ -6,12 +6,14 @@ const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
 const manifest = @import("../../policy/manifest.zig");
 const manifest_fixtures = @import("../../policy/manifest_fixtures.zig");
+const native_util = @import("../../core/util.zig");
 const native_ux = @import("../native_ux.zig");
 const notification_center = @import("../../services/notification_center.zig");
 const object_store = @import("../../storage/object_store.zig");
 const package_service = @import("../../services/package_service.zig");
 const policy_object = @import("../../policy/policy_object.zig");
 const principal = @import("../../core/principal.zig");
+const public_store = @import("../../services/public_store.zig");
 const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
@@ -427,6 +429,13 @@ test "production journey service rejects premature controls then routes lifecycl
         .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
         .{ .path = "assets/theme.css", .content_type = "text/css" },
     };
+    const v1_store_assets = [_]public_store.ReleaseAsset{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml", .digest = "sha256:7070707070707070707070707070707070707070707070707070707070707070", .size_bytes = 1536 },
+    };
+    const v2_store_assets = [_]public_store.ReleaseAsset{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml", .digest = "sha256:7171717171717171717171717171717171717171717171717171717171717171", .size_bytes = 1600 },
+        .{ .path = "assets/theme.css", .content_type = "text/css", .digest = "sha256:7272727272727272727272727272727272727272727272727272727272727272", .size_bytes = 4096 },
+    };
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .object_access,
@@ -445,6 +454,15 @@ test "production journey service rejects premature controls then routes lifecycl
         .components = &components,
         .assets = &v1_assets,
         .requested_permissions = &permissions,
+        .supply_chain = .{
+            .sbom_digest = "sha256:7373737373737373737373737373737373737373737373737373737373737373",
+            .source_archive_digest = "sha256:7474747474747474747474747474747474747474747474747474747474747474",
+            .build_recipe_digest = "sha256:7575757575757575757575757575757575757575757575757575757575757575",
+            .vulnerability_scan_digest = "sha256:7676767676767676767676767676767676767676767676767676767676767676",
+            .build_provenance_identity = "builder:zigos/reproducible-notes",
+            .reproducible_build = true,
+            .trusted_builder = true,
+        },
     };
     v1.signature = try signReleaseBundle(bundle_signer, v1);
     var v2 = manifest.BundleManifest{
@@ -458,8 +476,21 @@ test "production journey service rejects premature controls then routes lifecycl
         .components = &components,
         .assets = &v2_assets,
         .requested_permissions = &permissions,
+        .supply_chain = .{
+            .sbom_digest = "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            .source_archive_digest = "sha256:7878787878787878787878787878787878787878787878787878787878787878",
+            .build_recipe_digest = "sha256:7979797979797979797979797979797979797979797979797979797979797979",
+            .vulnerability_scan_digest = "sha256:8080808080808080808080808080808080808080808080808080808080808080",
+            .build_provenance_identity = "builder:zigos/reproducible-notes",
+            .reproducible_build = true,
+            .trusted_builder = true,
+        },
     };
     v2.signature = try signReleaseBundle(bundle_signer, v2);
+    var store_channel = public_store.Channel.init("store:zigos/public", .stable);
+    try store_channel.trustPublisher("Example Software", try signing.publicKey(bundle_signer));
+    try store_channel.publish(store_channel.prepareRelease(v1, &v1_store_assets, 1));
+    try store_channel.publish(store_channel.prepareRelease(v2, &v2_store_assets, 1));
 
     var package_capabilities = capability.CapabilityTable.init();
     var packages_service = package_service.Service.init();
@@ -536,12 +567,13 @@ test "production journey service rejects premature controls then routes lifecycl
             .task_title = "Notes",
             .bundle_id = "app.notes.daily",
             .display_name = "Notes",
-            .source_identity = "store:zigos",
+            .source_identity = "store:zigos/public",
             .sync_destination = "relay.production.zigos",
             .device_label = "tablet",
             .policy_label = "production-journey-defaults",
             .install_bundle = v1,
             .update_bundle = v2,
+            .public_store_channel = &store_channel,
             .ui_surface_id = 97,
             .image_id = 97_001,
             .share_principal = collaborator,
@@ -571,10 +603,27 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expect(sync.isTrustedDevice(primary_device));
     try std.testing.expect(sync.isTrustedDevice(paired_device));
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .install_app, .tick = 22 }).status);
+    const installed_bundle = packages_service.find("app.notes.daily").?;
+    try std.testing.expectEqualStrings("store:zigos/public", installed_bundle.sourceIdentitySlice());
+    try std.testing.expectEqual(@as(usize, 1), installed_bundle.activeRevision().asset_count);
+    try std.testing.expectEqualStrings("assets/icon.svg", installed_bundle.activeRevision().assets[0].pathSlice());
+    try std.testing.expectEqualStrings("sha256:7373737373737373737373737373737373737373737373737373737373737373", installed_bundle.activeRevision().supply_chain.sbomDigestSlice());
+    const installed_launch_plan = try packages_service.buildLaunchPlan("app.notes.daily");
+    try std.testing.expectEqualStrings("store:zigos/public", installed_launch_plan.provenance.source_identity);
+    try std.testing.expectEqual(@as(u64, 1), installed_launch_plan.provenance.release_transparency.sequence);
     const start_response = journey.dispatch(.{ .control = .start_task, .tick = 23 });
     try std.testing.expectEqual(ProductionJourneyStatus.ok, start_response.status);
     const started_task_id = start_response.task_id;
     try std.testing.expect(started_task_id != 0);
+    const started_task = runtime_service.runtimePtr().find(started_task_id).?;
+    try std.testing.expectEqualStrings("store:zigos/public", started_task.launchSourceIdentitySlice());
+    try std.testing.expect(started_task.launch.hasReleaseTransparency());
+    try std.testing.expectEqual(@as(u64, 1), started_task.launch.release_transparency_sequence);
+    try std.testing.expectEqual(native_util.fnv1a64("store:zigos/public"), started_task.latestProvenanceEvent().?.source_identity_fingerprint);
+    try std.testing.expect(started_task.latestProvenanceEvent().?.hasReleaseTransparency());
+    try std.testing.expectEqual(@as(u64, 1), started_task.latestProvenanceEvent().?.release_transparency_sequence);
+    try std.testing.expect(std.mem.indexOf(u8, started_task.latestProvenanceEvent().?.detailSlice(), "source=store:zigos/public") != null);
+    try std.testing.expect(std.mem.indexOf(u8, started_task.latestProvenanceEvent().?.detailSlice(), "seq=1") != null);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .open_workspace, .tick = 24 }).status);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .open_document, .tick = 25 }).status);
     var marker_buffer: [SMALL_EXPORT_BUFFER_BYTES]u8 = undefined;
@@ -612,20 +661,64 @@ test "production journey service rejects premature controls then routes lifecycl
         .network_scope = .trusted_overlay,
         .now_ticks = 28,
     }));
+    const tablet_offline = try storage.putVersion(.{
+        .preferred_object_id = shared_entry.object_id,
+        .object_type = .document,
+        .payload = "tablet offline conflict",
+        .metadata = try object_store.signMetadata(
+            user_signer,
+            "tablet-offline-conflict",
+            "text/markdown",
+            .document,
+            "tablet offline conflict",
+            28,
+        ),
+        .parent_version_id = edited_entry.version_id,
+    });
+    try sync_port.setReplicaVersion(
+        sync_authority,
+        workspace_id,
+        paired_device,
+        document_path,
+        shared_entry.object_id,
+        tablet_offline.version_id,
+    );
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .sync_workspace, .tick = 29 }).status);
     const synced_markers = try journey.renderMarkerContract(&marker_buffer);
     try expectContains(synced_markers, boot_markers.notes_daily_driver_share_sync_ok);
     try expectNotContains(synced_markers, boot_markers.notes_daily_driver_update_rollback_ok);
 
     try std.testing.expectEqual(edited_entry.version_id.raw(), sync.replicaVersion(workspace_id, paired_device, document_path).?);
+    try std.testing.expect(sync.findConflict(workspace_id, paired_device, document_path) == null);
+    try std.testing.expect(journey.share_object_scope_verified);
+    try std.testing.expect(journey.share_write_verified);
+    try std.testing.expectEqual(shared_entry.object_id.raw(), journey.shared_object_id);
+    try std.testing.expectEqual(@as(u64, 508), journey.share_expires_at_ticks);
+    try std.testing.expectEqual(@as(u16, 1), journey.sync_conflict_count);
+    try std.testing.expect(journey.sync_conflict_reviewed);
+    try std.testing.expect(journey.sync_conflict_resolved);
+    try std.testing.expectEqual(edited_entry.version_id.raw(), journey.sync_conflict_local_version_id);
+    try std.testing.expectEqual(tablet_offline.version_id.raw(), journey.sync_conflict_remote_version_id);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .update_app, .tick = 30 }).status);
-    try std.testing.expectEqual(@as(u16, 1), packages_service.find("app.notes.daily").?.versionMinor());
+    const updated_bundle = packages_service.find("app.notes.daily").?;
+    try std.testing.expectEqual(@as(u16, 1), updated_bundle.versionMinor());
+    try std.testing.expectEqualStrings("store:zigos/public", updated_bundle.sourceIdentitySlice());
+    try std.testing.expectEqual(@as(usize, 2), updated_bundle.activeRevision().asset_count);
+    try std.testing.expectEqualStrings("assets/theme.css", updated_bundle.activeRevision().assets[1].pathSlice());
+    try std.testing.expectEqualStrings("sha256:7777777777777777777777777777777777777777777777777777777777777777", updated_bundle.activeRevision().supply_chain.sbomDigestSlice());
+    const updated_launch_plan = try packages_service.buildLaunchPlan("app.notes.daily");
+    try std.testing.expectEqual(@as(u64, 2), updated_launch_plan.provenance.release_transparency.sequence);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .rollback_update, .tick = 31 }).status);
     const rolled_back_markers = try journey.renderMarkerContract(&marker_buffer);
     try expectContains(rolled_back_markers, boot_markers.notes_daily_driver_update_rollback_ok);
     try expectNotContains(rolled_back_markers, boot_markers.notes_daily_driver_recovery_remove_ok);
 
-    try std.testing.expectEqual(@as(u16, 0), packages_service.find("app.notes.daily").?.versionMinor());
+    const rolled_back_bundle = packages_service.find("app.notes.daily").?;
+    try std.testing.expectEqual(@as(u16, 0), rolled_back_bundle.versionMinor());
+    try std.testing.expectEqual(@as(usize, 1), rolled_back_bundle.activeRevision().asset_count);
+    try std.testing.expectEqualStrings("sha256:7373737373737373737373737373737373737373737373737373737373737373", rolled_back_bundle.activeRevision().supply_chain.sbomDigestSlice());
+    const rollback_launch_plan = try packages_service.buildLaunchPlan("app.notes.daily");
+    try std.testing.expectEqual(@as(u64, 1), rollback_launch_plan.provenance.release_transparency.sequence);
     try std.testing.expectEqual(edited_entry.version_id, (try storage.resolve(workspace_id, document_path)).version_id);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .recover_system, .tick = 32 }).status);
     try std.testing.expectEqual(edited_entry.version_id, (try storage.resolve(workspace_id, document_path)).version_id);
@@ -660,7 +753,7 @@ test "production journey service rejects premature controls then routes lifecycl
         journey.dispatch(.{ .control = .install_app, .tick = 36 }).status,
     );
 
-    try std.testing.expectEqual(@as(usize, 13), ledger.countMatching(.{ .kind = .task_flow }));
+    try std.testing.expectEqual(@as(usize, 14), ledger.countMatching(.{ .kind = .task_flow }));
     try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .policy_change }));
     try std.testing.expectEqual(@as(usize, 3), ledger.countMatching(.{ .kind = .device_trust_change }));
     try std.testing.expect(runtime_checkpoint_store.has_checkpoint);
@@ -677,7 +770,9 @@ test "production journey service rejects premature controls then routes lifecycl
     try expectContains(rendered, "edited=yes");
     try expectContains(rendered, "task=0 bundle=app.notes.daily");
     try expectContains(rendered, "visible_windows=0");
-    try expectContains(rendered, "task_flow_events=13");
+    try expectContains(rendered, "task_flow_events=14");
+    try expectContains(rendered, "share object_scoped=yes write_verified=yes");
+    try expectContains(rendered, "sync conflict_count=1 reviewed=yes resolved=yes");
     try expectContains(rendered, "notes_daily_driver complete=yes");
     try expectContains(rendered, boot_markers.notes_daily_driver_complete);
 
@@ -688,6 +783,7 @@ test "production journey service rejects premature controls then routes lifecycl
     try expectContains(exported, "flow_kind=review_permission_request");
     try expectContains(exported, "flow_kind=edit_document");
     try expectContains(exported, "flow_kind=share_document");
+    try expectContains(exported, "flow_kind=sync_conflict_review");
     try expectContains(exported, "flow_kind=recover_system");
 }
 

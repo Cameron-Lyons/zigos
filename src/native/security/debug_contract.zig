@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 
@@ -88,6 +89,10 @@ pub const ProvenanceRecord = struct {
     operation: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     detail_len: usize = 0,
     detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
+    source_identity_fingerprint: u64 = 0,
+    release_transparency_sequence: u64 = 0,
+    release_transparency_root_fingerprint: u64 = 0,
+    release_transparency_log_head_fingerprint: u64 = 0,
     denial: DenialExplanation = .{},
 
     pub fn operationSlice(self: *const ProvenanceRecord) []const u8 {
@@ -98,10 +103,16 @@ pub const ProvenanceRecord = struct {
         return self.detail[0..self.detail_len];
     }
 
+    pub fn hasReleaseTransparency(self: *const ProvenanceRecord) bool {
+        return self.release_transparency_sequence != 0 and
+            self.release_transparency_root_fingerprint != 0 and
+            self.release_transparency_log_head_fingerprint != 0;
+    }
+
     pub fn render(self: *const ProvenanceRecord, buffer: []u8) []const u8 {
         return std.fmt.bufPrint(
             buffer,
-            "trace=0x{x} parent=0x{x} tick={d} kind={s} decision={s} task={d} artifact={d} service={d} capability={d} target={s}:{d} operation={s} detail={s} reason={s}",
+            "trace=0x{x} parent=0x{x} tick={d} kind={s} decision={s} task={d} artifact={d} service={d} capability={d} target={s}:{d} operation={s} detail={s} source_fingerprint=0x{x} seq={d} reason={s}",
             .{
                 self.trace_id,
                 self.parent_trace_id,
@@ -116,6 +127,8 @@ pub const ProvenanceRecord = struct {
                 self.target_id,
                 self.operationSlice(),
                 self.detailSlice(),
+                self.source_identity_fingerprint,
+                self.release_transparency_sequence,
                 @tagName(self.denial.reason),
             },
         ) catch "";
@@ -238,7 +251,21 @@ pub fn launchProvenance(
     signed: bool,
     operation: []const u8,
     bundle_id: []const u8,
+    source_identity: []const u8,
+    transparency_sequence: u64,
+    transparency_root: crypto_hash.Digest,
+    transparency_log_head: crypto_hash.Digest,
 ) ProvenanceRecord {
+    var detail_buffer: [MAX_DETAIL_BYTES]u8 = undefined;
+    const fallback_detail = if (bundle_id.len != 0) bundle_id else if (signed) "signed-launch" else "direct-launch";
+    const detail = if (source_identity.len != 0 or transparency_sequence != 0)
+        std.fmt.bufPrint(
+            &detail_buffer,
+            "bundle={s} source={s} seq={d}",
+            .{ if (bundle_id.len != 0) bundle_id else "unknown", source_identity, transparency_sequence },
+        ) catch fallback_detail
+    else
+        fallback_detail;
     var record = provenance(
         .launch,
         .allowed,
@@ -249,10 +276,14 @@ pub fn launchProvenance(
         .task,
         task_id,
         operation,
-        if (bundle_id.len != 0) bundle_id else if (signed) "signed-launch" else "direct-launch",
+        detail,
         .{},
         0,
     );
+    record.source_identity_fingerprint = if (source_identity.len == 0) 0 else native_util.fnv1a64(source_identity);
+    record.release_transparency_sequence = transparency_sequence;
+    record.release_transparency_root_fingerprint = digestFingerprint(transparency_root);
+    record.release_transparency_log_head_fingerprint = digestFingerprint(transparency_log_head);
     record.artifact_id = image_id;
     record.trace_id = provenanceFingerprint(record);
     return record;
@@ -441,8 +472,17 @@ pub fn provenanceFingerprint(record: ProvenanceRecord) u64 {
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.tick);
     hash = native_util.fnv1a64WithSeed(hash, record.operationSlice());
     hash = native_util.fnv1a64WithSeed(hash, record.detailSlice());
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.source_identity_fingerprint);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.release_transparency_sequence);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.release_transparency_root_fingerprint);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.release_transparency_log_head_fingerprint);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.denial.fingerprint);
     return hash;
+}
+
+fn digestFingerprint(digest: crypto_hash.Digest) u64 {
+    if (std.mem.eql(u8, &digest, &crypto_hash.zero_digest)) return 0;
+    return native_util.fnv1a64(&digest);
 }
 
 fn policyLabel(reason: abi.DenialReason) []const u8 {

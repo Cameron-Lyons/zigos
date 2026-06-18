@@ -1,5 +1,6 @@
 const std = @import("std");
 const compositor_session = @import("compositor_session.zig");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -15,7 +16,36 @@ const DISPLAY_LINE_BUFFER_BYTES: usize = 512;
 pub const Error = error{
     ActiveWindowMissing,
     DisplayTooSmall,
+    ExpectedDisplayTextMissing,
+    InvalidPresentationProof,
     NoSpaceLeft,
+    PresentationBlank,
+};
+
+pub const PresentationProof = struct {
+    width: usize,
+    height: usize,
+    frame_bytes: usize,
+    presented_bytes: usize,
+    non_blank_bytes: usize,
+    content_digest: crypto_hash.Digest,
+    expected_text_bytes: usize,
+    expected_text_present: bool,
+    visible_window_count: usize,
+    active_window_id: u64,
+
+    pub fn verified(self: PresentationProof) bool {
+        return self.width >= MIN_WIDTH and
+            self.height >= MIN_HEIGHT and
+            self.frame_bytes == self.width * self.height and
+            self.presented_bytes == self.frame_bytes and
+            self.non_blank_bytes > 0 and
+            self.expected_text_bytes > 0 and
+            self.expected_text_present and
+            self.visible_window_count > 0 and
+            self.active_window_id != 0 and
+            !std.mem.eql(u8, &self.content_digest, &crypto_hash.zero_digest);
+    }
 };
 
 pub const Framebuffer = struct {
@@ -92,6 +122,51 @@ pub const Framebuffer = struct {
             used += 1;
         }
         return out[0..used];
+    }
+
+    pub fn presentationProof(
+        self: *const Framebuffer,
+        expected_text: []const u8,
+        visible_window_count: usize,
+        active_window_id: u64,
+    ) PresentationProof {
+        var non_blank_bytes: usize = 0;
+        for (self.cells) |cell| {
+            if (cell != ' ') non_blank_bytes += 1;
+        }
+
+        var hasher = crypto_hash.init();
+        crypto_hash.updateInt(&hasher, "width", self.width);
+        crypto_hash.updateInt(&hasher, "height", self.height);
+        crypto_hash.updateBytes(&hasher, "cells", self.cells);
+        crypto_hash.updateInt(&hasher, "visible-window-count", visible_window_count);
+        crypto_hash.updateInt(&hasher, "active-window-id", active_window_id);
+
+        return .{
+            .width = self.width,
+            .height = self.height,
+            .frame_bytes = self.width * self.height,
+            .presented_bytes = self.cells.len,
+            .non_blank_bytes = non_blank_bytes,
+            .content_digest = crypto_hash.finalize(&hasher),
+            .expected_text_bytes = expected_text.len,
+            .expected_text_present = self.containsText(expected_text),
+            .visible_window_count = visible_window_count,
+            .active_window_id = active_window_id,
+        };
+    }
+
+    pub fn requirePresentation(
+        self: *const Framebuffer,
+        expected_text: []const u8,
+        visible_window_count: usize,
+        active_window_id: u64,
+    ) Error!PresentationProof {
+        const proof = self.presentationProof(expected_text, visible_window_count, active_window_id);
+        if (proof.non_blank_bytes == 0) return error.PresentationBlank;
+        if (proof.expected_text_bytes == 0 or !proof.expected_text_present) return error.ExpectedDisplayTextMissing;
+        if (!proof.verified()) return error.InvalidPresentationProof;
+        return proof;
     }
 
     fn drawWindowSummary(
@@ -294,6 +369,13 @@ test "compositor display framebuffer renders windows switching recovery and perm
     var storage: [DEFAULT_STORAGE_BYTES]u8 = undefined;
     var display = try Framebuffer.init(&storage, DEFAULT_WIDTH, DEFAULT_HEIGHT);
     try display.renderSession(&session);
+    const document_proof = try display.requirePresentation(
+        "active_type=document_view",
+        session.visibleWindowCount(),
+        session.active_window_id,
+    );
+    try std.testing.expect(document_proof.verified());
+    try std.testing.expect(document_proof.non_blank_bytes > 0);
     try expectDisplayContains(&display, "active_type=document_view");
     try expectDisplayContains(&display, "title=Document: trip/brief.md");
     try expectDisplayContains(&display, "surface=31");
@@ -362,6 +444,42 @@ test "compositor display framebuffer renders windows switching recovery and perm
     try expectDisplayContains(&display, "permission_scope object=none network=net:trip local=no lease=80");
     try std.testing.expectEqual(document_window.id, session.windowAtOrder(0).?.id);
     try std.testing.expectEqual(task_window.id, session.active_window_id);
+}
+
+test "compositor display presentation proof requires visible rendered content" {
+    var runtime = task_runtime.Runtime.init();
+    const app_task = try makeAppTask(&runtime);
+    var session = compositor_session.Session.init();
+    var storage: [DEFAULT_STORAGE_BYTES]u8 = undefined;
+    var display = try Framebuffer.init(&storage, DEFAULT_WIDTH, DEFAULT_HEIGHT);
+
+    try std.testing.expectError(
+        error.PresentationBlank,
+        display.requirePresentation("active_type=", 1, 1),
+    );
+
+    _ = try session.openDocumentView(app_task, 1_200, "trip/brief.md");
+    try display.renderSession(&session);
+    const proof = try display.requirePresentation(
+        "active_type=document_view",
+        session.visibleWindowCount(),
+        session.active_window_id,
+    );
+    try std.testing.expect(proof.verified());
+    try std.testing.expectEqual(@as(usize, DEFAULT_WIDTH * DEFAULT_HEIGHT), proof.frame_bytes);
+    try std.testing.expectEqual(proof.frame_bytes, proof.presented_bytes);
+    try std.testing.expectError(
+        error.ExpectedDisplayTextMissing,
+        display.requirePresentation("definitely absent text", session.visibleWindowCount(), session.active_window_id),
+    );
+    try std.testing.expectError(
+        error.InvalidPresentationProof,
+        display.requirePresentation("active_type=document_view", 0, session.active_window_id),
+    );
+    try std.testing.expectError(
+        error.InvalidPresentationProof,
+        display.requirePresentation("active_type=document_view", session.visibleWindowCount(), 0),
+    );
 }
 
 test "compositor display framebuffer rejects undersized surfaces" {

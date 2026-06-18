@@ -655,21 +655,21 @@ fn proveBootedRenderedPermissionReviewSurface(
     surface.bindLedger(&ledger);
 
     try surface.begin();
-    try expectDisplayFrameContains(&display, "active_type=app_panel");
-    try expectDisplayFrameContains(&display, "permission_scope object=ws:trip network=none local=yes lease=400");
-    try expectDisplayFrameContains(&display, "control=allow_local_requested_lease window=1 kind=object_access resource=ws:trip lease=400");
+    try expectDisplayFrameContains(&display, session, "active_type=app_panel");
+    try expectDisplayFrameContains(&display, session, "permission_scope object=ws:trip network=none local=yes lease=400");
+    try expectDisplayFrameContains(&display, session, "control=allow_local_requested_lease window=1 kind=object_access resource=ws:trip lease=400");
 
     try surface.click(.allow_local_requested_lease);
-    try expectDisplayFrameContains(&display, "permission_decision kind=object_access resource=ws:trip decision=allow");
-    try expectDisplayFrameContains(&display, "permission_scope object=none network=net:trip local=no lease=80");
-    try expectDisplayFrameContains(&display, "control=deny window=1 kind=network_egress resource=net:trip");
+    try expectDisplayFrameContains(&display, session, "permission_decision kind=object_access resource=ws:trip decision=allow");
+    try expectDisplayFrameContains(&display, session, "permission_scope object=none network=net:trip local=no lease=80");
+    try expectDisplayFrameContains(&display, session, "control=deny window=1 kind=network_egress resource=net:trip");
 
     try surface.click(.deny);
     const grants = try surface.finish(&grants_buffer);
     try std.testing.expectEqual(@as(usize, 1), grants.len);
     try std.testing.expectEqual(manifest.PermissionKind.object_access, grants[0].kind);
     try std.testing.expectEqual(@as(?u64, 557), grants[0].expires_at_ticks);
-    try expectDisplayFrameContains(&display, "permission_decision kind=network_egress resource=net:trip decision=deny");
+    try expectDisplayFrameContains(&display, session, "permission_decision kind=network_egress resource=net:trip decision=deny");
 
     var mediator = policy_mediation.PolicyMediator.init(
         .{ .kind = .policy_authority, .serial = 82_030 },
@@ -729,11 +729,25 @@ fn assertDisplayContains(session: *const compositor_session.Session, needle: []c
         compositor_display.DEFAULT_HEIGHT,
     );
     try display.renderSession(session);
-    if (!display.containsText(needle)) return error.ExpectedDisplaySubstringMissing;
+    const proof = try display.requirePresentation(
+        needle,
+        session.visibleWindowCount(),
+        session.active_window_id,
+    );
+    try std.testing.expect(proof.verified());
 }
 
-fn expectDisplayFrameContains(display: *const compositor_display.Framebuffer, needle: []const u8) !void {
-    if (!display.containsText(needle)) return error.ExpectedDisplaySubstringMissing;
+fn expectDisplayFrameContains(
+    display: *const compositor_display.Framebuffer,
+    session: *const compositor_session.Session,
+    needle: []const u8,
+) !void {
+    const proof = try display.requirePresentation(
+        needle,
+        session.visibleWindowCount(),
+        session.active_window_id,
+    );
+    try std.testing.expect(proof.verified());
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {

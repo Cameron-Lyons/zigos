@@ -55,8 +55,11 @@ REQUIRED_ARTIFACTS=(
   "zig-out/bin/userspace-network-stack.elf"
   "zig-out/bin/userspace-storage-driver.elf"
   "zig-out/bin/userspace-sync-service.elf"
+  "SECURITY.md"
   "spec/production_readiness.json"
   "spec/release_security/release_artifacts.json"
+  "spec/release_security/release_keyring.json"
+  "spec/release_security/revoked_release_keys.json"
   "spec/hardware/nuc11tnki5-required-markers.txt"
 )
 
@@ -102,12 +105,18 @@ mkdir -p "$OUTPUT_PATH"
 manifest_path="$OUTPUT_PATH/proof-manifest.txt"
 firmware_path="$OUTPUT_PATH/firmware-settings.txt"
 power_path="$OUTPUT_PATH/power-cycle-notes.txt"
+attestation_path="$OUTPUT_PATH/attestation-lifecycle.txt"
 metadata_markers_path="$OUTPUT_PATH/operator-metadata-markers.txt"
 digests_path="$OUTPUT_PATH/artifact-digests.sha256"
 
 prepared_at_utc="$(jsonish_datetime)"
-repo_commit="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')"
-repo_dirty_files="$(git -C "$ROOT_DIR" status --short 2>/dev/null | wc -l | tr -d ' ')"
+if ! command -v jj >/dev/null 2>&1; then
+  printf 'Jujutsu (jj) is required to prepare NUC11TNKi5 proof metadata.\n' >&2
+  exit 1
+fi
+repo_commit="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"')"
+repo_change_id="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'change_id ++ "\n"')"
+repo_dirty_files="$(jj -R "$ROOT_DIR" diff -r @ --name-only | wc -l | tr -d ' ')"
 
 write_if_missing "$manifest_path" <<EOF
 target_id=intel-nuc11tnki5
@@ -116,11 +125,14 @@ evidence_source=real_hardware
 serial_log=serial.log
 firmware_settings=firmware-settings.txt
 power_cycle_notes=power-cycle-notes.txt
+attestation_lifecycle=attestation-lifecycle.txt
 artifact_digests=artifact-digests.sha256
 required_markers=spec/hardware/nuc11tnki5-required-markers.txt
 prepared_at_utc=$prepared_at_utc
 captured_at_utc=TODO-fill-after-run
 operator=TODO-fill-operator
+repo_vcs=jj
+repo_change_id=$repo_change_id
 repo_commit=$repo_commit
 repo_dirty_files=$repo_dirty_files
 EOF
@@ -130,8 +142,8 @@ target_id=intel-nuc11tnki5
 board_sku=NUC11TNKi5
 bios_version=TODO-fill-from-NUC-setup
 boot_mode=UEFI
-secure_boot=TODO-enabled-or-disabled
-storage_mode=TODO-nvme-mode
+secure_boot=TODO-enabled-disabled-or-disabled-for-local-proof-media
+storage_mode=TODO-fill-nvme
 wake_suspend=TODO-suspend-wake-settings
 changed_options=TODO-list-any-changed-firmware-options
 EOF
@@ -152,7 +164,28 @@ update_rollback_cycles=0
 notes=TODO-record-observed-hangs-panics-retries-and-recovery-behavior
 EOF
 
+write_if_missing "$attestation_path" <<'EOF'
+target_id=intel-nuc11tnki5
+evidence_source=real_hardware
+operator=TODO-fill-operator
+captured_at_utc=TODO-fill-attestation-capture-time
+provider=TODO-fill-tpm-secure-enclave-hsm-or-kms-provider
+root_key_id=TODO-fill-root-key-id
+initial_generation=0
+active_generation=0
+revoked_generation_count=0
+stale_generation_rejected=TODO-true-after-verifier-rejected-old-generation
+revoked_generation_rejected=TODO-true-after-verifier-rejected-revoked-generation
+verifier_rejected_stale_attestation=TODO-true-after-response-verification-failed
+verifier_metadata_digest_bound=TODO-true-after-request-bound-metadata-digest
+verifier_metadata_digest=TODO-fill-64-hex-digest
+attestation_request_digest=TODO-fill-64-hex-request-digest
+notes=TODO-record-root-rotation-revocation-and-verifier-rejection-evidence
+EOF
+
 cat > "$metadata_markers_path" <<EOF
+$TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE
+$TARGET_PREFIX:BOARD_SKU:NUC11TNKi5
 $TARGET_PREFIX:PROOF_MANIFEST:RECORDED
 $TARGET_PREFIX:FIRMWARE_SETTINGS:RECORDED
 $TARGET_PREFIX:POWER_CYCLE_NOTES:RECORDED

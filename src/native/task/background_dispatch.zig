@@ -1,5 +1,7 @@
 const std = @import("std");
 const manifest = @import("../policy/manifest.zig");
+const policy_object = @import("../policy/policy_object.zig");
+const signing = @import("../core/signing.zig");
 const units = @import("../core/units.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
@@ -15,6 +17,7 @@ pub const RecordState = enum(u8) {
     running,
     delayed,
     denied,
+    expired,
     completed,
 };
 
@@ -27,11 +30,13 @@ pub const DecisionReason = enum(u8) {
     bundle_mismatch,
     task_not_declared,
     background_permission_missing,
+    policy_denied,
     trigger_mismatch,
     budget_exceeded,
     network_denied,
     visibility_denied,
     throttled,
+    expired,
 };
 
 pub const DispatchPolicy = struct {
@@ -53,10 +58,20 @@ pub const DispatchRecord = struct {
     network: manifest.BackgroundNetworkMode,
     visibility: manifest.BackgroundVisibility,
     state: RecordState,
+    reason: DecisionReason = .allowed,
     tick: u64,
+    completed_tick: u64 = 0,
 
     pub fn backgroundTaskIdSlice(self: *const DispatchRecord) []const u8 {
         return self.background_task_id[0..self.background_task_id_len];
+    }
+
+    pub fn deadlineTick(self: *const DispatchRecord) u64 {
+        return std.math.add(u64, self.tick, @as(u64, self.expected_duration_seconds)) catch std.math.maxInt(u64);
+    }
+
+    pub fn isOverdue(self: *const DispatchRecord, now_tick: u64) bool {
+        return self.state == .running and now_tick >= self.deadlineTick();
     }
 };
 
@@ -69,6 +84,9 @@ pub const DispatchDecision = struct {
     budget: manifest.BackgroundResourceBudget = .{},
     network: manifest.BackgroundNetworkMode = .none,
     visibility: manifest.BackgroundVisibility = .status_only,
+    policy_reason: policy_object.DecisionReason = .none,
+    blocking_policy_id: u64 = 0,
+    blocking_policy_generation: u32 = 0,
 };
 
 pub const Error = task_runtime.Error || error{
@@ -83,6 +101,8 @@ const RecordSlot = struct {
 
 pub const Controller = struct {
     policy: DispatchPolicy = .{},
+    policy_directory: ?*const policy_object.Directory = null,
+    policy_subjects: policy_object.SubjectSet = .{},
     next_record_id: u64 = 1,
     records: [MAX_RECORDS]RecordSlot = [_]RecordSlot{RecordSlot{}} ** MAX_RECORDS,
 
@@ -92,6 +112,20 @@ pub const Controller = struct {
 
     pub fn configure(self: *Controller, policy: DispatchPolicy) void {
         self.policy = policy;
+    }
+
+    pub fn configurePolicy(
+        self: *Controller,
+        directory: *const policy_object.Directory,
+        subjects: policy_object.SubjectSet,
+    ) void {
+        self.policy_directory = directory;
+        self.policy_subjects = subjects;
+    }
+
+    pub fn clearPolicy(self: *Controller) void {
+        self.policy_directory = null;
+        self.policy_subjects = .{};
     }
 
     pub fn dispatch(
@@ -140,6 +174,11 @@ pub const Controller = struct {
         if (!visibilityAllowed(task, background_task.visibility)) {
             return self.recordDecision(task_id, background_task_id, trigger, background_task, .visibility_denied, tick);
         }
+        if (self.policyDecision(background_task)) |policy_decision| {
+            if (!policy_decision.allowed) {
+                return self.recordPolicyDecision(task_id, background_task_id, trigger, background_task, policy_decision, tick);
+            }
+        }
         if (!runtime.canReserveBackgroundWork(task.id, background_task.budget)) {
             return self.recordDecision(task_id, background_task_id, trigger, background_task, .budget_exceeded, tick);
         }
@@ -168,14 +207,32 @@ pub const Controller = struct {
         for (&self.records) |*slot| {
             if (!slot.in_use or slot.record.id != record_id) continue;
             if (slot.record.state != .running) return false;
-            slot.record.state = .completed;
             if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) {
-                slot.record.state = .running;
                 return false;
             }
+            slot.record.state = .completed;
             return true;
         }
         return error.DispatchRecordNotFound;
+    }
+
+    pub fn expireOverdue(self: *Controller, runtime: *task_runtime.Runtime, now_tick: u64) Error!usize {
+        var expired_count: usize = 0;
+        for (&self.records) |*slot| {
+            if (!slot.in_use) continue;
+            if (!slot.record.isOverdue(now_tick)) continue;
+            if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) continue;
+            slot.record.state = .expired;
+            slot.record.reason = .expired;
+            slot.record.completed_tick = now_tick;
+            expired_count += 1;
+            try runtime.audit(slot.record.task_id, .{
+                .kind = .background_expired,
+                .detail = @intFromEnum(slot.record.trigger),
+                .tick = now_tick,
+            });
+        }
+        return expired_count;
     }
 
     pub fn activeRecordCount(self: *const Controller) usize {
@@ -220,6 +277,46 @@ pub const Controller = struct {
         };
     }
 
+    fn recordPolicyDecision(
+        self: *Controller,
+        task_id: u64,
+        background_task_id: []const u8,
+        trigger: manifest.BackgroundTrigger,
+        background_task: manifest.BackgroundTaskDecl,
+        policy_decision: policy_object.PolicyDecision,
+        tick: u64,
+    ) Error!DispatchDecision {
+        const record = try self.appendRecord(task_id, background_task_id, trigger, background_task, .policy_denied, tick);
+        return .{
+            .allowed = false,
+            .delayed = false,
+            .reason = .policy_denied,
+            .record_id = record.id,
+            .expected_duration_seconds = background_task.expected_duration_seconds,
+            .budget = background_task.budget,
+            .network = background_task.network,
+            .visibility = background_task.visibility,
+            .policy_reason = policy_decision.reason,
+            .blocking_policy_id = policy_decision.blocking_policy_id,
+            .blocking_policy_generation = policy_decision.blocking_generation,
+        };
+    }
+
+    fn policyDecision(
+        self: *const Controller,
+        background_task: manifest.BackgroundTaskDecl,
+    ) ?policy_object.PolicyDecision {
+        const directory = self.policy_directory orelse return null;
+        return directory.backgroundActivityDecision(self.policy_subjects, .{
+            .expected_duration_seconds = background_task.expected_duration_seconds,
+            .cpu_time_ticks = background_task.budget.cpu_time_ticks,
+            .memory_bytes = background_task.budget.memory_bytes,
+            .shared_memory_bytes = background_task.budget.shared_memory_bytes,
+            .network = background_task.network,
+            .visibility = background_task.visibility,
+        });
+    }
+
     fn appendRecord(
         self: *Controller,
         task_id: u64,
@@ -240,8 +337,10 @@ pub const Controller = struct {
         slot.record.state = switch (reason) {
             .allowed => .running,
             .throttled => .delayed,
+            .expired => .expired,
             else => .denied,
         };
+        slot.record.reason = reason;
         slot.record.tick = tick;
         if (background_task) |task| {
             slot.record.expected_duration_seconds = task.expected_duration_seconds;
@@ -296,6 +395,7 @@ fn zeroRecord() DispatchRecord {
         .network = .none,
         .visibility = .status_only,
         .state = .completed,
+        .reason = .allowed,
         .tick = 0,
     };
 }
@@ -501,6 +601,71 @@ test "background dispatch denies remote work for local-only tasks and user-visib
     try std.testing.expectEqual(DecisionReason.visibility_denied, visible_denied.reason);
 }
 
+test "background dispatch enforces signed background activity policy before reserving work" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createActiveTestTask(&runtime, .{
+        .serial = 313,
+        .bundle_id = "app.policy-background",
+        .cpu_time_ticks = 5_000,
+        .memory_bytes = TEST_SMALL_APP_MEMORY_BYTES,
+        .local_only = false,
+    });
+
+    var policies = policy_object.Directory.init();
+    const policy = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 313,
+        .issuer = .{ .kind = .policy_authority, .serial = 313 },
+        .label = "background-activity-policy",
+        .max_background_duration_seconds = 30,
+        .max_background_cpu_time_ticks = 1_000,
+        .max_background_memory_bytes = TEST_SYNC_BACKGROUND_MEMORY_BYTES,
+        .max_background_shared_memory_bytes = kibibytes(8),
+        .allow_remote_background_network = false,
+        .require_visible_background_activity = true,
+    }, .{
+        .label = "background-policy-key",
+        .seed = signing.seedFromByte(0xD1),
+    });
+
+    const permissions = [_]manifest.PermissionRequest{
+        backgroundRunPermission("safe"),
+        backgroundRunPermission("remote"),
+        backgroundRunPermission("hidden"),
+        backgroundRunPermission("slow"),
+    };
+    const tasks = [_]manifest.BackgroundTaskDecl{
+        .{ .id = "safe", .trigger = .sync_completion, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 500, .memory_bytes = kibibytes(32), .shared_memory_bytes = kibibytes(4) }, .network = .local_network_only, .visibility = .status_only },
+        .{ .id = "remote", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 500, .memory_bytes = kibibytes(32), .shared_memory_bytes = kibibytes(4) }, .network = .named_domains, .visibility = .status_only },
+        .{ .id = "hidden", .trigger = .local_object_change, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 500, .memory_bytes = kibibytes(32), .shared_memory_bytes = kibibytes(4) }, .network = .none, .visibility = .hidden },
+        .{ .id = "slow", .trigger = .media_export_completion, .expected_duration_seconds = 31, .budget = .{ .cpu_time_ticks = 500, .memory_bytes = kibibytes(32), .shared_memory_bytes = kibibytes(4) }, .network = .none, .visibility = .status_only },
+    };
+    const bundle = testBundle("app.policy-background", "Policy Background", &permissions, &tasks);
+
+    var controller = Controller.init();
+    controller.configurePolicy(&policies, .{ .organization_id = 313 });
+
+    const safe = try controller.dispatch(&runtime, task.id, bundle, "safe", .sync_completion, 27);
+    try std.testing.expect(safe.allowed);
+    try std.testing.expect(try controller.complete(&runtime, safe.record_id.?));
+
+    const remote = try controller.dispatch(&runtime, task.id, bundle, "remote", .push_event, 28);
+    try std.testing.expectEqual(DecisionReason.policy_denied, remote.reason);
+    try std.testing.expectEqual(policy_object.DecisionReason.background_network_denied, remote.policy_reason);
+    try std.testing.expectEqual(policy.id, remote.blocking_policy_id);
+    try std.testing.expectEqual(policy.generation, remote.blocking_policy_generation);
+
+    const hidden = try controller.dispatch(&runtime, task.id, bundle, "hidden", .local_object_change, 29);
+    try std.testing.expectEqual(DecisionReason.policy_denied, hidden.reason);
+    try std.testing.expectEqual(policy_object.DecisionReason.background_visibility_denied, hidden.policy_reason);
+
+    const slow = try controller.dispatch(&runtime, task.id, bundle, "slow", .media_export_completion, 30);
+    try std.testing.expectEqual(DecisionReason.policy_denied, slow.reason);
+    try std.testing.expectEqual(policy_object.DecisionReason.background_duration_denied, slow.policy_reason);
+
+    try std.testing.expectEqual(@as(u16, 0), task.background_active_count);
+}
+
 test "background dispatch requires the launched bundle and explicit run rights" {
     var runtime = task_runtime.Runtime.init();
     const task = try createActiveTestTask(&runtime, .{ .serial = 303, .local_only = true });
@@ -547,4 +712,41 @@ test "background dispatch reuses completed and denied record slots" {
     }
     try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
     try std.testing.expectEqual(task.budget.cpu_time_ticks, task.background_cpu_consumed_ticks);
+}
+
+test "background dispatch expires overdue work and releases reservations" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createActiveTestTask(&runtime, .{
+        .serial = 305,
+        .local_only = false,
+    });
+
+    const permissions = [_]manifest.PermissionRequest{
+        backgroundRunPermission(TEST_SYNC_BACKGROUND_ID),
+    };
+    const tasks = [_]manifest.BackgroundTaskDecl{
+        syncBackgroundTask(),
+    };
+    const bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &permissions, &tasks);
+
+    var controller = Controller.init();
+    const decision = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 100);
+    try std.testing.expect(decision.allowed);
+    try std.testing.expectEqual(@as(u16, 1), task.background_active_count);
+    try std.testing.expectEqual(TEST_SYNC_BACKGROUND_MEMORY_BYTES, task.background_reserved_memory_bytes);
+
+    try std.testing.expectEqual(@as(usize, 0), try controller.expireOverdue(&runtime, 129));
+    try std.testing.expectEqual(@as(u16, 1), task.background_active_count);
+
+    try std.testing.expectEqual(@as(usize, 1), try controller.expireOverdue(&runtime, 130));
+    try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
+    try std.testing.expectEqual(@as(u16, 0), task.background_active_count);
+    try std.testing.expectEqual(@as(usize, 0), task.background_reserved_memory_bytes);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.background_expired, task.latestAuditEvent().?.kind);
+
+    const latest = controller.latestRecord().?;
+    try std.testing.expectEqual(RecordState.expired, latest.state);
+    try std.testing.expectEqual(DecisionReason.expired, latest.reason);
+    try std.testing.expectEqual(@as(u64, 130), latest.completed_tick);
+    try std.testing.expect(!try controller.complete(&runtime, decision.record_id.?));
 }

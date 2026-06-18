@@ -8,6 +8,7 @@ const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
 const userspace_executor = @import("userspace_executor.zig");
 const userspace_loader = @import("userspace_loader.zig");
+const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -140,6 +141,7 @@ pub const Scheduler = struct {
     resource_state: accelerator_scheduler.SystemState = .{},
     resource_telemetry_source: accelerator_scheduler.TelemetrySource = .synthetic,
     resource_telemetry_observed_tick: u64 = 0,
+    resource_hardware_evidence_complete: bool = false,
     last_dispatch_tick: u64 = 0,
     ready_marker_printed: bool = false,
     active_marker_printed: bool = false,
@@ -168,6 +170,7 @@ pub const Scheduler = struct {
         self.resource_state = .{};
         self.resource_telemetry_source = .synthetic;
         self.resource_telemetry_observed_tick = 0;
+        self.resource_hardware_evidence_complete = false;
         self.last_dispatch_tick = 0;
         self.ready_marker_printed = false;
         self.active_marker_printed = false;
@@ -196,6 +199,7 @@ pub const Scheduler = struct {
         self.resource_state = state;
         self.resource_telemetry_source = .synthetic;
         self.resource_telemetry_observed_tick = 0;
+        self.resource_hardware_evidence_complete = false;
     }
 
     pub fn configureResourceTelemetry(self: *Scheduler, sample: accelerator_scheduler.TelemetrySample) void {
@@ -207,6 +211,7 @@ pub const Scheduler = struct {
         self.resource_state = sample.toSystemState();
         self.resource_telemetry_source = sample.source;
         self.resource_telemetry_observed_tick = sample.observed_tick;
+        self.resource_hardware_evidence_complete = sample.hardwareReaderEvidenceComplete();
     }
 
     pub fn configureResourceTelemetryFromProvider(
@@ -464,7 +469,7 @@ pub const Scheduler = struct {
                 {
                     slot.resource_class = updated_task.resourceClass();
                     if (!slot.dispatch_request_configured) slot.dispatch_request = deriveDispatchRequest(updated_task);
-                    slot.deadline_tick = deadlineFromNow(slot.resource_class, now_ticks);
+                    slot.deadline_tick = deadlineAfterDispatch(slot.resource_class, now_ticks);
                     _ = self.enqueueReadyIndex(index, slot.resource_class);
                 }
             }
@@ -552,14 +557,22 @@ pub const Scheduler = struct {
     fn selectReadyResourceClass(self: *const Scheduler, now_ticks: u64) ?accelerator_scheduler.ResourceClass {
         var deadline_class: ?accelerator_scheduler.ResourceClass = null;
         var earliest_deadline: u64 = std.math.maxInt(u64);
+        var selected_dispatch_count: u64 = std.math.maxInt(u64);
+        var selected_last_dispatch_tick: u64 = std.math.maxInt(u64);
         for (resource_priority_order) |class| {
             if (!self.resourceClassDispatchable(class)) continue;
             const queue_index = resourceClassIndex(class);
             const head = self.ready_heads[queue_index];
             if (head == no_index) continue;
-            const deadline = self.slots.slots[head].deadline_tick;
-            if (deadline != 0 and deadline <= now_ticks and deadline < earliest_deadline) {
+            const slot = &self.slots.slots[head];
+            const deadline = slot.deadline_tick;
+            if (deadline != 0 and
+                deadline <= now_ticks and
+                expiredReadyCandidateBeats(slot, deadline, earliest_deadline, selected_dispatch_count, selected_last_dispatch_tick))
+            {
                 earliest_deadline = deadline;
+                selected_dispatch_count = slot.dispatch_count;
+                selected_last_dispatch_tick = slot.last_dispatch_tick;
                 deadline_class = class;
             }
         }
@@ -749,12 +762,18 @@ pub const Scheduler = struct {
     }
 
     fn physicalEngineAvailable(self: *const Scheduler, engine: accelerator_scheduler.Engine) bool {
+        const telemetry_ready = self.hardwareQueueTelemetryReady();
         return switch (engine) {
             .cpu => true,
-            .gpu => self.observedResourceTelemetry() and self.resource_state.gpu_available,
-            .npu => self.observedResourceTelemetry() and self.resource_state.npu_available,
-            .media => self.observedResourceTelemetry() and self.resource_state.media_available,
+            .gpu => telemetry_ready and self.resource_state.gpu_available,
+            .npu => telemetry_ready and self.resource_state.npu_available,
+            .media => telemetry_ready and self.resource_state.media_available,
         };
+    }
+
+    fn hardwareQueueTelemetryReady(self: *const Scheduler) bool {
+        if (!self.observedResourceTelemetry()) return false;
+        return self.resource_telemetry_source != .hardware or self.resource_hardware_evidence_complete;
     }
 
     fn accountDeadline(self: *Scheduler, slot: *Slot, now_ticks: u64) void {
@@ -966,6 +985,25 @@ fn deadlineFromNow(class: accelerator_scheduler.ResourceClass, now_ticks: u64) u
     return std.math.add(u64, now_ticks, delta) catch std.math.maxInt(u64);
 }
 
+fn deadlineAfterDispatch(class: accelerator_scheduler.ResourceClass, now_ticks: u64) u64 {
+    const next_quantum_tick = std.math.add(u64, now_ticks, DISPATCH_CPU_TICK_COST) catch std.math.maxInt(u64);
+    return deadlineFromNow(class, next_quantum_tick);
+}
+
+fn expiredReadyCandidateBeats(
+    slot: *const Slot,
+    deadline: u64,
+    selected_deadline: u64,
+    selected_dispatch_count: u64,
+    selected_last_dispatch_tick: u64,
+) bool {
+    if (deadline < selected_deadline) return true;
+    if (deadline > selected_deadline) return false;
+    if (slot.dispatch_count < selected_dispatch_count) return true;
+    if (slot.dispatch_count > selected_dispatch_count) return false;
+    return slot.last_dispatch_tick < selected_last_dispatch_tick;
+}
+
 fn zeroAcceleratorClaim() AcceleratorClaimRecord {
     return .{
         .id = 0,
@@ -976,6 +1014,26 @@ fn zeroAcceleratorClaim() AcceleratorClaimRecord {
         .deadline_tick = 0,
         .shared_memory_bytes = 0,
     };
+}
+
+fn completeTestHardwareEvidence() accelerator_scheduler.HardwareTelemetryEvidence {
+    return .{
+        .target_id = "test-hardware-telemetry",
+        .reader_generation = 1,
+        .acpi_observed = true,
+        .thermal_observed = true,
+        .battery_observed = true,
+        .accelerator_observed = true,
+        .grid_carbon_observed = true,
+    };
+}
+
+fn schedulerTestUserspaceImage(service_task: bool) !task_runtime.ExecutableImageSpec {
+    if (!builtin.is_test) @compileError("schedulerTestUserspaceImage is test-only");
+    return if (service_task)
+        try generated_image_fixtures.serviceImage()
+    else
+        try generated_image_fixtures.appImage();
 }
 
 fn createRunnableSchedulerTask(
@@ -1006,8 +1064,9 @@ fn createRunnableSchedulerTaskWithBudget(
     ui_surface_id: ?u64,
     cpu_time_ticks: u64,
 ) !*task_runtime.TaskRecord {
-    var image = task_runtime.syntheticUserspaceImage(label, bundle_id);
+    _ = label;
     const service_task = class == .emergency_system_critical;
+    var image = try schedulerTestUserspaceImage(service_task);
     return runtime.createTask(.{
         .owner = .{
             .kind = if (service_task) .service else .app,
@@ -1154,8 +1213,8 @@ test "userspace scheduler dispatches resource ready queues by priority" {
     var capabilities = capability.CapabilityTable.init();
     scheduler.bind(&catalog, &runtime, &capabilities);
 
-    const background_image = task_runtime.syntheticUserspaceImage("background", "app.example.background");
-    const foreground_image = task_runtime.syntheticUserspaceImage("foreground", "app.example.foreground");
+    const background_image = try schedulerTestUserspaceImage(false);
+    const foreground_image = try schedulerTestUserspaceImage(false);
     const background = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 3 },
         .component_class = .app_component,
@@ -1218,7 +1277,7 @@ test "userspace scheduler uses event wakeups and explicit budget refills" {
     var capabilities = capability.CapabilityTable.init();
     scheduler.bind(&catalog, &runtime, &capabilities);
 
-    const image = task_runtime.syntheticUserspaceImage("wake-budgeted", "app.example.wake-budgeted");
+    const image = try schedulerTestUserspaceImage(false);
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 5 },
         .component_class = .app_component,
@@ -1334,7 +1393,7 @@ test "userspace scheduler requires observed platform telemetry before waking har
         .media_available = false,
     });
 
-    const image = task_runtime.syntheticUserspaceImage("media-required", "app.example.media-required");
+    const image = try schedulerTestUserspaceImage(false);
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 20 },
         .component_class = .app_component,
@@ -1379,12 +1438,25 @@ test "userspace scheduler requires observed platform telemetry before waking har
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDenialCount(.media));
 
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 2,
+        .media_available = true,
+    });
+    try std.testing.expect(scheduler.observedResourceTelemetry());
+    try std.testing.expect(!scheduler.resource_hardware_evidence_complete);
+    try std.testing.expect(!scheduler.runNext(2));
+    const partial_hardware_slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expectEqual(@as(u64, 0), partial_hardware_slot.dispatch_count);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
+
     var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(2, 20, 3, .{
         .total_cpu_budget_ticks = 10_000,
         .memory_capacity_bytes = units.kibibytes(512),
         .gpu_driver_online = false,
         .npu_driver_online = false,
         .media_driver_online = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
@@ -1412,6 +1484,7 @@ test "userspace scheduler ignores stale observed telemetry samples" {
         .npu_available = false,
         .media_available = false,
         .grid_carbon_intensity_grams_per_kwh = 500,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetry(.{
         .source = .hardware,
@@ -1420,6 +1493,7 @@ test "userspace scheduler ignores stale observed telemetry samples" {
         .npu_available = true,
         .media_available = true,
         .grid_carbon_intensity_grams_per_kwh = 100,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
 
     try std.testing.expectEqual(@as(u64, 10), scheduler.resource_telemetry_observed_tick);
@@ -1434,6 +1508,7 @@ test "userspace scheduler ignores stale observed telemetry samples" {
         .npu_available = true,
         .media_available = true,
         .grid_carbon_intensity_grams_per_kwh = 100,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     try std.testing.expectEqual(@as(u64, 11), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(scheduler.resource_state.gpu_available);
@@ -1452,7 +1527,7 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
         .npu_available = true,
     });
 
-    const image = task_runtime.syntheticUserspaceImage("npu-batch", "app.example.npu-batch");
+    const image = try schedulerTestUserspaceImage(false);
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 21 },
         .component_class = .app_component,
@@ -1496,6 +1571,7 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
         .gpu_driver_online = false,
         .npu_driver_online = true,
         .media_driver_online = false,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
@@ -1549,6 +1625,7 @@ test "userspace scheduler derives low-carbon deferral for batch tasks" {
         .observed_tick = 2,
         .grid_carbon_intensity_grams_per_kwh = 180,
         .npu_available = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     try std.testing.expect(!scheduler.runNext(2));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
@@ -1564,7 +1641,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     scheduler.bind(&catalog, &runtime, &capabilities);
-    const foreground_image = task_runtime.syntheticUserspaceImage("thermal-ui", "app.example.thermal-ui");
+    const foreground_image = try schedulerTestUserspaceImage(false);
     const foreground = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 22 },
         .component_class = .app_component,
@@ -1594,6 +1671,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .gpu_driver_online = true,
         .npu_driver_online = true,
         .media_driver_online = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
@@ -1606,7 +1684,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     try std.testing.expect(foreground_slot.last_dispatch_degraded);
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, foreground_slot.last_dispatch_reason);
 
-    const media_image = task_runtime.syntheticUserspaceImage("battery-media", "app.example.battery-media");
+    const media_image = try schedulerTestUserspaceImage(false);
     const media_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 23 },
         .component_class = .app_component,
@@ -1637,6 +1715,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .gpu_driver_online = true,
         .npu_driver_online = true,
         .media_driver_online = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expectEqual(@as(u64, 102), scheduler.resource_telemetry_observed_tick);
@@ -1682,6 +1761,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .gpu_driver_online = true,
         .npu_driver_online = true,
         .media_driver_online = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
 
@@ -1724,6 +1804,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .npu_driver_online = true,
         .media_driver_online = true,
         .privacy_sensitive_task_count = 1,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
 
@@ -1749,6 +1830,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .gpu_driver_online = true,
         .npu_driver_online = true,
         .media_driver_online = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
 
@@ -1773,6 +1855,7 @@ test "userspace scheduler sustained load gate bounds background and batch starva
         .media_available = true,
         .cpu_budget_ticks = DISPATCH_CPU_TICK_COST * 256,
         .memory_bandwidth_units = 1024,
+        .hardware_evidence = completeTestHardwareEvidence(),
     });
 
     const foreground = try createRunnableSchedulerTaskWithBudget(
@@ -1831,7 +1914,63 @@ test "userspace scheduler sustained load gate bounds background and batch starva
     try std.testing.expect(first_background_dispatch_tick <= BACKGROUND_DEADLINE_DELTA_TICKS);
     try std.testing.expect(first_batch_dispatch_tick <= BATCH_DEADLINE_DELTA_TICKS + 1_000);
     try std.testing.expectEqual(@as(u64, 0), background_stats.missed_deadline_count);
-    try std.testing.expectEqual(@as(u64, 1), batch_stats.missed_deadline_count);
+    try std.testing.expectEqual(@as(u64, 0), batch_stats.missed_deadline_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, batch_stats.last_dispatch_engine);
+}
+
+test "userspace scheduler breaks expired lower-class ties by service debt" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .npu_available = true,
+        .cpu_budget_ticks = DISPATCH_CPU_TICK_COST * 16,
+        .memory_bandwidth_units = 1024,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+
+    const background = try createRunnableSchedulerTaskWithBudget(
+        &runtime,
+        250,
+        .background_light,
+        "tie-background",
+        "app.example.tie-background",
+        null,
+        DISPATCH_CPU_TICK_COST * 2,
+    );
+    const batch = try createRunnableSchedulerTaskWithBudget(
+        &runtime,
+        251,
+        .batch_compute,
+        "tie-batch",
+        "app.example.tie-batch",
+        null,
+        DISPATCH_CPU_TICK_COST * 2,
+    );
+
+    try std.testing.expect(scheduler.registerTask(background.id));
+    try std.testing.expect(scheduler.registerTask(batch.id));
+    try std.testing.expect(scheduler.wakeTask(background.id, .timer, 10, 20));
+    try std.testing.expect(scheduler.wakeTask(batch.id, .timer, 10, 100));
+
+    try std.testing.expect(!scheduler.runNext(20));
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(background.id).?.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.taskDispatchStats(batch.id).?.dispatch_count);
+
+    try std.testing.expect(scheduler.wakeTask(background.id, .timer, 21, 30));
+    try std.testing.expect(scheduler.wakeTask(batch.id, .timer, 21, 30));
+    try std.testing.expect(!scheduler.runNext(30));
+
+    const background_stats = scheduler.taskDispatchStats(background.id).?;
+    const batch_stats = scheduler.taskDispatchStats(batch.id).?;
+    try std.testing.expectEqual(@as(u64, 1), background_stats.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 1), batch_stats.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 0), batch_stats.missed_deadline_count);
     try std.testing.expectEqual(accelerator_scheduler.Engine.npu, batch_stats.last_dispatch_engine);
 }
 
@@ -1843,7 +1982,7 @@ test "userspace scheduler thermal pressure gates batch queues without scanning t
     var capabilities = capability.CapabilityTable.init();
     scheduler.bind(&catalog, &runtime, &capabilities);
 
-    const image = task_runtime.syntheticUserspaceImage("batch", "app.example.batch");
+    const image = try schedulerTestUserspaceImage(false);
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 7 },
         .component_class = .app_component,
@@ -1884,7 +2023,7 @@ test "userspace scheduler stops dispatching tasks after their cpu budget is cons
     var capabilities = capability.CapabilityTable.init();
     scheduler.bind(&catalog, &runtime, &capabilities);
 
-    const image = task_runtime.syntheticUserspaceImage("budgeted", "app.example.budgeted");
+    const image = try schedulerTestUserspaceImage(false);
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 1 },
         .component_class = .app_component,

@@ -21,6 +21,8 @@ test "service contract order follows declared dependencies" {
     try std.testing.expect(orderedIndex(.storage_object).? < orderedIndex(.package_install_update).?);
     try std.testing.expect(orderedIndex(.network_stack).? < orderedIndex(.package_install_update).?);
     try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.compositor_ui_session).?);
+    try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.secure_pasteboard).?);
+    try std.testing.expect(orderedIndex(.compositor_ui_session).? < orderedIndex(.secure_pasteboard).?);
 }
 
 test "service contract interfaces remain unique and discoverable" {
