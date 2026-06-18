@@ -40,7 +40,8 @@ pub const Decision = struct {
 
 pub const Error = task_runtime.Error || capability.Error || error{
     ActivePrivacyIndicatorRequired,
-    HiddenGlobalHookDenied,
+    ContinuousOperationDenied,
+    HiddenOperationDenied,
     InvalidIsolationTarget,
     PermissionDenied,
     ScopeViolation,
@@ -76,9 +77,13 @@ pub const Broker = struct {
             }
         }
 
-        if (request.operation == .register_global_hook and request.hidden) {
+        if (request.hidden) {
             try self.auditDenied(request, 0, .policy_denied);
-            return error.HiddenGlobalHookDenied;
+            return error.HiddenOperationDenied;
+        }
+        if (request.continuous and !operationSupportsContinuous(request.operation)) {
+            try self.auditDenied(request, 0, .policy_denied);
+            return error.ContinuousOperationDenied;
         }
 
         const owned = self.capability_table.query(request.capability_id) orelse {
@@ -145,7 +150,7 @@ pub const Broker = struct {
 };
 
 fn privacyIndicatorActive(request: Request) bool {
-    return request.privacy_indicator_id != 0 and request.privacy_indicator_expires_at_ticks >= request.now_ticks;
+    return request.privacy_indicator_id != 0 and request.privacy_indicator_expires_at_ticks > request.now_ticks;
 }
 
 fn allowedAuditDetail(request: Request) u32 {
@@ -169,6 +174,13 @@ fn isCrossTaskOperation(operation: Operation) bool {
     return switch (operation) {
         .inspect_memory, .inject_code, .scrape_window => true,
         .watch_clipboard, .register_global_hook => false,
+    };
+}
+
+fn operationSupportsContinuous(operation: Operation) bool {
+    return switch (operation) {
+        .watch_clipboard, .register_global_hook => true,
+        .inspect_memory, .inject_code, .scrape_window => false,
     };
 }
 
@@ -276,6 +288,28 @@ test "process isolation denies memory injection window clipboard and hook bypass
 
     const visible_cross_task = try visibleProcessControlCapability(&capabilities, attacker.owner, attacker.id, victim.id, true, 14);
     try runtime.grantCapability(attacker.id, visible_cross_task.id);
+    try std.testing.expectError(error.HiddenOperationDenied, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .target_task_id = victim.id,
+        .capability_id = visible_cross_task.id,
+        .operation = .scrape_window,
+        .user_visible = true,
+        .privacy_indicator_id = 44,
+        .privacy_indicator_expires_at_ticks = 100,
+        .hidden = true,
+        .now_ticks = 15,
+    }));
+    try std.testing.expectError(error.ContinuousOperationDenied, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .target_task_id = victim.id,
+        .capability_id = visible_cross_task.id,
+        .operation = .inspect_memory,
+        .user_visible = true,
+        .privacy_indicator_id = 44,
+        .privacy_indicator_expires_at_ticks = 100,
+        .continuous = true,
+        .now_ticks = 16,
+    }));
     inline for (.{ Operation.inspect_memory, Operation.inject_code, Operation.scrape_window }) |operation| {
         const decision = try broker.authorize(.{
             .caller_task_id = attacker.id,
@@ -320,6 +354,16 @@ test "process isolation denies memory injection window clipboard and hook bypass
         .user_visible = true,
         .privacy_indicator_id = 55,
         .privacy_indicator_expires_at_ticks = 31,
+        .now_ticks = 31,
+    }));
+    try std.testing.expectError(error.ActivePrivacyIndicatorRequired, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = true,
+        .privacy_indicator_id = 55,
+        .privacy_indicator_expires_at_ticks = 31,
         .now_ticks = 32,
     }));
     try std.testing.expect((try broker.authorize(.{
@@ -332,7 +376,7 @@ test "process isolation denies memory injection window clipboard and hook bypass
         .privacy_indicator_expires_at_ticks = 100,
         .now_ticks = 32,
     })).allowed);
-    try std.testing.expectError(error.HiddenGlobalHookDenied, broker.authorize(.{
+    try std.testing.expectError(error.HiddenOperationDenied, broker.authorize(.{
         .caller_task_id = attacker.id,
         .capability_id = visible_self.id,
         .operation = .register_global_hook,
@@ -342,6 +386,17 @@ test "process isolation denies memory injection window clipboard and hook bypass
         .hidden = true,
         .now_ticks = 33,
     }));
+    try std.testing.expectError(error.HiddenOperationDenied, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = true,
+        .privacy_indicator_id = 55,
+        .privacy_indicator_expires_at_ticks = 100,
+        .hidden = true,
+        .now_ticks = 34,
+    }));
     try std.testing.expect((try broker.authorize(.{
         .caller_task_id = attacker.id,
         .capability_id = visible_self.id,
@@ -349,7 +404,7 @@ test "process isolation denies memory injection window clipboard and hook bypass
         .user_visible = true,
         .privacy_indicator_id = 55,
         .privacy_indicator_expires_at_ticks = 100,
-        .now_ticks = 34,
+        .now_ticks = 35,
     })).allowed);
 
     const latest = attacker.latestAuditEvent().?;

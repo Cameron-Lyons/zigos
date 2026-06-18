@@ -5,12 +5,14 @@ const binary_cursor = @import("binary_cursor");
 const capability = @import("../../kernel_api/capability.zig");
 const component_port = @import("../../kernel_api/component_port.zig");
 const crypto_hash = @import("../../core/crypto_hash.zig");
+const manifest = @import("../../policy/manifest.zig");
 const measured_boot = @import("../../platform/measured_boot.zig");
 const network_driver_task = @import("../../drivers/network_driver_task.zig");
 const network_policy = @import("../../sync/network_policy.zig");
 const object_store = @import("../../storage/object_store.zig");
 const principal = @import("../../core/principal.zig");
 const session_manager = @import("../session_manager.zig");
+const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
@@ -214,25 +216,66 @@ pub fn proveBootedSyncServicePath(
         .target = "printer",
     });
     const network_attestation_root = signer("booted-network-attestation-root", 0x7B);
-    var network_attestation_provider = attestation_service.FakeTpmRootProvider.init(network_attestation_root);
-    const network_attestation_identity = try network_attestation_provider.publicIdentity();
+    const network_attestation_identity = try signing.publicIdentity(network_attestation_root);
+    const network_attestation_key = attestation_service.AttestationRootKeyHandle{
+        .key_id = "booted-network-attestation-root",
+        .label = "booted-network-attestation-root",
+        .public_identity = network_attestation_identity,
+        .generation = 1,
+        .origin = .tpm,
+        .provider_boundary = .platform_tpm,
+        .custody = .tpm,
+    };
+    const network_attestation_descriptor = attestation_service.RootProviderDescriptor{
+        .name = "booted-sync-tpm-attestation-root",
+        .role = .production,
+        .origin = .tpm,
+        .key_id = "booted-network-attestation-root",
+        .key_generation = 1,
+        .provider_boundary = .platform_tpm,
+        .custody = .tpm,
+        .customer_verifiable = true,
+    };
+    const NetworkAttestationSigner = struct {
+        signer: signing.SignerIdentity,
+
+        fn sign(context: *anyopaque, handle: attestation_service.AttestationRootKeyHandle, digest: []const u8) !manifest.Signature {
+            const fixture: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, fixture.signer.label, handle.label)) return error.RootIdentityMismatch;
+            return signing.signWithDefaultRegistry(.ed25519, fixture.signer, digest);
+        }
+    };
+    var network_attestation_fixture = NetworkAttestationSigner{ .signer = network_attestation_root };
+    var network_attestation_provider = try attestation_service.ExternalAttestationRootProvider.init(
+        network_attestation_descriptor,
+        network_attestation_key,
+        &network_attestation_fixture,
+        NetworkAttestationSigner.sign,
+    );
+    const network_attestation_metadata_digest = network_attestation_provider.verifierMetadataDigest();
     const peer_boot = try verifiedBootedNetworkPeer(7_050);
     var peer_attestation = attestation_service.Service.init(tablet);
     try peer_attestation.provisionRootProvider(network_attestation_provider.provider());
-    const native_identity_statement = try peer_attestation.attestWithProvisionedRoot(
-        peer_boot,
-        "overlay.service-path.notes",
-        "native-net-00001",
-        true,
-    );
-    try std.testing.expect(attestation_service.Service.verifyForBoot(native_identity_statement, .{
-        .boot = &peer_boot,
+    const native_identity_request = try attestation_service.RemoteAttestationRequest.init(.{
         .remote_party = "overlay.service-path.notes",
         .nonce = "native-net-00001",
-        .user_visible = true,
-        .key_origin = .tpm,
-        .attestation_root = network_attestation_identity,
-    }));
+        .policy_label = "booted-service-path-network-identity",
+        .expected_key_origin = .tpm,
+        .root_key_id = "booted-network-attestation-root",
+        .minimum_root_generation = 1,
+        .attestation_verifier_metadata_digest_required = true,
+        .attestation_verifier_metadata_digest = network_attestation_metadata_digest,
+    });
+    const native_identity_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, native_identity_request);
+    try std.testing.expect(attestation_service.Service.verifyRemoteAttestationResponse(
+        native_identity_response,
+        native_identity_request,
+        &peer_boot,
+        network_attestation_identity,
+    ));
+    try std.testing.expect(native_identity_response.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(std.mem.eql(u8, &network_attestation_metadata_digest, &native_identity_response.attestation_verifier_metadata_digest));
+    const native_identity_statement = native_identity_response.statement;
     const native_identity_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
@@ -241,6 +284,7 @@ pub fn proveBootedSyncServicePath(
         .target = "overlay.service-path.notes",
         .require_remote_attestation = true,
         .pinned_root_digest = native_identity_statement.root_digest,
+        .pinned_attestation_verifier_metadata_digest = network_attestation_metadata_digest,
     });
     _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_id,
@@ -307,6 +351,7 @@ pub fn proveBootedSyncServicePath(
         native_identity_policy.id,
         discovery_policy.id,
         native_identity_statement.root_digest,
+        network_attestation_metadata_digest,
         laptop,
         tablet,
     );
@@ -571,6 +616,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     policy_id: u64,
     discovery_policy_id: u64,
     peer_root_digest: crypto_hash.Digest,
+    attestation_verifier_metadata_digest: crypto_hash.Digest,
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
 ) !void {
@@ -629,6 +675,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     }, source_device, target_device));
     try std.testing.expectEqual(network_policy.EgressDecisionReason.attestation_required, stack.last_denial_reason);
 
+    const network_attestation_request_digest = crypto_hash.digestFromByte(0x87);
     try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
         .task_id = sync.task_id,
         .principal_id = network_service_task.owner,
@@ -637,8 +684,14 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         .evidence = .{
             .destination = .{ .service_identity = "overlay.service-path.notes" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = network_attestation_request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = peer_root_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = attestation_verifier_metadata_digest,
         },
         .now_ticks = 119,
     }, source_device, target_device));
@@ -654,8 +707,14 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         .evidence = .{
             .destination = .{ .service_identity = "overlay.service-path.notes" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = network_attestation_request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = wrong_root_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = attestation_verifier_metadata_digest,
         },
         .now_ticks = 120,
     }, source_device, target_device));
@@ -670,8 +729,14 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         .evidence = .{
             .destination = .{ .service_identity = "overlay.service-path.notes" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = network_attestation_request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = peer_root_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = attestation_verifier_metadata_digest,
         },
         .now_ticks = 121,
     }, source_device, target_device);

@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const capability = @import("../kernel_api/capability.zig");
+const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const principal = @import("../core/principal.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
@@ -27,6 +28,7 @@ pub const NativeStoreMount = struct {
         owner: principal.PrincipalId,
         capability_table: *capability.CapabilityTable,
     ) void {
+        _ = bootstrap_driver_port.refreshActiveStorageAttachment(service_id);
         _ = adoptRootStorageVolume(&self.storage_checkpoint_store);
         self.storage_service_instance = storage_service_mod.Service.reloadFromAttachedVolume(
             service_id,
@@ -39,6 +41,7 @@ pub const NativeStoreMount = struct {
     }
 
     pub fn checkpoint(self: *NativeStoreMount) void {
+        _ = bootstrap_driver_port.refreshActiveStorageAttachment(self.storage_service_instance.service_id);
         _ = adoptRootStorageVolume(&self.storage_checkpoint_store);
         self.storage_service_instance.checkpoint();
     }

@@ -92,10 +92,7 @@ pub const TrustBoot = struct {
             common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
             return true;
         }
-        const signed_manifest = measured_boot.signArtifactManifest(
-            artifact_manifest,
-            measured_boot.production_artifact_manifest_signer,
-        ) catch return false;
+        const signed_manifest = signProductionArtifactManifest(artifact_manifest) catch return false;
         if (!measured_boot.verifySignedArtifactManifest(
             &signed_manifest,
             measured_boot.production_artifact_manifest_signer,
@@ -379,10 +376,7 @@ pub const TrustBoot = struct {
         graph: *const service_graph_builder_mod.ServiceGraph,
     ) bool {
         const artifact_manifest = self.buildProductionArtifactManifest(graph) catch return false;
-        const signed_manifest = measured_boot.signArtifactManifest(
-            artifact_manifest,
-            measured_boot.production_artifact_manifest_signer,
-        ) catch return false;
+        const signed_manifest = signProductionArtifactManifest(artifact_manifest) catch return false;
         if (!measured_boot.verifySignedArtifactManifest(
             &signed_manifest,
             measured_boot.production_artifact_manifest_signer,
@@ -467,6 +461,18 @@ pub const TrustBoot = struct {
         )) return false;
 
         const bootloader_measurement_digest = bootloaderProvidedMeasurementDigest() catch return false;
+        if (smokeFaultModeIs("tampered_bootloader_measurement")) {
+            var tampered_measurement_digest = bootloader_measurement_digest;
+            tampered_measurement_digest[0] ^= 0x7B;
+            if (measured_boot.buildArtifactDigestMatches(
+                &generated_manifest,
+                .bootloader_measurement,
+                build_bootloader_measurement_label,
+                &tampered_measurement_digest,
+            )) return false;
+            common.printBootMarker(boot_markers.platform_bootloader_measurement_tamper_rejected);
+            return false;
+        }
         if (!measured_boot.buildArtifactDigestMatches(
             &generated_manifest,
             .bootloader_measurement,
@@ -855,6 +861,55 @@ fn smokeFaultModeIs(comptime mode_name: []const u8) bool {
     if (builtin.target.os.tag != .freestanding) return false;
     const config = @import("../../kernel/config.zig");
     return std.mem.eql(u8, @tagName(config.smokeFaultMode()), mode_name);
+}
+
+const ArtifactManifestSigningBackend = struct {
+    seed: signing.Seed,
+
+    fn sign(context: *anyopaque, key: signing.ReleaseRootKeyHandle, message: []const u8) ![signing.SIGNATURE_BYTES]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(self.seed);
+        if (!std.mem.eql(u8, &key.public_key, &key_pair.public_key.toBytes())) {
+            return error.ReleaseKeyIdentityMismatch;
+        }
+        return (try key_pair.sign(message, null)).toBytes();
+    }
+};
+
+fn signProductionArtifactManifest(
+    artifact_manifest: measured_boot.ArtifactManifest,
+) !measured_boot.SignedArtifactManifest {
+    const identity = measured_boot.production_artifact_manifest_signer;
+    var backend = ArtifactManifestSigningBackend{ .seed = identity.seed };
+    var provider_impl = try signing.ExternalReleaseProvider.init(
+        .{
+            .name = "smoke-kms-artifact-manifest",
+            .profile = .ed25519,
+            .role = .production,
+            .provider_boundary = .cloud_kms,
+            .custody = .cloud_kms,
+            .hardware_backed = true,
+            .rotation_supported = true,
+            .revocation_supported = true,
+            .customer_verifiable = true,
+            .verifier_protocol = .dsse_in_toto_slsa,
+        },
+        .{
+            .key_id = "kms://zigos/smoke/artifact-manifest/1",
+            .label = identity.label,
+            .public_key = try signing.publicKey(identity),
+            .generation = 1,
+            .provider_boundary = .cloud_kms,
+            .custody = .cloud_kms,
+        },
+        &backend,
+        ArtifactManifestSigningBackend.sign,
+    );
+    return measured_boot.signArtifactManifestWithProvider(
+        artifact_manifest,
+        identity,
+        provider_impl.provider(),
+    );
 }
 
 const DirectArtifactTamperFixture = struct {

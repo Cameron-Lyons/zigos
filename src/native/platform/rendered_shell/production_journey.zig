@@ -9,6 +9,7 @@ const object_store = @import("../../storage/object_store.zig");
 const package_service = @import("../../services/package_service.zig");
 const policy_object = @import("../../policy/policy_object.zig");
 const principal = @import("../../core/principal.zig");
+const public_store = @import("../../services/public_store.zig");
 const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const workspace = @import("../../storage/workspace.zig");
@@ -72,6 +73,7 @@ pub const ProductionJourneyConfig = struct {
     policy_label: []const u8,
     install_bundle: manifest.BundleManifest,
     update_bundle: manifest.BundleManifest,
+    public_store_channel: ?*const public_store.Channel = null,
     ui_surface_id: u64,
     image_id: u64,
     share_principal: principal.PrincipalId,
@@ -142,9 +144,18 @@ pub const ProductionJourneyService = struct {
     document_payload_bytes: usize = 0,
     permission_reviewed: bool = false,
     document_shared: bool = false,
+    share_object_scope_verified: bool = false,
+    share_write_verified: bool = false,
+    shared_object_id: u64 = 0,
+    share_expires_at_ticks: u64 = 0,
     device_trusted: bool = false,
     sync_configured: bool = false,
     synced: bool = false,
+    sync_conflict_count: u16 = 0,
+    sync_conflict_reviewed: bool = false,
+    sync_conflict_resolved: bool = false,
+    sync_conflict_local_version_id: u64 = 0,
+    sync_conflict_remote_version_id: u64 = 0,
     updated: bool = false,
     rolled_back: bool = false,
     recovered: bool = false,
@@ -233,6 +244,20 @@ pub const ProductionJourneyService = struct {
             self.document_payload_bytes,
             if (self.document_edited) "yes" else "no",
         });
+        try appendFmt(buffer, &used, "share object_scoped={s} write_verified={s} object={d} expires={d} path={s}\n", .{
+            if (self.share_object_scope_verified) "yes" else "no",
+            if (self.share_write_verified) "yes" else "no",
+            self.shared_object_id,
+            self.share_expires_at_ticks,
+            self.config.document_path,
+        });
+        try appendFmt(buffer, &used, "sync conflict_count={d} reviewed={s} resolved={s} local_version={d} remote_version={d}\n", .{
+            self.sync_conflict_count,
+            if (self.sync_conflict_reviewed) "yes" else "no",
+            if (self.sync_conflict_resolved) "yes" else "no",
+            self.sync_conflict_local_version_id,
+            self.sync_conflict_remote_version_id,
+        });
         try appendFmt(buffer, &used, "visible_windows={d} task_flow_events={d} policy_events={d} device_trust_events={d}\n", .{
             session.visibleWindowCount(),
             self.ledger.countMatching(.{ .kind = .task_flow }),
@@ -300,7 +325,7 @@ pub const ProductionJourneyService = struct {
 
     fn applyPolicy(self: *ProductionJourneyService, tick: u64) !void {
         if (self.policy_id != 0 and !self.policy_revoked) return error.PolicyAlreadyApplied;
-        const allowed_install_sources = [_][]const u8{self.config.source_identity};
+        const allowed_install_sources = [_][]const u8{self.installSourceIdentity()};
         const allowed_sync_destinations = [_][]const u8{self.config.sync_destination};
         const policy = try self.policies.create(.{
             .scope = .organization,
@@ -369,11 +394,8 @@ pub const ProductionJourneyService = struct {
     fn installApp(self: *ProductionJourneyService, tick: u64) !void {
         if (self.installed and !self.removed) return error.AppAlreadyInstalled;
         const policy = try self.requireActivePolicy();
-        const installed_result = try self.packages.install(self.package_authority, .{
-            .bundle = self.config.install_bundle,
-            .source_identity = self.config.source_identity,
-            .data_schema_version = 1,
-        }, policy);
+        const request = try self.installRequestForBundle(self.config.install_bundle);
+        const installed_result = try self.packages.install(self.package_authority, request, policy);
         if (!installed_result.installed_new) return error.AppAlreadyInstalled;
         _ = try self.ux.installApp(self.config.user, self.config.bundle_id);
         self.installed = true;
@@ -384,7 +406,13 @@ pub const ProductionJourneyService = struct {
     fn startTask(self: *ProductionJourneyService, tick: u64) !void {
         if (!self.installed or self.removed) return error.AppNotInstalled;
         if (self.task_id != 0) return error.TaskAlreadyStarted;
-        const task = try task_launch.startConfiguredTask(self.ux, self.runtime_service.runtimePtr(), self.config);
+        const launch_plan = try self.packages.service.buildLaunchPlan(self.config.bundle_id);
+        const task = try task_launch.startConfiguredTaskWithPackageProvenance(
+            self.ux,
+            self.runtime_service.runtimePtr(),
+            self.config,
+            launch_plan.provenance,
+        );
         self.task_id = task.id;
         try self.recordPendingTaskFlows(tick);
     }
@@ -540,6 +568,10 @@ pub const ProductionJourneyService = struct {
             .network_scope = .trusted_overlay,
             .now_ticks = tick,
         })) return error.ShareRejected;
+        const stored_grant = self.storage.findShareGrant(workspace_id, self.config.share_principal) orelse return error.ShareRejected;
+        if (!stored_grant.isObjectScoped()) return error.ShareRejected;
+        if (!stored_grant.allowsObject(entry.object_id, entry.pathSlice())) return error.ShareRejected;
+        if (!stored_grant.can_write or stored_grant.network_scope != .trusted_overlay) return error.ShareRejected;
 
         _ = try self.ux.shareDocument(
             self.config.workspace_id,
@@ -548,6 +580,10 @@ pub const ProductionJourneyService = struct {
             self.config.document_path,
         );
         self.document_shared = true;
+        self.share_object_scope_verified = true;
+        self.share_write_verified = true;
+        self.shared_object_id = entry.object_id.raw();
+        self.share_expires_at_ticks = stored_grant.expires_at_ticks;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -579,6 +615,7 @@ pub const ProductionJourneyService = struct {
             return error.SyncPolicyMissing;
         }
         _ = try self.ux.syncWorkspace(self.config.workspace_id, self.config.user, "device-to-device");
+        self.sync_conflict_count = @intCast(@min(summary.conflict_count, std.math.maxInt(u16)));
         if (summary.conflict_count != 0) {
             var detail_buffer: [compositor_session.MAX_WINDOW_DETAIL_BYTES]u8 = undefined;
             const detail = std.fmt.bufPrint(&detail_buffer, "sync conflicts: {d}", .{summary.conflict_count}) catch "sync conflicts";
@@ -590,20 +627,39 @@ pub const ProductionJourneyService = struct {
                 .detail = detail,
             });
             _ = try self.ux.syncConflictReview(self.config.workspace_id, self.config.user, detail);
+            const review = try self.sync.reviewConflictForObject(
+                self.sync_authority,
+                self.config.workspace_id,
+                self.config.sync_to_device,
+                self.document_object_id,
+            );
+            const resolved = try self.sync.resolveConflictForObject(
+                self.sync_authority,
+                self.config.workspace_id,
+                self.config.sync_to_device,
+                self.document_object_id,
+                .keep_local,
+            );
+            self.sync_conflict_reviewed = true;
+            self.sync_conflict_resolved = resolved.resolved;
+            self.sync_conflict_local_version_id = review.local_version_id;
+            self.sync_conflict_remote_version_id = review.remote_version_id;
         }
         self.synced = true;
-        self.marker_share_sync = self.document_shared and self.synced and self.document_version_id != 0;
+        self.marker_share_sync = self.document_shared and
+            self.share_object_scope_verified and
+            self.share_write_verified and
+            self.synced and
+            self.document_version_id != 0 and
+            (self.sync_conflict_count == 0 or (self.sync_conflict_reviewed and self.sync_conflict_resolved));
         try self.recordPendingTaskFlows(tick);
     }
 
     fn updateApp(self: *ProductionJourneyService, tick: u64) !void {
         if (!self.installed or self.removed) return error.AppNotInstalled;
         const policy = try self.requireActivePolicy();
-        const updated_result = try self.packages.install(self.package_authority, .{
-            .bundle = self.config.update_bundle,
-            .source_identity = self.config.source_identity,
-            .data_schema_version = 1,
-        }, policy);
+        const request = try self.installRequestForBundle(self.config.update_bundle);
+        const updated_result = try self.packages.install(self.package_authority, request, policy);
         if (!updated_result.updated_existing or !updated_result.rollback_available) return error.AppNotInstalled;
         _ = try self.ux.updateApp(self.task_id, self.config.user, self.config.bundle_id);
         self.updated = true;
@@ -696,6 +752,29 @@ pub const ProductionJourneyService = struct {
         return active;
     }
 
+    fn installSourceIdentity(self: *const ProductionJourneyService) []const u8 {
+        if (self.config.public_store_channel) |channel| return channel.source_identity;
+        return self.config.source_identity;
+    }
+
+    fn installRequestForBundle(
+        self: *const ProductionJourneyService,
+        bundle: manifest.BundleManifest,
+    ) !package_service.InstallRequest {
+        if (self.config.public_store_channel) |channel| {
+            return (try channel.resolveVersion(
+                self.config.bundle_id,
+                bundle.version_major,
+                bundle.version_minor,
+            )).installRequest();
+        }
+        return .{
+            .bundle = bundle,
+            .source_identity = self.config.source_identity,
+            .data_schema_version = 1,
+        };
+    }
+
     fn permissionRequest(self: *const ProductionJourneyService) manifest.PermissionRequest {
         if (self.config.install_bundle.requested_permissions.len != 0) {
             return self.config.install_bundle.requested_permissions[0];
@@ -782,6 +861,22 @@ fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
         error.SchemaVersionRegressionRejected,
         error.VersionRegressionRejected,
         error.VersionReplayRejected,
+        error.StoreSourceMissing,
+        error.StoreSourceTooLong,
+        error.StoreSourceInvalid,
+        error.StoreChannelFull,
+        error.StoreReleaseAlreadyPublished,
+        error.StoreReleaseMissing,
+        error.StoreReleaseUnsigned,
+        error.StoreReleaseChannelMismatch,
+        error.StoreReleaseInvalidSchema,
+        error.StoreReleaseMissingAssets,
+        error.StoreAssetCatalogMismatch,
+        error.StoreAssetDigestMissing,
+        error.StoreAssetDigestInvalid,
+        error.StoreAssetDigestTooLong,
+        error.StoreAssetSizeMissing,
+        error.StoreSupplyChainMissing,
         => .package_rejected,
         error.DeviceTrustRequired,
         error.SyncPolicyMissing,

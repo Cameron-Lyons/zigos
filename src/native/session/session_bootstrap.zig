@@ -30,6 +30,7 @@ pub const Principals = struct {
     indexing_service: principal.PrincipalId,
     sync_service: principal.PrincipalId,
     media_service: principal.PrincipalId,
+    pasteboard_service: principal.PrincipalId,
     task_runtime_service: principal.PrincipalId,
 };
 
@@ -46,6 +47,7 @@ pub const CoreServices = struct {
     indexing_service: *supervisor_mod.ServiceRecord,
     sync_service: *supervisor_mod.ServiceRecord,
     media_service: *supervisor_mod.ServiceRecord,
+    pasteboard_service: *supervisor_mod.ServiceRecord,
 };
 
 pub const Error = userspace_boot_registry.Error || supervisor_mod.Error;
@@ -65,6 +67,7 @@ pub fn principals() Principals {
         .indexing_service = .{ .kind = .service, .serial = 7 },
         .sync_service = .{ .kind = .service, .serial = 8 },
         .media_service = .{ .kind = .service, .serial = 9 },
+        .pasteboard_service = .{ .kind = .service, .serial = 11 },
         .task_runtime_service = .{ .kind = .service, .serial = 10 },
     };
 }
@@ -102,6 +105,7 @@ pub fn registerCoreServices(
         .indexing_service = try supervisor.register(.indexing_search, ids.indexing_service),
         .sync_service = try supervisor.register(.sync_replication, ids.sync_service),
         .media_service = try supervisor.register(.media_print_helpers, ids.media_service),
+        .pasteboard_service = try supervisor.register(.secure_pasteboard, ids.pasteboard_service),
     };
 
     runtime_service.bind(services.runtime_service_record.id, ids.task_runtime_service);
@@ -149,6 +153,7 @@ fn principalForOwnerKey(ids: Principals, owner_key: service_catalog.BootstrapOwn
         .indexing_service => ids.indexing_service,
         .sync_service => ids.sync_service,
         .media_service => ids.media_service,
+        .pasteboard_service => ids.pasteboard_service,
         .task_runtime_service => ids.task_runtime_service,
     };
 }
@@ -167,6 +172,7 @@ fn serviceRecordForKey(services: CoreServices, record_key: service_catalog.Boots
         .indexing_service => services.indexing_service,
         .sync_service => services.sync_service,
         .media_service => services.media_service,
+        .pasteboard_service => services.pasteboard_service,
     };
 }
 

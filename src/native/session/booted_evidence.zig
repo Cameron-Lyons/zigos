@@ -1,17 +1,32 @@
 const builtin = @import("builtin");
+const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const booted_system = @import("../platform/rendered_shell/booted_system.zig");
 const bootstrap_packages = @import("../demo/bootstrap_packages.zig");
+const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const humane_shell = @import("../platform/rendered_shell/humane_shell.zig");
+const native_ux = @import("../platform/native_ux.zig");
+const notification_center = @import("../services/notification_center.zig");
 const permission_flows = @import("../demo/permission_flows.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
+const policy_object = @import("../policy/policy_object.zig");
 const policy_component_port = @import("../policy/policy_component_port.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const manifest = @import("../policy/manifest.zig");
+const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
+const package_service = @import("../services/package_service.zig");
+const principal = @import("../core/principal.zig");
+const production_journey = @import("../platform/rendered_shell/production_journey.zig");
+const public_store = @import("../services/public_store.zig");
 const scenario_support = @import("../demo/scenario_support.zig");
+const signing = @import("../core/signing.zig");
 const storage_scenarios = @import("../demo/storage_scenarios.zig");
 const sync_scenarios = @import("../demo/sync_scenarios.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const xhci = @import("../../kernel/drivers/xhci.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -44,15 +59,37 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     );
     mediator.attachLedger(manager.updateLedgerPtr());
 
-    var review_service = permission_review_service.Service.initProfiled(
+    const physical_review_commands = [_][]const u8{
+        "allow local lease=400",
+        "allow local lease=50",
+        "deny",
+        "allow lease=10",
+        "allow local lease=30",
+        "allow local lease=35",
+        "deny",
+        "allow local lease=25",
+        "allow local lease=15",
+    };
+    var physical_review_input = permission_review_service.PhysicalInputSource.initDefault() catch unreachable;
+    var expected_physical_review_reports: usize = 0;
+    for (physical_review_commands) |command| {
+        physical_review_input.enqueueTextCommand(
+            xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+            xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+            command,
+        ) catch unreachable;
+        expected_physical_review_reports += command.len + 1;
+    }
+
+    var review_service = permission_review_service.Service.init(
         graph.state.services.review_service_record.id,
         graph.state.review_service_task.id,
         manager.runtimePtr(),
         &[_][]const u8{},
-        @import("../policy/bootstrap_review_profile.zig").rules[0..],
-        manager.compositorSessionPtr(),
-        manager.reviewUxControllerPtr(),
     );
+    review_service.compositor = manager.compositorSessionPtr();
+    review_service.ux = manager.reviewUxControllerPtr();
+    review_service.bindPhysicalInput(&physical_review_input);
     var compositor_checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(
         graph.state.services.compositor_service.id,
@@ -76,16 +113,23 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         &review_port,
         &policy_port,
     );
+    if (review_service.physicalInputReportCount() >= expected_physical_review_reports and
+        review_service.physicalInputEventCount() >= expected_physical_review_reports)
+    {
+        common.printBootMarker(boot_markers.permission_xhci_keyboard_report);
+    }
+    if (review_service.physicalInputCommandCount() >= 1) {
+        common.printBootMarker(boot_markers.permission_xhci_review_command);
+    }
+    if (review_service.physicalInputCommandCount() >= physical_review_commands.len) {
+        common.printBootMarker(boot_markers.permission_xhci_boot_flow_commands);
+    }
     const compositor = manager.compositorSessionPtr();
-    if (compositor.visibleWindowCount() > 0) {
+    if (bootedFramebufferContains(compositor, "active_type=")) {
         common.printBootMarker(boot_markers.compositor_framebuffer_presented);
     }
-    if (compositor.item_count > 0) {
+    if (compositor.item_count > 0 and bootedFramebufferContains(compositor, "permission kind=")) {
         common.printBootMarker(boot_markers.compositor_permission_review_rendered);
-    }
-
-    if (manager.storageServicePtr().findWorkspace(graph.state.ids.session_user, "notes-workspace") != null) {
-        return true;
     }
 
     var lifecycle_context = scenario_support.Context{
@@ -134,5 +178,386 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         lifecycle_context.sync_resident_state,
     ) catch unreachable;
     _ = sync_scenarios.run(&lifecycle_context, &sync_service, storage_state);
+    if (!runNotesDailyDriverJourney(manager, graph, &lifecycle_context, &sync_service, &compositor_service, storage_state)) {
+        return false;
+    }
+    if (!runBootedNotesTypedInputLoop(graph, &lifecycle_context, &compositor_service, storage_state)) {
+        return false;
+    }
     return true;
+}
+
+fn bootedFramebufferContains(compositor: *const compositor_session.Session, expected_text: []const u8) bool {
+    if (compositor.visibleWindowCount() == 0 or compositor.active_window_id == 0) return false;
+
+    var display_storage: [compositor_display.DEFAULT_STORAGE_BYTES]u8 = undefined;
+    var display = compositor_display.Framebuffer.init(
+        &display_storage,
+        compositor_display.DEFAULT_WIDTH,
+        compositor_display.DEFAULT_HEIGHT,
+    ) catch return false;
+    display.renderSession(compositor) catch return false;
+    const proof = display.requirePresentation(
+        expected_text,
+        compositor.visibleWindowCount(),
+        compositor.active_window_id,
+    ) catch return false;
+    return proof.verified();
+}
+
+const notes_daily_bundle_signer = signing.SignerIdentity{
+    .label = "zigos-notes-daily-bundle",
+    .seed = signing.seedFromByte(0xd1),
+};
+const notes_daily_policy_signer = signing.SignerIdentity{
+    .label = "zigos-notes-daily-policy",
+    .seed = signing.seedFromByte(0xd2),
+};
+const notes_daily_user_signer = signing.SignerIdentity{
+    .label = "zigos-notes-daily-user",
+    .seed = signing.seedFromByte(0xd3),
+};
+const notes_daily_primary_device_signer = signing.SignerIdentity{
+    .label = "zigos-notes-daily-primary",
+    .seed = signing.seedFromByte(0xd4),
+};
+const notes_daily_paired_device_signer = signing.SignerIdentity{
+    .label = "zigos-notes-daily-paired",
+    .seed = signing.seedFromByte(0xd5),
+};
+const notes_daily_snapshot_signer = signing.SignerIdentity{
+    .label = "zigos-notes-daily-snapshot",
+    .seed = signing.seedFromByte(0xd6),
+};
+const booted_notes_typed_text = "booted native smoke typed notes edit survived recovery";
+const notes_daily_public_store_source = "store:zigos/public";
+const notes_daily_v1_manifest_assets = [_]manifest.AssetDecl{
+    .{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" },
+    .{ .path = "assets/notes/editor.wasm", .content_type = "application/wasm" },
+};
+const notes_daily_v2_manifest_assets = [_]manifest.AssetDecl{
+    .{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" },
+    .{ .path = "assets/notes/editor.wasm", .content_type = "application/wasm" },
+    .{ .path = "assets/notes/offline-index.dat", .content_type = "application/octet-stream" },
+};
+const notes_daily_v1_store_assets = [_]public_store.ReleaseAsset{
+    .{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml", .digest = "sha256:5151515151515151515151515151515151515151515151515151515151515151", .size_bytes = 1536 },
+    .{ .path = "assets/notes/editor.wasm", .content_type = "application/wasm", .digest = "sha256:5252525252525252525252525252525252525252525252525252525252525252", .size_bytes = 32768 },
+};
+const notes_daily_v2_store_assets = [_]public_store.ReleaseAsset{
+    .{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml", .digest = "sha256:5353535353535353535353535353535353535353535353535353535353535353", .size_bytes = 1600 },
+    .{ .path = "assets/notes/editor.wasm", .content_type = "application/wasm", .digest = "sha256:5454545454545454545454545454545454545454545454545454545454545454", .size_bytes = 34816 },
+    .{ .path = "assets/notes/offline-index.dat", .content_type = "application/octet-stream", .digest = "sha256:5555555555555555555555555555555555555555555555555555555555555555", .size_bytes = 8192 },
+};
+
+fn runNotesDailyDriverJourney(
+    manager: anytype,
+    graph: anytype,
+    context: *scenario_support.Context,
+    sync_service: *sync_service_mod.Service,
+    compositor_service: *compositor_session.Service,
+    storage_state: scenario_support.StorageScenarioState,
+) bool {
+    var package_port = package_service.PackagePort.init(manager.packageServicePtr(), context.capability_table);
+    const package_authority = mintNotesDailyPackageAuthority(context, graph.state.session_task.id, 220) catch return false;
+    _ = package_port.trustPolicyAuthorityRoot(
+        package_authority,
+        .{ .kind = .policy_authority, .serial = 1 },
+        signing.publicKeyFromByte(0x5A),
+    ) catch return false;
+    _ = package_port.trustPublisher(
+        package_authority,
+        .{ .kind = .app, .serial = 26_026 },
+        .{ .kind = .policy_authority, .serial = 1 },
+        "zigos.dev",
+        signing.publicKey(notes_daily_bundle_signer) catch return false,
+    ) catch return false;
+
+    var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
+    const sync_authority = scenario_support.mintSyncAuthority(context, 221);
+    var policies = policy_object.Directory.init();
+    var journey_ux = native_ux.Controller.init();
+    const install_bundle = signedNotesDailyBundle(0) catch return false;
+    const update_bundle = signedNotesDailyBundle(1) catch return false;
+    var store_channel = public_store.Channel.init(notes_daily_public_store_source, .beta);
+    store_channel.trustPublisher("zigos.dev", signing.publicKey(notes_daily_bundle_signer) catch return false) catch return false;
+    store_channel.publish(store_channel.prepareRelease(install_bundle, &notes_daily_v1_store_assets, 1)) catch return false;
+    store_channel.publish(store_channel.prepareRelease(update_bundle, &notes_daily_v2_store_assets, 1)) catch return false;
+    var journey = production_journey.ProductionJourneyService.init(
+        context.runtime_service,
+        &journey_ux,
+        compositor_service,
+        context.storage_service_instance,
+        &package_port,
+        package_authority,
+        &sync_port,
+        sync_authority,
+        &policies,
+        context.update_ledger,
+        .{
+            .user = context.session_user,
+            .admin = context.policy_authority,
+            .app_owner = context.session_user,
+            .organization_id = 2_026,
+            .reviewer_task_id = graph.state.review_service_task.id,
+            .workspace_id = storage_state.notes_workspace_id,
+            .workspace_label = "Notes Workspace",
+            .document_path = "documents/notes.md",
+            .task_label = "notes-daily",
+            .task_entry = "app.notes.daily",
+            .task_title = "Notes",
+            .bundle_id = "app.notes.daily",
+            .display_name = "Notes",
+            .edit_payload = "Booted native smoke Notes edit persisted through recovery",
+            .source_identity = notes_daily_public_store_source,
+            .sync_destination = "relay.production.zigos",
+            .device_label = "tablet",
+            .policy_label = "notes-daily-native-smoke",
+            .install_bundle = install_bundle,
+            .update_bundle = update_bundle,
+            .public_store_channel = &store_channel,
+            .ui_surface_id = 26_026,
+            .image_id = 26_026_001,
+            .share_principal = principal.PrincipalId{ .kind = .user, .serial = 26_027 },
+            .sync_from_device = principal.PrincipalId{ .kind = .device, .serial = 26_028 },
+            .sync_to_device = principal.PrincipalId{ .kind = .device, .serial = 26_029 },
+            .policy_signer = notes_daily_policy_signer,
+            .user_signer = notes_daily_user_signer,
+            .primary_device_signer = notes_daily_primary_device_signer,
+            .paired_device_signer = notes_daily_paired_device_signer,
+        },
+    );
+
+    const controls = [_]production_journey.ProductionJourneyControl{
+        .apply_policy,
+        .trust_device,
+        .install_app,
+        .start_task,
+        .open_workspace,
+        .open_document,
+        .edit_document,
+        .review_permission,
+        .share_document,
+        .sync_workspace,
+        .update_app,
+        .rollback_update,
+        .recover_system,
+        .remove_app,
+        .revoke_device,
+        .revoke_policy,
+    };
+    for (controls, 0..) |control, index| {
+        const tick = 230 + @as(u64, @intCast(index));
+        if (journey.dispatch(.{ .control = control, .tick = tick }).status != .ok) {
+            return false;
+        }
+    }
+
+    const snapshot = journey.markerSnapshot();
+    if (!snapshot.complete()) return false;
+    emitNotesDailyDriverMarkers(snapshot);
+    return true;
+}
+
+fn runBootedNotesTypedInputLoop(
+    graph: anytype,
+    context: *scenario_support.Context,
+    compositor_service: *compositor_session.Service,
+    storage_state: scenario_support.StorageScenarioState,
+) bool {
+    const local_device = principal.PrincipalId{ .kind = .device, .serial = 26_031 };
+    const tablet_device = principal.PrincipalId{ .kind = .device, .serial = 26_032 };
+    var typed_sync_service = sync_service_mod.Service.init(context.sync_service_id, context.sync_task_id, context.sync_service_principal);
+    var sync_port = sync_service_mod.SyncPort.init(&typed_sync_service, context.capability_table);
+    const sync_authority = scenario_support.mintSyncAuthority(context, 260);
+    _ = sync_port.ensureUserRoot(sync_authority, context.session_user, "notes-typed", notes_daily_user_signer) catch return false;
+    _ = sync_port.enrollTrustedDevice(
+        sync_authority,
+        context.session_user,
+        local_device,
+        "local-devbox",
+        notes_daily_user_signer,
+        notes_daily_primary_device_signer,
+        260,
+    ) catch return false;
+    _ = sync_port.enrollTrustedDevice(
+        sync_authority,
+        context.session_user,
+        tablet_device,
+        "tablet",
+        notes_daily_user_signer,
+        notes_daily_paired_device_signer,
+        261,
+    ) catch return false;
+    const local_policy = sync_port.createNetworkPolicy(sync_authority, .{
+        .owner = context.sync_service_principal,
+        .workspace_id = storage_state.notes_workspace_id,
+        .label = "notes-typed-local",
+        .mode = .local_network,
+    }) catch return false;
+    _ = sync_port.configureWorkspacePolicy(sync_authority, .{
+        .workspace_id = storage_state.notes_workspace_id,
+        .owner = context.session_user,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .selective_prefixes = &.{"documents/"},
+        .device_to_device_policy_id = local_policy.id,
+    }) catch return false;
+
+    var notifications = notification_center.Center.init();
+    var shell_checkpoint_store = humane_shell.HumaneShellCheckpointStore{};
+    var shell_ux = native_ux.Controller.init();
+    var shell = humane_shell.HumaneShell.init(
+        context.runtime_service,
+        &shell_ux,
+        compositor_service,
+        context.storage_service_instance,
+        &sync_port,
+        sync_authority,
+        &notifications,
+        context.update_ledger,
+        .{
+            .user = context.session_user,
+            .app_owner = context.session_user,
+            .reviewer_task_id = graph.state.review_service_task.id,
+            .workspace_id = storage_state.notes_workspace_id,
+            .workspace_label = "Notes Workspace",
+            .document_path = "documents/notes.md",
+            .task_label = "notes-typed",
+            .task_entry = "app.notes",
+            .task_title = "Notes",
+            .bundle_id = "app.notes",
+            .display_name = "Notes",
+            .ui_surface_id = 26_030,
+            .image_id = 26_030_001,
+            .object_query_label = "documents/notes.md",
+            .sync_from_device = local_device,
+            .sync_to_device = tablet_device,
+            .paired_device = tablet_device,
+            .device_label = "tablet",
+            .user_signer = notes_daily_user_signer,
+            .device_signer = notes_daily_paired_device_signer,
+            .snapshot_label = "booted-native-smoke-notes-edit",
+            .snapshot_signer = notes_daily_snapshot_signer,
+            .document_edit_signer = notes_daily_user_signer,
+        },
+        .{},
+        &shell_checkpoint_store,
+    );
+    var system = booted_system.BootedSystem.init(&shell);
+
+    if (!system.dispatchInput(.{ .kind = .boot, .tick = 260 }).accepted) return false;
+    if (!system.dispatchInput(.{ .kind = .start_task, .tick = 261 }).accepted) return false;
+    if (!system.dispatchInput(.{ .kind = .open_workspace, .tick = 262 }).accepted) return false;
+    if (!system.dispatchInput(.{ .kind = .open_document, .tick = 263 }).accepted) return false;
+    const previous_version_id = shell.state.document_version_id;
+    if (!system.dispatchInput(.{
+        .kind = .text_input,
+        .tick = 264,
+        .text = booted_notes_typed_text,
+    }).accepted) return false;
+    if (!shell.state.document_edited or shell.state.document_version_id == previous_version_id) return false;
+    if (!std.mem.eql(u8, shell.documentTextSlice(), booted_notes_typed_text)) return false;
+    const typed_version = context.storage_service_instance.version(shell.state.document_version_id) orelse return false;
+    const typed_payload = context.storage_service_instance.versionPayload(typed_version) catch return false;
+    if (!std.mem.eql(u8, typed_payload, booted_notes_typed_text)) return false;
+    common.printBootMarker(boot_markers.notes_daily_driver_typed_edit_ok);
+
+    if (!system.dispatchInput(.{ .kind = .sync_document, .tick = 265 }).accepted) return false;
+    if (!shell.state.document_synced or shell.state.sync_selected_entries == 0 or shell.state.sync_transport_frames == 0) return false;
+    const synced_replica_version = typed_sync_service.replicaVersion(
+        storage_state.notes_workspace_id,
+        tablet_device,
+        "documents/notes.md",
+    ) orelse return false;
+    if (synced_replica_version != shell.state.document_version_id) return false;
+    common.printBootMarker(boot_markers.notes_daily_driver_typed_sync_ok);
+
+    const previous_restart_generation = context.runtime_service.restart_generation;
+    if (!system.dispatchInput(.{ .kind = .recover_state, .tick = 266 }).accepted) return false;
+    if (!shell.state.recovered or context.runtime_service.restart_generation <= previous_restart_generation) return false;
+    if (!std.mem.eql(u8, shell.documentTextSlice(), booted_notes_typed_text)) return false;
+    common.printBootMarker(boot_markers.notes_daily_driver_typed_recovery_ok);
+    common.printBootMarker(boot_markers.notes_daily_driver_typed_loop_complete);
+    return true;
+}
+
+fn mintNotesDailyPackageAuthority(
+    context: *scenario_support.Context,
+    session_task_id: u64,
+    now_ticks: u64,
+) !package_service.AuthorityContext {
+    const package_authority = try context.capability_table.mintBootRoot(.{
+        .holder = context.session_service,
+        .issuer = context.policy_authority,
+        .target = .{ .kind = .service, .id = context.package_service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+            .capability_mint = true,
+            .capability_revoke = true,
+        } },
+        .scope = .{
+            .task_id = session_task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 1_000,
+        },
+        .audit = .{},
+    });
+    return .{
+        .task_id = session_task_id,
+        .principal = context.session_service,
+        .capability_id = package_authority.id,
+        .now_ticks = now_ticks,
+    };
+}
+
+fn signedNotesDailyBundle(version_minor: u16) !manifest.BundleManifest {
+    var bundle = manifest_fixtures.notesBundle();
+    bundle.bundle_id = "app.notes.daily";
+    bundle.version_minor = version_minor;
+    bundle.assets = if (version_minor == 0) &notes_daily_v1_manifest_assets else &notes_daily_v2_manifest_assets;
+    bundle.supply_chain = notesDailySupplyChain(version_minor);
+    bundle.signature = try signing.signWithDefaultRegistry(
+        .ed25519,
+        notes_daily_bundle_signer,
+        &package_service.digestBundle(bundle),
+    );
+    return bundle;
+}
+
+fn notesDailySupplyChain(version_minor: u16) manifest.SupplyChainDecl {
+    if (version_minor == 0) {
+        return .{
+            .sbom_digest = "sha256:5656565656565656565656565656565656565656565656565656565656565656",
+            .source_archive_digest = "sha256:5757575757575757575757575757575757575757575757575757575757575757",
+            .build_recipe_digest = "sha256:5858585858585858585858585858585858585858585858585858585858585858",
+            .vulnerability_scan_digest = "sha256:5959595959595959595959595959595959595959595959595959595959595959",
+            .build_provenance_identity = "builder:zigos/native-reproducible",
+            .reproducible_build = true,
+            .trusted_builder = true,
+        };
+    }
+    return .{
+        .sbom_digest = "sha256:6060606060606060606060606060606060606060606060606060606060606060",
+        .source_archive_digest = "sha256:6161616161616161616161616161616161616161616161616161616161616161",
+        .build_recipe_digest = "sha256:6262626262626262626262626262626262626262626262626262626262626262",
+        .vulnerability_scan_digest = "sha256:6363636363636363636363636363636363636363636363636363636363636363",
+        .build_provenance_identity = "builder:zigos/native-reproducible",
+        .reproducible_build = true,
+        .trusted_builder = true,
+    };
+}
+
+fn emitNotesDailyDriverMarkers(snapshot: production_journey.ProductionJourneyMarkerSnapshot) void {
+    if (snapshot.install_open) common.printBootMarker(boot_markers.notes_daily_driver_install_open_ok);
+    if (snapshot.edit_saved) common.printBootMarker(boot_markers.notes_daily_driver_edit_saved_ok);
+    if (snapshot.share_sync) common.printBootMarker(boot_markers.notes_daily_driver_share_sync_ok);
+    if (snapshot.update_rollback) common.printBootMarker(boot_markers.notes_daily_driver_update_rollback_ok);
+    if (snapshot.recovery_remove) common.printBootMarker(boot_markers.notes_daily_driver_recovery_remove_ok);
+    if (snapshot.authority_revoked) common.printBootMarker(boot_markers.notes_daily_driver_authority_revoked_ok);
+    if (snapshot.complete()) common.printBootMarker(boot_markers.notes_daily_driver_complete);
 }

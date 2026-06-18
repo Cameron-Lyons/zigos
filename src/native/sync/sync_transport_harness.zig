@@ -1,9 +1,11 @@
 const std = @import("std");
+const attestation_service = @import("../platform/attestation_service.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -20,6 +22,7 @@ pub const Error = error{
     PacketAuthenticationFailed,
     PacketTargetMismatch,
     FrameSigningFailed,
+    ProductionAttestationRequired,
     RelayDomainTooLong,
     RelayQueueFull,
 };
@@ -46,6 +49,24 @@ pub const SignedEncryptedFrame = struct {
     packet: EncryptedPacket,
     packet_digest: crypto_hash.Digest,
     signature: manifest.Signature,
+};
+
+pub const SessionTrustPosture = enum(u8) {
+    local_lab_only,
+    production_attested,
+};
+
+pub const VerifiedServiceIdentityOpenRequest = struct {
+    task_id: u64,
+    principal_id: principal.PrincipalId,
+    capability_id: u64,
+    policy_id: u64,
+    service_identity: []const u8,
+    attestation_response: attestation_service.RemoteAttestationResponse,
+    attestation_request: attestation_service.RemoteAttestationRequest,
+    attested_boot: *const measured_boot.BootRecord,
+    trusted_root: signing.PublicIdentity,
+    now_ticks: u64,
 };
 
 const RelayPacketSlot = struct {
@@ -232,9 +253,36 @@ pub const TransportSession = struct {
     relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     key: crypto_hash.Digest,
     egress_decision: network_policy.EgressDecision,
+    trust_posture: SessionTrustPosture = .local_lab_only,
+    verified_remote_attestation: bool = false,
+    attestation_request_digest_present: bool = false,
+    attestation_request_digest: crypto_hash.Digest = crypto_hash.zero_digest,
+    peer_root_digest_present: bool = false,
+    peer_root_digest: crypto_hash.Digest = crypto_hash.zero_digest,
+    attestation_verifier_metadata_digest_present: bool = false,
+    attestation_verifier_metadata_digest_bound: bool = false,
+    attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
 
     pub fn relayDomainSlice(self: *const TransportSession) []const u8 {
         return self.relay_domain[0..self.relay_domain_len];
+    }
+
+    pub fn productionAttested(self: *const TransportSession) bool {
+        return self.trust_posture == .production_attested and
+            self.egress_decision.policy_decision.attestation_required and
+            self.egress_decision.policy_decision.identity_pinned and
+            self.verified_remote_attestation and
+            self.attestation_request_digest_present and
+            !std.mem.allEqual(u8, &self.attestation_request_digest, 0) and
+            self.peer_root_digest_present and
+            !std.mem.allEqual(u8, &self.peer_root_digest, 0) and
+            self.attestation_verifier_metadata_digest_present and
+            self.attestation_verifier_metadata_digest_bound and
+            !std.mem.allEqual(u8, &self.attestation_verifier_metadata_digest, 0);
+    }
+
+    pub fn requireProductionAttestation(self: *const TransportSession) Error!void {
+        if (!self.productionAttested()) return error.ProductionAttestationRequired;
     }
 };
 
@@ -285,6 +333,33 @@ pub const Harness = struct {
             target_device,
             "",
         );
+    }
+
+    pub fn openVerifiedServiceIdentity(
+        self: *Harness,
+        broker: *network_policy.EgressBroker,
+        request: VerifiedServiceIdentityOpenRequest,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!TransportSession {
+        const evidence = network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
+            .{ .service_identity = request.service_identity },
+            request.attestation_response,
+            request.attestation_request,
+            request.attested_boot,
+            request.trusted_root,
+        ) orelse {
+            self.denied_sessions += 1;
+            return error.ProductionAttestationRequired;
+        };
+        return self.openServiceIdentity(broker, .{
+            .task_id = request.task_id,
+            .principal_id = request.principal_id,
+            .capability_id = request.capability_id,
+            .policy_id = request.policy_id,
+            .evidence = evidence,
+            .now_ticks = request.now_ticks,
+        }, source_device, target_device);
     }
 
     pub fn openRelay(
@@ -384,6 +459,7 @@ pub const Harness = struct {
             self.denied_sessions += 1;
             return error.EgressDenied;
         }
+        const trust_posture = sessionTrustPosture(request.evidence, decision.policy_decision);
 
         var session = TransportSession{
             .id = self.nextSessionId(),
@@ -393,8 +469,17 @@ pub const Harness = struct {
             .capability_id = request.capability_id,
             .source_device = source_device,
             .target_device = target_device,
-            .key = deriveSessionKey(transport, request, source_device, target_device, relay_domain),
+            .key = deriveSessionKey(transport, trust_posture, request, source_device, target_device, relay_domain),
             .egress_decision = decision,
+            .trust_posture = trust_posture,
+            .verified_remote_attestation = request.evidence.verified_remote_attestation,
+            .attestation_request_digest_present = request.evidence.attestation_request_digest_present,
+            .attestation_request_digest = request.evidence.attestation_request_digest,
+            .peer_root_digest_present = request.evidence.peer_root_digest_present,
+            .peer_root_digest = request.evidence.peer_root_digest,
+            .attestation_verifier_metadata_digest_present = request.evidence.attestation_verifier_metadata_digest_present,
+            .attestation_verifier_metadata_digest_bound = request.evidence.attestation_verifier_metadata_digest_bound,
+            .attestation_verifier_metadata_digest = request.evidence.attestation_verifier_metadata_digest,
         };
         session.relay_domain_len = @min(relay_domain.len, session.relay_domain.len);
         @memcpy(session.relay_domain[0..session.relay_domain_len], relay_domain[0..session.relay_domain_len]);
@@ -440,6 +525,25 @@ pub const EmulatedNativeTransport = struct {
         };
     }
 
+    pub fn openVerifiedServiceIdentity(
+        self: *EmulatedNativeTransport,
+        broker: *network_policy.EgressBroker,
+        request: VerifiedServiceIdentityOpenRequest,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!TransportSession {
+        self.attempted_connections += 1;
+        return self.harness.openVerifiedServiceIdentity(
+            broker,
+            request,
+            source_device,
+            target_device,
+        ) catch |err| {
+            self.denied_before_transmit += 1;
+            return err;
+        };
+    }
+
     pub fn send(
         self: *EmulatedNativeTransport,
         session: *const TransportSession,
@@ -471,6 +575,7 @@ pub fn verifySignedFrame(frame: *const SignedEncryptedFrame) bool {
 
 fn deriveSessionKey(
     transport: sync_state.TransportMode,
+    trust_posture: SessionTrustPosture,
     request: network_policy.EgressConnectionRequest,
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
@@ -478,6 +583,17 @@ fn deriveSessionKey(
 ) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "transport", transport);
+    crypto_hash.updateEnum(&hasher, "trust-posture", trust_posture);
+    crypto_hash.updateBool(&hasher, "verified-attestation", request.evidence.verified_remote_attestation);
+    crypto_hash.updateBool(&hasher, "attestation-request-digest-present", request.evidence.attestation_request_digest_present);
+    if (request.evidence.attestation_request_digest_present) {
+        crypto_hash.updateBytes(&hasher, "attestation-request-digest", &request.evidence.attestation_request_digest);
+    }
+    crypto_hash.updateBool(&hasher, "attestation-verifier-metadata-digest-present", request.evidence.attestation_verifier_metadata_digest_present);
+    if (request.evidence.attestation_verifier_metadata_digest_present) {
+        crypto_hash.updateBool(&hasher, "attestation-verifier-metadata-digest-bound", request.evidence.attestation_verifier_metadata_digest_bound);
+        crypto_hash.updateBytes(&hasher, "attestation-verifier-metadata-digest", &request.evidence.attestation_verifier_metadata_digest);
+    }
     crypto_hash.updateInt(&hasher, "policy", request.policy_id);
     crypto_hash.updateInt(&hasher, "capability", request.capability_id);
     crypto_hash.updateInt(&hasher, "source-kind", @intFromEnum(source_device.kind));
@@ -487,6 +603,19 @@ fn deriveSessionKey(
     crypto_hash.updateBytes(&hasher, "relay-domain", relay_domain);
     crypto_hash.updateInt(&hasher, "task", request.task_id);
     return crypto_hash.finalize(&hasher);
+}
+
+fn sessionTrustPosture(
+    evidence: network_policy.ConnectionEvidence,
+    decision: network_policy.Decision,
+) SessionTrustPosture {
+    if (decision.attestation_required and
+        decision.identity_pinned and
+        evidence.hasVerifiedRemoteAttestation())
+    {
+        return .production_attested;
+    }
+    return .local_lab_only;
 }
 
 fn digestPayload(session: *const TransportSession, plaintext: []const u8) crypto_hash.Digest {
@@ -631,6 +760,9 @@ test "encrypted transport harness only creates sessions after egress approval" {
     try std.testing.expect(packet.encrypted);
     try std.testing.expect(packet.egress_allowed);
     try std.testing.expect(!std.mem.eql(u8, packet.ciphertextSlice(), "sync payload"));
+    try std.testing.expectEqual(SessionTrustPosture.local_lab_only, session.trust_posture);
+    try std.testing.expect(!session.productionAttested());
+    try std.testing.expectError(error.ProductionAttestationRequired, session.requireProductionAttestation());
     try std.testing.expectEqual(@as(usize, 1), harness.created_sessions);
 
     var zero_id_session = session;
@@ -782,12 +914,15 @@ test "encrypted transport harness binds device sessions to attested identity and
     const target = principal.PrincipalId{ .kind = .device, .serial = 21 };
     const other_target = principal.PrincipalId{ .kind = .device, .serial = 22 };
     const pinned_digest = crypto_hash.digestFromByte(0xA5);
+    const request_digest = crypto_hash.digestFromByte(0xA6);
+    const metadata_digest = crypto_hash.digestFromByte(0xA7);
     const local = try policies.create(.{
         .owner = owner,
         .label = "local-pinned",
         .mode = .local_network,
         .require_remote_attestation = true,
         .pinned_root_digest = pinned_digest,
+        .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
     const local_capability = try capabilities.mintBootRoot(.{
         .holder = app,
@@ -818,8 +953,14 @@ test "encrypted transport harness binds device sessions to attested identity and
         .evidence = .{
             .destination = .{ .domain = "relay.sync.example" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = pinned_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = metadata_digest,
         },
         .now_ticks = 5,
     }, source, target));
@@ -832,13 +973,55 @@ test "encrypted transport harness binds device sessions to attested identity and
         .evidence = .{
             .destination = .local_network,
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = pinned_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = metadata_digest,
         },
         .now_ticks = 5,
     }, source, target);
     try std.testing.expectEqual(sync_state.TransportMode.device_to_device, session.transport);
     try std.testing.expect(session.egress_decision.policy_decision.identity_pinned);
+    try std.testing.expect(session.productionAttested());
+    try session.requireProductionAttestation();
+    try std.testing.expectEqual(SessionTrustPosture.production_attested, session.trust_posture);
+    try std.testing.expect(session.peer_root_digest_present);
+    try std.testing.expect(std.mem.eql(u8, &pinned_digest, &session.peer_root_digest));
+    try std.testing.expect(session.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(session.attestation_verifier_metadata_digest_bound);
+    try std.testing.expect(std.mem.eql(u8, &metadata_digest, &session.attestation_verifier_metadata_digest));
+
+    const lab_relay = try policies.create(.{
+        .owner = owner,
+        .label = "lab-relay",
+        .mode = .named_domain,
+        .target = "relay.lab.sync",
+    });
+    const lab_relay_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = lab_relay.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 43, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 10 },
+        .audit = .{},
+    });
+    const lab_session = try harness.openRelay(&broker, .{
+        .task_id = 43,
+        .principal_id = app,
+        .capability_id = lab_relay_capability.id,
+        .policy_id = lab_relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.lab.sync" } },
+        .now_ticks = 5,
+    }, source, target, "relay.lab.sync");
+    try std.testing.expectEqual(SessionTrustPosture.local_lab_only, lab_session.trust_posture);
+    try std.testing.expect(!lab_session.productionAttested());
+    try std.testing.expectError(error.ProductionAttestationRequired, lab_session.requireProductionAttestation());
+    try std.testing.expect(!std.mem.eql(u8, &session.key, &lab_session.key));
 
     const retargeted = try harness.openDeviceToDevice(&broker, .{
         .task_id = 43,
@@ -848,8 +1031,14 @@ test "encrypted transport harness binds device sessions to attested identity and
         .evidence = .{
             .destination = .local_network,
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = pinned_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = metadata_digest,
         },
         .now_ticks = 5,
     }, source, other_target);
@@ -883,7 +1072,7 @@ test "encrypted transport harness binds device sessions to attested identity and
     forged_packet.ciphertext_len = MAX_PACKET_BYTES + 1;
     try std.testing.expectError(error.PacketTooLarge, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
 
-    try std.testing.expectEqual(@as(usize, 2), harness.created_sessions);
+    try std.testing.expectEqual(@as(usize, 3), harness.created_sessions);
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
 }
 
@@ -896,6 +1085,8 @@ test "emulated native transport denies service identity before packet transmissi
     const target = principal.PrincipalId{ .kind = .device, .serial = 31 };
     const pinned_digest = crypto_hash.digestFromByte(0xC1);
     const wrong_digest = crypto_hash.digestFromByte(0xC2);
+    const request_digest = crypto_hash.digestFromByte(0xC3);
+    const metadata_digest = crypto_hash.digestFromByte(0xC4);
 
     const overlay = try policies.create(.{
         .owner = owner,
@@ -904,6 +1095,7 @@ test "emulated native transport denies service identity before packet transmissi
         .target = "overlay.notes.sync",
         .require_remote_attestation = true,
         .pinned_root_digest = pinned_digest,
+        .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
     const overlay_capability = try capabilities.mintBootRoot(.{
         .holder = app,
@@ -935,8 +1127,14 @@ test "emulated native transport denies service identity before packet transmissi
         .evidence = .{
             .destination = .{ .service_identity = "overlay.notes.sync" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = wrong_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = metadata_digest,
         },
         .now_ticks = 5,
     }, source, target));
@@ -954,13 +1152,27 @@ test "emulated native transport denies service identity before packet transmissi
         .evidence = .{
             .destination = .{ .service_identity = "overlay.notes.sync" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = pinned_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = metadata_digest,
         },
         .now_ticks = 5,
     }, source, target);
     try std.testing.expect(session.egress_decision.policy_decision.attestation_required);
     try std.testing.expect(session.egress_decision.policy_decision.identity_pinned);
+    try std.testing.expectEqual(SessionTrustPosture.production_attested, session.trust_posture);
+    try std.testing.expect(session.productionAttested());
+    try session.requireProductionAttestation();
+    try std.testing.expect(session.peer_root_digest_present);
+    try std.testing.expect(std.mem.eql(u8, &pinned_digest, &session.peer_root_digest));
+    try std.testing.expect(session.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(session.attestation_verifier_metadata_digest_bound);
+    try std.testing.expect(std.mem.eql(u8, &metadata_digest, &session.attestation_verifier_metadata_digest));
 
     const packet = try transport.send(&session, "attested payload");
     try std.testing.expect(packet.encrypted);

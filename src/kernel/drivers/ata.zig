@@ -1,4 +1,18 @@
-const x86 = @import("../../arch/x86.zig");
+const builtin = @import("builtin");
+const x86 = if (builtin.target.os.tag == .freestanding)
+    @import("../../arch/x86.zig")
+else
+    struct {
+        pub fn outb(_: u16, _: u8) void {}
+
+        pub fn inb(_: u16) u8 {
+            return 0;
+        }
+
+        pub fn inw(_: u16) u16 {
+            return 0;
+        }
+    };
 const vga = @import("vga.zig");
 
 pub const kernel_boundary_role = "bootstrap_storage_inventory_shim";

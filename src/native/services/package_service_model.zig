@@ -34,6 +34,19 @@ pub const InstallRequest = struct {
     source_identity: []const u8,
     data_schema_version: u32 = 1,
     declared_permission_change: bool = false,
+    release_transparency: ReleaseTransparencyEvidence = .{},
+};
+
+pub const ReleaseTransparencyEvidence = struct {
+    sequence: u64 = 0,
+    root: crypto_hash.Digest = crypto_hash.zero_digest,
+    log_head: crypto_hash.Digest = crypto_hash.zero_digest,
+
+    pub fn present(self: ReleaseTransparencyEvidence) bool {
+        return self.sequence != 0 and
+            !digestIsZero(self.root) and
+            !digestIsZero(self.log_head);
+    }
 };
 
 pub const InstallResult = struct {
@@ -84,6 +97,24 @@ pub const LaunchPlan = struct {
     components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent,
     asset_count: usize,
     assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset,
+    provenance: PackageLaunchProvenance = .{},
+};
+
+pub const PackageLaunchProvenance = struct {
+    bundle_id: []const u8 = "",
+    display_name: []const u8 = "",
+    publisher: []const u8 = "",
+    source_identity: []const u8 = "",
+    version_major: u16 = 0,
+    version_minor: u16 = 0,
+    update_channel: manifest.UpdateChannel = .stable,
+    data_schema_version: u32 = 0,
+    permission_digest: crypto_hash.Digest = crypto_hash.zero_digest,
+    signature_format: []const u8 = "",
+    signature_signer: []const u8 = "",
+    signature_public_key_len: usize = 0,
+    signed: bool = false,
+    release_transparency: ReleaseTransparencyEvidence = .{},
 };
 
 pub const StoredInterface = struct {
@@ -324,6 +355,7 @@ pub const BundleRevision = struct {
     version_minor: u16 = 0,
     channel: manifest.UpdateChannel = .stable,
     permission_digest: crypto_hash.Digest = crypto_hash.zero_digest,
+    release_transparency: ReleaseTransparencyEvidence = .{},
     schema_version: u32 = 0,
     component_count: usize = 0,
     components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent = [_]StoredComponent{zeroStoredComponent()} ** MAX_COMPONENTS_PER_BUNDLE,
@@ -356,6 +388,13 @@ pub const BundleRevision = struct {
         return self.source_identity[0..self.source_identity_len];
     }
 };
+
+fn digestIsZero(digest: crypto_hash.Digest) bool {
+    for (digest) |byte| {
+        if (byte != 0) return false;
+    }
+    return true;
+}
 
 pub const InstalledBundle = struct {
     bundle_id_len: usize,

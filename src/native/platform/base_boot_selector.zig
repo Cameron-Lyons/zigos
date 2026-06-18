@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const hardware_target = @import("hardware_target.zig");
 const immutable_base = @import("immutable_base.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -342,6 +343,38 @@ pub fn verifiedManagerSelection(
         std.mem.eql(u8, image.signerSlice(), selection.signerSlice());
 }
 
+pub fn powerCycleRollbackProof(
+    staged: Decision,
+    rollback: Decision,
+    recovered: *const Selector,
+    cycles: u16,
+    persisted_state_preserved: bool,
+) hardware_target.UpdateRollbackProof {
+    const stable_slot = staged.active_slot orelse std.math.maxInt(usize);
+    const candidate_slot = staged.candidate_slot orelse std.math.maxInt(usize);
+    const recovered_slot = recovered.activeSlotIndex() orelse std.math.maxInt(usize);
+    return .{
+        .cycles = cycles,
+        .stable_slot = stable_slot,
+        .candidate_slot = candidate_slot,
+        .recovered_slot = recovered_slot,
+        .activation_generation_before = staged.activation_generation,
+        .activation_generation_after = rollback.activation_generation,
+        .rollback_generation_before = staged.rollback_generation,
+        .rollback_generation_after = rollback.rollback_generation,
+        .failure_detected = rollback.failure != .none,
+        .rollback_decision = rollback.rolled_back,
+        .service_use_started = rollback.service_use_started,
+        .selector_record_persisted = recovered.state == .stable and recovered.pending == null,
+        .post_power_cycle_verified = if (rollback.active_slot) |active_slot|
+            recovered.coldRebootVerified(active_slot, rollback.activation_generation)
+        else
+            false,
+        .active_slot_verified = recovered_slot == stable_slot,
+        .persisted_state_preserved = persisted_state_preserved,
+    };
+}
+
 fn encodeSelection(bytes: []u8, selection: immutable_base.BootSelection) void {
     @memset(bytes[0..selection_record_size], 0);
     bytes[0] = selection.slot_index;
@@ -459,7 +492,7 @@ test "freestanding base boot selector promotes and rolls back signed artifacts a
     _ = try manager.stageImage(0, "stable-a", "kernel=v3", image_signer, 16);
     try manager.beginActivation(0, 17);
     const failed_candidate = try manager.selectVerifiedBootImage();
-    _ = try after_promote_reboot.stageCandidate(&manager, failed_candidate, 17);
+    const staged_failure = try after_promote_reboot.stageCandidate(&manager, failed_candidate, 17);
     const failed_manager = try manager.finalizeActivation(.{ .network_ok = false }, 18);
     const failed_selector = try after_promote_reboot.finalizeBoot(.{ .network_ok = false }, false, 18);
     try std.testing.expect(failed_manager.rolled_back);
@@ -473,6 +506,25 @@ test "freestanding base boot selector promotes and rolls back signed artifacts a
     var after_rollback_reboot = Selector.init();
     try after_rollback_reboot.loadFromMemory(&store);
     try std.testing.expect(after_rollback_reboot.coldRebootVerified(1, failed_manager.activation_generation));
+    const rollback_proof = powerCycleRollbackProof(staged_failure, failed_selector, &after_rollback_reboot, 2, true);
+    try std.testing.expect(rollback_proof.verified());
+    try std.testing.expect(!rollback_proof.productionHardwareVerified());
+    const hardware_rollback_proof = hardware_target.withHardwareUpdateRollbackEvidence(rollback_proof, .{
+        .source = .hardware_power_cycle,
+        .candidate_activation_writes = 2,
+        .selector_record_flushes = 2,
+        .power_cycle_observations = 2,
+        .failure_detector_observations = 2,
+        .rollback_decision_records = 2,
+        .stable_slot_boot_observations = 2,
+        .recovered_slot_reads = 2,
+        .persisted_state_verifications = 2,
+        .service_start_suppression_observations = 2,
+    });
+    try std.testing.expect(hardware_rollback_proof.productionHardwareVerified());
+    var missing_power_cycle = hardware_rollback_proof;
+    missing_power_cycle.hardware_rollback.power_cycle_observations = 0;
+    try std.testing.expect(!missing_power_cycle.productionHardwareVerified());
 
     _ = try manager.stageImage(0, "stable-a", "kernel=v4", image_signer, 19);
     try manager.beginActivation(0, 20);

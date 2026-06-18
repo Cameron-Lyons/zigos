@@ -27,6 +27,107 @@ const signer = common.signer;
 const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(2);
 const FAILURE_NEEDLE_BUFFER_BYTES: usize = 48;
 
+const BootedFirstTargetDriverReadings = struct {
+    reader_generation: u32,
+    acpi: platform_policy_signals.FirstTargetAcpiDriverSample,
+    thermal: platform_policy_signals.FirstTargetThermalDriverSample,
+    battery: platform_policy_signals.FirstTargetBatteryDriverSample,
+    accelerators: platform_policy_signals.FirstTargetAcceleratorDriverSample,
+    memory_capacity_bytes: usize,
+    grid_carbon: platform_policy_signals.FirstTargetGridCarbonDriverSample,
+
+    fn init(
+        reader_generation: u32,
+        snapshot: platform_policy_signals.Snapshot,
+    ) BootedFirstTargetDriverReadings {
+        return .{
+            .reader_generation = reader_generation,
+            .acpi = .{
+                .firmware = .{
+                    .revision = 6,
+                    .dsdt_address = 0x00AB_C000,
+                    .sci_interrupt = 9,
+                    .pm1a_event_block = 0x1800,
+                    .pm1b_event_block = 0,
+                    .pm1a_control_block = 0x1804,
+                    .pm1b_control_block = 0,
+                    .pm_timer_block = 0x1808,
+                    .pm1_event_length = 4,
+                    .pm1_control_length = 2,
+                    .pm_timer_length = 4,
+                    .reset_register = null,
+                    .reset_value = 0,
+                },
+                .thermal_zone_count = 1,
+                .battery_device_count = 1,
+            },
+            .thermal = .{
+                .zone_count = 1,
+                .sample_sequence = @intCast(reader_generation),
+                .thermal_milli_celsius = snapshot.thermal_milli_celsius,
+            },
+            .battery = .{
+                .battery_device_count = 1,
+                .sample_sequence = @intCast(reader_generation),
+                .battery_percent = snapshot.battery_percent,
+                .charging = snapshot.battery_charging,
+            },
+            .accelerators = .{
+                .sample_sequence = @intCast(reader_generation),
+                .gpu_driver_online = snapshot.gpu_driver_online,
+                .npu_driver_online = snapshot.npu_driver_online,
+                .media_driver_online = snapshot.media_driver_online,
+                .gpu_driver_generation = if (snapshot.gpu_driver_online) reader_generation else 0,
+                .npu_driver_generation = if (snapshot.npu_driver_online) reader_generation else 0,
+                .media_driver_generation = if (snapshot.media_driver_online) reader_generation else 0,
+                .completion_interrupts_observed = 1,
+            },
+            .memory_capacity_bytes = snapshot.memory_capacity_bytes,
+            .grid_carbon = .{
+                .sample_sequence = @intCast(reader_generation),
+                .grams_per_kwh = 0,
+            },
+        };
+    }
+
+    pub fn readAcpiSample(self: *BootedFirstTargetDriverReadings) platform_policy_signals.PlatformTelemetryError!platform_policy_signals.FirstTargetAcpiDriverSample {
+        return self.acpi;
+    }
+
+    pub fn readThermalSample(self: *BootedFirstTargetDriverReadings) platform_policy_signals.PlatformTelemetryError!platform_policy_signals.FirstTargetThermalDriverSample {
+        return self.thermal;
+    }
+
+    pub fn readBatterySample(self: *BootedFirstTargetDriverReadings) platform_policy_signals.PlatformTelemetryError!platform_policy_signals.FirstTargetBatteryDriverSample {
+        return self.battery;
+    }
+
+    pub fn readAcceleratorSample(self: *BootedFirstTargetDriverReadings) platform_policy_signals.PlatformTelemetryError!platform_policy_signals.FirstTargetAcceleratorDriverSample {
+        return self.accelerators;
+    }
+
+    pub fn memoryCapacityBytes(self: *BootedFirstTargetDriverReadings) usize {
+        return self.memory_capacity_bytes;
+    }
+
+    pub fn readGridCarbonSample(self: *BootedFirstTargetDriverReadings) platform_policy_signals.PlatformTelemetryError!platform_policy_signals.FirstTargetGridCarbonDriverSample {
+        return self.grid_carbon;
+    }
+};
+
+fn firstTargetDriverProvider(
+    readings: *BootedFirstTargetDriverReadings,
+) platform_policy_signals.FirstTargetDriverCallbackProvider {
+    return platform_policy_signals.FirstTargetDriverCallbackProvider.init(
+        .{
+            .name = "booted-nuc11tnki5-driver-callbacks",
+            .role = .production,
+            .reader_generation = readings.reader_generation,
+        },
+        platform_policy_signals.FirstTargetDriverCallbacks.init(BootedFirstTargetDriverReadings, readings),
+    );
+}
+
 pub fn proveBootedPostActivationHealthChecks(
     runtime: *task_runtime.Runtime,
     capability_table: *capability.CapabilityTable,
@@ -299,23 +400,31 @@ pub fn proveBootedSchedulerTelemetryProvider(
         .shared_memory_bytes = shared_memory.PAGE_SIZE,
     }, false));
 
-    var provider = try platform_policy_signals.FreestandingPlatformTelemetryProvider.initForBootedService(
+    var initial_driver_readings = BootedFirstTargetDriverReadings.init(1, .{
+        .thermal_milli_celsius = 91_000,
+        .battery_percent = 15,
+        .battery_charging = false,
+        .gpu_driver_online = true,
+        .npu_driver_online = false,
+        .media_driver_online = true,
+    });
+    var initial_driver_provider = firstTargetDriverProvider(&initial_driver_readings);
+    var provider = try platform_policy_signals.FirstTargetPlatformTelemetryProvider.initFromReaderProvider(
         44,
         provider_task.task_id,
         701,
-        platform_policy_signals.collectLiveCounters(runtime, scheduler, .{
-            .thermal_milli_celsius = 91_000,
-            .battery_percent = 15,
-            .battery_charging = false,
-            .gpu_driver_online = true,
-            .npu_driver_online = false,
-            .media_driver_online = true,
-        }),
+        runtime,
+        scheduler,
+        initial_driver_provider.readerProvider(),
     );
-    try std.testing.expectError(error.TelemetryProviderUnauthorized, provider.observeLive(
+    var unauthorized_driver_readings = BootedFirstTargetDriverReadings.init(1, .{});
+    var unauthorized_driver_provider = firstTargetDriverProvider(&unauthorized_driver_readings);
+    try std.testing.expectError(error.TelemetryProviderUnauthorized, provider.observeFirstTargetProvider(
         session_task_id,
         701,
-        platform_policy_signals.collectLiveCounters(runtime, scheduler, .{}),
+        runtime,
+        scheduler,
+        unauthorized_driver_provider.readerProvider(),
     ));
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
@@ -368,14 +477,16 @@ pub fn proveBootedSchedulerTelemetryProvider(
     }, true));
 
     const media_denials_before = scheduler.engineDenialCount(.media);
-    try provider.observeLive(provider_task.task_id, 702, platform_policy_signals.collectLiveCounters(runtime, scheduler, .{
+    var offline_driver_readings = BootedFirstTargetDriverReadings.init(2, .{
         .thermal_milli_celsius = 45_000,
         .battery_percent = 15,
         .battery_charging = false,
         .gpu_driver_online = false,
         .npu_driver_online = false,
         .media_driver_online = false,
-    }));
+    });
+    var offline_driver_provider = firstTargetDriverProvider(&offline_driver_readings);
+    try provider.observeFirstTargetProvider(provider_task.task_id, 702, runtime, scheduler, offline_driver_provider.readerProvider());
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expectEqual(@as(u64, 702), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(scheduler.resource_state.battery_saver);
@@ -390,14 +501,16 @@ pub fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expectEqual(media_denials_before + 1, scheduler.engineDenialCount(.media));
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
 
-    try provider.observeLive(provider_task.task_id, 703, platform_policy_signals.collectLiveCounters(runtime, scheduler, .{
+    var online_driver_readings = BootedFirstTargetDriverReadings.init(3, .{
         .thermal_milli_celsius = 45_000,
         .battery_percent = 15,
         .battery_charging = false,
         .gpu_driver_online = true,
         .npu_driver_online = true,
         .media_driver_online = true,
-    }));
+    });
+    var online_driver_provider = firstTargetDriverProvider(&online_driver_readings);
+    try provider.observeFirstTargetProvider(provider_task.task_id, 703, runtime, scheduler, online_driver_provider.readerProvider());
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expectEqual(@as(u64, 703), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(scheduler.resource_state.gpu_available);

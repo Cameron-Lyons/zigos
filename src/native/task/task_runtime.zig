@@ -1,5 +1,6 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const builtin = @import("builtin");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const debug_contract = @import("../security/debug_contract.zig");
 const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 const indexed_arena = @import("../core/indexed_arena.zig");
@@ -272,6 +273,10 @@ pub const Runtime = struct {
             request.launch.signed,
             @tagName(request.launch.boundary),
             request.launch.bundle_id,
+            request.launch.source_identity,
+            request.launch.release_transparency_sequence,
+            request.launch.release_transparency_root,
+            request.launch.release_transparency_log_head,
         ));
         if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
             native_util.impossibleByInvariant("task owner index capacity covers task slots");
@@ -530,6 +535,10 @@ pub const Runtime = struct {
             task.launch.signed,
             "service-restart",
             task.launchBundleIdSlice(),
+            task.launchSourceIdentitySlice(),
+            task.launch.release_transparency_sequence,
+            task.launch.release_transparency_root,
+            task.launch.release_transparency_log_head,
         ));
         try self.audit(task_id, .{
             .kind = .service_restarted,
@@ -871,6 +880,10 @@ test "userspace launch provenance is recorded for explicit image launches" {
             .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.notes",
+            .source_identity = "store:zigos/public",
+            .release_transparency_sequence = 7,
+            .release_transparency_root = crypto_hash.digestFromByte(0x91),
+            .release_transparency_log_head = crypto_hash.digestFromByte(0x92),
         },
         .userspace_image = &notes_image,
     });
@@ -880,8 +893,24 @@ test "userspace launch provenance is recorded for explicit image launches" {
     try std.testing.expect(task.launch.signed);
     try std.testing.expect(task.hasLoadedExecutable());
     try std.testing.expectEqualStrings("app.notes", task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("store:zigos/public", task.launchSourceIdentitySlice());
+    try std.testing.expect(task.launch.hasReleaseTransparency());
+    try std.testing.expectEqual(@as(u64, 7), task.launch.release_transparency_sequence);
+    const expected_root = crypto_hash.digestFromByte(0x91);
+    const expected_log_head = crypto_hash.digestFromByte(0x92);
+    const expected_root_fingerprint = native_util.fnv1a64(&expected_root);
+    const expected_log_head_fingerprint = native_util.fnv1a64(&expected_log_head);
+    try std.testing.expect(std.mem.eql(u8, &expected_root, &task.launch.release_transparency_root));
+    try std.testing.expect(std.mem.eql(u8, &expected_log_head, &task.launch.release_transparency_log_head));
     try std.testing.expectEqual(debug_contract.ProvenanceKind.launch, task.latestProvenanceEvent().?.kind);
     try std.testing.expectEqual(@as(u64, 44), task.latestProvenanceEvent().?.artifact_id);
+    try std.testing.expectEqual(native_util.fnv1a64("store:zigos/public"), task.latestProvenanceEvent().?.source_identity_fingerprint);
+    try std.testing.expect(task.latestProvenanceEvent().?.hasReleaseTransparency());
+    try std.testing.expectEqual(@as(u64, 7), task.latestProvenanceEvent().?.release_transparency_sequence);
+    try std.testing.expectEqual(expected_root_fingerprint, task.latestProvenanceEvent().?.release_transparency_root_fingerprint);
+    try std.testing.expectEqual(expected_log_head_fingerprint, task.latestProvenanceEvent().?.release_transparency_log_head_fingerprint);
+    try std.testing.expect(std.mem.indexOf(u8, task.latestProvenanceEvent().?.detailSlice(), "source=store:zigos/public") != null);
+    try std.testing.expect(std.mem.indexOf(u8, task.latestProvenanceEvent().?.detailSlice(), "seq=7") != null);
     try std.testing.expect(task.latestProvenanceEvent().?.trace_id != 0);
 }
 

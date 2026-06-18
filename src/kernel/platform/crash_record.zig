@@ -14,6 +14,10 @@ pub const Error = error{
     BadVersion,
     BadChecksum,
     ReasonTooLong,
+    PersistenceCycleCountInvalid,
+    PersistenceRecordMismatch,
+    RecoveryBootNotAdvanced,
+    RedactedReportInvalid,
 };
 
 pub const CrashKind = enum(u8) {
@@ -53,6 +57,68 @@ pub const Record = extern struct {
     stack_pointer: u64 = 0,
     reason: [MAX_REASON_BYTES]u8 = [_]u8{0} ** MAX_REASON_BYTES,
     checksum: u32 = 0,
+};
+
+pub const PersistenceEvidenceSource = enum(u8) {
+    modeled_recovery,
+    hardware_reboot_persistence,
+};
+
+pub const HardwarePersistenceEvidence = struct {
+    source: PersistenceEvidenceSource = .modeled_recovery,
+    crash_handler_entries: u32 = 0,
+    persistent_record_writes: u32 = 0,
+    persistent_record_flushes: u32 = 0,
+    reboot_observations: u32 = 0,
+    recovery_boot_reads: u32 = 0,
+    recovered_record_validations: u32 = 0,
+    redacted_report_emissions: u32 = 0,
+    persistent_bytes_written: u64 = 0,
+    persistent_bytes_read: u64 = 0,
+
+    pub fn verified(self: HardwarePersistenceEvidence, proof: PersistenceProof) bool {
+        const expected_cycles = @as(u32, proof.cycles);
+        const expected_bytes = std.math.mul(u64, @sizeOf(Record), expected_cycles) catch return false;
+        return self.source == .hardware_reboot_persistence and
+            expected_cycles > 0 and
+            self.crash_handler_entries >= expected_cycles and
+            self.persistent_record_writes >= expected_cycles and
+            self.persistent_record_flushes >= expected_cycles and
+            self.reboot_observations >= expected_cycles and
+            self.recovery_boot_reads >= expected_cycles and
+            self.recovered_record_validations >= expected_cycles and
+            self.redacted_report_emissions >= expected_cycles and
+            self.persistent_bytes_written >= expected_bytes and
+            self.persistent_bytes_read >= expected_bytes;
+    }
+};
+
+pub const PersistenceProof = struct {
+    persisted_record: Record,
+    recovered_record: Record,
+    recovery_boot_id: u64,
+    cycles: u16,
+    redaction: RedactionMetadata,
+    redacted_report_len: u16,
+    hardware_persistence: HardwarePersistenceEvidence = .{},
+
+    pub fn verified(self: PersistenceProof) bool {
+        validate(self.persisted_record) catch return false;
+        validate(self.recovered_record) catch return false;
+        if (!sameRecord(self.persisted_record, self.recovered_record)) return false;
+        if (self.cycles == 0) return false;
+        if (self.recovery_boot_id <= self.persisted_record.boot_id) return false;
+        const recovered_redaction = redactionMetadata(self.recovered_record);
+        if (!sameRedactionMetadata(self.redaction, recovered_redaction)) return false;
+
+        var report_buffer: [REDACTED_REPORT_BUFFER_BYTES]u8 = undefined;
+        const report = redactedReport(self.recovered_record, report_buffer[0..]);
+        return report.len == self.redacted_report_len and reportRedactionValid(self.recovered_record, report);
+    }
+
+    pub fn productionHardwareVerified(self: PersistenceProof) bool {
+        return self.verified() and self.hardware_persistence.verified(self);
+    }
 };
 
 pub fn init(
@@ -132,6 +198,41 @@ pub fn redactedReport(record: Record, buffer: []u8) []const u8 {
     ) catch "";
 }
 
+pub fn provePersistence(
+    persisted_record: Record,
+    recovered_record: Record,
+    recovery_boot_id: u64,
+    cycles: u16,
+    report_buffer: []u8,
+) Error!PersistenceProof {
+    if (cycles == 0) return error.PersistenceCycleCountInvalid;
+    try validate(persisted_record);
+    try validate(recovered_record);
+    if (!sameRecord(persisted_record, recovered_record)) return error.PersistenceRecordMismatch;
+    if (recovery_boot_id <= persisted_record.boot_id) return error.RecoveryBootNotAdvanced;
+
+    const report = redactedReport(recovered_record, report_buffer);
+    if (report.len == 0 or !reportRedactionValid(recovered_record, report)) return error.RedactedReportInvalid;
+
+    return .{
+        .persisted_record = persisted_record,
+        .recovered_record = recovered_record,
+        .recovery_boot_id = recovery_boot_id,
+        .cycles = cycles,
+        .redaction = redactionMetadata(recovered_record),
+        .redacted_report_len = @intCast(report.len),
+    };
+}
+
+pub fn withHardwarePersistenceEvidence(
+    proof: PersistenceProof,
+    evidence: HardwarePersistenceEvidence,
+) PersistenceProof {
+    var upgraded = proof;
+    upgraded.hardware_persistence = evidence;
+    return upgraded;
+}
+
 fn reasonContainsSensitiveData(reason: []const u8) bool {
     return redactionMarkerMask(reason) != 0;
 }
@@ -153,6 +254,26 @@ fn fingerprintReason(reason: []const u8) u64 {
         hash *%= 0x0000_0100_0000_01B3;
     }
     return hash;
+}
+
+fn sameRecord(left: Record, right: Record) bool {
+    return std.mem.eql(u8, std.mem.asBytes(&left), std.mem.asBytes(&right));
+}
+
+fn sameRedactionMetadata(left: RedactionMetadata, right: RedactionMetadata) bool {
+    return left.policy_version == right.policy_version and
+        left.redacted == right.redacted and
+        left.marker_mask == right.marker_mask and
+        left.reason_fingerprint == right.reason_fingerprint;
+}
+
+fn reportRedactionValid(record: Record, report: []const u8) bool {
+    if (std.mem.indexOf(u8, report, "redaction_policy=") == null) return false;
+    const metadata = redactionMetadata(record);
+    if (!metadata.redacted) return std.mem.indexOf(u8, report, "redacted=no") != null;
+    const reason = record.reason[0..@min(record.reason_len, MAX_REASON_BYTES)];
+    return std.mem.indexOf(u8, report, "redacted=yes") != null and
+        std.mem.indexOf(u8, report, reason) == null;
 }
 
 fn checksum(record: Record) u32 {
@@ -194,6 +315,41 @@ test "crash record redacts sensitive reason text by default" {
     try std.testing.expect(std.mem.indexOf(u8, report, "redacted=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "reason_fingerprint=0x") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "secret=abc") == null);
+}
+
+test "crash record persistence proof validates recovered record and redaction" {
+    const persisted = try init(.watchdog, 7, 11, 0x1234, 0x5678, "capability token persisted");
+    const recovered = persisted;
+    var report_buffer: [REDACTED_REPORT_BUFFER_BYTES]u8 = undefined;
+    const proof = try provePersistence(persisted, recovered, 8, 3, report_buffer[0..]);
+    try std.testing.expect(proof.verified());
+    try std.testing.expect(!proof.productionHardwareVerified());
+    try std.testing.expect(proof.redaction.redacted);
+    try std.testing.expectEqual(@as(u16, 3), proof.cycles);
+
+    const hardware_proof = withHardwarePersistenceEvidence(proof, .{
+        .source = .hardware_reboot_persistence,
+        .crash_handler_entries = 3,
+        .persistent_record_writes = 3,
+        .persistent_record_flushes = 3,
+        .reboot_observations = 3,
+        .recovery_boot_reads = 3,
+        .recovered_record_validations = 3,
+        .redacted_report_emissions = 3,
+        .persistent_bytes_written = 3 * @sizeOf(Record),
+        .persistent_bytes_read = 3 * @sizeOf(Record),
+    });
+    try std.testing.expect(hardware_proof.productionHardwareVerified());
+
+    var missing_flush = hardware_proof;
+    missing_flush.hardware_persistence.persistent_record_flushes = 0;
+    try std.testing.expect(!missing_flush.productionHardwareVerified());
+
+    var tampered = recovered;
+    tampered.tick += 1;
+    try std.testing.expectError(error.BadChecksum, provePersistence(persisted, tampered, 8, 1, report_buffer[0..]));
+    try std.testing.expectError(error.RecoveryBootNotAdvanced, provePersistence(persisted, recovered, 7, 1, report_buffer[0..]));
+    try std.testing.expectError(error.PersistenceCycleCountInvalid, provePersistence(persisted, recovered, 8, 0, report_buffer[0..]));
 }
 
 test "crash record rejects tampering" {

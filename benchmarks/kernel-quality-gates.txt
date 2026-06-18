@@ -4,5 +4,7 @@ thermal_critical.background_delay 1 1
 memory_pressure.batch_delay 1 1
 scheduler_fairness.max_min_dispatch_ratio_percent 100 125
 starvation_resistance.min_dispatches_after_pressure 1 -
+lower_class_service_debt.batch_tie_dispatch 1 1
+brokered_accelerator_queue.completion_release 1 1
 background_throttling.delayed_dispatches 1 1
 latency_under_load.max_foreground_wait_ticks 0 5

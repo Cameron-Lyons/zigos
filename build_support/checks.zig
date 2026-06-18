@@ -86,9 +86,12 @@ pub fn addCheckSteps(
     prod_readiness_step.dependOn(&hardware_proof_checker_cmd.step);
 
     const release_security_cmd = addReleaseSecurityGateRun(b, optimize);
+    const release_security_test_cmd = addReleaseSecurityGateTestRun(b, optimize);
     const release_security_step = b.step("release-security-check", "Run release-security fuzz, audit, redaction, SBOM/provenance, threat-model, and disclosure source gates");
     release_security_step.dependOn(&release_security_cmd.step);
+    release_security_step.dependOn(&release_security_test_cmd.step);
     prod_readiness_step.dependOn(&release_security_cmd.step);
+    prod_readiness_step.dependOn(&release_security_test_cmd.step);
 
     return .{
         .test_roots = zig_test_roots_step,
@@ -141,6 +144,32 @@ fn addReleaseSecurityGateRun(
     tool.root_module.addImport("userspace_wire", wire.userspace_wire);
 
     const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    return run;
+}
+
+fn addReleaseSecurityGateTestRun(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Run {
+    const check_common_module = b.createModule(.{
+        .root_source_file = b.path("tools/check_common.zig"),
+    });
+    const wire = native_modules.addWireModules(b);
+
+    const tests = b.addTest(.{
+        .name = "check-release-security-gate-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/check_release_security_gate.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    tests.root_module.addImport("check_common", check_common_module);
+    tests.root_module.addImport("binary_cursor", wire.binary_cursor);
+    tests.root_module.addImport("userspace_wire", wire.userspace_wire);
+
+    const run = b.addRunArtifact(tests);
     run.setCwd(b.path("."));
     return run;
 }

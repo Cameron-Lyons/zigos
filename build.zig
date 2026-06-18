@@ -77,6 +77,7 @@ pub fn build(b: *std.Build) void {
 
     const negative_smoke_cmds = [_]*std.Build.Step.Run{
         qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_artifact_manifest, userspace_images, .tampered_artifact_manifest),
+        qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_bootloader_measurement, userspace_images, .tampered_bootloader_measurement),
         qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_kernel, userspace_images, .tampered_kernel),
         qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_userspace_image, userspace_images, .tampered_userspace_image),
         qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_policy, userspace_images, .tampered_policy),

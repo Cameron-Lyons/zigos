@@ -89,6 +89,10 @@ pub const LaunchRequest = struct {
     budget: task_runtime.ResourceBudget,
     ui_surface_id: ?u64 = null,
     local_only: bool = true,
+    source_identity: []const u8 = "",
+    release_transparency_sequence: u64 = 0,
+    release_transparency_root: crypto_hash.Digest = crypto_hash.zero_digest,
+    release_transparency_log_head: crypto_hash.Digest = crypto_hash.zero_digest,
 };
 
 pub const KernelLaunchAuthority = struct {
@@ -346,6 +350,10 @@ fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest) task_run
             .component_abi_version = image.component_abi_version,
             .signed = image.bundle_signed,
             .bundle_id = image.bundleIdSlice(),
+            .source_identity = request.source_identity,
+            .release_transparency_sequence = request.release_transparency_sequence,
+            .release_transparency_root = request.release_transparency_root,
+            .release_transparency_log_head = request.release_transparency_log_head,
         },
         .userspace_image = &image.executable_image,
     };

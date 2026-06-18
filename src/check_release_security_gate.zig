@@ -47,6 +47,13 @@ const REQUIRED_THREAT_DOMAINS = [_][]const u8{
     "driver-isolation",
 };
 
+const RELEASE_KEY_STATUSES = [_][]const u8{
+    "active",
+    "retired",
+    "revoked",
+    "required-not-configured",
+};
+
 const UNSAFE_SCAN_PATTERNS = [_][]const u8{
     "@ptrFromInt",
     "@intFromPtr",
@@ -358,13 +365,120 @@ fn validateReleaseArtifacts(
     if (generator.len > 0 and !common.pathExists(io, generator)) {
         try common.addError(errors, allocator, "release artifact generator is missing: {s}", .{generator});
     }
+    if (generator.len > 0 and common.pathExists(io, generator)) {
+        const generator_source = try common.readFileAlloc(allocator, io, generator, common.source_file_max_bytes);
+        const required_generator_snippets = [_][]const u8{
+            "command -v jj",
+            "repo_vcs=\"jj\"",
+            "jj -R \"$ROOT_DIR\" git remote list",
+            "repo_change_id=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
+            "commit_sha=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
+            "dirty_count=\"$(jj -R \"$ROOT_DIR\" diff -r @ --name-only",
+            "sourceControl",
+            "changeId",
+            "buildType",
+            "https://github.com/Cameron-Lyons/zigos/release-security-gate",
+            "zigos-local-release-security-gate",
+            "require_artifact_path",
+            "missing_required_artifacts",
+            "missing required release artifact",
+            "require_artifact_path \"build/os.iso\"",
+            "require_artifact_path \"zig-out/bin\"",
+            "require_artifact_path \"spec/release_security/release_keyring.json\"",
+        };
+        for (required_generator_snippets) |snippet| {
+            if (std.mem.indexOf(u8, generator_source, snippet) == null) {
+                try common.addError(errors, allocator, "release artifact generator must enforce Jujutsu provenance snippet: {s}", .{snippet});
+            }
+        }
+        if (std.mem.indexOf(u8, generator_source, "git -C \"$ROOT_DIR\"") != null) {
+            try common.addError(errors, allocator, "release artifact generator must use Jujutsu metadata instead of raw git -C provenance lookups", .{});
+        }
+    }
     const repro_checker = try common.expectStringField(allocator, errors, root, "release artifacts", "reproducible_build_checker") orelse "";
     if (repro_checker.len > 0 and !common.pathExists(io, repro_checker)) {
         try common.addError(errors, allocator, "reproducible build checker is missing: {s}", .{repro_checker});
     }
+    if (repro_checker.len > 0 and common.pathExists(io, repro_checker)) {
+        const repro_source = try common.readFileAlloc(allocator, io, repro_checker, common.source_file_max_bytes);
+        const required_repro_snippets = [_][]const u8{
+            "command -v jj",
+            "jj -R \"$ROOT_DIR\" file list -r @",
+            "repo_vcs=\"jj\"",
+            "jj -R \"$ROOT_DIR\" git remote list",
+            "repo_change_id=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
+            "commit_sha=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
+            "dirty_count=\"$(jj -R \"$ROOT_DIR\" diff -r @ --name-only",
+            "\"repo_vcs\": \"$repo_vcs\"",
+            "\"repository\":",
+            "\"repo_change_id\":",
+            "\"dirty_workspace_file_count\":",
+        };
+        for (required_repro_snippets) |snippet| {
+            if (std.mem.indexOf(u8, repro_source, snippet) == null) {
+                try common.addError(errors, allocator, "reproducible build checker must enforce Jujutsu provenance snippet: {s}", .{snippet});
+            }
+        }
+        if (std.mem.indexOf(u8, repro_source, "git -C \"$ROOT_DIR\"") != null) {
+            try common.addError(errors, allocator, "reproducible build checker must use Jujutsu metadata instead of raw git -C provenance lookups", .{});
+        }
+    }
     const customer_verifier_source = try common.expectStringField(allocator, errors, root, "release artifacts", "customer_verifier_source") orelse "";
     if (customer_verifier_source.len > 0 and !common.pathExists(io, customer_verifier_source)) {
         try common.addError(errors, allocator, "customer verifier source is missing: {s}", .{customer_verifier_source});
+    }
+    if (customer_verifier_source.len > 0 and common.pathExists(io, customer_verifier_source)) {
+        const customer_verifier = try common.readFileAlloc(allocator, io, customer_verifier_source, common.source_file_max_bytes);
+        const required_customer_verifier_snippets = [_][]const u8{
+            "verifySlsaSourceParameters",
+            "release_slsa_build_type",
+            "release_slsa_builder_id",
+            "\"buildType\"",
+            "\"builder\"",
+            "\"sourceControl\"",
+            "\"changeId\"",
+            "\"repo_vcs\"",
+            "\"repository\"",
+            "\"repo_change_id\"",
+            "\"dirty_workspace_file_count\"",
+            "\"dirtyWorkspaceFileCount\"",
+            "InvalidSlsaSourceControl",
+            "InvalidSlsaBuildType",
+            "InvalidSlsaBuilderId",
+            "SlsaStatementSubjectCardinalityInvalid",
+            "InvalidSlsaChangeId",
+            "InvalidSlsaCommitId",
+            "InvalidSlsaRepository",
+            "InvalidSlsaZigVersion",
+            "SlsaDirtyWorkspaceEvidence",
+            "SlsaSourceIdentityMismatch",
+            "ReproducibleBuildSourceControlMismatch",
+            "ReproducibleBuildRepositoryInvalid",
+            "ReproducibleBuildChangeIdInvalid",
+            "ReproducibleBuildCommitInvalid",
+            "ReproducibleBuildDirtyCountInvalid",
+            "ReproducibleBuildDirtyWorkspace",
+            "ReproducibleBuildZigVersionInvalid",
+            "ReproducibleBuildSourceIdentityMismatch",
+            "ReproducibleDigestCoverageMismatch",
+            "DuplicateArtifactMeasurement",
+            "seen_measurements.count()",
+            "reproducible_digests.count()",
+            "sourceIdentitiesEqual",
+            "looksLikeJjChangeId",
+            "looksLikeGitCommitId",
+            "verifySlsaRunMetadata",
+            "\"startedOn\"",
+            "\"invocationId\"",
+            "validateReleaseKeyCoversSigningDate",
+            "ReleaseKeyNotYetValidForSlsaStartedOn",
+            "ReleaseKeyExpiredForSlsaStartedOn",
+        };
+        for (required_customer_verifier_snippets) |snippet| {
+            if (std.mem.indexOf(u8, customer_verifier, snippet) == null) {
+                try common.addError(errors, allocator, "customer release verifier must enforce Jujutsu source identity snippet: {s}", .{snippet});
+            }
+        }
     }
     const customer_verifier_command = try common.expectStringField(allocator, errors, root, "release artifacts", "customer_verifier_command") orelse "";
     if (std.mem.indexOf(u8, customer_verifier_command, "zigos-verify-release") == null) {
@@ -373,6 +487,30 @@ fn validateReleaseArtifacts(
     const artifact_measurements = try common.expectStringField(allocator, errors, root, "release artifacts", "artifact_measurements") orelse "";
     if (std.mem.indexOf(u8, artifact_measurements, "artifact-measurements.json") == null) {
         try common.addError(errors, allocator, "release artifacts must declare artifact-measurements.json output", .{});
+    }
+    try expectTrueBoolField(allocator, errors, root, "release artifacts", "generator_requires_all_release_artifacts");
+    const required_generator_inputs = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(root, "required_generator_inputs"),
+        "release artifacts required_generator_inputs",
+        true,
+    );
+    const required_generator_artifacts = [_][]const u8{
+        "zig-out/bin/kernel-zigos-native.elf",
+        "zig-out/bin/zigos-sign",
+        "zig-out/bin/zigos-verify-release",
+        "build/os.iso",
+        "zig-out/bin",
+        "spec/production_readiness.json",
+        "spec/release_security/release_artifacts.json",
+        "spec/release_security/release_keyring.json",
+        "spec/release_security/revoked_release_keys.json",
+    };
+    for (required_generator_artifacts) |artifact_path| {
+        if (!stringArrayContains(required_generator_inputs, artifact_path)) {
+            try common.addError(errors, allocator, "release artifacts required_generator_inputs must include {s}", .{artifact_path});
+        }
     }
     const sbom_format = try common.expectStringField(allocator, errors, root, "release artifacts", "sbom_format") orelse "";
     if (!std.mem.eql(u8, sbom_format, "SPDX-2.3")) {
@@ -383,6 +521,12 @@ fn validateReleaseArtifacts(
         try common.addError(errors, allocator, "release artifacts must require in-toto/SLSA provenance output", .{});
     }
     try expectStringValue(allocator, errors, root, "release artifacts", "provenance_predicate_type", "https://slsa.dev/provenance/v1");
+    try expectStringValue(allocator, errors, root, "release artifacts", "source_vcs", "jj");
+    try expectTrueBoolField(allocator, errors, root, "release artifacts", "source_change_id_required");
+    try expectTrueBoolField(allocator, errors, root, "release artifacts", "source_commit_id_required");
+    try expectTrueBoolField(allocator, errors, root, "release artifacts", "customer_verifier_requires_slsa_source_identity");
+    try expectTrueBoolField(allocator, errors, root, "release artifacts", "customer_verifier_requires_reproducible_source_identity");
+    try expectTrueBoolField(allocator, errors, root, "release artifacts", "customer_verifier_requires_source_identity_consistency");
     const envelope_format = try common.expectStringField(allocator, errors, root, "release artifacts", "attestation_envelope_format") orelse "";
     if (std.mem.indexOf(u8, envelope_format, "DSSE") == null) {
         try common.addError(errors, allocator, "release artifacts must require DSSE attestation envelopes", .{});
@@ -422,6 +566,8 @@ fn validateReleaseArtifacts(
         "artifact-digests",
         "DSSE",
         "SLSA",
+        "Jujutsu",
+        "changeId",
         "post_quantum_policy",
         "FIPS 203",
         "ML-KEM",
@@ -516,8 +662,110 @@ fn validateReleaseKeyring(
     errors: *std.ArrayList([]const u8),
 ) !void {
     const root = try parseJsonFile(allocator, io, errors, RELEASE_KEYRING_PATH) orelse return;
+    try validateReleaseKeyringRoot(allocator, errors, root);
+}
+
+fn validateReleaseKeyringRoot(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    root: std.json.Value,
+) !void {
+    const public_release_allowed = try expectBoolField(allocator, errors, root, "release keyring", "public_release_allowed") orelse false;
+    const required_provider_boundary = try common.expectStringField(allocator, errors, root, "release keyring", "required_provider_boundary") orelse "";
+    if (!containsHardwareReleaseBoundary(required_provider_boundary)) {
+        try common.addError(errors, allocator, "release keyring required_provider_boundary must name TPM, secure enclave, HSM, or KMS custody", .{});
+    }
     const policy = try common.expectObjectField(allocator, errors, root, "release keyring", "post_quantum_policy") orelse return;
     try validatePostQuantumReleasePolicy(allocator, errors, policy);
+
+    const keys_value = common.field(root, "keys") orelse {
+        try common.addError(errors, allocator, "release keyring must include keys", .{});
+        return;
+    };
+    const keys = switch (keys_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "release keyring keys must be an array", .{});
+            return;
+        },
+    };
+    if (keys.len == 0) {
+        try common.addError(errors, allocator, "release keyring keys must be non-empty", .{});
+    }
+    var active_key_count: usize = 0;
+    var unconfigured_key_count: usize = 0;
+    for (keys, 0..) |key, index| {
+        if (key != .object) {
+            try common.addError(errors, allocator, "release keyring key at index {d} must be an object", .{index});
+            continue;
+        }
+        const key_id = try common.expectStringField(allocator, errors, key, "release keyring key", "key_id") orelse "<unknown>";
+        const status = try common.expectStringField(allocator, errors, key, key_id, "status") orelse "";
+        if (status.len > 0 and !isOneOf(status, &RELEASE_KEY_STATUSES)) {
+            try common.addError(errors, allocator, "release keyring key {s} has unsupported status: {s}", .{ key_id, status });
+        }
+        const algorithm = try common.expectStringField(allocator, errors, key, key_id, "algorithm") orelse "";
+        if (!std.mem.eql(u8, algorithm, "ed25519") and !std.mem.eql(u8, algorithm, "ml-dsa-65")) {
+            try common.addError(errors, allocator, "release keyring key {s} algorithm must be ed25519 or ml-dsa-65", .{key_id});
+        }
+        const custody = try common.expectStringField(allocator, errors, key, key_id, "custody") orelse "";
+        if (!containsHardwareReleaseBoundary(custody)) {
+            try common.addError(errors, allocator, "release keyring key {s} custody must name TPM, secure enclave, HSM, or KMS custody", .{key_id});
+        }
+        try expectTrueBoolField(allocator, errors, key, key_id, "hardware_backed");
+        _ = try expectPositiveIntegerField(allocator, errors, key, key_id, "generation");
+        const not_before = try common.expectStringField(allocator, errors, key, key_id, "not_before") orelse "";
+        const not_after = try common.expectStringField(allocator, errors, key, key_id, "not_after") orelse "";
+        const encoding = try common.expectStringField(allocator, errors, key, key_id, "public_key_encoding") orelse "";
+        const public_key = try common.expectStringField(allocator, errors, key, key_id, "public_key") orelse "";
+        try expectStringValue(allocator, errors, key, key_id, "verifier_metadata_schema", "zigos.release-verifier-metadata.v1");
+        const verifier_metadata_digest = try common.expectStringField(allocator, errors, key, key_id, "verifier_metadata_digest") orelse "";
+        const provider_name = try common.expectStringField(allocator, errors, key, key_id, "provider_name") orelse "";
+        const provider_boundary = try common.expectStringField(allocator, errors, key, key_id, "provider_boundary") orelse "";
+        if (!containsHardwareReleaseBoundary(provider_boundary)) {
+            try common.addError(errors, allocator, "release keyring key {s} provider_boundary must name TPM, secure enclave, HSM, or KMS custody", .{key_id});
+        }
+        try expectStringValue(allocator, errors, key, key_id, "revocation_source", "spec/release_security/revoked_release_keys.json");
+        _ = try common.expectStringField(allocator, errors, key, key_id, "rotation_policy");
+
+        const is_active = std.mem.eql(u8, status, "active");
+        const is_unconfigured = std.mem.eql(u8, status, "required-not-configured");
+        if (is_active) {
+            active_key_count += 1;
+            try validateConfiguredReleaseKey(
+                allocator,
+                errors,
+                key_id,
+                algorithm,
+                encoding,
+                public_key,
+                not_before,
+                not_after,
+                verifier_metadata_digest,
+                provider_name,
+            );
+        } else if (is_unconfigured) {
+            unconfigured_key_count += 1;
+            if (public_release_allowed) {
+                try common.addError(errors, allocator, "release keyring cannot allow public releases while key {s} is required-not-configured", .{key_id});
+            }
+            if (!isPlaceholder(not_before) or !isPlaceholder(not_after) or !isPlaceholder(public_key) or
+                !isPlaceholder(verifier_metadata_digest) or !isPlaceholder(provider_name))
+            {
+                try common.addError(errors, allocator, "release keyring key {s} required-not-configured fields must stay explicit placeholders until provisioned", .{key_id});
+            }
+        } else {
+            if (hasReleaseKeyPlaceholder(not_before, not_after, public_key, verifier_metadata_digest, provider_name)) {
+                try common.addError(errors, allocator, "release keyring key {s} status {s} must not contain TBD verifier or key material", .{ key_id, status });
+            }
+        }
+    }
+    if (public_release_allowed and active_key_count == 0) {
+        try common.addError(errors, allocator, "release keyring cannot allow public releases without at least one active hardware-backed release key", .{});
+    }
+    if (public_release_allowed and unconfigured_key_count != 0) {
+        try common.addError(errors, allocator, "release keyring cannot allow public releases with required-not-configured keys", .{});
+    }
 
     const production_profiles_value = common.field(root, "production_pqc_profiles") orelse {
         try common.addError(errors, allocator, "release keyring must include production_pqc_profiles", .{});
@@ -577,6 +825,189 @@ fn validateReleaseKeyring(
     if (!has_hybrid_preview) {
         try common.addError(errors, allocator, "release keyring preview_profiles must include ed25519+ml-dsa65", .{});
     }
+}
+
+fn validateConfiguredReleaseKey(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    key_id: []const u8,
+    algorithm: []const u8,
+    encoding: []const u8,
+    public_key: []const u8,
+    not_before: []const u8,
+    not_after: []const u8,
+    verifier_metadata_digest: []const u8,
+    provider_name: []const u8,
+) !void {
+    if (hasReleaseKeyPlaceholder(not_before, not_after, public_key, verifier_metadata_digest, provider_name)) {
+        try common.addError(errors, allocator, "active release key {s} must not contain TBD verifier or key material", .{key_id});
+    }
+    if (!looksLikeUtcDate(not_before) or !looksLikeUtcDate(not_after) or std.mem.order(u8, not_before, not_after) != .lt) {
+        try common.addError(errors, allocator, "active release key {s} must have ordered YYYY-MM-DD validity dates", .{key_id});
+    }
+    if (std.mem.eql(u8, algorithm, "ed25519")) {
+        try expectConfiguredHexKey(allocator, errors, key_id, encoding, public_key, "hex-ed25519-raw", 64);
+    } else if (std.mem.eql(u8, algorithm, "ml-dsa-65")) {
+        try expectConfiguredHexKey(allocator, errors, key_id, encoding, public_key, "hex-ml-dsa-65-raw", 3904 * 2);
+    }
+    if (!hexTextOfLength(verifier_metadata_digest, 64)) {
+        try common.addError(errors, allocator, "active release key {s} verifier_metadata_digest must be a SHA-256 hex digest", .{key_id});
+    }
+}
+
+fn expectConfiguredHexKey(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    key_id: []const u8,
+    encoding: []const u8,
+    public_key: []const u8,
+    expected_encoding: []const u8,
+    expected_hex_len: usize,
+) !void {
+    if (!std.mem.eql(u8, encoding, expected_encoding)) {
+        try common.addError(errors, allocator, "active release key {s} public_key_encoding must be {s}", .{ key_id, expected_encoding });
+    }
+    if (!hexTextOfLength(public_key, expected_hex_len)) {
+        try common.addError(errors, allocator, "active release key {s} public_key must be {d} hex characters", .{ key_id, expected_hex_len });
+    }
+}
+
+const release_keyring_fixture =
+    \\{
+    \\  "schema_version": 1,
+    \\  "purpose": "test release keyring",
+    \\  "public_release_allowed": false,
+    \\  "required_provider_boundary": "hardware-backed TPM, secure enclave, offline HSM, or cloud KMS release signing provider",
+    \\  "post_quantum_policy": {
+    \\    "mode": "shadow",
+    \\    "fips_validated_required": true,
+    \\    "fips_140_validation_required": true,
+    \\    "production_signature_algorithm": "ml-dsa-65",
+    \\    "key_establishment_algorithm": "ml-kem-768",
+    \\    "backup_signature_algorithm": "slh-dsa-sha2-128s",
+    \\    "hybrid_transition": "Ed25519 remains required; ed25519+ml-dsa65 is preview-only and never satisfies production FIPS 204 ML-DSA",
+    \\    "standards": [
+    \\      { "fips": "FIPS 203", "algorithm": "ML-KEM", "scope": "key establishment" },
+    \\      { "fips": "FIPS 204", "algorithm": "ML-DSA", "scope": "digital signatures" },
+    \\      { "fips": "FIPS 205", "algorithm": "SLH-DSA", "scope": "hash fallback" }
+    \\    ],
+    \\    "rollout": [
+    \\      "shadow verifier measurement",
+    \\      "canary dual-signature release",
+    \\      "required public-release ML-DSA verification"
+    \\    ]
+    \\  },
+    \\  "keys": [
+    \\    {
+    \\      "key_id": "zigos-release-signing-required",
+    \\      "status": "required-not-configured",
+    \\      "algorithm": "ed25519",
+    \\      "custody": "tpm-secure-enclave-hsm-or-kms-required",
+    \\      "hardware_backed": true,
+    \\      "generation": 1,
+    \\      "not_before": "TBD",
+    \\      "not_after": "TBD",
+    \\      "public_key_encoding": "hex-ed25519-raw",
+    \\      "public_key": "TBD",
+    \\      "verifier_metadata_schema": "zigos.release-verifier-metadata.v1",
+    \\      "verifier_metadata_digest": "TBD",
+    \\      "provider_name": "TBD",
+    \\      "provider_boundary": "tpm-secure-enclave-hsm-or-kms-required",
+    \\      "rotation_policy": "new release key generation before not_after",
+    \\      "revocation_source": "spec/release_security/revoked_release_keys.json"
+    \\    }
+    \\  ],
+    \\  "production_pqc_profiles": [
+    \\    {
+    \\      "profile": "ml-dsa-65",
+    \\      "status": "provider-required-not-configured",
+    \\      "release_allowed": false,
+    \\      "fips_standard": "FIPS 204",
+    \\      "fips_validation_required": true,
+    \\      "fips_140_validated_module_required": true
+    \\    }
+    \\  ],
+    \\  "preview_profiles": [
+    \\    {
+    \\      "profile": "ed25519+ml-dsa65",
+    \\      "status": "preview-only",
+    \\      "release_allowed": false,
+    \\      "fips_204_status": "not a production FIPS 204 ML-DSA implementation"
+    \\    }
+    \\  ]
+    \\}
+;
+
+fn expectNoReleaseKeyringErrors(source: []const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
+    var errors = std.ArrayList([]const u8).empty;
+    try validateReleaseKeyringRoot(allocator, &errors, parsed.value);
+    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+}
+
+fn expectReleaseKeyringError(source: []const u8, needle: []const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
+    var errors = std.ArrayList([]const u8).empty;
+    try validateReleaseKeyringRoot(allocator, &errors, parsed.value);
+    for (errors.items) |message| {
+        if (std.mem.indexOf(u8, message, needle) != null) return;
+    }
+    try std.testing.expect(false);
+}
+
+fn replaceOnceForTest(allocator: std.mem.Allocator, source: []const u8, needle: []const u8, replacement: []const u8) ![]const u8 {
+    const offset = std.mem.indexOf(u8, source, needle) orelse return error.MissingFixtureNeedle;
+    const output = try allocator.alloc(u8, source.len - needle.len + replacement.len);
+    @memcpy(output[0..offset], source[0..offset]);
+    @memcpy(output[offset..][0..replacement.len], replacement);
+    @memcpy(output[offset + replacement.len ..], source[offset + needle.len ..]);
+    return output;
+}
+
+test "release keyring gate keeps unconfigured keys non-public" {
+    try expectNoReleaseKeyringErrors(release_keyring_fixture);
+
+    const public_release = try replaceOnceForTest(
+        std.testing.allocator,
+        release_keyring_fixture,
+        "\"public_release_allowed\": false",
+        "\"public_release_allowed\": true",
+    );
+    defer std.testing.allocator.free(public_release);
+    try expectReleaseKeyringError(public_release, "cannot allow public releases");
+}
+
+test "release keyring gate rejects active keys with placeholder verifier material" {
+    const active_placeholder = try replaceOnceForTest(
+        std.testing.allocator,
+        release_keyring_fixture,
+        "\"status\": \"required-not-configured\"",
+        "\"status\": \"active\"",
+    );
+    defer std.testing.allocator.free(active_placeholder);
+    try expectReleaseKeyringError(active_placeholder, "must not contain TBD verifier or key material");
+}
+
+test "release keyring gate accepts configured active hardware release keys" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var configured = try replaceOnceForTest(allocator, release_keyring_fixture, "\"public_release_allowed\": false", "\"public_release_allowed\": true");
+    configured = try replaceOnceForTest(allocator, configured, "\"status\": \"required-not-configured\"", "\"status\": \"active\"");
+    configured = try replaceOnceForTest(allocator, configured, "\"not_before\": \"TBD\"", "\"not_before\": \"2026-01-01\"");
+    configured = try replaceOnceForTest(allocator, configured, "\"not_after\": \"TBD\"", "\"not_after\": \"2027-01-01\"");
+    configured = try replaceOnceForTest(allocator, configured, "\"public_key\": \"TBD\"", "\"public_key\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"");
+    configured = try replaceOnceForTest(allocator, configured, "\"verifier_metadata_digest\": \"TBD\"", "\"verifier_metadata_digest\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"");
+    configured = try replaceOnceForTest(allocator, configured, "\"provider_name\": \"TBD\"", "\"provider_name\": \"release-kms-ed25519\"");
+
+    try expectNoReleaseKeyringErrors(configured);
 }
 
 fn validateThreatModel(
@@ -1048,6 +1479,26 @@ fn expectPositiveIntegerField(
     };
 }
 
+fn expectBoolField(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    object: std.json.Value,
+    context: []const u8,
+    name: []const u8,
+) !?bool {
+    const value = common.field(object, name) orelse {
+        try common.addError(errors, allocator, "{s} must include {s}", .{ context, name });
+        return null;
+    };
+    return switch (value) {
+        .bool => |flag| flag,
+        else => {
+            try common.addError(errors, allocator, "{s} {s} must be a bool", .{ context, name });
+            return null;
+        },
+    };
+}
+
 fn expectTrueBoolField(
     allocator: std.mem.Allocator,
     errors: *std.ArrayList([]const u8),
@@ -1121,9 +1572,53 @@ fn stringArrayContainsSubstring(values: []const []const u8, needle: []const u8) 
     return false;
 }
 
+fn isPlaceholder(value: []const u8) bool {
+    return std.mem.eql(u8, value, "TBD") or
+        std.mem.eql(u8, value, "provider-required") or
+        common.containsAsciiIgnoreCase(value, "not-configured");
+}
+
+fn hasReleaseKeyPlaceholder(
+    not_before: []const u8,
+    not_after: []const u8,
+    public_key: []const u8,
+    verifier_metadata_digest: []const u8,
+    provider_name: []const u8,
+) bool {
+    return isPlaceholder(not_before) or
+        isPlaceholder(not_after) or
+        isPlaceholder(public_key) or
+        isPlaceholder(verifier_metadata_digest) or
+        isPlaceholder(provider_name);
+}
+
+fn looksLikeUtcDate(value: []const u8) bool {
+    if (value.len != "YYYY-MM-DD".len) return false;
+    return std.ascii.isDigit(value[0]) and
+        std.ascii.isDigit(value[1]) and
+        std.ascii.isDigit(value[2]) and
+        std.ascii.isDigit(value[3]) and
+        value[4] == '-' and
+        std.ascii.isDigit(value[5]) and
+        std.ascii.isDigit(value[6]) and
+        value[7] == '-' and
+        std.ascii.isDigit(value[8]) and
+        std.ascii.isDigit(value[9]);
+}
+
+fn hexTextOfLength(value: []const u8, expected_len: usize) bool {
+    if (value.len != expected_len) return false;
+    for (value) |byte| {
+        if (hexValue(byte) == null) return false;
+    }
+    return true;
+}
+
 fn containsHardwareReleaseBoundary(value: []const u8) bool {
     return common.containsAsciiIgnoreCase(value, "tpm") or
         common.containsAsciiIgnoreCase(value, "secure enclave") or
+        common.containsAsciiIgnoreCase(value, "hardware_security_module") or
+        common.containsAsciiIgnoreCase(value, "hardware security module") or
         common.containsAsciiIgnoreCase(value, "hsm") or
         common.containsAsciiIgnoreCase(value, "kms");
 }

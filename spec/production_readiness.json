@@ -38,7 +38,7 @@
         ],
         "current_evidence": [
           "Adversarial spec tests reject malformed manifests, corrupted storage logs, stale metadata, and bypass attempts.",
-          "The release-security checker runs deterministic mutation fuzzing from checked seed corpora against binary cursors, userspace descriptors, ELF image metadata, storage volume loading, sync record decoding, capability messages, and syscall ABI range validation."
+          "The release-security checker runs deterministic mutation fuzzing from checked seed corpora against binary cursors, userspace descriptors, ELF image metadata, storage volume loading, sync record decoding, capability messages, and syscall ABI range validation, and release-security-check now runs checker unit tests for keyring fail-closed behavior."
         ],
         "open_gaps": [],
         "graduation_criteria": [
@@ -110,11 +110,11 @@
         ],
         "current_evidence": [
           "The repository pins the Zig toolchain entrypoint and keeps generated artifacts under build outputs.",
-          "The reproducible-build-check target copies tracked source into two isolated workspaces, builds release artifacts independently, compares kernel, ISO, signing tool, and userspace image digests, and records the result under build/release-security."
+          "The reproducible-build-check target copies the Jujutsu working-copy file list into two isolated workspaces, builds release artifacts independently, compares kernel, ISO, signing tool, and userspace image digests, and records repo_vcs=jj, repository, Jujutsu change ID, commit ID, dirty workspace count, toolchain, and result metadata under build/release-security."
         ],
         "open_gaps": [],
         "graduation_criteria": [
-          "Keep a reproducible-build release target that performs two isolated builds, compares artifact digests, records toolchain and environment metadata, and fails on undocumented nondeterminism."
+          "Keep a reproducible-build release target that performs two isolated Jujutsu source snapshots, compares artifact digests, records repository, Jujutsu source identity, toolchain, and environment metadata, and fails on undocumented nondeterminism."
         ],
         "verification_commands": [
           "./scripts/zig.sh build reproducible-build-check",
@@ -144,16 +144,16 @@
         ],
         "current_evidence": [
           "Userspace archives, boot measurements, signed bundle state, and launch provenance are modeled and tested.",
-          "The release-sbom-provenance target emits artifact-digests.sha256, artifact-measurements.json, SPDX 2.3 SBOM JSON, in-toto/SLSA provenance statements, DSSE provenance envelopes, release keyring metadata, revocation metadata, customer verification policy, and a disclosure dry-run bundle under build/release-security.",
+          "The release-sbom-provenance target emits artifact-digests.sha256, artifact-measurements.json, SPDX 2.3 SBOM JSON, in-toto/SLSA provenance statements, DSSE provenance envelopes, release keyring metadata, revocation metadata, customer verification policy, and a disclosure dry-run bundle under build/release-security, with SLSA externalParameters anchored to Jujutsu sourceControl=jj, changeId, commit id, repository, and Zig version; the generator now fails closed before output if required release inputs such as the boot ISO, kernel, release tools, userspace image directory, readiness manifest, keyring, or revocation metadata are missing.",
           "The release generator can delegate every DSSE PAE signing operation to a TPM, secure enclave, HSM, or KMS command through ZIGOS_RELEASE_DSSE_SIGN_COMMAND, keeping release code on key handles instead of seed material.",
-          "The zigos-verify-release customer CLI validates downloaded artifact digests, DSSE signatures before payload parsing, revoked key ids/generations, SLSA subject digests, artifact measurements, reproducible-build digest evidence, SPDX version metadata, post-quantum keyring policy, and required-mode ML-DSA signature coverage.",
-          "The release-security checker rejects release artifact metadata or keyrings that omit DSSE envelopes, hardware-backed key custody, rotation, revocation, customer verifier protocols, artifact measurements, executable verifier tooling, FIPS 203 ML-KEM/FIPS 204 ML-DSA/FIPS 205 SLH-DSA policy, measured rollout, or the explicit statement that ed25519+ml-dsa65 is preview-only and not production FIPS 204 ML-DSA."
+          "The zigos-verify-release customer CLI validates downloaded artifact digests, DSSE signatures before payload parsing, revoked key ids/generations, active release-key verifier metadata digests, exactly one signed SLSA subject per DSSE envelope plus pinned release-security buildType, pinned builder id, Jujutsu source identity externalParameters, zero dirtyWorkspaceFileCount in signed SLSA run metadata, active key validity windows against signed SLSA runDetails.metadata.startedOn, exact artifact measurement coverage without duplicates, complete reproducible-build digest and source identity evidence with dirty_workspace_file_count=0 that must match the signed SLSA repository/change/commit/toolchain identity, SPDX version metadata, post-quantum keyring policy, and required-mode ML-DSA signature coverage.",
+          "The release-security checker rejects release artifact metadata, generator sources, reproducible-build checker sources, customer verifier sources, or keyrings that omit required generator input enforcement, Jujutsu source provenance, DSSE envelopes, hardware-backed key custody, active-key lifecycle dates, configured public keys, verifier metadata digests, provider names, rotation, revocation, customer verifier protocols, artifact measurements, executable verifier tooling, FIPS 203 ML-KEM/FIPS 204 ML-DSA/FIPS 205 SLH-DSA policy, measured rollout, or the explicit statement that ed25519+ml-dsa65 is preview-only and not production FIPS 204 ML-DSA; release-security-check includes negative keyring fixtures proving public releases fail closed while any required release key remains required-not-configured."
         ],
         "open_gaps": [],
         "graduation_criteria": [
           "Generate SPDX SBOMs plus DSSE-wrapped in-toto/SLSA provenance attestations for kernels, userspace images, tools, policy manifests, and ISO outputs.",
           "Sign each DSSE PAE payload with a hardware-backed TPM, secure enclave, HSM, or KMS release key, publish customer-verifiable keyring and revocation metadata, and fail release if the signing key is missing, stale, or revoked.",
-          "Keep zigos-verify-release validating artifact digests, DSSE signatures, SLSA subject digests, key generation, revocation status, artifact measurements, reproducible-build evidence, post-quantum policy, and required ML-DSA coverage for every public release."
+          "Keep zigos-verify-release validating artifact digests, DSSE signatures, exactly one SLSA subject per DSSE envelope, signed SLSA builder identity, signed SLSA Jujutsu source identity, zero dirty workspace evidence, key generation, revocation status, signed SLSA startedOn coverage by key validity windows, exact artifact measurement coverage, complete reproducible-build source evidence that matches signed SLSA identity, post-quantum policy, and required ML-DSA coverage for every public release."
         ],
         "verification_commands": [
           "./scripts/zig.sh build release-sbom-provenance",
@@ -184,7 +184,7 @@
           "src/tests/spec/backlog_gates.zig"
         ],
         "current_evidence": [
-          "Spec conformance and adversarial tests already encode revoked capability, expired lease, malformed manifest, corrupted log, rollback, and bypass threats.",
+          "Spec conformance and adversarial tests already encode revoked capability, expired lease, malformed manifest, corrupted log, rollback, bypass, hidden observability, and unsupported continuous process-observation threats.",
           "spec/release_security/threat_model.json publishes a reviewer-facing matrix with threat IDs, abuse cases, mitigations, negative tests, residual-risk owners, and release decisions for every required security domain."
         ],
         "open_gaps": [],
@@ -250,7 +250,7 @@
           "src/check_release_security_gate.zig"
         ],
         "current_evidence": [
-          "Event-ledger, supervisor, and spec tests verify redacted diagnostics for crashes, permission decisions, and remote shares.",
+          "Event-ledger, supervisor, and spec tests verify redacted diagnostics for crashes, permission decisions, remote shares, and autonomous agent authorization/action denials.",
           "Crash record summaries now redact sensitive reason text by default, and spec/release_security/crash_dump_redaction.json gates raw memory denial, opt-in scoped diagnostics, support-bundle review, and reproducible redaction fixtures."
         ],
         "open_gaps": [],
@@ -344,27 +344,29 @@
       "./scripts/zig.sh build recovery-qemu-test"
     ],
     "proof_bundle_requirements": [
-      "proof-manifest.txt must tie the bundle to intel-nuc11tnki5, NUC11TNKi5, real_hardware, serial.log, the sidecar files, the marker contract, the repo commit, capture time, and operator.",
-      "serial.log must come from the Intel NUC11TNKi5 and include real-hardware source metadata, exact board SKU metadata, proof-manifest metadata, every required subsystem PASS marker, every booted production-evidence marker, and all minimum cycle counters.",
-      "firmware-settings.txt must record BIOS/UEFI version, boot mode, Secure Boot state, storage mode, wake/suspend settings, and any changed firmware options.",
-      "power-cycle-notes.txt must record the ten cold boots, ten warm reboots, one hundred NVMe read/write cycles, one hundred I225-LM frame cycles, twenty suspend/resume cycles, ten induced crash-recovery cycles, ten crash-record persistence checks, and ten update rollback power cycles.",
-      "artifact-digests.sha256 must record SHA-256 digests for the exact ISO or USB image, kernel, required userspace service images, production readiness manifest, release artifact manifest, hardware marker contract, policy, and driver-set artifacts.",
+      "proof-manifest.txt must tie the bundle to intel-nuc11tnki5, NUC11TNKi5, real_hardware, the checked serial.log path, the checked sidecar file paths including attestation-lifecycle.txt, the checked marker contract path, repo_vcs=jj, the Jujutsu change ID, the commit ID, a clean repo_dirty_files=0 state, preparation/capture times with captured_at_utc not before prepared_at_utc, and operator.",
+      "serial.log must come from the Intel NUC11TNKi5 and include real-hardware source metadata, exact board SKU metadata, proof-manifest metadata, every required subsystem PASS marker, every concrete hardware fact marker, every booted production-evidence marker, and all minimum cycle counters without duplicate required markers or cycle-counter lines.",
+      "proof-manifest.txt, firmware-settings.txt, power-cycle-notes.txt, and attestation-lifecycle.txt must not contain duplicate required keys.",
+      "firmware-settings.txt must record BIOS/UEFI version, boot_mode=UEFI, an explicit Secure Boot state of enabled, disabled, or disabled-for-local-proof-media, storage_mode=nvme, wake/suspend settings, and any changed firmware options.",
+      "power-cycle-notes.txt must record operator notes, started/completed times with completed_at_utc not before started_at_utc, the ten cold boots, ten warm reboots, one hundred NVMe read/write cycles, one hundred I225-LM frame cycles, twenty suspend/resume cycles, ten induced crash-recovery cycles, ten crash-record persistence checks, and ten update rollback power cycles, and those sidecar counters must exactly match the serial.log counters.",
+      "attestation-lifecycle.txt must record the real-hardware provider, root key id, positive initial generation, higher active generation, positive revoked generation count, stale-generation rejection, revoked-generation rejection, stale-attestation verifier rejection, request-bound verifier metadata digest, 64-hex verifier metadata digest, 64-hex attestation request digest, operator, notes, and captured_at_utc not before the proof manifest prepared_at_utc.",
+      "artifact-digests.sha256 must contain only well-formed SHA-256 digest rows and record exactly one SHA-256 digest per required ISO or USB image, kernel, userspace service image, release policy artifact, production readiness manifest, release artifact manifest, hardware marker contract, and driver image artifact under the checked artifact root.",
       "scripts/check-nuc11tnki5-hardware-proof.sh must pass against the proof bundle directory, not a QEMU or OVMF preflight log."
     ],
     "hardware_exit_criteria": [
       "Ten cold UEFI boots and ten warm reboots reach native-ready on the NUC11TNKi5 without panic, hang, or firmware fallback.",
-      "ACPI table discovery, APIC timer calibration, GOP framebuffer output, USB xHCI keyboard input, NVMe read/write, and Intel I225-LM transmit/receive each emit the required hardware target marker.",
+      "ACPI table discovery, APIC timer interrupt proof, GOP framebuffer scanout proof, USB xHCI keyboard input, NVMe read/write, Intel I225-LM transmit/receive, suspend/resume, crash persistence, and update rollback each emit the required hardware target marker plus the corresponding concrete fact marker.",
       "Generated userspace startup, service IPC connectivity, compositor framebuffer presentation, permission review rendering, sync replication/restart, driver restart/rebind, crash-record persistence, and update rollback health checks emit the required booted production-evidence markers.",
       "Twenty suspend/resume cycles preserve timer, framebuffer, USB input, NVMe, and network usability.",
       "Ten induced crash-recovery cycles preserve the native store and produce redacted recovery diagnostics, and ten crash-record persistence checks prove those diagnostics survive reboot without exposing raw memory.",
       "Ten update rollback cycles survive real power transitions and return to the verified active slot without losing persisted state.",
-      "Every hardware proof bundle includes a proof manifest, serial output, firmware settings, power-cycle notes, and the exact kernel/userspace artifact digests."
+      "Every hardware proof bundle includes a proof manifest, serial output, firmware settings, power-cycle notes, attestation lifecycle evidence, and the exact kernel/userspace artifact digests."
     ],
     "current_hardware_evidence": [],
     "open_gaps": [
       "No NUC11TNKi5 serial log has been captured from real hardware yet.",
       "The kernel now preserves the GRUB Multiboot handoff, requests a 32-bit framebuffer, validates memory-map and GOP framebuffer descriptors, scans SMBIOS for the NUC11TNKi5 SKU, and composes early ACPI/MADT/FADT/APIC evidence, but those paths have not been captured from the selected NUC firmware.",
-      "xHCI keyboard input reports, NVMe read/write cycles, Intel I225-LM transmit/receive cycles, compositor framebuffer presentation, suspend/resume loops, induced crash-recovery loops, persisted crash-record checks, update rollback power-cycle loops, and booted production-evidence markers still need real-device execution and capture."
+      "Real-device xHCI keyboard input reports, NVMe read/write cycles, Intel I225-LM transmit/receive cycles, compositor framebuffer presentation, suspend/resume loops, induced crash-recovery loops, persisted crash-record checks, update rollback power-cycle loops, and booted production-evidence markers still need execution and capture."
     ]
   },
   "tracks": [
@@ -446,21 +448,26 @@
       "current_evidence": [
         "Freestanding boot records can be verified against signed artifact manifests and compared across native smoke boots.",
         "Remote attestation refuses emulator-rooted measured state and requires a provisioned non-software root.",
-        "A/B base selection, rollback, and post-activation health markers are covered by host logic, QEMU smoke evidence before native-ready, and required real-hardware proof markers.",
-        "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest, direct kernel/userspace-image/policy/driver-set measurement tampering, and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready.",
+        "A/B base selection, rollback, post-activation health markers, and selector-derived power-cycle rollback proof are covered by host logic, QEMU smoke evidence before native-ready, and required real-hardware proof markers.",
+        "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest, direct bootloader-measurement digest mutation, direct kernel/userspace-image/policy/driver-set measurement tampering, and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready.",
         "The signature envelope and signing CLI now support Ed25519, an Ed25519+ML-DSA-65 hybrid preview profile, and a provider-backed production ML-DSA-65 FIPS 204 profile with full-size signature storage and fail-closed verification for unsupported formats.",
         "A signature-provider boundary and registry now report provider profile, key custody, hardware-backed release eligibility, lifecycle controls, customer-verifier protocol, FIPS 204/FIPS 140 validation metadata, and fail-closed profile mismatches so production Ed25519 or validated ML-DSA providers can be swapped in without changing manifest storage layouts.",
         "Attestation statements carry verifier-visible nonempty hardware root key ids and nonzero generations, verifier expectations can reject stale or revoked generations after provider rotation, and visible remote attestations now require fresh bounded challenge nonces with bounded replay-cache rejection before signing.",
-        "Userspace package signatures, boot artifact manifest signatures, generated archive signatures, and attestation statement signatures now route through the default provider registry instead of directly selecting raw Ed25519 operations.",
+        "Remote attestation now has bounded verifier request and response records that bind nonce, remote party, visible policy label, expected key origin, root key id, minimum root generation, revoked root generations, and any required attestation verifier metadata digest to a request digest before signing or verification.",
+        "Attestation roots now have a production external-provider implementation that provisions key-handle metadata for TPM, secure-enclave, HSM, or cloud-KMS custody, rejects local-software custody for production roots, requires verifier metadata digests for production providers, and verifies callback signatures against the provisioned public identity before issuing remote-attestation responses.",
+        "Platform-service and booted service-path attestation proofs now provision production external-provider key handles instead of test-only fake roots, require verifier metadata digests in the attestation challenge, and pin those digests into downstream network identity policy.",
+        "The NUC11TNKi5 hardware proof model now accepts attestation root lifecycle evidence only from real-target proofs that rotate to a higher root generation, propagate at least one revoked generation, reject stale and revoked root generations, bind the verifier metadata digest to the attestation challenge, and observe verifier rejection of stale attestations; unit tests reject QEMU, stale-rotation, missing-revocation, missing-stale-rejection, and missing-metadata-binding proofs, and the hardware proof bundle checker now requires both the emitted ATTESTATION_ROOT_LIFECYCLE marker and a structured attestation-lifecycle.txt sidecar with generation, revocation, rejection, metadata-digest, and request-digest evidence.",
+        "Release-signing and attestation external providers now emit verifier metadata records that own their public key bytes and bind provider name, key id, generation, custody boundary, lifecycle controls, verifier protocol, public key, and FIPS posture into a digest; host tests prove stale, local-software, validation-mismatched, or public-key-tampered metadata fails to match the provider, and release-security-check now runs negative keyring fixtures proving public-release keyrings are rejected unless active keys have configured dates, public keys, provider names, and verifier metadata digests.",
+        "Userspace package signatures, boot artifact manifest signatures, generated archive signatures, and attestation statement signatures now route through provider boundaries instead of directly selecting raw Ed25519 operations; the native smoke boot artifact manifest path uses a release-eligible provider fixture so smoke signing exercises key-handle based custody semantics.",
         "Demo seed packages, SDK simulator release bundles, rendered-shell journeys, package-service fixtures, and spec release fixtures now select the Ed25519 provider explicitly where they model release signing behavior.",
         "Package-service update gates now reject exact signed replay, active-version regression, publisher drift, update-channel drift, update-source drift, schema-version regression, empty install sources, oversized install source identities, and invalid data schema versions, including adversarial spec coverage for freshly signed downgrade metadata.",
         "Installed package launch plans, resolved active manifests, and rollback targets now fail closed when the package publisher key has been revoked, so revocation blocks both future updates and already-installed code paths."
       ],
       "production_gaps": [
-        "Host evidence still uses emulator-provided measurement fallbacks, and attestation root material is represented by software signer identities.",
-        "The provider, rotation, revocation, and verifier protocol boundaries exist in source, but the first operational TPM, secure-enclave, HSM, or KMS-backed root has not been provisioned on real hardware.",
+        "Host evidence still uses emulator-provided measurement fallbacks, and external-provider callbacks still route through software fixtures until real hardware or managed-key services are wired.",
+        "The provider, request/response, key-handle custody, rotation, revocation, and verifier protocol boundaries exist in source, but the first operational TPM, secure-enclave, HSM, or KMS-backed root has not been provisioned on real hardware.",
         "The Ed25519+ML-DSA-65 hybrid profile is a bounded preview commitment for envelope and policy plumbing, not a FIPS 204 ML-DSA implementation; the production path is the separate ml-dsa-65 provider profile with FIPS validation metadata.",
-        "Release artifact signing, bootloader measurement handoff, and update rollback now have smoke-level tamper rejection and QEMU rollback markers, but are not yet tied to an operational key-management story or captured on real hardware."
+        "Release artifact signing, bootloader measurement handoff, and update rollback now have provider-bound smoke-level tamper rejection, selector-derived power-cycle rollback proof, and QEMU rollback markers, but they are not yet tied to a real TPM, secure-enclave, HSM, or KMS deployment or captured on real hardware."
       ],
       "graduation_criteria": [
         "Introduce a hardware-root abstraction that supports TPM and secure enclave backed quote/sign operations without exposing root seed material.",
@@ -470,9 +477,9 @@
       ],
       "next_actions": [
         "Wire the production root provider interface to the first supported TPM, secure-enclave, HSM, or KMS implementation and keep fake providers test-only.",
-        "Add hardware proof evidence for root key rotation, revocation propagation, and verifier rejection of stale attestations.",
+        "Capture the attestation root lifecycle proof in the NUC11TNKi5 hardware proof bundle after the first operational TPM, secure-enclave, HSM, or KMS root is provisioned.",
         "Move explicit software-provider release fixtures onto operational Ed25519 plus ML-DSA key provisioning once the hardware-backed root, FIPS validation metadata, and release key-management interfaces exist.",
-        "Add a direct bootloader-measurement mutation fixture and bind the smoke signing path to the production root-provider abstraction.",
+        "Replace the release-eligible smoke signing fixture with the first operational TPM, secure-enclave, HSM, or KMS-backed signing command and publish concrete verifier metadata digests from that provider.",
         "Capture the update rollback marker group in the NUC11TNKi5 hardware proof bundle."
       ],
       "verification_commands": [
@@ -526,26 +533,28 @@
         "The kernel tree now has a tested ACPI RSDP parser and aligned scanner as the first non-invasive ACPI building block for the target.",
         "The ACPI parser now validates SDT headers and XSDT/RSDT root-table entries so the hardware proof path can require MADT and FADT presence instead of a standalone RSDP checksum.",
         "The kernel tree now has a tested MADT parser that summarizes local APIC, I/O APIC, interrupt-source override, x2APIC, and PC-AT compatibility data before APIC timer bring-up.",
-        "The kernel tree now has a tested FADT parser for PM control blocks, SCI interrupt, PM timer, and reset register plumbing needed before suspend/resume work.",
-        "The kernel tree now has a tested UEFI GOP-style linear framebuffer descriptor validator with stride, buffer-size, pixel-format, and text-grid checks.",
-        "The kernel tree now has a bounded crash-record format with checksum validation and redacted summary output for later persistent crash recovery.",
+        "The kernel tree now has a tested APIC timer interrupt proof that requires a valid LAPIC vector, nonzero divisor and initial count, count advancement, delivered timer interrupts, and EOI accounting, plus a separate productionHardwareVerified path that refuses the NUC APIC timer marker unless hardware LAPIC timer register writes, current-count reads, ISR vector observations, interrupt-handler entries, EOI register writes, and TSC advancement are present.",
+        "The kernel tree now has a tested FADT parser and ACPI suspend/resume proof model for PM control blocks, PM event blocks, SCI wake interrupts, PM timer advancement, reset plumbing, and resumed timer/framebuffer/xHCI/NVMe/I225 subsystem usability, plus a separate productionHardwareVerified path that refuses the NUC suspend/resume marker unless PM1 sleep writes, S-state entry observations, S0 resume observations, PM timer resume reads, SCI wake interrupts, and post-resume subsystem probes are present.",
+        "The kernel tree now has a tested UEFI GOP-style linear framebuffer descriptor validator with stride, buffer-size, pixel-format, and text-grid checks, plus a scanout proof that requires sampled framebuffer bytes to be nonblank and contain an expected rendered pixel, and a separate productionHardwareVerified path that refuses the NUC GOP framebuffer marker unless GOP mode-info reads, framebuffer base/stride observations, framebuffer memory-read bytes, display scanout observations, expected-pixel observations, captured scanline bytes, and sink-signal observations are present.",
+        "The native compositor framebuffer path now has a tested presentation proof with frame dimensions, byte counts, nonblank coverage, a content digest, active-window evidence, visible-window evidence, and expected rendered text before booted compositor markers are emitted.",
+        "The kernel tree now has a bounded crash-record format with checksum validation, redacted summary output, and executable persistence proof that validates recovered records across advanced boot ids, plus a separate productionHardwareVerified path that refuses the NUC crash recovery and persistence markers unless crash-handler entries, persistent record writes and flushes, reboot observations, recovery-boot reads, recovered-record validations, redacted report emissions, and persistent byte counts are present.",
         "PCI inventory helpers now identify NVMe controllers and the Intel I225-LM network controller required by the NUC target.",
-        "The kernel tree now has a tested NVMe inventory shim with controller-capability parsing, admin-queue validation, and fail-closed data-plane transfer behavior.",
-        "The kernel tree now has a tested Intel I225-LM inventory shim with RX/TX ring-plan validation and fail-closed kernel transmit behavior.",
-        "The kernel tree now has a tested xHCI input inventory shim with controller-capability parsing, command/event ring validation, and fail-closed USB input report behavior.",
-        "A composed kernel hardware-proof module now gates NUC markers on real SKU evidence, Multiboot memory-map and GOP framebuffer handoff, ACPI MADT/FADT discovery, APIC timer readiness evidence, xHCI input evidence, NVMe and I225 cycle counts, suspend/resume counts, redacted crash-recovery counts, crash-record persistence counts, and update rollback power-cycle counts.",
-        "The NUC11TNKi5 proof bundle contract now requires real-hardware source metadata, sidecar firmware settings, power-cycle notes, artifact digests, all subsystem PASS markers, all booted production-evidence markers, and minimum cold-boot, reboot, storage, network, suspend/resume, crash-recovery, crash-record persistence, and update rollback counters.",
-        "Production readiness rejects QEMU-only evidence for this target; hardware proof requires captured real-machine logs, firmware settings, power-cycle notes, booted service/sync/driver/compositor/permission/update markers, and repeated cold boot, reboot, suspend/resume, storage, network, crash-recovery, crash-record persistence, and update rollback cycles."
+        "The kernel tree now has a tested NVMe inventory shim with controller-capability parsing, admin-queue validation, fail-closed kernel data-plane transfer behavior, sector-aligned read/write completions, modeled MMIO queue doorbells, page-aligned PRP/DMA evidence, completion-head accounting, deterministic write/read cycle proof generation, and a separate productionHardwareVerified path that refuses NUC storage markers unless controller-written completions, DMA read/write byte counts, interrupt evidence, and phase-tag observations are present.",
+        "The kernel tree now has a tested Intel I225-LM inventory shim with RX/TX ring-plan validation, fail-closed kernel transmit behavior, descriptor-backed software TX/RX completions, modeled MMIO tail-register writes, aligned packet-buffer evidence, PHY link-status evidence, interrupt-cause accounting, deterministic packet cycle proof generation, and a separate productionHardwareVerified path that refuses NUC packet markers unless hardware-owned TX/RX descriptor evidence, DMA byte counts, asserted interrupts, and PHY packet observations are present.",
+        "The kernel tree now has a tested xHCI input inventory shim with controller-capability parsing, command/event ring validation, USB boot-keyboard descriptor enumeration, port connection, device-slot enable/address, configured interrupt-IN endpoint validation, modeled MMIO command and transfer doorbells, device/input/endpoint context-memory ownership evidence, ERST setup evidence, runtime event-ring counters, event-counted input delivery, fail-closed USB input report behavior, and a separate productionHardwareVerified path that refuses NUC keyboard markers unless hardware event TRBs, event-ring DMA writes, controller context reads, interrupt assertions, port-status changes, and input-report DMA bytes are present.",
+        "A composed kernel hardware-proof module now gates NUC markers on real SKU evidence, Multiboot memory-map handoff, GOP hardware framebuffer scanout proof evidence, ACPI MADT/FADT discovery, APIC hardware LAPIC timer proof evidence, xHCI hardware event-ring input proof evidence, NVMe hardware-DMA write/read proof evidence, I225 hardware descriptor-ring packet proof evidence, hardware power-transition suspend/resume proof counts, hardware reboot-persistence crash-record proof counts, and hardware power-cycle update rollback proof counts.",
+        "The NUC11TNKi5 proof bundle contract now requires real-hardware source metadata, Jujutsu change/commit provenance, sidecar firmware settings, power-cycle notes, structured attestation lifecycle evidence, proof-window-bounded sidecar timestamps, artifact digests, all subsystem PASS markers, concrete SMBIOS/Multiboot/ACPI/APIC/GOP/xHCI/NVMe/I225/suspend/crash/update/attestation-lifecycle fact markers, observation-before-PASS marker ordering, all booted production-evidence markers including accelerator queue ownership and completion-interrupt markers, and minimum cold-boot, reboot, storage, network, suspend/resume, crash-recovery, crash-record persistence, and update rollback counters.",
+        "Production readiness rejects QEMU-only evidence for this target; hardware proof requires captured real-machine logs, concrete device fact markers, firmware settings, power-cycle notes, booted service/sync/driver/compositor/permission/update markers, and repeated cold boot, reboot, suspend/resume, storage, network, crash-recovery, crash-record persistence, and update rollback cycles."
       ],
       "production_gaps": [
-        "The repo can now emit early NUC11TNKi5 proof markers only when the corresponding firmware/handoff facts are present, but no real NUC11TNKi5 boot log has been captured.",
+        "The repo can now emit NUC11TNKi5 subsystem PASS markers and concrete hardware fact markers only when the corresponding firmware, device, and power-cycle facts are present, but no real NUC11TNKi5 boot log has been captured.",
         "UEFI handoff still depends on the GRUB ISO path and has not been proven on the selected NUC firmware.",
-        "ACPI RSDP, XSDT/RSDT, MADT, and FADT discovery are wired into early boot proof capture, but APIC timer programming remains proof-readiness evidence rather than interrupt-driven timer replacement.",
-        "The framebuffer descriptor validator is wired to Multiboot/GOP-style framebuffer handoff, but real GOP ownership and rendering still need capture on HDMI/framebuffer output.",
-        "Crash record formatting is tested but not persisted before reboot or consumed by recovery boot.",
-        "PCI target identification, NVMe controller queue validation, and Intel I225-LM ring planning are tested, but NVMe read/write and Intel I225-LM packet I/O drivers are not implemented.",
-        "xHCI capability parsing and ring validation are tested, but USB HID keyboard enumeration and input reports are not implemented.",
-        "Suspend/resume, crash recovery, crash-record persistence, update rollback across power cycles, compositor framebuffer capture, and booted production-evidence marker capture need real-device implementations and logs."
+        "ACPI RSDP, XSDT/RSDT, MADT, APIC timer interrupt proof modeling, FADT discovery, and suspend/resume proof modeling are wired into proof capture; NUC APIC timer marker recording now rejects modeled-only LAPIC timer proof without hardware register/interrupt evidence, and NUC suspend/resume marker recording rejects modeled-only ACPI suspend proof without hardware power-transition evidence, but no real LAPIC timer interrupt run or suspend/resume cycle has been captured on the target hardware.",
+        "The framebuffer descriptor validator is wired to Multiboot/GOP-style framebuffer handoff, native compositor presentation is proof-gated in the modeled framebuffer, and the kernel GOP marker now rejects modeled-only framebuffer samples without hardware GOP scanout evidence, but real GOP ownership and rendering still need capture on HDMI/framebuffer output.",
+        "Crash record formatting and recovered-record persistence proof are tested, and NUC crash marker recording now rejects modeled-only persistence without hardware reboot-persistence evidence, but real crash records are not yet written before reboot or consumed by a recovery boot on the target hardware.",
+        "PCI target identification, NVMe controller queue validation, executable modeled NVMe MMIO doorbell/PRP completion proof cycles, and executable modeled I225 tail-register, interrupt, PHY-link, and TX/RX packet proof cycles are tested; NUC storage marker recording now rejects modeled-only NVMe completions without hardware-DMA evidence and NUC network marker recording rejects modeled-only I225 packet cycles without hardware descriptor-ring evidence, but real NVMe controller register writes, DMA ownership capture, hardware completions, Intel I225-LM descriptor-ring ownership, hardware interrupts, and PHY-backed packet I/O are not implemented.",
+        "xHCI capability parsing, ring validation, descriptor-level boot-keyboard enumeration, port/slot/address lifecycle, configured interrupt-transfer validation, modeled MMIO doorbell, context-memory, ERST, and event-ring proof, event-counted delivery, and boot-keyboard HID report handling are tested; NUC keyboard marker recording now rejects modeled-only xHCI input without hardware event-ring evidence, but real xHCI MMIO register writes, hardware-owned device contexts, and hardware event-ring input reports have not been captured from the controller.",
+        "Real suspend/resume, crash recovery, crash-record persistence, update rollback across physical power cycles, compositor framebuffer capture, and booted production-evidence marker capture need real-device implementations and logs; NUC update rollback marker recording now rejects modeled-only selector rollback without hardware power-cycle evidence."
       ],
       "graduation_criteria": [
         "Boot the NUC11TNKi5 from a UEFI USB image built from the repo and archive the serial/framebuffer proof bundle.",
@@ -555,11 +564,11 @@
       ],
       "next_actions": [
         "Make build/os.iso boot reliably through the NUC11TNKi5 UEFI firmware and record firmware settings.",
-        "Capture the new Multiboot memory-map, SMBIOS SKU, ACPI table, APIC timer-readiness, and GOP framebuffer proof markers from the NUC11TNKi5 firmware.",
+        "Capture the new Multiboot memory-map, SMBIOS SKU, ACPI table, APIC hardware LAPIC timer interrupt-proof, and GOP hardware framebuffer scanout-proof markers from the NUC11TNKi5 firmware.",
         "Use scripts/prepare-nuc11tnki5-hardware-proof.sh --build to create the proof manifest, sidecar templates, and artifact digest manifest before capture.",
-        "Add xHCI keyboard, NVMe read/write, and Intel I225-LM packet I/O implementations that record real cycle counters before emitting PASS markers.",
+        "Feed real GOP mode-info reads, framebuffer base/stride observations, framebuffer memory-read bytes, display scanout observations, expected-pixel observations, captured scanline bytes, and sink-signal observations into the productionHardwareVerified framebuffer proof; feed real APIC timer initial-count/divide/LVT register writes, current-count reads, ISR vector observations, interrupt-handler entries, EOI register writes, and TSC advancement into the productionHardwareVerified timer proof; feed real suspend/resume PM1 sleep writes, S-state entry observations, S0 resume observations, PM timer resume reads, SCI wake interrupts, and post-resume subsystem probes into the productionHardwareVerified suspend proof; feed real crash-handler entries, persistent record writes and flushes, reboot observations, recovery-boot reads, recovered-record validations, redacted report emissions, and persistent byte counts into the productionHardwareVerified crash persistence proof; feed real update candidate activation writes, selector-record flushes, power-cycle observations, failure-detector observations, rollback decision records, stable-slot boot observations, recovered-slot reads, persisted-state verifications, and service-start suppression observations into the productionHardwareVerified update rollback proof; feed real xHCI MMIO command submission, hardware-owned device-slot and endpoint context reads, ERST/event-ring DMA writes, interrupt assertions, port-status changes, and boot-keyboard report DMA bytes into the productionHardwareVerified input proof; feed real NVMe doorbell/MMIO queue submission, DMA/PRP read/write byte counts, controller-written completions, interrupts, and phase-tag observations into the productionHardwareVerified storage proof; and feed real Intel I225-LM tail-register writes, hardware-owned TX/RX descriptors, DMA byte counts, asserted interrupts, and PHY packet observations into the productionHardwareVerified network proof before emitting PASS markers.",
         "Add suspend/resume, induced crash-recovery, crash-record persistence, and update rollback power-cycle loops to the NUC proof runbook.",
-        "Capture service startup, compositor framebuffer, permission review, sync, driver restart, crash persistence, and update rollback markers in the NUC proof run."
+        "Capture service startup, compositor presentation-proof markers, permission review, sync, driver restart, crash persistence, and update rollback markers in the NUC proof run."
       ],
       "verification_commands": [
         "./scripts/zig.sh build prod-readiness",
@@ -601,21 +610,20 @@
         "Negative tests reject unsigned userspace launches and modeled runtime bypasses.",
         "The production-readiness gate rejects unmarked syntheticUserspaceImage fixtures in critical launch and service test paths; existing synthetic fixtures are marked model-only.",
         "The catalog registration path now rejects generated userspace artifacts when embedded ELF bytes are missing or malformed, when precomputed digests no longer match, or when generated ELF metadata and manifest state become stale.",
+        "Host launch, service, syscall, storage, sync, and scheduler tests now use generated-image fixture readers for archive-backed executable descriptors in critical userspace paths.",
         "The QEMU native smoke gate now requires generated userspace artifacts, scheduler binding, userspace exec/resume probes, service contract registration, service IPC connectivity, and driver restart markers before native-ready.",
-        "The service registry now rejects invalid bootstrap endpoints, zero binding identifiers, and unknown service connection flags before registering typed interfaces."
+        "The service registry now rejects invalid bootstrap endpoints, zero binding identifiers, and unknown service connection flags before registering typed interfaces.",
+        "The secure pasteboard service is now generated as a userspace service image, launched through the kernel-contract service bootstrap path, published as a native service contract, and included in the service IPC connectivity proof loop."
       ],
       "production_gaps": [
-        "Many host tests still rely on syntheticUserspaceImage records instead of built image descriptors.",
         "Real-hardware proof still needs to capture the booted userspace startup and service IPC markers from the NUC11TNKi5."
       ],
       "graduation_criteria": [
-        "Replace critical launch-path synthetic image tests with fixtures derived from generated userspace image artifacts.",
+        "Keep critical launch-path tests on fixtures derived from generated userspace image artifacts.",
         "Keep stale, truncated, unsigned, missing-byte, malformed-ELF, and digest-mismatched userspace archive tests in the spec and host gates.",
         "Keep the QEMU service-startup proof exercising generated-image boot, mailbox, descriptor validation, syscall query, service IPC, fault, and restart paths before native-ready."
       ],
       "next_actions": [
-        "Create a small generated-image fixture reader for host tests.",
-        "Replace the marked model-only launch and service synthetic fixtures with generated userspace image fixtures.",
         "Capture the service-startup marker group in the NUC11TNKi5 hardware proof bundle."
       ],
       "verification_commands": [
@@ -646,22 +654,21 @@
       ],
       "current_evidence": [
         "Freestanding QEMU boots now run the permission review flow before native-ready using generated app packages, the permission review service task, compositor-backed review rendering, policy mediation, and explicit grant/deny markers.",
+        "The booted permission proof now feeds every Notes, Sync, and Capture review command through the xHCI HID boot-keyboard report path without the bootstrap review profile, and the native smoke contract requires explicit xHCI keyboard report, review-command, and full boot-flow command markers.",
         "Permission review service paths reject zero audit ticks, oversized scripted commands, and rendered-surface controls before the review window exists, so profiled review flows remain bounded and auditable.",
         "The native smoke marker contract requires review-port readiness, policy-port readiness, rendered review output, zero-authority denials, local grants, explicit device/media decisions, and lease expiry evidence.",
-        "The NUC11TNKi5 hardware proof marker file requires the same permission review markers from real hardware serial output."
+        "The NUC11TNKi5 hardware proof marker file requires the same permission review and xHCI keyboard full-flow markers from real hardware serial output."
       ],
       "production_gaps": [
-        "The booted permission proof is QEMU-backed; the first real hardware proof bundle has not captured the same markers yet.",
-        "Interactive physical input for permission review remains represented by the profiled boot review plan until xHCI keyboard input is wired into the review loop on the hardware target."
+        "The booted permission proof is QEMU-backed; the first real hardware proof bundle has not captured the same markers yet."
       ],
       "graduation_criteria": [
         "Keep permission review markers release-gated in QEMU before native-ready and require the same markers in the hardware proof bundle.",
-        "Replace profiled permission review input with real hardware input events once the NUC11TNKi5 xHCI path is available.",
+        "Require real hardware input events from the NUC11TNKi5 xHCI path for at least one booted permission command before accepting the hardware proof bundle.",
         "Reject hardware proof bundles that omit review rendering, grant, deny, and lease-expiry markers."
       ],
       "next_actions": [
-        "Capture permission review markers in build/hardware-proofs/nuc11tnki5/serial.log.",
-        "Wire NUC11TNKi5 xHCI keyboard input into the permission review service and retire the profiled hardware path."
+        "Capture permission review and xHCI keyboard full-flow markers in build/hardware-proofs/nuc11tnki5/serial.log."
       ],
       "verification_commands": [
         "./scripts/zig.sh build zigos-native-smoke-test",
@@ -696,22 +703,30 @@
         "The overlay relay service rejects unauthorized relay use, target changes, empty encrypted packets, malformed zero-tick/zero-task egress requests, and relay fallback re-checks revoked device trust before enqueueing failed native sends across both disconnected/congested and post-send network-failure paths.",
         "Native sync transport ABI v3 host tests now bind captured frames to source and target task ids, require payload digests on the wire, reject zero or malformed frame headers, reject non-device or same-device endpoints, enforce packet/session metadata before encoding, reject invalid task ids before endpoint allocation, preflight packet-capture capacity before endpoint or driver side effects, and fail closed on mutated encrypted packet metadata during decrypt.",
         "End-to-end host tests replicate document, media, secret, and database payloads between two service tasks through a booted relay fallback model, and prove object-scoped grants skip private entries while offline conflicts stay reviewable.",
-        "The two-node QEMU gate boots separate native nodes with separate native-store images and now requires booted device graph, policy, device-to-device, relay, revoked-device, and persisted sync-service restart markers on each node."
+        "The two-node QEMU gate boots separate native nodes with separate native-store images and now requires booted device graph, policy, device-to-device, relay, revoked-device, persisted sync-service restart, and native driver packet-capture markers on each node.",
+        "The booted sync scenario sends encrypted native transport ABI v3 frames through network_driver_task.sendActiveFrame, validates the captured packet equals the active driver's transmitted frame, rejects plaintext-on-wire evidence, and requires packet-captured/frame-sent, malformed-packet rejection, reconnect, replay-window rejection, and congestion-backpressure markers before native-ready.",
+        "NativeTransportService now has a production fail-closed mode that refuses endpoint delivery, packet capture, and active-driver transmit until a real Intel I225 proof with ring ownership, PHY link, tail-register writes, interrupts, MAC evidence, and the first-target network frame cycle count is attached.",
+        "TransportSession now records an explicit trust posture: relay/local-lab sessions remain local_lab_only, pinned attested service-identity sessions are production_attested, and session key derivation binds the posture so lab and production sessions cannot share the same crypto context silently.",
+        "Network policy and transport session posture now require verified remote-attestation evidence with a bound verifier request digest and bound attestation verifier metadata digest before treating a pinned service-identity connection as production-attested; loose attested=true claims remain local-lab/denied for production policies.",
+        "NativeTransportService now exposes a typed verified service-identity open path that consumes the attestation response/request, measured boot record, trusted root, and policy-pinned attestation verifier metadata digest directly; the production regression uses that path and proves a response for the wrong service identity cannot open a production session.",
+        "The native network-driver service-identity path now carries verified-attestation state, the verifier request digest, and the request-bound attestation verifier metadata digest through connection creation, key derivation, frame metadata, and brokered transmit rechecks, with regression coverage proving brokered sends keep the same verified evidence instead of downgrading to loose attested flags.",
+        "The booted sync service-path proof now provisions its network identity root through the production external-provider boundary, requires a request-bound verifier metadata digest, and persists that digest into the service-identity network policy.",
+        "NativeTransportService can now require production-attested sessions before endpoint delivery, object-share encryption, packet capture, relay fallback, or active-driver transmit; the regression gate proves local-lab relay sessions stay blocked even after I225 hardware proof while pinned attested service-identity sessions can transmit.",
+        "The rendered production journey now surfaces the object-scoped trusted-overlay share grant and drives a real offline document conflict through sync conflict review/resolution, so object sharing and conflict handling are user-visible daily-driver evidence rather than backend-only sync assertions."
       ],
       "production_gaps": [
-        "The booted QEMU proof still observes native sync markers rather than a completed async network driver with packet capture, replay-window, reconnect, and congestion behavior.",
-        "Real-hardware evidence still needs to capture the same sync markers on the NUC11TNKi5 with the Intel I225-LM path active.",
-        "Device identity depends on the boot/attestation production root track before remote trust can be considered production-grade."
+        "The booted QEMU proof now observes native driver packet capture, transmit ownership, replay-window rejection, reconnect, congestion backpressure, malformed captured-packet rejection, and production-mode I225 proof enforcement, but it still uses the modeled boot network device rather than real e1000/I225-LM frame receive/transmit rings.",
+        "Real-hardware evidence still needs to capture the same sync markers on the NUC11TNKi5 with the Intel I225-LM path active and packet counters tied to physical frames.",
+        "Remote device identity sessions are explicitly marked local-lab unless pinned verified attestation-response evidence with a verifier request digest and request-bound attestation verifier metadata digest is present, but production-grade remote trust still depends on the boot/attestation track wiring external providers to operational TPM, secure-enclave, HSM, or KMS roots."
       ],
       "graduation_criteria": [
         "Replace sync_transport_harness as the primary evidence with a native transport service that runs through endpoint syscalls and the network driver task.",
         "Keep the two-node QEMU replication gate covering offline policy, device-to-device replication, relay fallback, revoked-device rejection, and persisted restart before release.",
-        "Bind remote device sessions to production attestation roots or explicitly mark them local-lab only."
+        "Bind production remote device sessions to operational attestation roots while keeping local-lab sessions explicitly labeled and rejectable by production-only callers."
       ],
       "next_actions": [
-        "Promote the native sync ABI v3 packet-capture checks into the two-QEMU sync harness once the network driver task owns real frames.",
-        "Promote conflict review and object-scoped sync grants into the rendered shell review surface.",
-        "Bind remote device sessions to production attestation roots instead of local-lab signer fixtures."
+        "Replace the modeled boot network device in the two-node sync proof with a QEMU-visible async NIC path that owns receive/transmit rings and packet counters.",
+        "Replace external-provider software callback fixtures for production remote sessions with provisioned TPM, secure-enclave, HSM, or KMS-backed attestation roots."
       ],
       "verification_commands": [
         "./scripts/zig.sh build sync-two-node-qemu-test",
@@ -736,7 +751,9 @@
         "src/native/platform/rendered_shell/production_journey.zig",
         "src/native/platform/rendered_shell/tests.zig",
         "src/native/platform/native_ux.zig",
+        "src/native/session/booted_evidence.zig",
         "src/native/services/package_service.zig",
+        "src/native/services/public_store.zig",
         "src/native/storage/storage_service.zig",
         "src/native/sync/sync_service.zig",
         "src/native/task/task_runtime_service.zig",
@@ -747,24 +764,25 @@
         "The rendered-shell production journey is now scoped to one Notes app daily-driver path rather than a generic desktop expansion path.",
         "The journey installs a signed native Notes package, starts its native component, opens a notes workspace and document, reviews the local object-access permission, grants an object-scoped collaborative share, syncs only after sharing, updates and rolls back the package, recovers shell/runtime state, removes the package, and revokes device and policy authority.",
         "The share step writes a concrete trusted-overlay, object-scoped workspace grant and verifies the collaborator can read and write the shared note before sync proceeds.",
+        "The production journey surface now renders the object-scoped share proof, records the share expiry and object id, creates a conflicting paired-device replica before sync, opens a sync-conflict review surface, resolves the conflict with the local document version, and keeps that conflict-review evidence in the final journey transcript.",
         "Task-flow ledger evidence now includes share_document alongside install_app, open_workspace, open_document, review_permission_request, sync_workspace, update_app, rollback_app_update, recover_system, and remove_app.",
         "The package-service lifecycle used by the journey now requires nonempty bounded install sources, nonzero monotonic data schema versions, monotonic active updates, stable publisher identity, stable update channels, and stable update sources before an installed Notes package can be replaced.",
-        "The host journey now renders an ordered Notes daily-driver marker contract directly in the production journey surface for install/open, edit persistence, share/sync, update rollback, recovery/removal, authority revocation, and complete-path proof; the same marker set is listed in the native-smoke marker registry and the NUC11TNKi5 hardware marker contract.",
-        "The booted shell input loop now renders typed document text, syncs the edited note, recovers runtime state while preserving the edit, and then continues through rollback, recovery, and package removal."
+        "The Notes production journey now resolves install and update requests from a public store channel release catalog. The channel refuses unsigned, signature-tampered, untrusted-publisher, or publisher-key-revoked releases; re-checks current publisher trust before resolving already-published releases; requires every published release to advance an append-only transparency sequence rooted in the previous channel root; rejects stale-root, forged-root, skipped-sequence, and per-bundle version-regression releases; carries that transparency sequence/root/log-head into package install requests, stored revisions, package launch-plan provenance, the launched task's runtime provenance record, the task debug provenance trail, and SDK debugger events/export text; records structured source fingerprints, transparency sequence, and root/log-head fingerprints on launch provenance events while keeping full roots on task launch state; rejects public-store installs without transparency evidence; rejects public-store updates that replay an already-installed sequence even after rollback; refuses launch, manifest resolution, and rollback when stored public-store transparency evidence has been stripped; exposes signed revision provenance, source identity, schema version, permission digest, signature metadata, and public-store transparency sequence to launch consumers; rejects releases without complete canonical SHA-256 supply-chain metadata; rejects releases without canonical SHA-256 asset digests and byte sizes; and rejects asset catalogs that do not match the signed manifest before producing the package install request.",
+        "The host journey now renders an ordered Notes daily-driver marker contract directly in the production journey surface for install/open, edit persistence, share/sync, update rollback, recovery/removal, authority revocation, and complete-path proof; the same marker set is required by the native-smoke cold-boot registry and the NUC11TNKi5 hardware marker contract.",
+        "The booted QEMU native smoke path now runs the ordered Notes daily-driver production journey through store:zigos/public before native-ready and emits the complete marker group on cold boot and cold reboot.",
+        "The booted shell input loop now renders typed document text, syncs the edited note, recovers runtime state while preserving the edit, and then continues through rollback, recovery, and package removal.",
+        "The bootstrapped native secure pasteboard service now replaces ambient clipboard assumptions with destination-bound, foreground-session-bound, user-gesture-bound, strictly expiring, read-once or revocable paste grants; audit events count pasteboard access and denials while redacting copied content from user-visible diagnostics.",
+        "The QEMU native smoke path now drives the booted Notes shell input loop with real text input, verifies the object-store payload equals the typed note, syncs that version device-to-device, recovers the shell/runtime checkpoint, and requires typed edit, typed sync, typed recovery, and typed-loop-complete markers before native-ready."
       ],
       "production_gaps": [
-        "The slice proof is still a host/service journey with a marker contract; the same ordered path is not yet emitted by a booted QEMU scenario or captured on real hardware.",
-        "The Notes editor behavior now includes a booted text input and recovery loop, but the proof is still host-backed rather than a native QEMU or real-hardware interactive path.",
-        "Native package install/update proof uses signed manifest state and package-service lifecycle rather than loading a realistic Notes app asset bundle through a public store channel."
+        "The ordered Notes daily-driver marker path and typed editor loop are now emitted by booted QEMU native smoke, but the complete path has not yet been captured on real hardware."
       ],
       "graduation_criteria": [
         "Keep the first daily-driver scenario narrow: Notes app install, notes workspace/document use, explicit permission review, object-scoped sharing, local-first sync, update rollback, recovery, and package removal.",
-        "Promote the ordered host journey into QEMU native smoke markers before broadening desktop surface area.",
+        "Keep the ordered Notes daily-driver marker path required by QEMU native smoke before broadening desktop surface area.",
         "Require the same journey markers in the NUC11TNKi5 hardware proof bundle before calling the slice production-ready."
       ],
       "next_actions": [
-        "Wire the Notes daily-driver marker contract into a booted native smoke scenario that emits the ordered markers before native-ready.",
-        "Promote the booted text edit, sync, and recovery proof into a QEMU native smoke scenario.",
         "Capture the complete Notes daily-driver marker group in build/hardware-proofs/nuc11tnki5/serial.log."
       ],
       "verification_commands": [
@@ -789,6 +807,7 @@
       "implementation_anchors": [
         "src/native/drivers/driver_service.zig",
         "src/native/drivers/driver_runtime.zig",
+        "src/native/drivers/accelerator_driver_task.zig",
         "src/native/drivers/network_driver_task.zig",
         "src/native/drivers/storage_driver_task.zig",
         "src/native/kernel_api/device_broker.zig",
@@ -801,13 +820,14 @@
         "Storage driver tasks attach through the kernel device broker and the ATA bootstrap path exports checked read/write bridges for freestanding volume access.",
         "The driver boundary spec gate exercises brokered ATA read/write I/O, programs an IOMMU-style DMA domain, authorizes brokered DMA buffers, and rejects stale task authority, stale DMA buffers, stale broker sessions, expired leases, invalid ports, explicit broker revocation, and post-restart target generation mismatches.",
         "The storage data-plane gate covers timeout propagation, active-I/O restart, and partial-transfer recovery by proving incomplete ATA writes are discarded before a restarted userspace driver reissues I/O.",
-        "The native network driver path reauthorizes brokered service-identity sends through the egress broker, so revoked network-policy capabilities stop already-open userspace network paths before transmit.",
-        "QEMU driver restart proof performs broker-mediated storage reads and writes before and after restart, rejects stale authority, stale DMA buffer, and stale port access after generation change, gates the new broker session rebind, and is now required by the real-hardware proof marker contract."
+        "The native network driver path reauthorizes brokered service-identity sends through the egress broker, so revoked network-policy capabilities stop already-open userspace network paths before transmit; the booted sync path now captures an encrypted ABI v3 native frame and proves the capture is the same frame sent through the active network driver.",
+        "A native accelerator driver task now owns brokered GPU, NPU, and media queue sessions, requires hardware queue ownership plus completion-interrupt evidence, emits typed scheduler queue events only after rejecting CPU engines, missing brokers, missing owners, missing generations, missing interrupts, and stale completions, and the booted driver proof now emits queue-owned and completion-interrupt markers required by native smoke and the NUC11TNKi5 hardware marker contract.",
+        "QEMU driver restart proof performs broker-mediated storage reads and writes before and after restart, injects checked ATA timeout propagation, rejects partial-sector transfers before port I/O, rejects stale authority, stale DMA buffer, stale port access, explicit broker revocation, and stale broker sessions, then gates republish/rebind before post-restart I/O; the expanded marker group is now required by the real-hardware proof marker contract."
       ],
       "production_gaps": [
-        "Only the bootstrap storage path has concrete hardware-like data-plane depth; other driver classes remain inventory, policy, or publication proofs.",
+        "Bootstrap storage has the deepest hardware-like data-plane proof; network now has booted encrypted frame ownership evidence and accelerator queues now have brokered driver-event evidence, but other driver classes remain inventory, policy, or publication proofs.",
         "IOMMU and DMA isolation now have executable native programming and brokered-buffer evidence, but not real VT-d/AMD-Vi page-table programming or device fault capture.",
-        "The timeout, partial-transfer, and explicit revocation cases are host spec gates; QEMU coverage now gates brokered restart and rebind while hardware packet/block I/O evidence is still pending."
+        "QEMU coverage now gates brokered restart, timeout propagation, partial-sector rejection, explicit broker revocation, republish, and rebind; real hardware packet/block I/O evidence and mid-transfer device-fault capture are still pending."
       ],
       "graduation_criteria": [
         "Add broker-mediated data-plane tests for at least storage and network that run in QEMU and prove no kernel direct publication for excluded subsystems.",
@@ -815,7 +835,7 @@
         "Gate driver restart on active I/O recovery, broker revocation, rebind, and no stale DMA or port access after generation change."
       ],
       "next_actions": [
-        "Move timeout, partial transfer, and explicit broker revocation proofs into the focused QEMU driver restart gate.",
+        "Capture hardware packet/block I/O traces for timeout, mid-transfer fault, and post-restart recovery on the first production target.",
         "Bind the native DMA-domain model to real VT-d/AMD-Vi programming and archive device-fault evidence before enabling bus-master DMA targets.",
         "Capture the expanded driver restart/rebind marker group, including DMA-domain and brokered-buffer markers, in the NUC11TNKi5 hardware proof bundle."
       ],
@@ -837,31 +857,56 @@
       "implementation_anchors": [
         "src/native/task/accelerator_scheduler.zig",
         "src/native/task/userspace_scheduler.zig",
+        "src/native/platform/os_contract_2026.zig",
+        "src/native/platform/event_ledger.zig",
+        "src/native/policy/policy_object.zig",
         "src/native/platform/platform_policy_signals.zig",
+        "src/native/drivers/accelerator_driver_task.zig",
+        "src/kernel/drivers/first_target_telemetry.zig",
+        "src/kernel/platform/hardware_proof.zig",
         "src/native/kernel_api/shared_memory.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/service_path_proofs.zig",
+        "src/kernel/boot/benchmark/suite.zig",
+        "benchmarks/kernel-quality-gates.txt"
       ],
       "current_evidence": [
         "Scheduler decisions account for resource class, engine availability, thermal pressure, battery saver, privacy mode, CPU budget, memory bandwidth, and zero-copy shared memory.",
         "Booted provider tests derive hardware-source telemetry from live runtime counters instead of purely synthetic state.",
         "Telemetry now flows through an explicit provider boundary with test-only host fakes and production freestanding provider descriptors.",
         "Negative tests require observed telemetry before waking hardware queues.",
-        "A sustained-load scheduler regression gate keeps foreground work continuously ready while proving background and batch classes still dispatch within bounded deadline windows instead of starving."
+        "Scheduler host tests now create runnable task records from generated userspace image fixtures, so dispatch, throttling, and fairness checks exercise archive-backed executable metadata instead of synthetic image descriptors.",
+        "The 2026 OS contract now treats background activity as a first-class native policy surface, and the dispatcher enforces signed duration, CPU, memory, remote-network, visibility, typed-service, overdue-work expiration, reservation release, and redacted-diagnostics gates before and after reserving work.",
+        "A sustained-load scheduler regression gate keeps foreground work continuously ready while proving background and batch classes still dispatch within bounded deadline windows without missed lower-class deadlines.",
+        "Expired lower-class deadline ties now break by service debt, so a repeatedly serviced background queue cannot hide an equally urgent batch queue.",
+        "Hardware telemetry samples now carry explicit reader evidence, and scheduler accelerator wake/claim paths refuse `.hardware` GPU, NPU, or media availability until ACPI, thermal, battery, accelerator-reader, target-id, and reader-generation evidence is complete.",
+        "The first-target platform telemetry provider validates NUC11TNKi5 real-hardware reader snapshots before publishing hardware scheduler samples, rejects QEMU or incomplete reader evidence, and host tests prove partial hardware telemetry cannot grant accelerator work.",
+        "First-target telemetry snapshots can now be composed only from typed ACPI/FADT, thermal-zone, battery, and accelerator reader proofs with matching reader generations; tests reject QEMU ACPI proofs, stale thermal generations, online accelerator drivers without generations, and out-of-range thermal readings before scheduler hardware availability is published.",
+        "A first-target reader-provider boundary now binds provider role, target id, reader generation, and typed ACPI/thermal/battery/accelerator callbacks before telemetry counters can reach the scheduler; host tests reject test-only providers, target-mismatched proofs, and stale provider generations.",
+        "A concrete first-target driver callback provider now accepts raw ACPI/FADT, thermal-zone, battery, and accelerator samples, converts them into typed reader proofs, and fails closed when required callbacks are missing or samples are stale before booted scheduler telemetry is published.",
+        "The kernel hardware-proof state now retains parsed FADT firmware, boot memory capacity, thermal-zone samples, battery status, accelerator driver generations, and completion-interrupt observations under one reader generation; the native first-target adapter feeds those proof facts into the production driver callback provider and rejects missing FADT or memory evidence.",
+        "A first-target hardware telemetry driver recorder now validates thermal-zone, battery, GPU, NPU, and media driver readings against the ACPI/FADT telemetry base before calling the kernel proof recorders; host tests reject missing base proof, overheated sensors, missing battery devices, online accelerators without driver generations, and stale reader-generation updates.",
+        "The first-target telemetry recorder now has a boot/live source callback interface for independent thermal, battery, accelerator, and grid-carbon providers; tests prove missing battery or accelerator callbacks and malformed source readings fail closed before hardware proof facts update.",
+        "A first-target telemetry source registry now refuses to publish scheduler hardware telemetry until complete thermal, battery, accelerator, and grid-carbon callbacks are installed; host tests reject empty or incomplete registries before accepting installed source readings.",
+        "The first-target telemetry registry now exposes independent thermal, battery, accelerator, and grid-carbon provider slots while preserving complete-source publication semantics; host tests prove partial slot registration cannot update hardware proof facts or publish scheduler telemetry.",
+        "Captured NUC11TNKi5 hardware proof facts can now be installed through the production first-target telemetry provider slots; kernel and native tests reject missing thermal, battery, accelerator, memory, FADT, grid-carbon, and callback evidence before scheduler hardware telemetry is published.",
+        "First-target telemetry now rejects replayed same-generation thermal, battery, accelerator, and grid-carbon source sample sequences in the kernel recorder, and the native platform telemetry provider refuses same-generation reader snapshots unless every source sequence advances before refreshing scheduler hardware availability.",
+        "Grid-carbon telemetry now uses sequenced reader proofs with bounded intensity values, and scheduler hardware evidence is incomplete until ACPI, thermal, battery, accelerator, and grid-carbon observations are all present.",
+        "Brokered accelerator queues now consume typed GPU, NPU, and media driver queue events with owner, broker, generation, completion-sequence, and completion-interrupt evidence; host tests and the QEMU benchmark reject missing interrupts, wrong owners, mismatched generations, and stale completions before releasing accelerator claims.",
+        "A native accelerator driver task now turns hardware-owned GPU, NPU, and media queue sessions into scheduler driver events only after ownership and completion-interrupt evidence is present; host tests prove missing ownership, missing interrupts, and stale completion interrupts fail closed before claim release, and native smoke plus the NUC11TNKi5 marker contract require accelerator queue-owned and completion-interrupt markers.",
+        "The QEMU benchmark quality gate now checks battery-saver batch delay, thermal background delay, memory-pressure delay, fairness ratio, starvation recovery, lower-class service-debt tie breaking, brokered accelerator queue ownership/completion before release, background throttling, and foreground latency under load."
       ],
       "production_gaps": [
-        "The freestanding provider is still assembled from native runtime counters and test-provided platform fields, not real ACPI, battery, thermal, GPU, NPU, or media driver sources.",
-        "The scheduler has host starvation/fairness coverage, but the sustained-load latency, background throttling, and thermal/battery policy checks are not yet promoted into the QEMU benchmark gate.",
-        "Accelerator availability is represented by booleans rather than device queue ownership and completion interrupts."
+        "The first-target telemetry contract now has a production callback provider, kernel hardware-proof adapter, driver recorder, source callback surface, complete-source registry, independent provider slots, and hardware-proof-backed slot installation for typed ACPI/FADT, battery, thermal, GPU, NPU, media, and grid-carbon readings before hardware accelerator scheduling, but real NUC11TNKi5 thermal, battery, GPU, NPU, media, and grid-carbon drivers still need to install their boot and live callbacks.",
+        "Brokered accelerator queues have a typed native driver task, driver event path, benchmark gates, and release marker requirements, but GPU, NPU, and media drivers still need to source those ownership and hardware completion-interrupt events from real device queues."
       ],
       "graduation_criteria": [
         "Introduce platform telemetry providers for the first supported target and mark emulator-only providers as test-only.",
-        "Promote scheduler latency, fairness across resource classes, background throttling, and thermal/battery policy transitions from host regression tests into benchmark gates.",
-        "Tie accelerator claims to brokered device queues or explicitly limit production support to CPU/media classes."
+        "Keep scheduler latency, fairness across resource classes, service-debt tie breaking, brokered accelerator queue completion, background throttling, and thermal/battery policy transitions covered by benchmark quality gates.",
+        "Wire accelerator claims to real brokered device queues and completion interrupts or explicitly limit production support to CPU/media classes."
       ],
       "next_actions": [
-        "Replace the freestanding runtime-counter bridge with first-target ACPI, battery, thermal, GPU, NPU, and media driver readers.",
-        "Add scheduler benchmark fixtures that run under the existing QEMU benchmark target.",
-        "Add regression tests for starvation and privacy-sensitive workload throttling."
+        "Attach real thermal-zone polling, battery status, GPU, NPU, media, and grid-carbon drivers to the independent first-target telemetry provider slots and feed their captured NUC11TNKi5 proof facts into the first-target callback provider.",
+        "Emit brokered queue owner, generation, completion-sequence, and hardware interrupt events from real GPU, NPU, and media drivers into the scheduler driver-event path."
       ],
       "verification_commands": [
         "./scripts/zig.sh build host-tests",

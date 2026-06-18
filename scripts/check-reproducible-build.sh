@@ -30,8 +30,9 @@ sha256_file() {
 copy_workspace() {
   local dest="${1:?destination required}"
   mkdir -p "$dest"
-  git -C "$ROOT_DIR" ls-files --cached --others --exclude-standard -z |
-    while IFS= read -r -d '' path; do
+  jj -R "$ROOT_DIR" file list -r @ -T 'path ++ "\n"' |
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
       mkdir -p "$dest/$(dirname "$path")"
       cp -p "$ROOT_DIR/$path" "$dest/$path"
     done
@@ -86,6 +87,11 @@ build_copy() {
   )
 }
 
+if ! command -v jj >/dev/null 2>&1; then
+  printf 'Jujutsu (jj) is required to record reproducible-build source provenance.\n' >&2
+  exit 1
+fi
+
 first_tree="$WORK_PARENT/first"
 second_tree="$WORK_PARENT/second"
 copy_workspace "$first_tree"
@@ -100,7 +106,11 @@ write_digest_manifest "$first_tree" "$first_manifest"
 write_digest_manifest "$second_tree" "$second_manifest"
 
 created_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-commit_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'NOASSERTION')"
+repo_vcs="jj"
+repo_url="$(jj -R "$ROOT_DIR" git remote list 2>/dev/null | awk '$1 == "origin" { print $2; found = 1; exit } END { exit found ? 0 : 1 }' || printf 'NOASSERTION')"
+repo_change_id="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'change_id ++ "\n"')"
+commit_sha="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"')"
+dirty_count="$(jj -R "$ROOT_DIR" diff -r @ --name-only | wc -l | tr -d ' ')"
 zig_version="$("$ROOT_DIR/scripts/zig.sh" version 2>/dev/null || printf 'unknown')"
 
 if ! cmp -s "$first_manifest" "$second_manifest"; then
@@ -109,7 +119,11 @@ if ! cmp -s "$first_manifest" "$second_manifest"; then
 {
   "schema_version": 1,
   "generated_at": "$created_utc",
+  "repo_vcs": "$repo_vcs",
+  "repository": "$(json_escape "$repo_url")",
+  "repo_change_id": "$(json_escape "$repo_change_id")",
   "commit": "$(json_escape "$commit_sha")",
+  "dirty_workspace_file_count": $dirty_count,
   "zig_version": "$(json_escape "$zig_version")",
   "status": "failed"
 }
@@ -122,7 +136,11 @@ cat > "$OUTPUT_PATH/reproducible-build.json" <<EOF
 {
   "schema_version": 1,
   "generated_at": "$created_utc",
+  "repo_vcs": "$repo_vcs",
+  "repository": "$(json_escape "$repo_url")",
+  "repo_change_id": "$(json_escape "$repo_change_id")",
   "commit": "$(json_escape "$commit_sha")",
+  "dirty_workspace_file_count": $dirty_count,
   "zig_version": "$(json_escape "$zig_version")",
   "status": "passed",
   "comparison": "two independent tracked-workspace builds produced identical release artifact digests",

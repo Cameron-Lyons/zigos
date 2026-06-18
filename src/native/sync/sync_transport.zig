@@ -1,11 +1,15 @@
 const std = @import("std");
+const attestation_service = @import("../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
 const capability = @import("../kernel_api/capability.zig");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("device_graph.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
 const hardware_target = @import("../platform/hardware_target.zig");
 const ids = @import("../core/ids.zig");
 const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
+const manifest = @import("../policy/manifest.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const network_driver_task = @import("../drivers/network_driver_task.zig");
 const network_policy = @import("network_policy.zig");
 const principal = @import("../core/principal.zig");
@@ -21,6 +25,7 @@ pub const SignedEncryptedFrame = harness.SignedEncryptedFrame;
 pub const Relay = harness.Relay;
 pub const BootedOverlayRelayService = harness.BootedOverlayRelayService;
 pub const TransportSession = harness.TransportSession;
+pub const VerifiedServiceIdentityOpenRequest = harness.VerifiedServiceIdentityOpenRequest;
 pub const Harness = harness.Harness;
 pub const EmulatedNativeTransport = harness.EmulatedNativeTransport;
 pub const signPacket = harness.signPacket;
@@ -95,15 +100,26 @@ pub const CapturedFrameExpectation = struct {
 pub const IntelI225TransportProof = struct {
     evidence: hardware_target.EvidenceSummary,
     ring_plan: intel_i225.RingPlan,
+    packet_proof: intel_i225.PacketProof,
     kernel_data_plane_disabled: bool = intel_i225.network_data_plane_exports_fail_closed,
     i225_driver_present: bool = true,
 
     pub fn satisfied(self: IntelI225TransportProof) bool {
         if (!self.kernel_data_plane_disabled or !self.i225_driver_present) return false;
         intel_i225.validateRingPlan(self.ring_plan) catch return false;
+        if (!self.packet_proof.verified()) return false;
+        if (!sameRingPlan(self.ring_plan, self.packet_proof.ring_plan)) return false;
+        if (self.packet_proof.tx_rx_cycles < hardware_target.first_supported_target.proof_minimums.network_frame_cycles) return false;
         return hardware_target.hardwareProofSatisfied(&hardware_target.first_supported_target, self.evidence);
     }
 };
+
+fn sameRingPlan(left: intel_i225.RingPlan, right: intel_i225.RingPlan) bool {
+    return left.rx_descriptors == right.rx_descriptors and
+        left.tx_descriptors == right.tx_descriptors and
+        left.rx_ring_address == right.rx_ring_address and
+        left.tx_ring_address == right.tx_ring_address;
+}
 
 pub const CapturedPacket = struct {
     in_use: bool = false,
@@ -210,7 +226,15 @@ pub const NativeTransportService = struct {
     congestion_drop_count: usize = 0,
     replay_rejection_count: usize = 0,
     revoked_device_rejection_count: usize = 0,
+    production_attested_sessions_required: bool = false,
+    i225_proof_required: bool = false,
     i225_proof_attached: bool = false,
+    i225_proof_cycles: u16 = 0,
+    i225_tx_tail_register_writes: u32 = 0,
+    i225_rx_tail_register_writes: u32 = 0,
+    i225_interrupt_cause_reads: u32 = 0,
+    i225_link_speed_mbps: u32 = 0,
+    i225_mac_address: [6]u8 = [_]u8{0} ** 6,
     trust_graph: ?*const device_graph.Graph = null,
 
     pub fn init() NativeTransportService {
@@ -221,9 +245,35 @@ pub const NativeTransportService = struct {
         self.trust_graph = graph;
     }
 
+    pub fn requireIntelI225Proof(self: *NativeTransportService) void {
+        self.i225_proof_required = true;
+    }
+
+    pub fn requireProductionAttestedSessions(self: *NativeTransportService) void {
+        self.production_attested_sessions_required = true;
+    }
+
+    pub fn intelI225NetworkReady(self: *const NativeTransportService) bool {
+        const minimum = hardware_target.first_supported_target.proof_minimums.network_frame_cycles;
+        const expected_interrupts = @as(u32, minimum) * 2;
+        return self.i225_proof_attached and
+            self.i225_proof_cycles >= minimum and
+            self.i225_tx_tail_register_writes >= minimum and
+            self.i225_rx_tail_register_writes >= minimum and
+            self.i225_interrupt_cause_reads >= expected_interrupts and
+            self.i225_link_speed_mbps != 0 and
+            macAddressPresent(self.i225_mac_address);
+    }
+
     pub fn attachIntelI225Proof(self: *NativeTransportService, proof: IntelI225TransportProof) Error!void {
         if (!proof.satisfied()) return error.NativeTransportHardwareProofMissing;
         self.i225_proof_attached = true;
+        self.i225_proof_cycles = proof.packet_proof.tx_rx_cycles;
+        self.i225_tx_tail_register_writes = proof.packet_proof.mmio.tx_tail_register_writes;
+        self.i225_rx_tail_register_writes = proof.packet_proof.mmio.rx_tail_register_writes;
+        self.i225_interrupt_cause_reads = proof.packet_proof.mmio.interrupt_cause_reads;
+        self.i225_link_speed_mbps = proof.packet_proof.mmio.link_speed_mbps;
+        self.i225_mac_address = proof.packet_proof.mac_address;
     }
 
     pub fn openDeviceToDevice(
@@ -256,6 +306,25 @@ pub const NativeTransportService = struct {
     ) Error!NativeConnection {
         try self.ensureTrustedTransportDevices(source_device, target_device);
         const session = try self.harness.openServiceIdentity(
+            broker,
+            request,
+            source_device,
+            target_device,
+        );
+        return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
+    }
+
+    pub fn openVerifiedServiceIdentity(
+        self: *NativeTransportService,
+        broker: *network_policy.EgressBroker,
+        request: VerifiedServiceIdentityOpenRequest,
+        source_task_id: u64,
+        target_task_id: u64,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!NativeConnection {
+        try self.ensureTrustedTransportDevices(source_device, target_device);
+        const session = try self.harness.openVerifiedServiceIdentity(
             broker,
             request,
             source_device,
@@ -321,6 +390,8 @@ pub const NativeTransportService = struct {
     ) Error!NativeDelivery {
         if (!connection.connected) return error.NativeTransportDisconnected;
         try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
+        try self.ensureProductionSessionReady(&connection.session);
+        try self.ensureHardwareBackedNetworkReady();
         if (connection.in_flight_frames >= MAX_NATIVE_IN_FLIGHT_FRAMES) {
             self.congestion_drop_count += 1;
             return error.NativeTransportCongested;
@@ -387,6 +458,8 @@ pub const NativeTransportService = struct {
         const delivery = self.sendSigned(connection, plaintext, signer) catch |err| switch (err) {
             error.NativeTransportDisconnected, error.NativeTransportCongested => {
                 try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
+                try self.ensureProductionSessionReady(&connection.session);
+                try self.ensureHardwareBackedNetworkReady();
                 const sequence = connection.next_sequence;
                 const signed_frame = try self.harness.encryptSignedFrame(&connection.session, plaintext, signer);
                 try relay_service.submitSignedFrame(connection.session.task_id, &connection.session, signed_frame);
@@ -430,6 +503,7 @@ pub const NativeTransportService = struct {
         payload: []const u8,
     ) Error!ObjectShareEnvelope {
         try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
+        try self.ensureProductionSessionReady(&connection.session);
         const packet = try self.harness.encryptPacket(&connection.session, payload);
         var envelope = ObjectShareEnvelope{
             .workspace_id = workspace_id,
@@ -484,6 +558,18 @@ pub const NativeTransportService = struct {
         if (!graph.isTrusted(source_device) or !graph.isTrusted(target_device)) {
             self.revoked_device_rejection_count += 1;
             return error.NativeTransportDeviceRevoked;
+        }
+    }
+
+    fn ensureHardwareBackedNetworkReady(self: *const NativeTransportService) Error!void {
+        if (self.i225_proof_required and !self.intelI225NetworkReady()) {
+            return error.NativeTransportHardwareProofMissing;
+        }
+    }
+
+    fn ensureProductionSessionReady(self: *const NativeTransportService, session: *const TransportSession) Error!void {
+        if (self.production_attested_sessions_required) {
+            try session.requireProductionAttestation();
         }
     }
 };
@@ -692,6 +778,13 @@ fn saturatingSubUsize(value: usize, amount: usize) usize {
     return value - amount;
 }
 
+fn macAddressPresent(mac_address: [6]u8) bool {
+    for (mac_address) |byte| {
+        if (byte != 0) return true;
+    }
+    return false;
+}
+
 fn expectNativeEncodeError(
     expected_error: anyerror,
     session: *const TransportSession,
@@ -785,7 +878,7 @@ test "native sync transport captures encrypted driver packets and handles replay
             return [_]u8{ 0x02, 0, 0, 0, 0, 0x51 };
         }
 
-        fn broker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
+        fn driverEgressBroker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
             return .{
                 .allowed = request.network_policy_id == 91,
                 .capability_backed = request.egress_capability_id == 92,
@@ -802,7 +895,7 @@ test "native sync transport captures encrypted driver packets and handles replay
         .getMacAddress = Driver.mac,
     };
     try std.testing.expect(network_driver_task.activateDevice(&device, 90));
-    network_driver_task.setEgressBroker(Driver.broker);
+    network_driver_task.setEgressBroker(Driver.driverEgressBroker);
     network_driver_task.bindEgressCapability(92, 91);
 
     var policies = network_policy.Directory.init();
@@ -1007,6 +1100,23 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expectEqual(@as(usize, 1), native_transport.replay_rejection_count);
 }
 
+fn verifiedSyncPeerBoot(generation: u64) !measured_boot.BootRecord {
+    var recorder = measured_boot.Recorder.init();
+    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
+    recorder.begin(generation);
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos-sync", "kernel=v1");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .base_image, "stable-sync", "image=v1");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "compositor", "healthy");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "production-sync-policy", "strict");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "production-sync-drivers", "i225");
+    var boot = recorder.finalize();
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    return boot;
+}
+
 test "native sync transport rejects revoked trusted devices and requires real I225 proof" {
     var graph = device_graph.Graph.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 170 };
@@ -1076,12 +1186,20 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         .rx_ring_address = 0x1000,
         .tx_ring_address = 0x2000,
     };
+    var i225_adapter = try intel_i225.SoftwareAdapter.initWithMmio(
+        good_ring_plan,
+        .{ 0x02, 0x15, 0xF2, 0, 0, 8 },
+        intel_i225.defaultPhyLinkState(),
+        intel_i225.defaultPacketBufferPlan(),
+    );
+    const packet_proof = try i225_adapter.proveFrameCycles(hardware_target.first_supported_target.proof_minimums.network_frame_cycles);
     const incomplete_proof = IntelI225TransportProof{
         .evidence = .{
             .target_id = hardware_target.first_supported_target.id,
             .source = .qemu,
         },
         .ring_plan = good_ring_plan,
+        .packet_proof = packet_proof,
     };
     try std.testing.expectError(error.NativeTransportHardwareProofMissing, native_transport.attachIntelI225Proof(incomplete_proof));
 
@@ -1105,9 +1223,211 @@ test "native sync transport rejects revoked trusted devices and requires real I2
             .artifact_digests_captured = true,
         },
         .ring_plan = good_ring_plan,
+        .packet_proof = packet_proof,
     };
     try native_transport.attachIntelI225Proof(complete_proof);
     try std.testing.expect(native_transport.i225_proof_attached);
+    try std.testing.expect(native_transport.intelI225NetworkReady());
+    try std.testing.expectEqual(hardware_target.first_supported_target.proof_minimums.network_frame_cycles, native_transport.i225_proof_cycles);
+    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles), native_transport.i225_tx_tail_register_writes);
+    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles), native_transport.i225_rx_tail_register_writes);
+    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles) * 2, native_transport.i225_interrupt_cause_reads);
+    try std.testing.expectEqual(@as(u32, 2500), native_transport.i225_link_speed_mbps);
+
+    const ProductionDriver = struct {
+        var send_count: usize = 0;
+        var authorized_native_frames: usize = 0;
+        var allowed_capability_id: u64 = 0;
+        var allowed_policy_id: u64 = 0;
+
+        fn send(_: []const u8) void {
+            send_count += 1;
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0x15, 0xF2, 0, 0, 8 };
+        }
+
+        fn driverEgressBroker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
+            const native_sync_frame = std.mem.startsWith(u8, request.frame, &NativeTransportAbi.magic);
+            const no_plaintext = std.mem.indexOf(u8, request.frame, "production after i225 proof") == null;
+            const allowed = request.egress_capability_id == allowed_capability_id and
+                request.network_policy_id == allowed_policy_id and
+                native_sync_frame and
+                no_plaintext;
+            if (allowed) authorized_native_frames += 1;
+            return .{
+                .allowed = allowed,
+                .capability_backed = request.egress_capability_id == allowed_capability_id,
+            };
+        }
+    };
+    network_driver_task.reset();
+    defer network_driver_task.reset();
+    ProductionDriver.send_count = 0;
+    ProductionDriver.authorized_native_frames = 0;
+    ProductionDriver.allowed_capability_id = relay_capability.id;
+    ProductionDriver.allowed_policy_id = relay.id;
+    const production_device = network_driver_task.NetworkDevice{
+        .send = ProductionDriver.send,
+        .getMacAddress = ProductionDriver.mac,
+    };
+    try std.testing.expect(network_driver_task.activateDevice(&production_device, 176));
+    network_driver_task.setEgressBroker(ProductionDriver.driverEgressBroker);
+    network_driver_task.bindEgressCapability(relay_capability.id, relay.id);
+
+    var production_transport = NativeTransportService.init();
+    production_transport.requireIntelI225Proof();
+    try std.testing.expect(!production_transport.intelI225NetworkReady());
+    var production_connection = try production_transport.openRelay(&broker, .{
+        .task_id = 176,
+        .principal_id = app,
+        .capability_id = relay_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.revoked.sync" } },
+        .now_ticks = 30,
+    }, 176, 177, source, target, "relay.revoked.sync");
+    try std.testing.expectError(error.NativeTransportHardwareProofMissing, production_transport.sendSigned(&production_connection, "blocked until i225 proof", frame_signer));
+    try std.testing.expectEqual(@as(usize, 0), production_transport.endpoint_frame_count);
+    try std.testing.expectEqual(@as(usize, 0), production_transport.network_frame_count);
+    try std.testing.expectEqual(@as(usize, 0), production_transport.capture.captured_count);
+    try std.testing.expectEqual(@as(usize, 0), production_connection.in_flight_frames);
+    try std.testing.expectEqual(@as(usize, 0), network_driver_task.activeDriverTransmitCount());
+
+    try production_transport.attachIntelI225Proof(complete_proof);
+    try std.testing.expect(production_transport.intelI225NetworkReady());
+    production_transport.requireProductionAttestedSessions();
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.sendSigned(&production_connection, "blocked lab session after i225 proof", frame_signer));
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.encryptObjectShare(&production_connection, 1, 2, 3, "blocked lab object share"));
+    production_transport.disconnect(&production_connection);
+    var production_relay_service = try BootedOverlayRelayService.init(179, 176, "relay.revoked.sync");
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.sendWithRelayFallback(&production_connection, &production_relay_service, "blocked lab relay fallback", frame_signer));
+    try std.testing.expectEqual(@as(usize, 0), production_relay_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 0), production_transport.endpoint_frame_count);
+    try std.testing.expectEqual(@as(usize, 0), production_transport.network_frame_count);
+    try std.testing.expectEqual(@as(usize, 0), production_transport.capture.captured_count);
+    try std.testing.expectEqual(@as(usize, 0), network_driver_task.activeDriverTransmitCount());
+
+    const peer_attestation_signer = signing.SignerIdentity{
+        .label = "production-sync-peer-root",
+        .seed = signing.seedFromByte(0xD7),
+    };
+    const peer_attestation_identity = try signing.publicIdentity(peer_attestation_signer);
+    const peer_attestation_key = attestation_service.AttestationRootKeyHandle{
+        .key_id = "production-sync-peer-root",
+        .label = "production-sync-peer-root",
+        .public_identity = peer_attestation_identity,
+        .generation = 1,
+        .origin = .tpm,
+        .provider_boundary = .platform_tpm,
+        .custody = .tpm,
+    };
+    const peer_attestation_descriptor = attestation_service.RootProviderDescriptor{
+        .name = "production-sync-tpm-attestation-root",
+        .role = .production,
+        .origin = .tpm,
+        .key_id = "production-sync-peer-root",
+        .key_generation = 1,
+        .provider_boundary = .platform_tpm,
+        .custody = .tpm,
+        .customer_verifiable = true,
+    };
+    const PeerAttestationSigner = struct {
+        signer: signing.SignerIdentity,
+
+        fn sign(context: *anyopaque, handle: attestation_service.AttestationRootKeyHandle, digest: []const u8) !manifest.Signature {
+            const fixture: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, fixture.signer.label, handle.label)) return error.RootIdentityMismatch;
+            return signing.signWithDefaultRegistry(.ed25519, fixture.signer, digest);
+        }
+    };
+    var peer_attestation_fixture = PeerAttestationSigner{ .signer = peer_attestation_signer };
+    var peer_attestation_provider = try attestation_service.ExternalAttestationRootProvider.init(
+        peer_attestation_descriptor,
+        peer_attestation_key,
+        &peer_attestation_fixture,
+        PeerAttestationSigner.sign,
+    );
+    const peer_attestation_metadata_digest = peer_attestation_provider.verifierMetadataDigest();
+    var peer_attestation = attestation_service.Service.init(target);
+    try peer_attestation.provisionRootProvider(peer_attestation_provider.provider());
+    const peer_boot = try verifiedSyncPeerBoot(32);
+    const peer_attestation_request = try attestation_service.RemoteAttestationRequest.init(.{
+        .remote_party = "overlay.production.sync",
+        .nonce = "native-sync-verified-0001",
+        .policy_label = "production-service-identity",
+        .expected_key_origin = .tpm,
+        .root_key_id = "production-sync-peer-root",
+        .minimum_root_generation = 1,
+        .attestation_verifier_metadata_digest_required = true,
+        .attestation_verifier_metadata_digest = peer_attestation_metadata_digest,
+    });
+    const peer_attestation_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, peer_attestation_request);
+    const pinned_peer_root = peer_attestation_response.statement.root_digest;
+    const service_identity_policy = try policies.create(.{
+        .owner = owner,
+        .label = "production-service-identity",
+        .mode = .named_service_identity,
+        .target = "overlay.production.sync",
+        .require_remote_attestation = true,
+        .pinned_root_digest = pinned_peer_root,
+        .pinned_attestation_verifier_metadata_digest = peer_attestation_metadata_digest,
+    });
+    const service_identity_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 180 },
+        .target = .{ .kind = .network_policy, .id = service_identity_policy.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 176, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    ProductionDriver.allowed_capability_id = service_identity_capability.id;
+    ProductionDriver.allowed_policy_id = service_identity_policy.id;
+    network_driver_task.bindEgressCapability(service_identity_capability.id, service_identity_policy.id);
+
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openVerifiedServiceIdentity(&broker, .{
+        .task_id = 176,
+        .principal_id = app,
+        .capability_id = service_identity_capability.id,
+        .policy_id = service_identity_policy.id,
+        .service_identity = "overlay.other.sync",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
+        .now_ticks = 31,
+    }, 176, 177, source, target));
+
+    var production_service_connection = try production_transport.openVerifiedServiceIdentity(&broker, .{
+        .task_id = 176,
+        .principal_id = app,
+        .capability_id = service_identity_capability.id,
+        .policy_id = service_identity_policy.id,
+        .service_identity = "overlay.production.sync",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
+        .now_ticks = 31,
+    }, 176, 177, source, target);
+    try std.testing.expect(production_service_connection.session.productionAttested());
+    try std.testing.expect(production_service_connection.session.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(production_service_connection.session.attestation_verifier_metadata_digest_bound);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &peer_attestation_metadata_digest,
+        &production_service_connection.session.attestation_verifier_metadata_digest,
+    ));
+    const production_delivery = try production_transport.sendSigned(&production_service_connection, "production after i225 proof", frame_signer);
+    try std.testing.expect(production_delivery.endpoint_delivered);
+    try std.testing.expect(production_delivery.network_delivered);
+    try std.testing.expectEqual(@as(usize, 1), production_transport.endpoint_frame_count);
+    try std.testing.expectEqual(@as(usize, 1), production_transport.network_frame_count);
+    try std.testing.expectEqual(@as(usize, 1), production_transport.capture.captured_count);
+    try std.testing.expectEqual(@as(usize, 1), ProductionDriver.authorized_native_frames);
+    try std.testing.expectEqual(@as(usize, 1), ProductionDriver.send_count);
+    try std.testing.expectEqual(@as(usize, 1), network_driver_task.activeDriverTransmitCount());
 }
 
 test "native sync transport falls back through booted relay and encrypts object shares" {

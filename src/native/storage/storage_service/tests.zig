@@ -795,6 +795,108 @@ test "storage service reloads authoritative state from the attached volume after
     }));
 }
 
+test "storage service refreshes checkpoint backend after device republish" {
+    const RepublishedBackend = struct {
+        var first_image: []u8 = &.{};
+        var second_image: []u8 = &.{};
+        var first_revoked: bool = false;
+
+        fn attachFirst(image_buffer: []u8) void {
+            first_image = image_buffer;
+            first_revoked = false;
+            storage_volume.attachBackend(.{
+                .sector_count = storage_volume.required_device_sectors,
+                .read = readFirst,
+                .write = writeFirst,
+            });
+        }
+
+        fn attachSecond(image_buffer: []u8) void {
+            second_image = image_buffer;
+            first_revoked = true;
+            storage_volume.attachBackend(.{
+                .sector_count = storage_volume.required_device_sectors,
+                .read = readSecond,
+                .write = writeSecond,
+            });
+        }
+
+        fn readFirst(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+            if (first_revoked) return false;
+            return readImage(first_image, start_lba, buffer_ptr[0..buffer_len]);
+        }
+
+        fn writeFirst(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+            if (first_revoked) return false;
+            return writeImage(first_image, start_lba, buffer_ptr[0..buffer_len]);
+        }
+
+        fn readSecond(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+            return readImage(second_image, start_lba, buffer_ptr[0..buffer_len]);
+        }
+
+        fn writeSecond(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+            return writeImage(second_image, start_lba, buffer_ptr[0..buffer_len]);
+        }
+
+        fn readImage(image: []const u8, start_lba: u64, buffer: []u8) bool {
+            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+            const end = start + buffer.len;
+            if (end > image.len) return false;
+            @memcpy(buffer, image[start..end]);
+            return true;
+        }
+
+        fn writeImage(image: []u8, start_lba: u64, buffer: []const u8) bool {
+            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+            const end = start + buffer.len;
+            if (end > image.len) return false;
+            @memcpy(image[start..end], buffer);
+            return true;
+        }
+    };
+
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    var first_image = [_]u8{0} ** storage_volume.image_bytes;
+    var second_image = [_]u8{0} ** storage_volume.image_bytes;
+    RepublishedBackend.attachFirst(&first_image);
+    defer storage_volume.clearAttachedBackend();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 49 };
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = signing.seedFromByte(0xA9),
+    };
+
+    var service = Service.initWithStore(705, 23, owner, &checkpoint_store);
+    const first = try service.putVersion(.{
+        .preferred_object_id = ids.object(955),
+        .object_type = .document,
+        .payload = "before republish",
+        .metadata = try object_store.signMetadata(signer, "before", "text/plain", .document, "before republish", 10),
+    });
+    try std.testing.expect(!first.version_id.isZero());
+    try std.testing.expect(checkpoint_store.checkpointHealthy());
+
+    RepublishedBackend.attachSecond(&second_image);
+    const second = try service.putVersion(.{
+        .preferred_object_id = ids.object(956),
+        .object_type = .document,
+        .payload = "after republish",
+        .metadata = try object_store.signMetadata(signer, "after", "text/plain", .document, "after republish", 11),
+    });
+
+    try std.testing.expect(checkpoint_store.checkpointHealthy());
+    checkpoint_store.resetPreparedState();
+    var reloaded = Service.initWithStore(705, 24, owner, &checkpoint_store);
+    try std.testing.expect(reloaded.loaded_from_volume);
+    try std.testing.expectEqual(second.version_id, reloaded.latestVersion(ids.object(956)).?.id);
+    try std.testing.expectEqualStrings("after republish", try reloaded.versionPayload(reloaded.latestVersion(ids.object(956)).?));
+}
+
 test "storage service coalesces checkpoint writes across an explicit batch" {
     var checkpoint_store = CheckpointStore{};
     checkpoint_store.resetPersistent();

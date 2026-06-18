@@ -1,8 +1,31 @@
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const network_driver_task = @import("../drivers/network_driver_task.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const std = @import("std");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const sync_transport = @import("../sync/sync_transport.zig");
 const support = @import("scenario_support.zig");
+
+const booted_native_sync_driver_payload = "booted native sync driver packet";
+const booted_native_sync_driver_reconnect_payload = "booted native sync driver reconnect";
+const booted_native_sync_driver_replay_payload = "booted native sync driver replay";
+const booted_native_sync_driver_fill_payload = "booted native sync driver fill";
+const booted_native_sync_driver_overflow_payload = "booted native sync driver overflow";
+const booted_native_sync_driver_plaintexts = [_][]const u8{
+    booted_native_sync_driver_payload,
+    booted_native_sync_driver_reconnect_payload,
+    booted_native_sync_driver_replay_payload,
+    booted_native_sync_driver_fill_payload,
+    booted_native_sync_driver_overflow_payload,
+};
+
+fn containsBootedNativeSyncPlaintext(frame: []const u8) bool {
+    for (booted_native_sync_driver_plaintexts) |plaintext| {
+        if (std.mem.indexOf(u8, frame, plaintext) != null) return true;
+    }
+    return false;
+}
 
 pub fn run(
     context: *support.Context,
@@ -293,6 +316,21 @@ pub fn run(
         support.common.printBootMarker("ZIGOS:SYNC:SEMANTICS:TRANSACTIONAL");
     }
 
+    if (proveNativeDriverPacketCapture(
+        context,
+        sync_service,
+        relay_network_policy.id,
+        local_device_principal,
+        tablet_device_principal,
+    )) {
+        support.common.printBootMarker(boot_markers.sync_native_driver_packet_captured);
+        support.common.printBootMarker(boot_markers.sync_native_driver_frame_sent);
+        support.common.printBootMarker(boot_markers.sync_native_driver_malformed_packet_rejected);
+        support.common.printBootMarker(boot_markers.sync_native_driver_reconnect_ok);
+        support.common.printBootMarker(boot_markers.sync_native_driver_replay_rejected);
+        support.common.printBootMarker(boot_markers.sync_native_driver_congestion_backpressure);
+    }
+
     if (sync_port.replicateWorkspace(
         sync_authority,
         context.storage_service_instance,
@@ -335,4 +373,157 @@ pub fn run(
         .relay_policy_id = relay_network_policy.id,
         .overlay_policy_id = overlay_network_policy.id,
     };
+}
+
+fn proveNativeDriverPacketCapture(
+    context: *support.Context,
+    sync_service: *sync_service_mod.Service,
+    relay_policy_id: u64,
+    local_device_principal: principal.PrincipalId,
+    tablet_device_principal: principal.PrincipalId,
+) bool {
+    if (!network_driver_task.hasActiveDevice()) return false;
+
+    const DriverEgress = struct {
+        var allowed_capability_id: u64 = 0;
+        var allowed_policy_id: u64 = 0;
+        var authorized_native_frames: usize = 0;
+
+        fn broker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
+            const native_sync_frame = std.mem.startsWith(u8, request.frame, &sync_transport.NativeTransportAbi.magic);
+            const no_plaintext = !containsBootedNativeSyncPlaintext(request.frame);
+            const allowed = request.egress_capability_id == allowed_capability_id and
+                request.network_policy_id == allowed_policy_id and
+                native_sync_frame and
+                no_plaintext;
+            if (allowed) authorized_native_frames += 1;
+            return .{
+                .allowed = allowed,
+                .capability_backed = request.egress_capability_id == allowed_capability_id,
+            };
+        }
+    };
+
+    const packet_capability = context.capability_table.mintBootRoot(.{
+        .holder = context.sync_service_principal,
+        .issuer = context.policy_authority,
+        .target = .{ .kind = .network_policy, .id = relay_policy_id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{
+            .task_id = context.sync_task_id,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 301,
+            .expires_at_ticks = 1_000,
+        },
+        .audit = .{},
+    }) catch return false;
+
+    DriverEgress.allowed_capability_id = packet_capability.id;
+    DriverEgress.allowed_policy_id = relay_policy_id;
+    DriverEgress.authorized_native_frames = 0;
+    network_driver_task.clearTransmitTelemetry();
+    network_driver_task.setEgressBroker(DriverEgress.broker);
+    network_driver_task.bindEgressCapability(packet_capability.id, relay_policy_id);
+    defer {
+        network_driver_task.clearEgressCapability();
+        network_driver_task.setEgressBroker(null);
+    }
+
+    var broker = sync_service.egressBroker(context.capability_table);
+    var native_transport = sync_transport.NativeTransportService.init();
+    var connection = native_transport.openRelay(&broker, .{
+        .task_id = context.sync_task_id,
+        .principal_id = context.sync_service_principal,
+        .capability_id = packet_capability.id,
+        .policy_id = relay_policy_id,
+        .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
+        .now_ticks = 302,
+    }, context.sync_task_id, context.network_service_id, local_device_principal, tablet_device_principal, "relay.zigos.dev") catch return false;
+
+    const driver_tx_before = network_driver_task.activeDriverTransmitCount();
+    const signer = signing.SignerIdentity{
+        .label = "booted-native-sync-driver",
+        .seed = signing.seedFromByte(0xA7),
+    };
+    const delivery = native_transport.sendSigned(&connection, booted_native_sync_driver_payload, signer) catch return false;
+    if (!delivery.network_delivered or delivery.sequence == 0) return false;
+    if (DriverEgress.authorized_native_frames != 1) return false;
+    if (network_driver_task.activeDriverTransmitCount() != driver_tx_before + 1) return false;
+
+    const captured = native_transport.capture.last() orelse return false;
+    const driver_frame = network_driver_task.lastActiveDriverFrame();
+    if (driver_frame.len == 0 or !std.mem.eql(u8, captured.slice(), driver_frame)) return false;
+
+    const view = native_transport.assertLastCapturedFrame(.{
+        .session_id = connection.session.id,
+        .sequence = delivery.sequence,
+        .source_task_id = connection.source_task_id,
+        .target_task_id = connection.target_task_id,
+        .transport = .relay_assisted,
+        .source_device = local_device_principal,
+        .target_device = tablet_device_principal,
+        .policy_id = relay_policy_id,
+        .capability_id = packet_capability.id,
+        .forbidden_plaintext = booted_native_sync_driver_payload,
+    }) catch return false;
+    if (view.abi_version != sync_transport.NativeTransportAbi.version or
+        !view.encrypted() or
+        !view.egressAllowed() or
+        native_transport.capture.captured_count != 1 or
+        native_transport.network_frame_count != 1)
+    {
+        return false;
+    }
+
+    var malformed_packet = captured;
+    malformed_packet.bytes[0] ^= 0x55;
+    var malformed_rejected = false;
+    _ = sync_transport.decodeNativeSyncFrame(malformed_packet.slice()) catch |err| {
+        if (err != error.NativeTransportMalformedFrame) return false;
+        malformed_rejected = true;
+    };
+    if (!malformed_rejected) return false;
+
+    native_transport.disconnect(&connection);
+    var disconnected_rejected = false;
+    _ = native_transport.sendSigned(&connection, booted_native_sync_driver_reconnect_payload, signer) catch |err| {
+        if (err != error.NativeTransportDisconnected) return false;
+        disconnected_rejected = true;
+    };
+    if (!disconnected_rejected) return false;
+    native_transport.reconnect(&connection);
+    const reconnect_delivery = native_transport.sendSigned(&connection, booted_native_sync_driver_reconnect_payload, signer) catch return false;
+    if (!reconnect_delivery.network_delivered or reconnect_delivery.sequence <= delivery.sequence) return false;
+    if (native_transport.disconnected_connections != 1 or native_transport.reconnect_count != 1) return false;
+
+    const next_sequence_after_reconnect = connection.next_sequence;
+    connection.next_sequence = connection.highest_sent_sequence;
+    var replay_rejected = false;
+    _ = native_transport.sendSigned(&connection, booted_native_sync_driver_replay_payload, signer) catch |err| {
+        if (err != error.NativeTransportReplayRejected) return false;
+        replay_rejected = true;
+    };
+    if (!replay_rejected or native_transport.replay_rejection_count != 1) return false;
+    connection.next_sequence = next_sequence_after_reconnect;
+
+    while (connection.in_flight_frames < sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES) {
+        const fill_delivery = native_transport.sendSigned(&connection, booted_native_sync_driver_fill_payload, signer) catch return false;
+        if (!fill_delivery.network_delivered) return false;
+    }
+    const tx_before_congestion = network_driver_task.activeDriverTransmitCount();
+    const drops_before_congestion = native_transport.congestion_drop_count;
+    var congestion_rejected = false;
+    _ = native_transport.sendSigned(&connection, booted_native_sync_driver_overflow_payload, signer) catch |err| {
+        if (err != error.NativeTransportCongested) return false;
+        congestion_rejected = true;
+    };
+    if (!congestion_rejected) return false;
+    if (native_transport.congestion_drop_count != drops_before_congestion + 1) return false;
+    if (network_driver_task.activeDriverTransmitCount() != tx_before_congestion) return false;
+
+    return DriverEgress.authorized_native_frames == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES and
+        native_transport.network_frame_count == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES and
+        native_transport.capture.captured_count == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES;
 }

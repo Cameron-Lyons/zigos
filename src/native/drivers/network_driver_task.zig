@@ -1,9 +1,13 @@
 const std = @import("std");
+const attestation_service = @import("../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const manifest = @import("../policy/manifest.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const network_policy = @import("../sync/network_policy.zig");
+const signing = @import("../core/signing.zig");
 
 pub const NetworkDevice = struct {
     send: *const fn (data: []const u8) void,
@@ -48,9 +52,15 @@ pub const NativeServiceIdentityConnection = struct {
     service_identity_len: usize = 0,
     service_identity: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     peer_root_digest: crypto_hash.Digest,
+    attestation_request_digest: crypto_hash.Digest = crypto_hash.zero_digest,
+    attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     key: crypto_hash.Digest,
     attested: bool,
+    verified_remote_attestation: bool,
     peer_root_digest_present: bool,
+    attestation_request_digest_present: bool,
+    attestation_verifier_metadata_digest_present: bool,
+    attestation_verifier_metadata_digest_bound: bool,
     attestation_required: bool,
     identity_pinned: bool,
     egress_decision: network_policy.EgressDecision,
@@ -71,7 +81,13 @@ pub const NativeServiceIdentityFrame = struct {
     encrypted: bool,
     egress_allowed: bool,
     attested: bool,
+    verified_remote_attestation: bool,
     identity_pinned: bool,
+    attestation_request_digest_present: bool,
+    attestation_request_digest: crypto_hash.Digest,
+    attestation_verifier_metadata_digest_present: bool,
+    attestation_verifier_metadata_digest_bound: bool,
+    attestation_verifier_metadata_digest: crypto_hash.Digest,
 
     pub fn ciphertextSlice(self: *const NativeServiceIdentityFrame) []const u8 {
         return self.ciphertext[0..self.payload_len];
@@ -158,9 +174,15 @@ pub const NativeNetworkStack = struct {
             .target_device = target_device,
             .source_mac = device.getMacAddress(),
             .peer_root_digest = request.evidence.peer_root_digest,
+            .attestation_request_digest = request.evidence.attestation_request_digest,
+            .attestation_verifier_metadata_digest = request.evidence.attestation_verifier_metadata_digest,
             .key = undefined,
             .attested = request.evidence.attested,
+            .verified_remote_attestation = request.evidence.verified_remote_attestation,
             .peer_root_digest_present = request.evidence.peer_root_digest_present,
+            .attestation_request_digest_present = request.evidence.attestation_request_digest_present,
+            .attestation_verifier_metadata_digest_present = request.evidence.attestation_verifier_metadata_digest_present,
+            .attestation_verifier_metadata_digest_bound = request.evidence.attestation_verifier_metadata_digest_bound,
             .attestation_required = decision.policy_decision.attestation_required,
             .identity_pinned = decision.policy_decision.identity_pinned,
             .egress_decision = decision,
@@ -169,6 +191,46 @@ pub const NativeNetworkStack = struct {
         connection.key = nativeConnectionKey(&connection);
         self.opened_connections += 1;
         return connection;
+    }
+
+    pub const VerifiedServiceIdentityOpenRequest = struct {
+        task_id: u64,
+        principal_id: principal.PrincipalId,
+        capability_id: u64,
+        policy_id: u64,
+        service_identity: []const u8,
+        attestation_response: attestation_service.RemoteAttestationResponse,
+        attestation_request: attestation_service.RemoteAttestationRequest,
+        attested_boot: *const measured_boot.BootRecord,
+        trusted_root: signing.PublicIdentity,
+        now_ticks: u64,
+    };
+
+    pub fn openVerifiedServiceIdentity(
+        self: *NativeNetworkStack,
+        broker: *network_policy.EgressBroker,
+        request: VerifiedServiceIdentityOpenRequest,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!NativeServiceIdentityConnection {
+        const evidence = network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
+            .{ .service_identity = request.service_identity },
+            request.attestation_response,
+            request.attestation_request,
+            request.attested_boot,
+            request.trusted_root,
+        ) orelse {
+            self.attempted_connections += 1;
+            return self.denyOpen(.attestation_required);
+        };
+        return self.openServiceIdentity(broker, .{
+            .task_id = request.task_id,
+            .principal_id = request.principal_id,
+            .capability_id = request.capability_id,
+            .policy_id = request.policy_id,
+            .evidence = evidence,
+            .now_ticks = request.now_ticks,
+        }, source_device, target_device);
     }
 
     pub fn openLocalDiscovery(
@@ -228,7 +290,13 @@ pub const NativeNetworkStack = struct {
             .encrypted = true,
             .egress_allowed = true,
             .attested = connection.attested,
+            .verified_remote_attestation = connection.verified_remote_attestation,
             .identity_pinned = connection.identity_pinned,
+            .attestation_request_digest_present = connection.attestation_request_digest_present,
+            .attestation_request_digest = connection.attestation_request_digest,
+            .attestation_verifier_metadata_digest_present = connection.attestation_verifier_metadata_digest_present,
+            .attestation_verifier_metadata_digest_bound = connection.attestation_verifier_metadata_digest_bound,
+            .attestation_verifier_metadata_digest = connection.attestation_verifier_metadata_digest,
         };
         for (payload, 0..) |byte, index| {
             frame.ciphertext[index] = byte ^ connection.key[index % connection.key.len];
@@ -256,8 +324,14 @@ pub const NativeNetworkStack = struct {
             .evidence = .{
                 .destination = .{ .service_identity = connection.serviceIdentitySlice() },
                 .attested = connection.attested,
+                .verified_remote_attestation = connection.verified_remote_attestation,
+                .attestation_request_digest_present = connection.attestation_request_digest_present,
+                .attestation_request_digest = connection.attestation_request_digest,
                 .peer_root_digest_present = connection.peer_root_digest_present,
                 .peer_root_digest = connection.peer_root_digest,
+                .attestation_verifier_metadata_digest_present = connection.attestation_verifier_metadata_digest_present,
+                .attestation_verifier_metadata_digest_bound = connection.attestation_verifier_metadata_digest_bound,
+                .attestation_verifier_metadata_digest = connection.attestation_verifier_metadata_digest,
             },
             .now_ticks = now_ticks,
         }) catch return self.denySend(.policy_denied);
@@ -341,6 +415,9 @@ var active_service_id: u64 = 0;
 var egress_broker: ?EgressBroker = null;
 var active_egress_capability_id: u64 = 0;
 var active_network_policy_id: u64 = 0;
+var active_driver_tx_count: usize = 0;
+var last_active_driver_frame_len: usize = 0;
+var last_active_driver_frame: [MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_NATIVE_FRAME_BYTES;
 
 pub fn reset() void {
     active_device = null;
@@ -348,6 +425,7 @@ pub fn reset() void {
     egress_broker = null;
     active_egress_capability_id = 0;
     active_network_policy_id = 0;
+    clearTransmitTelemetry();
 }
 
 pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
@@ -383,6 +461,20 @@ pub fn clearEgressCapability() void {
     active_network_policy_id = 0;
 }
 
+pub fn clearTransmitTelemetry() void {
+    active_driver_tx_count = 0;
+    last_active_driver_frame_len = 0;
+    @memset(last_active_driver_frame[0..], 0);
+}
+
+pub fn activeDriverTransmitCount() usize {
+    return active_driver_tx_count;
+}
+
+pub fn lastActiveDriverFrame() []const u8 {
+    return last_active_driver_frame[0..last_active_driver_frame_len];
+}
+
 pub fn authorizeDriverTx(frame: []const u8) bool {
     const device = active_device orelse return false;
     const broker = egress_broker orelse return false;
@@ -396,9 +488,13 @@ pub fn authorizeDriverTx(frame: []const u8) bool {
 }
 
 pub fn sendActiveFrame(frame: []const u8) bool {
+    if (frame.len > last_active_driver_frame.len) return false;
     if (!authorizeDriverTx(frame)) return false;
     const device = active_device orelse return false;
     device.send(frame);
+    active_driver_tx_count += 1;
+    last_active_driver_frame_len = frame.len;
+    @memcpy(last_active_driver_frame[0..frame.len], frame);
     return true;
 }
 
@@ -412,6 +508,16 @@ fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypt
     crypto_hash.updateBytes(&hasher, "source-mac", &connection.source_mac);
     crypto_hash.updateBytes(&hasher, "service-identity", connection.serviceIdentitySlice());
     crypto_hash.updateBytes(&hasher, "peer-root", &connection.peer_root_digest);
+    crypto_hash.updateBool(&hasher, "verified-attestation", connection.verified_remote_attestation);
+    crypto_hash.updateBool(&hasher, "attestation-request-digest-present", connection.attestation_request_digest_present);
+    if (connection.attestation_request_digest_present) {
+        crypto_hash.updateBytes(&hasher, "attestation-request-digest", &connection.attestation_request_digest);
+    }
+    crypto_hash.updateBool(&hasher, "attestation-verifier-metadata-digest-present", connection.attestation_verifier_metadata_digest_present);
+    if (connection.attestation_verifier_metadata_digest_present) {
+        crypto_hash.updateBool(&hasher, "attestation-verifier-metadata-digest-bound", connection.attestation_verifier_metadata_digest_bound);
+        crypto_hash.updateBytes(&hasher, "attestation-verifier-metadata-digest", &connection.attestation_verifier_metadata_digest);
+    }
     return crypto_hash.finalize(&hasher);
 }
 
@@ -494,6 +600,23 @@ fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principa
     crypto_hash.updateBytes(hasher, tag, &bytes);
 }
 
+fn verifiedDriverPeerBoot(generation: u64) !measured_boot.BootRecord {
+    var recorder = measured_boot.Recorder.init();
+    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
+    recorder.begin(generation);
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos-network-driver", "kernel=v1");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .base_image, "stable-network-driver", "image=v1");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "compositor", "healthy");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "native-network-policy", "strict");
+    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "native-network-driver-set", "i225");
+    var boot = recorder.finalize();
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    return boot;
+}
+
 test "network driver data plane is brokered by explicit egress capability" {
     const Harness = struct {
         var send_count: usize = 0;
@@ -528,6 +651,11 @@ test "network driver data plane is brokered by explicit egress capability" {
     bindEgressCapability(99, 41);
     try std.testing.expect(sendActiveFrame("frame"));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
+    try std.testing.expectEqual(@as(usize, 1), activeDriverTransmitCount());
+    try std.testing.expectEqualStrings("frame", lastActiveDriverFrame());
+    clearTransmitTelemetry();
+    try std.testing.expectEqual(@as(usize, 0), activeDriverTransmitCount());
+    try std.testing.expectEqual(@as(usize, 0), lastActiveDriverFrame().len);
 }
 
 test "native network stack gates service identity packets on attested policy capability" {
@@ -561,8 +689,65 @@ test "native network stack gates service identity packets on attested policy cap
     const service_owner = principal.PrincipalId{ .kind = .service, .serial = 70 };
     const source = principal.PrincipalId{ .kind = .device, .serial = 700 };
     const target = principal.PrincipalId{ .kind = .device, .serial = 701 };
-    const pinned_digest = crypto_hash.digestFromByte(0xA1);
-    const wrong_digest = crypto_hash.digestFromByte(0xA2);
+    const peer_attestation_signer = signing.SignerIdentity{
+        .label = "native-network-peer-root",
+        .seed = signing.seedFromByte(0xA1),
+    };
+    const peer_attestation_identity = try signing.publicIdentity(peer_attestation_signer);
+    const peer_attestation_key = attestation_service.AttestationRootKeyHandle{
+        .key_id = "native-network-peer-root",
+        .label = "native-network-peer-root",
+        .public_identity = peer_attestation_identity,
+        .generation = 1,
+        .origin = .tpm,
+        .provider_boundary = .platform_tpm,
+        .custody = .tpm,
+    };
+    const peer_attestation_descriptor = attestation_service.RootProviderDescriptor{
+        .name = "native-network-tpm-attestation-root",
+        .role = .production,
+        .origin = .tpm,
+        .key_id = "native-network-peer-root",
+        .key_generation = 1,
+        .provider_boundary = .platform_tpm,
+        .custody = .tpm,
+        .customer_verifiable = true,
+    };
+    const PeerAttestationSigner = struct {
+        signer: signing.SignerIdentity,
+
+        fn sign(context: *anyopaque, handle: attestation_service.AttestationRootKeyHandle, digest: []const u8) !manifest.Signature {
+            const fixture: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, fixture.signer.label, handle.label)) return error.RootIdentityMismatch;
+            return signing.signWithDefaultRegistry(.ed25519, fixture.signer, digest);
+        }
+    };
+    var peer_attestation_fixture = PeerAttestationSigner{ .signer = peer_attestation_signer };
+    var peer_attestation_provider = try attestation_service.ExternalAttestationRootProvider.init(
+        peer_attestation_descriptor,
+        peer_attestation_key,
+        &peer_attestation_fixture,
+        PeerAttestationSigner.sign,
+    );
+    const peer_attestation_metadata_digest = peer_attestation_provider.verifierMetadataDigest();
+    var peer_attestation = attestation_service.Service.init(target);
+    try peer_attestation.provisionRootProvider(peer_attestation_provider.provider());
+    const peer_boot = try verifiedDriverPeerBoot(70);
+    const peer_attestation_request = try attestation_service.RemoteAttestationRequest.init(.{
+        .remote_party = "overlay.native.identity",
+        .nonce = "native-network-verified-0001",
+        .policy_label = "native-service-identity",
+        .expected_key_origin = .tpm,
+        .root_key_id = "native-network-peer-root",
+        .minimum_root_generation = 1,
+        .attestation_verifier_metadata_digest_required = true,
+        .attestation_verifier_metadata_digest = peer_attestation_metadata_digest,
+    });
+    const peer_attestation_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, peer_attestation_request);
+    const pinned_digest = peer_attestation_response.statement.root_digest;
+    const request_digest = peer_attestation_response.request_digest;
+    var wrong_digest = pinned_digest;
+    wrong_digest[0] ^= 0xFF;
 
     const policy = try policies.create(.{
         .owner = service_owner,
@@ -571,6 +756,7 @@ test "native network stack gates service identity packets on attested policy cap
         .target = "overlay.native.identity",
         .require_remote_attestation = true,
         .pinned_root_digest = pinned_digest,
+        .pinned_attestation_verifier_metadata_digest = peer_attestation_metadata_digest,
     });
     const policy_capability = try capabilities.mintBootRoot(.{
         .holder = service_owner,
@@ -603,8 +789,14 @@ test "native network stack gates service identity packets on attested policy cap
         .evidence = .{
             .destination = .{ .service_identity = "overlay.native.identity" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = pinned_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = peer_attestation_metadata_digest,
         },
         .now_ticks = 10,
     }, source, target));
@@ -618,42 +810,83 @@ test "native network stack gates service identity packets on attested policy cap
         .evidence = .{
             .destination = .{ .service_identity = "overlay.native.identity" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = wrong_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = peer_attestation_metadata_digest,
         },
         .now_ticks = 10,
     }, source, target));
     try std.testing.expectEqual(network_policy.EgressDecisionReason.identity_pin_mismatch, stack.last_denial_reason);
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
-    const connection = try stack.openServiceIdentity(&broker, .{
+    try std.testing.expectError(error.EgressDenied, stack.openVerifiedServiceIdentity(&broker, .{
         .task_id = 70,
         .principal_id = service_owner,
         .capability_id = policy_capability.id,
         .policy_id = policy.id,
-        .evidence = .{
-            .destination = .{ .service_identity = "overlay.native.identity" },
-            .attested = true,
-            .peer_root_digest_present = true,
-            .peer_root_digest = pinned_digest,
-        },
+        .service_identity = "overlay.other.identity",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
+        .now_ticks = 10,
+    }, source, target));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.attestation_required, stack.last_denial_reason);
+
+    const connection = try stack.openVerifiedServiceIdentity(&broker, .{
+        .task_id = 70,
+        .principal_id = service_owner,
+        .capability_id = policy_capability.id,
+        .policy_id = policy.id,
+        .service_identity = "overlay.native.identity",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
         .now_ticks = 10,
     }, source, target);
     try std.testing.expect(connection.attestation_required);
     try std.testing.expect(connection.identity_pinned);
+    try std.testing.expect(connection.verified_remote_attestation);
+    try std.testing.expect(connection.attestation_request_digest_present);
+    try std.testing.expect(std.mem.eql(u8, &request_digest, &connection.attestation_request_digest));
+    try std.testing.expect(connection.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(connection.attestation_verifier_metadata_digest_bound);
+    try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &connection.attestation_verifier_metadata_digest));
 
     const frame = try stack.sendServiceIdentityFrame(&connection, "native payload");
     try std.testing.expect(frame.encrypted);
     try std.testing.expect(frame.egress_allowed);
     try std.testing.expect(frame.attested);
+    try std.testing.expect(frame.verified_remote_attestation);
+    try std.testing.expect(frame.attestation_request_digest_present);
+    try std.testing.expect(std.mem.eql(u8, &request_digest, &frame.attestation_request_digest));
+    try std.testing.expect(frame.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(frame.attestation_verifier_metadata_digest_bound);
+    try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &frame.attestation_verifier_metadata_digest));
     try std.testing.expect(frame.identity_pinned);
     try std.testing.expect(!std.mem.eql(u8, frame.ciphertextSlice(), "native payload"));
-    try std.testing.expectEqual(@as(usize, 4), stack.attempted_connections);
-    try std.testing.expectEqual(@as(usize, 3), stack.denied_before_transmit);
+    try std.testing.expectEqual(@as(usize, 5), stack.attempted_connections);
+    try std.testing.expectEqual(@as(usize, 4), stack.denied_before_transmit);
     try std.testing.expectEqual(@as(usize, 1), stack.opened_connections);
     try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
     try std.testing.expect(Harness.last_frame_len > "native payload".len);
+
+    const brokered_frame = try stack.sendServiceIdentityFrameBrokered(&broker, &connection, "native brokered payload", 11);
+    try std.testing.expect(brokered_frame.verified_remote_attestation);
+    try std.testing.expect(brokered_frame.attestation_request_digest_present);
+    try std.testing.expect(std.mem.eql(u8, &request_digest, &brokered_frame.attestation_request_digest));
+    try std.testing.expect(brokered_frame.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(brokered_frame.attestation_verifier_metadata_digest_bound);
+    try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &brokered_frame.attestation_verifier_metadata_digest));
+    try std.testing.expectEqual(@as(usize, 2), stack.transmitted_packets);
+    try std.testing.expectEqual(@as(usize, 2), Harness.send_count);
 }
 
 test "native network stack requires scoped local discovery before discovery broadcast" {

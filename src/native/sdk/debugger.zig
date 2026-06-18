@@ -1,4 +1,5 @@
 const std = @import("std");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const debug_contract = @import("../security/debug_contract.zig");
 const typed_component_abi = @import("../services/typed_component_abi.zig");
 const native_util = @import("../core/util.zig");
@@ -36,6 +37,10 @@ pub const Event = struct {
     label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     detail_len: usize = 0,
     detail: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    source_identity_fingerprint: u64 = 0,
+    release_transparency_sequence: u64 = 0,
+    release_transparency_root_fingerprint: u64 = 0,
+    release_transparency_log_head_fingerprint: u64 = 0,
 
     pub fn labelSlice(self: *const Event) []const u8 {
         return self.label[0..self.label_len];
@@ -43,6 +48,19 @@ pub const Event = struct {
 
     pub fn detailSlice(self: *const Event) []const u8 {
         return self.detail[0..self.detail_len];
+    }
+
+    pub fn hasStructuredProvenance(self: *const Event) bool {
+        return self.source_identity_fingerprint != 0 or
+            self.release_transparency_sequence != 0 or
+            self.release_transparency_root_fingerprint != 0 or
+            self.release_transparency_log_head_fingerprint != 0;
+    }
+
+    pub fn hasReleaseTransparency(self: *const Event) bool {
+        return self.release_transparency_sequence != 0 and
+            self.release_transparency_root_fingerprint != 0 and
+            self.release_transparency_log_head_fingerprint != 0;
     }
 };
 
@@ -140,6 +158,11 @@ pub const Session = struct {
             detail,
             provenance_record.decision == .allowed,
         );
+        const event = &self.events[self.event_count - 1];
+        event.source_identity_fingerprint = provenance_record.source_identity_fingerprint;
+        event.release_transparency_sequence = provenance_record.release_transparency_sequence;
+        event.release_transparency_root_fingerprint = provenance_record.release_transparency_root_fingerprint;
+        event.release_transparency_log_head_fingerprint = provenance_record.release_transparency_log_head_fingerprint;
     }
 
     pub fn recordDenial(self: *Session, tick: u64, explanation: debug_contract.DenialExplanation) Error!void {
@@ -162,7 +185,7 @@ pub const Session = struct {
             try appendFmt(
                 output,
                 &cursor,
-                "tick={d} kind={s} accepted={s} label={s} detail={s}\n",
+                "tick={d} kind={s} accepted={s} label={s} detail={s}",
                 .{
                     event.tick,
                     @tagName(event.kind),
@@ -171,6 +194,20 @@ pub const Session = struct {
                     event.detailSlice(),
                 },
             );
+            if (event.hasStructuredProvenance()) {
+                try appendFmt(
+                    output,
+                    &cursor,
+                    " source_fingerprint=0x{x} transparency_seq={d} root_fingerprint=0x{x} log_head_fingerprint=0x{x}",
+                    .{
+                        event.source_identity_fingerprint,
+                        event.release_transparency_sequence,
+                        event.release_transparency_root_fingerprint,
+                        event.release_transparency_log_head_fingerprint,
+                    },
+                );
+            }
+            try appendFmt(output, &cursor, "\n", .{});
         }
         return output[0..cursor];
     }
@@ -244,4 +281,41 @@ test "debugger records ABI checks and exports a redaction-safe trace" {
     try std.testing.expect(std.mem.indexOf(u8, text, "fingerprint=0x") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "kind=service_call_provenance") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "kind=crash_report") != null);
+}
+
+test "debugger preserves structured launch provenance in exported events" {
+    var session = Session.init();
+    const transparency_root = crypto_hash.digestFromByte(0x91);
+    const transparency_log_head = crypto_hash.digestFromByte(0x92);
+    const expected_root_fingerprint = native_util.fnv1a64(&transparency_root);
+    const expected_log_head_fingerprint = native_util.fnv1a64(&transparency_log_head);
+
+    try session.recordProvenance(17, debug_contract.launchProvenance(
+        9,
+        17,
+        44,
+        true,
+        "launch-notes",
+        "com.zigos.notes",
+        "store:zigos/public",
+        7,
+        transparency_root,
+        transparency_log_head,
+    ));
+
+    const latest = session.latest().?;
+    try std.testing.expectEqual(EventKind.launch_provenance, latest.kind);
+    try std.testing.expectEqual(native_util.fnv1a64("store:zigos/public"), latest.source_identity_fingerprint);
+    try std.testing.expect(latest.hasReleaseTransparency());
+    try std.testing.expectEqual(@as(u64, 7), latest.release_transparency_sequence);
+    try std.testing.expectEqual(expected_root_fingerprint, latest.release_transparency_root_fingerprint);
+    try std.testing.expectEqual(expected_log_head_fingerprint, latest.release_transparency_log_head_fingerprint);
+
+    var output: [EXPORT_TEXT_TEST_BUFFER_BYTES]u8 = undefined;
+    const text = try session.exportText(&output);
+    try std.testing.expect(std.mem.indexOf(u8, text, "kind=launch_provenance") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "source_fingerprint=0x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "transparency_seq=7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "root_fingerprint=0x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "log_head_fingerprint=0x") != null);
 }

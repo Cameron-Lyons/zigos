@@ -1,10 +1,13 @@
 const std = @import("std");
+const attestation_service = @import("../platform/attestation_service.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
+const signing = @import("../core/signing.zig");
 
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -48,6 +51,7 @@ pub const CreateRequest = struct {
     explicit_internet_grant: bool = false,
     require_remote_attestation: bool = false,
     pinned_root_digest: ?crypto_hash.Digest = null,
+    pinned_attestation_verifier_metadata_digest: ?crypto_hash.Digest = null,
 };
 
 pub const PolicyRecord = struct {
@@ -63,6 +67,8 @@ pub const PolicyRecord = struct {
     require_remote_attestation: bool,
     pinned_root_digest_present: bool,
     pinned_root_digest: crypto_hash.Digest,
+    pinned_attestation_verifier_metadata_digest_present: bool,
+    pinned_attestation_verifier_metadata_digest: crypto_hash.Digest,
 
     pub fn labelSlice(self: *const PolicyRecord) []const u8 {
         return self.label[0..self.label_len];
@@ -84,9 +90,64 @@ pub const Decision = struct {
 pub const ConnectionEvidence = struct {
     destination: Destination,
     attested: bool = false,
+    verified_remote_attestation: bool = false,
+    attestation_request_digest_present: bool = false,
+    attestation_request_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     peer_root_digest_present: bool = false,
     peer_root_digest: crypto_hash.Digest = crypto_hash.zero_digest,
+    attestation_verifier_metadata_digest_present: bool = false,
+    attestation_verifier_metadata_digest_bound: bool = false,
+    attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
+
+    pub fn fromVerifiedRemoteAttestation(
+        destination: Destination,
+        response: attestation_service.RemoteAttestationResponse,
+        request: attestation_service.RemoteAttestationRequest,
+        boot: *const measured_boot.BootRecord,
+        trusted_root: signing.PublicIdentity,
+    ) ?ConnectionEvidence {
+        if (!attestation_service.Service.verifyRemoteAttestationResponse(response, request, boot, trusted_root)) return null;
+        if (!destinationMatchesRemoteParty(destination, request.remotePartySlice())) return null;
+        return .{
+            .destination = destination,
+            .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = response.request_digest,
+            .peer_root_digest_present = true,
+            .peer_root_digest = response.statement.root_digest,
+            .attestation_verifier_metadata_digest_present = response.attestation_verifier_metadata_digest_present,
+            .attestation_verifier_metadata_digest_bound = request.attestation_verifier_metadata_digest_required,
+            .attestation_verifier_metadata_digest = response.attestation_verifier_metadata_digest,
+        };
+    }
+
+    pub fn hasVerifiedRemoteAttestation(self: *const ConnectionEvidence) bool {
+        return self.attested and
+            self.verified_remote_attestation and
+            self.attestation_request_digest_present and
+            !std.mem.allEqual(u8, &self.attestation_request_digest, 0) and
+            self.peer_root_digest_present and
+            !std.mem.allEqual(u8, &self.peer_root_digest, 0);
+    }
+
+    pub fn hasAttestationVerifierMetadataDigest(self: *const ConnectionEvidence) bool {
+        return self.attestation_verifier_metadata_digest_present and
+            self.attestation_verifier_metadata_digest_bound and
+            !std.mem.allEqual(u8, &self.attestation_verifier_metadata_digest, 0);
+    }
 };
+
+fn destinationMatchesRemoteParty(destination: Destination, remote_party: []const u8) bool {
+    if (remote_party.len == 0) return false;
+    return switch (destination) {
+        .service_identity => |identity| std.mem.eql(u8, identity, remote_party),
+        .domain => |domain| std.mem.eql(u8, domain, remote_party),
+        .discovery_class => |discovery_class| std.mem.eql(u8, discovery_class, remote_party),
+        .inbound_session_type => |session_type| std.mem.eql(u8, session_type, remote_party),
+        .local_network, .public_internet => false,
+    };
+}
 
 pub const EgressDecisionReason = enum(u8) {
     none,
@@ -130,6 +191,7 @@ pub const Error = error{
     UnexpectedTarget,
     PolicyNotFound,
     PolicyTableFull,
+    EmptyAttestationPin,
 };
 
 const PolicySlot = struct {
@@ -175,6 +237,10 @@ pub const Directory = struct {
         if (request.pinned_root_digest) |digest| {
             slot.policy.pinned_root_digest_present = true;
             slot.policy.pinned_root_digest = digest;
+        }
+        if (request.pinned_attestation_verifier_metadata_digest) |digest| {
+            slot.policy.pinned_attestation_verifier_metadata_digest_present = true;
+            slot.policy.pinned_attestation_verifier_metadata_digest = digest;
         }
         self.indexPolicy(slot_index);
         return &slot.policy;
@@ -293,7 +359,7 @@ pub const Directory = struct {
         var decision = try self.authorize(policy_id, evidence.destination);
         if (!decision.allowed) return decision;
 
-        if (policy.require_remote_attestation and !evidence.attested) {
+        if (policy.require_remote_attestation and !evidence.hasVerifiedRemoteAttestation()) {
             return .{
                 .allowed = false,
                 .reason = .attestation_required,
@@ -303,7 +369,7 @@ pub const Directory = struct {
         }
 
         if (policy.pinned_root_digest_present) {
-            if (!evidence.attested) {
+            if (!evidence.hasVerifiedRemoteAttestation()) {
                 return .{
                     .allowed = false,
                     .reason = .attestation_required,
@@ -325,7 +391,32 @@ pub const Directory = struct {
             decision.identity_pinned = true;
         }
 
-        decision.attestation_required = policy.require_remote_attestation or policy.pinned_root_digest_present;
+        if (policy.pinned_attestation_verifier_metadata_digest_present) {
+            if (!evidence.hasVerifiedRemoteAttestation()) {
+                return .{
+                    .allowed = false,
+                    .reason = .attestation_required,
+                    .matched_mode = decision.matched_mode,
+                    .attestation_required = true,
+                };
+            }
+            if (!evidence.hasAttestationVerifierMetadataDigest() or
+                !std.mem.eql(u8, &evidence.attestation_verifier_metadata_digest, &policy.pinned_attestation_verifier_metadata_digest))
+            {
+                return .{
+                    .allowed = false,
+                    .reason = .identity_pin_mismatch,
+                    .matched_mode = decision.matched_mode,
+                    .attestation_required = true,
+                    .identity_pinned = true,
+                };
+            }
+            decision.identity_pinned = true;
+        }
+
+        decision.attestation_required = policy.require_remote_attestation or
+            policy.pinned_root_digest_present or
+            policy.pinned_attestation_verifier_metadata_digest_present;
         return decision;
     }
 
@@ -442,6 +533,8 @@ fn zeroPolicy() PolicyRecord {
         .require_remote_attestation = false,
         .pinned_root_digest_present = false,
         .pinned_root_digest = crypto_hash.zero_digest,
+        .pinned_attestation_verifier_metadata_digest_present = false,
+        .pinned_attestation_verifier_metadata_digest = crypto_hash.zero_digest,
     };
 }
 
@@ -456,6 +549,8 @@ fn policyRequestKey(request: CreateRequest) u64 {
     updateBoolHash(&hasher, request.require_remote_attestation);
     updateBoolHash(&hasher, request.pinned_root_digest != null);
     if (request.pinned_root_digest) |digest| hasher.update(&digest);
+    updateBoolHash(&hasher, request.pinned_attestation_verifier_metadata_digest != null);
+    if (request.pinned_attestation_verifier_metadata_digest) |digest| hasher.update(&digest);
     return indexed_arena.nonZeroKey(hasher.final());
 }
 
@@ -470,6 +565,8 @@ fn policyRecordRequestKey(policy: *const PolicyRecord) u64 {
     updateBoolHash(&hasher, policy.require_remote_attestation);
     updateBoolHash(&hasher, policy.pinned_root_digest_present);
     if (policy.pinned_root_digest_present) hasher.update(&policy.pinned_root_digest);
+    updateBoolHash(&hasher, policy.pinned_attestation_verifier_metadata_digest_present);
+    if (policy.pinned_attestation_verifier_metadata_digest_present) hasher.update(&policy.pinned_attestation_verifier_metadata_digest);
     return indexed_arena.nonZeroKey(hasher.final());
 }
 
@@ -483,9 +580,15 @@ fn policyMatchesRequest(policy: *const PolicyRecord, request: CreateRequest) boo
     if (policy.require_remote_attestation != request.require_remote_attestation) return false;
 
     if (request.pinned_root_digest) |digest| {
-        return policy.pinned_root_digest_present and std.mem.eql(u8, &policy.pinned_root_digest, &digest);
+        if (!policy.pinned_root_digest_present or !std.mem.eql(u8, &policy.pinned_root_digest, &digest)) return false;
+    } else if (policy.pinned_root_digest_present) {
+        return false;
     }
-    return !policy.pinned_root_digest_present;
+    if (request.pinned_attestation_verifier_metadata_digest) |digest| {
+        return policy.pinned_attestation_verifier_metadata_digest_present and
+            std.mem.eql(u8, &policy.pinned_attestation_verifier_metadata_digest, &digest);
+    }
+    return !policy.pinned_attestation_verifier_metadata_digest_present;
 }
 
 fn updatePrincipalHash(hasher: *std.hash.Wyhash, id: principal.PrincipalId) void {
@@ -576,6 +679,12 @@ fn validateCreateRequest(request: CreateRequest) Error!void {
 
     if (request.mode == .named_domain and !validDomainTarget(request.target)) {
         return error.DomainTargetInvalid;
+    }
+    if (request.pinned_root_digest) |digest| {
+        if (std.mem.allEqual(u8, &digest, 0)) return error.EmptyAttestationPin;
+    }
+    if (request.pinned_attestation_verifier_metadata_digest) |digest| {
+        if (std.mem.allEqual(u8, &digest, 0)) return error.EmptyAttestationPin;
     }
 }
 
@@ -702,12 +811,28 @@ test "network policy creation rejects misleading and malformed targets" {
         .mode = .named_domain,
         .target = "HTTPS://Relay.Zigos.Dev/path",
     }));
+    try std.testing.expectError(error.EmptyAttestationPin, directory.create(.{
+        .owner = owner,
+        .label = "empty-root-pin",
+        .mode = .named_service_identity,
+        .target = "overlay.notes.sync",
+        .pinned_root_digest = crypto_hash.zero_digest,
+    }));
+    try std.testing.expectError(error.EmptyAttestationPin, directory.create(.{
+        .owner = owner,
+        .label = "empty-metadata-pin",
+        .mode = .named_service_identity,
+        .target = "overlay.notes.sync",
+        .pinned_attestation_verifier_metadata_digest = crypto_hash.zero_digest,
+    }));
 }
 
 test "network policy connections can require remote attestation and pinned service identities" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 10 };
     const pinned_digest = crypto_hash.digestFromByte(0xAB);
+    const request_digest = crypto_hash.digestFromByte(0xAC);
+    const metadata_digest = crypto_hash.digestFromByte(0xAD);
     const policy = try directory.create(.{
         .owner = owner,
         .label = "notes-overlay",
@@ -715,23 +840,52 @@ test "network policy connections can require remote attestation and pinned servi
         .target = "overlay.notes.sync",
         .require_remote_attestation = true,
         .pinned_root_digest = pinned_digest,
+        .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
 
     try std.testing.expectEqual(DecisionReason.attestation_required, (try directory.authorizeConnection(policy.id, .{
         .destination = .{ .service_identity = "overlay.notes.sync" },
     })).reason);
-    try std.testing.expectEqual(DecisionReason.identity_pin_mismatch, (try directory.authorizeConnection(policy.id, .{
+    try std.testing.expectEqual(DecisionReason.attestation_required, (try directory.authorizeConnection(policy.id, .{
         .destination = .{ .service_identity = "overlay.notes.sync" },
         .attested = true,
         .peer_root_digest_present = true,
+        .peer_root_digest = pinned_digest,
+    })).reason);
+    try std.testing.expectEqual(DecisionReason.identity_pin_mismatch, (try directory.authorizeConnection(policy.id, .{
+        .destination = .{ .service_identity = "overlay.notes.sync" },
+        .attested = true,
+        .verified_remote_attestation = true,
+        .attestation_request_digest_present = true,
+        .attestation_request_digest = request_digest,
+        .peer_root_digest_present = true,
         .peer_root_digest = crypto_hash.digestFromByte(0xCD),
+        .attestation_verifier_metadata_digest_present = true,
+        .attestation_verifier_metadata_digest_bound = true,
+        .attestation_verifier_metadata_digest = metadata_digest,
+    })).reason);
+
+    try std.testing.expectEqual(DecisionReason.identity_pin_mismatch, (try directory.authorizeConnection(policy.id, .{
+        .destination = .{ .service_identity = "overlay.notes.sync" },
+        .attested = true,
+        .verified_remote_attestation = true,
+        .attestation_request_digest_present = true,
+        .attestation_request_digest = request_digest,
+        .peer_root_digest_present = true,
+        .peer_root_digest = pinned_digest,
     })).reason);
 
     const decision = try directory.authorizeConnection(policy.id, .{
         .destination = .{ .service_identity = "overlay.notes.sync" },
         .attested = true,
+        .verified_remote_attestation = true,
+        .attestation_request_digest_present = true,
+        .attestation_request_digest = request_digest,
         .peer_root_digest_present = true,
         .peer_root_digest = pinned_digest,
+        .attestation_verifier_metadata_digest_present = true,
+        .attestation_verifier_metadata_digest_bound = true,
+        .attestation_verifier_metadata_digest = metadata_digest,
     });
     try std.testing.expect(decision.allowed);
     try std.testing.expect(decision.attestation_required);
@@ -742,6 +896,7 @@ test "network policy creation is idempotent for identical requests" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 11 };
     const pinned_digest = crypto_hash.digestFromByte(0xBC);
+    const metadata_digest = crypto_hash.digestFromByte(0xBD);
 
     const first = try directory.create(.{
         .owner = owner,
@@ -751,6 +906,7 @@ test "network policy creation is idempotent for identical requests" {
         .target = "overlay.notes.sync",
         .require_remote_attestation = true,
         .pinned_root_digest = pinned_digest,
+        .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
     const second = try directory.create(.{
         .owner = owner,
@@ -760,6 +916,7 @@ test "network policy creation is idempotent for identical requests" {
         .target = "overlay.notes.sync",
         .require_remote_attestation = true,
         .pinned_root_digest = pinned_digest,
+        .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
 
     try std.testing.expectEqual(first.id, second.id);
@@ -781,6 +938,7 @@ test "network policy indexes rebuild after persisted slots are loaded" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 12 };
     const pinned_digest = crypto_hash.digestFromByte(0xDE);
+    const metadata_digest = crypto_hash.digestFromByte(0xDF);
 
     directory.policies[3] = .{
         .in_use = true,
@@ -797,6 +955,8 @@ test "network policy indexes rebuild after persisted slots are loaded" {
             .require_remote_attestation = true,
             .pinned_root_digest_present = true,
             .pinned_root_digest = pinned_digest,
+            .pinned_attestation_verifier_metadata_digest_present = true,
+            .pinned_attestation_verifier_metadata_digest = metadata_digest,
         },
     };
     directory.next_policy_id = 45;
@@ -814,6 +974,7 @@ test "network policy indexes rebuild after persisted slots are loaded" {
         .target = "overlay.notes.sync",
         .require_remote_attestation = true,
         .pinned_root_digest = pinned_digest,
+        .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
     try std.testing.expectEqual(@as(u64, 44), duplicate.id);
 }
@@ -980,6 +1141,8 @@ test "egress broker binds connection creation to attested pinned service identit
     const app = principal.PrincipalId{ .kind = .app, .serial = 13 };
     const pinned_digest = crypto_hash.digestFromByte(0xD1);
     const wrong_digest = crypto_hash.digestFromByte(0xD2);
+    const request_digest = crypto_hash.digestFromByte(0xD3);
+    const metadata_digest = crypto_hash.digestFromByte(0xD4);
 
     const overlay = try directory.create(.{
         .owner = owner,
@@ -988,6 +1151,7 @@ test "egress broker binds connection creation to attested pinned service identit
         .target = "overlay.notes.sync",
         .require_remote_attestation = true,
         .pinned_root_digest = pinned_digest,
+        .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
     var capabilities = capability.CapabilityTable.init();
     const overlay_capability = try capabilities.mintBootRoot(.{
@@ -1027,8 +1191,14 @@ test "egress broker binds connection creation to attested pinned service identit
         .evidence = .{
             .destination = .{ .service_identity = "overlay.notes.sync" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = wrong_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = metadata_digest,
         },
         .now_ticks = 10,
     });
@@ -1043,8 +1213,14 @@ test "egress broker binds connection creation to attested pinned service identit
         .evidence = .{
             .destination = .{ .service_identity = "overlay.other" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = pinned_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = metadata_digest,
         },
         .now_ticks = 10,
     });
@@ -1059,8 +1235,14 @@ test "egress broker binds connection creation to attested pinned service identit
         .evidence = .{
             .destination = .{ .service_identity = "overlay.notes.sync" },
             .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
             .peer_root_digest_present = true,
             .peer_root_digest = pinned_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = metadata_digest,
         },
         .now_ticks = 10,
     });

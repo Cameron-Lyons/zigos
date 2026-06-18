@@ -56,6 +56,12 @@ pub const AgentKillSwitchRequest = schema.requestType(.agent_kill_switch);
 pub const AccessibilityProfileGetRequest = schema.requestType(.accessibility_profile_get);
 pub const AccessibilityProfileApplyRequest = schema.requestType(.accessibility_profile_apply);
 pub const AccessibilityProfileAuditRequest = schema.requestType(.accessibility_profile_audit);
+pub const BackgroundAuthorizeRequest = schema.requestType(.background_authorize);
+pub const BackgroundRecordRequest = schema.requestType(.background_record);
+pub const BackgroundCompleteRequest = schema.requestType(.background_complete);
+pub const PasteboardOfferRequest = schema.requestType(.pasteboard_offer);
+pub const PasteboardReadRequest = schema.requestType(.pasteboard_read);
+pub const PasteboardRevokeRequest = schema.requestType(.pasteboard_revoke);
 
 pub const ServiceRegisterResponse = schema.responseType(.service_register);
 pub const ServiceConnectionResponse = schema.responseType(.service_connect);
@@ -95,6 +101,10 @@ pub const AgentKillSwitchResponse = schema.responseType(.agent_kill_switch);
 pub const AccessibilityProfileGetResponse = schema.responseType(.accessibility_profile_get);
 pub const AccessibilityProfileApplyResponse = schema.responseType(.accessibility_profile_apply);
 pub const AccessibilityProfileAuditResponse = schema.responseType(.accessibility_profile_audit);
+pub const BackgroundAuthorizeResponse = schema.responseType(.background_authorize);
+pub const BackgroundRecordResponse = schema.responseType(.background_record);
+pub const BackgroundCompleteResponse = schema.responseType(.background_complete);
+pub const PasteboardResponse = schema.responseType(.pasteboard_offer);
 
 pub const contracts = schema.contracts;
 pub const manifest_interfaces = schema.manifest_interfaces;
@@ -181,6 +191,10 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(u16, 0x0F01), @intFromEnum(OperationId.agent_authorize));
     try std.testing.expectEqual(@as(u16, 0x0F04), @intFromEnum(OperationId.agent_bind_session));
     try std.testing.expectEqual(@as(u16, 0x1001), @intFromEnum(OperationId.accessibility_profile_get));
+    try std.testing.expectEqual(@as(u16, 0x1101), @intFromEnum(OperationId.background_authorize));
+    try std.testing.expectEqual(@as(u16, 0x1201), @intFromEnum(OperationId.pasteboard_offer));
+    try std.testing.expectEqual(@as(u16, 0x1202), @intFromEnum(OperationId.pasteboard_read));
+    try std.testing.expectEqual(@as(u16, 0x1203), @intFromEnum(OperationId.pasteboard_revoke));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionRequest), @sizeOf(Request(.service_connect)));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionResponse), @sizeOf(Response(.service_connect)));
     try std.testing.expectEqual(@sizeOf(PackageRollbackRequest), @sizeOf(Request(.package_rollback)));
@@ -207,6 +221,12 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@sizeOf(AgentBindSessionResponse), @sizeOf(Response(.agent_bind_session)));
     try std.testing.expectEqual(@sizeOf(AccessibilityProfileApplyRequest), @sizeOf(Request(.accessibility_profile_apply)));
     try std.testing.expectEqual(@sizeOf(AccessibilityProfileApplyResponse), @sizeOf(Response(.accessibility_profile_apply)));
+    try std.testing.expectEqual(@sizeOf(BackgroundAuthorizeRequest), @sizeOf(Request(.background_authorize)));
+    try std.testing.expectEqual(@sizeOf(BackgroundAuthorizeResponse), @sizeOf(Response(.background_authorize)));
+    try std.testing.expectEqual(@sizeOf(PasteboardOfferRequest), @sizeOf(Request(.pasteboard_offer)));
+    try std.testing.expectEqual(@sizeOf(PasteboardReadRequest), @sizeOf(Request(.pasteboard_read)));
+    try std.testing.expectEqual(@sizeOf(PasteboardRevokeRequest), @sizeOf(Request(.pasteboard_revoke)));
+    try std.testing.expectEqual(@sizeOf(PasteboardResponse), @sizeOf(Response(.pasteboard_read)));
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(WorkspacePutVersionRequest))), contractFor("zigos.object.workspace").?.operation(.workspace_put_version).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PackageUpdateRequest))), contractFor("zigos.package.install").?.operation(.package_update).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AiAuthorizeRequest))), contractFor("zigos.ai.inference").?.operation(.ai_authorize).?.request_size);
@@ -220,6 +240,8 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AgentRecordActionRequest))), contractFor("zigos.agent.delegation").?.operation(.agent_record_action).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AgentKillSwitchRequest))), contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch).?.request_size);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AccessibilityProfileAuditRequest))), contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_audit).?.request_size);
+    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(BackgroundCompleteRequest))), contractFor("zigos.background.activity").?.operation(.background_complete).?.request_size);
+    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PasteboardReadRequest))), contractFor("zigos.secure.pasteboard").?.operation(.pasteboard_read).?.request_size);
 }
 
 test "typed component ABI rejects incompatible interfaces and malformed messages" {

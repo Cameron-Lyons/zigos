@@ -2,6 +2,7 @@ const std = @import("std");
 const common = @import("check_common.zig");
 
 const TEST_ROOTS = [_][]const u8{
+    "src/check_release_security_gate.zig",
     "src/native_host_test.zig",
     "src/zigos_spec_test.zig",
     "src/userspace/runtime.zig",

@@ -36,9 +36,11 @@ pub const MAX_INSTALL_SOURCE_BYTES = model.MAX_INSTALL_SOURCE_BYTES;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
 pub const RemoveResult = model.RemoveResult;
+pub const ReleaseTransparencyEvidence = model.ReleaseTransparencyEvidence;
 pub const StoredComponent = model.StoredComponent;
 pub const StoredAsset = model.StoredAsset;
 pub const LaunchPlan = model.LaunchPlan;
+pub const PackageLaunchProvenance = model.PackageLaunchProvenance;
 pub const StoredInterface = model.StoredInterface;
 pub const StoredPermission = model.StoredPermission;
 pub const StoredBackgroundTask = model.StoredBackgroundTask;
@@ -73,6 +75,8 @@ pub const Error = bundle_ops.Error || error{
     UpdateSourceChanged,
     VersionRegressionRejected,
     VersionReplayRejected,
+    StoreTransparencyMissing,
+    StoreTransparencyReplayRejected,
 };
 
 pub const digestBundle = bundle_digest.digestBundle;
@@ -170,6 +174,7 @@ pub const Service = struct {
             if (!std.mem.eql(u8, active_revision.sourceIdentitySlice(), request.source_identity)) {
                 return error.UpdateSourceChanged;
             }
+            try validateTransparencyTransition(bundle, request);
 
             try bundle_ops.installRevisionValidated(
                 bundle,
@@ -178,6 +183,7 @@ pub const Service = struct {
                 request.data_schema_version,
                 permission_digest,
             );
+            bundle.activeRevisionMut().release_transparency = request.release_transparency;
 
             return .{
                 .installed_new = false,
@@ -199,6 +205,7 @@ pub const Service = struct {
             request.data_schema_version,
             permission_digest,
         );
+        slot.bundle.activeRevisionMut().release_transparency = request.release_transparency;
         self.indexBundle(slot_index);
         return .{
             .installed_new = true,
@@ -230,11 +237,15 @@ pub const Service = struct {
 
     fn validateRevisionTrusted(self: *const Service, revision: *const BundleRevision) Error!void {
         const signature = revision.signature.toManifest();
-        if (self.trust_store.trustedPublisherSignature(revision.publisherSlice(), signature)) return;
-        if (publisherKeyWasRevoked(&self.trust_store, revision.publisherSlice(), signature)) {
-            return error.PublisherKeyRevoked;
+        if (!self.trust_store.trustedPublisherSignature(revision.publisherSlice(), signature)) {
+            if (publisherKeyWasRevoked(&self.trust_store, revision.publisherSlice(), signature)) {
+                return error.PublisherKeyRevoked;
+            }
+            return error.UntrustedManifestSigner;
         }
-        return error.UntrustedManifestSigner;
+        if (publicStoreSource(revision.sourceIdentitySlice()) and !revision.release_transparency.present()) {
+            return error.StoreTransparencyMissing;
+        }
     }
 
     fn remove(self: *Service, bundle_id: []const u8) Error!RemoveResult {
@@ -273,6 +284,7 @@ pub const Service = struct {
             .components = active_revision.components,
             .asset_count = active_revision.asset_count,
             .assets = active_revision.assets,
+            .provenance = launchProvenance(bundle, active_revision),
         };
     }
 
@@ -420,6 +432,9 @@ fn validateInstallRequestShape(request: InstallRequest) Error!void {
         if (!allowed) return error.InstallSourceInvalid;
     }
     if (request.data_schema_version == 0) return error.InvalidDataSchemaVersion;
+    if (publicStoreSource(request.source_identity) and !request.release_transparency.present()) {
+        return error.StoreTransparencyMissing;
+    }
 }
 
 fn validateRevisionTransition(
@@ -444,6 +459,46 @@ fn validateRevisionTransition(
     if (incoming.version_major == active_revision.version_major and incoming.version_minor == active_revision.version_minor) {
         return error.VersionReplayRejected;
     }
+}
+
+fn validateTransparencyTransition(
+    installed: *const InstalledBundle,
+    request: InstallRequest,
+) Error!void {
+    if (!publicStoreSource(request.source_identity)) return;
+    var max_known_sequence: u64 = 0;
+    for (installed.revisions) |revision| {
+        if (revision.revision_id == 0) continue;
+        max_known_sequence = @max(max_known_sequence, revision.release_transparency.sequence);
+    }
+    if (request.release_transparency.sequence <= max_known_sequence) return error.StoreTransparencyReplayRejected;
+}
+
+fn launchProvenance(
+    bundle: *const InstalledBundle,
+    revision: *const BundleRevision,
+) PackageLaunchProvenance {
+    const signature = revision.signature.toManifest();
+    return .{
+        .bundle_id = bundle.bundleIdSlice(),
+        .display_name = revision.displayNameSlice(),
+        .publisher = revision.publisherSlice(),
+        .source_identity = revision.sourceIdentitySlice(),
+        .version_major = revision.version_major,
+        .version_minor = revision.version_minor,
+        .update_channel = revision.channel,
+        .data_schema_version = revision.schema_version,
+        .permission_digest = revision.permission_digest,
+        .signature_format = signature.format,
+        .signature_signer = signature.signer,
+        .signature_public_key_len = signature.public_key_len,
+        .signed = signature.isComplete(),
+        .release_transparency = revision.release_transparency,
+    };
+}
+
+fn publicStoreSource(source_identity: []const u8) bool {
+    return std.mem.startsWith(u8, source_identity, "store:zigos/public");
 }
 
 fn publisherKeyWasRevoked(
@@ -519,6 +574,14 @@ fn signTestReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.Bund
         identity,
         &digestBundle(bundle),
     );
+}
+
+fn publicStoreTransparency(sequence: u64, root_byte: u8, log_head_byte: u8) ReleaseTransparencyEvidence {
+    return .{
+        .sequence = sequence,
+        .root = crypto_hash.digestFromByte(root_byte),
+        .log_head = crypto_hash.digestFromByte(log_head_byte),
+    };
 }
 
 test "package port requires service authority before install update rollback and remove" {
@@ -779,6 +842,15 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqual(@as(usize, 2), launch_plan.asset_count);
     try std.testing.expectEqualStrings("notes-ui", launch_plan.components[0].idSlice());
     try std.testing.expectEqualStrings("assets/editor.css", launch_plan.assets[1].pathSlice());
+    try std.testing.expectEqualStrings("app.notes", launch_plan.provenance.bundle_id);
+    try std.testing.expectEqualStrings("Example Software", launch_plan.provenance.publisher);
+    try std.testing.expectEqualStrings("store:zigos", launch_plan.provenance.source_identity);
+    try std.testing.expectEqual(@as(u16, 1), launch_plan.provenance.version_major);
+    try std.testing.expectEqual(@as(u16, 1), launch_plan.provenance.version_minor);
+    try std.testing.expectEqual(@as(u32, 2), launch_plan.provenance.data_schema_version);
+    try std.testing.expect(launch_plan.provenance.signed);
+    try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519, launch_plan.provenance.signature_format);
+    try std.testing.expectEqual(@as(usize, signing.PUBLIC_KEY_BYTES), launch_plan.provenance.signature_public_key_len);
 
     _ = try service.rollback("app.notes");
     const rolled_back = service.find("app.notes").?;
@@ -1004,6 +1076,134 @@ test "package service rejects stale update metadata publisher drift and channel 
         .source_identity = "store:zigos",
         .data_schema_version = 1,
     }, null));
+}
+
+test "package service preserves and advances public store transparency evidence" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-public-store-transparency",
+        .seed = signing.seedFromByte(0x3D),
+    };
+    try trustTestPublisher(&service, signer_identity, "zigos.dev");
+
+    var v1 = manifest_fixtures.notesBundle();
+    v1.signature = try signTestReleaseBundle(signer_identity, v1);
+
+    try std.testing.expectError(error.StoreTransparencyMissing, service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos/public",
+        .data_schema_version = 1,
+    }, null));
+
+    _ = try service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos/public",
+        .data_schema_version = 1,
+        .release_transparency = publicStoreTransparency(1, 0x61, 0x61),
+    }, null);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        service.find("app.notes").?.activeRevision().release_transparency.sequence,
+    );
+
+    var v11 = v1;
+    v11.version_minor = 1;
+    v11.signature = try signTestReleaseBundle(signer_identity, v11);
+    try std.testing.expectError(error.StoreTransparencyReplayRejected, service.install(.{
+        .bundle = v11,
+        .source_identity = "store:zigos/public",
+        .data_schema_version = 1,
+        .release_transparency = publicStoreTransparency(1, 0x61, 0x61),
+    }, null));
+
+    _ = try service.install(.{
+        .bundle = v11,
+        .source_identity = "store:zigos/public",
+        .data_schema_version = 1,
+        .release_transparency = publicStoreTransparency(2, 0x62, 0x62),
+    }, null);
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        service.find("app.notes").?.activeRevision().release_transparency.sequence,
+    );
+    const v11_launch_plan = try service.buildLaunchPlan("app.notes");
+    try std.testing.expectEqualStrings("store:zigos/public", v11_launch_plan.provenance.source_identity);
+    try std.testing.expectEqual(@as(u64, 2), v11_launch_plan.provenance.release_transparency.sequence);
+
+    _ = try service.rollback("app.notes");
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        service.find("app.notes").?.activeRevision().release_transparency.sequence,
+    );
+    const rollback_launch_plan = try service.buildLaunchPlan("app.notes");
+    try std.testing.expectEqual(@as(u64, 1), rollback_launch_plan.provenance.release_transparency.sequence);
+
+    var v20 = v1;
+    v20.version_major = 2;
+    v20.version_minor = 0;
+    v20.signature = try signTestReleaseBundle(signer_identity, v20);
+    try std.testing.expectError(error.StoreTransparencyReplayRejected, service.install(.{
+        .bundle = v20,
+        .source_identity = "store:zigos/public",
+        .data_schema_version = 1,
+        .release_transparency = publicStoreTransparency(2, 0x62, 0x62),
+    }, null));
+
+    const updated = try service.install(.{
+        .bundle = v20,
+        .source_identity = "store:zigos/public",
+        .data_schema_version = 1,
+        .release_transparency = publicStoreTransparency(3, 0x63, 0x63),
+    }, null);
+    try std.testing.expect(updated.updated_existing);
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        service.find("app.notes").?.activeRevision().release_transparency.sequence,
+    );
+}
+
+test "package service refuses runtime use of public store revisions with stripped transparency" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-public-store-runtime-transparency",
+        .seed = signing.seedFromByte(0x3E),
+    };
+    try trustTestPublisher(&service, signer_identity, "zigos.dev");
+
+    var v1 = manifest_fixtures.notesBundle();
+    v1.signature = try signTestReleaseBundle(signer_identity, v1);
+    _ = try service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos/public",
+        .data_schema_version = 1,
+        .release_transparency = publicStoreTransparency(1, 0x71, 0x71),
+    }, null);
+
+    var resolved: ResolvedManifest = undefined;
+    _ = try service.buildLaunchPlan("app.notes");
+    _ = try service.resolveCurrentManifest("app.notes", &resolved);
+
+    const bundle = service.find("app.notes").?;
+    const saved_active_transparency = bundle.activeRevision().release_transparency;
+    bundle.activeRevisionMut().release_transparency = .{};
+    try std.testing.expectError(error.StoreTransparencyMissing, service.buildLaunchPlan("app.notes"));
+    try std.testing.expectError(error.StoreTransparencyMissing, service.resolveCurrentManifest("app.notes", &resolved));
+    bundle.activeRevisionMut().release_transparency = saved_active_transparency;
+
+    var v11 = v1;
+    v11.version_minor = 1;
+    v11.signature = try signTestReleaseBundle(signer_identity, v11);
+    _ = try service.install(.{
+        .bundle = v11,
+        .source_identity = "store:zigos/public",
+        .data_schema_version = 1,
+        .release_transparency = publicStoreTransparency(2, 0x72, 0x72),
+    }, null);
+
+    const rollback_slot = service.find("app.notes").?.rollback_revision_slot.?;
+    service.find("app.notes").?.revisions[rollback_slot].release_transparency = .{};
+    try std.testing.expectError(error.StoreTransparencyMissing, service.rollback("app.notes"));
+    try std.testing.expectEqual(@as(u16, 1), service.find("app.notes").?.versionMinor());
 }
 
 test "package service refuses rollback to a revision whose publisher key was revoked" {

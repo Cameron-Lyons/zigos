@@ -22,6 +22,7 @@ const marker_groups = [_]MarkerGroup{
     .{ .name = "ab_rollback", .markers = &smoke_markers.ab_rollback_required },
     .{ .name = "update_rollback", .markers = &smoke_markers.update_rollback_required },
     .{ .name = "tampered_artifact_manifest", .markers = &smoke_markers.tampered_artifact_manifest_required },
+    .{ .name = "tampered_bootloader_measurement", .markers = &smoke_markers.tampered_bootloader_measurement_required },
     .{ .name = "tampered_kernel", .markers = &smoke_markers.tampered_kernel_required },
     .{ .name = "tampered_userspace_image", .markers = &smoke_markers.tampered_userspace_image_required },
     .{ .name = "tampered_policy", .markers = &smoke_markers.tampered_policy_required },

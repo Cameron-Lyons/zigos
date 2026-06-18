@@ -2,6 +2,7 @@ const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
 const contract = @import("../session/contract.zig");
+const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const native_util = @import("../core/util.zig");
 const object_store_mod = @import("../storage/object_store.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
@@ -10,6 +11,7 @@ const support = @import("scenario_support.zig");
 
 pub fn run(context: *support.Context) support.StorageScenarioState {
     support.common.printBootMarker("ZIGOS:STORAGE:BOOTSTRAP:START");
+    _ = bootstrap_driver_port.refreshActiveStorageAttachment(context.storage_service_id);
     var storage_reloaded = false;
     if (context.storage_checkpoint_store.hasCachedPersistentState()) {
         support.common.printBootMarker("ZIGOS:STORAGE:PERSIST:CACHE_READY");
@@ -249,10 +251,12 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         support.common.printBootMarker("ZIGOS:STORAGE:EXPORT_IMPORT:OK");
     }
 
+    _ = bootstrap_driver_port.refreshActiveStorageAttachment(context.storage_service_id);
     context.storage_service_instance.checkpoint();
     _ = context.supervisor.recordCrash(context.storage_service_id, 94, 0x53);
     _ = context.supervisor.requestRestart(context.storage_service_id, 95);
     _ = context.runtime.rehostTask(context.storage_task_id, 95) catch unreachable;
+    _ = bootstrap_driver_port.refreshActiveStorageAttachment(context.storage_service_id);
     context.storage_service_instance.* = if (storage_volume_mod.hasAttachedDevice())
         storage_service_mod.Service.reloadFromAttachedVolume(
             context.storage_service_id,

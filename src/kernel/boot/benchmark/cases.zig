@@ -36,13 +36,15 @@ pub fn benchmarkCases(handlers: anytype) [22]BenchmarkCase {
     };
 }
 
-pub fn qualityGateCases(handlers: anytype) [7]QualityGateCase {
+pub fn qualityGateCases(handlers: anytype) [9]QualityGateCase {
     return .{
         .{ .name = "battery_saver.batch_delay", .run = handlers.battery_saver_batch_delay },
         .{ .name = "thermal_critical.background_delay", .run = handlers.thermal_critical_background_delay },
         .{ .name = "memory_pressure.batch_delay", .run = handlers.memory_pressure_batch_delay },
         .{ .name = "scheduler_fairness.max_min_dispatch_ratio_percent", .run = handlers.scheduler_fairness_ratio_percent },
         .{ .name = "starvation_resistance.min_dispatches_after_pressure", .run = handlers.starvation_resistance_after_pressure },
+        .{ .name = "lower_class_service_debt.batch_tie_dispatch", .run = handlers.lower_class_service_debt_batch_tie_dispatch },
+        .{ .name = "brokered_accelerator_queue.completion_release", .run = handlers.brokered_accelerator_queue_completion_release },
         .{ .name = "background_throttling.delayed_dispatches", .run = handlers.background_throttling_delayed_dispatches },
         .{ .name = "latency_under_load.max_foreground_wait_ticks", .run = handlers.latency_under_load_max_wait_ticks },
     };

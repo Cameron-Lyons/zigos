@@ -1,11 +1,19 @@
 const std = @import("std");
+const abi = @import("../core/abi.zig");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
+const background_dispatch = @import("../task/background_dispatch.zig");
+const capability = @import("../kernel_api/capability.zig");
 const event_ledger = @import("event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
 const os_identity = @import("os_identity.zig");
 const notification_center = @import("../services/notification_center.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
+const process_isolation = @import("../task/process_isolation.zig");
+const service_catalog = @import("../session/service_catalog.zig");
+const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
+const userspace_registry = @import("../task/userspace_registry.zig");
 const humane_shell = @import("rendered_shell/humane_shell.zig");
 const signing = @import("../core/signing.zig");
 const manifest_linter = @import("../sdk/manifest_linter.zig");
@@ -13,6 +21,7 @@ const agent_delegation_service = @import("../services/agent_delegation_service.z
 const package_digest = @import("../services/package_service_digest.zig");
 const package_service = @import("../services/package_service.zig");
 const package_model = @import("../services/package_service_model.zig");
+const secure_pasteboard = @import("../services/secure_pasteboard.zig");
 const typed_component_abi = @import("../services/typed_component_abi.zig");
 
 pub const Feature = enum(u8) {
@@ -59,6 +68,8 @@ pub const ExtraFeature = enum(u8) {
     privacy_budget_ledger,
     diagnostics_private_egress_summary,
     remote_diagnostics_consent,
+    process_hidden_observability_denied,
+    process_continuous_observability_scope,
     ai_context_budget_policy,
     ai_training_audit_manifest,
     offline_ai_local_model_manifest,
@@ -302,11 +313,59 @@ pub const EleventhFeature = enum(u8) {
     typed_agent_kill_switch_operation,
     agent_session_service_model,
     agent_session_service_kill_switch,
+    agent_session_cumulative_context_budget,
+    agent_action_denial_audit,
     agent_session_ledger,
     agent_session_redaction,
 };
 
 pub const eleventh_feature_count = std.meta.fields(EleventhFeature).len;
+
+pub const TwelfthFeature = enum(u8) {
+    background_manifest_decl,
+    background_permission_pairing,
+    background_budget_validation,
+    background_network_visibility_validation,
+    background_digest_covers_budget,
+    package_preserves_background_tasks,
+    policy_background_duration_gate,
+    policy_background_cpu_gate,
+    policy_background_memory_gate,
+    policy_background_network_gate,
+    policy_background_visibility_gate,
+    background_activity_policy_request,
+    typed_background_activity_service,
+    background_authorize_operation,
+    background_record_operation,
+    background_complete_operation,
+    native_registry_background_discovery,
+    background_dispatch_runtime_gate,
+    background_expiration_watchdog,
+    background_activity_ledger,
+    background_activity_redaction,
+};
+
+pub const twelfth_feature_count = std.meta.fields(TwelfthFeature).len;
+
+pub const ThirteenthFeature = enum(u8) {
+    secure_pasteboard_service_model,
+    pasteboard_foreground_gesture_gate,
+    pasteboard_destination_bound_grant,
+    pasteboard_strict_expiry_gate,
+    pasteboard_read_once_token,
+    pasteboard_revocation_gate,
+    pasteboard_user_visible_audit,
+    pasteboard_redacted_diagnostics,
+    typed_secure_pasteboard_service,
+    pasteboard_offer_operation,
+    pasteboard_read_operation,
+    pasteboard_revoke_operation,
+    native_registry_pasteboard_discovery,
+    pasteboard_bootstrap_service_contract,
+    pasteboard_boot_image_registry,
+};
+
+pub const thirteenth_feature_count = std.meta.fields(ThirteenthFeature).len;
 
 pub const Checklist = struct {
     native_only_apps: bool,
@@ -386,6 +445,8 @@ pub const ExtraChecklist = struct {
     privacy_budget_ledger: bool,
     diagnostics_private_egress_summary: bool,
     remote_diagnostics_consent: bool,
+    process_hidden_observability_denied: bool,
+    process_continuous_observability_scope: bool,
     ai_context_budget_policy: bool,
     ai_training_audit_manifest: bool,
     offline_ai_local_model_manifest: bool,
@@ -454,6 +515,8 @@ pub const EighthChecklist = FeatureChecklist(EighthFeature);
 pub const NinthChecklist = FeatureChecklist(NinthFeature);
 pub const TenthChecklist = FeatureChecklist(TenthFeature);
 pub const EleventhChecklist = FeatureChecklist(EleventhFeature);
+pub const TwelfthChecklist = FeatureChecklist(TwelfthFeature);
+pub const ThirteenthChecklist = FeatureChecklist(ThirteenthFeature);
 
 pub fn currentRepositoryContract() Checklist {
     const default_ai = manifest.AiMetadata{};
@@ -614,6 +677,8 @@ pub fn currentRepositoryExtraContract() ExtraChecklist {
         .privacy_budget_ledger = event_ledger.EventKind.privacy_budget == .privacy_budget,
         .diagnostics_private_egress_summary = @hasField(event_ledger.DiagnosticSummary, "private_egress_denials"),
         .remote_diagnostics_consent = true,
+        .process_hidden_observability_denied = processHiddenObservabilityDeniedCheck(),
+        .process_continuous_observability_scope = processContinuousObservabilityScopeCheck(),
         .ai_context_budget_policy = @hasField(policy_object.CreateRequest, "max_ai_context_bytes"),
         .ai_training_audit_manifest = validationFailsWith(.{
             .bundle_id = "app.training-ai",
@@ -660,6 +725,154 @@ pub fn currentRepositoryExtraContract() ExtraChecklist {
         .typed_diagnostics_share_validation = contractOperationPresent("zigos.diagnostics.export", .diagnostics_share_remote),
         .local_first_sensitive_defaults = !manifest.isSensitive(default_permission.sensitivity) and default_permission.local_only,
     };
+}
+
+fn processContractTask(
+    runtime: *task_runtime.Runtime,
+    owner: principal.PrincipalId,
+    image_id: u64,
+    bundle_id: []const u8,
+) !*task_runtime.TaskRecord {
+    const image = task_runtime.syntheticUserspaceImage("process-contract", "main");
+    return runtime.createTask(.{
+        .owner = owner,
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = units.kibibytes(64),
+            .endpoint_slots = 4,
+            .shared_memory_bytes = units.kibibytes(16),
+        },
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = image_id,
+            .component_abi_version = abi.ABI_VERSION,
+            .signed = true,
+            .bundle_id = bundle_id,
+        },
+        .userspace_image = &image,
+    });
+}
+
+fn processContractGrant(
+    table: *capability.CapabilityTable,
+    holder: principal.PrincipalId,
+    caller_task_id: u64,
+    target_task_id: u64,
+    issued_at_ticks: u64,
+) !capability.Capability {
+    return table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = .{ .kind = .policy_authority, .serial = 2026 },
+        .target = .{ .kind = .task, .id = target_task_id },
+        .rights = .{ .task = .{ .process_control = true } },
+        .scope = .{
+            .task_id = caller_task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = issued_at_ticks,
+            .expires_at_ticks = issued_at_ticks + 100,
+        },
+        .audit = .{
+            .policy_generation = 1,
+            .source_task_id = caller_task_id,
+            .broker_service_id = 77,
+            .user_visible_entitlement = true,
+        },
+    });
+}
+
+fn processHiddenObservabilityDeniedCheck() bool {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    const caller = processContractTask(&runtime, .{ .kind = .app, .serial = 2040 }, 2040, "app.hidden-observer") catch return false;
+    const caller_id = caller.id;
+    const caller_owner = caller.owner;
+    const target = processContractTask(&runtime, .{ .kind = .app, .serial = 2041 }, 2041, "app.hidden-target") catch return false;
+    if (!runtime.processSeparated(caller_id, target.id)) return false;
+
+    const grant = processContractGrant(&capabilities, caller_owner, caller_id, target.id, 10) catch return false;
+    runtime.grantCapability(caller_id, grant.id) catch return false;
+    var broker = process_isolation.Broker.init(&runtime, &capabilities);
+    if (broker.authorize(.{
+        .caller_task_id = caller_id,
+        .target_task_id = target.id,
+        .capability_id = grant.id,
+        .operation = .scrape_window,
+        .user_visible = true,
+        .privacy_indicator_id = 9,
+        .privacy_indicator_expires_at_ticks = 100,
+        .hidden = true,
+        .now_ticks = 20,
+    })) |_| {
+        return false;
+    } else |err| {
+        if (err != error.HiddenOperationDenied) return false;
+        const latest = (runtime.find(caller_id) orelse return false).latestAuditEvent() orelse return false;
+        return latest.kind == .policy_denied and latest.capability_id == 0;
+    }
+}
+
+fn processContinuousObservabilityScopeCheck() bool {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    const caller = processContractTask(&runtime, .{ .kind = .app, .serial = 2042 }, 2042, "app.continuous-observer") catch return false;
+    const caller_id = caller.id;
+    const caller_owner = caller.owner;
+    const target = processContractTask(&runtime, .{ .kind = .app, .serial = 2043 }, 2043, "app.continuous-target") catch return false;
+
+    const self_grant = processContractGrant(&capabilities, caller_owner, caller_id, caller_id, 20) catch return false;
+    runtime.grantCapability(caller_id, self_grant.id) catch return false;
+    var broker = process_isolation.Broker.init(&runtime, &capabilities);
+    const allowed_hook = broker.authorize(.{
+        .caller_task_id = caller_id,
+        .capability_id = self_grant.id,
+        .operation = .register_global_hook,
+        .user_visible = true,
+        .privacy_indicator_id = 11,
+        .privacy_indicator_expires_at_ticks = 60,
+        .continuous = true,
+        .now_ticks = 30,
+    }) catch return false;
+    if (!allowed_hook.allowed or allowed_hook.target_task_id != caller_id) return false;
+
+    if (broker.authorize(.{
+        .caller_task_id = caller_id,
+        .capability_id = self_grant.id,
+        .operation = .register_global_hook,
+        .user_visible = true,
+        .privacy_indicator_id = 11,
+        .privacy_indicator_expires_at_ticks = 40,
+        .continuous = true,
+        .now_ticks = 40,
+    })) |_| {
+        return false;
+    } else |err| {
+        if (err != error.ActivePrivacyIndicatorRequired) return false;
+    }
+
+    const cross_grant = processContractGrant(&capabilities, caller_owner, caller_id, target.id, 20) catch return false;
+    runtime.grantCapability(caller_id, cross_grant.id) catch return false;
+    if (broker.authorize(.{
+        .caller_task_id = caller_id,
+        .target_task_id = target.id,
+        .capability_id = cross_grant.id,
+        .operation = .inspect_memory,
+        .user_visible = true,
+        .privacy_indicator_id = 12,
+        .privacy_indicator_expires_at_ticks = 90,
+        .continuous = true,
+        .now_ticks = 50,
+    })) |_| {
+        return false;
+    } else |err| {
+        if (err != error.ContinuousOperationDenied) return false;
+        const latest = (runtime.find(caller_id) orelse return false).latestAuditEvent() orelse return false;
+        return latest.kind == .policy_denied and latest.capability_id == 0;
+    }
 }
 
 fn validationFailsWith(bundle: manifest.BundleManifest, expected: anyerror) bool {
@@ -1621,6 +1834,8 @@ pub fn currentRepositoryEleventhContract() EleventhChecklist {
     features[@intFromEnum(EleventhFeature.agent_session_service_kill_switch)] =
         @hasDecl(agent_delegation_service.Service, "killSwitch") and
         @hasField(agent_delegation_service.Service, "minimum_generation");
+    features[@intFromEnum(EleventhFeature.agent_session_cumulative_context_budget)] = agentCumulativeContextBudgetCheck();
+    features[@intFromEnum(EleventhFeature.agent_action_denial_audit)] = agentActionDenialAuditCheck();
     features[@intFromEnum(EleventhFeature.agent_session_ledger)] =
         event_ledger.EventKind.agent_session == .agent_session and
         @hasDecl(event_ledger.Ledger, "recordAgentSessionBoundary");
@@ -1738,6 +1953,685 @@ fn agentSessionRedactionCheck() bool {
         std.mem.indexOf(u8, exported, "kind=agent_session") != null;
 }
 
+fn agentCumulativeContextBudgetCheck() bool {
+    var directory = policy_object.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "agent-context-budget-contract",
+        .seed = signing.seedFromByte(0xCE),
+    };
+    _ = directory.create(.{
+        .scope = .organization,
+        .subject_id = 2033,
+        .issuer = .{ .kind = .policy_authority, .serial = 2033 },
+        .label = "agent-context-cumulative",
+        .agent_delegation_allowed = true,
+        .max_agent_actions_per_session = 4,
+        .require_agent_user_confirmation = true,
+        .require_agent_audit = true,
+        .require_agent_session_binding = true,
+        .require_agent_local_context = true,
+        .max_agent_context_bytes = 1024,
+        .min_agent_delegation_generation = 1,
+        .require_agent_visible_plan = true,
+    }, signer) catch return false;
+
+    var service = agent_delegation_service.Service.init();
+    const delegation = service.authorize(&directory, .{ .organization_id = 2033 }, .{
+        .subject = .{ .kind = .app, .serial = 2033 },
+        .task_id = 2034,
+        .session_id = 2035,
+        .autonomous_actions = 4,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 1024,
+        .delegation_generation = 1,
+        .user_visible_plan = true,
+    }, null) catch return false;
+
+    _ = service.recordAction(.{
+        .delegation_id = delegation.id,
+        .session_id = 2035,
+        .action_count = 1,
+        .context_bytes = 700,
+    }, null) catch return false;
+    if (delegation.remainingContextBytes() != 324) return false;
+    if (service.recordAction(.{
+        .delegation_id = delegation.id,
+        .session_id = 2035,
+        .action_count = 1,
+        .context_bytes = 400,
+    }, null)) |_| return false else |err| {
+        if (err != error.ContextBudgetExceeded) return false;
+    }
+    return delegation.used_context_bytes == 700;
+}
+
+fn agentActionDenialAuditCheck() bool {
+    var directory = policy_object.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "agent-denial-audit-contract",
+        .seed = signing.seedFromByte(0xCF),
+    };
+    _ = directory.create(.{
+        .scope = .organization,
+        .subject_id = 2036,
+        .issuer = .{ .kind = .policy_authority, .serial = 2036 },
+        .label = "agent-denial-audit",
+        .agent_delegation_allowed = true,
+        .max_agent_actions_per_session = 1,
+        .max_agent_remote_calls_per_session = 0,
+        .require_agent_user_confirmation = true,
+        .require_agent_audit = true,
+        .require_agent_session_binding = true,
+        .require_agent_local_context = true,
+        .max_agent_context_bytes = 512,
+        .min_agent_delegation_generation = 1,
+        .require_agent_visible_plan = true,
+    }, signer) catch return false;
+
+    var service = agent_delegation_service.Service.init();
+    var ledger = event_ledger.Ledger.init();
+    const delegation = service.authorize(&directory, .{ .organization_id = 2036 }, .{
+        .subject = .{ .kind = .app, .serial = 2036 },
+        .task_id = 2037,
+        .session_id = 2038,
+        .autonomous_actions = 1,
+        .remote_calls = 0,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 512,
+        .delegation_generation = 1,
+        .user_visible_plan = true,
+        .detail = "private contract authorization",
+    }, &ledger) catch return false;
+
+    if (service.recordAction(.{
+        .delegation_id = delegation.id,
+        .session_id = 2038,
+        .action_count = 2,
+        .detail = "private action overrun",
+    }, &ledger)) |_| return false else |err| {
+        if (err != error.ActionBudgetExceeded) return false;
+    }
+    if (service.recordAction(.{
+        .delegation_id = delegation.id,
+        .session_id = 2038,
+        .remote_call_count = 1,
+        .detail = "private remote overrun",
+    }, &ledger)) |_| return false else |err| {
+        if (err != error.RemoteCallBudgetExceeded) return false;
+    }
+    if (service.recordAction(.{
+        .delegation_id = delegation.id,
+        .session_id = 2039,
+        .detail = "private session mismatch",
+    }, &ledger)) |_| return false else |err| {
+        if (err != error.SessionMismatch) return false;
+    }
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    var buffer: [1024]u8 = undefined;
+    const exported = ledger.exportText(&buffer, .{}) catch return false;
+    return summary.agent_delegation_events == 3 and
+        summary.agent_delegation_denials == 2 and
+        summary.agent_remote_call_events == 1 and
+        summary.agent_session_events == 2 and
+        summary.agent_session_denials == 1 and
+        std.mem.indexOf(u8, exported, "private action overrun") == null and
+        std.mem.indexOf(u8, exported, "private session mismatch") == null;
+}
+
+pub fn currentRepositoryTwelfthContract() TwelfthChecklist {
+    var features = [_]bool{false} ** twelfth_feature_count;
+    const background_permission = manifest.PermissionRequest{
+        .kind = .background_execution,
+        .resource = "sync",
+        .rights = .{ .task = .{ .background_run = true } },
+    };
+    const background_permissions = [_]manifest.PermissionRequest{background_permission};
+    const background_tasks = [_]manifest.BackgroundTaskDecl{.{
+        .id = "sync",
+        .trigger = .sync_completion,
+        .expected_duration_seconds = 30,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = units.kibibytes(64),
+            .shared_memory_bytes = units.kibibytes(4),
+        },
+        .network = .local_network_only,
+        .visibility = .status_only,
+    }};
+    const background_bundle = manifest.BundleManifest{
+        .bundle_id = "app.background-contract",
+        .display_name = "Background Contract",
+        .publisher = "zigos.dev",
+        .requested_permissions = &background_permissions,
+        .background_tasks = &background_tasks,
+    };
+    const background_tasks_b = [_]manifest.BackgroundTaskDecl{.{
+        .id = "sync",
+        .trigger = .sync_completion,
+        .expected_duration_seconds = 30,
+        .budget = .{
+            .cpu_time_ticks = 2_000,
+            .memory_bytes = units.kibibytes(64),
+            .shared_memory_bytes = units.kibibytes(4),
+        },
+        .network = .local_network_only,
+        .visibility = .status_only,
+    }};
+    const background_bundle_b = manifest.BundleManifest{
+        .bundle_id = "app.background-contract",
+        .display_name = "Background Contract",
+        .publisher = "zigos.dev",
+        .requested_permissions = &background_permissions,
+        .background_tasks = &background_tasks_b,
+    };
+    const digest_a = package_digest.digestBundle(background_bundle);
+    const digest_b = package_digest.digestBundle(background_bundle_b);
+
+    features[@intFromEnum(TwelfthFeature.background_manifest_decl)] =
+        @hasField(manifest.BundleManifest, "background_tasks") and
+        @hasField(manifest.BackgroundTaskDecl, "budget") and
+        @hasField(manifest.BackgroundTaskDecl, "visibility");
+    features[@intFromEnum(TwelfthFeature.background_permission_pairing)] = validationFailsWith(.{
+        .bundle_id = "app.background-contract",
+        .display_name = "Background Contract",
+        .publisher = "zigos.dev",
+        .background_tasks = &background_tasks,
+    }, error.MissingBackgroundPermission);
+    features[@intFromEnum(TwelfthFeature.background_budget_validation)] = validationFailsWith(.{
+        .bundle_id = "app.background-contract",
+        .display_name = "Background Contract",
+        .publisher = "zigos.dev",
+        .requested_permissions = &background_permissions,
+        .background_tasks = &.{.{
+            .id = "sync",
+            .trigger = .sync_completion,
+            .expected_duration_seconds = 30,
+            .network = .local_network_only,
+            .visibility = .status_only,
+        }},
+    }, error.BackgroundTaskBudgetMissing);
+    features[@intFromEnum(TwelfthFeature.background_network_visibility_validation)] = backgroundNetworkVisibilityValidation(&background_permissions);
+    features[@intFromEnum(TwelfthFeature.background_digest_covers_budget)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@intFromEnum(TwelfthFeature.package_preserves_background_tasks)] =
+        @hasField(package_model.BundleRevision, "background_tasks") and
+        @hasField(package_model.StoredBackgroundTask, "budget") and
+        @hasField(package_model.ResolvedManifest, "background_tasks");
+    features[@intFromEnum(TwelfthFeature.policy_background_duration_gate)] = backgroundPolicyDenies(.background_duration_denied);
+    features[@intFromEnum(TwelfthFeature.policy_background_cpu_gate)] = backgroundPolicyDenies(.background_cpu_denied);
+    features[@intFromEnum(TwelfthFeature.policy_background_memory_gate)] = backgroundPolicyDenies(.background_memory_denied);
+    features[@intFromEnum(TwelfthFeature.policy_background_network_gate)] = backgroundPolicyDenies(.background_network_denied);
+    features[@intFromEnum(TwelfthFeature.policy_background_visibility_gate)] = backgroundPolicyDenies(.background_visibility_denied);
+    features[@intFromEnum(TwelfthFeature.background_activity_policy_request)] =
+        @hasField(policy_object.BackgroundActivityRequest, "expected_duration_seconds") and
+        @hasDecl(policy_object.Directory, "backgroundActivityDecision");
+    features[@intFromEnum(TwelfthFeature.typed_background_activity_service)] = contractPresent("zigos.background.activity");
+    features[@intFromEnum(TwelfthFeature.background_authorize_operation)] = contractOperationPresent("zigos.background.activity", .background_authorize);
+    features[@intFromEnum(TwelfthFeature.background_record_operation)] = contractOperationPresent("zigos.background.activity", .background_record);
+    features[@intFromEnum(TwelfthFeature.background_complete_operation)] = contractOperationPresent("zigos.background.activity", .background_complete);
+    features[@intFromEnum(TwelfthFeature.native_registry_background_discovery)] =
+        typed_component_abi.interfaceId(.background_activity) == .background_activity;
+    features[@intFromEnum(TwelfthFeature.background_dispatch_runtime_gate)] = backgroundDispatchRuntimeCheck(background_bundle);
+    features[@intFromEnum(TwelfthFeature.background_expiration_watchdog)] = backgroundExpirationWatchdogCheck(background_bundle);
+    features[@intFromEnum(TwelfthFeature.background_activity_ledger)] =
+        event_ledger.EventKind.background_activity == .background_activity and
+        @hasDecl(event_ledger.Ledger, "recordBackgroundActivity");
+    features[@intFromEnum(TwelfthFeature.background_activity_redaction)] = backgroundActivityRedactionCheck();
+
+    return .{ .satisfied_features = features };
+}
+
+fn backgroundNetworkVisibilityValidation(background_permissions: []const manifest.PermissionRequest) bool {
+    const no_network_tasks = [_]manifest.BackgroundTaskDecl{.{
+        .id = "sync",
+        .trigger = .sync_completion,
+        .expected_duration_seconds = 30,
+        .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = units.kibibytes(64) },
+        .visibility = .status_only,
+    }};
+    const no_visibility_tasks = [_]manifest.BackgroundTaskDecl{.{
+        .id = "sync",
+        .trigger = .sync_completion,
+        .expected_duration_seconds = 30,
+        .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = units.kibibytes(64) },
+        .network = .local_network_only,
+    }};
+    return validationFailsWith(.{
+        .bundle_id = "app.background-contract",
+        .display_name = "Background Contract",
+        .publisher = "zigos.dev",
+        .requested_permissions = background_permissions,
+        .background_tasks = &no_network_tasks,
+    }, error.BackgroundTaskNetworkMissing) and validationFailsWith(.{
+        .bundle_id = "app.background-contract",
+        .display_name = "Background Contract",
+        .publisher = "zigos.dev",
+        .requested_permissions = background_permissions,
+        .background_tasks = &no_visibility_tasks,
+    }, error.BackgroundTaskVisibilityMissing);
+}
+
+fn backgroundPolicyDenies(expected: policy_object.DecisionReason) bool {
+    var directory = policy_object.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "background-contract-policy",
+        .seed = signing.seedFromByte(0xCD),
+    };
+    _ = directory.create(.{
+        .scope = .organization,
+        .subject_id = 2030,
+        .issuer = .{ .kind = .policy_authority, .serial = 2030 },
+        .label = "background-contract",
+        .max_background_duration_seconds = 30,
+        .max_background_cpu_time_ticks = 1_000,
+        .max_background_memory_bytes = units.kibibytes(64),
+        .max_background_shared_memory_bytes = units.kibibytes(8),
+        .allow_remote_background_network = false,
+        .require_visible_background_activity = true,
+    }, signer) catch return false;
+    const subjects = policy_object.SubjectSet{
+        .organization_id = 2030,
+    };
+    const request = switch (expected) {
+        .background_duration_denied => policy_object.BackgroundActivityRequest{
+            .expected_duration_seconds = 31,
+            .cpu_time_ticks = 500,
+            .memory_bytes = units.kibibytes(32),
+            .network = .none,
+            .visibility = .status_only,
+        },
+        .background_cpu_denied => policy_object.BackgroundActivityRequest{
+            .expected_duration_seconds = 20,
+            .cpu_time_ticks = 1_001,
+            .memory_bytes = units.kibibytes(32),
+            .network = .none,
+            .visibility = .status_only,
+        },
+        .background_memory_denied => policy_object.BackgroundActivityRequest{
+            .expected_duration_seconds = 20,
+            .cpu_time_ticks = 500,
+            .memory_bytes = units.kibibytes(65),
+            .network = .none,
+            .visibility = .status_only,
+        },
+        .background_network_denied => policy_object.BackgroundActivityRequest{
+            .expected_duration_seconds = 20,
+            .cpu_time_ticks = 500,
+            .memory_bytes = units.kibibytes(32),
+            .network = .named_domains,
+            .visibility = .status_only,
+        },
+        .background_visibility_denied => policy_object.BackgroundActivityRequest{
+            .expected_duration_seconds = 20,
+            .cpu_time_ticks = 500,
+            .memory_bytes = units.kibibytes(32),
+            .network = .none,
+            .visibility = .hidden,
+        },
+        else => return false,
+    };
+    const decision = directory.backgroundActivityDecision(subjects, request);
+    return !decision.allowed and decision.reason == expected;
+}
+
+fn backgroundDispatchRuntimeCheck(bundle: manifest.BundleManifest) bool {
+    var runtime = task_runtime.Runtime.init();
+    const task = runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 2030 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 20_000,
+            .memory_bytes = units.mebibytes(2),
+            .endpoint_slots = 4,
+            .shared_memory_bytes = units.kibibytes(64),
+            .background_allowed = true,
+        },
+        .local_only = false,
+        .launch = .{
+            .bundle_id = "app.background-contract",
+        },
+    }) catch return false;
+    var controller = background_dispatch.Controller.init();
+    var directory = policy_object.Directory.init();
+    _ = directory.create(.{
+        .scope = .organization,
+        .subject_id = 2030,
+        .issuer = .{ .kind = .policy_authority, .serial = 2030 },
+        .label = "background-dispatch-runtime",
+        .max_background_duration_seconds = 30,
+        .max_background_cpu_time_ticks = 1_000,
+        .max_background_memory_bytes = units.kibibytes(64),
+        .max_background_shared_memory_bytes = units.kibibytes(8),
+        .allow_remote_background_network = false,
+        .require_visible_background_activity = true,
+    }, .{
+        .label = "background-dispatch-policy",
+        .seed = signing.seedFromByte(0xD2),
+    }) catch return false;
+    controller.configurePolicy(&directory, .{ .organization_id = 2030 });
+    const decision = controller.dispatch(&runtime, task.id, bundle, "sync", .sync_completion, 3030) catch return false;
+    if (!(decision.allowed and
+        decision.reason == .allowed and
+        decision.record_id != null and
+        controller.activeRecordCount() == 1))
+    {
+        return false;
+    }
+
+    const remote_permission = manifest.PermissionRequest{
+        .kind = .background_execution,
+        .resource = "remote",
+        .rights = .{ .task = .{ .background_run = true } },
+    };
+    const remote_permissions = [_]manifest.PermissionRequest{remote_permission};
+    const remote_tasks = [_]manifest.BackgroundTaskDecl{.{
+        .id = "remote",
+        .trigger = .push_event,
+        .expected_duration_seconds = 20,
+        .budget = .{
+            .cpu_time_ticks = 500,
+            .memory_bytes = units.kibibytes(32),
+            .shared_memory_bytes = units.kibibytes(4),
+        },
+        .network = .named_domains,
+        .visibility = .status_only,
+    }};
+    const remote_bundle = manifest.BundleManifest{
+        .bundle_id = "app.background-contract",
+        .display_name = "Background Contract",
+        .publisher = "zigos.dev",
+        .requested_permissions = &remote_permissions,
+        .background_tasks = &remote_tasks,
+    };
+    const denied = controller.dispatch(&runtime, task.id, remote_bundle, "remote", .push_event, 3031) catch return false;
+    return denied.reason == .policy_denied and
+        denied.policy_reason == .background_network_denied;
+}
+
+fn backgroundExpirationWatchdogCheck(bundle: manifest.BundleManifest) bool {
+    var runtime = task_runtime.Runtime.init();
+    const task = runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 2031 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 20_000,
+            .memory_bytes = units.mebibytes(2),
+            .endpoint_slots = 4,
+            .shared_memory_bytes = units.kibibytes(64),
+            .background_allowed = true,
+        },
+        .local_only = false,
+        .launch = .{
+            .bundle_id = "app.background-contract",
+        },
+    }) catch return false;
+    var controller = background_dispatch.Controller.init();
+    const decision = controller.dispatch(&runtime, task.id, bundle, "sync", .sync_completion, 100) catch return false;
+    if (!(decision.allowed and
+        decision.record_id != null and
+        task.background_active_count == 1 and
+        task.background_reserved_memory_bytes != 0))
+    {
+        return false;
+    }
+    const early_expired = controller.expireOverdue(&runtime, 129) catch return false;
+    if (early_expired != 0 or task.background_active_count != 1) return false;
+    const expired = controller.expireOverdue(&runtime, 130) catch return false;
+    const latest = controller.latestRecord() orelse return false;
+    return expired == 1 and
+        controller.activeRecordCount() == 0 and
+        task.background_active_count == 0 and
+        task.background_reserved_memory_bytes == 0 and
+        latest.state == .expired and
+        latest.reason == .expired and
+        latest.completed_tick == 130 and
+        task.latestAuditEvent().?.kind == .background_expired;
+}
+
+fn backgroundActivityRedactionCheck() bool {
+    var ledger = event_ledger.Ledger.init();
+    ledger.recordBackgroundActivity(
+        principal.PrincipalId{ .kind = .user, .serial = 2030 },
+        3030,
+        false,
+        true,
+        false,
+        120,
+        91,
+        "private background activity detail",
+    ) catch return false;
+    var buffer: [512]u8 = undefined;
+    const exported = ledger.exportText(&buffer, .{}) catch return false;
+    const summary = ledger.userVisibleDiagnosticSummary();
+    return summary.background_activity_events == 1 and
+        summary.background_activity_denials == 1 and
+        summary.protected_details_redacted == 1 and
+        std.mem.indexOf(u8, exported, "private background activity detail") == null and
+        std.mem.indexOf(u8, exported, "kind=background_activity") != null;
+}
+
+const PasteboardContractEvidence = struct {
+    foreground_gesture_gate: bool = false,
+    destination_bound_grant: bool = false,
+    strict_expiry_gate: bool = false,
+    read_once_token: bool = false,
+    revocation_gate: bool = false,
+    user_visible_audit: bool = false,
+    redacted_diagnostics: bool = false,
+};
+
+pub fn currentRepositoryThirteenthContract() ThirteenthChecklist {
+    var features = [_]bool{false} ** thirteenth_feature_count;
+    const evidence = securePasteboardContractEvidence();
+    features[@intFromEnum(ThirteenthFeature.secure_pasteboard_service_model)] =
+        @hasDecl(secure_pasteboard.Service, "offer") and
+        @hasDecl(secure_pasteboard.Service, "read") and
+        @hasDecl(secure_pasteboard.Service, "revoke") and
+        @hasField(secure_pasteboard.Grant, "foreground_session_id") and
+        @hasField(secure_pasteboard.Grant, "read_once");
+    features[@intFromEnum(ThirteenthFeature.pasteboard_foreground_gesture_gate)] = evidence.foreground_gesture_gate;
+    features[@intFromEnum(ThirteenthFeature.pasteboard_destination_bound_grant)] = evidence.destination_bound_grant;
+    features[@intFromEnum(ThirteenthFeature.pasteboard_strict_expiry_gate)] = evidence.strict_expiry_gate;
+    features[@intFromEnum(ThirteenthFeature.pasteboard_read_once_token)] = evidence.read_once_token;
+    features[@intFromEnum(ThirteenthFeature.pasteboard_revocation_gate)] = evidence.revocation_gate;
+    features[@intFromEnum(ThirteenthFeature.pasteboard_user_visible_audit)] =
+        event_ledger.EventKind.pasteboard_access == .pasteboard_access and
+        @hasDecl(event_ledger.Ledger, "recordPasteboardAccess") and
+        evidence.user_visible_audit;
+    features[@intFromEnum(ThirteenthFeature.pasteboard_redacted_diagnostics)] = evidence.redacted_diagnostics;
+    features[@intFromEnum(ThirteenthFeature.typed_secure_pasteboard_service)] = contractPresent("zigos.secure.pasteboard");
+    features[@intFromEnum(ThirteenthFeature.pasteboard_offer_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_offer);
+    features[@intFromEnum(ThirteenthFeature.pasteboard_read_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_read);
+    features[@intFromEnum(ThirteenthFeature.pasteboard_revoke_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_revoke);
+    features[@intFromEnum(ThirteenthFeature.native_registry_pasteboard_discovery)] =
+        typed_component_abi.interfaceId(.secure_pasteboard) == .secure_pasteboard;
+    features[@intFromEnum(ThirteenthFeature.pasteboard_bootstrap_service_contract)] = securePasteboardBootstrapContractCheck();
+    features[@intFromEnum(ThirteenthFeature.pasteboard_boot_image_registry)] = securePasteboardBootImageRegistryCheck();
+    return .{ .satisfied_features = features };
+}
+
+fn securePasteboardBootstrapContractCheck() bool {
+    const entry = service_catalog.entryForClass(.secure_pasteboard) orelse return false;
+    const launch = entry.service_bootstrap orelse return false;
+    const contract = service_catalog.serviceContractForClass(.secure_pasteboard) orelse return false;
+    return entry.published_native_service and
+        entry.userspace_image != null and
+        launch.mode == .kernel_contract and
+        launch.grants.len != 0 and
+        launch.grants[0] == .service_task_authority and
+        contract.interface_id == .secure_pasteboard and
+        std.mem.eql(u8, contract.interface.name, "zigos.secure.pasteboard");
+}
+
+fn securePasteboardBootImageRegistryCheck() bool {
+    const image = userspace_registry.findByServiceClass(.secure_pasteboard) orelse return false;
+    return std.mem.eql(u8, image.bundle_id, "zigos.system.secure-pasteboard") and
+        std.mem.eql(u8, image.artifact_name, "userspace-secure-pasteboard.elf") and
+        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
+        image.service_class.? == .secure_pasteboard and
+        image.provided_interfaces.len == 1 and
+        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.secure.pasteboard");
+}
+
+fn securePasteboardContractEvidence() PasteboardContractEvidence {
+    var evidence = PasteboardContractEvidence{};
+    var service = secure_pasteboard.Service.init();
+    var ledger = event_ledger.Ledger.init();
+    const source = principal.PrincipalId{ .kind = .app, .serial = 2050 };
+    const destination = principal.PrincipalId{ .kind = .app, .serial = 2051 };
+    var buffer: [secure_pasteboard.MAX_PAYLOAD_BYTES]u8 = undefined;
+
+    if (service.offer(.{
+        .subject = source,
+        .source_task_id = 2050,
+        .destination_task_id = 2051,
+        .user_gesture_id = 0,
+        .foreground_session_id = 77,
+        .expires_at_ticks = 100,
+        .now_ticks = 10,
+        .purpose = "paste into contract note",
+        .payload = "contract private pasteboard payload",
+    }, &ledger)) |_| {
+        return evidence;
+    } else |err| {
+        evidence.foreground_gesture_gate = err == error.MissingUserGesture;
+    }
+    if (service.offer(.{
+        .subject = source,
+        .source_task_id = 2050,
+        .destination_task_id = 2051,
+        .user_gesture_id = 11,
+        .foreground_session_id = 0,
+        .expires_at_ticks = 100,
+        .now_ticks = 10,
+        .purpose = "paste into contract note",
+        .payload = "contract private pasteboard payload",
+    }, &ledger)) |_| {
+        return evidence;
+    } else |err| {
+        evidence.foreground_gesture_gate = evidence.foreground_gesture_gate and err == error.MissingForegroundSession;
+    }
+
+    const grant = service.offer(.{
+        .subject = source,
+        .source_task_id = 2050,
+        .destination_task_id = 2051,
+        .user_gesture_id = 11,
+        .foreground_session_id = 77,
+        .expires_at_ticks = 100,
+        .now_ticks = 12,
+        .purpose = "paste into contract note",
+        .payload = "contract private pasteboard payload",
+        .detail = "contract private pasteboard payload",
+    }, &ledger) catch return evidence;
+    const token_id = grant.token_id;
+
+    if (service.read(.{
+        .subject = destination,
+        .destination_task_id = 9999,
+        .token_id = token_id,
+        .user_gesture_id = 12,
+        .foreground_session_id = 77,
+        .now_ticks = 13,
+        .expected_purpose = "paste into contract note",
+        .detail = "contract private pasteboard payload",
+    }, buffer[0..], &ledger)) |_| {
+        return evidence;
+    } else |err| {
+        evidence.destination_bound_grant = err == error.InvalidDestination;
+    }
+    if (service.read(.{
+        .subject = destination,
+        .destination_task_id = 2051,
+        .token_id = token_id,
+        .user_gesture_id = 13,
+        .foreground_session_id = 77,
+        .now_ticks = 100,
+        .expected_purpose = "paste into contract note",
+        .detail = "contract private pasteboard payload",
+    }, buffer[0..], &ledger)) |_| {
+        return evidence;
+    } else |err| {
+        evidence.strict_expiry_gate = err == error.ExpiredGrant;
+    }
+
+    const pasted = service.read(.{
+        .subject = destination,
+        .destination_task_id = 2051,
+        .token_id = token_id,
+        .user_gesture_id = 14,
+        .foreground_session_id = 77,
+        .now_ticks = 20,
+        .expected_purpose = "paste into contract note",
+        .detail = "contract private pasteboard payload",
+    }, buffer[0..], &ledger) catch return evidence;
+    if (!std.mem.eql(u8, pasted, "contract private pasteboard payload")) return evidence;
+    if (service.read(.{
+        .subject = destination,
+        .destination_task_id = 2051,
+        .token_id = token_id,
+        .user_gesture_id = 15,
+        .foreground_session_id = 77,
+        .now_ticks = 21,
+        .expected_purpose = "paste into contract note",
+        .detail = "contract private pasteboard payload replay",
+    }, buffer[0..], &ledger)) |_| {
+        return evidence;
+    } else |err| {
+        evidence.read_once_token = err == error.GrantAlreadyConsumed;
+    }
+
+    const revocable = service.offer(.{
+        .subject = source,
+        .source_task_id = 2050,
+        .destination_task_id = 2051,
+        .user_gesture_id = 16,
+        .foreground_session_id = 77,
+        .expires_at_ticks = 120,
+        .now_ticks = 30,
+        .purpose = "paste into contract note",
+        .payload = "contract revoked pasteboard payload",
+        .detail = "contract revoked pasteboard payload",
+    }, &ledger) catch return evidence;
+    const revoked_token_id = revocable.token_id;
+    service.revoke(.{
+        .subject = source,
+        .source_task_id = 2050,
+        .token_id = revoked_token_id,
+        .now_ticks = 31,
+        .detail = "contract revoked pasteboard payload",
+    }, &ledger) catch return evidence;
+    if (service.read(.{
+        .subject = destination,
+        .destination_task_id = 2051,
+        .token_id = revoked_token_id,
+        .user_gesture_id = 17,
+        .foreground_session_id = 77,
+        .now_ticks = 32,
+        .expected_purpose = "paste into contract note",
+        .detail = "contract revoked pasteboard payload",
+    }, buffer[0..], &ledger)) |_| {
+        return evidence;
+    } else |err| {
+        evidence.revocation_gate = err == error.GrantRevoked;
+    }
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    evidence.user_visible_audit = summary.pasteboard_events >= 10 and summary.pasteboard_denials >= 6;
+    var export_buffer: [2048]u8 = undefined;
+    const exported = ledger.exportText(&export_buffer, .{}) catch return evidence;
+    evidence.redacted_diagnostics =
+        summary.protected_details_redacted >= summary.pasteboard_events and
+        std.mem.indexOf(u8, exported, "contract private pasteboard payload") == null and
+        std.mem.indexOf(u8, exported, "contract revoked pasteboard payload") == null and
+        std.mem.indexOf(u8, exported, "kind=pasteboard_access") != null;
+    return evidence;
+}
+
 test "2026 OS contract keeps sixteen modernization features satisfied" {
     const checklist = currentRepositoryContract();
     try std.testing.expectEqual(@as(usize, 16), feature_count);
@@ -1747,14 +2641,16 @@ test "2026 OS contract keeps sixteen modernization features satisfied" {
     try std.testing.expect(checklist.satisfied(.typed_ai_inference_service));
 }
 
-test "2026 OS contract keeps thirty two additional modernization passes satisfied" {
+test "2026 OS contract keeps thirty four additional modernization passes satisfied" {
     const checklist = currentRepositoryExtraContract();
-    try std.testing.expectEqual(@as(usize, 32), extra_feature_count);
+    try std.testing.expectEqual(@as(usize, 34), extra_feature_count);
     try std.testing.expectEqual(extra_feature_count, checklist.satisfiedCount());
     try std.testing.expect(checklist.complete());
     try std.testing.expect(checklist.satisfied(.typed_privacy_budget_service));
     try std.testing.expect(checklist.satisfied(.typed_diagnostics_export_service));
     try std.testing.expect(checklist.satisfied(.private_egress_budget_policy));
+    try std.testing.expect(checklist.satisfied(.process_hidden_observability_denied));
+    try std.testing.expect(checklist.satisfied(.process_continuous_observability_scope));
 }
 
 test "2026 OS contract keeps thirty two third-loop lifecycle passes satisfied" {
@@ -1837,15 +2733,43 @@ test "2026 OS contract keeps twenty tenth-loop accessibility profile passes sati
     try std.testing.expect(checklist.satisfied(.accessibility_redaction));
 }
 
-test "2026 OS contract keeps twenty two eleventh-loop agent session passes satisfied" {
+test "2026 OS contract keeps twenty four eleventh-loop agent session passes satisfied" {
     const checklist = currentRepositoryEleventhContract();
-    try std.testing.expectEqual(@as(usize, 22), eleventh_feature_count);
+    try std.testing.expectEqual(@as(usize, 24), eleventh_feature_count);
     try std.testing.expectEqual(eleventh_feature_count, checklist.satisfiedCount());
     try std.testing.expect(checklist.complete());
     try std.testing.expect(checklist.satisfied(.agent_manifest_session_binding));
     try std.testing.expect(checklist.satisfied(.agent_session_service_model));
     try std.testing.expect(checklist.satisfied(.policy_agent_kill_switch_gate));
+    try std.testing.expect(checklist.satisfied(.agent_session_cumulative_context_budget));
+    try std.testing.expect(checklist.satisfied(.agent_action_denial_audit));
     try std.testing.expect(checklist.satisfied(.agent_session_redaction));
+}
+
+test "2026 OS contract keeps twenty one twelfth-loop background activity passes satisfied" {
+    const checklist = currentRepositoryTwelfthContract();
+    try std.testing.expectEqual(@as(usize, 21), twelfth_feature_count);
+    try std.testing.expectEqual(twelfth_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.background_manifest_decl));
+    try std.testing.expect(checklist.satisfied(.policy_background_network_gate));
+    try std.testing.expect(checklist.satisfied(.typed_background_activity_service));
+    try std.testing.expect(checklist.satisfied(.background_dispatch_runtime_gate));
+    try std.testing.expect(checklist.satisfied(.background_expiration_watchdog));
+    try std.testing.expect(checklist.satisfied(.background_activity_redaction));
+}
+
+test "2026 OS contract keeps fifteen thirteenth-loop secure pasteboard passes satisfied" {
+    const checklist = currentRepositoryThirteenthContract();
+    try std.testing.expectEqual(@as(usize, 15), thirteenth_feature_count);
+    try std.testing.expectEqual(thirteenth_feature_count, checklist.satisfiedCount());
+    try std.testing.expect(checklist.complete());
+    try std.testing.expect(checklist.satisfied(.secure_pasteboard_service_model));
+    try std.testing.expect(checklist.satisfied(.pasteboard_foreground_gesture_gate));
+    try std.testing.expect(checklist.satisfied(.pasteboard_read_once_token));
+    try std.testing.expect(checklist.satisfied(.pasteboard_redacted_diagnostics));
+    try std.testing.expect(checklist.satisfied(.pasteboard_bootstrap_service_contract));
+    try std.testing.expect(checklist.satisfied(.pasteboard_boot_image_registry));
 }
 
 test "2026 OS contract proves AI policy and diagnostics stay private by default" {

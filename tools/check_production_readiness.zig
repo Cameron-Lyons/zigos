@@ -54,6 +54,21 @@ const FIRST_HARDWARE_TARGET_REQUIRED_MARKERS = [_][]const u8{
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME:PASS",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECOVERY:PASS",
 };
+const FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS = [_][]const u8{
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SMBIOS_SKU:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:MULTIBOOT_MEMORY_MAP:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_RSDP:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_MADT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_FADT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER_INTERRUPT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_WRITE_READ_COMPLETION:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:I225_LM_FRAME_INTERRUPT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME_POWER:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
+};
 const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
@@ -62,12 +77,17 @@ const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
     "ZIGOS:SERVICE_BOOT:IPC_CONNECT:ALL_OK",
     "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REBIND_OK",
+    "ZIGOS:SERVICE_BOOT:DRIVER:BROKER_REVOKE_REJECTED",
+    "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REPUBLISH_AFTER_REVOKE_OK",
     "ZIGOS:COMPOSITOR:SERVICE:READY",
     "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED",
     "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED",
     "ZIGOS:PERMISSION:REVIEW_PORT:READY",
     "ZIGOS:PERMISSION:POLICY_PORT:READY",
     "ZIGOS:PERMISSION:UI:REVIEW_RENDERED",
+    "ZIGOS:PERMISSION:XHCI_KEYBOARD:REPORT",
+    "ZIGOS:PERMISSION:XHCI_KEYBOARD:REVIEW_COMMAND",
+    "ZIGOS:PERMISSION:XHCI_KEYBOARD:BOOT_FLOW_COMMANDS",
     "ZIGOS:PERMISSION:LEASE:EXPIRED",
     "ZIGOS:SYNC:DEVICE_GRAPH:ROOTED",
     "ZIGOS:SYNC:SYNC:DEVICE_TO_DEVICE",
@@ -505,7 +525,9 @@ fn validateFirstHardwareTarget(
         }
     }
     try validateNuc11tnki5MarkerFile(allocator, io, errors);
+    try validateNuc11tnki5ProofPreparation(allocator, io, errors);
     try validateNuc11tnki5ProofChecker(allocator, io, errors);
+    try validateNuc11tnki5KernelProofSources(allocator, io, errors);
 
     const current_hardware_evidence = try common.collectStringArray(
         allocator,
@@ -539,6 +561,287 @@ fn validateFirstHardwareTarget(
     }
 }
 
+fn validateNuc11tnki5KernelProofSources(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const hardware_proof_path = "src/kernel/platform/hardware_proof.zig";
+    const apic_path = "src/kernel/platform/apic.zig";
+    const crash_record_path = "src/kernel/platform/crash_record.zig";
+    const fadt_path = "src/kernel/platform/fadt.zig";
+    const framebuffer_path = "src/kernel/platform/framebuffer.zig";
+    const hardware_target_path = "src/native/platform/hardware_target.zig";
+    const first_target_telemetry_path = "src/kernel/drivers/first_target_telemetry.zig";
+    const platform_policy_signals_path = "src/native/platform/platform_policy_signals.zig";
+    const xhci_path = "src/kernel/drivers/xhci.zig";
+    const nvme_path = "src/kernel/drivers/nvme.zig";
+    const i225_path = "src/kernel/drivers/intel_i225.zig";
+    if (!common.pathExists(io, hardware_proof_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source is missing: {s}", .{hardware_proof_path});
+        return;
+    }
+    if (!common.pathExists(io, apic_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 APIC proof source is missing: {s}", .{apic_path});
+        return;
+    }
+    if (!common.pathExists(io, crash_record_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 crash persistence proof source is missing: {s}", .{crash_record_path});
+        return;
+    }
+    if (!common.pathExists(io, fadt_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 FADT suspend proof source is missing: {s}", .{fadt_path});
+        return;
+    }
+    if (!common.pathExists(io, framebuffer_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 framebuffer proof source is missing: {s}", .{framebuffer_path});
+        return;
+    }
+    if (!common.pathExists(io, hardware_target_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 update rollback proof source is missing: {s}", .{hardware_target_path});
+        return;
+    }
+    if (!common.pathExists(io, first_target_telemetry_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 first-target telemetry source is missing: {s}", .{first_target_telemetry_path});
+        return;
+    }
+    if (!common.pathExists(io, platform_policy_signals_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 platform policy signal source is missing: {s}", .{platform_policy_signals_path});
+        return;
+    }
+    if (!common.pathExists(io, nvme_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 NVMe proof source is missing: {s}", .{nvme_path});
+        return;
+    }
+    if (!common.pathExists(io, xhci_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 xHCI proof source is missing: {s}", .{xhci_path});
+        return;
+    }
+    if (!common.pathExists(io, i225_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 I225 proof source is missing: {s}", .{i225_path});
+        return;
+    }
+    const hardware_proof_source = try common.readFileAlloc(allocator, io, hardware_proof_path, common.source_file_max_bytes);
+    const apic_source = try common.readFileAlloc(allocator, io, apic_path, common.source_file_max_bytes);
+    const crash_record_source = try common.readFileAlloc(allocator, io, crash_record_path, common.source_file_max_bytes);
+    const fadt_source = try common.readFileAlloc(allocator, io, fadt_path, common.source_file_max_bytes);
+    const framebuffer_source = try common.readFileAlloc(allocator, io, framebuffer_path, common.source_file_max_bytes);
+    const hardware_target_source = try common.readFileAlloc(allocator, io, hardware_target_path, common.source_file_max_bytes);
+    const first_target_telemetry_source = try common.readFileAlloc(allocator, io, first_target_telemetry_path, common.source_file_max_bytes);
+    const platform_policy_signals_source = try common.readFileAlloc(allocator, io, platform_policy_signals_path, common.source_file_max_bytes);
+    const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
+    const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
+    const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
+    const required_hardware_proof_snippets = [_][]const u8{
+        "recordApicTimerProof",
+        "recordFramebufferProof",
+        "recordInputProof",
+        "recordStorageProof",
+        "recordNetworkProof",
+        "recordSuspendResumeProof",
+        "recordCrashPersistenceProof",
+        "recordUpdateRollbackProof",
+        "productionHardwareVerified",
+    };
+    for (required_hardware_proof_snippets) |snippet| {
+        if (std.mem.indexOf(u8, hardware_proof_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source must enforce snippet: {s}", .{snippet});
+        }
+    }
+    const required_apic_snippets = [_][]const u8{
+        "TimerEvidenceSource",
+        "hardware_lapic_timer",
+        "HardwareTimerInterruptEvidence",
+        "initial_count_register_writes",
+        "divide_register_writes",
+        "lvt_timer_register_writes",
+        "current_count_register_reads",
+        "isr_vector_observations",
+        "interrupt_handler_entries",
+        "eoi_register_writes",
+        "tsc_delta_ticks",
+        "productionHardwareVerified",
+        "withHardwareTimerEvidence",
+    };
+    for (required_apic_snippets) |snippet| {
+        if (std.mem.indexOf(u8, apic_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 APIC proof source must enforce hardware LAPIC timer snippet: {s}", .{snippet});
+        }
+    }
+    const required_crash_record_snippets = [_][]const u8{
+        "PersistenceEvidenceSource",
+        "hardware_reboot_persistence",
+        "HardwarePersistenceEvidence",
+        "crash_handler_entries",
+        "persistent_record_writes",
+        "persistent_record_flushes",
+        "reboot_observations",
+        "recovery_boot_reads",
+        "recovered_record_validations",
+        "redacted_report_emissions",
+        "persistent_bytes_written",
+        "persistent_bytes_read",
+        "productionHardwareVerified",
+        "withHardwarePersistenceEvidence",
+    };
+    for (required_crash_record_snippets) |snippet| {
+        if (std.mem.indexOf(u8, crash_record_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 crash persistence proof source must enforce hardware reboot-persistence snippet: {s}", .{snippet});
+        }
+    }
+    const required_fadt_snippets = [_][]const u8{
+        "SuspendEvidenceSource",
+        "hardware_power_transition",
+        "HardwareSuspendResumeEvidence",
+        "pm1_control_sleep_writes",
+        "s_state_entry_observations",
+        "s0_resume_observations",
+        "pm_timer_resume_reads",
+        "sci_wake_interrupts",
+        "resumed_timer_probes",
+        "resumed_framebuffer_probes",
+        "resumed_xhci_probes",
+        "resumed_nvme_probes",
+        "resumed_i225_probes",
+        "productionHardwareVerified",
+        "withHardwareSuspendResumeEvidence",
+    };
+    for (required_fadt_snippets) |snippet| {
+        if (std.mem.indexOf(u8, fadt_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 FADT suspend proof source must enforce hardware power-transition snippet: {s}", .{snippet});
+        }
+    }
+    const required_framebuffer_snippets = [_][]const u8{
+        "ScanoutEvidenceSource",
+        "hardware_gop_scanout",
+        "HardwareScanoutEvidence",
+        "gop_mode_info_reads",
+        "framebuffer_base_observations",
+        "framebuffer_stride_observations",
+        "framebuffer_memory_read_bytes",
+        "display_scanout_observations",
+        "expected_pixel_observations",
+        "captured_scanline_bytes",
+        "sink_signal_observations",
+        "productionHardwareVerified",
+        "withHardwareScanoutEvidence",
+    };
+    for (required_framebuffer_snippets) |snippet| {
+        if (std.mem.indexOf(u8, framebuffer_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 framebuffer proof source must enforce hardware GOP scanout snippet: {s}", .{snippet});
+        }
+    }
+    const required_update_rollback_snippets = [_][]const u8{
+        "UpdateRollbackEvidenceSource",
+        "hardware_power_cycle",
+        "HardwareUpdateRollbackEvidence",
+        "candidate_activation_writes",
+        "selector_record_flushes",
+        "power_cycle_observations",
+        "failure_detector_observations",
+        "rollback_decision_records",
+        "stable_slot_boot_observations",
+        "recovered_slot_reads",
+        "persisted_state_verifications",
+        "service_start_suppression_observations",
+        "productionHardwareVerified",
+        "withHardwareUpdateRollbackEvidence",
+    };
+    for (required_update_rollback_snippets) |snippet| {
+        if (std.mem.indexOf(u8, hardware_target_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 update rollback proof source must enforce hardware power-cycle snippet: {s}", .{snippet});
+        }
+    }
+    const required_first_target_telemetry_snippets = [_][]const u8{
+        "TelemetrySampleSequenceStale",
+        "telemetrySampleSequenceStale",
+        "thermal_sample_sequence",
+        "battery_sample_sequence",
+        "accelerator_sample_sequence",
+        "grid_carbon_sample_sequence",
+        "reading.thermal.sample_sequence <= recorded.thermal_sample_sequence",
+        "reading.battery.sample_sequence <= recorded.battery_sample_sequence",
+        "reading.accelerators.sample_sequence <= recorded.accelerator_sample_sequence",
+        "reading.grid_carbon.sample_sequence <= recorded.grid_carbon_sample_sequence",
+    };
+    for (required_first_target_telemetry_snippets) |snippet| {
+        if (std.mem.indexOf(u8, first_target_telemetry_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 first-target telemetry recorder must reject stale source sequence snippet: {s}", .{snippet});
+        }
+    }
+    const required_platform_policy_signal_snippets = [_][]const u8{
+        "freshAfter",
+        "thermal_sample_sequence",
+        "battery_sample_sequence",
+        "accelerator_sample_sequence",
+        "grid_carbon_sample_sequence",
+        "error.TelemetryObservationStale",
+        "rejected_observation_count += 1",
+        "self.reader_generation < previous.reader_generation",
+        "self.thermal_sample_sequence > previous.thermal_sample_sequence",
+        "self.grid_carbon_sample_sequence > previous.grid_carbon_sample_sequence",
+    };
+    for (required_platform_policy_signal_snippets) |snippet| {
+        if (std.mem.indexOf(u8, platform_policy_signals_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 platform telemetry provider must reject stale reader snapshot snippet: {s}", .{snippet});
+        }
+    }
+    const required_xhci_snippets = [_][]const u8{
+        "InputEvidenceSource",
+        "hardware_event_ring",
+        "HardwareInputEvidence",
+        "controller_event_trbs",
+        "event_ring_dma_writes",
+        "device_context_reads_by_controller",
+        "endpoint_context_reads_by_controller",
+        "interrupt_assertions",
+        "port_status_change_events",
+        "input_report_dma_bytes",
+        "productionHardwareVerified",
+        "withHardwareInputEvidence",
+    };
+    for (required_xhci_snippets) |snippet| {
+        if (std.mem.indexOf(u8, xhci_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 xHCI proof source must enforce hardware-owned event-ring snippet: {s}", .{snippet});
+        }
+    }
+    const required_nvme_snippets = [_][]const u8{
+        "CompletionEvidenceSource",
+        "hardware_dma",
+        "HardwareCompletionEvidence",
+        "controller_completion_writes",
+        "dma_read_bytes",
+        "dma_write_bytes",
+        "interrupt_count",
+        "phase_tag_observations",
+        "productionHardwareVerified",
+        "withHardwareCompletionEvidence",
+    };
+    for (required_nvme_snippets) |snippet| {
+        if (std.mem.indexOf(u8, nvme_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 NVMe proof source must enforce hardware-owned completion snippet: {s}", .{snippet});
+        }
+    }
+    const required_i225_snippets = [_][]const u8{
+        "PacketEvidenceSource",
+        "hardware_descriptor_ring",
+        "HardwarePacketEvidence",
+        "tx_descriptors_owned_by_device",
+        "rx_descriptors_owned_by_device",
+        "tx_dma_bytes",
+        "rx_dma_bytes",
+        "asserted_interrupts",
+        "phy_packet_observations",
+        "productionHardwareVerified",
+        "withHardwarePacketEvidence",
+    };
+    for (required_i225_snippets) |snippet| {
+        if (std.mem.indexOf(u8, i225_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 I225 proof source must enforce hardware-owned descriptor-ring snippet: {s}", .{snippet});
+        }
+    }
+}
+
 fn validateNuc11tnki5MarkerFile(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -555,9 +858,41 @@ fn validateNuc11tnki5MarkerFile(
             try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required marker: {s}", .{marker});
         }
     }
+    for (FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS) |marker| {
+        if (std.mem.indexOf(u8, source, marker) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required hardware fact marker: {s}", .{marker});
+        }
+    }
     for (FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS) |marker| {
         if (std.mem.indexOf(u8, source, marker) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required booted proof marker: {s}", .{marker});
+        }
+    }
+}
+
+fn validateNuc11tnki5ProofPreparation(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const prep_path = "scripts/prepare-nuc11tnki5-hardware-proof.sh";
+    if (!common.pathExists(io, prep_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 proof preparation script is missing: {s}", .{prep_path});
+        return;
+    }
+    const source = try common.readFileAlloc(allocator, io, prep_path, common.source_file_max_bytes);
+    const required_snippets = [_][]const u8{
+        "operator-metadata-markers.txt",
+        "$TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE",
+        "$TARGET_PREFIX:BOARD_SKU:NUC11TNKi5",
+        "$TARGET_PREFIX:PROOF_MANIFEST:RECORDED",
+        "$TARGET_PREFIX:FIRMWARE_SETTINGS:RECORDED",
+        "$TARGET_PREFIX:POWER_CYCLE_NOTES:RECORDED",
+        "$TARGET_PREFIX:ARTIFACT_DIGESTS:RECORDED",
+    };
+    for (required_snippets) |snippet| {
+        if (std.mem.indexOf(u8, source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 proof preparation script must emit metadata marker snippet: {s}", .{snippet});
         }
     }
 }
@@ -582,10 +917,77 @@ fn validateNuc11tnki5ProofChecker(
         "ARTIFACT_DIGESTS:RECORDED",
         "proof-manifest.txt",
         "target_id",
+        "REQUIRED_MARKERS_PATH",
+        "EXPECTED_MARKER_FILE",
+        "absolute_path",
+        "EXPECTED_LOG_PATH",
+        "EXPECTED_PROOF_MANIFEST_PATH",
+        "EXPECTED_FIRMWARE_SETTINGS_PATH",
+        "EXPECTED_POWER_CYCLE_NOTES_PATH",
+        "EXPECTED_ATTESTATION_LIFECYCLE_PATH",
+        "EXPECTED_ARTIFACT_DIGESTS_PATH",
+        "require_expected_bundle_path",
+        "does not match proof bundle path",
+        "does not match proof manifest required_markers",
+        "non-real proof evidence text",
+        "synthetic|simulated|mock|fake|fixture|test[-_ ]only|emulated",
         "captured_at_utc",
+        "require_timestamp_not_before",
+        "require_timestamp_value_not_before",
+        "require_timestamp_value_not_after",
+        "is before",
+        "is after",
+        "proof_prepared_at",
+        "proof_captured_at",
+        "power_started_at",
+        "power_completed_at",
+        "attestation_captured_at",
+        "proof manifest prepared_at_utc",
+        "proof manifest captured_at_utc",
+        "started_at_utc",
+        "completed_at_utc",
+        "changed_options",
+        "disabled-for-local-proof-media",
+        "\"storage_mode\" \"nvme\"",
+        "\"notes\"",
+        "repo_vcs",
+        "repo_change_id",
         "repo_commit",
+        "ZIGOS_EXPECTED_REPO_CHANGE_ID",
         "ZIGOS_EXPECTED_REPO_COMMIT",
-        "git -C \"$ROOT_DIR\" rev-parse HEAD",
+        "ZIGOS_ARTIFACT_ROOT",
+        "sha256_file",
+        "artifact digest mismatch",
+        "require_digest_manifest_format",
+        "malformed artifact digest line",
+        "digest_count",
+        "sha256 lines for",
+        "grep -Fxc",
+        "marker_line_number",
+        "require_marker_before",
+        "must appear before",
+        "APIC_TIMER_INTERRUPT:OBSERVED",
+        "APIC_TIMER:PASS",
+        "FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
+        "FRAMEBUFFER_GOP:PASS",
+        "XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
+        "USB_INPUT_XHCI:PASS",
+        "NVME_WRITE_READ_COMPLETION:OBSERVED",
+        "NVME_BLOCK:PASS",
+        "I225_LM_FRAME_INTERRUPT:OBSERVED",
+        "NETWORK_I225_LM:PASS",
+        "SUSPEND_RESUME_POWER:OBSERVED",
+        "SUSPEND_RESUME:PASS",
+        "CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
+        "CRASH_RECOVERY:PASS",
+        "UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
+        "ZIGOS:PLATFORM:UPDATE_ROLLBACK:POWER_CYCLE_OK",
+        "ZIGOS:PLATFORM:CRASH_RECORD:PERSISTED",
+        "ZIGOS:PERMISSION:XHCI_KEYBOARD:REPORT",
+        "ZIGOS:SYNC:NATIVE_DRIVER:FRAME_SENT",
+        "key_line_count",
+        "require_unique_key",
+        "jj -R \"$ROOT_DIR\" log -r @ --no-graph",
         "COLD_BOOTS",
         "WARM_REBOOTS",
         "STORAGE_WRITE_READ_CYCLES",
@@ -595,11 +997,30 @@ fn validateNuc11tnki5ProofChecker(
         "CRASH_RECORD_PERSISTENCE_CYCLES",
         "UPDATE_ROLLBACK_CYCLES",
         "repo_dirty_files",
+        "require_unique_counter",
+        "appears",
+        "require_counter_matches_sidecar",
+        "does not match serial counter",
+        "attestation-lifecycle.txt",
+        "attestation_lifecycle",
+        "initial_generation",
+        "active_generation",
+        "revoked_generation_count",
+        "stale_generation_rejected",
+        "revoked_generation_rejected",
+        "verifier_rejected_stale_attestation",
+        "verifier_metadata_digest_bound",
+        "verifier_metadata_digest",
+        "attestation_request_digest",
         "artifact-digests.sha256",
         "zig-out/bin/kernel-zigos-native.elf",
+        "zig-out/bin/userspace-network-stack.elf",
         "zig-out/bin/userspace-policy-mediation.elf",
         "zig-out/bin/userspace-storage-driver.elf",
+        "SECURITY.md",
         "spec/release_security/release_artifacts.json",
+        "spec/release_security/release_keyring.json",
+        "spec/release_security/revoked_release_keys.json",
         "QEMU",
     };
     for (required_snippets) |snippet| {

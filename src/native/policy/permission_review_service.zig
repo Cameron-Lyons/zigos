@@ -13,6 +13,7 @@ const permission_review = @import("permission_review.zig");
 const policy_mediation = @import("policy_mediation.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
+const xhci = @import("../../kernel/drivers/xhci.zig");
 
 const REVIEW_RENDER_BUFFER_BYTES: usize = units.kibibytes(4);
 const REVIEW_CARD_BUFFER_BYTES: usize = 512;
@@ -66,7 +67,9 @@ else
 
 pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
+pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
+pub const PhysicalInputError = xhci.Error || error{ UnsupportedPhysicalInput, PhysicalInputCommandQueueFull };
 pub const Error = task_runtime.Error || manifest.ValidationError || compositor_display.Error || event_ledger.Error || error{
     ReviewCommandTooLong,
     ReviewComplete,
@@ -81,6 +84,172 @@ pub const ScriptedPlanEntry = struct {
     resource: []const u8,
     command: []const u8,
 };
+
+pub const PhysicalInputSource = struct {
+    controller: xhci.HidController,
+    pending_line: [MAX_INPUT_LINE]u8 = [_]u8{0} ** MAX_INPUT_LINE,
+    pending_line_len: usize = 0,
+    pending_commands: [MAX_PHYSICAL_INPUT_COMMANDS][MAX_INPUT_LINE]u8 = [_][MAX_INPUT_LINE]u8{[_]u8{0} ** MAX_INPUT_LINE} ** MAX_PHYSICAL_INPUT_COMMANDS,
+    pending_command_lens: [MAX_PHYSICAL_INPUT_COMMANDS]usize = [_]usize{0} ** MAX_PHYSICAL_INPUT_COMMANDS,
+    pending_command_head: usize = 0,
+    pending_command_tail: usize = 0,
+    pending_command_count: usize = 0,
+    reports_consumed: usize = 0,
+    commands_completed: usize = 0,
+
+    pub fn init(plan: xhci.RingPlan) xhci.Error!PhysicalInputSource {
+        return .{
+            .controller = try xhci.HidController.init(plan),
+        };
+    }
+
+    pub fn initDefault() xhci.Error!PhysicalInputSource {
+        var source = PhysicalInputSource{
+            .controller = try xhci.HidController.initWithMmio(xhci.defaultCapabilityRegisters(), .{
+                .command_ring_trbs = 64,
+                .event_ring_trbs = 64,
+                .command_ring_address = 0x1000,
+                .event_ring_address = 0x2000,
+            }),
+        };
+        const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
+        _ = try source.controller.attachBootKeyboard(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, descriptor[0..]);
+        return source;
+    }
+
+    pub fn enqueueTextCommand(
+        self: *PhysicalInputSource,
+        device_id: u64,
+        endpoint_id: u8,
+        command: []const u8,
+    ) PhysicalInputError!void {
+        try self.drainReports();
+        if (self.pending_command_count == self.pending_commands.len) return error.PhysicalInputCommandQueueFull;
+        for (command) |ch| {
+            try self.enqueueAsciiKey(device_id, endpoint_id, ch);
+            try self.drainReports();
+        }
+        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{0x28}));
+        try self.drainReports();
+    }
+
+    pub fn takeCommand(self: *PhysicalInputSource, buffer: *[MAX_INPUT_LINE]u8) ?[]const u8 {
+        self.drainReports() catch return null;
+        if (self.pending_command_count == 0) return null;
+        const index = self.pending_command_head;
+        const len = self.pending_command_lens[index];
+        @memcpy(buffer[0..len], self.pending_commands[index][0..len]);
+        @memset(self.pending_commands[index][0..], 0);
+        self.pending_command_lens[index] = 0;
+        self.pending_command_head = (self.pending_command_head + 1) % self.pending_commands.len;
+        self.pending_command_count -= 1;
+        return buffer[0..len];
+    }
+
+    pub fn reportCount(self: *const PhysicalInputSource) usize {
+        return self.reports_consumed;
+    }
+
+    pub fn commandCount(self: *const PhysicalInputSource) usize {
+        return self.commands_completed;
+    }
+
+    pub fn queuedCommandCount(self: *const PhysicalInputSource) usize {
+        return self.pending_command_count;
+    }
+
+    pub fn inputProof(self: *const PhysicalInputSource) ?xhci.InputProof {
+        return self.controller.inputProof();
+    }
+
+    fn enqueueAsciiKey(
+        self: *PhysicalInputSource,
+        device_id: u64,
+        endpoint_id: u8,
+        ch: u8,
+    ) PhysicalInputError!void {
+        const key = hidKeyForAscii(ch) orelse return error.UnsupportedPhysicalInput;
+        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, key.modifiers, &.{key.usage}));
+    }
+
+    fn submitKeyboardReport(
+        self: *PhysicalInputSource,
+        device_id: u64,
+        endpoint_id: u8,
+        report: xhci.HidReport,
+    ) PhysicalInputError!void {
+        const boot_keyboard = self.controller.configuredBootKeyboard() orelse return error.MissingBootKeyboardInterface;
+        if (boot_keyboard.device_id != device_id) return error.UnknownHidDevice;
+        try self.controller.submitKeyboardInterruptEvent(boot_keyboard.slot_id, endpoint_id, report.reportSlice());
+    }
+
+    fn drainReports(self: *PhysicalInputSource) PhysicalInputError!void {
+        while (true) {
+            const report = self.controller.pollHidReport() catch |err| switch (err) {
+                error.EventRingEmpty => return,
+                else => return err,
+            };
+            self.reports_consumed += 1;
+            const ch = asciiFromReport(report) orelse continue;
+            if (ch == '\n') {
+                if (self.pending_line_len == 0) continue;
+                if (self.pending_command_count == self.pending_commands.len) return error.PhysicalInputCommandQueueFull;
+                const index = self.pending_command_tail;
+                @memcpy(self.pending_commands[index][0..self.pending_line_len], self.pending_line[0..self.pending_line_len]);
+                self.pending_command_lens[index] = self.pending_line_len;
+                self.pending_command_tail = (self.pending_command_tail + 1) % self.pending_commands.len;
+                self.pending_command_count += 1;
+                self.commands_completed += 1;
+                self.pending_line_len = 0;
+                @memset(self.pending_line[0..], 0);
+                return;
+            }
+            if (self.pending_line_len >= self.pending_line.len) return error.ReportTooLarge;
+            self.pending_line[self.pending_line_len] = ch;
+            self.pending_line_len += 1;
+        }
+    }
+};
+
+const HidKey = struct {
+    usage: u8,
+    modifiers: u8 = 0,
+};
+
+fn hidKeyForAscii(ch: u8) ?HidKey {
+    return switch (ch) {
+        'a'...'z' => .{ .usage = 0x04 + (ch - 'a') },
+        '1'...'9' => .{ .usage = 0x1e + (ch - '1') },
+        '0' => .{ .usage = 0x27 },
+        '\n' => .{ .usage = 0x28 },
+        ' ' => .{ .usage = 0x2c },
+        '-' => .{ .usage = 0x2d },
+        '=' => .{ .usage = 0x2e },
+        else => null,
+    };
+}
+
+fn asciiFromReport(report: xhci.HidReport) ?u8 {
+    for (report.keySlots()) |usage| {
+        if (usage == 0) continue;
+        return asciiFromUsage(usage, report.modifiers());
+    }
+    return null;
+}
+
+fn asciiFromUsage(usage: u8, modifiers: u8) ?u8 {
+    _ = modifiers;
+    return switch (usage) {
+        0x04...0x1d => 'a' + (usage - 0x04),
+        0x1e...0x26 => '1' + (usage - 0x1e),
+        0x27 => '0',
+        0x28 => '\n',
+        0x2c => ' ',
+        0x2d => '-',
+        0x2e => '=',
+        else => null,
+    };
+}
 
 pub const ProfileLeaseMode = enum(u8) {
     none,
@@ -292,6 +461,7 @@ pub const Service = struct {
     compositor: ?*compositor_session.Session = null,
     compositor_service: ?*compositor_session.Service = null,
     ux: ?*native_ux.Controller = null,
+    physical_input: ?*PhysicalInputSource = null,
 
     pub fn init(
         service_id: u64,
@@ -326,6 +496,23 @@ pub const Service = struct {
     pub fn bindCompositorService(self: *Service, service: *compositor_session.Service) void {
         self.compositor_service = service;
         self.compositor = service.session;
+    }
+
+    pub fn bindPhysicalInput(self: *Service, source: *PhysicalInputSource) void {
+        self.physical_input = source;
+    }
+
+    pub fn physicalInputReportCount(self: *const Service) usize {
+        return if (self.physical_input) |source| source.reportCount() else 0;
+    }
+
+    pub fn physicalInputCommandCount(self: *const Service) usize {
+        return if (self.physical_input) |source| source.commandCount() else 0;
+    }
+
+    pub fn physicalInputEventCount(self: *const Service) usize {
+        const source = self.physical_input orelse return 0;
+        return if (source.inputProof()) |proof| proof.event_count else 0;
     }
 
     pub fn initProfiled(
@@ -419,6 +606,15 @@ pub const Service = struct {
         bundle: manifest.BundleManifest,
         request: manifest.PermissionRequest,
     ) []const u8 {
+        if (self.physical_input) |source| {
+            if (source.takeCommand(buffer)) |line| {
+                console.print("    input> ");
+                console.print(line);
+                console.print("\n");
+                return line;
+            }
+        }
+
         if (self.renderProfileCommand(buffer, bundle, request)) |line| {
             console.print("    input> ");
             console.print(line);
@@ -922,6 +1118,55 @@ test "review service renders commands from a typed decision profile" {
     try std.testing.expectEqual(@as(usize, 1), grants.len);
     try std.testing.expectEqual(@as(?u64, 425), grants[0].expires_at_ticks);
     const window = compositor.windowAtOrder(0).?;
+    try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(window.id, .clipboard, "clipboard").?.decision);
+}
+
+test "review service consumes xHCI keyboard reports for physical permission commands" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createReviewTestTask(&runtime, 14, 37);
+    var physical_input = try PhysicalInputSource.initDefault();
+    try physical_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
+    try physical_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
+
+    var compositor = compositor_session.Session.init();
+    var checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(17, 18, &runtime, &compositor, &checkpoint_store);
+    var service = Service.init(17, 18, &runtime, &[_][]const u8{});
+    service.bindCompositorService(&compositor_service);
+    service.bindPhysicalInput(&physical_input);
+
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+            .local_only = true,
+            .max_lease_ticks = 50,
+        },
+        .{
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .rights = .{ .workspace = .{ .clipboard_read = true } },
+            .required = false,
+        },
+    };
+    var bundle = manifest_fixtures.basicNotesBundle(&permissions);
+    bundle.signature = .{
+        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .signer = "zigos-dev-key",
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+
+    const grants = try service.reviewBundle(task.id, bundle, 30, &grants_buffer);
+    try std.testing.expectEqual(@as(usize, 1), grants.len);
+    try std.testing.expectEqual(manifest.PermissionKind.object_access, grants[0].kind);
+    try std.testing.expect(grants[0].local_only);
+    try std.testing.expectEqual(@as(?u64, 55), grants[0].expires_at_ticks);
+    try std.testing.expectEqual(@as(usize, 2), service.physicalInputCommandCount());
+    try std.testing.expect(service.physicalInputReportCount() >= "allow local lease=25".len + "deny".len + 2);
+    try std.testing.expect(service.physical_input.?.inputProof().?.event_count >= service.physicalInputReportCount());
+    const window = compositor.windowAtOrder(0).?;
+    try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(window.id, .object_access, "workspace:notes").?.decision);
     try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(window.id, .clipboard, "clipboard").?.decision);
 }
 

@@ -35,6 +35,7 @@ pub const ServiceClass = enum(u8) {
     indexing_search,
     sync_replication,
     media_print_helpers,
+    secure_pasteboard,
 };
 
 pub const ServiceBoundary = enum(u8) {
@@ -132,6 +133,7 @@ pub const BootstrapOwnerKey = enum(u8) {
     indexing_service,
     sync_service,
     media_service,
+    pasteboard_service,
     task_runtime_service,
 };
 
@@ -148,6 +150,7 @@ pub const BootstrapServiceRecordKey = enum(u8) {
     indexing_service,
     sync_service,
     media_service,
+    pasteboard_service,
 };
 
 pub const BootstrapLaunch = struct {
@@ -598,6 +601,37 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .published_native_service = true,
     },
+    .{
+        .class = .secure_pasteboard,
+        .owner_key = .pasteboard_service,
+        .service_record_key = .pasteboard_service,
+        .boundary = .userspace_service,
+        .interface = catalogInterface(.secure_pasteboard),
+        .required_capabilities = &.{ .service_bootstrap, .ui_session_surface },
+        .dependencies = &.{ .policy_mediation, .compositor_ui_session },
+        .restart_policy = .supervised_restart,
+        .isolation = .{ .namespace_isolated = true },
+        .userspace_image = .{
+            .bundle_id = "zigos.system.secure-pasteboard",
+            .artifact_name = "userspace-secure-pasteboard.elf",
+            .source_path = "src/userspace/service_main.zig",
+            .display_name = "Secure Pasteboard",
+            .label = "secure-pasteboard",
+            .entry = "zigos.secure.pasteboard",
+            .role_tag = 0xA113,
+            .heartbeat_increment = 19,
+            .contract_flags = userspace_flags.FLAG_SYSTEM_BUNDLE,
+        },
+        .description = "destination-bound foreground paste grants without ambient clipboard state",
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.secure_pasteboard),
+            .correlation_base = 325,
+            .tick = 53,
+            .grants = &.{.service_task_authority},
+        },
+        .published_native_service = true,
+    },
 };
 
 pub const default_services = blk: {
@@ -797,6 +831,7 @@ pub fn serviceName(class: ServiceClass) []const u8 {
         .indexing_search => "indexing_search",
         .sync_replication => "sync_replication",
         .media_print_helpers => "media_print_helpers",
+        .secure_pasteboard => "secure_pasteboard",
     };
 }
 
@@ -870,13 +905,13 @@ fn publishedNativeServiceCount() usize {
 
 test "service catalog derives descriptors and bootstrap contracts from one source" {
     try std.testing.expectEqual(@as(usize, catalog.len), default_services.len);
-    try std.testing.expectEqual(@as(usize, 9), ordered_service_contracts.len);
-    try std.testing.expectEqual(@as(usize, 8), ordered_published_native_service_contracts.len);
+    try std.testing.expectEqual(@as(usize, 10), ordered_service_contracts.len);
+    try std.testing.expectEqual(@as(usize, 9), ordered_published_native_service_contracts.len);
     try std.testing.expectEqual(component_abi_schema.service_catalog_bindings.len, catalog.len);
     try std.testing.expectEqual(ServiceClass.service_registry, ordered_service_contracts[0].class);
     try std.testing.expectEqual(ServiceClass.policy_mediation, ordered_service_contracts[1].class);
-    try std.testing.expectEqual(ServiceClass.media_print_helpers, ordered_service_contracts[8].class);
-    try std.testing.expectEqual(ServiceClass.media_print_helpers, ordered_published_native_service_contracts[7].class);
+    try std.testing.expectEqual(ServiceClass.secure_pasteboard, ordered_service_contracts[9].class);
+    try std.testing.expectEqual(ServiceClass.secure_pasteboard, ordered_published_native_service_contracts[8].class);
     try std.testing.expectEqualStrings(component_abi_schema.interfaceForService(.storage_object).name, entryForClass(.storage_object).?.interface.name);
     try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));

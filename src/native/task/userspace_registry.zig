@@ -226,6 +226,7 @@ pub const boot_image_specs = [_]ImageSpec{
     serviceImageSpec(.indexing_search, .service_component),
     serviceImageSpec(.sync_replication, .service_component),
     serviceImageSpec(.media_print_helpers, .service_component),
+    serviceImageSpec(.secure_pasteboard, .service_component),
     standaloneImageSpec(.{
         .bundle_id = "zigos.system.service-client",
         .artifact_name = "userspace-service-client.elf",
@@ -336,6 +337,7 @@ test "core platform services use the parameterized userspace service entrypoint"
     try std.testing.expectEqual(userspace_mailbox.ServiceKind.package, findByServiceClass(.package_install_update).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.compositor_ui_session).?.source_path);
     try std.testing.expectEqual(userspace_mailbox.ServiceKind.compositor, findByServiceClass(.compositor_ui_session).?.service_kind);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.secure_pasteboard).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/component_main.zig", findByServiceClass(.policy_mediation).?.source_path);
 }
 

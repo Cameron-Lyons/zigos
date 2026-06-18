@@ -379,6 +379,7 @@ fn backgroundStateLabel(state: background_dispatch.RecordState) []const u8 {
         .running => "running",
         .delayed => "waiting",
         .denied => "blocked",
+        .expired => "expired",
         .completed => "completed",
     };
 }

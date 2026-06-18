@@ -39,11 +39,17 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.service_boot_storage_io_before_restart_ok,
     boot_markers.service_boot_storage_dma_domain_programmed,
     boot_markers.service_boot_storage_brokered_dma_buffer_ok,
+    boot_markers.service_boot_storage_timeout_propagated,
+    boot_markers.service_boot_storage_partial_transfer_rejected,
     boot_markers.service_boot_storage_stale_authority_rejected,
     boot_markers.service_boot_storage_stale_dma_port_rejected,
     boot_markers.service_boot_storage_stale_access_rejected,
     boot_markers.service_boot_storage_rebind_ok,
+    boot_markers.service_boot_storage_broker_revoke_rejected,
+    boot_markers.service_boot_storage_republish_after_revoke_ok,
     boot_markers.service_boot_storage_io_after_restart_ok,
+    boot_markers.service_boot_accelerator_queue_owned,
+    boot_markers.service_boot_accelerator_completion_interrupt,
     boot_markers.service_boot_ipc_connect_all_ok,
     boot_markers.permission_review_port_ready,
     boot_markers.permission_policy_port_ready,
@@ -61,6 +67,9 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.permission_grant_peer_ipc_local,
     boot_markers.permission_lease_expired,
     boot_markers.permission_ui_review_rendered,
+    boot_markers.permission_xhci_keyboard_report,
+    boot_markers.permission_xhci_review_command,
+    boot_markers.permission_xhci_boot_flow_commands,
     boot_markers.platform_bootloader_measurement_provided,
     boot_markers.platform_build_artifact_manifest_verified,
     boot_markers.platform_bootloader_handoff_verified,
@@ -73,6 +82,17 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.platform_health_checks_promote_ok,
     boot_markers.platform_measured_boot_recorded,
     boot_markers.platform_measured_boot_verified_root,
+    boot_markers.notes_daily_driver_install_open_ok,
+    boot_markers.notes_daily_driver_edit_saved_ok,
+    boot_markers.notes_daily_driver_share_sync_ok,
+    boot_markers.notes_daily_driver_update_rollback_ok,
+    boot_markers.notes_daily_driver_recovery_remove_ok,
+    boot_markers.notes_daily_driver_authority_revoked_ok,
+    boot_markers.notes_daily_driver_typed_edit_ok,
+    boot_markers.notes_daily_driver_typed_sync_ok,
+    boot_markers.notes_daily_driver_typed_recovery_ok,
+    boot_markers.notes_daily_driver_typed_loop_complete,
+    boot_markers.notes_daily_driver_complete,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
 };
@@ -95,11 +115,17 @@ pub const driver_restart_required = [_][]const u8{
     boot_markers.service_boot_storage_io_before_restart_ok,
     boot_markers.service_boot_storage_dma_domain_programmed,
     boot_markers.service_boot_storage_brokered_dma_buffer_ok,
+    boot_markers.service_boot_storage_timeout_propagated,
+    boot_markers.service_boot_storage_partial_transfer_rejected,
     boot_markers.service_boot_storage_stale_authority_rejected,
     boot_markers.service_boot_storage_stale_dma_port_rejected,
     boot_markers.service_boot_storage_stale_access_rejected,
     boot_markers.service_boot_storage_rebind_ok,
+    boot_markers.service_boot_storage_broker_revoke_rejected,
+    boot_markers.service_boot_storage_republish_after_revoke_ok,
     boot_markers.service_boot_storage_io_after_restart_ok,
+    boot_markers.service_boot_accelerator_queue_owned,
+    boot_markers.service_boot_accelerator_completion_interrupt,
 };
 
 pub const service_startup_required = [_][]const u8{
@@ -134,6 +160,9 @@ pub const permission_review_required = [_][]const u8{
     boot_markers.permission_grant_peer_ipc_local,
     boot_markers.permission_lease_expired,
     boot_markers.permission_ui_review_rendered,
+    boot_markers.permission_xhci_keyboard_report,
+    boot_markers.permission_xhci_review_command,
+    boot_markers.permission_xhci_boot_flow_commands,
 };
 
 pub const ab_rollback_required = [_][]const u8{
@@ -164,6 +193,12 @@ pub const tampered_artifact_manifest_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
     boot_markers.platform_artifact_manifest_tamper_rejected,
+};
+
+pub const tampered_bootloader_measurement_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.platform_bootloader_measurement_tamper_rejected,
 };
 
 pub const tampered_kernel_required = [_][]const u8{
@@ -223,6 +258,12 @@ pub const sync_two_node_required = [_][]const u8{
     "ZIGOS:SYNC:SYNC_POLICY:SELECTIVE",
     "ZIGOS:SYNC:SYNC:DEVICE_TO_DEVICE",
     "ZIGOS:SYNC:SYNC:RELAY",
+    boot_markers.sync_native_driver_packet_captured,
+    boot_markers.sync_native_driver_frame_sent,
+    boot_markers.sync_native_driver_malformed_packet_rejected,
+    boot_markers.sync_native_driver_reconnect_ok,
+    boot_markers.sync_native_driver_replay_rejected,
+    boot_markers.sync_native_driver_congestion_backpressure,
     "ZIGOS:SYNC:DEVICE_REVOKE:ENFORCED",
     "ZIGOS:SYNC:SYNC_SERVICE:RECOVERED",
     boot_markers.native_ready,
@@ -235,6 +276,10 @@ pub const notes_daily_driver_required = [_][]const u8{
     boot_markers.notes_daily_driver_update_rollback_ok,
     boot_markers.notes_daily_driver_recovery_remove_ok,
     boot_markers.notes_daily_driver_authority_revoked_ok,
+    boot_markers.notes_daily_driver_typed_edit_ok,
+    boot_markers.notes_daily_driver_typed_sync_ok,
+    boot_markers.notes_daily_driver_typed_recovery_ok,
+    boot_markers.notes_daily_driver_typed_loop_complete,
     boot_markers.notes_daily_driver_complete,
 };
 
@@ -293,6 +338,8 @@ test "native smoke gate requires in-boot driver crash restart proof markers" {
     for (driver_restart_required) |marker| {
         try std.testing.expect(contains(&cold_boot_required, marker));
     }
+    try std.testing.expect(contains(&driver_restart_required, boot_markers.service_boot_accelerator_queue_owned));
+    try std.testing.expect(contains(&driver_restart_required, boot_markers.service_boot_accelerator_completion_interrupt));
 }
 
 test "native smoke gate requires booted service startup proof markers" {
@@ -322,6 +369,7 @@ test "native smoke gate requires update rollback proof markers" {
 
 test "native smoke gate requires boot attestation negative proof markers" {
     try std.testing.expect(contains(&tampered_artifact_manifest_required, boot_markers.platform_artifact_manifest_tamper_rejected));
+    try std.testing.expect(contains(&tampered_bootloader_measurement_required, boot_markers.platform_bootloader_measurement_tamper_rejected));
     try std.testing.expect(contains(&tampered_kernel_required, boot_markers.platform_artifact_kernel_tamper_rejected));
     try std.testing.expect(contains(&tampered_userspace_image_required, boot_markers.platform_artifact_userspace_image_tamper_rejected));
     try std.testing.expect(contains(&tampered_policy_required, boot_markers.platform_artifact_policy_tamper_rejected));
@@ -341,6 +389,12 @@ test "native smoke gate requires two-node sync transport proof markers" {
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.transport_native_kernel_ready));
     try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC:DEVICE_TO_DEVICE"));
     try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC:RELAY"));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_packet_captured));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_frame_sent));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_malformed_packet_rejected));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_reconnect_ok));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_replay_rejected));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_congestion_backpressure));
     try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC_SERVICE:RECOVERED"));
 }
 
@@ -351,6 +405,10 @@ test "native smoke marker contract includes the Notes daily-driver proof path" {
     try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_update_rollback_ok));
     try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_recovery_remove_ok));
     try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_authority_revoked_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_typed_edit_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_typed_sync_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_typed_recovery_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_typed_loop_complete));
     try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_complete));
 }
 

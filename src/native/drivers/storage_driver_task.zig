@@ -63,6 +63,11 @@ pub const AtaControllerSession = struct {
     dma_domain_id: u64,
     dma_isolation: device_broker.DmaIsolationStatus,
     brokered_dma_buffer: device_broker.BrokeredDmaBuffer,
+    fault_injection: AtaFaultInjection = .{},
+};
+
+pub const AtaFaultInjection = struct {
+    force_next_timeout: bool = false,
 };
 
 pub fn establishAtaBootstrapSession(
@@ -99,6 +104,7 @@ pub fn establishAtaBootstrapSession(
         .dma_domain_id = dma_domain_id,
         .dma_isolation = dma_isolation,
         .brokered_dma_buffer = brokered_dma_buffer,
+        .fault_injection = .{},
     };
 }
 
@@ -122,6 +128,10 @@ pub fn readAtaBootstrapSessionChecked(session: *AtaControllerSession, start_lba:
 
 pub fn writeAtaBootstrapSessionChecked(session: *AtaControllerSession, start_lba: u64, buffer: []const u8) AtaDriverError!void {
     try transferWriteRangeChecked(session, start_lba, buffer);
+}
+
+pub fn forceNextAtaTimeout(session: *AtaControllerSession) void {
+    session.fault_injection.force_next_timeout = true;
 }
 
 pub fn constrainedProgrammedIoFirstTarget(session: *const AtaControllerSession) bool {
@@ -257,6 +267,10 @@ fn issueLba28Command(session: *AtaControllerSession, lba: u64, count: u8, comman
 }
 
 fn waitDriveReady(session: *AtaControllerSession) AtaDriverError!void {
+    if (consumeForcedTimeout(session)) {
+        try requireCurrentGeneration(session);
+        return error.Timeout;
+    }
     var timeout: u32 = ATA_POLL_LIMIT;
     while (timeout > 0) : (timeout -= 1) {
         const status = try readPortU8(session, session.base_port + ATA_REG_STATUS);
@@ -267,6 +281,10 @@ fn waitDriveReady(session: *AtaControllerSession) AtaDriverError!void {
 }
 
 fn waitDataReady(session: *AtaControllerSession) AtaDriverError!void {
+    if (consumeForcedTimeout(session)) {
+        try requireCurrentGeneration(session);
+        return error.Timeout;
+    }
     var timeout: u32 = ATA_POLL_LIMIT;
     while (timeout > 0) : (timeout -= 1) {
         const status = try readPortU8(session, session.base_port + ATA_REG_STATUS);
@@ -274,6 +292,12 @@ fn waitDataReady(session: *AtaControllerSession) AtaDriverError!void {
         if ((status & ATA_SR_BSY) == 0 and (status & ATA_SR_DRQ) != 0) return;
     }
     return error.Timeout;
+}
+
+fn consumeForcedTimeout(session: *AtaControllerSession) bool {
+    if (!session.fault_injection.force_next_timeout) return false;
+    session.fault_injection.force_next_timeout = false;
+    return true;
 }
 
 fn readPortU8(session: *AtaControllerSession, port: u16) AtaDriverError!u8 {
@@ -309,6 +333,10 @@ fn writePortU16(session: *AtaControllerSession, port: u16, value: u16) AtaDriver
 fn requireCurrentGeneration(session: *AtaControllerSession) AtaDriverError!void {
     const task = session.client.kernel_port.kernel.runtime.find(session.client.task_id) orelse return error.BrokerUnavailable;
     if (task.process_generation != session.process_generation) return error.StaleGeneration;
+    if (session.client.device_id != 0) {
+        const current_generation = device_broker.brokerGeneration(session.client.device_id) orelse return error.BrokerRevoked;
+        if (current_generation != session.client.broker_generation) return error.StaleBrokerSession;
+    }
 }
 
 fn mapBrokerError(err: anyerror) AtaDriverError {
@@ -402,6 +430,13 @@ test "storage driver task attaches only through the kernel device broker" {
     var session = establishAtaBootstrapSession(&kernel_port, 0x1F001, device_capability.id, driver_task.id, 11, 9).?;
     try std.testing.expect(constrainedProgrammedIoFirstTarget(&session));
     try std.testing.expect(brokeredDmaBufferReady(&session));
+    var readback: [storage_volume.sector_size]u8 = undefined;
+    forceNextAtaTimeout(&session);
+    try std.testing.expectError(error.Timeout, readAtaBootstrapSessionChecked(&session, 0, readback[0..]));
+    try std.testing.expectError(
+        error.InvalidParameter,
+        writeAtaBootstrapSessionChecked(&session, 0, readback[0 .. storage_volume.sector_size / 2]),
+    );
     attachAtaBootstrapSession(&session);
     try std.testing.expect(storage_volume.hasAttachedDevice());
 }
