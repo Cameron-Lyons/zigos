@@ -70,16 +70,6 @@ pub const StorageCore = struct {
         return checkpoint_support.makeService(StorageCore, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
-    pub fn bootstrapWithStore(
-        service_id: u64,
-        task_id: u64,
-        owner: principal.PrincipalId,
-        checkpoint_store: *CheckpointStore,
-    ) StorageCore {
-        const loaded_from_volume = checkpoint_store.preparePersistentState();
-        return checkpoint_support.makeService(StorageCore, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
-    }
-
     pub fn bindPrepared(
         checkpoint_store: *CheckpointStore,
         service_id: u64,
@@ -835,148 +825,107 @@ pub const StoragePort = struct {
         access: file_bridge.AccessMode,
     ) AuthorityError!*const capability.Capability {
         const required_right: capability.CapabilityRight = if (access == .write) .object_write else .object_read;
-        const authority = self.capability_table.requireUsable(authority_context.capability_id, authority_context.now_ticks) catch |err| switch (err) {
-            error.CapabilityNotFound => {
-                writeStorageTrace(
-                    authority_context,
-                    self.core.service_id,
-                    required_right,
-                    null,
-                    0,
-                    .denied,
-                    .capability_missing,
-                );
-                return error.CapabilityNotFound;
-            },
-            error.CapabilityRevoked => {
-                writeStorageTrace(
-                    authority_context,
-                    self.core.service_id,
-                    required_right,
-                    null,
-                    0,
-                    .denied,
-                    .capability_revoked,
-                );
-                return error.CapabilityRevoked;
-            },
-            else => native_util.impossibleByInvariantError("storage authority lookup only reports not-found or revoked capabilities", err),
-        };
+        const authority = try self.requireUsableStorageCapability(authority_context, required_right);
         if (!authority.holder.eql(authority_context.principal)) {
-            writeStorageTrace(
+            return self.denyStorageAuthorityTarget(
                 authority_context,
-                self.core.service_id,
                 required_right,
-                authority.target.kind,
-                authority.target.id,
-                .denied,
+                authority,
                 .policy_denied,
+                error.PermissionDenied,
             );
-            return error.PermissionDenied;
         }
         if (authority.scope.task_id) |scoped_task_id| {
             if (scoped_task_id != authority_context.task_id) {
-                writeStorageTrace(
+                return self.denyStorageAuthorityTarget(
                     authority_context,
-                    self.core.service_id,
                     required_right,
-                    authority.target.kind,
-                    authority.target.id,
-                    .denied,
+                    authority,
                     .scope_violation,
+                    error.PermissionDenied,
                 );
-                return error.PermissionDenied;
             }
         }
         if (workspace_id) |requested_workspace_id| {
             if (authority.scope.workspace_id) |scoped_workspace_id| {
                 if (scoped_workspace_id != requested_workspace_id.raw()) {
-                    writeStorageTrace(
+                    return self.denyStorageAuthority(
                         authority_context,
-                        self.core.service_id,
                         required_right,
                         .workspace,
                         requested_workspace_id.raw(),
-                        .denied,
                         .scope_violation,
+                        error.WorkspaceScopeViolation,
                     );
-                    return error.WorkspaceScopeViolation;
                 }
             }
         }
         switch (authority.target.kind) {
             .service => if (authority.target.id != self.core.service_id) {
-                writeStorageTrace(
+                return self.denyStorageAuthorityTarget(
                     authority_context,
-                    self.core.service_id,
                     required_right,
-                    authority.target.kind,
-                    authority.target.id,
-                    .denied,
+                    authority,
                     .invalid_target,
+                    error.CapabilityRequired,
                 );
-                return error.CapabilityRequired;
             },
-            .workspace => if (workspace_id == null or authority.target.id != workspace_id.?.raw()) {
-                writeStorageTrace(
-                    authority_context,
-                    self.core.service_id,
-                    required_right,
-                    authority.target.kind,
-                    authority.target.id,
-                    .denied,
-                    .scope_violation,
-                );
-                return error.WorkspaceScopeViolation;
+            .workspace => {
+                const requested_workspace_id = workspace_id orelse {
+                    return self.denyStorageAuthorityTarget(
+                        authority_context,
+                        required_right,
+                        authority,
+                        .scope_violation,
+                        error.WorkspaceScopeViolation,
+                    );
+                };
+                if (authority.target.id != requested_workspace_id.raw()) {
+                    return self.denyStorageAuthorityTarget(
+                        authority_context,
+                        required_right,
+                        authority,
+                        .scope_violation,
+                        error.WorkspaceScopeViolation,
+                    );
+                }
             },
             .object => if (access == .write) {
-                writeStorageTrace(
+                return self.denyStorageAuthorityTarget(
                     authority_context,
-                    self.core.service_id,
                     required_right,
-                    authority.target.kind,
-                    authority.target.id,
-                    .denied,
+                    authority,
                     .policy_denied,
+                    error.PermissionDenied,
                 );
-                return error.PermissionDenied;
             },
             else => {
-                writeStorageTrace(
+                return self.denyStorageAuthorityTarget(
                     authority_context,
-                    self.core.service_id,
                     required_right,
-                    authority.target.kind,
-                    authority.target.id,
-                    .denied,
+                    authority,
                     .invalid_target,
+                    error.CapabilityRequired,
                 );
-                return error.CapabilityRequired;
             },
         }
         if (access == .write and !authority.rights.has(.object_write)) {
-            writeStorageTrace(
+            return self.denyStorageAuthorityTarget(
                 authority_context,
-                self.core.service_id,
                 required_right,
-                authority.target.kind,
-                authority.target.id,
-                .denied,
+                authority,
                 .policy_denied,
+                error.PermissionDenied,
             );
-            return error.PermissionDenied;
         }
         if (access == .read and !authority.rights.has(.object_read)) {
-            writeStorageTrace(
+            return self.denyStorageAuthorityTarget(
                 authority_context,
-                self.core.service_id,
                 required_right,
-                authority.target.kind,
-                authority.target.id,
-                .denied,
+                authority,
                 .policy_denied,
+                error.PermissionDenied,
             );
-            return error.PermissionDenied;
         }
         writeStorageTrace(
             authority_context,
@@ -988,6 +937,75 @@ pub const StoragePort = struct {
             .none,
         );
         return authority;
+    }
+
+    fn requireUsableStorageCapability(
+        self: *const StoragePort,
+        authority_context: AuthorityContext,
+        required_right: capability.CapabilityRight,
+    ) AuthorityError!*const capability.Capability {
+        return self.capability_table.requireUsable(authority_context.capability_id, authority_context.now_ticks) catch |err| switch (err) {
+            error.CapabilityNotFound => {
+                return self.denyStorageAuthority(
+                    authority_context,
+                    required_right,
+                    null,
+                    0,
+                    .capability_missing,
+                    error.CapabilityNotFound,
+                );
+            },
+            error.CapabilityRevoked => {
+                return self.denyStorageAuthority(
+                    authority_context,
+                    required_right,
+                    null,
+                    0,
+                    .capability_revoked,
+                    error.CapabilityRevoked,
+                );
+            },
+            else => native_util.impossibleByInvariantError("storage authority lookup only reports not-found or revoked capabilities", err),
+        };
+    }
+
+    fn denyStorageAuthorityTarget(
+        self: *const StoragePort,
+        authority_context: AuthorityContext,
+        required_right: capability.CapabilityRight,
+        authority: *const capability.Capability,
+        reason: abi.DenialReason,
+        err: AuthorityError,
+    ) AuthorityError {
+        return self.denyStorageAuthority(
+            authority_context,
+            required_right,
+            authority.target.kind,
+            authority.target.id,
+            reason,
+            err,
+        );
+    }
+
+    fn denyStorageAuthority(
+        self: *const StoragePort,
+        authority_context: AuthorityContext,
+        required_right: capability.CapabilityRight,
+        target_kind: ?capability.CapabilityTargetKind,
+        target_id: u64,
+        reason: abi.DenialReason,
+        err: AuthorityError,
+    ) AuthorityError {
+        writeStorageTrace(
+            authority_context,
+            self.core.service_id,
+            required_right,
+            target_kind,
+            target_id,
+            .denied,
+            reason,
+        );
+        return err;
     }
 
     fn validateShareActor(

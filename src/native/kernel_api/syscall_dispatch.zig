@@ -120,6 +120,36 @@ pub fn invalidRequest() DispatchResult {
     return .{ .status = .invalid_request_pointer };
 }
 
+pub fn invokeAndWriteResponse(
+    comptime operation: abi.NativeOperation,
+    port: *component_port.KernelPort,
+    memory: UserMemoryContext,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult {
+    const request = readRequest(component_port.PortRequest(operation), memory, request_addr) orelse return invalidRequest();
+    const response = component_port.invokeGenerated(operation, port, request, now_ticks) catch |err| return mapError(err);
+    return writeResponse(memory, response_addr, response_len, response);
+}
+
+pub fn invokeNoResponse(
+    comptime operation: abi.NativeOperation,
+    port: *component_port.KernelPort,
+    memory: UserMemoryContext,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult {
+    _ = response_addr;
+    _ = response_len;
+    const request = readRequest(component_port.PortRequest(operation), memory, request_addr) orelse return invalidRequest();
+    _ = component_port.invokeGenerated(operation, port, request, now_ticks) catch |err| return mapError(err);
+    return success();
+}
+
 pub fn explainedFailure(
     status: abi.SyscallStatus,
     reason: abi.DenialReason,

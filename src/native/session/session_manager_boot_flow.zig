@@ -306,6 +306,10 @@ pub const SessionManager = struct {
         clearRootKernelPort();
     }
 
+    fn recordBootFailure(self: *SessionManager, service_id: u64, tick: u64, err: anyerror) void {
+        _ = self.service_graph_builder.supervisor.recordCrash(service_id, tick, bootFailureCode(err));
+    }
+
     fn trustBoot(self: *SessionManager) trust_boot.TrustBoot {
         return trust_boot.TrustBoot.init(
             &self.runtime_context,
@@ -331,28 +335,28 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
     const services = try session_bootstrap.registerCoreServices(&self.service_graph_builder.supervisor, &self.runtime_context.runtime_service, ids);
 
     const session_task = launchNativeBootstrapService(self, ids, services, .session_manager) catch |err| {
-        _ = self.service_graph_builder.supervisor.recordCrash(services.session.id, 0, bootFailureCode(err));
+        self.recordBootFailure(services.session.id, 0, err);
         return err;
     };
     common.printBootMarker(boot_markers.policy_ready);
 
     const review_service_task = launchNativeBootstrapService(self, ids, services, .permission_review_ui) catch |err| {
-        _ = self.service_graph_builder.supervisor.recordCrash(services.review_service_record.id, 0, bootFailureCode(err));
+        self.recordBootFailure(services.review_service_record.id, 0, err);
         return err;
     };
     common.printBootMarker(boot_markers.permission_ui_service_ready);
     common.printBootMarker(boot_markers.permission_ui_service_task_ready);
 
     const session_capability = mintNativeBootstrapGrant(self, ids, services, session_task.id, .session_manager, .session_service_authority) catch |err| {
-        _ = self.service_graph_builder.supervisor.recordCrash(services.session.id, 0, bootFailureCode(err));
+        self.recordBootFailure(services.session.id, 0, err);
         return err;
     };
     const policy_capability = mintNativeBootstrapGrant(self, ids, services, session_task.id, .session_manager, .policy_mint_authority) catch |err| {
-        _ = self.service_graph_builder.supervisor.recordCrash(services.policy_service.id, 0, bootFailureCode(err));
+        self.recordBootFailure(services.policy_service.id, 0, err);
         return err;
     };
     recordSessionTaskBootstrap(self, session_task.id, session_capability.id, policy_capability.id) catch |err| {
-        _ = self.service_graph_builder.supervisor.recordCrash(services.session.id, 0, bootFailureCode(err));
+        self.recordBootFailure(services.session.id, 0, err);
         return err;
     };
 
@@ -388,7 +392,7 @@ fn launchNativeBootstrapService(
         &self.runtime_context.userspace_scheduler,
     ) catch |err| {
         const record = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapLaunch;
-        _ = self.service_graph_builder.supervisor.recordCrash(record.id, launch.tick, bootFailureCode(err));
+        self.recordBootFailure(record.id, launch.tick, err);
         return err;
     };
 }

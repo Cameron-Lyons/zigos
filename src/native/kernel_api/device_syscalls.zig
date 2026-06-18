@@ -10,9 +10,7 @@ pub fn dispatchDeviceDescribe(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.DeviceDescribeRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = component_port.invokeGenerated(.device_describe, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
+    return dispatch.invokeAndWriteResponse(.device_describe, port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
 pub fn dispatchDeviceMmioWindow(
@@ -23,9 +21,7 @@ pub fn dispatchDeviceMmioWindow(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.DeviceMmioWindowRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = component_port.invokeGenerated(.device_mmio_window, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
+    return dispatch.invokeAndWriteResponse(.device_mmio_window, port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
 pub fn dispatchDevicePortRead(
@@ -51,9 +47,5 @@ pub fn dispatchDevicePortWrite(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    _ = response_len;
-    _ = response_addr;
-    const request = dispatch.readRequest(component_port.DevicePortWriteRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    component_port.invokeGenerated(.device_port_write, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.success();
+    return dispatch.invokeNoResponse(.device_port_write, port, memory, now_ticks, request_addr, response_addr, response_len);
 }

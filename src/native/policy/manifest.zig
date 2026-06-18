@@ -557,14 +557,19 @@ fn validatePermissionRights(bundle: BundleManifest) ValidationError!void {
 
 fn validateDuplicatePermissions(bundle: BundleManifest) ValidationError!void {
     for (bundle.requested_permissions, 0..) |request, index| {
-        var previous_index: usize = 0;
-        while (previous_index < index) : (previous_index += 1) {
-            const previous = bundle.requested_permissions[previous_index];
-            if (previous.kind == request.kind and std.mem.eql(u8, previous.resource, request.resource)) {
-                return error.DuplicatePermissionRequest;
-            }
+        if (hasDuplicatePermissionBefore(bundle.requested_permissions, index, request)) {
+            return error.DuplicatePermissionRequest;
         }
     }
+}
+
+fn hasDuplicatePermissionBefore(requests: []const PermissionRequest, index: usize, request: PermissionRequest) bool {
+    var previous_index: usize = 0;
+    while (previous_index < index) : (previous_index += 1) {
+        const previous = requests[previous_index];
+        if (previous.kind == request.kind and std.mem.eql(u8, previous.resource, request.resource)) return true;
+    }
+    return false;
 }
 
 fn validatePermissionPrivacy(bundle: BundleManifest) ValidationError!void {
@@ -695,12 +700,7 @@ fn validateBackgroundTasks(bundle: BundleManifest) ValidationError!void {
         const permission = findBackgroundPermission(bundle, task.id) orelse return error.BackgroundTaskMissingPermission;
         if (!permission.rights.has(.background_run)) return error.BackgroundPermissionMissingRunRight;
 
-        var duplicate_index: usize = 0;
-        while (duplicate_index < index) : (duplicate_index += 1) {
-            if (std.mem.eql(u8, bundle.background_tasks[duplicate_index].id, task.id)) {
-                return error.DuplicateBackgroundTaskId;
-            }
-        }
+        if (hasDuplicateStringFieldBefore(bundle.background_tasks, index, "id", task.id)) return error.DuplicateBackgroundTaskId;
     }
 
     for (bundle.requested_permissions) |request| {
@@ -716,13 +716,16 @@ fn validateComponents(bundle: BundleManifest) ValidationError!void {
         if (component.id.len == 0) return error.ComponentIdEmpty;
         if (component.entry.len == 0) return error.ComponentEntryEmpty;
 
-        var duplicate_index: usize = 0;
-        while (duplicate_index < index) : (duplicate_index += 1) {
-            if (std.mem.eql(u8, bundle.components[duplicate_index].id, component.id)) {
-                return error.DuplicateComponentId;
-            }
-        }
+        if (hasDuplicateStringFieldBefore(bundle.components, index, "id", component.id)) return error.DuplicateComponentId;
     }
+}
+
+fn hasDuplicateStringFieldBefore(items: anytype, index: usize, comptime field_name: []const u8, value: []const u8) bool {
+    var previous_index: usize = 0;
+    while (previous_index < index) : (previous_index += 1) {
+        if (std.mem.eql(u8, @field(items[previous_index], field_name), value)) return true;
+    }
+    return false;
 }
 
 pub fn requiresApplicationPackaging(bundle_id: []const u8) bool {

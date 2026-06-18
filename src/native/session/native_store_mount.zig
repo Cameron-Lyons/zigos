@@ -27,15 +27,12 @@ pub const NativeStoreMount = struct {
         owner: principal.PrincipalId,
         capability_table: *capability.CapabilityTable,
     ) void {
-        self.storage_checkpoint_store.resetPreparedState();
         _ = adoptRootStorageVolume(&self.storage_checkpoint_store);
-        const loaded_from_volume = self.storage_checkpoint_store.loadPreparedStateFromAttachedVolume();
-        self.storage_service_instance = storage_service_mod.Service.bindPrepared(
-            &self.storage_checkpoint_store,
+        self.storage_service_instance = storage_service_mod.Service.reloadFromAttachedVolume(
             service_id,
             task_id,
             owner,
-            loaded_from_volume,
+            &self.storage_checkpoint_store,
         );
         self.storage_service_instance.bindCapabilityTable(capability_table);
         self.storage_service_instance.checkpoint_enabled = false;

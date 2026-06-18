@@ -30,9 +30,7 @@ pub fn dispatchEndpointConnect(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.EndpointConnectRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = component_port.invokeGenerated(.endpoint_connect, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
+    return dispatch.invokeAndWriteResponse(.endpoint_connect, port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
 pub fn dispatchEndpointSend(
