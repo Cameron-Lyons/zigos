@@ -1,5 +1,8 @@
 name: Run Zig Command
 
+permissions:
+  contents: read
+
 on:
   workflow_call:
     inputs:
