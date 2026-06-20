@@ -1,4 +1,5 @@
 const std = @import("std");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
@@ -487,6 +488,20 @@ fn recordRevoke(
     }
 }
 
+fn testHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "secret-vault-test-provider", label);
+    crypto_hash.updateBytes(&hasher, "secret-vault-seal", raw);
+    return crypto_hash.finalize(&hasher);
+}
+
+fn testHardwareProvider() secure_secret_store.HardwareSealProvider {
+    return .{
+        .available = true,
+        .sealFn = testHardwareSeal,
+    };
+}
+
 test "secret vault brokers sealed leased handles raw export policy rotation and revocation" {
     const signing = @import("../core/signing.zig");
 
@@ -510,6 +525,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
 
     const subjects = policy_object.SubjectSet{ .user_id = user.serial };
     var service = Service.init();
+    service.attachHardwareProvider(testHardwareProvider());
     var ledger = event_ledger.Ledger.init();
 
     try std.testing.expectError(error.PolicyDenied, service.importSecret(&policies, subjects, .{
@@ -666,6 +682,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
     }, &ledger));
 
     var expiry_service = Service.init();
+    expiry_service.attachHardwareProvider(testHardwareProvider());
     var expiry_ledger = event_ledger.Ledger.init();
     const expiring_secret = try expiry_service.importSecret(&policies, subjects, .{
         .owner = user,
@@ -711,6 +728,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .seed = signing.seedFromByte(0xd8),
     });
     var export_service = Service.init();
+    export_service.attachHardwareProvider(testHardwareProvider());
     var export_ledger = event_ledger.Ledger.init();
     const sealed_only = try export_service.importSecret(&export_policies, subjects, .{
         .owner = user,

@@ -773,7 +773,7 @@ pub const Scheduler = struct {
 
     fn hardwareQueueTelemetryReady(self: *const Scheduler) bool {
         if (!self.observedResourceTelemetry()) return false;
-        return self.resource_telemetry_source != .hardware or self.resource_hardware_evidence_complete;
+        return self.resource_telemetry_source == .hardware and self.resource_hardware_evidence_complete;
     }
 
     fn accountDeadline(self: *Scheduler, slot: *Slot, now_ticks: u64) void {
@@ -1374,14 +1374,25 @@ test "userspace scheduler separates accelerator claim queues from cpu ready queu
         .npu_available = true,
         .media_available = true,
     });
-    const granted = scheduler.grantNextAcceleratorClaim(.media, 9).?;
+    try std.testing.expect(scheduler.grantNextAcceleratorClaim(.media, 9) == null);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
+
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 10,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    const granted = scheduler.grantNextAcceleratorClaim(.media, 10).?;
     try std.testing.expectEqual(media_claim, granted.id);
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.gpu));
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.media_export));
 }
 
-test "userspace scheduler requires observed platform telemetry before waking hardware queues" {
+test "userspace scheduler requires complete hardware telemetry before waking hardware queues" {
     var executor = userspace_executor.Executor{};
     var scheduler = Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
@@ -1437,6 +1448,17 @@ test "userspace scheduler requires observed platform telemetry before waking har
     try std.testing.expectEqual(@as(u64, 0), synthetic_slot.dispatch_count);
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDenialCount(.media));
+
+    scheduler.configureResourceTelemetry(.{
+        .source = .emulator,
+        .observed_tick = 1,
+        .media_available = true,
+    });
+    try std.testing.expect(scheduler.observedResourceTelemetry());
+    try std.testing.expect(!scheduler.runNext(2));
+    const emulator_slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expectEqual(@as(u64, 0), emulator_slot.dispatch_count);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
 
     scheduler.configureResourceTelemetry(.{
         .source = .hardware,

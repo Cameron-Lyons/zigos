@@ -55,6 +55,7 @@ pub const Error = error{
     HandleHolderMismatch,
     HandleNotFound,
     HandleTableFull,
+    HardwareProviderUnavailable,
     LabelTooLong,
     RawExportDenied,
     SecretNotFound,
@@ -103,6 +104,11 @@ pub const Store = struct {
         exportable: bool,
     ) Error!*SecretRecord {
         if (raw.len > MAX_VALUE_BYTES) return error.SecretTooLarge;
+        if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
+        const hardware_sealed_digest = if (hardware_backed)
+            self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable
+        else
+            crypto_hash.zero_digest;
         for (&self.secrets) |*slot| {
             if (slot.in_use) continue;
             slot.in_use = true;
@@ -114,15 +120,13 @@ pub const Store = struct {
             slot.secret.exportable = exportable;
             slot.secret.resident_material = true;
             slot.secret.label_len = native_util.copyTextExact(&slot.secret.label, label) catch return error.LabelTooLong;
+            if (hardware_backed) {
+                slot.secret.hardware_provider_used = true;
+                slot.secret.sealed_digest_present = true;
+                slot.secret.sealed_digest = hardware_sealed_digest;
+            }
             if (hardware_backed and !exportable) {
                 slot.secret.resident_material = false;
-                slot.secret.sealed_digest_present = true;
-                if (self.hardware_provider.seal(label, raw)) |sealed_digest| {
-                    slot.secret.hardware_provider_used = true;
-                    slot.secret.sealed_digest = sealed_digest;
-                } else {
-                    slot.secret.sealed_digest = digestSecretMaterial(raw);
-                }
                 slot.secret.value_len = 0;
                 @memset(&slot.secret.value, 0);
             } else {
@@ -209,12 +213,6 @@ fn zeroSecret() SecretRecord {
     };
 }
 
-fn digestSecretMaterial(raw: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "secret-material", raw);
-    return crypto_hash.finalize(&hasher);
-}
-
 fn defaultSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "hardware-seal-label", label);
@@ -222,10 +220,13 @@ fn defaultSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
     return crypto_hash.finalize(&hasher);
 }
 
-test "secure secret store returns handles by default and only exports raw when allowed" {
+test "secure secret store requires a hardware provider before hardware-backed imports" {
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const app_holder = principal.PrincipalId{ .kind = .app, .serial = 44 };
+
+    try std.testing.expectError(error.HardwareProviderUnavailable, store.importSecret(owner, "api-key", "super-secret-token", true, false));
+    store.attachHardwareProvider(.{ .available = true });
 
     const api_key = try store.importSecret(owner, "api-key", "super-secret-token", true, false);
     const handle = try store.lendHandle(api_key.id, app_holder, 90, true);
@@ -233,7 +234,7 @@ test "secure secret store returns handles by default and only exports raw when a
     try std.testing.expect(!handle.export_allowed);
     try std.testing.expect(!api_key.resident_material);
     try std.testing.expect(api_key.sealed_digest_present);
-    try std.testing.expect(!api_key.hardware_provider_used);
+    try std.testing.expect(api_key.hardware_provider_used);
     try std.testing.expectEqual(@as(usize, 0), api_key.value_len);
     try std.testing.expectError(error.RawExportDenied, store.exportRaw(handle.id, .{
         .holder = app_holder,
@@ -256,7 +257,7 @@ test "secure secret store returns handles by default and only exports raw when a
     }));
 }
 
-test "secure secret store uses hardware seal provider when available" {
+test "secure secret store uses hardware seal provider for sealed and exportable hardware-backed imports" {
     const Provider = struct {
         fn seal(label: []const u8, raw: []const u8) crypto_hash.Digest {
             var hasher = crypto_hash.init();
@@ -280,6 +281,13 @@ test "secure secret store uses hardware seal provider when available" {
     const expected = Provider.seal("device-key", "private-material");
     try std.testing.expectEqualSlices(u8, expected[0..], sealed.sealed_digest[0..]);
     try std.testing.expectEqual(@as(usize, 0), sealed.value_len);
+
+    const exportable = try store.importSecret(owner, "portable-key", "exportable-material", true, true);
+    try std.testing.expect(exportable.hardware_backed);
+    try std.testing.expect(exportable.hardware_provider_used);
+    try std.testing.expect(exportable.sealed_digest_present);
+    try std.testing.expect(exportable.resident_material);
+    try std.testing.expectEqualStrings("exportable-material", exportable.value[0..exportable.value_len]);
 }
 
 test "secure secret store reports missing handles and oversized secrets" {

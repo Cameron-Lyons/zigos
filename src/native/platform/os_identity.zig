@@ -640,11 +640,26 @@ fn hostEnd(rest: []const u8) usize {
     return rest.len;
 }
 
+fn testHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "identity-test-secret-provider", label);
+    crypto_hash.updateBytes(&hasher, "identity-test-seal", raw);
+    return crypto_hash.finalize(&hasher);
+}
+
+fn testHardwareProvider() secure_secret_store.HardwareSealProvider {
+    return .{
+        .available = true,
+        .sealFn = testHardwareSeal,
+    };
+}
+
 test "os identity creates passkey credentials and rejects phishing origins" {
     try std.testing.expect(std.meta.stringToEnum(UnlockMethod, "password") == null);
 
     var graph = device_graph.Graph.init();
     var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(testHardwareProvider());
     var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 701 };
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 711 };
@@ -722,6 +737,7 @@ test "os identity creates passkey credentials and rejects phishing origins" {
 test "os identity recovers synced credentials through trusted device graph" {
     var graph = device_graph.Graph.init();
     var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(testHardwareProvider());
     var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 801 };
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 811 };
@@ -836,6 +852,7 @@ test "os identity recovers synced credentials through trusted device graph" {
 test "os identity requires fresh local unlock and primary device for device-bound credentials" {
     var graph = device_graph.Graph.init();
     var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(testHardwareProvider());
     var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 901 };
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 911 };

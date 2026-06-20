@@ -240,6 +240,7 @@ pub fn sendActiveNetworkFrame(frame: []const u8) bool {
 }
 
 pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
+    if (!networkPublicationMatchesTargetI225(device_id)) return false;
     if (publicationForActivation(NetworkPublication, &published_network, device_id, service_id)) |publication| {
         if (publication.network_device == null) {
             const activator = publication.activator orelse return false;
@@ -296,7 +297,7 @@ pub fn activateStorageBackend(
                     const activator = publication.activator orelse return false;
                     publication.backend = activator(device_id) orelse return false;
                 }
-                storage_volume.attachBackend(publication.backend.?);
+                if (!attachPublishedStorageBackend(publication, publication.backend.?)) return false;
             },
         }
         publication.active_service_id = service_id;
@@ -339,8 +340,7 @@ pub fn refreshActiveStorageAttachment(service_id: u64) bool {
         },
         .backend, .activator => blk: {
             const backend = publication.backend orelse break :blk false;
-            storage_volume.attachBackend(backend);
-            break :blk true;
+            break :blk attachPublishedStorageBackend(publication, backend);
         },
     };
 }
@@ -443,6 +443,11 @@ fn publicationForDeactivation(comptime T: type, publication: *?T, service_id: u6
     return null;
 }
 
+fn networkPublicationMatchesTargetI225(device_id: u64) bool {
+    const production_device_id = device_inventory.requireProductionDriverDeviceId(.network_adapter) catch return false;
+    return production_device_id == device_id;
+}
+
 fn publicationForActiveStorage(service_id: u64) ?*StoragePublication {
     if (published_storage) |*publication| {
         if (publication.active_service_id == service_id) return publication;
@@ -504,11 +509,24 @@ fn ataPublicationSessionCurrent(session: *const storage_driver_task.AtaControlle
 
 fn attachActiveAtaPublicationBackend(service_id: u64, session: *const storage_driver_task.AtaControllerSession) void {
     active_storage_backend_service_id = service_id;
-    storage_volume.attachBackend(.{
+    storage_volume.attachAtaBootstrapBrokerBackend(.{
         .sector_count = session.sector_count,
         .read = activeAtaPublicationBackendRead,
         .write = activeAtaPublicationBackendWrite,
     });
+}
+
+fn attachPublishedStorageBackend(publication: *const StoragePublication, backend: storage_volume.Backend) bool {
+    if (!storagePublicationMatchesTargetNvme(publication)) return false;
+    storage_volume.attachNvmePciBackend(backend);
+    return storage_volume.hasProductionStorageBackend();
+}
+
+fn storagePublicationMatchesTargetNvme(publication: *const StoragePublication) bool {
+    const inventory = device_inventory.recordForClass(.storage_controller);
+    return inventory.detected and
+        inventory.device_id == publication.device_id and
+        device_inventory.sourceCanBindProductionDriver(.storage_controller, inventory.source, inventory.device_id);
 }
 
 fn activeAtaPublicationBackendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
@@ -553,6 +571,9 @@ test "driver-backed network tx fails closed without capability-backed egress dec
 
     reset();
     defer reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
+    const i225_device_id: u64 = 0x8086_15F2_0001;
 
     const Harness = struct {
         var send_count: usize = 0;
@@ -581,8 +602,10 @@ test "driver-backed network tx fails closed without capability-backed egress dec
         .send = Harness.send,
         .getMacAddress = Harness.mac,
     };
-    try std.testing.expect(try publishNetworkDevice(7001, "test-net", &device, false));
-    try std.testing.expect(activateNetworkDevice(7001, 9));
+    try std.testing.expect(try publishNetworkDevice(i225_device_id, "i225-userspace", &device, false));
+    try std.testing.expect(!activateNetworkDevice(i225_device_id, 9));
+    device_inventory.registerDetected(.network_adapter, i225_device_id, .intel_i225_lm_inventory, false);
+    try std.testing.expect(activateNetworkDevice(i225_device_id, 9));
 
     const frame_with_raw_destination = "GET / HTTP/1.1\r\nHost: relay.zigos.dev\r\nX-IP: 203.0.113.7\r\n\r\n";
     try std.testing.expect(!sendActiveNetworkFrame(frame_with_raw_destination));
@@ -605,6 +628,9 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
 
     reset();
     defer reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
+    const i225_device_id: u64 = 0x8086_15F2_0001;
 
     const Harness = struct {
         var send_count: usize = 0;
@@ -631,8 +657,9 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
         .send = Harness.send,
         .getMacAddress = Harness.mac,
     };
-    try std.testing.expect(try publishNetworkDevice(7002, "test-net", &device, false));
-    try std.testing.expect(activateNetworkDevice(7002, 10));
+    device_inventory.registerDetected(.network_adapter, i225_device_id, .intel_i225_lm_inventory, false);
+    try std.testing.expect(try publishNetworkDevice(i225_device_id, "i225-userspace", &device, false));
+    try std.testing.expect(activateNetworkDevice(i225_device_id, 10));
     setEgressBroker(Harness.adversarialBroker);
 
     const forged_frame = "dst=203.0.113.7; host=relay.zigos.dev";
@@ -681,6 +708,8 @@ test "active storage attachment refreshes from the publication" {
 
     reset();
     defer reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
 
     const Backend = struct {
         fn read(_: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
@@ -697,17 +726,57 @@ test "active storage attachment refreshes from the publication" {
         .read = Backend.read,
         .write = Backend.write,
     };
-    const device_id: u64 = 0x5101;
+    const device_id: u64 = 0x0000_8086_5845_5101;
     const service_id: u64 = 0x5102;
+    device_inventory.registerDetected(.storage_controller, device_id, .nvme_pci_inventory, false);
 
     try std.testing.expect(try publishStorageBackend(device_id, "test-storage", backend, false));
     try std.testing.expect(activateStorageBackend(device_id, service_id, 0, 0, 1, 0, null));
     try std.testing.expect(storage_volume.hasAttachedDevice());
+    try std.testing.expect(storage_volume.hasProductionStorageBackend());
 
     storage_volume.clearAttachedBackend();
     try std.testing.expect(!storage_volume.hasAttachedDevice());
     try std.testing.expect(refreshActiveStorageAttachment(service_id));
     try std.testing.expect(storage_volume.hasAttachedDevice());
+    try std.testing.expect(storage_volume.hasProductionStorageBackend());
+}
+
+test "storage backend activation requires target nvme inventory" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+
+    reset();
+    defer reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
+
+    const Backend = struct {
+        fn read(_: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+            @memset(buffer_ptr[0..buffer_len], 0);
+            return true;
+        }
+
+        fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            return true;
+        }
+    };
+    const backend = storage_volume.Backend{
+        .sector_count = storage_volume.required_device_sectors,
+        .read = Backend.read,
+        .write = Backend.write,
+    };
+
+    const uninventoried_device_id: u64 = 0x0000_8086_5845_5201;
+    try std.testing.expect(try publishStorageBackend(uninventoried_device_id, "test-storage", backend, false));
+    try std.testing.expect(!activateStorageBackend(uninventoried_device_id, 0x5202, 0, 0, 1, 0, null));
+    try std.testing.expect(!storage_volume.hasAttachedDevice());
+
+    reset();
+    const ata_device_id: u64 = 0x0000_1F00_0000_5203;
+    device_inventory.registerDetected(.storage_controller, ata_device_id, .ata_bootstrap, true);
+    try std.testing.expect(try publishStorageBackend(ata_device_id, "test-storage", backend, false));
+    try std.testing.expect(!activateStorageBackend(ata_device_id, 0x5204, 0, 0, 1, 0, null));
+    try std.testing.expect(!storage_volume.hasAttachedDevice());
 }
 
 test "active ata bootstrap refresh repairs a revoked broker publication" {
@@ -718,6 +787,7 @@ test "active ata bootstrap refresh repairs a revoked broker publication" {
     const native_kernel = @import("../kernel_api/native_kernel.zig");
     const principal = @import("../core/principal.zig");
     const shared_memory = @import("../kernel_api/shared_memory.zig");
+    const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
     const task_runtime = @import("../task/task_runtime.zig");
     const units = @import("../core/units.zig");
 
@@ -755,10 +825,7 @@ test "active ata bootstrap refresh repairs a revoked broker publication" {
     var kernel_port = component_port.KernelPort.init(&kernel);
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = service_id };
-    const storage_driver_image = task_runtime.syntheticUserspaceImage(
-        "storage-driver-refresh-test",
-        "zigos.system.storage-driver",
-    );
+    const storage_driver_image = try generated_image_fixtures.storageDriverImage();
     const driver_task = try runtime.createTask(.{
         .owner = owner,
         .component_class = .service_component,
@@ -867,7 +934,7 @@ test "kernel bootstrap cannot publish peripheral device data-plane transports di
         try std.testing.expect(deviceDataPlanePublication(device_class) == null);
     }
 
-    try std.testing.expect(!(try publishDeviceDataPlane(.network_adapter, 0x8086_100E_0001, "generic-network", false)));
+    try std.testing.expect(!(try publishDeviceDataPlane(.network_adapter, 0x8086_15F2_0001, "generic-network", false)));
     try std.testing.expect(!(try publishDeviceDataPlane(.storage_controller, 0x1F001, "generic-storage", false)));
 
     try std.testing.expect(try publishDeviceDataPlane(.graphics_adapter, 0x1234_1111_0001, "compositor-driver", false));

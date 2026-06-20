@@ -1788,7 +1788,7 @@ pub const Ledger = struct {
     }
 
     pub fn absorb(self: *Ledger, source: *const Ledger) Error!void {
-        for (source.events.slots) |slot| {
+        for (&source.events.slots) |*slot| {
             if (!slot.in_use) continue;
             var event = slot.event;
             event.sequence = 0;

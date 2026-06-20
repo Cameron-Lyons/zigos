@@ -79,6 +79,69 @@ test "storage quota policy rejects writes above the first supported envelope" {
     try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
 }
 
+test "storage volume separates generic, target nvme, and brokered ata attachments" {
+    const BackendFns = struct {
+        fn read(_: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+            @memset(buffer_ptr[0..buffer_len], 0);
+            return true;
+        }
+
+        fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            return true;
+        }
+    };
+
+    var volume = Volume.init();
+    const backend = storage_volume.Backend{
+        .sector_count = storage_volume.required_device_sectors,
+        .read = BackendFns.read,
+        .write = BackendFns.write,
+    };
+    volume.attachBackend(backend);
+    try std.testing.expectEqual(storage_volume.AttachedBackendKind.generic, volume.attached_backend_kind);
+    try std.testing.expect(!volume.hasProductionStorageBackend());
+
+    volume.attachAtaBootstrapBrokerBackend(backend);
+    try std.testing.expectEqual(storage_volume.AttachedBackendKind.ata_bootstrap_broker, volume.attached_backend_kind);
+    try std.testing.expect(!volume.hasProductionStorageBackend());
+
+    volume.attachNvmePciBackend(backend);
+    try std.testing.expectEqual(storage_volume.AttachedBackendKind.nvme_pci, volume.attached_backend_kind);
+    try std.testing.expect(volume.hasProductionStorageBackend());
+
+    const undersized_nvme_backend = storage_volume.Backend{
+        .sector_count = storage_volume.required_device_sectors - 1,
+        .read = BackendFns.read,
+        .write = BackendFns.write,
+    };
+    volume.attachNvmePciBackend(undersized_nvme_backend);
+    try std.testing.expectEqual(storage_volume.AttachedBackendKind.nvme_pci, volume.attached_backend_kind);
+    try std.testing.expect(!volume.hasProductionStorageBackend());
+}
+
+test "storage volume rejects undersized legacy images without mutating state" {
+    const legacy_image = try std.testing.allocator.alloc(u8, image_bytes - storage_volume.sector_size);
+    defer std.testing.allocator.free(legacy_image);
+    @memset(legacy_image, 0xA5);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = signing.seedFromByte(0x79),
+    };
+    _ = try loaded_store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(905),
+        .object_type = .document,
+        .payload = "preexisting",
+        .metadata = try object_store.signMetadata(signer, "preexisting", "text/plain", .document, "preexisting", 17),
+    });
+
+    try std.testing.expectError(error.ImageTooSmall, loadFromImage(legacy_image, &loaded_store, &loaded_workspaces));
+    try std.testing.expectEqual(@as(usize, 1), loaded_store.objectCount());
+    try std.testing.expectEqual(@as(usize, 0), loaded_workspaces.workspaces.countInUse());
+}
+
 test "storage volume image reloads the latest persisted state across slot generations" {
     const image = try std.testing.allocator.alloc(u8, image_bytes);
     defer std.testing.allocator.free(image);
@@ -449,6 +512,64 @@ test "storage volume ignores power-loss data writes that happen before root comm
     try std.testing.expectEqual(generation_one.generation, loaded_generation);
     try std.testing.expectEqual(first.version_id, loaded_store.latestVersion(906).?.id);
     try std.testing.expectEqualStrings("committed-before-power-loss", try loaded_store.versionPayload(loaded_store.latestVersion(906).?));
+}
+
+test "storage volume survives an interrupted compaction into the alternate region" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = signing.seedFromByte(0x7C),
+    };
+
+    const committed = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(909),
+        .object_type = .document,
+        .payload = "survives-compaction-power-loss",
+        .metadata = try object_store.signMetadata(signer, "compact", "text/plain", .document, "survives-compaction-power-loss", 40),
+    });
+    _ = try saveToImage(image, &store, &workspaces);
+
+    // Drive enough mutations to force at least one ping-pong compaction so the
+    // committed root references a definite data region.
+    var previous_version_id = object_store.ids.VersionId.zero;
+    const compaction_mutations = @as(usize, storage_volume.testing.maxReplayLogSegments()) + 4;
+    for (0..compaction_mutations) |index| {
+        var payload_buffer: [DELTA_PAYLOAD_BUFFER_BYTES]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&payload_buffer, "compact-delta-{d}", .{index});
+        const result = try store.putVersion(.{
+            .preferred_object_id = object_store.ids.object(910),
+            .object_type = .document,
+            .payload = payload,
+            .metadata = try object_store.signMetadata(signer, "compact", "text/plain", .document, payload, 41 + @as(u64, @intCast(index))),
+            .parent_version_id = if (previous_version_id.isZero()) null else previous_version_id,
+        });
+        previous_version_id = result.version_id;
+        _ = try saveToImage(image, &store, &workspaces);
+    }
+
+    try std.testing.expect((try storage_volume.testing.latestImageCompactedGeneration(image)) > 1);
+
+    // Simulate a power loss midway through the NEXT compaction: it would write a
+    // fresh checkpoint into the region the live root does not use and then commit
+    // a new root. Scribble that alternate region but leave the root sectors so the
+    // previously committed root is still the newest on disk. Before the ping-pong
+    // fix, compaction overwrote the live root's only data copy and this lost every
+    // persisted object.
+    const committed_offset = try storage_volume.testing.latestImageDataOffset(image);
+    const alternate: u32 = if (committed_offset == 0) storage_volume.testing.alternateDataRegionOffset() else 0;
+    storage_volume.testing.scribbleDataRegion(image, alternate);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    _ = try loadFromImage(image, &loaded_store, &loaded_workspaces);
+
+    try std.testing.expectEqualStrings("survives-compaction-power-loss", try loaded_store.versionPayload(loaded_store.version(committed.version_id).?));
+    try std.testing.expectEqual(previous_version_id, loaded_store.latestVersion(910).?.id);
 }
 
 test "storage volume falls back when a partial-sector corruption hits only the newest log generation" {

@@ -20,6 +20,9 @@ pub const WorkspaceSummary = struct {
 pub const RootState = struct {
     generation: u64 = 0,
     log_bytes: u32 = 0,
+    // Byte offset (relative to data_start_byte) of the log region this root
+    // references. Either 0 or volume_layout.alternate_data_region_offset.
+    data_offset: u32 = 0,
     next_object_id: u64 = 1,
     next_version_id: u64 = 1,
     next_workspace_id: u64 = 1,
@@ -106,6 +109,7 @@ pub fn encodeRoot(buffer: []u8, root: RootState) Error!void {
     try writer.writeU16(volume_layout.root_format_version);
     try writer.writeU64(root.generation);
     try writer.writeU32(root.log_bytes);
+    try writer.writeU32(root.data_offset);
     try writer.writeU64(root.next_object_id);
     try writer.writeU64(root.next_version_id);
     try writer.writeU64(root.next_workspace_id);
@@ -135,6 +139,7 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
     var root = RootState{
         .generation = try reader.readU64(),
         .log_bytes = try reader.readU32(),
+        .data_offset = try reader.readU32(),
         .next_object_id = try reader.readU64(),
         .next_version_id = try reader.readU64(),
         .next_workspace_id = try reader.readU64(),
@@ -154,7 +159,9 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
             .state_hash = try reader.readU64(),
         };
     }
-    if (root.log_bytes > volume_layout.data_capacity_bytes) return error.CorruptImage;
+    if (root.data_offset != 0 and root.data_offset != volume_layout.alternate_data_region_offset) return error.CorruptImage;
+    if (root.log_bytes > volume_layout.data_region_bytes) return error.CorruptImage;
+    if (@as(usize, root.data_offset) + root.log_bytes > volume_layout.data_capacity_bytes) return error.CorruptImage;
     if (root.log_record_count == 0 or root.log_record_count > volume_layout.max_replay_log_records) return error.CorruptImage;
     if (root.log_segment_count > volume_layout.max_log_segments) return error.CorruptImage;
     const checksum_offset = reader.offset;

@@ -11,7 +11,7 @@ pub const QuotaRejection = volume_capacity.QuotaRejection;
 pub const first_supported_capacity_envelope = ProductCapacityEnvelope{
     .volume_image_bytes = volume_layout.image_bytes,
     .required_device_sectors = volume_layout.required_device_sectors,
-    .max_volume_log_bytes = volume_layout.data_capacity_bytes,
+    .max_volume_log_bytes = volume_layout.data_region_bytes,
     .max_object_payload_bytes = object_store.MAX_PAYLOAD_BYTES,
     .max_object_records = object_store.MAX_OBJECTS,
     .max_version_records = object_store.MAX_VERSIONS,
@@ -36,11 +36,11 @@ pub fn productCapacityUsage(store: *const object_store.Store, workspaces: *const
         .snapshots = snapshotCount(workspaces),
     };
 
-    for (workspaces.workspaces.slots) |slot| {
+    for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
         usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.workspace.path_index.entry_count);
     }
-    for (workspaces.snapshots.slots) |slot| {
+    for (&workspaces.snapshots.slots) |*slot| {
         if (!persistableSnapshotSlot(slot)) continue;
         usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.snapshot.entry_count);
     }
@@ -92,7 +92,7 @@ pub fn quotaRejectionForUsage(usage: ProductCapacityUsage, envelope: ProductCapa
 
 pub fn workspaceCount(workspaces: *const workspace.Directory) usize {
     var count: usize = 0;
-    for (workspaces.workspaces.slots) |slot| {
+    for (&workspaces.workspaces.slots) |*slot| {
         if (persistableWorkspaceSlot(slot)) count += 1;
     }
     return count;
@@ -100,7 +100,7 @@ pub fn workspaceCount(workspaces: *const workspace.Directory) usize {
 
 pub fn snapshotCount(workspaces: *const workspace.Directory) usize {
     var count: usize = 0;
-    for (workspaces.snapshots.slots) |slot| {
+    for (&workspaces.snapshots.slots) |*slot| {
         if (persistableSnapshotSlot(slot)) count += 1;
     }
     return count;

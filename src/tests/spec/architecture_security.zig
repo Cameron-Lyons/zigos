@@ -302,9 +302,9 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
 
     device_inventory.reset();
     device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
-    device_inventory.registerDetected(.network_adapter, 0x8086100E0001, .pci_inventory, false);
+    device_inventory.registerDetected(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory, false);
     device_inventory.registerDetected(.usb_controller, 0x8086A0ED0001, .xhci_inventory, false);
-    device_inventory.registerDetected(.input_device, 0x8042_0001, .ps2_bootstrap, false);
+    device_inventory.registerDetected(.input_device, 0x8086A0ED0001, .xhci_inventory, false);
     const storage_handoff = device_inventory.recordForClass(.storage_controller);
     const network_handoff = device_inventory.recordForClass(.network_adapter);
     const usb_handoff = device_inventory.recordForClass(.usb_controller);
@@ -314,13 +314,13 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expectEqualStrings("ata_bootstrap", device_inventory.sourceName(storage_handoff.source));
     try std.testing.expect(network_handoff.detected);
     try std.testing.expect(!network_handoff.kernel_bootstrap);
-    try std.testing.expectEqualStrings("pci_inventory", device_inventory.sourceName(network_handoff.source));
+    try std.testing.expectEqualStrings("intel_i225_lm_inventory", device_inventory.sourceName(network_handoff.source));
     try std.testing.expect(usb_handoff.detected);
     try std.testing.expect(!usb_handoff.kernel_bootstrap);
     try std.testing.expectEqualStrings("xhci_inventory", device_inventory.sourceName(usb_handoff.source));
     try std.testing.expect(input_handoff.detected);
     try std.testing.expect(!input_handoff.kernel_bootstrap);
-    try std.testing.expectEqualStrings("ps2_bootstrap", device_inventory.sourceName(input_handoff.source));
+    try std.testing.expectEqualStrings("xhci_inventory", device_inventory.sourceName(input_handoff.source));
 
     var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
     var runtime = task_runtime.Runtime.init();

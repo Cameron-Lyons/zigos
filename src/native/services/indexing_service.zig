@@ -137,7 +137,7 @@ pub const Service = struct {
 
         const snapshot_generation = self.generation;
         var count: usize = 0;
-        for (self.documents.slots) |slot| {
+        for (&self.documents.slots) |*slot| {
             if (!slot.in_use) continue;
             if (!workspaceAllowed(permitted_workspaces, slot.record.workspace_id)) continue;
 
@@ -204,7 +204,7 @@ pub const Service = struct {
 
     pub fn permittedWorkspaceSensitivity(self: *const Service, permitted_workspaces: []const u64) manifest.DataSensitivity {
         var result: manifest.DataSensitivity = .public_data;
-        for (self.documents.slots) |slot| {
+        for (&self.documents.slots) |*slot| {
             if (!slot.in_use) continue;
             if (!workspaceAllowed(permitted_workspaces, slot.record.workspace_id)) continue;
             result = maxSensitivity(result, slot.record.sensitivity);

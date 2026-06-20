@@ -140,7 +140,11 @@ const CRITICAL_SYNTHETIC_IMAGE_PATHS = [_][]const u8{
     "src/native/session/service_path_proofs.zig",
     "src/native/storage/storage_service_ipc.zig",
     "src/native/sync/sync_service_test.zig",
+    "src/native/platform/os_contract_2026.zig",
+    "src/native/platform/compositor_session.zig",
+    "src/native/platform/rendered_shell/task_launch.zig",
     "src/native/task/process_isolation.zig",
+    "src/kernel/boot/benchmark/suite.zig",
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -568,12 +572,17 @@ fn validateNuc11tnki5KernelProofSources(
 ) !void {
     const hardware_proof_path = "src/kernel/platform/hardware_proof.zig";
     const apic_path = "src/kernel/platform/apic.zig";
+    const devices_path = "src/kernel/boot/init/devices.zig";
     const crash_record_path = "src/kernel/platform/crash_record.zig";
     const fadt_path = "src/kernel/platform/fadt.zig";
     const framebuffer_path = "src/kernel/platform/framebuffer.zig";
     const hardware_target_path = "src/native/platform/hardware_target.zig";
     const first_target_telemetry_path = "src/kernel/drivers/first_target_telemetry.zig";
     const platform_policy_signals_path = "src/native/platform/platform_policy_signals.zig";
+    const device_inventory_path = "src/native/drivers/device_inventory.zig";
+    const service_bootstrap_path = "src/native/session/service_bootstrap.zig";
+    const session_service_bootstrap_path = "src/native/session/session_service_bootstrap.zig";
+    const keyboard_path = "src/kernel/drivers/keyboard.zig";
     const xhci_path = "src/kernel/drivers/xhci.zig";
     const nvme_path = "src/kernel/drivers/nvme.zig";
     const i225_path = "src/kernel/drivers/intel_i225.zig";
@@ -583,6 +592,10 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (!common.pathExists(io, apic_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 APIC proof source is missing: {s}", .{apic_path});
+        return;
+    }
+    if (!common.pathExists(io, devices_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 boot device inventory source is missing: {s}", .{devices_path});
         return;
     }
     if (!common.pathExists(io, crash_record_path)) {
@@ -609,6 +622,22 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 platform policy signal source is missing: {s}", .{platform_policy_signals_path});
         return;
     }
+    if (!common.pathExists(io, device_inventory_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 device inventory source is missing: {s}", .{device_inventory_path});
+        return;
+    }
+    if (!common.pathExists(io, service_bootstrap_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 service bootstrap source is missing: {s}", .{service_bootstrap_path});
+        return;
+    }
+    if (!common.pathExists(io, session_service_bootstrap_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 session service bootstrap source is missing: {s}", .{session_service_bootstrap_path});
+        return;
+    }
+    if (!common.pathExists(io, keyboard_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 keyboard bootstrap source is missing: {s}", .{keyboard_path});
+        return;
+    }
     if (!common.pathExists(io, nvme_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 NVMe proof source is missing: {s}", .{nvme_path});
         return;
@@ -623,12 +652,17 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const hardware_proof_source = try common.readFileAlloc(allocator, io, hardware_proof_path, common.source_file_max_bytes);
     const apic_source = try common.readFileAlloc(allocator, io, apic_path, common.source_file_max_bytes);
+    const devices_source = try common.readFileAlloc(allocator, io, devices_path, common.source_file_max_bytes);
     const crash_record_source = try common.readFileAlloc(allocator, io, crash_record_path, common.source_file_max_bytes);
     const fadt_source = try common.readFileAlloc(allocator, io, fadt_path, common.source_file_max_bytes);
     const framebuffer_source = try common.readFileAlloc(allocator, io, framebuffer_path, common.source_file_max_bytes);
     const hardware_target_source = try common.readFileAlloc(allocator, io, hardware_target_path, common.source_file_max_bytes);
     const first_target_telemetry_source = try common.readFileAlloc(allocator, io, first_target_telemetry_path, common.source_file_max_bytes);
     const platform_policy_signals_source = try common.readFileAlloc(allocator, io, platform_policy_signals_path, common.source_file_max_bytes);
+    const device_inventory_source = try common.readFileAlloc(allocator, io, device_inventory_path, common.source_file_max_bytes);
+    const service_bootstrap_source = try common.readFileAlloc(allocator, io, service_bootstrap_path, common.source_file_max_bytes);
+    const session_service_bootstrap_source = try common.readFileAlloc(allocator, io, session_service_bootstrap_path, common.source_file_max_bytes);
+    const keyboard_source = try common.readFileAlloc(allocator, io, keyboard_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
@@ -646,6 +680,108 @@ fn validateNuc11tnki5KernelProofSources(
     for (required_hardware_proof_snippets) |snippet| {
         if (std.mem.indexOf(u8, hardware_proof_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source must enforce snippet: {s}", .{snippet});
+        }
+    }
+    const required_device_inventory_snippets = [_][]const u8{
+        "requireProductionDriverDeviceId",
+        "sourceCanEnterInventory",
+        "sourceCanBindProductionDriver",
+        "NonProductionDeviceBinding",
+        "intel_i225_lm_inventory",
+        "nvme_pci_inventory",
+        "sourceCanBindProductionDriver(record.device_class, record.source, record.device_id)",
+        "isStablePciVendorDevice(device_id, PCI_VENDOR_INTEL, PCI_DEVICE_INTEL_I225_LM)",
+        ".storage_controller => source == .nvme_pci_inventory and isStablePciId(device_id)",
+        ".input_device => source == .xhci_inventory and isStablePciVendor(device_id, PCI_VENDOR_INTEL)",
+        "if (source == .absent or source == .synthetic or device_id == 0) return false",
+        ".absent => \"absent\"",
+        "device inventory starts absent until hardware is discovered",
+        "if (!sourceCanEnterInventory(device_class, source, device_id)) return",
+        ".platform_policy",
+        "device inventory refuses synthetic records for production driver binding",
+        "device inventory records ATA bootstrap but requires target-grade NVMe for production storage binding",
+        "device inventory refuses PS/2 bootstrap for production input binding",
+        "device inventory promotes observed ATA storage to target NVMe production binding",
+    };
+    for (required_device_inventory_snippets) |snippet| {
+        if (std.mem.indexOf(u8, device_inventory_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 device inventory source must enforce production binding snippet: {s}", .{snippet});
+        }
+    }
+    const retired_device_inventory_snippets = [_][]const u8{
+        "defaultRecord(.network_adapter, 100)",
+        "defaultRecord(.storage_controller, 200)",
+        "defaultRecord(.usb_controller, 300)",
+        "defaultRecord(.input_device, 600)",
+    };
+    for (retired_device_inventory_snippets) |snippet| {
+        if (std.mem.indexOf(u8, device_inventory_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 device inventory source must not reintroduce stable synthetic fallback ids: {s}", .{snippet});
+        }
+    }
+    const retired_device_inventory_binding_snippets = [_][]const u8{
+        ".input_device => source == .ps2_bootstrap",
+    };
+    for (retired_device_inventory_binding_snippets) |snippet| {
+        if (std.mem.indexOf(u8, device_inventory_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 device inventory source must not bind production input through PS/2 bootstrap: {s}", .{snippet});
+        }
+    }
+    const required_boot_device_inventory_snippets = [_][]const u8{
+        "pci.firstIntelI225Lm()",
+        ".intel_i225_lm_inventory",
+        "pci.firstNvmeController()",
+        ".nvme_pci_inventory",
+        "pci.firstXhciController()",
+        "device_inventory.registerDetected(.input_device, xhci_device_id, .xhci_inventory, false)",
+    };
+    for (required_boot_device_inventory_snippets) |snippet| {
+        if (std.mem.indexOf(u8, devices_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 boot device inventory source must capture target-specific PCI snippet: {s}", .{snippet});
+        }
+    }
+    const required_service_bootstrap_snippets = [_][]const u8{
+        "device_inventory.requireProductionDriverDeviceId(device_class)",
+        "const device_id = try",
+        "driver_service.authorityTarget(device_id)",
+        ".device_id = device_id",
+    };
+    for (required_service_bootstrap_snippets) |snippet| {
+        if (std.mem.indexOf(u8, service_bootstrap_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 service bootstrap source must bind drivers through detected inventory snippet: {s}", .{snippet});
+        }
+    }
+    const required_session_service_bootstrap_snippets = [_][]const u8{
+        "seedHostedModelDeviceInventory",
+        "builtin.target.os.tag == .freestanding",
+        ".intel_i225_lm_inventory",
+        ".nvme_pci_inventory",
+        "hosted_xhci_device_id",
+        "device_inventory.registerDetected(.input_device, hosted_xhci_device_id, .xhci_inventory, false)",
+        ".platform_policy",
+    };
+    for (required_session_service_bootstrap_snippets) |snippet| {
+        if (std.mem.indexOf(u8, session_service_bootstrap_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 hosted service bootstrap source must keep explicit modeled inventory snippet: {s}", .{snippet});
+        }
+    }
+    const Ps2SeedSource = struct {
+        label: []const u8,
+        source: []const u8,
+    };
+    const retired_ps2_input_seed_snippets = [_][]const u8{
+        "device_inventory.registerDetected(.input_device, 0x8042_0001, .ps2_bootstrap, false)",
+    };
+    const ps2_seed_sources = [_]Ps2SeedSource{
+        .{ .label = devices_path, .source = devices_source },
+        .{ .label = session_service_bootstrap_path, .source = session_service_bootstrap_source },
+        .{ .label = keyboard_path, .source = keyboard_source },
+    };
+    for (ps2_seed_sources) |source_check| {
+        for (retired_ps2_input_seed_snippets) |snippet| {
+            if (std.mem.indexOf(u8, source_check.source, snippet) != null) {
+                try common.addError(errors, allocator, "NUC11TNKi5 source {s} must not seed production input through PS/2 bootstrap: {s}", .{ source_check.label, snippet });
+            }
         }
     }
     const required_apic_snippets = [_][]const u8{
@@ -1108,6 +1244,8 @@ fn validateProdReadinessManifest(
             requirement_evidence,
         );
     }
+
+    try validateSecretVaultHardwareProviderBoundary(allocator, io, errors);
 }
 
 fn validateTrack(
@@ -1225,6 +1363,593 @@ fn validateTrack(
     if (std.mem.eql(u8, status, "prod_ready") and production_gaps != null and production_gaps.? == .array and production_gaps.?.array.items.len > 0) {
         try common.addError(errors, allocator, "Production readiness track {s} is prod_ready but still lists production_gaps", .{track_id});
     }
+
+    if (std.mem.eql(u8, track_id, "storage-object-store-durability")) {
+        try validateStorageModernOnlyTrack(allocator, io, errors, track);
+    }
+    if (std.mem.eql(u8, track_id, "boot-attestation-update-chain")) {
+        try validateBootAttestationProviderTrack(allocator, io, errors);
+    }
+    if (std.mem.eql(u8, track_id, "userspace-launch-provenance")) {
+        try validateNativeOnlyLaunchTrack(allocator, io, errors);
+    }
+    if (std.mem.eql(u8, track_id, "sync-private-overlay")) {
+        try validateSyncPrivateOverlayTrack(allocator, io, errors);
+    }
+    if (std.mem.eql(u8, track_id, "resource-scheduler-telemetry")) {
+        try validateResourceSchedulerTelemetryTrack(allocator, io, errors);
+    }
+    if (std.mem.eql(u8, track_id, "userspace-driver-data-path")) {
+        try validateUserspaceDriverDataPathTrack(allocator, io, errors);
+    }
+}
+
+fn validateStorageModernOnlyTrack(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    track: std.json.Value,
+) !void {
+    const source_path = "src/native/storage/storage_volume.zig";
+    if (!common.pathExists(io, source_path)) {
+        try common.addError(errors, allocator, "Storage production track references missing source: {s}", .{source_path});
+        return;
+    }
+    const source = try common.readFileAlloc(allocator, io, source_path, common.source_file_max_bytes);
+    const required_snippets = [_][]const u8{
+        "if (image.len < image_bytes) return error.ImageTooSmall",
+        "workspaces.workspaces.get(workspace_id)",
+        "workspaces.snapshots.slotIndexOf(snapshot_id)",
+    };
+    for (required_snippets) |snippet| {
+        if (std.mem.indexOf(u8, source, snippet) == null) {
+            try common.addError(errors, allocator, "Storage production track must keep modern-only/indexed replay snippet: {s}", .{snippet});
+        }
+    }
+    const production_attachment_snippets = [_][]const u8{
+        "pub fn attachNvmePciBackend(self: *Volume, backend: Backend) void",
+        "pub fn hasProductionStorageBackend(self: *const Volume) bool",
+        "self.attached_backend_kind == .nvme_pci",
+    };
+    for (production_attachment_snippets) |snippet| {
+        if (std.mem.indexOf(u8, source, snippet) == null) {
+            try common.addError(errors, allocator, "Storage production track must keep target NVMe attachment snippet: {s}", .{snippet});
+        }
+    }
+
+    const backend_source_path = "src/native/storage/volume/backend.zig";
+    const backend_source = try readRequiredSource(allocator, io, errors, backend_source_path) orelse return;
+    const backend_snippets = [_][]const u8{
+        "nvme_pci",
+        "ata_bootstrap_broker",
+    };
+    for (backend_snippets) |snippet| {
+        if (std.mem.indexOf(u8, backend_source, snippet) == null) {
+            try common.addError(errors, allocator, "Storage production track must keep distinct backend kind: {s}", .{snippet});
+        }
+    }
+
+    const driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
+    const driver_port_source = try readRequiredSource(allocator, io, errors, driver_port_path) orelse return;
+    const driver_port_snippets = [_][]const u8{
+        "attachPublishedStorageBackend(publication, publication.backend.?)",
+        "storagePublicationMatchesTargetNvme",
+        "storage_volume.attachNvmePciBackend(backend)",
+        "storage_volume.attachAtaBootstrapBrokerBackend",
+    };
+    for (driver_port_snippets) |snippet| {
+        if (std.mem.indexOf(u8, driver_port_source, snippet) == null) {
+            try common.addError(errors, allocator, "Storage production track must gate attached storage backend activation: {s}", .{snippet});
+        }
+    }
+
+    const storage_test_path = "src/native/storage/storage_volume_test.zig";
+    const storage_test_source = try readRequiredSource(allocator, io, errors, storage_test_path) orelse return;
+    if (std.mem.indexOf(u8, storage_test_source, "storage volume separates generic, target nvme, and brokered ata attachments") == null) {
+        try common.addError(errors, allocator, "Storage production track must keep regression coverage for production storage attachment kinds", .{});
+    }
+
+    const native_store_mount_path = "src/native/session/native_store_mount.zig";
+    const native_store_mount_source = try readRequiredSource(allocator, io, errors, native_store_mount_path) orelse return;
+    const native_store_mount_snippets = [_][]const u8{
+        "pub fn canAdoptProductionRootVolume(root_volume: anytype) bool",
+        "return root_volume.hasProductionStorageBackend()",
+        "if (!canAdoptProductionRootVolume(root_volume)) return false",
+        "checkpoint_store.volume.attachNvmePciBackendFns(",
+        "native store root adoption only accepts production NVMe PCI volumes",
+    };
+    for (native_store_mount_snippets) |snippet| {
+        if (std.mem.indexOf(u8, native_store_mount_source, snippet) == null) {
+            try common.addError(errors, allocator, "Storage production track must keep NVMe-only native store adoption snippet: {s}", .{snippet});
+        }
+    }
+    const retired_native_store_mount_snippets = [_][]const u8{
+        "checkpoint_store.volume.attachBackendFns(",
+        "checkpoint_store.volume.attachAtaBootstrapDevice(",
+        "checkpoint_store.volume.attachAtaBootstrapBrokerBackendFns(",
+    };
+    for (retired_native_store_mount_snippets) |snippet| {
+        if (std.mem.indexOf(u8, native_store_mount_source, snippet) != null) {
+            try common.addError(errors, allocator, "Storage production track must not adopt non-NVMe root storage into the native store: {s}", .{snippet});
+        }
+    }
+
+    const removed_snippets = [_][]const u8{
+        "findWorkspaceSlotById",
+        "findSnapshotSlotIndexById",
+    };
+    for (removed_snippets) |snippet| {
+        if (std.mem.indexOf(u8, source, snippet) != null) {
+            try common.addError(errors, allocator, "Storage production track must not reintroduce replay scan helper: {s}", .{snippet});
+        }
+    }
+
+    const retired_manifest_claims = [_][]const u8{
+        "legacy demo-image migration",
+        "migration inputs",
+    };
+    for (retired_manifest_claims) |claim| {
+        if (trackListContains(track, "current_evidence", claim) or
+            trackListContains(track, "graduation_criteria", claim) or
+            trackListContains(track, "next_actions", claim))
+        {
+            try common.addError(errors, allocator, "Storage production track must not claim legacy migration support: {s}", .{claim});
+        }
+    }
+}
+
+fn validateBootAttestationProviderTrack(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const source_path = "src/native/platform/attestation_service.zig";
+    const source = try readRequiredSource(allocator, io, errors, source_path) orelse return;
+
+    const required_snippets = [_][]const u8{
+        "hasTestOnlyOperationalName",
+        "containsNameTokenIgnoreCase",
+        "isOperationalNameSeparator",
+        "containsAsciiIgnoreCase",
+        "!self.hasProductionUnsafeName()",
+        "hasTestOnlyOperationalName(key.label)",
+        "hasTestOnlyOperationalName(provider.label())",
+        "AttestationVerifierMetadata.fromProvider",
+        "ExternalAttestationRootProvider.init",
+        "production attestation descriptors reject test-only operational names",
+    };
+    for (required_snippets) |snippet| {
+        if (std.mem.indexOf(u8, source, snippet) == null) {
+            try common.addError(errors, allocator, "Boot attestation production track must keep provider hardening snippet: {s}", .{snippet});
+        }
+    }
+}
+
+fn validateSyncPrivateOverlayTrack(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const harness_path = "src/native/sync/sync_transport_harness.zig";
+    const harness_source = try readRequiredSource(allocator, io, errors, harness_path) orelse return;
+
+    const required_snippets = [_][]const u8{
+        "evidence.hasVerifiedRemoteAttestation() and",
+        "evidence.hasAttestationVerifierMetadataDigest()",
+        "root-pinned-without-metadata",
+        "SessionTrustPosture.local_lab_only, root_pinned_session.trust_posture",
+        "root_pinned_session.requireProductionAttestation()",
+    };
+    for (required_snippets) |snippet| {
+        if (std.mem.indexOf(u8, harness_source, snippet) == null) {
+            try common.addError(errors, allocator, "Sync private overlay track must keep production attestation posture snippet: {s}", .{snippet});
+        }
+    }
+
+    const policy_path = "src/native/sync/network_policy.zig";
+    const policy_source = try readRequiredSource(allocator, io, errors, policy_path) orelse return;
+    const policy_snippets = [_][]const u8{
+        "pub fn hasAttestationVerifierMetadataDigest(self: *const ConnectionEvidence) bool",
+        "self.attestation_verifier_metadata_digest_bound",
+        "pinned_attestation_verifier_metadata_digest_present",
+    };
+    for (policy_snippets) |snippet| {
+        if (std.mem.indexOf(u8, policy_source, snippet) == null) {
+            try common.addError(errors, allocator, "Sync private overlay track must keep verifier metadata policy snippet: {s}", .{snippet});
+        }
+    }
+}
+
+fn validateSecretVaultHardwareProviderBoundary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const store_path = "src/native/platform/secure_secret_store.zig";
+    const store_source = try readRequiredSource(allocator, io, errors, store_path) orelse return;
+    const store_snippets = [_][]const u8{
+        "HardwareProviderUnavailable",
+        "self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable",
+        "slot.secret.hardware_provider_used = true",
+        "secure secret store requires a hardware provider before hardware-backed imports",
+    };
+    for (store_snippets) |snippet| {
+        if (std.mem.indexOf(u8, store_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep store snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, store_source, "digestSecretMaterial") != null) {
+        try common.addError(errors, allocator, "Secret vault hardware-backed boundary must not reintroduce software digest fallback for hardware-backed secrets", .{});
+    }
+
+    const service_path = "src/native/services/secret_vault_service.zig";
+    const service_source = try readRequiredSource(allocator, io, errors, service_path) orelse return;
+    const service_snippets = [_][]const u8{
+        "service.attachHardwareProvider(testHardwareProvider())",
+        "expiry_service.attachHardwareProvider(testHardwareProvider())",
+        "export_service.attachHardwareProvider(testHardwareProvider())",
+    };
+    for (service_snippets) |snippet| {
+        if (std.mem.indexOf(u8, service_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep service provider test snippet: {s}", .{snippet});
+        }
+    }
+
+    const identity_path = "src/native/platform/os_identity.zig";
+    const identity_source = try readRequiredSource(allocator, io, errors, identity_path) orelse return;
+    const identity_snippets = [_][]const u8{
+        "testHardwareProvider() secure_secret_store.HardwareSealProvider",
+        "secrets.attachHardwareProvider(testHardwareProvider())",
+    };
+    for (identity_snippets) |snippet| {
+        if (std.mem.indexOf(u8, identity_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep identity provider test snippet: {s}", .{snippet});
+        }
+    }
+
+    const contract_path = "src/native/platform/os_contract_2026.zig";
+    const contract_source = try readRequiredSource(allocator, io, errors, contract_path) orelse return;
+    const contract_snippets = [_][]const u8{
+        "credentialContractHardwareProvider",
+        "secrets.attachHardwareProvider(credentialContractHardwareProvider())",
+        "secretVaultContractHardwareProvider",
+        "service.attachHardwareProvider(secretVaultContractHardwareProvider())",
+        "secret.hardware_provider_used",
+    };
+    for (contract_snippets) |snippet| {
+        if (std.mem.indexOf(u8, contract_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep contract provider evidence snippet: {s}", .{snippet});
+        }
+    }
+
+    const benchmark_path = "src/kernel/boot/benchmark/suite.zig";
+    const benchmark_source = try readRequiredSource(allocator, io, errors, benchmark_path) orelse return;
+    const benchmark_snippets = [_][]const u8{
+        "secret_store_context.store.attachHardwareProvider(.{ .available = true })",
+        "const secret = secret_store_context.store.importSecret(",
+    };
+    for (benchmark_snippets) |snippet| {
+        if (std.mem.indexOf(u8, benchmark_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep benchmark provider snippet: {s}", .{snippet});
+        }
+    }
+}
+
+fn validateResourceSchedulerTelemetryTrack(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const accelerator_path = "src/native/task/accelerator_scheduler.zig";
+    const userspace_path = "src/native/task/userspace_scheduler.zig";
+    const platform_policy_signals_path = "src/native/platform/platform_policy_signals.zig";
+    const benchmark_path = "src/kernel/boot/benchmark/suite.zig";
+    const accelerator_source = try readRequiredSource(allocator, io, errors, accelerator_path) orelse return;
+    const userspace_source = try readRequiredSource(allocator, io, errors, userspace_path) orelse return;
+    const platform_policy_signals_source = try readRequiredSource(allocator, io, errors, platform_policy_signals_path) orelse return;
+    const benchmark_source = try readRequiredSource(allocator, io, errors, benchmark_path) orelse return;
+
+    const accelerator_snippets = [_][]const u8{
+        "production_hardware_telemetry_required: bool = false",
+        "requireProductionHardwareTelemetryForAccelerators",
+        "self.last_telemetry_source == .hardware and self.last_hardware_evidence_complete",
+        "accelerator scheduler production mode requires complete hardware telemetry before accelerator claims",
+    };
+    for (accelerator_snippets) |snippet| {
+        if (std.mem.indexOf(u8, accelerator_source, snippet) == null) {
+            try common.addError(errors, allocator, "Resource scheduler telemetry track must keep production hardware gate snippet: {s}", .{snippet});
+        }
+    }
+
+    const userspace_snippets = [_][]const u8{
+        "return self.resource_telemetry_source == .hardware and self.resource_hardware_evidence_complete",
+        "userspace scheduler requires complete hardware telemetry before waking hardware queues",
+        "scheduler.grantNextAcceleratorClaim(.media, 9) == null",
+    };
+    for (userspace_snippets) |snippet| {
+        if (std.mem.indexOf(u8, userspace_source, snippet) == null) {
+            try common.addError(errors, allocator, "Resource scheduler telemetry track must keep complete-hardware queue gate snippet: {s}", .{snippet});
+        }
+    }
+
+    if (std.mem.indexOf(u8, userspace_source, "return self.resource_telemetry_source != .hardware or self.resource_hardware_evidence_complete") != null) {
+        try common.addError(errors, allocator, "Resource scheduler telemetry track must not let emulator or boot-provider telemetry wake hardware queues", .{});
+    }
+
+    const platform_policy_signal_snippets = [_][]const u8{
+        "const generated_image_fixtures = @import(\"../task/generated_image_fixtures.zig\")",
+        "const foreground_image = try generated_image_fixtures.appImage()",
+        "const private_image = try generated_image_fixtures.appImage()",
+    };
+    for (platform_policy_signal_snippets) |snippet| {
+        if (std.mem.indexOf(u8, platform_policy_signals_source, snippet) == null) {
+            try common.addError(errors, allocator, "Resource scheduler telemetry track must keep generated-image runtime counter fixture snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, platform_policy_signals_source, "syntheticUserspaceImage(") != null) {
+        try common.addError(errors, allocator, "Resource scheduler telemetry track must not derive hardware policy counters from synthetic executable descriptors", .{});
+    }
+
+    const benchmark_snippets = [_][]const u8{
+        "const generated_image_fixtures = @import(\"../../../native/task/generated_image_fixtures.zig\")",
+        "benchmark_image_context.app_image = generated_image_fixtures.appImage() catch unreachable",
+        "const image = if (service_task) benchmarkServiceImage() else benchmarkAppImage()",
+    };
+    for (benchmark_snippets) |snippet| {
+        if (std.mem.indexOf(u8, benchmark_source, snippet) == null) {
+            try common.addError(errors, allocator, "Resource scheduler telemetry track must keep generated-image benchmark fixture snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, benchmark_source, "syntheticUserspaceImage(") != null) {
+        try common.addError(errors, allocator, "Resource scheduler telemetry track must not benchmark scheduler load tasks with synthetic executable descriptors", .{});
+    }
+}
+
+fn validateUserspaceDriverDataPathTrack(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const broker_path = "src/native/kernel_api/device_broker.zig";
+    const bootstrap_driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
+    const driver_runtime_path = "src/native/drivers/driver_runtime.zig";
+    const storage_driver_path = "src/native/drivers/storage_driver_task.zig";
+    const driver_spec_path = "src/tests/spec/drivers_storage_sync.zig";
+    const backlog_gate_path = "src/tests/spec/backlog_gates.zig";
+    const broker_source = try readRequiredSource(allocator, io, errors, broker_path) orelse return;
+    const bootstrap_driver_port_source = try readRequiredSource(allocator, io, errors, bootstrap_driver_port_path) orelse return;
+    const driver_runtime_source = try readRequiredSource(allocator, io, errors, driver_runtime_path) orelse return;
+    const storage_driver_source = try readRequiredSource(allocator, io, errors, storage_driver_path) orelse return;
+    const driver_spec_source = try readRequiredSource(allocator, io, errors, driver_spec_path) orelse return;
+    const backlog_gate_source = try readRequiredSource(allocator, io, errors, backlog_gate_path) orelse return;
+
+    const broker_snippets = [_][]const u8{
+        "UnsupportedBusMasterDma",
+        "if (request.bus_master_dma_enabled) return error.UnsupportedBusMasterDma",
+        "device broker records AMD-Vi programming evidence and rejects bus-master DMA",
+        "try std.testing.expectError(error.UnsupportedBusMasterDma, programDmaIsolation",
+        "try std.testing.expect(!status.bus_master_dma_enabled)",
+    };
+    for (broker_snippets) |snippet| {
+        if (std.mem.indexOf(u8, broker_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace driver data path must keep bus-master DMA fail-closed snippet: {s}", .{snippet});
+        }
+    }
+
+    if (std.mem.indexOf(u8, broker_source, "try std.testing.expect(status.bus_master_dma_enabled)") != null) {
+        try common.addError(errors, allocator, "Userspace driver data path must not treat bus-master DMA as test-accepted production evidence", .{});
+    }
+
+    const network_activation_snippets = [_][]const u8{
+        "networkPublicationMatchesTargetI225",
+        "device_inventory.requireProductionDriverDeviceId(.network_adapter)",
+        "if (!networkPublicationMatchesTargetI225(device_id)) return false",
+        "try std.testing.expect(!activateNetworkDevice(i225_device_id, 9))",
+    };
+    for (network_activation_snippets) |snippet| {
+        if (std.mem.indexOf(u8, bootstrap_driver_port_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace driver data path must keep I225-only network activation snippet: {s}", .{snippet});
+        }
+    }
+    const network_driver_spec_snippets = [_][]const u8{
+        "device_inventory.registerDetected(.network_adapter, network_device_id, .intel_i225_lm_inventory, false)",
+        "\"i225-userspace\"",
+        "try std.testing.expect(!bootstrap_driver_port.activateNetworkDevice(i225_device_id, 800))",
+    };
+    for (network_driver_spec_snippets) |snippet| {
+        if (std.mem.indexOf(u8, driver_spec_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace driver data path spec must keep I225-only network fixture snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, driver_spec_source, "e1000-userspace") != null) {
+        try common.addError(errors, allocator, "Userspace driver data path spec must not use e1000 as a production network fixture", .{});
+    }
+
+    const storage_driver_snippets = [_][]const u8{
+        "!session.dma_isolation.bus_master_dma_enabled",
+        "session.dma_isolation.hardware_iommu_programmed",
+        "session.dma_isolation.mode == .brokered_dma_buffers",
+    };
+    for (storage_driver_snippets) |snippet| {
+        if (std.mem.indexOf(u8, storage_driver_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace storage driver must keep brokered-DMA-only readiness snippet: {s}", .{snippet});
+        }
+    }
+
+    const generated_driver_fixture_sources = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippets: []const []const u8,
+    }{
+        .{
+            .path = bootstrap_driver_port_path,
+            .source = bootstrap_driver_port_source,
+            .snippets = &.{"try generated_image_fixtures.storageDriverImage()"},
+        },
+        .{
+            .path = driver_runtime_path,
+            .source = driver_runtime_source,
+            .snippets = &.{"try generated_image_fixtures.storageDriverImage()"},
+        },
+        .{
+            .path = storage_driver_path,
+            .source = storage_driver_source,
+            .snippets = &.{"try generated_image_fixtures.storageDriverImage()"},
+        },
+        .{
+            .path = backlog_gate_path,
+            .source = backlog_gate_source,
+            .snippets = &.{
+                "try generated_image_fixtures.serviceClientImage()",
+                "try generated_image_fixtures.storageDriverImage()",
+                "try generated_image_fixtures.appImage()",
+            },
+        },
+    };
+    for (generated_driver_fixture_sources) |fixture_source| {
+        if (std.mem.indexOf(u8, fixture_source.source, "syntheticUserspaceImage(") != null) {
+            try common.addError(errors, allocator, "Userspace driver data path must not use synthetic executable descriptors in {s}", .{fixture_source.path});
+        }
+        for (fixture_source.snippets) |snippet| {
+            if (std.mem.indexOf(u8, fixture_source.source, snippet) == null) {
+                try common.addError(errors, allocator, "Userspace driver data path must keep generated image fixture snippet in {s}: {s}", .{ fixture_source.path, snippet });
+            }
+        }
+    }
+}
+
+fn trackListContains(track: std.json.Value, field_name: []const u8, needle: []const u8) bool {
+    const value = common.field(track, field_name) orelse return false;
+    if (value != .array) return false;
+    for (value.array.items) |item| {
+        if (item == .string and std.mem.indexOf(u8, item.string, needle) != null) return true;
+    }
+    return false;
+}
+
+fn validateNativeOnlyLaunchTrack(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const manifest_path = "src/native/policy/manifest.zig";
+    const linter_path = "src/native/sdk/manifest_linter.zig";
+    const contract_path = "src/native/platform/os_contract_2026.zig";
+    const boot_registry_path = "src/native/task/userspace_boot_registry.zig";
+    const loader_path = "src/native/task/userspace_loader.zig";
+    const launch_path = "src/native/task/userspace_launch.zig";
+    const rendered_shell_launch_path = "src/native/platform/rendered_shell/task_launch.zig";
+
+    const manifest_source = try readRequiredSource(allocator, io, errors, manifest_path) orelse return;
+    const linter_source = try readRequiredSource(allocator, io, errors, linter_path) orelse return;
+    const contract_source = try readRequiredSource(allocator, io, errors, contract_path) orelse return;
+    const boot_registry_source = try readRequiredSource(allocator, io, errors, boot_registry_path) orelse return;
+    const loader_source = try readRequiredSource(allocator, io, errors, loader_path) orelse return;
+    const launch_source = try readRequiredSource(allocator, io, errors, launch_path) orelse return;
+    const rendered_shell_launch_source = try readRequiredSource(allocator, io, errors, rendered_shell_launch_path) orelse return;
+
+    const required_manifest_snippets = [_][]const u8{
+        "CompatibilityNamespaceUnsupported",
+        "try validateNativeOnlyNaming(bundle)",
+        "isUnsupportedCompatibilityNamespace",
+        "return !isReservedPlatformBundle(bundle_id) and",
+        "!isUnsupportedCompatibilityNamespace(bundle_id)",
+    };
+    for (required_manifest_snippets) |snippet| {
+        if (std.mem.indexOf(u8, manifest_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only launch track must keep manifest validation snippet: {s}", .{snippet});
+        }
+    }
+
+    const required_linter_snippets = [_][]const u8{
+        "manifest.isUnsupportedCompatibilityNamespace(bundle.bundle_id)",
+        "manifest.isUnsupportedCompatibilityNamespace(component.entry)",
+        "idlMentionsPosix",
+        "idlMentionsCompat",
+    };
+    for (required_linter_snippets) |snippet| {
+        if (std.mem.indexOf(u8, linter_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only launch track must keep SDK linter manifest-policy snippet: {s}", .{snippet});
+        }
+    }
+
+    const required_contract_snippets = [_][]const u8{
+        "!manifest.isApplicationBundle(\"compat.posix\")",
+        "error.CompatibilityNamespaceUnsupported",
+    };
+    for (required_contract_snippets) |snippet| {
+        if (std.mem.indexOf(u8, contract_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only launch track must keep 2026 contract snippet: {s}", .{snippet});
+        }
+    }
+
+    const required_boot_registry_snippets = [_][]const u8{
+        "const archive = @import(\"userspace_archive\")",
+        "GeneratedArtifactMissing",
+        "validateGeneratedArchiveHasOnlyRegisteredSpecs",
+        "generatedArtifactFor(spec.bundle_id) orelse return error.GeneratedArtifactMissing",
+        "catalog.registerEmbeddedArtifactWithInfo",
+        "try std.testing.expect(catalog.findByBundleId(\"zigos.system.session-manager\").?.embedsElf())",
+    };
+    for (required_boot_registry_snippets) |snippet| {
+        if (std.mem.indexOf(u8, boot_registry_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only launch track must keep archive-backed boot registry snippet: {s}", .{snippet});
+        }
+    }
+
+    const required_loader_snippets = [_][]const u8{
+        "const embedded_info = embedded orelse return error.EmbeddedArtifactRequired",
+        "if (!has_embedded_artifact) {",
+        "test \"catalog rejects metadata-only executable registration\"",
+    };
+    for (required_loader_snippets) |snippet| {
+        if (std.mem.indexOf(u8, loader_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only launch track must keep embedded-artifact catalog snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, loader_source, "syntheticExecutableImage") != null) {
+        try common.addError(errors, allocator, "Native-only launch track must not synthesize catalog executable images from metadata-only requests", .{});
+    }
+
+    const required_launch_snippets = [_][]const u8{
+        "if (!image.embedsElf()) {",
+        "try userspace_boot_registry.registerAll(catalog)",
+        "if (!image.embedsElf()) return error.EmbeddedArtifactRequired",
+        "logLaunchFailure(bundle.bundle_id, failure_phase, error.EmbeddedArtifactRequired)",
+    };
+    for (required_launch_snippets) |snippet| {
+        if (std.mem.indexOf(u8, launch_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only launch track must keep archive-backed launch guard snippet: {s}", .{snippet});
+        }
+    }
+
+    const required_rendered_shell_launch_snippets = [_][]const u8{
+        "generated_image_fixtures.imageByBundleId(config.bundle_id)",
+        "const image = try imageForConfig(config, builtin.is_test)",
+        "if (!allow_model_only_fallback) return err",
+        "test \"rendered shell task launch requires generated image outside model-only tests\"",
+    };
+    for (required_rendered_shell_launch_snippets) |snippet| {
+        if (std.mem.indexOf(u8, rendered_shell_launch_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only launch track must keep rendered-shell archive image snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, rendered_shell_launch_source, "const image = task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry)") != null) {
+        try common.addError(errors, allocator, "Native-only launch track must not synthesize rendered-shell task launch descriptors unconditionally", .{});
+    }
+}
+
+fn readRequiredSource(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    path: []const u8,
+) !?[]const u8 {
+    if (!common.pathExists(io, path)) {
+        try common.addError(errors, allocator, "Required production-readiness source is missing: {s}", .{path});
+        return null;
+    }
+    return try common.readFileAlloc(allocator, io, path, common.source_file_max_bytes);
 }
 
 fn validateSyntheticUserspaceImageMarkers(

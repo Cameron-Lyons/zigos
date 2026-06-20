@@ -15,6 +15,10 @@ NATIVE_STORE_IMAGE="${3:?native store image path required}"
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-180}"
 NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
 
+# Drive the native store as a real NVMe controller so the kernel NVMe data-plane
+# driver provides genuine persistence across the forced reboots in this proof.
+export ZIGOS_NATIVE_STORE_BUS=nvme
+
 BASE_LOG_PATH="${LOG_PATH%.log}"
 BOOT1_LOG="${BASE_LOG_PATH}.boot1.log"
 BOOT2_LOG="${BASE_LOG_PATH}.boot2.log"

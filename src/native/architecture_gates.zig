@@ -104,6 +104,10 @@ pub const indexed_hot_path_tables = .{
     .storage_volume = .{
         .persists_workspace_state_v4 = true,
         .hashes_workspace_root_address = true,
+        .rejects_legacy_demo_images = true,
+        .replays_workspaces_by_primary_index = true,
+        .replays_snapshots_by_primary_index = true,
+        .requires_target_nvme_attachment = true,
         .removed_monolithic_workspace_state_buffer = true,
     },
     .service_catalog = .{

@@ -1,15 +1,19 @@
+const builtin = @import("builtin");
 const abi = @import("../../core/abi.zig");
+const generated_image_fixtures = @import("../../task/generated_image_fixtures.zig");
 const native_ux = @import("../native_ux.zig");
 const shared_memory = @import("../../kernel_api/shared_memory.zig");
 const package_service = @import("../../services/package_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const units = @import("../../core/units.zig");
 
+pub const Error = native_ux.Error || generated_image_fixtures.Error;
+
 pub fn startConfiguredTask(
     ux: *native_ux.Controller,
     runtime: *task_runtime.Runtime,
     config: anytype,
-) native_ux.Error!*task_runtime.TaskRecord {
+) Error!*task_runtime.TaskRecord {
     return startConfiguredTaskWithPackageProvenance(ux, runtime, config, .{});
 }
 
@@ -18,8 +22,8 @@ pub fn startConfiguredTaskWithPackageProvenance(
     runtime: *task_runtime.Runtime,
     config: anytype,
     provenance: package_service.PackageLaunchProvenance,
-) native_ux.Error!*task_runtime.TaskRecord {
-    const image = task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry);
+) Error!*task_runtime.TaskRecord {
+    const image = try imageForConfig(config, builtin.is_test);
     return ux.startTask(runtime, .{
         .owner = config.app_owner,
         .component_class = .app_component,
@@ -48,4 +52,36 @@ pub fn startConfiguredTaskWithPackageProvenance(
         },
         .userspace_image = &image,
     });
+}
+
+fn imageForConfig(config: anytype, allow_model_only_fallback: bool) generated_image_fixtures.Error!task_runtime.ExecutableImageSpec {
+    return generated_image_fixtures.imageByBundleId(config.bundle_id) catch |err| switch (err) {
+        error.GeneratedImageMissing => {
+            if (!allow_model_only_fallback) return err;
+            // prod-readiness: model-only synthetic-userspace-image
+            return task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry);
+        },
+        else => return err,
+    };
+}
+
+test "rendered shell task launch requires generated image outside model-only tests" {
+    const config = .{
+        .task_label = "unknown",
+        .task_entry = "app.unknown",
+        .bundle_id = "app.unknown",
+    };
+
+    try @import("std").testing.expectError(error.GeneratedImageMissing, imageForConfig(config, false));
+}
+
+test "rendered shell task launch resolves generated archive images for registered bundles" {
+    const config = .{
+        .task_label = "notes",
+        .task_entry = "app.notes",
+        .bundle_id = "app.notes",
+    };
+
+    const image = try imageForConfig(config, false);
+    try @import("std").testing.expect(image.isPresent());
 }

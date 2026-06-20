@@ -249,7 +249,7 @@ pub const Service = struct {
 
     pub fn activeCount(self: *const Service) usize {
         var count: usize = 0;
-        for (self.slots) |slot| {
+        for (&self.slots) |*slot| {
             if (slot.in_use and !slot.delegation.revoked) count += 1;
         }
         return count;

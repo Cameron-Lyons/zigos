@@ -209,6 +209,7 @@ pub const Error = error{
     InvalidDmaWindow,
     InvalidIommuProgram,
     UnsupportedMmioWindow,
+    UnsupportedBusMasterDma,
     UnsupportedWidth,
 };
 
@@ -332,6 +333,7 @@ pub fn programBrokeredDmaIsolation(device_id: u64, dma_domain_id: u64) Error!Dma
 pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus {
     _ = findController(request.device_id) orelse return error.DeviceNotFound;
     if (request.dma_domain_id == 0) return error.InvalidDmaDomain;
+    if (request.bus_master_dma_enabled) return error.UnsupportedBusMasterDma;
     if (request.windows.len == 0 or request.windows.len > MAX_DMA_WINDOWS) return error.InvalidDmaWindow;
     for (request.windows) |window| {
         if (!validDmaWindow(window)) return error.InvalidDmaWindow;
@@ -884,7 +886,7 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
     try std.testing.expectEqual(@as(u32, 1), (try dmaIsolationStatus(0x1F001, 0xD170)).fault_count);
 }
 
-test "device broker records AMD-Vi programming evidence and rejects invalid IOMMU tables" {
+test "device broker records AMD-Vi programming evidence and rejects bus-master DMA" {
     reset();
 
     try std.testing.expect(publishAtaController(0x1F002, .{
@@ -895,17 +897,26 @@ test "device broker records AMD-Vi programming evidence and rejects invalid IOMM
         .sector_count = test_ata_sector_count,
     }));
     const window = defaultBrokeredDmaWindow(0x1F002);
-    const status = try programDmaIsolation(.{
+    try std.testing.expectError(error.UnsupportedBusMasterDma, programDmaIsolation(.{
         .device_id = 0x1F002,
         .dma_domain_id = 0xA11D,
         .mode = .brokered_dma_buffers,
         .bus_master_dma_enabled = true,
         .iommu_engine = .amd_vi,
         .windows = &.{window},
+    }));
+
+    const status = try programDmaIsolation(.{
+        .device_id = 0x1F002,
+        .dma_domain_id = 0xA11D,
+        .mode = .brokered_dma_buffers,
+        .bus_master_dma_enabled = false,
+        .iommu_engine = .amd_vi,
+        .windows = &.{window},
     });
     try std.testing.expect(status.hardware_iommu_programmed);
     try std.testing.expectEqual(IommuEngine.amd_vi, status.iommu_program.engine);
-    try std.testing.expect(status.bus_master_dma_enabled);
+    try std.testing.expect(!status.bus_master_dma_enabled);
     try std.testing.expect(aligned(status.iommu_program.root_table_address, iommu_page_size));
     try std.testing.expect(aligned(status.iommu_program.domain_page_table_address, iommu_page_size));
 

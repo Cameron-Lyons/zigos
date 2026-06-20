@@ -437,6 +437,7 @@ pub const Controller = struct {
     last_telemetry_source: TelemetrySource = .synthetic,
     last_telemetry_observed_tick: u64 = 0,
     last_hardware_evidence_complete: bool = false,
+    production_hardware_telemetry_required: bool = false,
     next_claim_id: u64 = 1,
     claims: ClaimArena = ClaimArena.init(),
     claim_task_index: ClaimTaskIndex = ClaimTaskIndex.init(),
@@ -470,6 +471,10 @@ pub const Controller = struct {
 
     pub fn observedTelemetry(self: *const Controller) bool {
         return self.last_telemetry_source != .synthetic;
+    }
+
+    pub fn requireProductionHardwareTelemetryForAccelerators(self: *Controller) void {
+        self.production_hardware_telemetry_required = true;
     }
 
     pub fn requireBrokeredEngineQueues(self: *Controller) void {
@@ -725,6 +730,9 @@ pub const Controller = struct {
     }
 
     fn hardwareQueueTelemetryReady(self: *const Controller) bool {
+        if (self.production_hardware_telemetry_required) {
+            return self.last_telemetry_source == .hardware and self.last_hardware_evidence_complete;
+        }
         return self.last_telemetry_source != .hardware or self.last_hardware_evidence_complete;
     }
 
@@ -1333,6 +1341,77 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
     try std.testing.expectEqual(@as(usize, 192), controller.state.memory_bandwidth_units);
     try std.testing.expectEqual(@as(u32, 2), provider.live_observation_count);
     try std.testing.expectEqual(@as(u32, 2), provider.read_count);
+}
+
+test "accelerator scheduler production mode requires complete hardware telemetry before accelerator claims" {
+    var controller = Controller.init();
+    controller.requireProductionHardwareTelemetryForAccelerators();
+    controller.configure(.{
+        .media_available = true,
+    });
+
+    try std.testing.expectError(error.AcceleratorRequired, controller.claim(.{
+        .task_id = 91,
+        .request = .{
+            .class = .media_export,
+            .wants_media_engine = true,
+        },
+        .require_accelerator = true,
+    }));
+
+    var emulator = EmulatedTelemetryDevice.init(.{
+        .observed_tick = 1,
+        .media_available = true,
+    });
+    controller.configureFromProvider(emulator.telemetryProvider());
+    try std.testing.expectEqual(TelemetrySource.emulator, controller.last_telemetry_source);
+    try std.testing.expectError(error.AcceleratorRequired, controller.claim(.{
+        .task_id = 91,
+        .request = .{
+            .class = .media_export,
+            .wants_media_engine = true,
+        },
+        .require_accelerator = true,
+    }));
+
+    controller.configureFromTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 2,
+        .media_available = true,
+    });
+    try std.testing.expect(!controller.last_hardware_evidence_complete);
+    try std.testing.expectError(error.AcceleratorRequired, controller.claim(.{
+        .task_id = 91,
+        .request = .{
+            .class = .media_export,
+            .wants_media_engine = true,
+        },
+        .require_accelerator = true,
+    }));
+
+    controller.configureFromTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 3,
+        .media_available = true,
+        .hardware_evidence = .{
+            .target_id = "nuc11tnki5",
+            .reader_generation = 7,
+            .acpi_observed = true,
+            .thermal_observed = true,
+            .battery_observed = true,
+            .accelerator_observed = true,
+            .grid_carbon_observed = true,
+        },
+    });
+    const claim = try controller.claim(.{
+        .task_id = 91,
+        .request = .{
+            .class = .media_export,
+            .wants_media_engine = true,
+        },
+        .require_accelerator = true,
+    });
+    try std.testing.expectEqual(Engine.media, claim.engine);
 }
 
 test "accelerator scheduler tracks exclusive engine claims and zero-copy attachments" {

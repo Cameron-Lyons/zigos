@@ -180,19 +180,14 @@ pub fn lintWithIdl(bundle: manifest.BundleManifest, idl_source: []const u8) Repo
         }
     }
 
-    if (mentionsPosix(bundle) or std.mem.indexOf(u8, idl_source, "posix") != null or std.mem.indexOf(u8, idl_source, "POSIX") != null) {
+    if (bundleUsesUnsupportedCompatibilityNamespace(bundle) or idlMentionsPosix(idl_source)) {
         report.add(.err, .posix_dependency, "native apps must use declared services instead of POSIX escape hatches");
     }
-    if (mentionsCompat(bundle) or std.mem.indexOf(u8, idl_source, "compat.") != null) {
+    if (bundleUsesUnsupportedCompatibilityNamespace(bundle) or idlMentionsCompat(idl_source)) {
         report.add(.err, .compat_dependency, "compatibility wrappers must be replaced with native typed components");
     }
 
     return report;
-}
-
-pub fn expectClean(bundle: manifest.BundleManifest) !void {
-    const report = lint(bundle);
-    if (report.hasErrors()) return error.ManifestLintFailed;
 }
 
 pub fn expectNativeClean(bundle: manifest.BundleManifest, idl_source: []const u8) !void {
@@ -230,20 +225,21 @@ fn bundleRequestsResource(bundle: manifest.BundleManifest, kind: manifest.Permis
     return false;
 }
 
-fn mentionsPosix(bundle: manifest.BundleManifest) bool {
-    if (std.mem.indexOf(u8, bundle.bundle_id, "posix") != null or std.mem.indexOf(u8, bundle.bundle_id, "POSIX") != null) return true;
+fn bundleUsesUnsupportedCompatibilityNamespace(bundle: manifest.BundleManifest) bool {
+    if (manifest.isUnsupportedCompatibilityNamespace(bundle.bundle_id)) return true;
     for (bundle.components) |component| {
-        if (std.mem.indexOf(u8, component.entry, "posix") != null or std.mem.indexOf(u8, component.entry, "POSIX") != null) return true;
+        if (manifest.isUnsupportedCompatibilityNamespace(component.entry)) return true;
     }
     return false;
 }
 
-fn mentionsCompat(bundle: manifest.BundleManifest) bool {
-    if (std.mem.startsWith(u8, bundle.bundle_id, "compat.") or std.mem.indexOf(u8, bundle.bundle_id, ".compat.") != null) return true;
-    for (bundle.components) |component| {
-        if (std.mem.startsWith(u8, component.entry, "compat.") or std.mem.indexOf(u8, component.entry, ".compat.") != null) return true;
-    }
-    return false;
+fn idlMentionsPosix(idl_source: []const u8) bool {
+    return std.mem.indexOf(u8, idl_source, "posix") != null or
+        std.mem.indexOf(u8, idl_source, "POSIX") != null;
+}
+
+fn idlMentionsCompat(idl_source: []const u8) bool {
+    return std.mem.indexOf(u8, idl_source, "compat.") != null;
 }
 
 test "manifest linter explains SDK packaging problems without stopping at the first issue" {

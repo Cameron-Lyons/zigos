@@ -5,6 +5,7 @@ const registry = @import("userspace_registry.zig");
 const service_catalog = @import("../session/service_catalog.zig");
 const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
+const archive = @import("userspace_archive");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 const console = if (builtin.target.os.tag == .freestanding)
@@ -19,12 +20,15 @@ const SigningError = @typeInfo(SignBundleReturn).error_union.error_set;
 
 pub const Error = userspace_loader.Error || SigningError || error{
     GeneratedArtifactContractMismatch,
+    GeneratedArtifactMissing,
     GeneratedArtifactIdentityMismatch,
     GeneratedArtifactSegmentCountInvalid,
     GeneratedArtifactSignatureMismatch,
     UnsupportedServiceClass,
     UnknownBundleId,
 };
+
+const GeneratedArtifact = @TypeOf(archive.artifacts[0]);
 
 pub fn specCount() usize {
     return registry.boot_image_specs.len;
@@ -39,65 +43,46 @@ pub fn manifestFor(bundle_id: []const u8) Error!manifest.BundleManifest {
     return bundleForSpec(spec);
 }
 
-pub fn initialComponentFor(bundle_id: []const u8) Error!task_runtime.ExecutionComponentSpec {
-    const spec = find(bundle_id) orelse return error.UnknownBundleId;
-    return .{
-        .label = spec.label,
-        .entry = spec.entry,
-    };
-}
-
-pub fn componentClassFor(bundle_id: []const u8) Error!task_runtime.ComponentClass {
-    const spec = find(bundle_id) orelse return error.UnknownBundleId;
-    return switch (spec.component_class) {
-        .session_manager => .session_manager,
-        .app_component => .app_component,
-        .service_component => .service_component,
-    };
-}
-
 pub fn signerFor(bundle_id: []const u8) Error![]const u8 {
     const spec = find(bundle_id) orelse return error.UnknownBundleId;
     return (try userspace_manifest_signing.identityForPublisher(spec.publisher)).label;
 }
 
 pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
-    if (builtin.target.os.tag == .freestanding) {
-        const archive = @import("userspace_archive");
-        inline for (archive.artifacts) |artifact| {
-            const spec = find(artifact.bundle_id) orelse return error.UnknownBundleId;
-            try validateGeneratedArtifactMatchesSpec(spec, artifact);
-            const bundle = try bundleForSpec(spec);
-            const embedded_info = try embeddedElfInfoFromArtifact(artifact);
-            _ = catalog.registerEmbeddedArtifactWithInfo(.{
-                .bundle = bundle,
-                .component_class = componentClassForSpec(spec),
-                .initial_component = initialComponentForSpec(spec),
-                .role_tag = spec.role_tag,
-                .heartbeat_increment = spec.heartbeat_increment,
-                .contract_flags = spec.contract_flags,
-                .elf_bytes = artifact.data,
-            }, embedded_info) catch |err| {
-                console.print("ZIGOS:USERSPACE:ARTIFACT:FAIL ");
-                console.print(artifact.bundle_id);
-                console.print("\n");
-                return err;
-            };
-        }
-        return;
-    }
-
+    try validateGeneratedArchiveHasOnlyRegisteredSpecs();
     for (registry.boot_image_specs) |spec| {
+        const artifact = generatedArtifactFor(spec.bundle_id) orelse return error.GeneratedArtifactMissing;
+        try validateGeneratedArtifactMatchesSpec(&spec, artifact);
         const bundle = try bundleForSpec(&spec);
-        _ = try catalog.register(.{
+        const embedded_info = try embeddedElfInfoFromArtifact(artifact);
+        _ = catalog.registerEmbeddedArtifactWithInfo(.{
             .bundle = bundle,
             .component_class = componentClassForSpec(&spec),
             .initial_component = initialComponentForSpec(&spec),
             .role_tag = spec.role_tag,
             .heartbeat_increment = spec.heartbeat_increment,
             .contract_flags = spec.contract_flags,
-        });
+            .elf_bytes = artifact.data,
+        }, embedded_info) catch |err| {
+            console.print("ZIGOS:USERSPACE:ARTIFACT:FAIL ");
+            console.print(artifact.bundle_id);
+            console.print("\n");
+            return err;
+        };
     }
+}
+
+fn validateGeneratedArchiveHasOnlyRegisteredSpecs() Error!void {
+    for (archive.artifacts) |artifact| {
+        _ = find(artifact.bundle_id) orelse return error.UnknownBundleId;
+    }
+}
+
+fn generatedArtifactFor(bundle_id: []const u8) ?GeneratedArtifact {
+    for (archive.artifacts) |artifact| {
+        if (std.mem.eql(u8, artifact.bundle_id, bundle_id)) return artifact;
+    }
+    return null;
 }
 
 pub fn validateGeneratedArtifactMatchesSpec(spec: *const registry.ImageSpec, artifact: anytype) Error!void {
@@ -213,6 +198,7 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     try registerAll(&catalog);
 
     try std.testing.expect(specCount() >= 10);
+    try std.testing.expectEqual(specCount(), catalog.imageCount());
     try std.testing.expect(find("zigos.system.session-manager") != null);
     try std.testing.expect(find("app.notes") != null);
     try std.testing.expectEqualStrings(
@@ -221,13 +207,14 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     );
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager") != null);
     try std.testing.expect(catalog.findByBundleId("app.capture") != null);
+    try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.embedsElf());
+    try std.testing.expect(catalog.findByBundleId("app.capture").?.embedsElf());
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.hasTypedContract());
     try std.testing.expect(catalog.findByBundleId("app.capture").?.hasTypedContract());
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.bundle_signed);
 }
 
 test "boot registry rejects generated archive records that diverge from registry specs" {
-    const archive = @import("userspace_archive");
     try std.testing.expect(archive.artifacts.len > 0);
     const spec = find(archive.artifacts[0].bundle_id) orelse return error.UnknownBundleId;
 

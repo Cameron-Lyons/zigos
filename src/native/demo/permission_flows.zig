@@ -58,7 +58,6 @@ fn runViewerPermissionFlow(
         env.userspace_catalog,
         env.runtime,
         "app.viewer",
-        .app_component,
         .{
             .owner = state.ids.session_user,
             .budget = .{
@@ -107,7 +106,6 @@ fn runNotesPermissionFlow(
         env.userspace_catalog,
         env.runtime,
         "app.notes",
-        .app_component,
         .{
             .owner = state.ids.session_user,
             .budget = .{
@@ -194,7 +192,6 @@ fn runSyncPermissionFlow(
         env.userspace_catalog,
         env.runtime,
         "app.sync",
-        .app_component,
         .{
             .owner = state.ids.session_user,
             .budget = .{
@@ -267,7 +264,6 @@ fn runCapturePermissionFlow(
         env.userspace_catalog,
         env.runtime,
         "app.capture",
-        .app_component,
         .{
             .owner = state.ids.session_user,
             .budget = .{

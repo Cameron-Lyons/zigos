@@ -229,12 +229,6 @@ pub fn requestedLeaseLabel(buffer: []u8, max_lease_ticks: u64) RenderError![]con
     return buffer[0..used];
 }
 
-pub fn expiryLabel(buffer: []u8, expires_at_ticks: ?u64, now_ticks: u64) RenderError![]const u8 {
-    var used: usize = 0;
-    try appendExpiry(buffer, &used, expires_at_ticks, now_ticks);
-    return buffer[0..used];
-}
-
 pub fn revocationHint(kind: manifest.PermissionKind) []const u8 {
     return switch (kind) {
         .object_access, .contacts => "remove this app from the object's share sheet",

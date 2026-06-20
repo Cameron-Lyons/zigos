@@ -648,7 +648,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             output: []ObjectQueryResult,
         ) []const ObjectQueryResult {
             var count: usize = 0;
-            for (self.objects.slots) |slot| {
+            for (&self.objects.slots) |*slot| {
                 if (!slot.in_use) continue;
                 const object_record = &slot.object;
                 if (query.object_type) |object_type| {
