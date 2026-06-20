@@ -328,7 +328,7 @@
         },
         {
           "file": "src/native/platform/secure_secret_store.zig",
-          "name": "secure secret store returns handles by default and only exports raw when allowed"
+          "name": "secure secret store requires a hardware provider before hardware-backed imports"
         }
       ],
       "requirements": [
@@ -544,7 +544,7 @@
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
-          "name": "userspace scheduler requires observed platform telemetry before waking hardware queues"
+          "name": "userspace scheduler requires complete hardware telemetry before waking hardware queues"
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
@@ -1228,6 +1228,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/task/task_runtime.zig",
+        "src/native/task/userspace_loader.zig",
         "src/native/task/userspace_launch.zig",
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/native_kernel_access.zig",
@@ -1236,6 +1237,14 @@
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
+        {
+          "file": "src/native/task/userspace_loader.zig",
+          "name": "catalog rejects metadata-only executable registration"
+        },
+        {
+          "file": "src/native/platform/rendered_shell/task_launch.zig",
+          "name": "rendered shell task launch requires generated image outside model-only tests"
+        },
         {
           "file": "src/native/kernel_api/native_kernel.zig",
           "name": "native kernel rejects app and service launches without signed userspace image provenance"
@@ -1724,7 +1733,7 @@
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
-          "name": "userspace scheduler requires observed platform telemetry before waking hardware queues"
+          "name": "userspace scheduler requires complete hardware telemetry before waking hardware queues"
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
@@ -1778,7 +1787,7 @@
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
-          "name": "userspace scheduler requires observed platform telemetry before waking hardware queues"
+          "name": "userspace scheduler requires complete hardware telemetry before waking hardware queues"
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
@@ -1813,6 +1822,10 @@
         {
           "file": "src/native/drivers/bootstrap_driver_port.zig",
           "name": "kernel bootstrap cannot publish peripheral device data-plane transports directly"
+        },
+        {
+          "file": "src/tests/spec/drivers_storage_sync.zig",
+          "name": "publishedDriversActivateScopedTransports"
         },
         {
           "file": "src/kernel/boot/init/data_plane_boundary.zig",
@@ -1900,6 +1913,10 @@
         {
           "file": "src/native/platform/immutable_base.zig",
           "name": "immutable base verification rejects mutable signer and measurement tampering"
+        },
+        {
+          "file": "src/native/session/native_store_mount.zig",
+          "name": "native store root adoption only accepts production NVMe PCI volumes"
         },
         {
           "file": "src/native_smoke_markers.zig",

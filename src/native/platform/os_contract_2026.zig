@@ -5,6 +5,7 @@ const background_dispatch = @import("../task/background_dispatch.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const event_ledger = @import("event_ledger.zig");
+const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
 const manifest = @import("../policy/manifest.zig");
 const os_identity = @import("os_identity.zig");
 const notification_center = @import("../services/notification_center.zig");
@@ -892,7 +893,11 @@ pub fn currentRepositoryContract() Checklist {
     const default_ai = manifest.AiMetadata{};
     return .{
         .native_only_apps = manifest.requiresApplicationPackaging("app.notes"),
-        .no_compatibility_namespace = !manifest.isReservedPlatformBundle("compat.posix"),
+        .no_compatibility_namespace = !manifest.isApplicationBundle("compat.posix") and validationFailsWith(.{
+            .bundle_id = "compat.posix",
+            .display_name = "Compat POSIX",
+            .publisher = "zigos.dev",
+        }, error.CompatibilityNamespaceUnsupported),
         .typed_component_services = contractPresent("zigos.service.registry"),
         .explicit_capability_grants = true,
         .object_native_storage = true,
@@ -1103,7 +1108,7 @@ fn processContractTask(
     image_id: u64,
     bundle_id: []const u8,
 ) !*task_runtime.TaskRecord {
-    const image = task_runtime.syntheticUserspaceImage("process-contract", "main");
+    const image = try generated_image_fixtures.appImage();
     return runtime.createTask(.{
         .owner = owner,
         .component_class = .app_component,
@@ -4056,6 +4061,20 @@ fn credentialPolicyDenies(expected: policy_object.DecisionReason) bool {
     return !decision.allowed and decision.reason == expected;
 }
 
+fn credentialContractHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "credential-contract-provider", label);
+    crypto_hash.updateBytes(&hasher, "credential-contract-seal", raw);
+    return crypto_hash.finalize(&hasher);
+}
+
+fn credentialContractHardwareProvider() secure_secret_store.HardwareSealProvider {
+    return .{
+        .available = true,
+        .sealFn = credentialContractHardwareSeal,
+    };
+}
+
 fn identityCredentialEvidence() IdentityCredentialEvidence {
     var evidence = IdentityCredentialEvidence{
         .service_model = @hasDecl(os_identity.Store, "registerCredential") and
@@ -4067,6 +4086,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
     };
     var graph = device_graph.Graph.init();
     var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(credentialContractHardwareProvider());
     var identities = os_identity.Store.init();
     var ledger = event_ledger.Ledger.init();
     var policies = policy_object.Directory.init();
@@ -4879,6 +4899,20 @@ pub fn currentRepositoryNineteenthContract() NineteenthChecklist {
     return .{ .satisfied_features = features };
 }
 
+fn secretVaultContractHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "secret-vault-contract-provider", label);
+    crypto_hash.updateBytes(&hasher, "secret-vault-contract-seal", raw);
+    return crypto_hash.finalize(&hasher);
+}
+
+fn secretVaultContractHardwareProvider() secure_secret_store.HardwareSealProvider {
+    return .{
+        .available = true,
+        .sealFn = secretVaultContractHardwareSeal,
+    };
+}
+
 fn secretVaultEvidence() SecretVaultEvidence {
     var evidence = SecretVaultEvidence{
         .service_model = @hasDecl(secret_vault_service.Service, "importSecret") and
@@ -4909,6 +4943,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
 
     const subjects = policy_object.SubjectSet{ .user_id = user.serial };
     var service = secret_vault_service.Service.init();
+    service.attachHardwareProvider(secretVaultContractHardwareProvider());
     var ledger = event_ledger.Ledger.init();
 
     evidence.hardware_policy_gate = if (service.importSecret(&policies, subjects, .{
@@ -4931,7 +4966,9 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .now_ticks = 2,
         .detail = "private api secret imported",
     }, &ledger) catch return evidence;
-    evidence.hardware_sealed_import = secret.hardware_backed and secret.sealed_digest_present;
+    evidence.hardware_sealed_import = secret.hardware_backed and
+        secret.hardware_provider_used and
+        secret.sealed_digest_present;
     evidence.nonresident_material = !secret.resident_material and secret.value_len == 0;
     const wrong_owner_lend_denied = if (service.lendHandle(&policies, subjects, .{
         .owner = other_user,
@@ -4983,6 +5020,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
         service.activeHandleCount() == 1;
 
     var expiry_service = secret_vault_service.Service.init();
+    expiry_service.attachHardwareProvider(secretVaultContractHardwareProvider());
     var expiry_ledger = event_ledger.Ledger.init();
     const expiring_secret = expiry_service.importSecret(&policies, subjects, .{
         .owner = user,
@@ -5038,6 +5076,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .seed = signing.seedFromByte(0xdf),
     }) catch return evidence;
     var export_service = secret_vault_service.Service.init();
+    export_service.attachHardwareProvider(secretVaultContractHardwareProvider());
     var export_ledger = event_ledger.Ledger.init();
     const sealed_only = export_service.importSecret(&export_policies, subjects, .{
         .owner = user,
@@ -6177,7 +6216,10 @@ fn createResourceGovernanceTask(
     ui_surface_id: ?u64,
 ) !*task_runtime.TaskRecord {
     const service_task = class == .emergency_system_critical;
-    const image = task_runtime.syntheticUserspaceImage(bundle_id, "main");
+    const image = if (service_task)
+        try generated_image_fixtures.serviceImage()
+    else
+        try generated_image_fixtures.appImage();
     return runtime.createTask(.{
         .owner = .{
             .kind = if (service_task) .service else .app,

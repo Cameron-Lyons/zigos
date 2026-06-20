@@ -20,6 +20,7 @@ const denial_explanation = @import("../../../native/policy/denial_explanation.zi
 const permission_review = @import("../../../native/policy/permission_review.zig");
 const policy_mediation = @import("../../../native/policy/policy_mediation.zig");
 const task_runtime = @import("../../../native/task/task_runtime.zig");
+const generated_image_fixtures = @import("../../../native/task/generated_image_fixtures.zig");
 const background_dispatch = @import("../../../native/task/background_dispatch.zig");
 const accelerator_scheduler = @import("../../../native/task/accelerator_scheduler.zig");
 const userspace_executor = @import("../../../native/task/userspace_executor.zig");
@@ -190,6 +191,12 @@ const UpdateHealthContext = struct {
     ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
     core_service_ids: [UPDATE_HEALTH_CORE_SERVICE_COUNT]u64 = [_]u64{0} ** UPDATE_HEALTH_CORE_SERVICE_COUNT,
     request: update_health.CheckRequest = undefined,
+};
+
+const BenchmarkImageContext = struct {
+    prepared: bool = false,
+    app_image: task_runtime.ExecutableImageSpec = .{},
+    service_image: task_runtime.ExecutableImageSpec = .{},
 };
 
 const cases = benchmark_cases.benchmarkCases(.{
@@ -407,11 +414,14 @@ var secret_store_context = SecretStoreContext{};
 var overlay_session_context = OverlaySessionContext{};
 var recovery_context = RecoveryContext{};
 var update_health_context = UpdateHealthContext{};
+var benchmark_image_context = BenchmarkImageContext{};
 
 pub fn run() noreturn {
     console.print("Running native spec-aligned benchmarks...\n");
     console.print(boot_markers.bench_start);
     console.print("\n");
+
+    prepareBenchmarkUserspaceImages();
 
     var total_cycles: u64 = 0;
     inline for (cases) |case| {
@@ -426,6 +436,7 @@ pub fn run() noreturn {
 }
 
 fn prepareFixtures() void {
+    prepareBenchmarkUserspaceImages();
     prepareFileBridgeFixture();
     preparePermissionReviewFixture();
     prepareNetworkPolicyFixture();
@@ -435,6 +446,24 @@ fn prepareFixtures() void {
     prepareWorkspaceCommitFixture();
     prepareTaskCheckpointFixture();
     preparePackageFixture();
+}
+
+fn prepareBenchmarkUserspaceImages() void {
+    if (benchmark_image_context.prepared) return;
+
+    benchmark_image_context.app_image = generated_image_fixtures.appImage() catch unreachable;
+    benchmark_image_context.service_image = generated_image_fixtures.serviceImage() catch unreachable;
+    benchmark_image_context.prepared = true;
+}
+
+fn benchmarkAppImage() task_runtime.ExecutableImageSpec {
+    prepareBenchmarkUserspaceImages();
+    return benchmark_image_context.app_image;
+}
+
+fn benchmarkServiceImage() task_runtime.ExecutableImageSpec {
+    prepareBenchmarkUserspaceImages();
+    return benchmark_image_context.service_image;
 }
 
 fn prepareFileBridgeFixture() void {
@@ -589,7 +618,7 @@ fn prepareTaskCheckpointFixture() void {
     task_checkpoint_context.restored_runtime = task_runtime.Runtime.init();
     task_checkpoint_context.snapshot = task_runtime.Runtime.initSnapshot();
 
-    const sync_image = task_runtime.syntheticUserspaceImage("sync-ui", "app.sync.ui");
+    const sync_image = benchmarkAppImage();
     const primary = task_checkpoint_context.source_runtime.createTask(.{
         .owner = app(120),
         .component_class = .app_component,
@@ -1224,6 +1253,7 @@ fn benchmarkEventLedgerExport(iteration: u32) u64 {
 
 fn benchmarkSecretStoreImportHandleExport(iteration: u32) u64 {
     secret_store_context.store = secure_secret_store.Store.init();
+    secret_store_context.store.attachHardwareProvider(.{ .available = true });
     const exportable = (iteration & 1) != 0;
     const secret = secret_store_context.store.importSecret(
         secret_store_context.owner,
@@ -1918,8 +1948,8 @@ fn createLoadTask(
     memory_bytes: usize,
     ui_surface_id: ?u64,
 ) *task_runtime.TaskRecord {
-    var image = task_runtime.syntheticUserspaceImage(label, bundle_id);
     const service_task = class == .emergency_system_critical;
+    const image = if (service_task) benchmarkServiceImage() else benchmarkAppImage();
     return runtime.createTask(.{
         .owner = if (service_task) service(serial) else app(serial),
         .component_class = if (service_task) .service_component else .app_component,
@@ -1933,6 +1963,10 @@ fn createLoadTask(
         },
         .ui_surface_id = ui_surface_id,
         .local_only = true,
+        .initial_component = .{
+            .label = label,
+            .entry = bundle_id,
+        },
         .launch = .{
             .boundary = .userspace_process,
             .image_id = serial,

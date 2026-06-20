@@ -1189,6 +1189,8 @@ fn testHardwareProofFacts(reader_generation: u32) hardware_proof.ProbeFacts {
 }
 
 test "platform policy signals derive hardware scheduler telemetry from booted runtime state" {
+    const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
+
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
@@ -1196,7 +1198,7 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
     var capabilities = capability.CapabilityTable.init();
     scheduler.bind(&catalog, &runtime, &capabilities);
 
-    const foreground_image = task_runtime.syntheticUserspaceImage("policy-signal-ui", "app.policy.signal-ui");
+    const foreground_image = try generated_image_fixtures.appImage();
     const foreground = try runtime.createTask(.{
         .owner = principal.PrincipalId{ .kind = .app, .serial = 91_001 },
         .component_class = .app_component,
@@ -1213,14 +1215,14 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
             .image_id = 91_001,
             .component_abi_version = 1,
             .signed = true,
-            .bundle_id = "app.policy.signal-ui",
+            .bundle_id = "app.viewer",
         },
         .userspace_image = &foreground_image,
     });
     foreground.background_cpu_consumed_ticks = 125;
     try std.testing.expect(scheduler.registerTask(foreground.id));
 
-    const private_image = task_runtime.syntheticUserspaceImage("policy-signal-private", "app.policy.signal-private");
+    const private_image = try generated_image_fixtures.appImage();
     const private_task = try runtime.createTask(.{
         .owner = principal.PrincipalId{ .kind = .app, .serial = 91_002 },
         .component_class = .app_component,
@@ -1238,7 +1240,7 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
             .image_id = 91_002,
             .component_abi_version = 1,
             .signed = true,
-            .bundle_id = "app.policy.signal-private",
+            .bundle_id = "app.viewer",
         },
         .userspace_image = &private_image,
     });

@@ -66,9 +66,7 @@ fn checkpointBaseline(storage: *storage_service.Service) bool {
     if (!putPath(storage, workspace_id, baseline_path, baseline_object_id, 10)) return false;
     storage.checkpoint();
     if (!storage.checkpoint_store.checkpointHealthy()) return false;
-    if (!storePhase(.baseline_checkpointed)) {
-        return false;
-    }
+    if (!storePhase(.baseline_checkpointed)) return false;
     common.printBootMarker(boot_markers.storage_durability_baseline_checkpointed);
     return true;
 }

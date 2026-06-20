@@ -5,6 +5,7 @@ const console_device = @import("../../devices/console_device.zig");
 const ata = @import("../../drivers/ata.zig");
 const first_target_telemetry = @import("../../drivers/first_target_telemetry.zig");
 const pci = @import("../../drivers/pci.zig");
+const nvme_hw = @import("../../drivers/nvme_hw.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
 const storage_driver_protocol = @import("../../../native/drivers/storage_driver_protocol.zig");
@@ -12,6 +13,7 @@ const panic_handler = @import("../../utils/panic.zig");
 const common = @import("../common.zig");
 const data_plane_boundary = @import("data_plane_boundary.zig");
 const hardware_proof = @import("../../platform/hardware_proof.zig");
+const handoff = @import("../handoff.zig");
 
 const PCI_CLASS_STORAGE_CONTROLLER: u8 = 0x01;
 const PCI_CLASS_NETWORK_ADAPTER: u8 = 0x02;
@@ -43,6 +45,18 @@ pub fn init() void {
     console.print("Initializing device drivers...\n");
     bootstrap_driver_port.reset();
     device_inventory.reset();
+    // QEMU "modeled" test boots cannot expose the exact first-target Intel
+    // devices, so let the service-bootstrap seed fill in absent non-storage
+    // classes. Enabled for the storage-durability profile (distinct kernel) and,
+    // for ISO-binary QEMU tests (smoke/driver-restart/sync that boot the same
+    // .none kernel), via an explicit test-only `model_inventory` multiboot
+    // cmdline token that real-hardware boots never pass. The real ISO leaves this
+    // off and keeps strict detection; real detected devices (QEMU NVMe) are kept.
+    const model_via_cmdline = if (handoff.capturedInfo()) |info|
+        handoff.commandLineContains(info, "model_inventory")
+    else
+        false;
+    device_inventory.setModelDeviceInventory(config.smokeFaultMode() == .storage_durability or model_via_cmdline);
     device.init();
     console_device.init() catch |err| {
         panic_handler.panic("Failed to initialize console device: {}", .{err});
@@ -73,28 +87,31 @@ fn captureAtaBootstrapInventory() void {
 }
 
 fn capturePciInventory() void {
-    if (pci.firstDeviceByClass(PCI_CLASS_NETWORK_ADAPTER)) |dev| {
-        device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .pci_inventory, false);
+    if (pci.firstIntelI225Lm()) |dev| {
+        device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .intel_i225_lm_inventory, false);
     }
     if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {
         device_inventory.registerDetected(.graphics_adapter, pciDeviceId(dev), .pci_inventory, false);
     }
-    if (pci.firstDeviceByClassSubclassProgIf(
-        pci.PCI_CLASS_SERIAL_BUS_CONTROLLER,
-        pci.PCI_SUBCLASS_USB,
-        pci.PCI_PROG_IF_XHCI,
-    )) |dev| {
-        device_inventory.registerDetected(.usb_controller, pciDeviceId(dev), .xhci_inventory, false);
+    if (pci.firstXhciController()) |dev| {
+        const xhci_device_id = pciDeviceId(dev);
+        device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false);
+        device_inventory.registerDetected(.input_device, xhci_device_id, .xhci_inventory, false);
     }
     if (pci.firstDeviceByClass(PCI_CLASS_MULTIMEDIA_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);
     } else if (pci.firstDeviceByClass(PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);
     }
-    if (!device_inventory.recordForClass(.storage_controller).detected) {
-        if (pci.firstDeviceByClass(PCI_CLASS_STORAGE_CONTROLLER)) |dev| {
-            device_inventory.registerDetected(.storage_controller, pciDeviceId(dev), .pci_inventory, false);
-        }
+    // Always probe NVMe even after an ATA bootstrap record exists: a detected
+    // NVMe controller promotes the storage record away from the non-production
+    // ATA bootstrap observation. device_inventory.registerDetected keeps the
+    // higher-grade NVMe binding and never downgrades back to ATA, so probing
+    // unconditionally is the only way the documented promotion path runs on
+    // machines that expose both an ATA disk and the target NVMe controller.
+    if (pci.firstNvmeController()) |dev| {
+        device_inventory.registerDetected(.storage_controller, pciDeviceId(dev), .nvme_pci_inventory, false);
+        nvme_hw.probeAndReport(dev);
     }
 }
 

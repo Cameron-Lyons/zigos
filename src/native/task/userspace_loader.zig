@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const fixed_table = @import("../core/fixed_table.zig");
@@ -15,6 +14,7 @@ const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 
 pub const MAX_IMAGES: usize = 32;
 const BUNDLE_INDEX_CAPACITY: usize = MAX_IMAGES * 2;
+const IMAGE_ID_INDEX_CAPACITY: usize = MAX_IMAGES * 2;
 const MAX_BUNDLE_ID_BYTES: usize = 64;
 const MAX_DISPLAY_NAME_BYTES: usize = 48;
 const MAX_PUBLISHER_BYTES: usize = 48;
@@ -168,6 +168,7 @@ const ImageSlot = struct {
 pub const Catalog = struct {
     next_image_id: u64 = 1,
     bundle_index_slots: [BUNDLE_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(BUNDLE_INDEX_CAPACITY),
+    image_id_index_slots: [IMAGE_ID_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(IMAGE_ID_INDEX_CAPACITY),
     images: [MAX_IMAGES]ImageSlot = [_]ImageSlot{ImageSlot{}} ** MAX_IMAGES,
 
     pub fn init() Catalog {
@@ -218,10 +219,19 @@ pub const Catalog = struct {
     }
 
     pub fn findById(self: *Catalog, image_id: u64) ?*const ImageRecord {
-        for (&self.images) |*slot| {
-            if (slot.in_use and slot.image.id == image_id) return &slot.image;
-        }
-        return null;
+        if (image_id == 0) return null;
+        const slot = fixed_table.findIndexedConstSlot(
+            ImageSlot,
+            MAX_IMAGES,
+            IMAGE_ID_INDEX_CAPACITY,
+            &self.images,
+            &self.image_id_index_slots,
+            image_id,
+            imageSlotImageIdKey,
+            image_id,
+            imageSlotMatchesImageId,
+        ) orelse return null;
+        return &slot.image;
     }
 
     pub fn imageCount(self: *const Catalog) usize {
@@ -281,11 +291,10 @@ pub const Catalog = struct {
         if (fixed_table.firstFreeSlotIndex(ImageSlot, MAX_IMAGES, &self.images)) |slot_index| {
             const slot = &self.images[slot_index];
 
+            const embedded_info = embedded orelse return error.EmbeddedArtifactRequired;
+
             var image = zeroImage();
-            const executable_image = if (embedded) |info|
-                info.executable_image
-            else
-                syntheticExecutableImage(request);
+            const executable_image = embedded_info.executable_image;
             image.id = self.next_image_id;
             image.component_class = request.component_class;
             image.component_abi_version = componentAbiVersion(request.initial_component.substrate);
@@ -294,11 +303,11 @@ pub const Catalog = struct {
             image.heartbeat_increment = request.heartbeat_increment;
             image.contract_flags = request.contract_flags;
             image.substrate = request.initial_component.substrate;
-            image.artifact_source = if (embedded != null) .embedded_elf else .metadata_only;
+            image.artifact_source = .embedded_elf;
             image.entry_point = executable_image.entry_point;
             image.loadable_segment_count = @intCast(executable_image.segment_count);
             image.byte_len = executable_image.file_size_bytes;
-            image.bootstrap_mailbox_address = if (embedded) |info| info.bootstrap_mailbox_address else 0;
+            image.bootstrap_mailbox_address = embedded_info.bootstrap_mailbox_address;
             image.file_sha256 = executable_image.file_sha256;
             image.executable_image = executable_image;
             image.elf_bytes = elf_bytes;
@@ -311,6 +320,7 @@ pub const Catalog = struct {
             slot.in_use = true;
             slot.image = image;
             id_index.insert(BUNDLE_INDEX_CAPACITY, &self.bundle_index_slots, bundleIndexKey(slot.image.bundleIdSlice()), slot_index, "userspace bundle id index covers image table");
+            id_index.insert(IMAGE_ID_INDEX_CAPACITY, &self.image_id_index_slots, slot.image.id, slot_index, "userspace image id index covers image table");
             self.next_image_id += 1;
             return &slot.image;
         }
@@ -326,6 +336,14 @@ fn bundleIndexKey(bundle_id: []const u8) u64 {
 
 fn imageSlotBundleKey(slot: *const ImageSlot) u64 {
     return bundleIndexKey(slot.image.bundleIdSlice());
+}
+
+fn imageSlotImageIdKey(slot: *const ImageSlot) u64 {
+    return slot.image.id;
+}
+
+fn imageSlotMatchesImageId(image_id: u64, slot: *const ImageSlot) bool {
+    return slot.image.id == image_id;
 }
 
 fn imageSlotMatchesBundleId(bundle_id: []const u8, slot: *const ImageSlot) bool {
@@ -375,7 +393,7 @@ fn validateExecutableBundle(
     if (initial_component.substrate != substrateForComponentAbi(declared_component.abi)) {
         return error.InitialComponentAbiMismatch;
     }
-    if (builtin.target.os.tag == .freestanding and !has_embedded_artifact) {
+    if (!has_embedded_artifact) {
         return error.EmbeddedArtifactRequired;
     }
 }
@@ -437,15 +455,13 @@ fn imageMatchesRequest(
     request: ImageRegisterRequest,
     embedded: ?EmbeddedElfInfo,
 ) bool {
-    const expected_source: ArtifactSource = if (embedded != null) .embedded_elf else .metadata_only;
-    const expected_image = if (embedded) |info|
-        info.executable_image
-    else
-        syntheticExecutableImage(request);
+    const embedded_info = embedded orelse return false;
+    const expected_source: ArtifactSource = .embedded_elf;
+    const expected_image = embedded_info.executable_image;
     const expected_entry_point: u64 = expected_image.entry_point;
     const expected_segment_count: u16 = @intCast(expected_image.segment_count);
     const expected_byte_len: usize = expected_image.file_size_bytes;
-    const expected_bootstrap_mailbox_address: u64 = if (embedded) |info| info.bootstrap_mailbox_address else 0;
+    const expected_bootstrap_mailbox_address: u64 = embedded_info.bootstrap_mailbox_address;
     const expected_hash = expected_image.file_sha256;
 
     return existing.component_class == request.component_class and
@@ -535,10 +551,6 @@ fn arrayFieldLen(comptime T: type, comptime field_name: []const u8) usize {
     };
 }
 
-fn syntheticExecutableImage(request: ImageRegisterRequest) task_runtime.ExecutableImageSpec {
-    return task_runtime.syntheticUserspaceImage(request.bundle.bundle_id, request.initial_component.entry);
-}
-
 pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments: u16) [SYNTHETIC_ELF_BYTES]u8 {
     var bytes = [_]u8{0} ** SYNTHETIC_ELF_BYTES;
     bytes[0] = 0x7F;
@@ -606,7 +618,8 @@ test "userspace image launch records bundle provenance and isolated process stat
         .assets = &assets,
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
-    _ = try catalog.register(.{
+    const image_bytes = makeSyntheticElf32ForTest(0x406000, 2, 1);
+    _ = try catalog.registerEmbeddedArtifact(.{
         .bundle = bundle,
         .component_class = .app_component,
         .initial_component = .{
@@ -616,6 +629,7 @@ test "userspace image launch records bundle provenance and isolated process stat
         .role_tag = 0xA107,
         .heartbeat_increment = 7,
         .contract_flags = 0x2,
+        .elf_bytes = &image_bytes,
     });
 
     var runtime = task_runtime.Runtime.init();
@@ -650,7 +664,8 @@ test "kernel-launched userspace images surface a userspace task flag" {
         },
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
-    _ = try catalog.register(.{
+    const image_bytes = makeSyntheticElf32ForTest(0x407000, 2, 1);
+    _ = try catalog.registerEmbeddedArtifact(.{
         .bundle = bundle,
         .component_class = .service_component,
         .initial_component = .{
@@ -660,6 +675,7 @@ test "kernel-launched userspace images surface a userspace task flag" {
         .role_tag = 0xA10C,
         .heartbeat_increment = 12,
         .contract_flags = 0x11,
+        .elf_bytes = &image_bytes,
     });
 
     var runtime = task_runtime.Runtime.init();
@@ -876,19 +892,53 @@ test "catalog preserves exact-limit identity and component labels without trunca
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
 
-    const image = try catalog.register(.{
+    const image_bytes = makeSyntheticElf32ForTest(0x408000, 2, 1);
+    const image = try catalog.registerEmbeddedArtifact(.{
         .bundle = bundle,
         .component_class = .app_component,
         .initial_component = .{
             .label = label[0..],
             .entry = entry[0..],
         },
+        .elf_bytes = &image_bytes,
     });
 
     try std.testing.expectEqualStrings(bundle_id[0..], image.bundleIdSlice());
     try std.testing.expectEqualStrings(display_name[0..], image.displayNameSlice());
     try std.testing.expectEqualStrings(label[0..], image.labelSlice());
     try std.testing.expectEqualStrings(entry[0..], image.entrySlice());
+}
+
+test "catalog rejects metadata-only executable registration" {
+    var catalog = Catalog.init();
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" },
+    };
+    var bundle = manifest.BundleManifest{
+        .bundle_id = "app.metadata-only",
+        .display_name = "Metadata Only",
+        .publisher = "zigos.dev",
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
+        .components = &[_]manifest.ExecutionComponentDecl{
+            .{ .id = "metadata-only", .entry = "app.metadata-only" },
+        },
+        .assets = &assets,
+    };
+    bundle.signature = try userspace_manifest_signing.signBundle(bundle);
+
+    try std.testing.expectError(error.EmbeddedArtifactRequired, catalog.register(.{
+        .bundle = bundle,
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "metadata-only",
+            .entry = "app.metadata-only",
+        },
+    }));
 }
 
 test "catalog rejects unsigned bundles and missing declared components for userspace launch" {

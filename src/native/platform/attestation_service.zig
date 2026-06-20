@@ -65,11 +65,66 @@ pub const RootProviderDescriptor = struct {
             self.hasProviderBoundary() and
             self.hasOperationalCustody() and
             self.hasLifecycleControls() and
+            !self.hasProductionUnsafeName() and
             self.customer_verifiable and
             self.key_id.len != 0 and
             self.key_generation != 0;
     }
+
+    pub fn hasProductionUnsafeName(self: RootProviderDescriptor) bool {
+        return hasTestOnlyOperationalName(self.name) or
+            hasTestOnlyOperationalName(self.key_id);
+    }
 };
+
+const TEST_ONLY_OPERATIONAL_NAME_MARKERS = [_][]const u8{
+    "fake",
+    "mock",
+    "fixture",
+    "smoke",
+    "local-software",
+    "software-fixture",
+    "synthetic",
+    "simulated",
+};
+
+fn hasTestOnlyOperationalName(value: []const u8) bool {
+    if (containsNameTokenIgnoreCase(value, "test")) return true;
+    for (TEST_ONLY_OPERATIONAL_NAME_MARKERS) |marker| {
+        if (containsAsciiIgnoreCase(value, marker)) return true;
+    }
+    return false;
+}
+
+fn containsNameTokenIgnoreCase(value: []const u8, token: []const u8) bool {
+    if (token.len == 0 or token.len > value.len) return false;
+    var index: usize = 0;
+    while (index + token.len <= value.len) : (index += 1) {
+        if (!std.ascii.eqlIgnoreCase(value[index..][0..token.len], token)) continue;
+        const starts_on_boundary = index == 0 or isOperationalNameSeparator(value[index - 1]);
+        const after_index = index + token.len;
+        const ends_on_boundary = after_index == value.len or isOperationalNameSeparator(value[after_index]);
+        if (starts_on_boundary and ends_on_boundary) return true;
+    }
+    return false;
+}
+
+fn isOperationalNameSeparator(byte: u8) bool {
+    return switch (byte) {
+        '-', '_', '.', ':', '/', ' ' => true,
+        else => false,
+    };
+}
+
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var index: usize = 0;
+    while (index + needle.len <= haystack.len) : (index += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[index..][0..needle.len], needle)) return true;
+    }
+    return false;
+}
 
 pub const RootProvider = struct {
     context: *anyopaque,
@@ -168,6 +223,7 @@ pub const AttestationVerifierMetadata = struct {
         if (!descriptor.productionEligible()) return error.UnbackedAttestationRoot;
         if (!std.mem.eql(u8, descriptor.key_id, key.key_id)) return error.RootIdentityMismatch;
         if (!std.mem.eql(u8, key.label, key.public_identity.label)) return error.RootIdentityMismatch;
+        if (hasTestOnlyOperationalName(key.label)) return error.UnbackedAttestationRoot;
         if (descriptor.key_generation != key.generation) return error.RootProviderGenerationMismatch;
         if (descriptor.origin != key.origin) return error.UnbackedAttestationRoot;
         if (descriptor.provider_boundary != key.provider_boundary) return error.RootProviderBoundaryMismatch;
@@ -177,6 +233,7 @@ pub const AttestationVerifierMetadata = struct {
 
     pub fn productionEligible(self: AttestationVerifierMetadata) bool {
         if (self.provider_name.len == 0 or self.key_id.len == 0 or self.label.len == 0) return false;
+        if (hasTestOnlyOperationalName(self.label)) return false;
         if (self.generation == 0) return false;
         const descriptor = RootProviderDescriptor{
             .name = self.provider_name,
@@ -273,6 +330,7 @@ pub const ExternalAttestationRootProvider = struct {
         if (!descriptor.productionEligible()) return error.UnbackedAttestationRoot;
         if (!std.mem.eql(u8, descriptor.key_id, key.key_id)) return error.RootIdentityMismatch;
         if (!std.mem.eql(u8, key.label, key.public_identity.label)) return error.RootIdentityMismatch;
+        if (hasTestOnlyOperationalName(key.label)) return error.UnbackedAttestationRoot;
         if (descriptor.key_generation != key.generation) return error.RootProviderGenerationMismatch;
         if (descriptor.origin != key.origin) return error.UnbackedAttestationRoot;
         if (descriptor.provider_boundary != key.provider_boundary) return error.RootProviderBoundaryMismatch;
@@ -645,6 +703,7 @@ pub const Service = struct {
     pub fn provisionRootProvider(self: *Service, provider: RootProvider) Error!void {
         if (!isBackedRootOrigin(provider.origin()) or !provider.descriptor.hardware_backed) return error.UnbackedAttestationRoot;
         if (provider.descriptor.role == .production and !provider.descriptor.productionEligible()) return error.UnbackedAttestationRoot;
+        if (provider.descriptor.role == .production and hasTestOnlyOperationalName(provider.label())) return error.UnbackedAttestationRoot;
         if (!provider.descriptor.rotation_supported or !provider.descriptor.revocation_supported) return error.RootLifecycleUnsupported;
         if (provider.keyGeneration() == 0) return error.InvalidRootGeneration;
         if (provider.label().len == 0 or provider.keyId().len == 0) return error.RootIdentityMissing;
@@ -1527,6 +1586,74 @@ test "external attestation root provider rejects local software custody" {
     try std.testing.expectError(error.RootProviderCustodyMismatch, ExternalAttestationRootProvider.init(
         custody_mismatch_descriptor,
         key,
+        &context,
+        SignFixture.sign,
+    ));
+}
+
+test "production attestation descriptors reject test-only operational names" {
+    const signer_identity = signing.SignerIdentity{
+        .label = "device-hsm-root-6",
+        .seed = signing.seedFromByte(0x68),
+    };
+    const key = AttestationRootKeyHandle{
+        .key_id = "hsm-root-key-6",
+        .label = "device-hsm-root-6",
+        .public_identity = try signing.publicIdentity(signer_identity),
+        .generation = 6,
+        .origin = .hsm,
+        .provider_boundary = .offline_hsm,
+        .custody = .hardware_security_module,
+    };
+    const descriptor = RootProviderDescriptor{
+        .name = "external-hsm-attestation-root",
+        .role = .production,
+        .origin = .hsm,
+        .key_id = "hsm-root-key-6",
+        .key_generation = 6,
+        .provider_boundary = .offline_hsm,
+        .custody = .hardware_security_module,
+        .customer_verifiable = true,
+    };
+    try std.testing.expect(descriptor.productionEligible());
+
+    const SignFixture = struct {
+        fn sign(_: *anyopaque, _: AttestationRootKeyHandle, _: []const u8) !manifest.Signature {
+            return error.UnbackedAttestationRoot;
+        }
+    };
+    var context: u8 = 0;
+
+    var fake_named_descriptor = descriptor;
+    fake_named_descriptor.name = "fake-production-root";
+    try std.testing.expect(fake_named_descriptor.hasProductionUnsafeName());
+    try std.testing.expect(!fake_named_descriptor.productionEligible());
+    try std.testing.expectError(error.UnbackedAttestationRoot, AttestationVerifierMetadata.fromProvider(fake_named_descriptor, key));
+    try std.testing.expectError(error.UnbackedAttestationRoot, ExternalAttestationRootProvider.init(
+        fake_named_descriptor,
+        key,
+        &context,
+        SignFixture.sign,
+    ));
+
+    var test_key_descriptor = descriptor;
+    test_key_descriptor.key_id = "hsm-root-key-test";
+    try std.testing.expect(test_key_descriptor.hasProductionUnsafeName());
+    try std.testing.expect(!test_key_descriptor.productionEligible());
+    try std.testing.expectError(error.UnbackedAttestationRoot, AttestationVerifierMetadata.fromProvider(test_key_descriptor, key));
+
+    const test_label_identity = signing.SignerIdentity{
+        .label = "test-only-hsm-root",
+        .seed = signing.seedFromByte(0x69),
+    };
+    var test_label_key = key;
+    test_label_key.label = "test-only-hsm-root";
+    test_label_key.public_identity = try signing.publicIdentity(test_label_identity);
+    try std.testing.expect(descriptor.productionEligible());
+    try std.testing.expectError(error.UnbackedAttestationRoot, AttestationVerifierMetadata.fromProvider(descriptor, test_label_key));
+    try std.testing.expectError(error.UnbackedAttestationRoot, ExternalAttestationRootProvider.init(
+        descriptor,
+        test_label_key,
         &context,
         SignFixture.sign,
     ));

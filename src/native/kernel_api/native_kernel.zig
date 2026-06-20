@@ -628,15 +628,6 @@ pub const Kernel = struct {
         return output[0..count];
     }
 
-    fn requireCapability(
-        self: *Kernel,
-        capability_id: u64,
-        now_ticks: u64,
-        needed_rights: capability.CapabilityRights,
-    ) Error!capability.Capability {
-        return kernel_access.requireCapability(Error, self, capability_id, now_ticks, needed_rights);
-    }
-
     fn authorizeOperation(
         self: *Kernel,
         comptime expected_operation: abi.NativeOperation,
@@ -645,36 +636,52 @@ pub const Kernel = struct {
         input: AuthorizationInput,
     ) Error!capability.Capability {
         const descriptor = operation_metadata.declarationFor(expected_operation);
-        try self.requireCallSubject(context, descriptor.operation, now_ticks);
+        if (context.operation != descriptor.operation) return error.UnexpectedOperation;
+
+        // Resolve the calling task first when authenticated, preserving the
+        // original TaskNotFound-before-capability error ordering.
+        const subject_task = if (context.caller_task_id != 0)
+            (self.runtime.find(context.caller_task_id) orelse return error.TaskNotFound)
+        else
+            null;
+
+        // Fetch and usability-check the presented capability exactly once, by
+        // reference. Both the caller-subject check and the rights/target check
+        // below validate the same id, so the previous code paid for two full
+        // Capability copies and two generation-index lookups per syscall. No
+        // capability-table mutation happens before the final copy-out, so the
+        // reference stays valid for the duration of this call.
+        const owned = self.capability_table.queryRef(context.presented_capability_id) orelse return error.CapabilityNotFound;
+        if (!self.capability_table.isUsableRef(owned, now_ticks)) return error.CapabilityRevoked;
+
+        if (subject_task) |task| {
+            if (!self.runtime.hasCapability(context.caller_task_id, context.presented_capability_id)) return error.CapabilityNotFound;
+            if (!task.owner.eql(owned.holder)) return error.PermissionDenied;
+            if (owned.scope.task_id) |scoped_task_id| {
+                if (scoped_task_id != context.caller_task_id) return error.ScopeViolation;
+            }
+        }
 
         const base_rights = capability.CapabilityRights.single(descriptor.required_right);
-        const authorized = switch (descriptor.target_kind) {
-            .none => try self.requireCapability(context.presented_capability_id, now_ticks, base_rights),
-            .fixed => |target_kind| blk: {
-                const owned = try self.requireTargetedCapability(
-                    context.presented_capability_id,
-                    now_ticks,
-                    base_rights,
-                    target_kind,
-                );
+        switch (descriptor.target_kind) {
+            .none => {
+                if (!owned.rights.containsAll(base_rights)) return error.PermissionDenied;
+            },
+            .fixed => |target_kind| {
+                if (!owned.rights.containsAll(base_rights)) return error.PermissionDenied;
+                if (owned.target.kind != target_kind) return error.InvalidCapabilityTarget;
                 try validateContextTarget(context.target, owned.target);
-                break :blk owned;
             },
-            .same_as_target_capability => blk: {
+            .same_as_target_capability => {
                 const target_capability = input.target_capability orelse return error.InvalidCapabilityTarget;
-                const authority = try self.requireTargetedCapability(
-                    context.presented_capability_id,
-                    now_ticks,
-                    base_rights.retarget(target_capability.target.kind),
-                    target_capability.target.kind,
-                );
-                if (!authority.target.eql(target_capability.target)) return error.InvalidCapabilityTarget;
+                if (!owned.rights.containsAll(base_rights.retarget(target_capability.target.kind))) return error.PermissionDenied;
+                if (owned.target.kind != target_capability.target.kind) return error.InvalidCapabilityTarget;
+                if (!owned.target.eql(target_capability.target)) return error.InvalidCapabilityTarget;
                 try validateContextTarget(context.target, target_capability.target);
-                break :blk authority;
             },
-        };
-        try validateOperationScope(descriptor.scope_rule, authorized.scope, input);
-        return authorized;
+        }
+        try validateOperationScope(descriptor.scope_rule, owned.scope, input);
+        return owned.*;
     }
 
     fn requireTargetedCapability(
@@ -708,18 +715,6 @@ pub const Kernel = struct {
         );
         if (peer.target.id != peer_endpoint_id) return error.InvalidCapabilityTarget;
         return peer;
-    }
-
-    fn requireCallSubject(
-        self: *Kernel,
-        context: KernelCallContext,
-        expected_operation: abi.NativeOperation,
-        now_ticks: u64,
-    ) Error!void {
-        if (context.operation != expected_operation) return error.UnexpectedOperation;
-        if (context.caller_task_id != 0) {
-            try self.requireTaskCapability(context.caller_task_id, context.presented_capability_id, now_ticks);
-        }
     }
 
     fn validateRuntimeGrantPlan(self: *Kernel, plan: *const capability.GrantPlan) Error!void {

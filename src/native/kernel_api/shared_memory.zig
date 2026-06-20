@@ -577,7 +577,7 @@ pub const Table = struct {
 
     pub fn liveOwnedBytesForTask(self: *const Table, task_id: ids.TaskId) usize {
         var total: usize = 0;
-        for (self.arena.slots) |slot| {
+        for (&self.arena.slots) |*slot| {
             if (!slot.in_use or slot.object.revoked or !slot.object.owner_task_id.eql(task_id)) continue;
             total = std.math.add(usize, total, slot.object.size_bytes) catch return std.math.maxInt(usize);
         }
@@ -586,7 +586,7 @@ pub const Table = struct {
 
     pub fn liveMappedBytesForTask(self: *const Table, task_id: ids.TaskId) usize {
         var total: usize = 0;
-        for (self.arena.slots) |slot| {
+        for (&self.arena.slots) |*slot| {
             if (!slot.in_use or slot.object.revoked) continue;
             for (slot.object.mapped_task_ids[0..slot.object.mapping_count]) |mapped_task_id| {
                 if (!mapped_task_id.eql(task_id)) continue;

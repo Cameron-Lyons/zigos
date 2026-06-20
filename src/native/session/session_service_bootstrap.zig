@@ -55,6 +55,39 @@ const BootedNetworkDataPlane = struct {
     }
 };
 
+// Bridge to the kernel's real NVMe data plane (src/kernel/drivers/nvme_hw.zig).
+// When a real NVMe controller is brought up (QEMU `-device nvme` or the first
+// target), the booted storage backend uses it for genuine persistence across
+// reboots instead of the RAM-backed image. Host builds get inert stubs.
+const nvme_bridge = if (builtin.target.os.tag == .freestanding)
+    struct {
+        extern fn zigosStorageBootstrapNvmeAttached() callconv(.c) bool;
+        extern fn zigosStorageBootstrapNvmeSectorCount() callconv(.c) u64;
+        pub extern fn zigosStorageBootstrapNvmeRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool;
+        pub extern fn zigosStorageBootstrapNvmeWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool;
+        pub fn attached() bool {
+            return zigosStorageBootstrapNvmeAttached();
+        }
+        pub fn sectorCount() u64 {
+            return zigosStorageBootstrapNvmeSectorCount();
+        }
+    }
+else
+    struct {
+        pub fn attached() bool {
+            return false;
+        }
+        pub fn sectorCount() u64 {
+            return 0;
+        }
+        pub fn zigosStorageBootstrapNvmeRead(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+        pub fn zigosStorageBootstrapNvmeWrite(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+    };
+
 const BootedStorageDataPlane = struct {
     var image = [_]u8{0} ** booted_storage_image_bytes;
 
@@ -82,6 +115,23 @@ const BootedStorageDataPlane = struct {
 
     fn activate(device_id: u64) ?storage_volume_mod.Backend {
         if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
+        // Prefer the real NVMe data plane when present so storage persists across
+        // reboots; otherwise fall back to the RAM-backed image for model boots.
+        if (nvme_bridge.attached()) {
+            const nvme_sectors = nvme_bridge.sectorCount();
+            // Real persistence: report the device's true capacity and never floor
+            // it. If the namespace cannot hold the full volume layout plus the
+            // restart-probe scratch range, fail closed (return null -> the
+            // production storage gate refuses) rather than advertising a phantom
+            // 1554-sector device whose writes would address LBAs past the
+            // namespace and fail silently per sector at runtime.
+            if (nvme_sectors < booted_storage_sector_count) return null;
+            return .{
+                .sector_count = nvme_sectors,
+                .read = nvme_bridge.zigosStorageBootstrapNvmeRead,
+                .write = nvme_bridge.zigosStorageBootstrapNvmeWrite,
+            };
+        }
         return .{
             .sector_count = booted_storage_sector_count,
             .read = read,
@@ -362,6 +412,7 @@ pub fn bootServices(
     kernel_port: *component_port.KernelPort,
     service_bindings: *support.ServiceBindings,
 ) bool {
+    seedHostedModelDeviceInventory();
     const env_snapshot = env.*;
     const state_snapshot = state.*;
     if (!@call(.never_inline, launchServices, .{ &env_snapshot, &state_snapshot, kernel_port, service_bindings })) return false;
@@ -398,6 +449,38 @@ fn launchServices(
         };
     }
     return true;
+}
+
+fn seedHostedModelDeviceInventory() void {
+    // Host (model) builds always seed; freestanding seeds only when the kernel
+    // enabled modeled-inventory mode (QEMU storage-durability proof). Real
+    // detected devices are preserved by the per-class `!detected` guards below,
+    // so a real QEMU NVMe controller still backs storage.
+    if (builtin.target.os.tag == .freestanding and !device_inventory.modelDeviceInventoryEnabled()) return;
+
+    const hosted_xhci_device_id = 0x8086_A0ED_0001;
+
+    if (!device_inventory.recordForClass(.network_adapter).detected) {
+        device_inventory.registerDetected(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory, false);
+    }
+    if (!device_inventory.recordForClass(.storage_controller).detected) {
+        device_inventory.registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
+    }
+    if (!device_inventory.recordForClass(.usb_controller).detected) {
+        device_inventory.registerDetected(.usb_controller, hosted_xhci_device_id, .xhci_inventory, false);
+    }
+    if (!device_inventory.recordForClass(.graphics_adapter).detected) {
+        device_inventory.registerDetected(.graphics_adapter, 0x8086_9A49_0001, .pci_inventory, false);
+    }
+    if (!device_inventory.recordForClass(.audio_print_io).detected) {
+        device_inventory.registerDetected(.audio_print_io, 0x8086_A0C8_0001, .pci_inventory, false);
+    }
+    if (!device_inventory.recordForClass(.input_device).detected) {
+        device_inventory.registerDetected(.input_device, hosted_xhci_device_id, .xhci_inventory, false);
+    }
+    if (!device_inventory.recordForClass(.compositor_policy).detected) {
+        device_inventory.registerDetected(.compositor_policy, 0xC0DE_9001, .platform_policy, false);
+    }
 }
 
 fn launchService(

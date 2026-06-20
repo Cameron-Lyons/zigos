@@ -182,22 +182,6 @@ pub const Directory = struct {
         return &slot.driver;
     }
 
-    pub fn hotSwap(self: *Directory, request: RegistrationRequest) Error!*DriverRecord {
-        return self.hotSwapSigned(.{
-            .service_id = request.service_id,
-            .owner_task_id = request.owner_task_id,
-            .device_id = request.device_id,
-            .device_class = request.device_class,
-            .authority_capability_id = request.authority_capability_id,
-            .capability_table = request.capability_table,
-            .requester = request.requester,
-            .now_ticks = request.now_ticks,
-            .signer = request.bundle.signature.signer,
-            .bootstrap_transport = request.bootstrap_transport,
-            .require_iommu = request.require_iommu,
-        });
-    }
-
     pub fn hotSwapSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
         const slot = self.findSlotByServiceAndClass(request.service_id, request.device_class) orelse return error.DriverNotFound;
         if (slot.driver.device_id != request.device_id or slot.driver.device_class != request.device_class) {
@@ -587,7 +571,7 @@ test "driver directory indexes service binding and class lookups" {
     var directory = Directory.init();
     var capabilities = capability.CapabilityTable.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 18 };
-    const network_device_id: u64 = 0x8086_100E_0018;
+    const network_device_id: u64 = 0x8086_15F2_0018;
     const storage_device_id: u64 = 0x1F001;
     const network_authority = try mintDriverAuthority(&capabilities, .{
         .holder = owner,
@@ -768,14 +752,14 @@ test "network drivers cannot request kernel bootstrap broker transports" {
     const authority = try mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 91 },
         .task_id = 901,
-        .device_id = 0x8086_100E_0001,
+        .device_id = 0x8086_15F2_0001,
         .device_class = .network_adapter,
     });
 
     try std.testing.expectError(error.InvalidBootstrapTransport, directory.registerSigned(.{
         .service_id = 91,
         .owner_task_id = 901,
-        .device_id = 0x8086_100E_0001,
+        .device_id = 0x8086_15F2_0001,
         .device_class = .network_adapter,
         .authority_capability_id = authority.id,
         .capability_table = &capabilities,
@@ -932,13 +916,13 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
     const input_authority = try mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 5 },
         .task_id = 13,
-        .device_id = 0x8042_0001,
+        .device_id = 0x8086_A0ED_0001,
         .device_class = .input_device,
     });
     try std.testing.expectError(error.InvalidBootstrapTransport, directory.register(.{
         .service_id = 61,
         .owner_task_id = 13,
-        .device_id = 0x8042_0001,
+        .device_id = 0x8086_A0ED_0001,
         .device_class = .input_device,
         .authority_capability_id = input_authority.id,
         .capability_table = &capabilities,

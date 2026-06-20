@@ -40,7 +40,6 @@ const ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES: usize = units.kibibytes(2);
 const BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES: usize = units.kibibytes(4);
 const BOOT_SUMMARY_PAYLOAD_BUFFER_BYTES: usize = 128;
 const BUILD_ARTIFACT_LABEL_BUFFER_BYTES: usize = 32;
-const UserspaceServiceMeasurementPayload = [62]u8;
 const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
@@ -115,20 +114,6 @@ pub const ArtifactManifest = struct {
         };
         self.entries[self.entry_count].label_len = copyText(&self.entries[self.entry_count].label, label);
         self.entry_count += 1;
-    }
-
-    pub fn addUserspaceServiceImage(
-        self: *ArtifactManifest,
-        image: *const userspace_loader.ImageRecord,
-    ) Error!void {
-        var payload = std.mem.zeroes(UserspaceServiceMeasurementPayload);
-        @memcpy(payload[0..32], &image.file_sha256);
-        std.mem.writeInt(u64, payload[32..40], image.id, .little);
-        std.mem.writeInt(u64, payload[40..48], image.entry_point, .little);
-        std.mem.writeInt(u64, payload[48..56], @intCast(image.byte_len), .little);
-        std.mem.writeInt(u32, payload[56..60], image.contract_flags, .little);
-        std.mem.writeInt(u16, payload[60..62], image.component_abi_version, .little);
-        return self.add(.critical_service, image.bundleIdSlice(), payload[0..]);
     }
 
     pub fn addCriticalServiceImage(
@@ -957,7 +942,8 @@ test "critical service measurements bind launched userspace image artifacts" {
         },
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
-    const image = try catalog.register(.{
+    const image_bytes = userspace_loader.makeSyntheticElf32ForTest(0x405000, 2, 1);
+    const image = try catalog.registerEmbeddedArtifact(.{
         .bundle = bundle,
         .component_class = .service_component,
         .initial_component = .{
@@ -967,6 +953,7 @@ test "critical service measurements bind launched userspace image artifacts" {
         .role_tag = 0xA10C,
         .heartbeat_increment = 12,
         .contract_flags = 0x11,
+        .elf_bytes = &image_bytes,
     });
 
     var supervisor = supervisor_mod.Supervisor.init();

@@ -36,25 +36,70 @@ is_sha256_hex() {
 
 dsse_payload_type="application/vnd.in-toto+json"
 
+fail_release_generation() {
+  printf 'release SBOM/provenance generation failed: %s\n' "$*" >&2
+  exit 1
+}
+
+static_dsse_signature_configured() {
+  [ -n "${ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64:-}" ] || [ -n "${ZIGOS_RELEASE_DSSE_SIGNATURE_B64:-}" ]
+}
+
+is_base64_text() {
+  local value="${1:-}"
+  [ -n "$value" ] || return 1
+  [[ "$value" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
+  [ $(( ${#value} % 4 )) -eq 0 ] || return 1
+}
+
+require_dsse_signature_b64() {
+  local source_label="${1:?signature source required}"
+  local signature_b64="${2:?signature required}"
+  if ! is_base64_text "$signature_b64"; then
+    fail_release_generation "$source_label produced malformed DSSE signature; expected non-empty standard base64"
+  fi
+  printf '%s' "$signature_b64"
+}
+
+validate_dsse_signing_environment() {
+  if [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ] && static_dsse_signature_configured; then
+    fail_release_generation "set ZIGOS_RELEASE_DSSE_SIGN_COMMAND or static local-preview DSSE signatures, not both"
+  fi
+  if static_dsse_signature_configured && [ "${ZIGOS_RELEASE_LOCAL_PREVIEW_STATIC_DSSE:-}" != "true" ]; then
+    fail_release_generation "static DSSE signature environment variables require ZIGOS_RELEASE_LOCAL_PREVIEW_STATIC_DSSE=true"
+  fi
+  if static_dsse_signature_configured && [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ]; then
+    fail_release_generation "hardware-backed releases must use ZIGOS_RELEASE_DSSE_SIGN_COMMAND, not static DSSE signatures"
+  fi
+  if [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ] && [ -z "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ]; then
+    fail_release_generation "ZIGOS_RELEASE_HARDWARE_BACKED=true requires ZIGOS_RELEASE_DSSE_SIGN_COMMAND"
+  fi
+}
+
 sign_dsse_statement() {
   local statement="${1:?statement required}"
+  local signature_b64
   if [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ]; then
-    {
+    signature_b64="$({
       printf 'DSSEv1 %d %s %d ' "${#dsse_payload_type}" "$dsse_payload_type" "${#statement}"
       printf '%s' "$statement"
-    } | bash -c "$ZIGOS_RELEASE_DSSE_SIGN_COMMAND" | tr -d '\n'
+    } | bash -c "$ZIGOS_RELEASE_DSSE_SIGN_COMMAND" | tr -d '\n')"
+    require_dsse_signature_b64 "ZIGOS_RELEASE_DSSE_SIGN_COMMAND" "$signature_b64"
     return
   fi
   if [ -n "${ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64:-}" ]; then
-    printf '%s' "$ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64"
+    require_dsse_signature_b64 "ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64" "$ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64"
     return
   fi
   if [ -n "${ZIGOS_RELEASE_DSSE_SIGNATURE_B64:-}" ]; then
-    printf '%s' "$ZIGOS_RELEASE_DSSE_SIGNATURE_B64"
+    require_dsse_signature_b64 "ZIGOS_RELEASE_DSSE_SIGNATURE_B64" "$ZIGOS_RELEASE_DSSE_SIGNATURE_B64"
     return
   fi
-  printf '%s' 'UNSIGNED_LOCAL_PREVIEW_REQUIRES_HARDWARE_RELEASE_SIGNING' | base64_no_wrap
+  signature_b64="$(printf '%s' 'UNSIGNED_LOCAL_PREVIEW_REQUIRES_HARDWARE_RELEASE_SIGNING' | base64_no_wrap)"
+  require_dsse_signature_b64 "unsigned local preview marker" "$signature_b64"
 }
+
+validate_dsse_signing_environment
 
 artifact_files=()
 

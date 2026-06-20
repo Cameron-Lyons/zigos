@@ -299,9 +299,9 @@ test "syscall surface dispatches typed task creation requests" {
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     try std.testing.expectEqual(@as(u32, @sizeOf(abi.TaskDescriptor)), result.bytes_written);
     try std.testing.expectEqual(abi.DenialReason.none, result.denial_reason);
-    try std.testing.expectEqual(debug_contract.ProvenanceKind.syscall, result.provenance.kind);
-    try std.testing.expectEqual(debug_contract.Decision.allowed, result.provenance.decision);
-    try std.testing.expect(result.provenance.trace_id != 0);
+    // Successful syscalls intentionally carry no synthesized provenance record:
+    // the register ABI discards it, so it is built only on the denial path.
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.none, result.provenance.kind);
     try std.testing.expect(response.task_id != 0);
     try std.testing.expectEqual(@as(u16, @intFromEnum(task_runtime.ComponentClass.app_component)), response.component_class);
     try std.testing.expect(abi.taskFlagsHas(response.flags, abi.TASK_FLAG_USERSPACE_PROCESS));

@@ -20,7 +20,7 @@ const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
-pub const Error = error{ MissingBootstrapGrant, DriverAttachmentNotAllowed } || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
+pub const Error = error{ MissingBootstrapGrant, DriverAttachmentNotAllowed } || device_inventory.Error || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
 
 const driver_endpoint_slots = 4;
 const kibibytes = units.kibibytes;
@@ -164,12 +164,13 @@ pub fn attachDriver(
     now_ticks: u64,
 ) Error!*driver_service.DriverRecord {
     if (!supervisor.allowsDriverAttachment(service_id, device_class)) return error.DriverAttachmentNotAllowed;
+    const device_id = try device_inventory.requireProductionDriverDeviceId(device_class);
 
     const driver_capability_id = if (controller_task_id == 0) blk: {
         const driver_capability = try capability_table.mintBootRoot(.{
             .holder = owner,
             .issuer = policy_authority,
-            .target = driver_service.authorityTarget(deviceId(device_class)),
+            .target = driver_service.authorityTarget(device_id),
             .rights = driver_service.allowedRightsFor(device_class),
             .scope = .{
                 .task_id = task_id,
@@ -194,7 +195,7 @@ pub fn attachDriver(
         controller_task_id,
         policy_capability_id,
         task_id,
-        driver_service.authorityTarget(deviceId(device_class)),
+        driver_service.authorityTarget(device_id),
         driver_service.allowedRightsFor(device_class),
         policy_authority,
         360 + now_ticks,
@@ -204,7 +205,7 @@ pub fn attachDriver(
     const driver = try directory.registerSigned(.{
         .service_id = service_id,
         .owner_task_id = task_id,
-        .device_id = deviceId(device_class),
+        .device_id = device_id,
         .device_class = device_class,
         .authority_capability_id = driver_capability_id,
         .capability_table = capability_table,
@@ -292,10 +293,6 @@ pub fn contractsReady(service_directory: *const service_registry.Service) bool {
         _ = service_directory.connect(entry.interface) catch return false;
     }
     return true;
-}
-
-fn deviceId(device_class: driver_service.DeviceClass) u64 {
-    return device_inventory.deviceIdForClass(device_class);
 }
 
 fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8) userspace_boot_registry.Error![]const u8 {

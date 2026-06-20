@@ -45,7 +45,9 @@ pub const Backend = struct {
 pub const AttachedBackendKind = enum(u8) {
     none,
     generic,
+    nvme_pci,
     ata_bootstrap,
+    ata_bootstrap_broker,
 };
 
 pub fn unattachedRead(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
@@ -118,7 +120,7 @@ pub fn readAttachedBytes(volume: anytype, offset: usize, buffer: []u8) bool {
 pub fn readAttachedRange(volume: anytype, start_lba: u64, buffer: []u8) bool {
     return switch (volume.attached_backend_kind) {
         .none => false,
-        .generic => volume.attached_backend_read(start_lba, buffer.ptr, buffer.len),
+        .generic, .nvme_pci, .ata_bootstrap_broker => volume.attached_backend_read(start_lba, buffer.ptr, buffer.len),
         .ata_bootstrap => ataReadRange(volume, start_lba, buffer),
     };
 }
@@ -126,7 +128,7 @@ pub fn readAttachedRange(volume: anytype, start_lba: u64, buffer: []u8) bool {
 pub fn writeAttachedRange(volume: anytype, start_lba: u64, buffer: []const u8) bool {
     return switch (volume.attached_backend_kind) {
         .none => false,
-        .generic => volume.attached_backend_write(start_lba, buffer.ptr, buffer.len),
+        .generic, .nvme_pci, .ata_bootstrap_broker => volume.attached_backend_write(start_lba, buffer.ptr, buffer.len),
         .ata_bootstrap => ataWriteRange(volume, start_lba, buffer),
     };
 }

@@ -354,6 +354,7 @@ test "storage driver task attaches only through the kernel device broker" {
     const native_kernel = @import("../kernel_api/native_kernel.zig");
     const principal = @import("../core/principal.zig");
     const shared_memory = @import("../kernel_api/shared_memory.zig");
+    const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
     const task_runtime = @import("../task/task_runtime.zig");
 
     storage_volume.clearAttachedBackend();
@@ -374,10 +375,7 @@ test "storage driver task attaches only through the kernel device broker" {
     );
     var kernel_port = component_port.KernelPort.init(&kernel);
 
-    const storage_driver_broker_image = task_runtime.syntheticUserspaceImage(
-        "storage-driver-broker-test",
-        "zigos.system.storage-driver",
-    );
+    const storage_driver_broker_image = try generated_image_fixtures.storageDriverImage();
     const driver_task = try runtime.createTask(.{
         .owner = principal.PrincipalId{ .kind = .service, .serial = 30 },
         .component_class = .service_component,

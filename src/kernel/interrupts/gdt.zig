@@ -117,7 +117,10 @@ fn setGdtEntry(num: usize, base: u32, limit: u32, access: u8, gran: u8) void {
 
 fn writeTss(num: usize, ss0: u16, esp0: u32) void {
     const base = @intFromPtr(&tss);
-    const limit = base + @sizeOf(Tss);
+    // A GDT descriptor's limit field is the segment size minus one, not an end
+    // address; with byte granularity the TSS limit must be @sizeOf(Tss) - 1 so
+    // the CPU's I/O-permission-bitmap bound (iomap_base vs limit) is correct.
+    const limit = @sizeOf(Tss) - 1;
 
     setGdtEntry(num, base, limit, PRESENT | EXECUTABLE | ACCESSED, 0);
 

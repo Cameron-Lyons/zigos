@@ -457,14 +457,14 @@ pub const StorageCore = struct {
     }
 
     pub fn hasAnySnapshots(self: *const Service) bool {
-        for (self.workspaces.snapshots.slots) |slot| {
+        for (&self.workspaces.snapshots.slots) |*slot| {
             if (slot.in_use) return true;
         }
         return false;
     }
 
     pub fn hasAnyWorkspaceRecords(self: *const Service) bool {
-        for (self.workspaces.workspaces.slots) |slot| {
+        for (&self.workspaces.workspaces.slots) |*slot| {
             if (slot.in_use) return true;
         }
         return false;

@@ -66,6 +66,10 @@ pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, ali
     }
 
     if (memory.address_space) |address_space| {
+        // An address space with zero registered regions is the hosted/in-process
+        // (no MMU region map) mode: the pointers are real process pointers, so
+        // allow, matching the absent-address_space case below. Region enforcement
+        // applies only once a task actually publishes regions.
         if (address_space.region_count == 0) return true;
         return validateAddressSpaceRange(address_space, addr, end_exclusive, access);
     }
@@ -215,7 +219,12 @@ pub fn withSyscallContract(
             0,
         );
     }
-    if (out.provenance.kind == .none) {
+    // Successful syscalls return only status/bytes_written/denial_reason to the
+    // register ABI (see main.zig syscall_handler), so synthesizing and FNV-hashing
+    // a full provenance record on every successful call is pure waste on the
+    // hottest path in the system. Build provenance only for the denial path, where
+    // it feeds audit and diagnostics.
+    if (!success_status and out.provenance.kind == .none) {
         out.provenance = debug_contract.syscallProvenance(
             decision,
             now_ticks,

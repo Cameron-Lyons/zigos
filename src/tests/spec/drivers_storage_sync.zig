@@ -2,6 +2,7 @@ const std = @import("std");
 const spec_support = @import("support.zig");
 const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_port.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
+const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_runtime_mod = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const file_bridge = @import("../../native/storage/file_bridge.zig");
@@ -34,7 +35,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         };
 
         fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
-            if (device_id != 0x8086_100E_0001) return null;
+            if (device_id != 0x8086_15F2_0001) return null;
             activation_count += 1;
             return &published_device;
         }
@@ -62,7 +63,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         }
 
         fn activate(device_id: u64) ?storage_volume.Backend {
-            if (device_id != 0x0000_1F00_0001) return null;
+            if (device_id != 0x0000_8086_5845_0001) return null;
             activation_count += 1;
             return .{
                 .sector_count = storage_volume.required_device_sectors,
@@ -74,12 +75,18 @@ pub fn publishedDriversActivateScopedTransports() !void {
 
     bootstrap_driver_port.reset();
     defer bootstrap_driver_port.reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
 
     var image = [_]u8{0} ** storage_volume.image_bytes;
+    FakeNetworkDevice.activation_count = 0;
+    FakeBackend.activation_count = 0;
     FakeBackend.image = &image;
 
-    const network_device_id: u64 = 0x8086_100E_0001;
-    const storage_device_id: u64 = 0x0000_1F00_0001;
+    const network_device_id: u64 = 0x8086_15F2_0001;
+    const storage_device_id: u64 = 0x0000_8086_5845_0001;
+    device_inventory.registerDetected(.storage_controller, storage_device_id, .nvme_pci_inventory, false);
+    device_inventory.registerDetected(.network_adapter, network_device_id, .intel_i225_lm_inventory, false);
     const bundle = manifest.BundleManifest{
         .bundle_id = "svc.driver.runtime",
         .display_name = "Published Driver Runtime",
@@ -92,13 +99,13 @@ pub fn publishedDriversActivateScopedTransports() !void {
 
     try std.testing.expect(try bootstrap_driver_port.publishStorageActivator(
         storage_device_id,
-        "ata-bootstrap",
+        "nvme-userspace",
         FakeBackend.activate,
         false,
     ));
     try std.testing.expect(try bootstrap_driver_port.publishNetworkActivator(
         network_device_id,
-        "e1000-userspace",
+        "i225-userspace",
         FakeNetworkDevice.activate,
         false,
     ));
@@ -122,7 +129,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
     ));
     try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
         .input_device,
-        0x8042_0001,
+        0x8086_A0ED_0001,
         "input-userspace",
         false,
     ));
@@ -229,13 +236,13 @@ pub fn publishedDriversActivateScopedTransports() !void {
         &capabilities,
         spec_support.service(95),
         905,
-        0x8042_0001,
+        0x8086_A0ED_0001,
         .input_device,
     );
     const input_driver = try directory.register(.{
         .service_id = 95,
         .owner_task_id = 905,
-        .device_id = 0x8042_0001,
+        .device_id = 0x8086_A0ED_0001,
         .device_class = .input_device,
         .authority_capability_id = input_authority.id,
         .capability_table = &capabilities,
@@ -274,7 +281,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
     try std.testing.expect(network_activation.exclusive_claim);
     try std.testing.expect(!network_activation.kernel_bootstrap);
-    try std.testing.expectEqualStrings("e1000-userspace", network_activation.publisherSlice());
+    try std.testing.expectEqualStrings("i225-userspace", network_activation.publisherSlice());
     try std.testing.expectEqual(@as(usize, 1), FakeNetworkDevice.activation_count);
     try std.testing.expect(bootstrap_driver_port.hasActiveNetworkDevice());
     try std.testing.expectEqual(@as(u64, 91), bootstrap_driver_port.networkPublication().?.active_service_id);
@@ -284,9 +291,10 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, storage_activation.mode);
     try std.testing.expect(storage_activation.exclusive_claim);
     try std.testing.expect(!storage_activation.kernel_bootstrap);
-    try std.testing.expectEqualStrings("ata-bootstrap", storage_activation.publisherSlice());
+    try std.testing.expectEqualStrings("nvme-userspace", storage_activation.publisherSlice());
     try std.testing.expectEqual(@as(usize, 1), FakeBackend.activation_count);
     try std.testing.expect(storage_volume.hasAttachedDevice());
+    try std.testing.expect(storage_volume.hasProductionStorageBackend());
     try std.testing.expectEqual(@as(u64, 92), bootstrap_driver_port.storagePublication().?.active_service_id);
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, graphics_activation.mode);
@@ -320,7 +328,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expect(compositor_policy_driver.allowsDma(compositor_policy_driver.dma_ranges[0].base, DMA_PROBE_BYTES));
     try std.testing.expect(!compositor_policy_driver.allowsDma(compositor_policy_driver.dma_ranges[0].base + compositor_policy_driver.dma_ranges[0].length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PROBE_BYTES));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.network_adapter).?.mode);
-    try std.testing.expectEqualStrings("ata-bootstrap", runtime.findByClass(.storage_controller).?.publisherSlice());
+    try std.testing.expectEqualStrings("nvme-userspace", runtime.findByClass(.storage_controller).?.publisherSlice());
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.usb_controller).?.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.graphics_adapter).?.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.audio_print_io).?.mode);
@@ -392,7 +400,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
         .service_id = 99,
         .owner_task_id = 905,
-        .device_id = 0x8042_0001,
+        .device_id = 0x8086_A0ED_0001,
         .device_class = .input_device,
         .authority_capability_id = input_authority.id,
         .capability_table = &capabilities,
@@ -401,6 +409,10 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .bundle = bundle,
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
+}
+
+test "publishedDriversActivateScopedTransports" {
+    try publishedDriversActivateScopedTransports();
 }
 
 pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
@@ -895,6 +907,8 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
 
     bootstrap_driver_port.reset();
     defer bootstrap_driver_port.reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
 
     Harness.send_count = 0;
     Harness.policies = network_policy.Directory.init();
@@ -920,8 +934,11 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
         .send = Harness.send,
         .getMacAddress = Harness.mac,
     };
-    try std.testing.expect(try bootstrap_driver_port.publishNetworkDevice(0xCAFE, "policy-egress", &device, false));
-    try std.testing.expect(bootstrap_driver_port.activateNetworkDevice(0xCAFE, 800));
+    const i225_device_id: u64 = 0x8086_15F2_0001;
+    try std.testing.expect(try bootstrap_driver_port.publishNetworkDevice(i225_device_id, "policy-egress", &device, false));
+    try std.testing.expect(!bootstrap_driver_port.activateNetworkDevice(i225_device_id, 800));
+    device_inventory.registerDetected(.network_adapter, i225_device_id, .intel_i225_lm_inventory, false);
+    try std.testing.expect(bootstrap_driver_port.activateNetworkDevice(i225_device_id, 800));
     bootstrap_driver_port.setEgressBroker(Harness.broker);
 
     const frame = "dst=relay.spec.zigos";

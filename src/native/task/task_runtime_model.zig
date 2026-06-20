@@ -507,10 +507,6 @@ pub fn resetTaskCold(dest: *TaskColdRecord) void {
     zeroBytes(std.mem.asBytes(dest));
 }
 
-pub fn copyTaskCold(dest: *TaskColdRecord, src: *const TaskColdRecord) void {
-    copyBytes(std.mem.asBytes(dest), std.mem.asBytes(src));
-}
-
 pub fn copyTaskColdForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
     copySlots(ExecutionComponentRecord, dest.execution_components[0..task.execution_component_count], src.execution_components[0..task.execution_component_count]);
     copySlots(u64, dest.capability_ids[0..task.capability_count], src.capability_ids[0..task.capability_count]);

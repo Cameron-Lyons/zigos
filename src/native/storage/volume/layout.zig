@@ -14,11 +14,22 @@ pub const data_start_sector: u32 = root_sector_count;
 pub const data_start_byte: usize = data_start_sector * sector_size;
 pub const data_capacity_bytes: usize = image_bytes - data_start_byte;
 
+// The data area is split into two equal log regions that the committed root
+// ping-pongs between. Compaction always writes its fresh checkpoint into the
+// region the live root does *not* reference, so a power loss mid-compaction
+// leaves the previously committed root's backing log fully intact for replay
+// (the prior in-place overwrite destroyed the only copy and could lose all
+// persisted state). The per-region log capacity is therefore half the data
+// area, which is why compaction runs roughly twice as often.
+pub const data_region_count: usize = 2;
+pub const data_region_bytes: usize = data_capacity_bytes / data_region_count;
+pub const alternate_data_region_offset: u32 = @intCast(data_region_bytes);
+
 pub const root_magic = "ZG4LOG1";
-pub const root_format_version: u16 = 2;
+pub const root_format_version: u16 = 3;
 pub const max_replay_log_records: u16 = 512;
 pub const max_log_segments: u16 = 64;
-pub const compaction_threshold_bytes: u32 = @intCast((data_capacity_bytes * 3) / 4);
+pub const compaction_threshold_bytes: u32 = @intCast((data_region_bytes * 3) / 4);
 
 pub const log_record_kind_bytes: usize = 1;
 pub const log_record_payload_len_bytes: usize = 4;

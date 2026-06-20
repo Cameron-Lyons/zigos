@@ -366,6 +366,7 @@ pub const ValidationError = error{
     BundleIdTooLong,
     DisplayNameTooLong,
     PublisherTooLong,
+    CompatibilityNamespaceUnsupported,
     MissingExecutableComponent,
     MissingInterfaceDefinition,
     MissingAsset,
@@ -465,6 +466,7 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
     if (bundle.display_name.len == 0) return error.EmptyDisplayName;
     if (bundle.publisher.len == 0) return error.EmptyPublisher;
 
+    try validateNativeOnlyNaming(bundle);
     if (bundle.background_tasks.len > 0 and !hasPermission(bundle, .background_execution)) {
         return error.MissingBackgroundPermission;
     }
@@ -706,7 +708,9 @@ pub fn dangerousPermissionKind(kind: PermissionKind) bool {
 }
 
 pub fn validateApplicationPackaging(bundle: BundleManifest) ValidationError!void {
+    if (isUnsupportedCompatibilityNamespace(bundle.bundle_id)) return error.CompatibilityNamespaceUnsupported;
     if (!requiresApplicationPackaging(bundle.bundle_id)) return;
+    try validateNativeOnlyNaming(bundle);
     if (bundle.components.len == 0) return error.MissingExecutableComponent;
     if (bundle.provided_interfaces.len == 0 and bundle.consumed_interfaces.len == 0) {
         return error.MissingInterfaceDefinition;
@@ -786,7 +790,8 @@ fn hasDuplicateStringFieldBefore(items: anytype, index: usize, comptime field_na
 }
 
 pub fn requiresApplicationPackaging(bundle_id: []const u8) bool {
-    return !isReservedPlatformBundle(bundle_id);
+    return !isReservedPlatformBundle(bundle_id) and
+        !isUnsupportedCompatibilityNamespace(bundle_id);
 }
 
 pub fn isApplicationBundle(bundle_id: []const u8) bool {
@@ -796,6 +801,31 @@ pub fn isApplicationBundle(bundle_id: []const u8) bool {
 pub fn isReservedPlatformBundle(bundle_id: []const u8) bool {
     return std.mem.startsWith(u8, bundle_id, "zigos.") or
         std.mem.startsWith(u8, bundle_id, "svc.");
+}
+
+pub fn isUnsupportedCompatibilityNamespace(bundle_id: []const u8) bool {
+    return mentionsPosix(bundle_id) or mentionsCompatNamespace(bundle_id);
+}
+
+fn validateNativeOnlyNaming(bundle: BundleManifest) ValidationError!void {
+    if (isUnsupportedCompatibilityNamespace(bundle.bundle_id)) {
+        return error.CompatibilityNamespaceUnsupported;
+    }
+    for (bundle.components) |component| {
+        if (mentionsPosix(component.entry) or mentionsCompatNamespace(component.entry)) {
+            return error.CompatibilityNamespaceUnsupported;
+        }
+    }
+}
+
+fn mentionsPosix(value: []const u8) bool {
+    return std.mem.indexOf(u8, value, "posix") != null or
+        std.mem.indexOf(u8, value, "POSIX") != null;
+}
+
+fn mentionsCompatNamespace(value: []const u8) bool {
+    return std.mem.startsWith(u8, value, "compat.") or
+        std.mem.indexOf(u8, value, ".compat.") != null;
 }
 
 test "validate rejects background tasks without explicit background permission" {
@@ -1597,13 +1627,20 @@ test "validate gates adaptive UI declarations behind concrete accessibility supp
     });
 }
 
-test "compatibility namespaces are not reserved platform packages" {
+test "compatibility namespaces are rejected by native-only manifest validation" {
     try std.testing.expect(!isReservedPlatformBundle("compat.posix"));
-    try std.testing.expect(requiresApplicationPackaging("compat.posix"));
-    try std.testing.expectError(error.MissingExecutableComponent, validateApplicationPackaging(.{
+    try std.testing.expect(isUnsupportedCompatibilityNamespace("compat.posix"));
+    try std.testing.expect(!requiresApplicationPackaging("compat.posix"));
+    try std.testing.expectError(error.CompatibilityNamespaceUnsupported, validateApplicationPackaging(.{
         .bundle_id = "compat.posix",
         .display_name = "Compat POSIX",
         .publisher = "zigos.dev",
+    }));
+    try std.testing.expectError(error.CompatibilityNamespaceUnsupported, validate(.{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "zigos.dev",
+        .components = &.{.{ .id = "main", .entry = "compat.posix.main" }},
     }));
 }
 

@@ -1310,12 +1310,14 @@ test "compositor service rejects tasks without valid display surfaces" {
 }
 
 test "task-first compositor flow persists app-linked task views and audit state" {
+    const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
+
     var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
     var runtime = task_runtime.Runtime.init();
     var runtime_service = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
     runtime_service.bind(70, .{ .kind = .service, .serial = 70 });
 
-    const app_image = task_runtime.syntheticUserspaceImage("trip-task", "app.trip.coordinate");
+    const app_image = try generated_image_fixtures.appImage();
     const app_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 70 },
         .component_class = .app_component,
@@ -1328,15 +1330,15 @@ test "task-first compositor flow persists app-linked task views and audit state"
         .ui_surface_id = 91,
         .local_only = true,
         .initial_component = .{
-            .label = "trip-task",
-            .entry = "app.trip.coordinate",
+            .label = "viewer",
+            .entry = "app.viewer",
         },
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 70_001,
             .component_abi_version = abi.ABI_VERSION,
             .signed = true,
-            .bundle_id = "app.trip",
+            .bundle_id = "app.viewer",
         },
         .userspace_image = &app_image,
     });
@@ -1369,16 +1371,16 @@ test "task-first compositor flow persists app-linked task views and audit state"
         .view_type = .app_panel,
         .subject_task_id = app_task_id,
         .workspace_id = 800,
-        .bundle_id = "app.trip",
-        .display_name = "Trip",
+        .bundle_id = "app.viewer",
+        .display_name = "Viewer",
         .detail = "Calendar Panel",
     });
     try std.testing.expectEqual(ServiceStatus.ok, panel_response.status);
     try std.testing.expectEqual(panel_response.window_id, session.active_window_id);
 
     _ = try runtime.attachComponent(app_task_id, .{
-        .label = "calendar-panel",
-        .entry = "app.trip.calendar",
+        .label = "viewer-panel",
+        .entry = "app.viewer.panel",
     }, 12);
     try runtime.audit(app_task_id, .{
         .kind = .service_connected,
@@ -1419,9 +1421,9 @@ test "task-first compositor flow persists app-linked task views and audit state"
     try std.testing.expect(runtime.find(ephemeral_task_id) == null);
     try std.testing.expect(restored_task.runsAsUserspaceProcess());
     try std.testing.expectEqual(@as(?u64, 91), restored_task.ui_surface_id);
-    try std.testing.expectEqualStrings("app.trip", restored_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("app.viewer", restored_task.launchBundleIdSlice());
     try std.testing.expectEqual(@as(usize, 2), restored_task.execution_component_count);
-    try std.testing.expectEqualStrings("calendar-panel", restored_task.executionComponents()[1].labelSlice());
+    try std.testing.expectEqualStrings("viewer-panel", restored_task.executionComponents()[1].labelSlice());
     try std.testing.expectEqual(@as(usize, 2), restored_task.audit_count);
     try std.testing.expectEqual(task_runtime.AuditEventKind.component_attached, restored_task.auditEventAt(0).?.kind);
     try std.testing.expectEqual(task_runtime.AuditEventKind.service_connected, restored_task.auditEventAt(1).?.kind);
@@ -1438,16 +1440,16 @@ test "task-first compositor flow persists app-linked task views and audit state"
     try std.testing.expectEqual(ViewType.full_screen_task_view, restored_task_window.view_type);
     try std.testing.expectEqual(ViewType.document_view, restored_document_window.view_type);
     try std.testing.expectEqual(ViewType.app_panel, restored_panel_window.view_type);
-    try std.testing.expectEqualStrings("app.trip", restored_panel_window.bundleIdSlice());
-    try std.testing.expectEqualStrings("Trip", restored_panel_window.displayNameSlice());
+    try std.testing.expectEqualStrings("app.viewer", restored_panel_window.bundleIdSlice());
+    try std.testing.expectEqualStrings("Viewer", restored_panel_window.displayNameSlice());
 
     var render_buffer: [TEST_WINDOW_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered_task = try renderWindowToBuffer(&render_buffer, restored_task_window);
     try std.testing.expect(std.mem.indexOf(u8, rendered_task, "type=full_screen_task_view") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered_task, "title=Task: Coordinate Trip") != null);
     const rendered_panel = try renderWindowToBuffer(&render_buffer, restored_panel_window);
-    try std.testing.expect(std.mem.indexOf(u8, rendered_panel, "bundle=app.trip") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered_panel, "display=Trip") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered_panel, "bundle=app.viewer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered_panel, "display=Viewer") != null);
 }
 
 test "compositor session creates app-panel permission review windows and cards" {

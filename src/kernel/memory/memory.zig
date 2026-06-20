@@ -163,14 +163,23 @@ pub fn kfree(ptr: ?*anyopaque) void {
     const raw_ptr: [*]u8 = @ptrCast(ptr.?);
     const block: *BlockHeader = @ptrCast(@alignCast(raw_ptr - @sizeOf(BlockHeader)));
 
-    if (@intFromPtr(block) < @intFromPtr(heap_start) or
-        @intFromPtr(block) >= @intFromPtr(heap_end))
-    {
+    if (!blockWithinHeap(block)) {
+        return;
+    }
+
+    // Guard against double-free: coalescing an already-free block a second time
+    // corrupts the free list (it merges neighbours twice).
+    if (block.is_free) {
         return;
     }
 
     block.is_free = true;
     coalesceBlocks(block);
+}
+
+fn blockWithinHeap(block: *const BlockHeader) bool {
+    const addr = @intFromPtr(block);
+    return addr >= @intFromPtr(heap_start) and addr + @sizeOf(BlockHeader) <= @intFromPtr(heap_end);
 }
 
 pub fn krealloc(ptr: ?*anyopaque, new_size: usize) ?*anyopaque {
@@ -182,6 +191,12 @@ pub fn krealloc(ptr: ?*anyopaque, new_size: usize) ?*anyopaque {
 
     const raw_ptr: [*]u8 = @ptrCast(ptr.?);
     const block: *BlockHeader = @ptrCast(@alignCast(raw_ptr - @sizeOf(BlockHeader)));
+
+    // Reject pointers that do not refer to a live heap block before dereferencing
+    // the header (kfree applies the same range check; krealloc previously did not).
+    if (!blockWithinHeap(block) or block.is_free) {
+        return null;
+    }
 
     if (block.size >= new_size) {
         return ptr;

@@ -611,7 +611,8 @@ fn sessionTrustPosture(
 ) SessionTrustPosture {
     if (decision.attestation_required and
         decision.identity_pinned and
-        evidence.hasVerifiedRemoteAttestation())
+        evidence.hasVerifiedRemoteAttestation() and
+        evidence.hasAttestationVerifierMetadataDigest())
     {
         return .production_attested;
     }
@@ -1023,6 +1024,45 @@ test "encrypted transport harness binds device sessions to attested identity and
     try std.testing.expectError(error.ProductionAttestationRequired, lab_session.requireProductionAttestation());
     try std.testing.expect(!std.mem.eql(u8, &session.key, &lab_session.key));
 
+    const root_pinned_without_metadata_policy = try policies.create(.{
+        .owner = owner,
+        .label = "root-pinned-without-metadata",
+        .mode = .local_network,
+        .require_remote_attestation = true,
+        .pinned_root_digest = pinned_digest,
+    });
+    const root_only_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = root_pinned_without_metadata_policy.id },
+        .rights = .{ .network_policy = .{ .network_local = true } },
+        .scope = .{ .task_id = 43, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 10 },
+        .audit = .{},
+    });
+    const root_pinned_session = try harness.openDeviceToDevice(&broker, .{
+        .task_id = 43,
+        .principal_id = app,
+        .capability_id = root_only_capability.id,
+        .policy_id = root_pinned_without_metadata_policy.id,
+        .evidence = .{
+            .destination = .local_network,
+            .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = request_digest,
+            .peer_root_digest_present = true,
+            .peer_root_digest = pinned_digest,
+        },
+        .now_ticks = 5,
+    }, source, target);
+    try std.testing.expect(root_pinned_session.egress_decision.policy_decision.attestation_required);
+    try std.testing.expect(root_pinned_session.egress_decision.policy_decision.identity_pinned);
+    try std.testing.expectEqual(SessionTrustPosture.local_lab_only, root_pinned_session.trust_posture);
+    try std.testing.expect(!root_pinned_session.productionAttested());
+    try std.testing.expectError(error.ProductionAttestationRequired, root_pinned_session.requireProductionAttestation());
+    try std.testing.expect(!std.mem.eql(u8, &session.key, &root_pinned_session.key));
+
     const retargeted = try harness.openDeviceToDevice(&broker, .{
         .task_id = 43,
         .principal_id = app,
@@ -1072,7 +1112,7 @@ test "encrypted transport harness binds device sessions to attested identity and
     forged_packet.ciphertext_len = MAX_PACKET_BYTES + 1;
     try std.testing.expectError(error.PacketTooLarge, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
 
-    try std.testing.expectEqual(@as(usize, 3), harness.created_sessions);
+    try std.testing.expectEqual(@as(usize, 4), harness.created_sessions);
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
 }
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const bootstrap_driver_port = @import("bootstrap_driver_port.zig");
+const device_inventory = @import("device_inventory.zig");
 const driver_service = @import("driver_service.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
@@ -284,7 +285,7 @@ test "kernel bootstrap cannot publish network data-plane transports" {
         };
 
         fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
-            if (device_id != 0x8086_100E_0001) return null;
+            if (device_id != 0x8086_15F2_0001) return null;
             return &device;
         }
     };
@@ -293,8 +294,8 @@ test "kernel bootstrap cannot publish network data-plane transports" {
     defer bootstrap_driver_port.reset();
 
     try std.testing.expect(!(try bootstrap_driver_port.publishNetworkActivator(
-        0x8086_100E_0001,
-        "e1000",
+        0x8086_15F2_0001,
+        "i225",
         FakeNetworkDevice.activate,
         true,
     )));
@@ -305,13 +306,13 @@ test "kernel bootstrap cannot publish network data-plane transports" {
     const driver_authority = try driver_service.mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 91 },
         .task_id = 901,
-        .device_id = 0x8086_100E_0001,
+        .device_id = 0x8086_15F2_0001,
         .device_class = .network_adapter,
     });
     const driver = try directory.register(.{
         .service_id = 91,
         .owner_task_id = 901,
-        .device_id = 0x8086_100E_0001,
+        .device_id = 0x8086_15F2_0001,
         .device_class = .network_adapter,
         .authority_capability_id = driver_authority.id,
         .capability_table = &capabilities,
@@ -341,9 +342,8 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     const native_kernel = @import("../kernel_api/native_kernel.zig");
     const principal = @import("../core/principal.zig");
     const shared_memory = @import("../kernel_api/shared_memory.zig");
+    const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
     const task_runtime = @import("../task/task_runtime.zig");
-    const device_inventory = @import("device_inventory.zig");
-
     const device_id: u64 = 0x0000_1F00_0001;
 
     bootstrap_driver_port.reset();
@@ -377,10 +377,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         .sector_count = storage_volume.required_device_sectors,
     });
 
-    const storage_driver_lease_image = task_runtime.syntheticUserspaceImage(
-        "storage-driver-lease-test",
-        "zigos.system.storage-driver",
-    );
+    const storage_driver_lease_image = try generated_image_fixtures.storageDriverImage();
     const driver_task = try runtime.createTask(.{
         .owner = principal.PrincipalId{ .kind = .service, .serial = 30 },
         .component_class = .service_component,
@@ -468,7 +465,7 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
         }
 
         fn activate(device_id: u64) ?storage_volume.Backend {
-            if (device_id != 0x0000_1F00_00A1) return null;
+            if (device_id != 0x0000_8086_5845_00A1) return null;
             activation_count += 1;
             return .{
                 .sector_count = storage_volume.required_device_sectors,
@@ -480,6 +477,8 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
 
     bootstrap_driver_port.reset();
     defer bootstrap_driver_port.reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
     storage_volume.clearAttachedBackend();
     defer storage_volume.clearAttachedBackend();
 
@@ -487,9 +486,10 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
     FakeBackend.image = &image;
     FakeBackend.activation_count = 0;
 
-    const device_id: u64 = 0x0000_1F00_00A1;
+    const device_id: u64 = 0x0000_8086_5845_00A1;
     const service_id: u64 = 301;
     const task_id: u64 = 3_001;
+    device_inventory.registerDetected(.storage_controller, device_id, .nvme_pci_inventory, false);
     try std.testing.expect(try bootstrap_driver_port.publishStorageActivator(
         device_id,
         "nvme-userspace",
@@ -522,6 +522,7 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
     const activation = try runtime.activateAt(driver, 1);
     try std.testing.expectEqual(ActivationMode.published_data_plane, activation.mode);
     try std.testing.expectEqual(@as(usize, 1), FakeBackend.activation_count);
+    try std.testing.expect(storage_volume.hasProductionStorageBackend());
 
     var before_restart = [_]u8{0x44} ** storage_volume.sector_size;
     const before_label = "before-restart";

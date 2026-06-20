@@ -856,7 +856,7 @@ pub fn driverBoundaryAuditGate() !void {
     var capabilities = capability.CapabilityTable.init();
     var directory = driver_service.Directory.init();
     const holder = spec_support.service(811);
-    const authority = try spec_support.driverAuthority(&capabilities, holder, 812, 0x8086_100E_0007, .network_adapter);
+    const authority = try spec_support.driverAuthority(&capabilities, holder, 812, 0x8086_15F2_0007, .network_adapter);
 
     const bundle = manifest.BundleManifest{
         .bundle_id = "svc.driver.backlog",
@@ -867,7 +867,7 @@ pub fn driverBoundaryAuditGate() !void {
     const driver = try directory.register(.{
         .service_id = 811,
         .owner_task_id = 812,
-        .device_id = 0x8086_100E_0007,
+        .device_id = 0x8086_15F2_0007,
         .device_class = .network_adapter,
         .authority_capability_id = authority.id,
         .capability_table = &capabilities,
@@ -882,7 +882,7 @@ pub fn driverBoundaryAuditGate() !void {
     try std.testing.expectError(error.InvalidBootstrapTransport, rejected_directory.register(.{
         .service_id = 812,
         .owner_task_id = 812,
-        .device_id = 0x8086_100E_0007,
+        .device_id = 0x8086_15F2_0007,
         .device_class = .network_adapter,
         .authority_capability_id = authority.id,
         .capability_table = &capabilities,
@@ -1347,7 +1347,7 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expect(kernel_ethernet.network_data_plane_exports_fail_closed);
     try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, kernel_ethernet.rejectDataPlaneExport(.{
         .service_id = 811,
-        .device_id = 0x8086_100E_0007,
+        .device_id = 0x8086_15F2_0007,
         .frame_len = 64,
     }));
 
@@ -1355,7 +1355,7 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expect(!kernel_link_port.publishes_full_network_service);
     try std.testing.expect(kernel_link_port.network_data_plane_exports_fail_closed);
     try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, kernel_link_port.rejectKernelDataPlaneTransport(.{
-        .device_id = 0x8086_100E_0007,
+        .device_id = 0x8086_15F2_0007,
         .service_id = 811,
     }));
 
@@ -1602,6 +1602,8 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
 }
 
 pub fn bootedDriverKernelBoundaryGate() !void {
+    const generated_image_fixtures = @import("../../native/task/generated_image_fixtures.zig");
+
     const BoundaryRuntime = struct {
         tasks: *task_runtime.Runtime,
         activations: driver_runtime.Runtime = driver_runtime.Runtime.init(),
@@ -1671,35 +1673,35 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     const storage_service = try session_supervisor.register(.storage_object, spec_support.service(822));
     try std.testing.expect(session_supervisor.markHealthy(storage_service.id, 2));
 
-    const control_image = task_runtime.syntheticUserspaceImage("driver-boundary-control", "zigos.boundary.control");
+    const control_image = try generated_image_fixtures.serviceClientImage();
     const control_task = try kernel.taskCreate(kernelContext(bootstrap_task.id, .task_create, bootstrap_authority.id, .{ .task = 0 }), .{
         .owner = spec_support.service(823),
         .component_class = .service_component,
         .budget = spec_support.defaultBudget(false),
         .local_only = true,
         .initial_component = .{
-            .label = "driver-boundary-control",
-            .entry = "zigos.boundary.control",
+            .label = "service-client",
+            .entry = "app.service.client",
         },
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 821,
             .component_abi_version = 1,
             .signed = true,
-            .bundle_id = "zigos.boundary.control",
+            .bundle_id = "zigos.system.service-client",
         },
         .userspace_image = &control_image,
     }, 3);
 
-    const storage_driver_image = task_runtime.syntheticUserspaceImage("storage-driver-boundary", "zigos.system.storage-driver");
+    const storage_driver_image = try generated_image_fixtures.storageDriverImage();
     const driver_task = try kernel.taskCreate(kernelContext(bootstrap_task.id, .task_create, bootstrap_authority.id, .{ .task = 0 }), .{
         .owner = storage_service.owner,
         .component_class = .service_component,
         .budget = spec_support.defaultBudget(false),
         .local_only = true,
         .initial_component = .{
-            .label = "storage-driver-boundary",
-            .entry = "zigos.system.storage-driver",
+            .label = "storage-driver",
+            .entry = "zigos.driver.storage",
         },
         .launch = .{
             .boundary = .userspace_process,
@@ -1711,22 +1713,22 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .userspace_image = &storage_driver_image,
     }, 4);
 
-    const untrusted_image = task_runtime.syntheticUserspaceImage("untrusted-driver-peer", "app.untrusted.driver-peer");
+    const untrusted_image = try generated_image_fixtures.appImage();
     const untrusted_task = try kernel.taskCreate(kernelContext(bootstrap_task.id, .task_create, bootstrap_authority.id, .{ .task = 0 }), .{
         .owner = spec_support.app(824),
         .component_class = .app_component,
         .budget = spec_support.defaultBudget(false),
         .local_only = true,
         .initial_component = .{
-            .label = "untrusted-driver-peer",
-            .entry = "app.untrusted.driver-peer",
+            .label = "viewer",
+            .entry = "app.viewer",
         },
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 823,
             .component_abi_version = 1,
             .signed = true,
-            .bundle_id = "app.untrusted.driver-peer",
+            .bundle_id = "app.viewer",
         },
         .userspace_image = &untrusted_image,
     }, 5);

@@ -385,6 +385,13 @@ fn validateReleaseArtifacts(
             "require_artifact_path \"build/os.iso\"",
             "require_artifact_path \"zig-out/bin\"",
             "require_artifact_path \"spec/release_security/release_keyring.json\"",
+            "validate_dsse_signing_environment",
+            "ZIGOS_RELEASE_LOCAL_PREVIEW_STATIC_DSSE",
+            "ZIGOS_RELEASE_HARDWARE_BACKED:-}\" = \"true\" ] && [ -z \"${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}\"",
+            "hardware-backed releases must use ZIGOS_RELEASE_DSSE_SIGN_COMMAND, not static DSSE signatures",
+            "set ZIGOS_RELEASE_DSSE_SIGN_COMMAND or static local-preview DSSE signatures, not both",
+            "require_dsse_signature_b64 \"ZIGOS_RELEASE_DSSE_SIGN_COMMAND\"",
+            "produced malformed DSSE signature; expected non-empty standard base64",
         };
         for (required_generator_snippets) |snippet| {
             if (std.mem.indexOf(u8, generator_source, snippet) == null) {
@@ -547,6 +554,8 @@ fn validateReleaseArtifacts(
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "rotation_required");
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "revocation_required");
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "customer_verifiable_required");
+    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "static_dsse_signatures_local_preview_only");
+    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "dsse_signature_output_base64_required");
     const hybrid_status = try common.expectStringField(allocator, errors, release_signing, "release signing", "hybrid_ml_dsa_status") orelse "";
     if (std.mem.indexOf(u8, hybrid_status, "preview") == null or
         std.mem.indexOf(u8, hybrid_status, "not a production FIPS 204") == null)
