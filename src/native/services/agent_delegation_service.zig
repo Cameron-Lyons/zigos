@@ -1,5 +1,6 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -77,10 +78,16 @@ const Slot = struct {
     delegation: Delegation = .{},
 };
 
+fn slotDelegationKey(slot: *const Slot) u64 {
+    return slot.delegation.id;
+}
+
+const DelegationArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_DELEGATIONS, MAX_DELEGATIONS * 2, slotDelegationKey);
+
 pub const Service = struct {
     next_delegation_id: u64 = 1,
     minimum_generation: u32 = 1,
-    slots: [MAX_DELEGATIONS]Slot = [_]Slot{Slot{}} ** MAX_DELEGATIONS,
+    slots: DelegationArena = DelegationArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -115,8 +122,7 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const slot = self.firstFreeSlot() orelse return error.DelegationTableFull;
-        slot.in_use = true;
+        const slot = self.slots.reserve(self.next_delegation_id) orelse return error.DelegationTableFull;
         slot.delegation = .{
             .id = self.next_delegation_id,
             .subject = request.subject,
@@ -216,7 +222,7 @@ pub const Service = struct {
         if (minimum_generation <= self.minimum_generation) return 0;
         self.minimum_generation = minimum_generation;
         var revoked_count: usize = 0;
-        for (&self.slots) |*slot| {
+        for (&self.slots.slots) |*slot| {
             if (!slot.in_use) continue;
             if (slot.delegation.revoked) continue;
             if (slot.delegation.delegation_generation >= self.minimum_generation) continue;
@@ -240,26 +246,16 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, delegation_id: u64) ?*Delegation {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.delegation.id == delegation_id) return &slot.delegation;
-        }
-        return null;
+        const slot = self.slots.get(delegation_id) orelse return null;
+        return &slot.delegation;
     }
 
     pub fn activeCount(self: *const Service) usize {
         var count: usize = 0;
-        for (&self.slots) |*slot| {
+        for (&self.slots.slots) |*slot| {
             if (slot.in_use and !slot.delegation.revoked) count += 1;
         }
         return count;
-    }
-
-    fn firstFreeSlot(self: *Service) ?*Slot {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
     }
 };
 

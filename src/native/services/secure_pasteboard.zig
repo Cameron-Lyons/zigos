@@ -1,5 +1,6 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -96,9 +97,15 @@ const Slot = struct {
     grant: Grant = .{},
 };
 
+fn slotTokenKey(slot: *const Slot) u64 {
+    return slot.grant.token_id;
+}
+
+const GrantArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_GRANTS, MAX_GRANTS * 2, slotTokenKey);
+
 pub const Service = struct {
     next_token_id: u64 = 1,
-    slots: [MAX_GRANTS]Slot = [_]Slot{Slot{}} ** MAX_GRANTS,
+    slots: GrantArena = GrantArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -134,11 +141,10 @@ pub const Service = struct {
             return error.PayloadTooLarge;
         }
 
-        const slot = self.firstFreeSlot() orelse {
+        const slot = self.slots.reserve(self.next_token_id) orelse {
             try recordOffer(ledger, request, 0, false, "pasteboard offer denied: grant table full");
             return error.GrantTableFull;
         };
-        slot.in_use = true;
         slot.grant = .{
             .token_id = self.next_token_id,
             .subject = request.subject,
@@ -227,18 +233,8 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, token_id: u64) ?*Grant {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.grant.token_id == token_id) return &slot.grant;
-        }
-        return null;
-    }
-
-    fn firstFreeSlot(self: *Service) ?*Slot {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
+        const slot = self.slots.get(token_id) orelse return null;
+        return &slot.grant;
     }
 };
 
