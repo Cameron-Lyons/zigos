@@ -38,6 +38,7 @@ const secret_vault_service = @import("../services/secret_vault_service.zig");
 const sensitive_capture_service = @import("../services/sensitive_capture_service.zig");
 const task_lifecycle_service = @import("../services/task_lifecycle_service.zig");
 const typed_component_abi = @import("../services/typed_component_abi.zig");
+const component_abi_schema = @import("../services/component_abi_schema.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
@@ -3082,27 +3083,52 @@ pub fn currentRepositoryThirteenthContract() ThirteenthChecklist {
     return .{ .satisfied_features = features };
 }
 
-fn securePasteboardBootstrapContractCheck() bool {
-    const entry = service_catalog.entryForClass(.secure_pasteboard) orelse return false;
+// Shared shape for a kernel-contract service bootstrap entry: published native
+// service, userspace image present, kernel-contract launch granting service task
+// authority, and a matching typed interface. Each service's check differs only
+// by its class, interface id, and interface name.
+fn serviceBootstrapContractCheck(
+    class: service_catalog.ServiceClass,
+    interface_id: component_abi_schema.InterfaceId,
+    interface_name: []const u8,
+) bool {
+    const entry = service_catalog.entryForClass(class) orelse return false;
     const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.secure_pasteboard) orelse return false;
+    const contract = service_catalog.serviceContractForClass(class) orelse return false;
     return entry.published_native_service and
         entry.userspace_image != null and
         launch.mode == .kernel_contract and
         launch.grants.len != 0 and
         launch.grants[0] == .service_task_authority and
-        contract.interface_id == .secure_pasteboard and
-        std.mem.eql(u8, contract.interface.name, "zigos.secure.pasteboard");
+        contract.interface_id == interface_id and
+        std.mem.eql(u8, contract.interface.name, interface_name);
+}
+
+// Shared shape for a service's generated boot image registry record. All system
+// service images share src/userspace/service_main.zig and expose exactly one
+// provided interface; they differ only by class, bundle id, artifact name, and
+// interface name.
+fn serviceBootImageRegistryCheck(
+    class: service_catalog.ServiceClass,
+    bundle_id: []const u8,
+    artifact_name: []const u8,
+    interface_name: []const u8,
+) bool {
+    const image = userspace_registry.findByServiceClass(class) orelse return false;
+    return std.mem.eql(u8, image.bundle_id, bundle_id) and
+        std.mem.eql(u8, image.artifact_name, artifact_name) and
+        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
+        image.service_class.? == class and
+        image.provided_interfaces.len == 1 and
+        std.mem.eql(u8, image.provided_interfaces[0].name, interface_name);
+}
+
+fn securePasteboardBootstrapContractCheck() bool {
+    return serviceBootstrapContractCheck(.secure_pasteboard, .secure_pasteboard, "zigos.secure.pasteboard");
 }
 
 fn securePasteboardBootImageRegistryCheck() bool {
-    const image = userspace_registry.findByServiceClass(.secure_pasteboard) orelse return false;
-    return std.mem.eql(u8, image.bundle_id, "zigos.system.secure-pasteboard") and
-        std.mem.eql(u8, image.artifact_name, "userspace-secure-pasteboard.elf") and
-        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
-        image.service_class.? == .secure_pasteboard and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.secure.pasteboard");
+    return serviceBootImageRegistryCheck(.secure_pasteboard, "zigos.system.secure-pasteboard", "userspace-secure-pasteboard.elf", "zigos.secure.pasteboard");
 }
 
 fn securePasteboardContractEvidence() PasteboardContractEvidence {
@@ -3625,26 +3651,11 @@ fn objectResilienceEvidence() ObjectResilienceEvidence {
 }
 
 fn objectResilienceBootstrapContractCheck() bool {
-    const entry = service_catalog.entryForClass(.object_resilience) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.object_resilience) orelse return false;
-    return entry.published_native_service and
-        entry.userspace_image != null and
-        launch.mode == .kernel_contract and
-        launch.grants.len != 0 and
-        launch.grants[0] == .service_task_authority and
-        contract.interface_id == .object_resilience and
-        std.mem.eql(u8, contract.interface.name, "zigos.object.resilience");
+    return serviceBootstrapContractCheck(.object_resilience, .object_resilience, "zigos.object.resilience");
 }
 
 fn objectResilienceBootImageRegistryCheck() bool {
-    const image = userspace_registry.findByServiceClass(.object_resilience) orelse return false;
-    return std.mem.eql(u8, image.bundle_id, "zigos.system.object-resilience") and
-        std.mem.eql(u8, image.artifact_name, "userspace-object-resilience.elf") and
-        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
-        image.service_class.? == .object_resilience and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.object.resilience");
+    return serviceBootImageRegistryCheck(.object_resilience, "zigos.system.object-resilience", "userspace-object-resilience.elf", "zigos.object.resilience");
 }
 
 const SemanticMemoryEvidence = struct {
@@ -4479,26 +4490,11 @@ fn privateSyncEvidence() PrivateSyncEvidence {
 }
 
 fn syncBootstrapContractCheck() bool {
-    const entry = service_catalog.entryForClass(.sync_replication) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.sync_replication) orelse return false;
-    return entry.published_native_service and
-        entry.userspace_image != null and
-        launch.mode == .kernel_contract and
-        launch.grants.len != 0 and
-        launch.grants[0] == .service_task_authority and
-        contract.interface_id == .sync_replication and
-        std.mem.eql(u8, contract.interface.name, "zigos.sync.replication");
+    return serviceBootstrapContractCheck(.sync_replication, .sync_replication, "zigos.sync.replication");
 }
 
 fn syncBootImageRegistryCheck() bool {
-    const image = userspace_registry.findByServiceClass(.sync_replication) orelse return false;
-    return std.mem.eql(u8, image.bundle_id, "zigos.system.sync-service") and
-        std.mem.eql(u8, image.artifact_name, "userspace-sync-service.elf") and
-        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
-        image.service_class.? == .sync_replication and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.sync.replication");
+    return serviceBootImageRegistryCheck(.sync_replication, "zigos.system.sync-service", "userspace-sync-service.elf", "zigos.sync.replication");
 }
 
 const SensitiveCaptureEvidence = struct {
@@ -4817,26 +4813,11 @@ fn capturePermissionIsModern(request: manifest.PermissionRequest, kind: manifest
 }
 
 fn captureBootstrapContractCheck() bool {
-    const entry = service_catalog.entryForClass(.sensitive_capture) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.sensitive_capture) orelse return false;
-    return entry.published_native_service and
-        entry.userspace_image != null and
-        launch.mode == .kernel_contract and
-        launch.grants.len != 0 and
-        launch.grants[0] == .service_task_authority and
-        contract.interface_id == .sensitive_capture and
-        std.mem.eql(u8, contract.interface.name, "zigos.sensitive.capture");
+    return serviceBootstrapContractCheck(.sensitive_capture, .sensitive_capture, "zigos.sensitive.capture");
 }
 
 fn captureBootImageRegistryCheck() bool {
-    const image = userspace_registry.findByServiceClass(.sensitive_capture) orelse return false;
-    return std.mem.eql(u8, image.bundle_id, "zigos.system.sensitive-capture") and
-        std.mem.eql(u8, image.artifact_name, "userspace-sensitive-capture.elf") and
-        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
-        image.service_class.? == .sensitive_capture and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.sensitive.capture");
+    return serviceBootImageRegistryCheck(.sensitive_capture, "zigos.system.sensitive-capture", "userspace-sensitive-capture.elf", "zigos.sensitive.capture");
 }
 
 const SecretVaultEvidence = struct {
@@ -5281,26 +5262,11 @@ fn secretVaultEvidence() SecretVaultEvidence {
 }
 
 fn secretVaultBootstrapContractCheck() bool {
-    const entry = service_catalog.entryForClass(.secret_vault) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.secret_vault) orelse return false;
-    return entry.published_native_service and
-        entry.userspace_image != null and
-        launch.mode == .kernel_contract and
-        launch.grants.len != 0 and
-        launch.grants[0] == .service_task_authority and
-        contract.interface_id == .secret_vault and
-        std.mem.eql(u8, contract.interface.name, "zigos.secret.vault");
+    return serviceBootstrapContractCheck(.secret_vault, .secret_vault, "zigos.secret.vault");
 }
 
 fn secretVaultBootImageRegistryCheck() bool {
-    const image = userspace_registry.findByServiceClass(.secret_vault) orelse return false;
-    return std.mem.eql(u8, image.bundle_id, "zigos.system.secret-vault") and
-        std.mem.eql(u8, image.artifact_name, "userspace-secret-vault.elf") and
-        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
-        image.service_class.? == .secret_vault and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.secret.vault");
+    return serviceBootImageRegistryCheck(.secret_vault, "zigos.system.secret-vault", "userspace-secret-vault.elf", "zigos.secret.vault");
 }
 
 const AttentionBrokerEvidence = struct {
@@ -5540,26 +5506,11 @@ fn attentionBrokerEvidence() AttentionBrokerEvidence {
 }
 
 fn attentionBrokerBootstrapContractCheck() bool {
-    const entry = service_catalog.entryForClass(.attention_broker) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.attention_broker) orelse return false;
-    return entry.published_native_service and
-        entry.userspace_image != null and
-        launch.mode == .kernel_contract and
-        launch.grants.len != 0 and
-        launch.grants[0] == .service_task_authority and
-        contract.interface_id == .attention_broker and
-        std.mem.eql(u8, contract.interface.name, "zigos.attention.broker");
+    return serviceBootstrapContractCheck(.attention_broker, .attention_broker, "zigos.attention.broker");
 }
 
 fn attentionBrokerBootImageRegistryCheck() bool {
-    const image = userspace_registry.findByServiceClass(.attention_broker) orelse return false;
-    return std.mem.eql(u8, image.bundle_id, "zigos.system.attention-broker") and
-        std.mem.eql(u8, image.artifact_name, "userspace-attention-broker.elf") and
-        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
-        image.service_class.? == .attention_broker and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.attention.broker");
+    return serviceBootImageRegistryCheck(.attention_broker, "zigos.system.attention-broker", "userspace-attention-broker.elf", "zigos.attention.broker");
 }
 
 const TaskLifecycleEvidence = struct {
@@ -5731,26 +5682,11 @@ fn taskLifecycleEvidence() TaskLifecycleEvidence {
 }
 
 fn taskLifecycleBootstrapContractCheck() bool {
-    const entry = service_catalog.entryForClass(.task_lifecycle) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.task_lifecycle) orelse return false;
-    return entry.published_native_service and
-        entry.userspace_image != null and
-        launch.mode == .kernel_contract and
-        launch.grants.len != 0 and
-        launch.grants[0] == .service_task_authority and
-        contract.interface_id == .task_lifecycle and
-        std.mem.eql(u8, contract.interface.name, "zigos.task.lifecycle");
+    return serviceBootstrapContractCheck(.task_lifecycle, .task_lifecycle, "zigos.task.lifecycle");
 }
 
 fn taskLifecycleBootImageRegistryCheck() bool {
-    const image = userspace_registry.findByServiceClass(.task_lifecycle) orelse return false;
-    return std.mem.eql(u8, image.bundle_id, "zigos.system.task-lifecycle") and
-        std.mem.eql(u8, image.artifact_name, "userspace-task-lifecycle.elf") and
-        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
-        image.service_class.? == .task_lifecycle and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.task.lifecycle");
+    return serviceBootImageRegistryCheck(.task_lifecycle, "zigos.system.task-lifecycle", "userspace-task-lifecycle.elf", "zigos.task.lifecycle");
 }
 
 const PackageOffboardingEvidence = struct {
