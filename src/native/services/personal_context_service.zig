@@ -1,6 +1,7 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const indexing_service = @import("indexing_service.zig");
 const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
@@ -157,10 +158,16 @@ const Slot = struct {
     lease: ContextLease = .{},
 };
 
+fn slotLeaseKey(slot: *const Slot) u64 {
+    return slot.lease.id;
+}
+
+const LeaseArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_CONTEXT_LEASES, MAX_CONTEXT_LEASES * 2, slotLeaseKey);
+
 pub const Service = struct {
     next_lease_id: u64 = 1,
     next_receipt_id: u64 = 1,
-    slots: [MAX_CONTEXT_LEASES]Slot = [_]Slot{Slot{}} ** MAX_CONTEXT_LEASES,
+    slots: LeaseArena = LeaseArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -190,11 +197,10 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const slot = self.firstFreeSlot() orelse {
+        const slot = self.slots.reserve(self.next_lease_id) orelse {
             try recordSemantic(ledger, request.subject, request.task_id, false, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
             return error.LeaseTableFull;
         };
-        slot.in_use = true;
         slot.lease = .{
             .id = self.next_lease_id,
             .subject = request.subject,
@@ -327,19 +333,13 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, lease_id: u64) ?*ContextLease {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.lease.id == lease_id) return &slot.lease;
-        }
-        return null;
+        const slot = self.slots.get(lease_id) orelse return null;
+        return &slot.lease;
     }
 
     pub fn findConst(self: *const Service, lease_id: u64) ?*const ContextLease {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.lease.id == lease_id) return &slot.lease;
-        }
-        return null;
+        const slot = self.slots.getConst(lease_id) orelse return null;
+        return &slot.lease;
     }
 
     pub fn consumePackReceipt(
@@ -417,12 +417,6 @@ pub const Service = struct {
         return lease;
     }
 
-    fn firstFreeSlot(self: *Service) ?*Slot {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
-    }
 };
 
 pub fn verifyPackReceipt(

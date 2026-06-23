@@ -1,5 +1,6 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
@@ -108,9 +109,15 @@ const Slot = struct {
     session: Session = .{},
 };
 
+fn slotSessionKey(slot: *const Slot) u64 {
+    return slot.session.id;
+}
+
+const SessionArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_SESSIONS, MAX_SESSIONS * 2, slotSessionKey);
+
 pub const Service = struct {
     next_session_id: u64 = 1,
-    slots: [MAX_SESSIONS]Slot = [_]Slot{Slot{}} ** MAX_SESSIONS,
+    slots: SessionArena = SessionArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -153,11 +160,10 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const slot = self.firstFreeSlot() orelse {
+        const slot = self.slots.reserve(self.next_session_id) orelse {
             try recordStart(ledger, request, 0, false);
             return error.CaptureTableFull;
         };
-        slot.in_use = true;
         slot.session = .{
             .id = self.next_session_id,
             .subject = request.subject,
@@ -238,16 +244,13 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, session_id: u64) ?*Session {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.session.id == session_id) return &slot.session;
-        }
-        return null;
+        const slot = self.slots.get(session_id) orelse return null;
+        return &slot.session;
     }
 
     pub fn activeSessionCount(self: *const Service) usize {
         var count: usize = 0;
-        for (&self.slots) |*slot| {
+        for (&self.slots.slots) |*slot| {
             if (slot.in_use and slot.session.active and !slot.session.revoked) count += 1;
         }
         return count;
@@ -255,14 +258,14 @@ pub const Service = struct {
 
     pub fn activeSessionCountAt(self: *const Service, now_ticks: u64) usize {
         var count: usize = 0;
-        for (&self.slots) |*slot| {
+        for (&self.slots.slots) |*slot| {
             if (slot.in_use and sessionLiveAt(&slot.session, now_ticks)) count += 1;
         }
         return count;
     }
 
     pub fn privacyIndicatorActive(self: *const Service, kind: CaptureKind) bool {
-        for (&self.slots) |*slot| {
+        for (&self.slots.slots) |*slot| {
             if (!slot.in_use) continue;
             if (slot.session.active and !slot.session.revoked and slot.session.kind == kind and slot.session.indicator_visible) {
                 return true;
@@ -272,20 +275,13 @@ pub const Service = struct {
     }
 
     pub fn privacyIndicatorActiveAt(self: *const Service, kind: CaptureKind, now_ticks: u64) bool {
-        for (&self.slots) |*slot| {
+        for (&self.slots.slots) |*slot| {
             if (!slot.in_use) continue;
             if (sessionLiveAt(&slot.session, now_ticks) and slot.session.kind == kind and slot.session.indicator_visible) {
                 return true;
             }
         }
         return false;
-    }
-
-    fn firstFreeSlot(self: *Service) ?*Slot {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
     }
 };
 

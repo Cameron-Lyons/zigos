@@ -1,5 +1,6 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
@@ -71,9 +72,15 @@ const Slot = struct {
     snapshot: Snapshot = .{},
 };
 
+fn slotSnapshotKey(slot: *const Slot) u64 {
+    return slot.snapshot.id;
+}
+
+const SnapshotArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_SNAPSHOTS, MAX_SNAPSHOTS * 2, slotSnapshotKey);
+
 pub const Service = struct {
     next_snapshot_id: u64 = 1,
-    slots: [MAX_SNAPSHOTS]Slot = [_]Slot{Slot{}} ** MAX_SNAPSHOTS,
+    slots: SnapshotArena = SnapshotArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -98,11 +105,10 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const slot = self.firstFreeSlot() orelse {
+        const slot = self.slots.reserve(self.next_snapshot_id) orelse {
             try recordBackup(ledger, request, 0, false);
             return error.SnapshotTableFull;
         };
-        slot.in_use = true;
         slot.snapshot = .{
             .id = self.next_snapshot_id,
             .subject = request.subject,
@@ -181,18 +187,8 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, snapshot_id: u64) ?*Snapshot {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.snapshot.id == snapshot_id) return &slot.snapshot;
-        }
-        return null;
-    }
-
-    fn firstFreeSlot(self: *Service) ?*Slot {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
+        const slot = self.slots.get(snapshot_id) orelse return null;
+        return &slot.snapshot;
     }
 };
 

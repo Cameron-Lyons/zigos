@@ -27,6 +27,11 @@ const sync_adapters = @import("sync/sync_adapters.zig");
 const sync_state_store = @import("sync/sync_state_store.zig");
 const workspace = @import("storage/workspace.zig");
 const storage_volume = @import("storage/storage_volume.zig");
+const secure_pasteboard = @import("services/secure_pasteboard.zig");
+const sensitive_capture_service = @import("services/sensitive_capture_service.zig");
+const agent_delegation_service = @import("services/agent_delegation_service.zig");
+const object_resilience_service = @import("services/object_resilience_service.zig");
+const personal_context_service = @import("services/personal_context_service.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
@@ -87,6 +92,24 @@ pub const indexed_hot_path_tables = .{
     },
     .indexing_service = .{
         .uses_document_arena = @hasField(indexing_service.Service, "documents"),
+    },
+    // Services migrated from [MAX]Slot + firstFreeSlot linear scans to
+    // indexed_arena.IndexedArenaWithKey: the slots field must be an arena
+    // (its reserve() method replaced firstFreeSlot()).
+    .secure_pasteboard = .{
+        .uses_grant_arena = @hasDecl(@FieldType(secure_pasteboard.Service, "slots"), "reserve"),
+    },
+    .sensitive_capture_service = .{
+        .uses_session_arena = @hasDecl(@FieldType(sensitive_capture_service.Service, "slots"), "reserve"),
+    },
+    .agent_delegation_service = .{
+        .uses_delegation_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "slots"), "reserve"),
+    },
+    .object_resilience_service = .{
+        .uses_snapshot_arena = @hasDecl(@FieldType(object_resilience_service.Service, "slots"), "reserve"),
+    },
+    .personal_context_service = .{
+        .uses_lease_arena = @hasDecl(@FieldType(personal_context_service.Service, "slots"), "reserve"),
     },
     .event_ledger = .{
         .uses_event_arena = @hasField(event_ledger.Ledger, "events"),
