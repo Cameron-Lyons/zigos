@@ -36,7 +36,6 @@ const RecordKind = enum(u8) {
 };
 
 const Envelope = struct {
-    version: u16,
     kind: RecordKind,
 };
 
@@ -133,7 +132,7 @@ fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet)
         if (!slot.in_use) continue;
         try out.add(try devicePath(path_buffer[0..], slot.device.principal_id));
     }
-    for (resident.persisted_state.network_policies.policies) |slot| {
+    for (resident.persisted_state.network_policies.policies.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try networkPolicyPath(path_buffer[0..], slot.policy.id));
     }
@@ -216,7 +215,7 @@ fn persistDevices(storage: *storage_service.Service, workspace_id: u64, resident
 fn persistNetworkPolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.network_policies.policies) |slot| {
+    for (resident.persisted_state.network_policies.policies.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try networkPolicyPath(path_buffer[0..], slot.policy.id);
         const bytes = try encodeNetworkPolicy(payload[0..], &slot.policy);
@@ -334,9 +333,9 @@ fn decodeRecordInto(resident: *state_support.ResidentState, payload: []const u8)
     const envelope = try readEnvelope(&reader);
     switch (envelope.kind) {
         .user_root => try decodeUserRoot(resident, &reader),
-        .device => try decodeDevice(resident, &reader, envelope.version),
+        .device => try decodeDevice(resident, &reader),
         .network_policy => try decodeNetworkPolicy(resident, &reader),
-        .workspace_policy => try decodeWorkspacePolicy(resident, &reader, envelope.version),
+        .workspace_policy => try decodeWorkspacePolicy(resident, &reader),
         .replica => try decodeReplica(resident, &reader),
         .conflict => try decodeConflict(resident, &reader),
         .database_contract => try decodeDatabaseContract(resident, &reader),
@@ -509,7 +508,7 @@ fn decodeUserRoot(resident: *state_support.ResidentState, reader: *CursorReader)
     slot.root.root_signature = try readSignature(reader, &resident.user_root_signers[slot_index]);
 }
 
-fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader, version: u16) Error!void {
+fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
     const slot_index = firstFreeDeviceIndex(resident) orelse return error.CorruptState;
     const slot = &resident.persisted_state.graph.devices[slot_index];
     slot.in_use = true;
@@ -527,26 +526,23 @@ fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader, v
     slot.device.revocation_signature = try readSignature(reader, &resident.device_signature_signers[slot_index][3]);
     slot.device.last_rotated_at_ticks = try reader.readU64();
     slot.device.revoked_at_ticks = try reader.readU64();
-    if (version >= 2) {
-        slot.device.device_key_origin = try parseDeviceKeyOrigin(try reader.readByte());
-        slot.device.platform_key_bound = (try reader.readByte()) != 0;
-        try readTextInto(reader, &slot.device.platform_key_label, &slot.device.platform_key_label_len);
-        if (slot.device.platform_key_bound) {
-            try reader.readBytes(&slot.device.platform_key_digest);
-            if (version < 3) return error.CorruptState;
-            slot.device.platform_root_generation = try reader.readU64();
-            slot.device.platform_root_provenance = try parseRootProvenance(try reader.readByte());
-            try reader.readBytes(&slot.device.platform_root_digest);
-            if (!slot.device.hasBootloaderBackedPlatformRoot()) return error.CorruptState;
-        } else if (slot.device.device_key_origin != .software or slot.device.platform_key_label_len != 0) {
-            return error.CorruptState;
-        }
+    slot.device.device_key_origin = try parseDeviceKeyOrigin(try reader.readByte());
+    slot.device.platform_key_bound = (try reader.readByte()) != 0;
+    try readTextInto(reader, &slot.device.platform_key_label, &slot.device.platform_key_label_len);
+    if (slot.device.platform_key_bound) {
+        try reader.readBytes(&slot.device.platform_key_digest);
+        slot.device.platform_root_generation = try reader.readU64();
+        slot.device.platform_root_provenance = try parseRootProvenance(try reader.readByte());
+        try reader.readBytes(&slot.device.platform_root_digest);
+        if (!slot.device.hasBootloaderBackedPlatformRoot()) return error.CorruptState;
+    } else if (slot.device.device_key_origin != .software or slot.device.platform_key_label_len != 0) {
+        return error.CorruptState;
     }
 }
 
 fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
     const slot_index = firstFreeNetworkPolicyIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.network_policies.policies[slot_index];
+    const slot = &resident.persisted_state.network_policies.policies.slots[slot_index];
     slot.in_use = true;
     slot.policy = .{
         .id = try reader.readU64(),
@@ -579,7 +575,7 @@ fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorRe
     }
 }
 
-fn decodeWorkspacePolicy(resident: *state_support.ResidentState, reader: *CursorReader, version: u16) Error!void {
+fn decodeWorkspacePolicy(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
     const slot_index = firstFreeWorkspacePolicyIndex(resident) orelse return error.CorruptState;
     const slot = &resident.persisted_state.workspace_policies[slot_index];
     slot.in_use = true;
@@ -599,7 +595,7 @@ fn decodeWorkspacePolicy(resident: *state_support.ResidentState, reader: *Cursor
     while (prefix_index < prefix_count) : (prefix_index += 1) {
         try readTextInto(reader, &slot.policy.selective_prefixes[prefix_index], &slot.policy.selective_prefix_lens[prefix_index]);
     }
-    slot.policy.require_shared_access = if (version >= 4 and reader.offset < reader.buffer.len) (try reader.readByte()) != 0 else false;
+    slot.policy.require_shared_access = (try reader.readByte()) != 0;
 }
 
 fn decodeReplica(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
@@ -721,9 +717,11 @@ fn readEnvelope(reader: *CursorReader) Error!Envelope {
     try reader.readBytes(&magic_buffer);
     if (!std.mem.eql(u8, &magic_buffer, record_magic)) return error.CorruptState;
     const version = try reader.readU16();
-    if (version == 0 or version > record_version) return error.UnsupportedStateVersion;
+    // Single-version on-disk format: only the current record_version is written, so
+    // any other version is corrupt/forged and must fail closed (the prior v1-v4
+    // compat branches were dead and have been removed under the ignore-compat directive).
+    if (version != record_version) return error.UnsupportedStateVersion;
     return .{
-        .version = version,
         .kind = try parseRecordKind(try reader.readByte()),
     };
 }
@@ -904,7 +902,7 @@ fn firstFreeDeviceIndex(resident: *const state_support.ResidentState) ?usize {
 }
 
 fn firstFreeNetworkPolicyIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.network_policies.policies, 0..) |slot, index| {
+    for (resident.persisted_state.network_policies.policies.slots, 0..) |slot, index| {
         if (!slot.in_use) return index;
     }
     return null;

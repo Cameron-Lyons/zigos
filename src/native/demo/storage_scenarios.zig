@@ -307,7 +307,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         .now_ticks = 94,
     })) |_| {} else |err| {
         if (err == error.PathAuthorityRejected) {
-            support.common.printBootMarker(boot_markers.storage_path_authority_deprecated);
+            support.common.printBootMarker(boot_markers.storage_path_authority_rejected);
         }
     }
 

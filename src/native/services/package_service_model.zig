@@ -1,3 +1,4 @@
+const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 
@@ -432,10 +433,7 @@ pub const BundleRevision = struct {
 };
 
 fn digestIsZero(digest: crypto_hash.Digest) bool {
-    for (digest) |byte| {
-        if (byte != 0) return false;
-    }
-    return true;
+    return std.mem.eql(u8, &digest, &crypto_hash.zero_digest);
 }
 
 pub const InstalledBundle = struct {

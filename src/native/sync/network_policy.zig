@@ -199,13 +199,16 @@ const PolicySlot = struct {
     policy: PolicyRecord = zeroPolicy(),
 };
 
-const PolicyIdIndex = indexed_arena.UniqueIndex(POLICY_INDEX_CAPACITY);
+fn policySlotKey(slot: *const PolicySlot) u64 {
+    return slot.policy.id;
+}
+
+const PolicyArena = indexed_arena.IndexedArenaWithKey(u64, PolicySlot, MAX_POLICIES, POLICY_INDEX_CAPACITY, policySlotKey);
 const PolicyRequestIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_INDEX_CAPACITY);
 
 pub const Directory = struct {
     next_policy_id: u64 = 1,
-    policies: [MAX_POLICIES]PolicySlot = [_]PolicySlot{PolicySlot{}} ** MAX_POLICIES,
-    policy_id_index: PolicyIdIndex = PolicyIdIndex.init(),
+    policies: PolicyArena = PolicyArena.init(),
     request_index: PolicyRequestIndex = PolicyRequestIndex.init(),
 
     pub fn init() Directory {
@@ -222,11 +225,12 @@ pub const Directory = struct {
         const request_key = policyRequestKey(request);
         if (self.findByRequestKey(request_key, request)) |policy| return policy;
 
-        const slot_index = self.firstFreePolicyIndex() orelse return error.PolicyTableFull;
-        const slot = &self.policies[slot_index];
-        slot.in_use = true;
+        if (self.policies.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
+        const policy_id = self.nextPolicyId();
+        const slot_index = self.policies.reserveIndex(policy_id) orelse return error.PolicyTableFull;
+        const slot = &self.policies.slots[slot_index];
         slot.policy = zeroPolicy();
-        slot.policy.id = self.nextPolicyId();
+        slot.policy.id = policy_id;
         slot.policy.owner = request.owner;
         slot.policy.workspace_id = request.workspace_id;
         slot.policy.label_len = native_util.copyTextExact(&slot.policy.label, request.label) catch return error.LabelTooLong;
@@ -248,17 +252,14 @@ pub const Directory = struct {
 
     pub fn find(self: *Directory, policy_id: u64) ?*PolicyRecord {
         if (policy_id == 0) return null;
-        const slot_index = self.policy_id_index.lookup(policy_id) orelse return null;
-        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("network policy id index points outside slots");
-        const slot = &self.policies[slot_index];
-        if (!slot.in_use or slot.policy.id != policy_id) native_util.impossibleByInvariant("network policy id index points at the wrong policy");
+        const slot = self.policies.get(policy_id) orelse return null;
         return &slot.policy;
     }
 
     pub fn rebuildIndexes(self: *Directory) void {
-        self.policy_id_index.reset();
+        self.policies.rebuildPrimaryIndex();
         self.request_index.reset();
-        for (self.policies, 0..) |slot, slot_index| {
+        for (self.policies.slots, 0..) |slot, slot_index| {
             if (!slot.in_use) continue;
             self.indexPolicy(slot_index);
         }
@@ -425,13 +426,6 @@ pub const Directory = struct {
         return self.next_policy_id;
     }
 
-    fn firstFreePolicyIndex(self: *const Directory) ?usize {
-        for (self.policies, 0..) |slot, slot_index| {
-            if (!slot.in_use) return slot_index;
-        }
-        return null;
-    }
-
     fn findByRequestKey(
         self: *Directory,
         request_key: u64,
@@ -440,7 +434,7 @@ pub const Directory = struct {
         var cursor = self.request_index.head(request_key);
         while (cursor != indexed_arena.no_index) : (cursor = self.request_index.next(cursor)) {
             if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("network policy request index points outside slots");
-            const slot = &self.policies[cursor];
+            const slot = &self.policies.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("network policy request index points at a free slot");
             if (policyMatchesRequest(&slot.policy, request)) return &slot.policy;
         }
@@ -449,9 +443,8 @@ pub const Directory = struct {
 
     fn indexPolicy(self: *Directory, slot_index: usize) void {
         if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("network policy index update points outside slots");
-        const slot = &self.policies[slot_index];
+        const slot = &self.policies.slots[slot_index];
         if (!slot.in_use or slot.policy.id == 0) native_util.impossibleByInvariant("network policy index update requires a live policy");
-        self.policy_id_index.insert(slot.policy.id, slot_index);
         const request_key = policyRecordRequestKey(&slot.policy);
         if (!self.request_index.append(request_key, slot_index)) {
             native_util.impossibleByInvariant("network policy request index capacity covers policy slots");
@@ -940,7 +933,7 @@ test "network policy indexes rebuild after persisted slots are loaded" {
     const pinned_digest = crypto_hash.digestFromByte(0xDE);
     const metadata_digest = crypto_hash.digestFromByte(0xDF);
 
-    directory.policies[3] = .{
+    directory.policies.slots[3] = .{
         .in_use = true,
         .policy = .{
             .id = 44,

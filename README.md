@@ -164,7 +164,6 @@ For ISO and full disk-image workflows, install the tools verified by
 - `xorriso`
 - `mtools`
 - `dosfstools`
-- `e2fsprogs`
 
 The repo includes `.tool-versions` and `mise.toml` pins. `build.zig` rejects any
 Zig version other than `0.16.0`. Run Zig through `./scripts/zig.sh` so the repo

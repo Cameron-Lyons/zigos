@@ -68,9 +68,14 @@ pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, ali
     if (memory.address_space) |address_space| {
         // An address space with zero registered regions is the hosted/in-process
         // (no MMU region map) mode: the pointers are real process pointers, so
-        // allow, matching the absent-address_space case below. Region enforcement
-        // applies only once a task actually publishes regions.
-        if (address_space.region_count == 0) return true;
+        // allow, matching the absent-address_space case below. A freestanding task
+        // has a real MMU region map and always publishes its regions before it can
+        // issue a syscall, so zero regions there means an unmapped pointer: fail
+        // closed rather than inherit the hosted allow-all.
+        if (address_space.region_count == 0) {
+            if (builtin.target.os.tag == .freestanding) return false;
+            return true;
+        }
         return validateAddressSpaceRange(address_space, addr, end_exclusive, access);
     }
     return true;

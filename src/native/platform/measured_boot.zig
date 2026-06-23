@@ -766,7 +766,7 @@ fn criticalServiceMeasurementPayload(
 fn driverSetDigest(directory: *const driver_service.Directory) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     var driver_count: usize = 0;
-    for (directory.slots) |slot| {
+    for (directory.slots.slots) |slot| {
         if (!slot.in_use) continue;
         driver_count += 1;
         const driver = &slot.driver;

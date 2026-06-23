@@ -2,7 +2,7 @@ const std = @import("std");
 const object_store_facade = @import("../storage/object_store.zig");
 const signing = @import("../core/signing.zig");
 
-const object_store = object_store_facade.api;
+const object_store = object_store_facade;
 
 pub const Store = object_store.Store;
 pub const ObjectType = object_store.ObjectType;
@@ -56,26 +56,6 @@ pub const Client = struct {
     pub fn putDocumentObject(self: *Client, label: []const u8, content_type: []const u8, payload: []const u8) !ObjectHandle {
         const result = try self.putDocument(label, content_type, payload);
         return handleFromPut(result, .document, label, content_type);
-    }
-
-    pub fn putMedia(self: *Client, label: []const u8, content_type: []const u8, payload: []const u8) !PutResult {
-        return self.put(.media_asset, label, content_type, payload, null);
-    }
-
-    pub fn putMediaObject(self: *Client, label: []const u8, content_type: []const u8, payload: []const u8) !ObjectHandle {
-        const result = try self.putMedia(label, content_type, payload);
-        return handleFromPut(result, .media_asset, label, content_type);
-    }
-
-    pub fn putObject(
-        self: *Client,
-        object_type: ObjectType,
-        label: []const u8,
-        content_type: []const u8,
-        payload: []const u8,
-    ) !ObjectHandle {
-        const result = try self.put(object_type, label, content_type, payload, null);
-        return handleFromPut(result, object_type, label, content_type);
     }
 
     pub fn update(

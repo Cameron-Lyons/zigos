@@ -467,6 +467,106 @@ test "sync service persists durable transport queues and enforces replay and wor
     try std.testing.expect(saw_duplicate_count);
 }
 
+test "sync service inbound queue evicts out-of-window frames instead of the queue-full cliff" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 9_700 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 9_701 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 9_702 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 9_703 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 9_704 };
+    const storage_signer = signing.SignerIdentity{ .label = "evict-storage", .seed = signing.seedFromByte(0xC1) };
+    const user_signer = signing.SignerIdentity{ .label = "evict-user", .seed = signing.seedFromByte(0xC2) };
+    const laptop_signer = signing.SignerIdentity{ .label = "evict-laptop", .seed = signing.seedFromByte(0xC3) };
+    const tablet_signer = signing.SignerIdentity{ .label = "evict-tablet", .seed = signing.seedFromByte(0xC4) };
+    const path = "documents/evict.md";
+
+    var storage = storage_service.Service.initWithStore(9_710, 9_711, storage_owner, &storage_checkpoint_store);
+    const version = try storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(9_720),
+        .object_type = .document,
+        .payload = "evict v1",
+        .metadata = try object_store.signMetadata(storage_signer, "evict-v1", "text/plain", .document, "evict v1", 10),
+    });
+    const workspace_record = try storage.createWorkspace(.{ .owner = user, .label = "evict-notes" });
+    try storage.beginTransaction(workspace_record.id);
+    try storage.stagePut(workspace_record.id, path, version.object_id, version.version_id, .document);
+    _ = try storage.commit(workspace_record.id, 11);
+
+    var resident = ResidentState{};
+    var service = try Service.initWithStorage(9_730, 9_731, sync_owner, &storage, &resident);
+    var capabilities = capability.CapabilityTable.init();
+    const authority_capability = try mintSyncServiceAuthority(&capabilities, &service, sync_owner);
+    var port = sync_service.SyncPort.init(&service, &capabilities);
+    const authority = syncAuthority(&service, sync_owner, authority_capability, 20);
+    _ = try port.ensureUserRoot(authority, user, "owner", user_signer);
+    _ = try port.enrollTrustedDevice(authority, user, laptop, "laptop", user_signer, laptop_signer, 21);
+    _ = try port.enrollTrustedDevice(authority, user, tablet, "tablet", user_signer, tablet_signer, 22);
+    const local_policy = try port.createNetworkPolicy(authority, .{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id.raw(),
+        .label = "local",
+        .mode = .local_network,
+    });
+    _ = try port.configureWorkspacePolicy(authority, .{
+        .workspace_id = workspace_record.id.raw(),
+        .owner = user,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .require_shared_access = true,
+        .selective_prefixes = &.{"documents/"},
+        .device_to_device_policy_id = local_policy.id,
+    });
+    try storage.shareWorkspace(workspace_record.id, .{
+        .principal_id = tablet,
+        .can_read = true,
+        .network_scope = .local_only,
+    });
+
+    var request = sync_service.TransportFrameRequest{
+        .source_frame_id = 0,
+        .workspace_id = workspace_record.id.raw(),
+        .object_id = version.object_id.raw(),
+        .version_id = version.version_id.raw(),
+        .source_device = laptop,
+        .target_device = tablet,
+        .transport = .device_to_device,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .workspace_generation = 1,
+        .path = path,
+    };
+
+    // Accept well past MAX_TRANSPORT_FRAMES distinct inbound frames (monotonic
+    // source_frame_id, one scope). Before reclamation the (MAX+1)th returned
+    // error.TransportQueueFull, permanently breaking inbound sync for this peer;
+    // the persist of a full table also depended on storage mutation-log compaction.
+    const total: u64 = sync_service.MAX_TRANSPORT_FRAMES * 2;
+    var sfid: u64 = 1;
+    while (sfid <= total) : (sfid += 1) {
+        request.source_frame_id = sfid;
+        _ = try port.acceptTransportFrame(authority, &storage, request);
+    }
+
+    // The inbound table stays bounded to the most-recent window.
+    try std.testing.expect(resident.inboundTransportFrameCount() <= sync_service.MAX_TRANSPORT_FRAMES);
+
+    // A replay of an old, evicted (out-of-window) frame is still rejected: eviction
+    // only drops frames at least TRANSPORT_REPLAY_WINDOW behind the high-water, so the
+    // replay floor never regresses.
+    request.source_frame_id = 1;
+    try std.testing.expectError(error.TransportReplayRejected, port.acceptTransportFrame(authority, &storage, request));
+
+    // A recent in-window frame is still deduplicated (never evicted), not re-enqueued.
+    request.source_frame_id = total;
+    const before = resident.inboundTransportFrameCount();
+    const duplicate = try port.acceptTransportFrame(authority, &storage, request);
+    try std.testing.expectEqual(total, duplicate.source_frame_id);
+    try std.testing.expectEqual(before, resident.inboundTransportFrameCount());
+}
+
 test "sync service treats per-object shares and conflict review as local-first primitives" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();

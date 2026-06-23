@@ -86,27 +86,6 @@ pub fn validateHeader(
     );
 }
 
-pub fn ensureManifestDeclares(bundle: manifest.BundleManifest, comptime key: InterfaceKey) Error!void {
-    const expected = typed_component_abi.Interface(key);
-    for (bundle.provided_interfaces) |decl| {
-        if (interfacesEqual(decl, expected)) return;
-    }
-    for (bundle.consumed_interfaces) |decl| {
-        if (interfacesEqual(decl, expected)) return;
-    }
-    return error.InterfaceNotDeclared;
-}
-
-pub fn parseDeveloperIdl(source: []const u8) idl.Error!idl.Document {
-    return idl.parse(source);
-}
-
-fn interfacesEqual(left: manifest.InterfaceDecl, right: manifest.InterfaceDecl) bool {
-    return std.mem.eql(u8, left.name, right.name) and
-        left.version_major == right.version_major and
-        left.version_minor == right.version_minor;
-}
-
 test "SDK component ABI exposes typed bindings and validates real wire headers" {
     const bind = binding(.package_install);
     try std.testing.expectEqual(InterfaceId.package_install, bind.interface_id);

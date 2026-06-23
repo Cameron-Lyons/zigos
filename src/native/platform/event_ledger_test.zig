@@ -491,6 +491,36 @@ test "event ledger indexes structured queries by kind subject and task" {
     try std.testing.expect(std.mem.indexOf(u8, exported, "detail=alice protected") == null);
 }
 
+test "event ledger evicts oldest events instead of jamming past MAX_EVENTS" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 7 };
+
+    // Record well past ring capacity. Before the ring fix the (MAX_EVENTS+1)th
+    // append returned error.EventTableFull, permanently disabling the security
+    // audit log for every subsequent capability/crash/sensitive-capture record.
+    const total: u64 = event_ledger.MAX_EVENTS * 2 + 5;
+    var task_id: u64 = 1;
+    while (task_id <= total) : (task_id += 1) {
+        try ledger.recordPermissionDecision(user, task_id, .screen_capture, false, .policy_denied, task_id, "denied", true);
+    }
+
+    // The live ring retains exactly the most-recent MAX_EVENTS entries.
+    try std.testing.expectEqual(event_ledger.MAX_EVENTS, ledger.countMatching(.{ .kind = .permission_decision }));
+    try std.testing.expectEqual(event_ledger.MAX_EVENTS, ledger.countMatching(.{ .subject = user }));
+
+    // task_id == sequence here, so the oldest are evicted and the newest survive.
+    const oldest_retained = total - event_ledger.MAX_EVENTS + 1;
+    try std.testing.expectEqual(@as(usize, 0), ledger.countMatching(.{ .task_id = 1 }));
+    try std.testing.expectEqual(@as(usize, 0), ledger.countMatching(.{ .task_id = oldest_retained - 1 }));
+    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .task_id = oldest_retained }));
+    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .task_id = total }));
+
+    // The most recent event survives and carries the latest monotonic sequence.
+    const latest = ledger.latestKind(.permission_decision).?;
+    try std.testing.expectEqual(total, latest.sequence);
+    try std.testing.expectEqual(total, latest.task_id);
+}
+
 test "event ledger renders what an app knows about a document" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 303 };

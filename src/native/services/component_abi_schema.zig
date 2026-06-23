@@ -3,9 +3,10 @@ const abi = @import("../core/abi.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
+const wire = @import("component_abi_wire.zig");
 
-pub const MAGIC: u32 = 0x54434142; // TCAB
-pub const VERSION: u16 = 1;
+pub const MAGIC = wire.MAGIC;
+pub const VERSION = wire.VERSION;
 
 const COMPONENT_MODEL_REQ = "REQ-COMPONENT-MODEL";
 const SCHEMA_TEST_FILE = "src/native/services/component_abi_schema.zig";
@@ -25,18 +26,7 @@ pub const Error = error{
     SubjectTaskRequired,
 };
 
-pub const WireHeader = extern struct {
-    magic: u32 = MAGIC,
-    abi_version: u16 = VERSION,
-    interface_major: u16,
-    interface_minor: u16,
-    operation: u16,
-    flags: u16 = 0,
-    request_len: u32,
-    response_len: u32,
-    correlation_id: u64,
-    subject_task_id: u64,
-};
+pub const WireHeader = wire.WireHeader;
 
 pub const InterfaceKey = enum(u8) {
     task_runtime,
@@ -210,907 +200,6 @@ pub const ServiceBinding = enum(u8) {
     personal_context,
 };
 
-const ServiceRegisterRequestWire = extern struct {
-    header: WireHeader,
-    service_id: u64,
-    owner_task_id: u64,
-    endpoint_id: u64,
-    flags: u16,
-    interface_id: u16,
-    interface_name_len: u16,
-    version_major: u16,
-    version_minor: u16,
-};
-
-const ServiceConnectionRequestWire = extern struct {
-    header: WireHeader,
-    interface_id: u16,
-    version_major: u16,
-    version_minor: u16,
-    _reserved: u16 = 0,
-};
-
-const TaskDescribeRequestWire = extern struct {
-    header: WireHeader,
-    task_id: u64,
-};
-
-const WorkspacePutVersionRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    object_id: u64,
-    object_type: u16,
-    payload_len: u32,
-};
-
-const WorkspaceResolveRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    path_len: u16,
-    _reserved: u16 = 0,
-};
-
-const IndexUpsertRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    object_id: u64,
-    version_id: u64,
-    title_len: u16,
-    body_len: u16,
-    sensitivity: u16,
-    flags: u16,
-};
-
-const IndexQueryRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    query_len: u16,
-    max_results: u16,
-};
-
-const SemanticIndexQueryRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    query_len: u16,
-    max_results: u16,
-    flags: u16,
-};
-
-const SyncDeviceEnrollRequestWire = extern struct {
-    header: WireHeader,
-    user_id: u64,
-    device_id: u64,
-    label_len: u16,
-    flags: u16,
-};
-
-const SyncWorkspaceReplicateRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    from_device_id: u64,
-    to_device_id: u64,
-    transport_mode: u16,
-    flags: u16,
-};
-
-const SyncConflictReviewRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    device_id: u64,
-    object_id: u64,
-};
-
-const SyncConflictResolveRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    device_id: u64,
-    object_id: u64,
-    decision: u16,
-    _reserved: u16 = 0,
-};
-
-const SyncTransportFrameRequestWire = extern struct {
-    header: WireHeader,
-    frame_id: u64,
-    workspace_id: u64,
-    object_id: u64,
-    version_id: u64,
-    semantic: u16,
-    flags: u16,
-};
-
-const NetworkAuthorizeRequestWire = extern struct {
-    header: WireHeader,
-    policy_id: u64,
-    destination_len: u16,
-    flags: u16,
-};
-
-const NetworkOpenSessionRequestWire = extern struct {
-    header: WireHeader,
-    policy_id: u64,
-    capability_id: u64,
-    remote_bytes: u64,
-    expires_at_tick: u64,
-    destination_len: u16,
-    sensitivity: u16,
-    flags: u16,
-    _reserved: u16 = 0,
-};
-
-const NetworkRecordTransferRequestWire = extern struct {
-    header: WireHeader,
-    session_id: u64,
-    expected_policy_id: u64,
-    expected_capability_id: u64,
-    bytes: u64,
-    flags: u16,
-    _reserved: u16 = 0,
-};
-
-const NetworkRevokeSessionRequestWire = extern struct {
-    header: WireHeader,
-    session_id: u64,
-    expected_policy_id: u64,
-    expected_capability_id: u64,
-    reason: u16,
-    flags: u16,
-};
-
-const PolicyAuthorizeRequestWire = extern struct {
-    header: WireHeader,
-    requester_task_id: u64,
-    permission_kind: u16,
-    resource_len: u16,
-};
-
-const PackageInstallRequestWire = extern struct {
-    header: WireHeader,
-    bundle_digest: crypto_hash.Digest,
-    bundle_id_len: u16,
-    source_identity_len: u16,
-    schema_version: u32,
-    flags: u32,
-};
-
-const PackageUpdateRequestWire = extern struct {
-    header: WireHeader,
-    bundle_digest: crypto_hash.Digest,
-    bundle_id_len: u16,
-    source_identity_len: u16,
-    from_schema_version: u32,
-    to_schema_version: u32,
-    flags: u16,
-};
-
-const PackageRollbackRequestWire = extern struct {
-    header: WireHeader,
-    expected_active_digest: crypto_hash.Digest,
-    bundle_id_len: u16,
-    _reserved: u16 = 0,
-};
-
-const PackageRemoveRequestWire = extern struct {
-    header: WireHeader,
-    expected_active_digest: crypto_hash.Digest,
-    bundle_id_len: u16,
-    reason: u16,
-    flags: u32,
-    receipt_id: u64,
-};
-
-const AiAuthorizeRequestWire = extern struct {
-    header: WireHeader,
-    model_family_len: u16,
-    context_bytes: u32,
-    flags: u16,
-};
-
-const AiRunLocalRequestWire = extern struct {
-    header: WireHeader,
-    model_family_len: u16,
-    prompt_bytes: u32,
-    context_bytes: u32,
-    flags: u16,
-};
-
-const AiModelRegisterRequestWire = extern struct {
-    header: WireHeader,
-    model_digest_len: u16,
-    source_identity_len: u16,
-    model_family_len: u16,
-    flags: u16,
-};
-
-const AiModelAttestRequestWire = extern struct {
-    header: WireHeader,
-    model_id: u64,
-    measurement_len: u16,
-    source_identity_len: u16,
-    model_age_days: u16,
-    flags: u16,
-};
-
-const AiModelRevokeRequestWire = extern struct {
-    header: WireHeader,
-    model_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const PrivacyAuthorizeEgressRequestWire = extern struct {
-    header: WireHeader,
-    policy_id: u64,
-    remote_bytes: u64,
-    sensitivity: u16,
-    flags: u16,
-};
-
-const PrivacyQueryBudgetRequestWire = extern struct {
-    header: WireHeader,
-    window_ticks: u64,
-    sensitivity: u16,
-    _reserved: u16 = 0,
-};
-
-const DiagnosticsPrepareExportRequestWire = extern struct {
-    header: WireHeader,
-    max_bytes: u32,
-    include_protected_content: u32,
-};
-
-const DiagnosticsShareRemoteRequestWire = extern struct {
-    header: WireHeader,
-    user_opted_in: u32,
-    include_protected_content: u32,
-};
-
-const ConsentRecordRequestWire = extern struct {
-    header: WireHeader,
-    receipt_id: u64,
-    permission_kind: u16,
-    purpose: u16,
-    retention_days: u16,
-    _reserved: u16 = 0,
-};
-
-const ConsentRevokeRequestWire = extern struct {
-    header: WireHeader,
-    receipt_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const PermissionLeaseIssueRequestWire = extern struct {
-    header: WireHeader,
-    permission_kind: u16,
-    sensitivity: u16,
-    lease_ticks: u64,
-};
-
-const PermissionLeaseRenewRequestWire = extern struct {
-    header: WireHeader,
-    lease_id: u64,
-    lease_ticks: u64,
-};
-
-const PermissionLeaseExpireRequestWire = extern struct {
-    header: WireHeader,
-    lease_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const DataExportPrepareRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    max_bytes: u64,
-    sensitivity: u16,
-    format_len: u16,
-};
-
-const DataDeleteRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    object_id: u64,
-    reason: u16,
-    require_receipt: u16,
-};
-
-const DataDeleteReceiptRequestWire = extern struct {
-    header: WireHeader,
-    receipt_id: u64,
-    object_id: u64,
-    erased_versions: u32,
-    retained_tombstone: u32,
-};
-
-const IdentitySessionAuthorizeRequestWire = extern struct {
-    header: WireHeader,
-    credential_id: u64,
-    unlock_age_ticks: u64,
-    device_trust_generation: u32,
-    flags: u32,
-};
-
-const IdentitySessionStepUpRequestWire = extern struct {
-    header: WireHeader,
-    credential_id: u64,
-    challenge_len: u16,
-    method: u16,
-};
-
-const IdentitySessionRevokeRequestWire = extern struct {
-    header: WireHeader,
-    session_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const IdentityCredentialRegisterRequestWire = extern struct {
-    header: WireHeader,
-    owner_id: u64,
-    device_id: u64,
-    relying_party_id_len: u16,
-    label_len: u16,
-    flags: u16,
-    _reserved: u16 = 0,
-};
-
-const IdentityCredentialAssertRequestWire = extern struct {
-    header: WireHeader,
-    credential_id: u64,
-    device_id: u64,
-    relying_party_id_len: u16,
-    origin_len: u16,
-    challenge_len: u16,
-    flags: u16,
-};
-
-const IdentityCredentialRecoverRequestWire = extern struct {
-    header: WireHeader,
-    credential_id: u64,
-    recovery_device_id: u64,
-    relying_party_id_len: u16,
-    challenge_len: u16,
-    approval_count: u16,
-    flags: u16,
-};
-
-const IdentityCredentialRevokeRequestWire = extern struct {
-    header: WireHeader,
-    credential_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const AgentAuthorizeRequestWire = extern struct {
-    header: WireHeader,
-    autonomous_actions: u16,
-    remote_calls: u16,
-    flags: u16,
-    purpose_len: u16,
-};
-
-const AgentRecordActionRequestWire = extern struct {
-    header: WireHeader,
-    delegation_id: u64,
-    expected_subject_serial: u64,
-    expected_task_id: u64,
-    expected_generation: u32,
-    action_count: u16,
-    remote_call_count: u16,
-    expected_subject_kind: u16,
-    flags: u16,
-    detail_len: u16,
-    _reserved: u16 = 0,
-};
-
-const AgentRevokeRequestWire = extern struct {
-    header: WireHeader,
-    delegation_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const AgentBindSessionRequestWire = extern struct {
-    header: WireHeader,
-    session_id: u64,
-    delegation_generation: u32,
-    max_context_bytes: u32,
-    flags: u32,
-};
-
-const AgentKillSwitchRequestWire = extern struct {
-    header: WireHeader,
-    minimum_generation: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const AccessibilityProfileGetRequestWire = extern struct {
-    header: WireHeader,
-    subject_id: u64,
-};
-
-const AccessibilityProfileApplyRequestWire = extern struct {
-    header: WireHeader,
-    subject_id: u64,
-    flags: u32,
-    profile_notes_len: u16,
-    _reserved: u16 = 0,
-};
-
-const AccessibilityProfileAuditRequestWire = extern struct {
-    header: WireHeader,
-    subject_id: u64,
-    flags: u32,
-    decision_reason: u16,
-    _reserved: u16 = 0,
-};
-
-const BackgroundAuthorizeRequestWire = extern struct {
-    header: WireHeader,
-    task_id: u64,
-    duration_seconds: u32,
-    cpu_time_ticks: u32,
-    memory_bytes: u32,
-    shared_memory_bytes: u32,
-    network_mode: u16,
-    visibility: u16,
-};
-
-const BackgroundRecordRequestWire = extern struct {
-    header: WireHeader,
-    task_id: u64,
-    record_id: u64,
-    duration_seconds: u32,
-    decision_reason: u16,
-    flags: u16,
-};
-
-const BackgroundCompleteRequestWire = extern struct {
-    header: WireHeader,
-    record_id: u64,
-    expected_task_id: u64,
-    completed_tick: u64,
-    expected_background_task_len: u16,
-    expected_trigger: u16,
-    result_code: u16,
-    flags: u16 = 0,
-};
-
-const ServiceRegisterResponseWire = extern struct {
-    accepted: u32,
-};
-
-const WorkspacePutVersionResponseWire = extern struct {
-    object_id: u64,
-    version_id: u64,
-};
-
-const WorkspaceResolveResponseWire = extern struct {
-    object_id: u64,
-    version_id: u64,
-    object_type: u16,
-};
-
-const IndexResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    result_count: u16,
-    top_object_id: u64,
-    top_version_id: u64,
-    index_generation: u64,
-};
-
-const SyncResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    selected_entry_count: u16,
-    conflict_count: u16,
-    transport_frame_count: u16,
-    flags: u16,
-    latest_frame_id: u64,
-};
-
-const NetworkAuthorizeResponseWire = extern struct {
-    allowed: u32,
-    reason: u16,
-};
-
-const NetworkSessionResponseWire = extern struct {
-    allowed: u32,
-    reason: u16,
-    flags: u16,
-    session_id: u64,
-    remaining_bytes: u64,
-    expires_at_tick: u64,
-};
-
-const PolicyAuthorizeResponseWire = extern struct {
-    allowed: u32,
-    denial_reason: u16,
-};
-
-const PackageLifecycleResponseWire = extern struct {
-    installed_new: u32,
-    updated_existing: u32,
-    permissions_changed: u32,
-    rollback_available: u32,
-    removed_existing: u32,
-    removed_revision_count: u32,
-    deletion_receipt_id: u64,
-    removed_bundle_digest: crypto_hash.Digest,
-};
-
-const AiAuthorizeResponseWire = extern struct {
-    allowed: u32,
-    reason: u16,
-    max_context_bytes: u32,
-};
-
-const AiRunLocalResponseWire = extern struct {
-    accepted: u32,
-    output_bytes: u32,
-    local_model: u32,
-};
-
-const AiModelRegistryResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    model_id: u64,
-    expires_at_tick: u64,
-};
-
-const PrivacyAuthorizeEgressResponseWire = extern struct {
-    allowed: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    remaining_bytes: u64,
-};
-
-const PrivacyQueryBudgetResponseWire = extern struct {
-    remaining_bytes: u64,
-    reset_tick: u64,
-};
-
-const DiagnosticsExportResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    export_bytes: u32,
-};
-
-const ConsentReceiptResponseWire = extern struct {
-    accepted: u32,
-    receipt_id: u64,
-};
-
-const PermissionLeaseResponseWire = extern struct {
-    accepted: u32,
-    lease_id: u64,
-    expires_at_tick: u64,
-};
-
-const DataRightsResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    receipt_id: u64,
-    bytes_ready: u64,
-};
-
-const IdentitySessionResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    session_id: u64,
-    expires_at_tick: u64,
-};
-
-const IdentityCredentialResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    flags: u16,
-    credential_id: u64,
-    credential_generation: u32,
-};
-
-const AgentDelegationResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    delegation_id: u64,
-    remaining_actions: u16,
-    remaining_remote_calls: u16,
-};
-
-const AccessibilityProfileResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    flags: u32,
-    profile_generation: u64,
-};
-
-const BackgroundActivityResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    record_id: u64,
-    reserved_until_tick: u64,
-};
-
-const PasteboardOfferRequestWire = extern struct {
-    header: WireHeader,
-    destination_subject_serial: u64,
-    destination_task_id: u64,
-    user_gesture_id: u64,
-    foreground_session_id: u64,
-    expires_at_ticks: u64,
-    payload_len: u32,
-    destination_subject_kind: u16,
-    purpose_len: u16,
-    flags: u16,
-};
-
-const PasteboardReadRequestWire = extern struct {
-    header: WireHeader,
-    token_id: u64,
-    destination_task_id: u64,
-    user_gesture_id: u64,
-    foreground_session_id: u64,
-    expected_purpose_len: u16,
-    flags: u16,
-};
-
-const PasteboardRevokeRequestWire = extern struct {
-    header: WireHeader,
-    token_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const PasteboardResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    token_id: u64,
-    payload_len: u32,
-    flags: u32,
-};
-
-const ObjectBackupPrepareRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    object_id: u64,
-    restore_device_id: u64,
-    bytes: u64,
-    sensitivity: u16,
-    flags: u16,
-};
-
-const ObjectRestoreAuthorizeRequestWire = extern struct {
-    header: WireHeader,
-    snapshot_id: u64,
-    destination_device_id: u64,
-    restore_age_days: u16,
-    flags: u16,
-};
-
-const ObjectBackupRevokeRequestWire = extern struct {
-    header: WireHeader,
-    snapshot_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const ObjectResilienceResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    snapshot_id: u64,
-    bytes: u64,
-    flags: u32,
-};
-
-const CaptureStartRequestWire = extern struct {
-    header: WireHeader,
-    device_id: u64,
-    foreground_session_id: u64,
-    user_gesture_id: u64,
-    lease_ticks: u64,
-    sample_budget: u32,
-    kind: u16,
-    flags: u16,
-};
-
-const CaptureSampleRequestWire = extern struct {
-    header: WireHeader,
-    session_id: u64,
-    expected_device_id: u64,
-    expected_foreground_session_id: u64,
-    bytes: u64,
-    expected_kind: u16,
-    flags: u16,
-};
-
-const CaptureStopRequestWire = extern struct {
-    header: WireHeader,
-    session_id: u64,
-    expected_device_id: u64,
-    expected_foreground_session_id: u64,
-    reason: u16,
-    expected_kind: u16,
-    flags: u16,
-    _reserved: u16 = 0,
-};
-
-const CaptureResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    session_id: u64,
-    samples_remaining: u32,
-    flags: u32,
-};
-
-const AttentionPostRequestWire = extern struct {
-    header: WireHeader,
-    notification_task_id: u64,
-    expires_at_ticks: u64,
-    detail_len: u16,
-    reason: u16,
-    urgency: u16,
-    suppression_policy: u16,
-    flags: u32,
-};
-
-const AttentionDismissRequestWire = extern struct {
-    header: WireHeader,
-    notification_id: u64,
-    expected_source_serial: u64,
-    expected_notification_task_id: u64,
-    expected_source_kind: u16,
-    reason: u16,
-    flags: u16 = 0,
-};
-
-const AttentionQueryRequestWire = extern struct {
-    header: WireHeader,
-    now_ticks: u64,
-    flags: u32,
-};
-
-const AttentionResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    active_visible: u16,
-    active_interruptions: u16,
-    _reserved: u16 = 0,
-    notification_id: u64,
-    flags: u32,
-};
-
-const LifecycleControlRequestWire = extern struct {
-    header: WireHeader,
-    target_task_id: u64,
-    target_owner_serial: u64,
-    checkpoint_id: u64,
-    target_owner_kind: u16,
-    reason: u16,
-    flags: u16,
-    _reserved: u16 = 0,
-};
-
-const LifecycleControlResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    state: u16,
-    task_id: u64,
-    flags: u32,
-};
-
-const PersonalContextLeaseRequestWire = extern struct {
-    header: WireHeader,
-    workspace_id: u64,
-    max_query_bytes: u64,
-    expires_at_tick: u64,
-    sensitivity: u16,
-    flags: u16,
-};
-
-const PersonalContextQueryRequestWire = extern struct {
-    header: WireHeader,
-    lease_id: u64,
-    workspace_id: u64,
-    query_bytes: u64,
-    flags: u32,
-};
-
-const PersonalContextRevokeRequestWire = extern struct {
-    header: WireHeader,
-    lease_id: u64,
-    reason: u16,
-    _reserved: u16 = 0,
-};
-
-const PersonalContextResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    flags: u16,
-    result_count: u16,
-    receipt_privacy_flags: u16,
-    receipt_max_pack_sensitivity: u16,
-    lease_revocation_generation: u32,
-    top_score: u16,
-    top_title_hits: u16,
-    top_body_hits: u16,
-    top_sensitivity: u16,
-    lease_id: u64,
-    receipt_id: u64,
-    receipt_index_generation: u64,
-    remaining_bytes: u64,
-    receipt_issued_at_tick: u64,
-    expires_at_tick: u64,
-    top_object_id: u64,
-    top_version_id: u64,
-    top_title_fingerprint: u64,
-    request_fingerprint: crypto_hash.Digest,
-    query_fingerprint: crypto_hash.Digest,
-    pack_digest: crypto_hash.Digest,
-    receipt_digest: crypto_hash.Digest,
-};
-
-const SecretImportRequestWire = extern struct {
-    header: WireHeader,
-    owner_serial: u64,
-    label_len: u16,
-    raw_len: u16,
-    flags: u16,
-    _reserved: u16 = 0,
-};
-
-const SecretLendRequestWire = extern struct {
-    header: WireHeader,
-    secret_id: u64,
-    holder_serial: u64,
-    lease_ticks: u64,
-    flags: u16,
-    _reserved: u16 = 0,
-};
-
-const SecretRotateRequestWire = extern struct {
-    header: WireHeader,
-    old_secret_id: u64,
-    label_len: u16,
-    raw_len: u16,
-    flags: u16,
-    _reserved: u16 = 0,
-};
-
-const SecretRevokeRequestWire = extern struct {
-    header: WireHeader,
-    secret_id: u64,
-    handle_id: u64,
-    subject_serial: u64,
-    expected_holder_serial: u64,
-    expected_holder_task_id: u64,
-    subject_kind: u16,
-    expected_holder_kind: u16,
-    reason: u16,
-    flags: u16 = 0,
-};
-
-const SecretVaultResponseWire = extern struct {
-    accepted: u32,
-    reason: u16,
-    _reserved: u16 = 0,
-    secret_id: u64,
-    handle_id: u64,
-    flags: u32,
-};
-
 const InterfaceSpec = struct {
     id: InterfaceId,
     key: InterfaceKey,
@@ -1192,85 +281,85 @@ fn op(
 }
 
 pub const operation_specs = [_]OperationSpec{
-    op(.service_registry, .service_register, "register", ServiceRegisterRequestWire, ServiceRegisterResponseWire),
-    op(.service_registry, .service_connect, "connect", ServiceConnectionRequestWire, abi.ServiceConnectionDescriptor),
-    op(.task_runtime, .task_describe, "describe", TaskDescribeRequestWire, abi.TaskDescriptor),
-    op(.object_workspace, .workspace_put_version, "put_version", WorkspacePutVersionRequestWire, WorkspacePutVersionResponseWire),
-    op(.object_workspace, .workspace_resolve, "resolve", WorkspaceResolveRequestWire, WorkspaceResolveResponseWire),
-    op(.index_search, .index_upsert, "upsert", IndexUpsertRequestWire, IndexResponseWire),
-    op(.index_search, .index_query, "query", IndexQueryRequestWire, IndexResponseWire),
-    op(.index_search, .semantic_index_query, "semantic_query", SemanticIndexQueryRequestWire, IndexResponseWire),
-    op(.sync_replication, .sync_device_enroll, "device_enroll", SyncDeviceEnrollRequestWire, SyncResponseWire),
-    op(.sync_replication, .sync_workspace_replicate, "workspace_replicate", SyncWorkspaceReplicateRequestWire, SyncResponseWire),
-    op(.sync_replication, .sync_conflict_review, "conflict_review", SyncConflictReviewRequestWire, SyncResponseWire),
-    op(.sync_replication, .sync_conflict_resolve, "conflict_resolve", SyncConflictResolveRequestWire, SyncResponseWire),
-    op(.sync_replication, .sync_transport_frame, "transport_frame", SyncTransportFrameRequestWire, SyncResponseWire),
-    op(.network_policy, .network_authorize, "authorize", NetworkAuthorizeRequestWire, NetworkAuthorizeResponseWire),
-    op(.network_policy, .network_open_session, "open_session", NetworkOpenSessionRequestWire, NetworkSessionResponseWire),
-    op(.network_policy, .network_record_transfer, "record_transfer", NetworkRecordTransferRequestWire, NetworkSessionResponseWire),
-    op(.network_policy, .network_revoke_session, "revoke_session", NetworkRevokeSessionRequestWire, NetworkSessionResponseWire),
-    op(.policy_mediation, .policy_authorize, "authorize", PolicyAuthorizeRequestWire, PolicyAuthorizeResponseWire),
-    op(.package_install, .package_install, "install", PackageInstallRequestWire, PackageLifecycleResponseWire),
-    op(.package_install, .package_update, "update", PackageUpdateRequestWire, PackageLifecycleResponseWire),
-    op(.package_install, .package_rollback, "rollback", PackageRollbackRequestWire, PackageLifecycleResponseWire),
-    op(.package_install, .package_remove, "remove", PackageRemoveRequestWire, PackageLifecycleResponseWire),
-    op(.ai_inference, .ai_authorize, "authorize", AiAuthorizeRequestWire, AiAuthorizeResponseWire),
-    op(.ai_inference, .ai_run_local, "run_local", AiRunLocalRequestWire, AiRunLocalResponseWire),
-    op(.ai_model_registry, .ai_model_register, "register", AiModelRegisterRequestWire, AiModelRegistryResponseWire),
-    op(.ai_model_registry, .ai_model_attest, "attest", AiModelAttestRequestWire, AiModelRegistryResponseWire),
-    op(.ai_model_registry, .ai_model_revoke, "revoke", AiModelRevokeRequestWire, AiModelRegistryResponseWire),
-    op(.privacy_budget, .privacy_authorize_egress, "authorize_egress", PrivacyAuthorizeEgressRequestWire, PrivacyAuthorizeEgressResponseWire),
-    op(.privacy_budget, .privacy_query_budget, "query_budget", PrivacyQueryBudgetRequestWire, PrivacyQueryBudgetResponseWire),
-    op(.diagnostics_export, .diagnostics_prepare_export, "prepare_export", DiagnosticsPrepareExportRequestWire, DiagnosticsExportResponseWire),
-    op(.diagnostics_export, .diagnostics_share_remote, "share_remote", DiagnosticsShareRemoteRequestWire, DiagnosticsExportResponseWire),
-    op(.consent_receipts, .consent_record, "record", ConsentRecordRequestWire, ConsentReceiptResponseWire),
-    op(.consent_receipts, .consent_revoke, "revoke", ConsentRevokeRequestWire, ConsentReceiptResponseWire),
-    op(.permission_lease, .permission_lease_issue, "issue", PermissionLeaseIssueRequestWire, PermissionLeaseResponseWire),
-    op(.permission_lease, .permission_lease_renew, "renew", PermissionLeaseRenewRequestWire, PermissionLeaseResponseWire),
-    op(.permission_lease, .permission_lease_expire, "expire", PermissionLeaseExpireRequestWire, PermissionLeaseResponseWire),
-    op(.data_rights, .data_export_prepare, "export_prepare", DataExportPrepareRequestWire, DataRightsResponseWire),
-    op(.data_rights, .data_delete_request, "delete_request", DataDeleteRequestWire, DataRightsResponseWire),
-    op(.data_rights, .data_delete_receipt, "delete_receipt", DataDeleteReceiptRequestWire, DataRightsResponseWire),
-    op(.identity_session, .identity_session_authorize, "authorize", IdentitySessionAuthorizeRequestWire, IdentitySessionResponseWire),
-    op(.identity_session, .identity_session_step_up, "step_up", IdentitySessionStepUpRequestWire, IdentitySessionResponseWire),
-    op(.identity_session, .identity_session_revoke, "revoke", IdentitySessionRevokeRequestWire, IdentitySessionResponseWire),
-    op(.identity_session, .identity_credential_register, "credential_register", IdentityCredentialRegisterRequestWire, IdentityCredentialResponseWire),
-    op(.identity_session, .identity_credential_assert, "credential_assert", IdentityCredentialAssertRequestWire, IdentityCredentialResponseWire),
-    op(.identity_session, .identity_credential_recover, "credential_recover", IdentityCredentialRecoverRequestWire, IdentityCredentialResponseWire),
-    op(.identity_session, .identity_credential_revoke, "credential_revoke", IdentityCredentialRevokeRequestWire, IdentityCredentialResponseWire),
-    op(.agent_delegation, .agent_authorize, "authorize", AgentAuthorizeRequestWire, AgentDelegationResponseWire),
-    op(.agent_delegation, .agent_record_action, "record_action", AgentRecordActionRequestWire, AgentDelegationResponseWire),
-    op(.agent_delegation, .agent_revoke, "revoke", AgentRevokeRequestWire, AgentDelegationResponseWire),
-    op(.agent_delegation, .agent_bind_session, "bind_session", AgentBindSessionRequestWire, AgentDelegationResponseWire),
-    op(.agent_delegation, .agent_kill_switch, "kill_switch", AgentKillSwitchRequestWire, AgentDelegationResponseWire),
-    op(.accessibility_profile, .accessibility_profile_get, "get_profile", AccessibilityProfileGetRequestWire, AccessibilityProfileResponseWire),
-    op(.accessibility_profile, .accessibility_profile_apply, "apply_profile", AccessibilityProfileApplyRequestWire, AccessibilityProfileResponseWire),
-    op(.accessibility_profile, .accessibility_profile_audit, "audit_profile", AccessibilityProfileAuditRequestWire, AccessibilityProfileResponseWire),
-    op(.background_activity, .background_authorize, "authorize", BackgroundAuthorizeRequestWire, BackgroundActivityResponseWire),
-    op(.background_activity, .background_record, "record", BackgroundRecordRequestWire, BackgroundActivityResponseWire),
-    op(.background_activity, .background_complete, "complete", BackgroundCompleteRequestWire, BackgroundActivityResponseWire),
-    op(.attention_broker, .attention_post, "post", AttentionPostRequestWire, AttentionResponseWire),
-    op(.attention_broker, .attention_dismiss, "dismiss", AttentionDismissRequestWire, AttentionResponseWire),
-    op(.attention_broker, .attention_query, "query", AttentionQueryRequestWire, AttentionResponseWire),
-    op(.task_lifecycle, .lifecycle_suspend, "suspend", LifecycleControlRequestWire, LifecycleControlResponseWire),
-    op(.task_lifecycle, .lifecycle_resume, "resume", LifecycleControlRequestWire, LifecycleControlResponseWire),
-    op(.task_lifecycle, .lifecycle_terminate, "terminate", LifecycleControlRequestWire, LifecycleControlResponseWire),
-    op(.personal_context, .personal_context_lease, "lease", PersonalContextLeaseRequestWire, PersonalContextResponseWire),
-    op(.personal_context, .personal_context_query, "query", PersonalContextQueryRequestWire, PersonalContextResponseWire),
-    op(.personal_context, .personal_context_revoke, "revoke", PersonalContextRevokeRequestWire, PersonalContextResponseWire),
-    op(.secure_pasteboard, .pasteboard_offer, "offer", PasteboardOfferRequestWire, PasteboardResponseWire),
-    op(.secure_pasteboard, .pasteboard_read, "read", PasteboardReadRequestWire, PasteboardResponseWire),
-    op(.secure_pasteboard, .pasteboard_revoke, "revoke", PasteboardRevokeRequestWire, PasteboardResponseWire),
-    op(.object_resilience, .object_backup_prepare, "backup_prepare", ObjectBackupPrepareRequestWire, ObjectResilienceResponseWire),
-    op(.object_resilience, .object_restore_authorize, "restore_authorize", ObjectRestoreAuthorizeRequestWire, ObjectResilienceResponseWire),
-    op(.object_resilience, .object_backup_revoke, "backup_revoke", ObjectBackupRevokeRequestWire, ObjectResilienceResponseWire),
-    op(.sensitive_capture, .capture_start, "start", CaptureStartRequestWire, CaptureResponseWire),
-    op(.sensitive_capture, .capture_sample, "sample", CaptureSampleRequestWire, CaptureResponseWire),
-    op(.sensitive_capture, .capture_stop, "stop", CaptureStopRequestWire, CaptureResponseWire),
-    op(.secret_vault, .secret_import, "import", SecretImportRequestWire, SecretVaultResponseWire),
-    op(.secret_vault, .secret_lend, "lend", SecretLendRequestWire, SecretVaultResponseWire),
-    op(.secret_vault, .secret_rotate, "rotate", SecretRotateRequestWire, SecretVaultResponseWire),
-    op(.secret_vault, .secret_revoke, "revoke", SecretRevokeRequestWire, SecretVaultResponseWire),
+    op(.service_registry, .service_register, "register", wire.ServiceRegisterRequestWire, wire.ServiceRegisterResponseWire),
+    op(.service_registry, .service_connect, "connect", wire.ServiceConnectionRequestWire, abi.ServiceConnectionDescriptor),
+    op(.task_runtime, .task_describe, "describe", wire.TaskDescribeRequestWire, abi.TaskDescriptor),
+    op(.object_workspace, .workspace_put_version, "put_version", wire.WorkspacePutVersionRequestWire, wire.WorkspacePutVersionResponseWire),
+    op(.object_workspace, .workspace_resolve, "resolve", wire.WorkspaceResolveRequestWire, wire.WorkspaceResolveResponseWire),
+    op(.index_search, .index_upsert, "upsert", wire.IndexUpsertRequestWire, wire.IndexResponseWire),
+    op(.index_search, .index_query, "query", wire.IndexQueryRequestWire, wire.IndexResponseWire),
+    op(.index_search, .semantic_index_query, "semantic_query", wire.SemanticIndexQueryRequestWire, wire.IndexResponseWire),
+    op(.sync_replication, .sync_device_enroll, "device_enroll", wire.SyncDeviceEnrollRequestWire, wire.SyncResponseWire),
+    op(.sync_replication, .sync_workspace_replicate, "workspace_replicate", wire.SyncWorkspaceReplicateRequestWire, wire.SyncResponseWire),
+    op(.sync_replication, .sync_conflict_review, "conflict_review", wire.SyncConflictReviewRequestWire, wire.SyncResponseWire),
+    op(.sync_replication, .sync_conflict_resolve, "conflict_resolve", wire.SyncConflictResolveRequestWire, wire.SyncResponseWire),
+    op(.sync_replication, .sync_transport_frame, "transport_frame", wire.SyncTransportFrameRequestWire, wire.SyncResponseWire),
+    op(.network_policy, .network_authorize, "authorize", wire.NetworkAuthorizeRequestWire, wire.NetworkAuthorizeResponseWire),
+    op(.network_policy, .network_open_session, "open_session", wire.NetworkOpenSessionRequestWire, wire.NetworkSessionResponseWire),
+    op(.network_policy, .network_record_transfer, "record_transfer", wire.NetworkRecordTransferRequestWire, wire.NetworkSessionResponseWire),
+    op(.network_policy, .network_revoke_session, "revoke_session", wire.NetworkRevokeSessionRequestWire, wire.NetworkSessionResponseWire),
+    op(.policy_mediation, .policy_authorize, "authorize", wire.PolicyAuthorizeRequestWire, wire.PolicyAuthorizeResponseWire),
+    op(.package_install, .package_install, "install", wire.PackageInstallRequestWire, wire.PackageLifecycleResponseWire),
+    op(.package_install, .package_update, "update", wire.PackageUpdateRequestWire, wire.PackageLifecycleResponseWire),
+    op(.package_install, .package_rollback, "rollback", wire.PackageRollbackRequestWire, wire.PackageLifecycleResponseWire),
+    op(.package_install, .package_remove, "remove", wire.PackageRemoveRequestWire, wire.PackageLifecycleResponseWire),
+    op(.ai_inference, .ai_authorize, "authorize", wire.AiAuthorizeRequestWire, wire.AiAuthorizeResponseWire),
+    op(.ai_inference, .ai_run_local, "run_local", wire.AiRunLocalRequestWire, wire.AiRunLocalResponseWire),
+    op(.ai_model_registry, .ai_model_register, "register", wire.AiModelRegisterRequestWire, wire.AiModelRegistryResponseWire),
+    op(.ai_model_registry, .ai_model_attest, "attest", wire.AiModelAttestRequestWire, wire.AiModelRegistryResponseWire),
+    op(.ai_model_registry, .ai_model_revoke, "revoke", wire.AiModelRevokeRequestWire, wire.AiModelRegistryResponseWire),
+    op(.privacy_budget, .privacy_authorize_egress, "authorize_egress", wire.PrivacyAuthorizeEgressRequestWire, wire.PrivacyAuthorizeEgressResponseWire),
+    op(.privacy_budget, .privacy_query_budget, "query_budget", wire.PrivacyQueryBudgetRequestWire, wire.PrivacyQueryBudgetResponseWire),
+    op(.diagnostics_export, .diagnostics_prepare_export, "prepare_export", wire.DiagnosticsPrepareExportRequestWire, wire.DiagnosticsExportResponseWire),
+    op(.diagnostics_export, .diagnostics_share_remote, "share_remote", wire.DiagnosticsShareRemoteRequestWire, wire.DiagnosticsExportResponseWire),
+    op(.consent_receipts, .consent_record, "record", wire.ConsentRecordRequestWire, wire.ConsentReceiptResponseWire),
+    op(.consent_receipts, .consent_revoke, "revoke", wire.ConsentRevokeRequestWire, wire.ConsentReceiptResponseWire),
+    op(.permission_lease, .permission_lease_issue, "issue", wire.PermissionLeaseIssueRequestWire, wire.PermissionLeaseResponseWire),
+    op(.permission_lease, .permission_lease_renew, "renew", wire.PermissionLeaseRenewRequestWire, wire.PermissionLeaseResponseWire),
+    op(.permission_lease, .permission_lease_expire, "expire", wire.PermissionLeaseExpireRequestWire, wire.PermissionLeaseResponseWire),
+    op(.data_rights, .data_export_prepare, "export_prepare", wire.DataExportPrepareRequestWire, wire.DataRightsResponseWire),
+    op(.data_rights, .data_delete_request, "delete_request", wire.DataDeleteRequestWire, wire.DataRightsResponseWire),
+    op(.data_rights, .data_delete_receipt, "delete_receipt", wire.DataDeleteReceiptRequestWire, wire.DataRightsResponseWire),
+    op(.identity_session, .identity_session_authorize, "authorize", wire.IdentitySessionAuthorizeRequestWire, wire.IdentitySessionResponseWire),
+    op(.identity_session, .identity_session_step_up, "step_up", wire.IdentitySessionStepUpRequestWire, wire.IdentitySessionResponseWire),
+    op(.identity_session, .identity_session_revoke, "revoke", wire.IdentitySessionRevokeRequestWire, wire.IdentitySessionResponseWire),
+    op(.identity_session, .identity_credential_register, "credential_register", wire.IdentityCredentialRegisterRequestWire, wire.IdentityCredentialResponseWire),
+    op(.identity_session, .identity_credential_assert, "credential_assert", wire.IdentityCredentialAssertRequestWire, wire.IdentityCredentialResponseWire),
+    op(.identity_session, .identity_credential_recover, "credential_recover", wire.IdentityCredentialRecoverRequestWire, wire.IdentityCredentialResponseWire),
+    op(.identity_session, .identity_credential_revoke, "credential_revoke", wire.IdentityCredentialRevokeRequestWire, wire.IdentityCredentialResponseWire),
+    op(.agent_delegation, .agent_authorize, "authorize", wire.AgentAuthorizeRequestWire, wire.AgentDelegationResponseWire),
+    op(.agent_delegation, .agent_record_action, "record_action", wire.AgentRecordActionRequestWire, wire.AgentDelegationResponseWire),
+    op(.agent_delegation, .agent_revoke, "revoke", wire.AgentRevokeRequestWire, wire.AgentDelegationResponseWire),
+    op(.agent_delegation, .agent_bind_session, "bind_session", wire.AgentBindSessionRequestWire, wire.AgentDelegationResponseWire),
+    op(.agent_delegation, .agent_kill_switch, "kill_switch", wire.AgentKillSwitchRequestWire, wire.AgentDelegationResponseWire),
+    op(.accessibility_profile, .accessibility_profile_get, "get_profile", wire.AccessibilityProfileGetRequestWire, wire.AccessibilityProfileResponseWire),
+    op(.accessibility_profile, .accessibility_profile_apply, "apply_profile", wire.AccessibilityProfileApplyRequestWire, wire.AccessibilityProfileResponseWire),
+    op(.accessibility_profile, .accessibility_profile_audit, "audit_profile", wire.AccessibilityProfileAuditRequestWire, wire.AccessibilityProfileResponseWire),
+    op(.background_activity, .background_authorize, "authorize", wire.BackgroundAuthorizeRequestWire, wire.BackgroundActivityResponseWire),
+    op(.background_activity, .background_record, "record", wire.BackgroundRecordRequestWire, wire.BackgroundActivityResponseWire),
+    op(.background_activity, .background_complete, "complete", wire.BackgroundCompleteRequestWire, wire.BackgroundActivityResponseWire),
+    op(.attention_broker, .attention_post, "post", wire.AttentionPostRequestWire, wire.AttentionResponseWire),
+    op(.attention_broker, .attention_dismiss, "dismiss", wire.AttentionDismissRequestWire, wire.AttentionResponseWire),
+    op(.attention_broker, .attention_query, "query", wire.AttentionQueryRequestWire, wire.AttentionResponseWire),
+    op(.task_lifecycle, .lifecycle_suspend, "suspend", wire.LifecycleControlRequestWire, wire.LifecycleControlResponseWire),
+    op(.task_lifecycle, .lifecycle_resume, "resume", wire.LifecycleControlRequestWire, wire.LifecycleControlResponseWire),
+    op(.task_lifecycle, .lifecycle_terminate, "terminate", wire.LifecycleControlRequestWire, wire.LifecycleControlResponseWire),
+    op(.personal_context, .personal_context_lease, "lease", wire.PersonalContextLeaseRequestWire, wire.PersonalContextResponseWire),
+    op(.personal_context, .personal_context_query, "query", wire.PersonalContextQueryRequestWire, wire.PersonalContextResponseWire),
+    op(.personal_context, .personal_context_revoke, "revoke", wire.PersonalContextRevokeRequestWire, wire.PersonalContextResponseWire),
+    op(.secure_pasteboard, .pasteboard_offer, "offer", wire.PasteboardOfferRequestWire, wire.PasteboardResponseWire),
+    op(.secure_pasteboard, .pasteboard_read, "read", wire.PasteboardReadRequestWire, wire.PasteboardResponseWire),
+    op(.secure_pasteboard, .pasteboard_revoke, "revoke", wire.PasteboardRevokeRequestWire, wire.PasteboardResponseWire),
+    op(.object_resilience, .object_backup_prepare, "backup_prepare", wire.ObjectBackupPrepareRequestWire, wire.ObjectResilienceResponseWire),
+    op(.object_resilience, .object_restore_authorize, "restore_authorize", wire.ObjectRestoreAuthorizeRequestWire, wire.ObjectResilienceResponseWire),
+    op(.object_resilience, .object_backup_revoke, "backup_revoke", wire.ObjectBackupRevokeRequestWire, wire.ObjectResilienceResponseWire),
+    op(.sensitive_capture, .capture_start, "start", wire.CaptureStartRequestWire, wire.CaptureResponseWire),
+    op(.sensitive_capture, .capture_sample, "sample", wire.CaptureSampleRequestWire, wire.CaptureResponseWire),
+    op(.sensitive_capture, .capture_stop, "stop", wire.CaptureStopRequestWire, wire.CaptureResponseWire),
+    op(.secret_vault, .secret_import, "import", wire.SecretImportRequestWire, wire.SecretVaultResponseWire),
+    op(.secret_vault, .secret_lend, "lend", wire.SecretLendRequestWire, wire.SecretVaultResponseWire),
+    op(.secret_vault, .secret_rotate, "rotate", wire.SecretRotateRequestWire, wire.SecretVaultResponseWire),
+    op(.secret_vault, .secret_revoke, "revoke", wire.SecretRevokeRequestWire, wire.SecretVaultResponseWire),
 };
 
 const ServiceBindingSpec = struct {

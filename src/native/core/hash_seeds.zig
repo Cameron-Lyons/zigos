@@ -11,5 +11,6 @@ pub const network_policy_request_key: u64 = 0x5A47_4E45_5450_4F4C;
 pub const sync_state_record_key: u64 = 0x5A47_5359_4E43_5354;
 pub const sync_relay_session_key: u64 = 0x5A47_5245_4C41_59;
 pub const driver_binding_key: u64 = 0x5A47_4452_5642_494E;
+pub const driver_service_class_key: u64 = 0x5A47_4452_5653_434C;
 pub const document_index_key: u64 = 0x5A47_494E_4458;
 pub const shared_memory_label_key: u64 = 0x5A47_5348_4D45_4D00;

@@ -738,6 +738,12 @@ fn finishHostTransfer(slot: *ControllerSlot) void {
 
 fn readHostTransferData(slot: *ControllerSlot, width: PortWidth) u32 {
     const offset = hostTransferOffset(slot);
+    if (offset + widthByteCount(width) > slot.host_storage.len) {
+        // Defense in depth: hostTransferInRange already bounds the transfer, but
+        // never index past the backing store even if state were set directly.
+        finishHostTransfer(slot);
+        return 0;
+    }
     const value = switch (width) {
         .u8 => @as(u32, slot.host_storage[offset]),
         .u16 => @as(u32, std.mem.readInt(u16, slot.host_storage[offset..][0..2], .little)),
@@ -749,6 +755,12 @@ fn readHostTransferData(slot: *ControllerSlot, width: PortWidth) u32 {
 
 fn writeHostTransferData(slot: *ControllerSlot, width: PortWidth, value: u32) void {
     const offset = slot.transfer_byte_offset;
+    if (offset + widthByteCount(width) > slot.host_write_staging.len) {
+        // Defense in depth: fail closed rather than overrun the staging buffer.
+        slot.host_registers[ata_reg_status] = ata_sr_drdy | ata_sr_err;
+        finishHostTransfer(slot);
+        return;
+    }
     switch (width) {
         .u8 => slot.host_write_staging[offset] = @truncate(value),
         .u16 => std.mem.writeInt(u16, slot.host_write_staging[offset..][0..2], @truncate(value), .little),
@@ -783,6 +795,12 @@ fn hostTransferBaseOffset(slot: *const ControllerSlot) usize {
 
 fn hostTransferInRange(slot: *const ControllerSlot, lba: u64, sector_count: u16) bool {
     if (sector_count == 0) return false;
+    // The broker is the isolation boundary for a possibly-hostile driver, so it must
+    // never trust the driver-supplied seccount. A single transfer stages through
+    // host_write_staging (ata_max_sector_transfer_count sectors), so bound the COUNT
+    // against staging capacity — independently of the addressable LBA range, which is
+    // bounded against the backing store below.
+    if (sector_count > ata_max_sector_transfer_count) return false;
     const available_sectors = @min(slot.grant.sector_count, host_storage_sectors);
     return lba < available_sectors and @as(u64, sector_count) <= available_sectors - lba;
 }
@@ -819,6 +837,33 @@ test "device broker publishes ATA controllers and exposes typed port and irq met
     try std.testing.expectEqual(@as(u8, 14), try irqLine(0x1F001));
     try std.testing.expectError(error.UnsupportedMmioWindow, mmioWindow(0x1F001, 0));
     try std.testing.expectError(error.InvalidPort, readPort(0x1F001, 0x2F8, .u8));
+}
+
+test "device broker rejects a host write wider than the staging buffer" {
+    reset();
+
+    try std.testing.expect(publishAtaController(0x1F001, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = test_ata_sector_count,
+    }));
+
+    const seccount_port = 0x1F0 + @as(u16, ata_reg_seccount);
+    const command_port = 0x1F0 + @as(u16, ata_reg_command);
+
+    // A transfer exactly at the staging capacity is accepted (DRQ, no error).
+    try writePort(0x1F001, seccount_port, .u16, ata_max_sector_transfer_count);
+    try writePort(0x1F001, command_port, .u8, ata_cmd_write_sectors);
+    try std.testing.expectEqual(@as(u32, ata_sr_drdy | ata_sr_drq), try readPort(0x1F001, command_port, .u8));
+
+    // One sector past the staging capacity must fail closed, not overrun
+    // host_write_staging. The backing store has 4096 sectors, so the old
+    // host_storage-only bound would have admitted this hostile seccount.
+    try writePort(0x1F001, seccount_port, .u16, ata_max_sector_transfer_count + 1);
+    try writePort(0x1F001, command_port, .u8, ata_cmd_write_sectors);
+    try std.testing.expectEqual(@as(u32, ata_sr_drdy | ata_sr_err), try readPort(0x1F001, command_port, .u8));
 }
 
 test "device broker programs IOMMU domains and brokers DMA buffers" {

@@ -14,6 +14,12 @@ const workspace_sharing = @import("sharing.zig");
 pub const MAX_WORKSPACES: usize = 8;
 pub const MAX_WORKSPACE_ENTRIES: usize = 96;
 pub const MAX_WORKSPACE_ENTRY_MUTATIONS: usize = MAX_WORKSPACE_ENTRIES * 2;
+// Once the per-generation mutation log grows past this, commit collapses it back to
+// the current live entry set (one mutation each at the current generation), as long as
+// no live snapshot needs the older generations. This keeps high-churn workspaces (e.g.
+// the sync-state workspace, which rewrites transport-frame records) from hitting the
+// hard MAX_WORKSPACE_ENTRY_MUTATIONS cap over their lifetime.
+pub const MUTATION_LOG_COMPACTION_THRESHOLD: usize = MAX_WORKSPACE_ENTRY_MUTATIONS * 3 / 4;
 pub const MAX_SNAPSHOTS: usize = 16;
 pub const MAX_RECOVERABLE_DELETES: usize = 24;
 pub const MAX_ENTRY_PATH_BYTES: usize = 96;
@@ -520,8 +526,32 @@ pub const Directory = struct {
 
         try applyTransactionDelta(workspace);
         clearTransactionState(workspace);
+        self.compactMutationLogIfSafe(workspace_id, workspace);
         self.markWorkspaceDirty(workspace_id);
         return workspace.generation;
+    }
+
+    // Best-effort: collapse a large mutation log to the current live entry set so a
+    // high-churn workspace cannot exhaust MAX_WORKSPACE_ENTRY_MUTATIONS over its
+    // lifetime. Safe because (1) it only runs when no live snapshot references a
+    // generation older than the current one (snapshot restore reconstructs older
+    // generations from the log), and (2) entryChangesSince() only coarsens — a peer
+    // behind the collapsed generation receives the full current set, which
+    // replicateWorkspace re-deduplicates by remote version. The workspace generation
+    // is preserved, so peer replication cursors stay valid.
+    fn compactMutationLogIfSafe(self: *Directory, workspace_id: ids.WorkspaceId, workspace: *WorkspaceRecord) void {
+        if (workspace.mutation_log.entry_mutation_count <= MUTATION_LOG_COMPACTION_THRESHOLD) return;
+        if (self.hasSnapshotBelowGeneration(workspace_id, workspace.generation)) return;
+        compactMutationLogToCurrentEntries(workspace) catch return;
+    }
+
+    fn hasSnapshotBelowGeneration(self: *const Directory, workspace_id: ids.WorkspaceId, generation: u32) bool {
+        for (self.snapshots.slots) |slot| {
+            if (!slot.in_use) continue;
+            if (!slot.snapshot.workspace_id.eql(workspace_id)) continue;
+            if (slot.snapshot.generation < generation) return true;
+        }
+        return false;
     }
 
     pub fn share(self: *Directory, workspace_id: ids.WorkspaceId, request: ShareRequest) Error!void {
@@ -1219,6 +1249,19 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
         try appendEntryMutation(workspace, generation, entry);
     }
     rebuildWorkspaceEntryIndex(workspace);
+}
+
+fn compactMutationLogToCurrentEntries(workspace: *WorkspaceRecord) Error!void {
+    // Copy the live entries out first: seedWorkspaceEntries clears path_index before
+    // reading its source, so a slice into path_index.entries would be zeroed mid-use.
+    var current_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+    const count = workspace.path_index.entry_count;
+    for (workspace.path_index.entries[0..count], 0..) |entry, index| {
+        current_entries[index] = entry;
+    }
+    // Re-seed the log with exactly the current entries at the current generation,
+    // discarding the older per-generation history. Generation is preserved.
+    try seedWorkspaceEntries(workspace, current_entries[0..count], workspace.generation);
 }
 
 fn materializeEntriesAtGeneration(
