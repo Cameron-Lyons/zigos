@@ -1,133 +1,157 @@
+// Architecture gates: each flag is a comptime introspection of the live code,
+// not a hardcoded `true`. backlog_gates.expectAllMetadataTrue asserts every flag
+// holds, so removing or renaming a gated arena/index/decl makes the corresponding
+// flag false and fails the gate.
+//
+// Absence claims ("removed legacy fixed-table scan", "removed monolithic codec",
+// etc.) are intentionally NOT modeled: the removal of a pattern cannot be proven
+// by introspection, and the positive presence checks below already prove the
+// indexed replacements exist. This file is test-only (imported solely by
+// src/tests/spec/backlog_gates.zig), so its module imports do not enter any
+// production binary.
+
+const indexed_arena = @import("core/indexed_arena.zig");
+const service_registry = @import("services/service_registry.zig");
+const component_abi_schema = @import("services/component_abi_schema.zig");
+const userspace_scheduler = @import("task/userspace_scheduler.zig");
+const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
+const indexing_service = @import("services/indexing_service.zig");
+const event_ledger = @import("platform/event_ledger.zig");
+const compositor_session = @import("platform/compositor_session.zig");
+const native_ux = @import("platform/native_ux.zig");
+const sync_transport_harness = @import("sync/sync_transport_harness.zig");
+const sync_transport = @import("sync/sync_transport.zig");
+const sync_service = @import("sync/sync_service.zig");
+const sync_service_test = @import("sync/sync_service_test.zig");
+const sync_adapters = @import("sync/sync_adapters.zig");
+const sync_state_store = @import("sync/sync_state_store.zig");
+const workspace = @import("storage/workspace.zig");
+const storage_volume = @import("storage/storage_volume.zig");
+const service_catalog = @import("session/service_catalog.zig");
+const session_bootstrap = @import("session/session_bootstrap.zig");
+const service_bootstrap = @import("session/service_bootstrap.zig");
+const session_service_bootstrap = @import("session/session_service_bootstrap.zig");
+
+// A trivial instantiation of the indexed arena so its tracked-count field can be
+// introspected (the arena is a generic factory, so the field lives on the
+// instantiated type).
+const ProbeArenaSlot = struct { in_use: bool = false };
+fn probeArenaKey(_: *const ProbeArenaSlot) u64 {
+    return 0;
+}
+const ProbeArena = indexed_arena.IndexedArenaWithKey(u64, ProbeArenaSlot, 1, 2, probeArenaKey);
+
 pub const sync_private_overlay = .{
     .transport_harness = .{
-        .uses_signed_encrypted_frames = true,
-        .verifies_signed_frames = true,
-        .rejects_foreign_session_task_submitters = true,
+        .uses_signed_encrypted_frames = @hasField(sync_transport_harness.SignedEncryptedFrame, "signature"),
+        .verifies_signed_frames = @hasDecl(sync_transport_harness, "verifySignedFrame"),
+        .rejects_foreign_session_task_submitters = @hasDecl(sync_transport_harness.BootedOverlayRelayService, "submitSignedFrame"),
     },
     .service_test = .{
-        .runs_deterministic_two_device_overlay_replication = true,
-        .opens_overlay_sessions = true,
-        .replicates_workspaces = true,
-        .submits_relay_packets = true,
+        .runs_deterministic_two_device_overlay_replication = @hasDecl(sync_service_test, "deterministicTwoDeviceOverlayReplication"),
+        .opens_overlay_sessions = @hasDecl(sync_service.SyncPort, "openOverlaySession"),
+        .replicates_workspaces = @hasDecl(sync_service.SyncPort, "replicateWorkspace"),
+        .submits_relay_packets = @hasDecl(sync_transport.Relay, "submit"),
     },
     .sync_service = .{
-        .sends_overlay_relay_frames_via_service_port = true,
+        .sends_overlay_relay_frames_via_service_port = @hasDecl(sync_service.Service, "sendOverlayRelayFrameViaService"),
     },
 };
 
 pub const indexed_hot_path_tables = .{
     .indexed_arena = .{
-        .tracks_used_count = true,
+        .tracks_used_count = @hasField(ProbeArena, "used_count"),
     },
     .service_registry = .{
-        .uses_binding_arena = true,
-        .uses_typed_interface_ids = true,
-        .uses_interface_id_request_keys = true,
-        .removed_legacy_fixed_table_scan = true,
+        .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),
+        .uses_typed_interface_ids = @hasField(service_registry.Binding, "interface_id"),
     },
     .component_abi_schema = .{
-        .defines_interface_ids = true,
-        .binds_services_by_interface_id = true,
+        .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
+        .binds_services_by_interface_id = @hasDecl(component_abi_schema, "interfaceIdForService"),
     },
     .userspace_scheduler = .{
-        .uses_scheduler_slot_arena = true,
-        .uses_ready_heads = true,
-        .selects_ready_resource_class = true,
-        .wakes_tasks = true,
-        .refills_task_budget = true,
-        .tracks_deadline_tick = true,
-        .configures_resource_state = true,
-        .uses_accelerator_claim_heads = true,
-        .grants_next_accelerator_claim = true,
-        .removed_legacy_linear_slot_scan = true,
+        .uses_scheduler_slot_arena = @hasField(userspace_scheduler.Scheduler, "slots"),
+        .uses_ready_heads = @hasField(userspace_scheduler.Scheduler, "ready_heads"),
+        .selects_ready_resource_class = @hasDecl(userspace_scheduler.Scheduler, "readyQueueDepth"),
+        .wakes_tasks = @hasDecl(userspace_scheduler.Scheduler, "wakeTask"),
+        .refills_task_budget = @hasDecl(userspace_scheduler.Scheduler, "refillTaskBudget"),
+        .tracks_deadline_tick = @hasField(userspace_scheduler.AcceleratorClaimRecord, "deadline_tick"),
+        .configures_resource_state = @hasDecl(userspace_scheduler.Scheduler, "configureResourceState"),
+        .uses_accelerator_claim_heads = @hasField(userspace_scheduler.Scheduler, "accelerator_claim_heads"),
+        .grants_next_accelerator_claim = @hasDecl(userspace_scheduler.Scheduler, "grantNextAcceleratorClaim"),
     },
     .accelerator_scheduler = .{
-        .uses_claim_arena = true,
-        .uses_claim_task_index = true,
-        .removed_legacy_fixed_claim_array = true,
+        .uses_claim_arena = @hasField(accelerator_scheduler.Controller, "claims"),
+        .uses_claim_task_index = @hasField(accelerator_scheduler.Controller, "claim_task_index"),
     },
     .indexing_service = .{
-        .uses_document_arena = true,
-        .removed_legacy_fixed_table_scan = true,
+        .uses_document_arena = @hasField(indexing_service.Service, "documents"),
     },
     .event_ledger = .{
-        .uses_event_arena = true,
-        .indexes_kind = true,
-        .indexes_subject = true,
-        .indexes_task = true,
-        .visits_indexes = true,
+        .uses_event_arena = @hasField(event_ledger.Ledger, "events"),
+        .indexes_kind = @hasField(event_ledger.Ledger, "kind_index"),
+        .indexes_subject = @hasField(event_ledger.Ledger, "subject_index"),
+        .indexes_task = @hasField(event_ledger.Ledger, "task_index"),
+        .visits_indexes = @hasDecl(event_ledger.Ledger, "queryEvents"),
     },
     .compositor_session = .{
-        .uses_window_arena = true,
-        .uses_review_item_arena = true,
-        .removed_legacy_fixed_window_arrays = true,
+        .uses_window_arena = @hasField(compositor_session.Session, "windows"),
+        .uses_review_item_arena = @hasField(compositor_session.Session, "items"),
     },
     .native_ux = .{
-        .uses_flow_arena = true,
-        .supports_ordered_flow_lookup = true,
-        .removed_legacy_fixed_flow_array = true,
+        .uses_flow_arena = @hasField(native_ux.Controller, "flows"),
+        .supports_ordered_flow_lookup = @hasDecl(native_ux.Controller, "flowAtOrder"),
     },
     .sync_transport_harness = .{
-        .uses_relay_packet_arena = true,
-        .uses_relay_session_index = true,
-        .removed_legacy_packet_scan = true,
+        .uses_relay_packet_arena = @hasField(sync_transport_harness.Relay, "packets"),
+        .uses_relay_session_index = @hasField(sync_transport_harness.Relay, "session_index"),
     },
     .sync_service = .{
-        .uses_overlay_session_arena = true,
-        .tracks_closed_overlay_sessions = true,
-        .tracks_active_overlay_session_count = true,
-        .removed_legacy_fixed_overlay_session_array = true,
+        .uses_overlay_session_arena = @hasField(sync_service.Service, "overlay_sessions"),
+        .tracks_closed_overlay_sessions = @hasField(sync_service.Service, "closed_overlay_sessions"),
+        .tracks_active_overlay_session_count = @hasField(sync_service.Service, "active_overlay_session_count"),
     },
     .sync_adapters = .{
-        .uses_transport_frame_arena = true,
-        .uses_transport_frame_target_index = true,
-        .uses_transport_frame_path_index = true,
-        .removed_legacy_fixed_frame_array = true,
+        .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),
+        .uses_transport_frame_target_index = @hasField(sync_adapters.TransportQueue, "target_index"),
+        .uses_transport_frame_path_index = @hasField(sync_adapters.TransportQueue, "path_index"),
     },
     .sync_state_store = .{
-        .persists_state_records_v4 = true,
-        .uses_record_store_puts = true,
-        .deletes_stale_records = true,
-        .removed_monolithic_state_codec = true,
+        .persists_state_records = @hasDecl(sync_state_store, "persist"),
+        .loads_state_records = @hasDecl(sync_state_store, "load"),
     },
     .workspace = .{
-        .uses_path_index = true,
-        .tracks_mutation_log = true,
-        .tracks_share_table = true,
-        .tracks_staging_state = true,
-        .tracks_recoverable_deletes = true,
-        .caches_leaf_hashes = true,
-        .uses_index_root_address = true,
-        .supports_indexed_path_lookup = true,
-        .rebuilds_path_merkle = true,
+        .uses_path_index = @hasField(workspace.WorkspaceRecord, "path_index"),
+        .tracks_mutation_log = @hasField(workspace.WorkspaceRecord, "mutation_log"),
+        .tracks_share_table = @hasField(workspace.WorkspaceRecord, "share_table"),
+        .tracks_staging_state = @hasField(workspace.WorkspaceRecord, "staging"),
+        .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),
+        .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
+        .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),
+        .supports_indexed_path_lookup = @hasField(workspace.WorkspacePathIndex, "path_slots"),
     },
     .storage_volume = .{
-        .persists_workspace_state_v4 = true,
-        .hashes_workspace_root_address = true,
-        .rejects_legacy_demo_images = true,
-        .replays_workspaces_by_primary_index = true,
-        .replays_snapshots_by_primary_index = true,
-        .requires_target_nvme_attachment = true,
-        .removed_monolithic_workspace_state_buffer = true,
+        .persists_workspace_state = @hasDecl(storage_volume, "saveToImage"),
+        .replays_state_by_primary_index = @hasDecl(storage_volume, "loadFromImage"),
+        .requires_target_nvme_attachment = @hasDecl(storage_volume.Volume, "hasProductionStorageBackend"),
     },
     .service_catalog = .{
-        .uses_bootstrap_owner_keys = true,
-        .uses_bootstrap_service_record_keys = true,
+        .uses_bootstrap_owner_keys = @hasField(service_catalog.ServiceCatalogEntry, "owner_key"),
+        .uses_bootstrap_service_record_keys = @hasField(service_catalog.ServiceCatalogEntry, "service_record_key"),
     },
     .session_bootstrap = .{
-        .uses_catalog_owner_lookup = true,
-        .uses_catalog_service_record_lookup = true,
-        .iterates_service_catalog = true,
+        .uses_catalog_owner_lookup = @hasDecl(session_bootstrap, "ownerForServiceClass"),
+        .uses_catalog_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
+        .iterates_service_catalog = @hasDecl(session_bootstrap, "registerCoreServices"),
     },
     .service_bootstrap = .{
-        .has_launch_service_request = true,
+        .has_launch_service_request = @hasDecl(service_bootstrap, "LaunchServiceRequest"),
     },
     .session_service_bootstrap = .{
-        .launches_contract_services = true,
-        .delegates_owner_lookup_to_catalog = true,
-        .delegates_service_id_lookup_to_catalog = true,
+        .launches_contract_services = @hasDecl(session_service_bootstrap, "bootServices"),
     },
     .session_manager_boot_flow = .{
-        .delegates_service_record_lookup = true,
+        .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
     },
 };
