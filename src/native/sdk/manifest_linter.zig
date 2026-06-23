@@ -190,11 +190,6 @@ pub fn lintWithIdl(bundle: manifest.BundleManifest, idl_source: []const u8) Repo
     return report;
 }
 
-pub fn expectNativeClean(bundle: manifest.BundleManifest, idl_source: []const u8) !void {
-    const report = lintWithIdl(bundle, idl_source);
-    if (report.hasErrors()) return error.ManifestLintFailed;
-}
-
 fn bundleDeclaresInterface(bundle: manifest.BundleManifest, expected: manifest.InterfaceDecl) bool {
     return interfaceListDeclares(bundle.provided_interfaces, expected) or
         interfaceListDeclares(bundle.consumed_interfaces, expected);

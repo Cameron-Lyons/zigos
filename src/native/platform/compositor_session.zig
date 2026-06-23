@@ -321,7 +321,7 @@ pub const Session = struct {
         item.* = zeroItem();
         item.window_id = window_id;
         item.kind = request.kind;
-        item.label_len = copyText(&item.label, permissionLabel(request.kind));
+        item.label_len = copyText(&item.label, manifest.permissionDisplayLabel(request.kind));
         item.resource_len = copyText(&item.resource, request.resource);
         item.reason_len = deriveReason(&item.reason, bundle, request);
         item.object_scope_len = deriveObjectScope(&item.object_scope, request);
@@ -1038,23 +1038,6 @@ fn deriveNetworkPath(buffer: *[MAX_RESOURCE_BYTES]u8, request: manifest.Permissi
     return if (request.kind == .network_egress) copyText(buffer, request.resource) else 0;
 }
 
-fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
-    return switch (kind) {
-        .object_access => "Object access",
-        .network_egress => "Data egress",
-        .device_access => "Device access",
-        .clipboard => "Clipboard",
-        .camera => "Camera",
-        .mic => "Microphone",
-        .sensor => "Sensor",
-        .location => "Location",
-        .contacts => "Contacts",
-        .screen_capture => "Screen capture",
-        .notification_post => "Notification posting",
-        .background_execution => "Background execution",
-        .peer_ipc => "Peer IPC",
-    };
-}
 
 fn deriveDataEgressReason(
     buffer: *[MAX_REASON_BYTES]u8,

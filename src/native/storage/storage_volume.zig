@@ -122,15 +122,6 @@ pub const Volume = struct {
         self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, .generic);
     }
 
-    pub fn attachBackendFns(
-        self: *Volume,
-        sector_count: u64,
-        read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
-        write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
-    ) void {
-        self.attachBackendFnsWithKind(sector_count, read, write, .generic);
-    }
-
     pub fn attachNvmePciBackend(self: *Volume, backend: Backend) void {
         self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, .nvme_pci);
     }
@@ -146,15 +137,6 @@ pub const Volume = struct {
 
     pub fn attachAtaBootstrapBrokerBackend(self: *Volume, backend: Backend) void {
         self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, .ata_bootstrap_broker);
-    }
-
-    pub fn attachAtaBootstrapBrokerBackendFns(
-        self: *Volume,
-        sector_count: u64,
-        read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
-        write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
-    ) void {
-        self.attachBackendFnsWithKind(sector_count, read, write, .ata_bootstrap_broker);
     }
 
     fn attachBackendFnsWithKind(
@@ -258,14 +240,6 @@ pub fn attachBackend(backend: Backend) void {
     default_volume.attachBackend(backend);
 }
 
-pub fn attachBackendFns(
-    sector_count: u64,
-    read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
-    write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
-) void {
-    default_volume.attachBackendFns(sector_count, read, write);
-}
-
 pub fn attachNvmePciBackend(backend: Backend) void {
     default_volume.attachNvmePciBackend(backend);
 }
@@ -280,14 +254,6 @@ pub fn attachNvmePciBackendFns(
 
 pub fn attachAtaBootstrapBrokerBackend(backend: Backend) void {
     default_volume.attachAtaBootstrapBrokerBackend(backend);
-}
-
-pub fn attachAtaBootstrapBrokerBackendFns(
-    sector_count: u64,
-    read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
-    write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
-) void {
-    default_volume.attachAtaBootstrapBrokerBackendFns(sector_count, read, write);
 }
 
 pub fn attachAtaBootstrapDevice(device: *const anyopaque, sector_count: u64) void {

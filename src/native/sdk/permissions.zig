@@ -182,7 +182,7 @@ fn buildReviewUi(bundle: *const manifest.BundleManifest, plan: *ReviewPlan) void
     for (bundle.requested_permissions, 0..) |request, index| {
         if (plan.node_count >= plan.nodes.len) break;
         const allowed = index < plan.session.decision_count and plan.session.decisions[index].allow;
-        plan.nodes[plan.node_count] = ui.permissionRow(@intCast(10 + index), permissionLabel(request.kind), allowed);
+        plan.nodes[plan.node_count] = ui.permissionRow(@intCast(10 + index), manifest.permissionDisplayLabel(request.kind), allowed);
         plan.node_count += 1;
     }
 }
@@ -192,24 +192,6 @@ fn defaultCommand(request: manifest.PermissionRequest) ReviewCommand {
         .allow = true,
         .local_only = request.local_only,
         .lease_ticks = if (request.max_lease_ticks == 0) null else request.max_lease_ticks,
-    };
-}
-
-fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
-    return switch (kind) {
-        .object_access => "Object access",
-        .network_egress => "Data egress",
-        .device_access => "Device access",
-        .clipboard => "Clipboard",
-        .camera => "Camera",
-        .mic => "Microphone",
-        .sensor => "Sensor",
-        .location => "Location",
-        .contacts => "Contacts",
-        .screen_capture => "Screen capture",
-        .notification_post => "Notifications",
-        .background_execution => "Background execution",
-        .peer_ipc => "Peer IPC",
     };
 }
 

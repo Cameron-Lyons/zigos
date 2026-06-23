@@ -210,7 +210,7 @@ fn appendRequest(
     try appendFmt(buffer, used, "  [{d}/{d}] {s}: {s}\n", .{
         index + 1,
         bundle.requested_permissions.len,
-        permissionLabel(request.kind),
+        manifest.permissionDisplayLabel(request.kind),
         request.resource,
     });
 
@@ -274,7 +274,7 @@ fn appendCompactReceipt(
     request: manifest.PermissionRequest,
     decision: ReviewDecision,
 ) !void {
-    try appendFmt(buffer, used, "    receipt: granted={s} duration=", .{permissionLabel(request.kind)});
+    try appendFmt(buffer, used, "    receipt: granted={s} duration=", .{manifest.permissionDisplayLabel(request.kind)});
     if (decision.lease_ticks) |lease_ticks| {
         try appendFmt(buffer, used, "{d} ticks", .{lease_ticks});
     } else if (request.max_lease_ticks != 0) {
@@ -290,24 +290,6 @@ fn appendCompactReceipt(
         try appendText(buffer, used, "none");
     }
     try appendText(buffer, used, " revoke=Permission Review\n");
-}
-
-fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
-    return switch (kind) {
-        .object_access => "Object access",
-        .network_egress => "Data egress",
-        .device_access => "Device access",
-        .clipboard => "Clipboard",
-        .camera => "Camera",
-        .mic => "Microphone",
-        .sensor => "Sensor",
-        .location => "Location",
-        .contacts => "Contacts",
-        .screen_capture => "Screen capture",
-        .notification_post => "Notification posting",
-        .background_execution => "Background execution",
-        .peer_ipc => "Peer IPC",
-    };
 }
 
 fn dataEgressIntentSummary(intent: manifest.DataEgressIntent, buffer: *[EGRESS_INTENT_BUFFER_BYTES]u8) []const u8 {
