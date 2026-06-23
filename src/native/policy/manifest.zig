@@ -707,6 +707,28 @@ pub fn dangerousPermissionKind(kind: PermissionKind) bool {
     };
 }
 
+// Canonical short display label for a permission kind. Review surfaces (the
+// compositor permission review, permission_review rendering, and the SDK review
+// tree) share this single source of truth; the humane permissions layer keeps
+// its own friendlier, separately-tested vocabulary on purpose.
+pub fn permissionDisplayLabel(kind: PermissionKind) []const u8 {
+    return switch (kind) {
+        .object_access => "Object access",
+        .network_egress => "Data egress",
+        .device_access => "Device access",
+        .clipboard => "Clipboard",
+        .camera => "Camera",
+        .mic => "Microphone",
+        .sensor => "Sensor",
+        .location => "Location",
+        .contacts => "Contacts",
+        .screen_capture => "Screen capture",
+        .notification_post => "Notification posting",
+        .background_execution => "Background execution",
+        .peer_ipc => "Peer IPC",
+    };
+}
+
 pub fn validateApplicationPackaging(bundle: BundleManifest) ValidationError!void {
     if (isUnsupportedCompatibilityNamespace(bundle.bundle_id)) return error.CompatibilityNamespaceUnsupported;
     if (!requiresApplicationPackaging(bundle.bundle_id)) return;
