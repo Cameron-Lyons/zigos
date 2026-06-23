@@ -35,10 +35,6 @@ pub const HarnessResult = struct {
     pub fn allRequiredGranted(self: *const HarnessResult) bool {
         return self.denied_required_count == 0;
     }
-
-    pub fn optionalDenialsCovered(self: *const HarnessResult) bool {
-        return self.optional_count == 0 or self.denied_optional_count != 0;
-    }
 };
 
 pub const Harness = struct {
@@ -66,23 +62,6 @@ pub const Harness = struct {
 
     pub fn deny(self: *Harness, kind: manifest.PermissionKind) HarnessError!void {
         try self.set(kind, null, .{ .allow = false });
-    }
-
-    pub fn allowResource(
-        self: *Harness,
-        kind: manifest.PermissionKind,
-        resource: []const u8,
-        lease_ticks: ?u64,
-    ) HarnessError!void {
-        try self.set(kind, resource, .{ .allow = true, .local_only = true, .lease_ticks = lease_ticks });
-    }
-
-    pub fn denyResource(
-        self: *Harness,
-        kind: manifest.PermissionKind,
-        resource: []const u8,
-    ) HarnessError!void {
-        try self.set(kind, resource, .{ .allow = false });
     }
 
     pub fn run(self: *const Harness) !HarnessResult {

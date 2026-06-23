@@ -84,18 +84,24 @@ pub fn writeAttachedBytes(volume: anytype, offset: usize, bytes: []const u8) boo
         const absolute_offset = offset + cursor;
         const sector_index = absolute_offset / volume_layout.sector_size;
         const sector_offset = absolute_offset % volume_layout.sector_size;
-        const chunk_len = @min(remaining, volume_layout.sector_size - sector_offset);
 
-        if (sector_offset == 0 and chunk_len == volume_layout.sector_size) {
-            if (!writeAttachedRange(volume, @intCast(sector_index), bytes[cursor .. cursor + chunk_len])) return false;
+        if (sector_offset == 0 and remaining >= volume_layout.sector_size) {
+            // Sector-aligned full-sector run: issue ONE multi-sector backend write
+            // instead of decomposing into a backend call per 512B sector.
+            const run_sectors = remaining / volume_layout.sector_size;
+            const run_len = run_sectors * volume_layout.sector_size;
+            if (!writeAttachedRange(volume, @intCast(sector_index), bytes[cursor .. cursor + run_len])) return false;
+            cursor += run_len;
+            remaining -= run_len;
         } else {
+            // Unaligned head or sub-sector tail: read-modify-write one sector.
+            const chunk_len = @min(remaining, volume_layout.sector_size - sector_offset);
             if (!readAttachedRange(volume, @intCast(sector_index), volume.sector_buffer[0..])) return false;
             @memcpy(volume.sector_buffer[sector_offset .. sector_offset + chunk_len], bytes[cursor .. cursor + chunk_len]);
             if (!writeAttachedRange(volume, @intCast(sector_index), volume.sector_buffer[0..])) return false;
+            cursor += chunk_len;
+            remaining -= chunk_len;
         }
-
-        cursor += chunk_len;
-        remaining -= chunk_len;
     }
     return true;
 }
@@ -108,11 +114,23 @@ pub fn readAttachedBytes(volume: anytype, offset: usize, buffer: []u8) bool {
         const absolute_offset = offset + cursor;
         const sector_index = absolute_offset / volume_layout.sector_size;
         const sector_offset = absolute_offset % volume_layout.sector_size;
-        const chunk_len = @min(remaining, volume_layout.sector_size - sector_offset);
-        if (!readAttachedRange(volume, @intCast(sector_index), volume.sector_buffer[0..])) return false;
-        @memcpy(buffer[cursor .. cursor + chunk_len], volume.sector_buffer[sector_offset .. sector_offset + chunk_len]);
-        cursor += chunk_len;
-        remaining -= chunk_len;
+
+        if (sector_offset == 0 and remaining >= volume_layout.sector_size) {
+            // Sector-aligned full-sector run: read directly into the caller buffer in
+            // ONE multi-sector backend read, avoiding both the per-sector backend call
+            // and the per-sector staging memcpy.
+            const run_sectors = remaining / volume_layout.sector_size;
+            const run_len = run_sectors * volume_layout.sector_size;
+            if (!readAttachedRange(volume, @intCast(sector_index), buffer[cursor .. cursor + run_len])) return false;
+            cursor += run_len;
+            remaining -= run_len;
+        } else {
+            const chunk_len = @min(remaining, volume_layout.sector_size - sector_offset);
+            if (!readAttachedRange(volume, @intCast(sector_index), volume.sector_buffer[0..])) return false;
+            @memcpy(buffer[cursor .. cursor + chunk_len], volume.sector_buffer[sector_offset .. sector_offset + chunk_len]);
+            cursor += chunk_len;
+            remaining -= chunk_len;
+        }
     }
     return true;
 }

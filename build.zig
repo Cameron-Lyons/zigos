@@ -7,7 +7,6 @@ const qemu_build = @import("build_support/qemu.zig");
 const tests_build = @import("build_support/tests.zig");
 const userspace_build = @import("build_support/userspace.zig");
 
-pub const BootProfile = shared.BootProfile;
 const required_zig_version = "0.16.0";
 
 pub fn build(b: *std.Build) void {

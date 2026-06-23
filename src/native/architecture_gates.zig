@@ -32,6 +32,9 @@ const sensitive_capture_service = @import("services/sensitive_capture_service.zi
 const agent_delegation_service = @import("services/agent_delegation_service.zig");
 const object_resilience_service = @import("services/object_resilience_service.zig");
 const personal_context_service = @import("services/personal_context_service.zig");
+const package_service = @import("services/package_service.zig");
+const driver_service = @import("drivers/driver_service.zig");
+const network_policy = @import("sync/network_policy.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
@@ -110,6 +113,15 @@ pub const indexed_hot_path_tables = .{
     },
     .personal_context_service = .{
         .uses_lease_arena = @hasDecl(@FieldType(personal_context_service.Service, "slots"), "reserve"),
+    },
+    .package_service = .{
+        .uses_bundle_arena = @hasDecl(@FieldType(package_service.Service, "slots"), "reserve"),
+    },
+    .driver_service = .{
+        .uses_driver_arena = @hasDecl(@FieldType(driver_service.Directory, "slots"), "reserve"),
+    },
+    .network_policy = .{
+        .uses_policy_arena = @hasDecl(@FieldType(network_policy.Directory, "policies"), "reserve"),
     },
     .event_ledger = .{
         .uses_event_arena = @hasField(event_ledger.Ledger, "events"),

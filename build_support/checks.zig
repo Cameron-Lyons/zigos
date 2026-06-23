@@ -3,11 +3,9 @@ const native_modules = @import("native_modules.zig");
 const tests_build = @import("tests.zig");
 
 pub const CheckSteps = struct {
-    test_roots: *std.Build.Step,
     host_tests: *std.Build.Step,
     spec_tests: *std.Build.Step,
     prod_readiness: *std.Build.Step,
-    release_security_check: *std.Build.Step,
     lint: *std.Build.Step,
 };
 
@@ -94,11 +92,9 @@ pub fn addCheckSteps(
     prod_readiness_step.dependOn(&release_security_test_cmd.step);
 
     return .{
-        .test_roots = zig_test_roots_step,
         .host_tests = host_tests_step,
         .spec_tests = spec_tests_step,
         .prod_readiness = prod_readiness_step,
-        .release_security_check = release_security_step,
         .lint = lint_step,
     };
 }

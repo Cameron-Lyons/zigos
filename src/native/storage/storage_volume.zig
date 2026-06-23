@@ -852,7 +852,9 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
     store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU32());
     if (store.versions.slots[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-    store.versions.slots[slot_index].version.chunk_count = try reader.readU16();
+    const chunk_count_value = try reader.readU16();
+    if (chunk_count_value > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
+    store.versions.slots[slot_index].version.chunk_count = chunk_count_value;
     store.versions.slots[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions.slots[slot_index].version.blob_address) orelse return error.CorruptImage;
 }
 
@@ -1136,7 +1138,9 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
         store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU32());
         if (store.versions.slots[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-        store.versions.slots[slot_index].version.chunk_count = try reader.readU16();
+        const chunk_count_value = try reader.readU16();
+        if (chunk_count_value > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
+        store.versions.slots[slot_index].version.chunk_count = chunk_count_value;
         store.versions.slots[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions.slots[slot_index].version.blob_address) orelse return error.CorruptImage;
     }
 

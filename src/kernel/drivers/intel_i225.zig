@@ -1,8 +1,11 @@
 const std = @import("std");
+const data_plane_boundary = @import("../net/data_plane_boundary.zig");
 
 pub const kernel_boundary_role = "bootstrap_i225_lm_inventory_shim";
-pub const publishes_full_network_service = false;
-pub const network_data_plane_exports_fail_closed = true;
+// Source the network-boundary facts from the single net-layer definition instead
+// of re-declaring the literals (ethernet.zig and link_port.zig source them too).
+pub const publishes_full_network_service = data_plane_boundary.publishes_full_network_service;
+pub const network_data_plane_exports_fail_closed = data_plane_boundary.network_data_plane_exports_fail_closed;
 
 pub const DESCRIPTOR_BYTES: u32 = 16;
 pub const MIN_RING_DESCRIPTORS: u32 = 64;

@@ -727,119 +727,11 @@ pub const TwentyFifthFeature = enum(u8) {
 
 pub const twenty_fifth_feature_count = std.meta.fields(TwentyFifthFeature).len;
 
-pub const Checklist = struct {
-    native_only_apps: bool,
-    no_compatibility_namespace: bool,
-    typed_component_services: bool,
-    explicit_capability_grants: bool,
-    object_native_storage: bool,
-    local_first_sync: bool,
-    policy_gated_egress: bool,
-    device_bound_identity: bool,
-    measured_boot_attestation: bool,
-    signed_reversible_updates: bool,
-    recovery_key_lifecycle: bool,
-    restartable_userspace_drivers: bool,
-    redacted_diagnostics: bool,
-    private_local_ai: bool,
-    typed_ai_inference_service: bool,
-    carbon_aware_scheduling: bool,
+// Checklist and ExtraChecklist use the same generic enum-indexed checklist as the
+// other 23 contracts below; the builders set features by @intFromEnum(...) name.
+pub const Checklist = FeatureChecklist(Feature);
 
-    pub fn complete(self: Checklist) bool {
-        inline for (std.meta.fields(Feature)) |field| {
-            if (!self.satisfied(@field(Feature, field.name))) return false;
-        }
-        return true;
-    }
-
-    pub fn satisfiedCount(self: Checklist) usize {
-        var count: usize = 0;
-        inline for (std.meta.fields(Feature)) |field| {
-            if (self.satisfied(@field(Feature, field.name))) count += 1;
-        }
-        return count;
-    }
-
-    pub fn satisfied(self: Checklist, feature: Feature) bool {
-        return switch (feature) {
-            .native_only_apps => self.native_only_apps,
-            .no_compatibility_namespace => self.no_compatibility_namespace,
-            .typed_component_services => self.typed_component_services,
-            .explicit_capability_grants => self.explicit_capability_grants,
-            .object_native_storage => self.object_native_storage,
-            .local_first_sync => self.local_first_sync,
-            .policy_gated_egress => self.policy_gated_egress,
-            .device_bound_identity => self.device_bound_identity,
-            .measured_boot_attestation => self.measured_boot_attestation,
-            .signed_reversible_updates => self.signed_reversible_updates,
-            .recovery_key_lifecycle => self.recovery_key_lifecycle,
-            .restartable_userspace_drivers => self.restartable_userspace_drivers,
-            .redacted_diagnostics => self.redacted_diagnostics,
-            .private_local_ai => self.private_local_ai,
-            .typed_ai_inference_service => self.typed_ai_inference_service,
-            .carbon_aware_scheduling => self.carbon_aware_scheduling,
-        };
-    }
-};
-
-pub const ExtraChecklist = struct {
-    permission_sensitivity_labels: bool,
-    user_visible_permission_reasons: bool,
-    secret_permissions_local_only: bool,
-    sensitive_remote_egress_intent: bool,
-    permission_digest_covers_privacy: bool,
-    package_preserves_permission_privacy: bool,
-    dangerous_permission_lint_reason: bool,
-    typed_privacy_budget_service: bool,
-    typed_diagnostics_export_service: bool,
-    privacy_budget_policy: bool,
-    camera_policy_gate: bool,
-    microphone_policy_gate: bool,
-    location_policy_gate: bool,
-    contacts_policy_gate: bool,
-    sensor_policy_gate: bool,
-    clipboard_policy_gate: bool,
-    peer_ipc_policy_gate: bool,
-    private_egress_budget_policy: bool,
-    data_egress_ledger: bool,
-    privacy_budget_ledger: bool,
-    diagnostics_private_egress_summary: bool,
-    remote_diagnostics_consent: bool,
-    process_hidden_observability_denied: bool,
-    process_continuous_observability_scope: bool,
-    ai_context_budget_policy: bool,
-    ai_training_audit_manifest: bool,
-    offline_ai_local_model_manifest: bool,
-    private_ai_diagnostics_redaction: bool,
-    compatibility_lint_rejection: bool,
-    native_registry_privacy_discovery: bool,
-    no_secret_remote_permissions: bool,
-    sensitive_permission_reason_validation: bool,
-    typed_diagnostics_share_validation: bool,
-    local_first_sensitive_defaults: bool,
-
-    pub fn complete(self: ExtraChecklist) bool {
-        inline for (std.meta.fields(ExtraFeature)) |field| {
-            if (!self.satisfied(@field(ExtraFeature, field.name))) return false;
-        }
-        return true;
-    }
-
-    pub fn satisfiedCount(self: ExtraChecklist) usize {
-        var count: usize = 0;
-        inline for (std.meta.fields(ExtraFeature)) |field| {
-            if (self.satisfied(@field(ExtraFeature, field.name))) count += 1;
-        }
-        return count;
-    }
-
-    pub fn satisfied(self: ExtraChecklist, feature: ExtraFeature) bool {
-        inline for (std.meta.fields(ExtraFeature)) |field| {
-            if (feature == @field(ExtraFeature, field.name)) return @field(self, field.name);
-        }
-        return false;
-    }
-};
+pub const ExtraChecklist = FeatureChecklist(ExtraFeature);
 
 fn FeatureChecklist(comptime FeatureEnum: type) type {
     const count = std.meta.fields(FeatureEnum).len;
@@ -892,28 +784,28 @@ pub const TwentyFifthChecklist = FeatureChecklist(TwentyFifthFeature);
 
 pub fn currentRepositoryContract() Checklist {
     const default_ai = manifest.AiMetadata{};
-    return .{
-        .native_only_apps = manifest.requiresApplicationPackaging("app.notes"),
-        .no_compatibility_namespace = !manifest.isApplicationBundle("compat.posix") and validationFailsWith(.{
-            .bundle_id = "compat.posix",
-            .display_name = "Compat POSIX",
-            .publisher = "zigos.dev",
-        }, error.CompatibilityNamespaceUnsupported),
-        .typed_component_services = contractPresent("zigos.service.registry"),
-        .explicit_capability_grants = true,
-        .object_native_storage = true,
-        .local_first_sync = true,
-        .policy_gated_egress = true,
-        .device_bound_identity = true,
-        .measured_boot_attestation = true,
-        .signed_reversible_updates = true,
-        .recovery_key_lifecycle = true,
-        .restartable_userspace_drivers = true,
-        .redacted_diagnostics = true,
-        .private_local_ai = !default_ai.training_allowed and default_ai.locality == .inherit_task,
-        .typed_ai_inference_service = contractPresent("zigos.ai.inference"),
-        .carbon_aware_scheduling = carbonAwareSchedulingBackedByPlanner(),
-    };
+    var features = [_]bool{false} ** feature_count;
+    features[@intFromEnum(Feature.native_only_apps)] = manifest.requiresApplicationPackaging("app.notes");
+    features[@intFromEnum(Feature.no_compatibility_namespace)] = !manifest.isApplicationBundle("compat.posix") and validationFailsWith(.{
+        .bundle_id = "compat.posix",
+        .display_name = "Compat POSIX",
+        .publisher = "zigos.dev",
+    }, error.CompatibilityNamespaceUnsupported);
+    features[@intFromEnum(Feature.typed_component_services)] = contractPresent("zigos.service.registry");
+    features[@intFromEnum(Feature.explicit_capability_grants)] = true;
+    features[@intFromEnum(Feature.object_native_storage)] = true;
+    features[@intFromEnum(Feature.local_first_sync)] = true;
+    features[@intFromEnum(Feature.policy_gated_egress)] = true;
+    features[@intFromEnum(Feature.device_bound_identity)] = true;
+    features[@intFromEnum(Feature.measured_boot_attestation)] = true;
+    features[@intFromEnum(Feature.signed_reversible_updates)] = true;
+    features[@intFromEnum(Feature.recovery_key_lifecycle)] = true;
+    features[@intFromEnum(Feature.restartable_userspace_drivers)] = true;
+    features[@intFromEnum(Feature.redacted_diagnostics)] = true;
+    features[@intFromEnum(Feature.private_local_ai)] = !default_ai.training_allowed and default_ai.locality == .inherit_task;
+    features[@intFromEnum(Feature.typed_ai_inference_service)] = contractPresent("zigos.ai.inference");
+    features[@intFromEnum(Feature.carbon_aware_scheduling)] = carbonAwareSchedulingBackedByPlanner();
+    return .{ .satisfied_features = features };
 }
 
 fn carbonAwareSchedulingBackedByPlanner() bool {
@@ -999,108 +891,108 @@ pub fn currentRepositoryExtraContract() ExtraChecklist {
         \\native object workspace:notes
     );
 
-    return .{
-        .permission_sensitivity_labels = default_permission.sensitivity == .internal_data and manifest.isSensitive(.private_user_data),
-        .user_visible_permission_reasons = reasoned_permission.user_visible_reason.len != 0,
-        .secret_permissions_local_only = validationFailsWith(.{
-            .bundle_id = "app.secret-camera",
-            .display_name = "Secret Camera",
-            .publisher = "zigos.dev",
-            .requested_permissions = &.{.{
-                .kind = .camera,
-                .resource = "camera.front",
-                .rights = .{ .device = .{} },
-                .sensitivity = .secret_user_data,
-            }},
-        }, error.SecretPermissionMustStayLocal),
-        .sensitive_remote_egress_intent = validationFailsWith(.{
-            .bundle_id = "zigos.private-egress",
-            .display_name = "Private Egress",
-            .publisher = "zigos.dev",
-            .requested_permissions = &.{.{
-                .kind = .network_egress,
-                .resource = "relay.private",
-                .rights = .{ .network_policy = .{ .network_remote = true } },
-                .sensitivity = .private_user_data,
-            }},
-        }, error.SensitiveRemoteEgressRequiresIntent),
-        .permission_digest_covers_privacy = !std.mem.eql(u8, &reason_digest_a, &reason_digest_b),
-        .package_preserves_permission_privacy = @hasField(package_model.StoredPermission, "sensitivity") and @hasField(package_model.StoredPermission, "user_visible_reason"),
-        .dangerous_permission_lint_reason = manifest_linter.lint(.{
-            .bundle_id = "app.camera",
-            .display_name = "Camera",
-            .publisher = "zigos.dev",
-            .requested_permissions = &.{.{
-                .kind = .camera,
-                .resource = "camera.front",
-                .rights = .{ .device = .{} },
-                .local_only = true,
-                .sensitivity = .private_user_data,
-            }},
-        }).count(.warning) != 0,
-        .typed_privacy_budget_service = contractPresent("zigos.privacy.budget"),
-        .typed_diagnostics_export_service = contractPresent("zigos.diagnostics.export"),
-        .privacy_budget_policy = @hasField(policy_object.SensitiveEgressRequest, "remote_bytes"),
-        .camera_policy_gate = @hasField(policy_object.CreateRequest, "camera_allowed"),
-        .microphone_policy_gate = @hasField(policy_object.CreateRequest, "microphone_allowed"),
-        .location_policy_gate = @hasField(policy_object.CreateRequest, "location_allowed"),
-        .contacts_policy_gate = @hasField(policy_object.CreateRequest, "contacts_allowed"),
-        .sensor_policy_gate = @hasField(policy_object.CreateRequest, "sensors_allowed"),
-        .clipboard_policy_gate = @hasField(policy_object.CreateRequest, "clipboard_allowed"),
-        .peer_ipc_policy_gate = @hasField(policy_object.CreateRequest, "peer_ipc_allowed"),
-        .private_egress_budget_policy = @hasField(policy_object.CreateRequest, "max_remote_private_egress_bytes"),
-        .data_egress_ledger = event_ledger.EventKind.data_egress == .data_egress,
-        .privacy_budget_ledger = event_ledger.EventKind.privacy_budget == .privacy_budget,
-        .diagnostics_private_egress_summary = @hasField(event_ledger.DiagnosticSummary, "private_egress_denials"),
-        .remote_diagnostics_consent = true,
-        .process_hidden_observability_denied = processHiddenObservabilityDeniedCheck(),
-        .process_continuous_observability_scope = processContinuousObservabilityScopeCheck(),
-        .ai_context_budget_policy = @hasField(policy_object.CreateRequest, "max_ai_context_bytes"),
-        .ai_training_audit_manifest = validationFailsWith(.{
-            .bundle_id = "app.training-ai",
-            .display_name = "Training AI",
-            .publisher = "zigos.dev",
-            .ai_metadata = .{
-                .training_allowed = true,
-            },
-        }, error.AiTrainingRequiresAudit),
-        .offline_ai_local_model_manifest = validationFailsWith(.{
-            .bundle_id = "app.offline-ai",
-            .display_name = "Offline AI",
-            .publisher = "zigos.dev",
-            .ai_metadata = .{
-                .offline_required = true,
-            },
-        }, error.OfflineAiRequiresLocalModel),
-        .private_ai_diagnostics_redaction = @hasField(event_ledger.DiagnosticSummary, "ai_remote_denials"),
-        .compatibility_lint_rejection = compat_report.hasErrors(),
-        .native_registry_privacy_discovery = typed_component_abi.interfaceId(.privacy_budget) == .privacy_budget,
-        .no_secret_remote_permissions = validationFailsWith(.{
-            .bundle_id = "app.secret-egress",
-            .display_name = "Secret Egress",
-            .publisher = "zigos.dev",
-            .requested_permissions = &.{.{
-                .kind = .network_egress,
-                .resource = "relay.secret",
-                .rights = .{ .network_policy = .{ .network_remote = true } },
-                .sensitivity = .secret_user_data,
-            }},
-        }, error.SecretPermissionMustStayLocal),
-        .sensitive_permission_reason_validation = validationFailsWith(.{
-            .bundle_id = "app.private-camera",
-            .display_name = "Private Camera",
-            .publisher = "zigos.dev",
-            .requested_permissions = &.{.{
-                .kind = .camera,
-                .resource = "camera.front",
-                .rights = .{ .device = .{} },
-                .local_only = true,
-                .sensitivity = .private_user_data,
-            }},
-        }, error.SensitivePermissionRequiresReason),
-        .typed_diagnostics_share_validation = contractOperationPresent("zigos.diagnostics.export", .diagnostics_share_remote),
-        .local_first_sensitive_defaults = !manifest.isSensitive(default_permission.sensitivity) and default_permission.local_only,
-    };
+    var features = [_]bool{false} ** extra_feature_count;
+    features[@intFromEnum(ExtraFeature.permission_sensitivity_labels)] = default_permission.sensitivity == .internal_data and manifest.isSensitive(.private_user_data);
+    features[@intFromEnum(ExtraFeature.user_visible_permission_reasons)] = reasoned_permission.user_visible_reason.len != 0;
+    features[@intFromEnum(ExtraFeature.secret_permissions_local_only)] = validationFailsWith(.{
+        .bundle_id = "app.secret-camera",
+        .display_name = "Secret Camera",
+        .publisher = "zigos.dev",
+        .requested_permissions = &.{.{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{} },
+            .sensitivity = .secret_user_data,
+        }},
+    }, error.SecretPermissionMustStayLocal);
+    features[@intFromEnum(ExtraFeature.sensitive_remote_egress_intent)] = validationFailsWith(.{
+        .bundle_id = "zigos.private-egress",
+        .display_name = "Private Egress",
+        .publisher = "zigos.dev",
+        .requested_permissions = &.{.{
+            .kind = .network_egress,
+            .resource = "relay.private",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .sensitivity = .private_user_data,
+        }},
+    }, error.SensitiveRemoteEgressRequiresIntent);
+    features[@intFromEnum(ExtraFeature.permission_digest_covers_privacy)] = !std.mem.eql(u8, &reason_digest_a, &reason_digest_b);
+    features[@intFromEnum(ExtraFeature.package_preserves_permission_privacy)] = @hasField(package_model.StoredPermission, "sensitivity") and @hasField(package_model.StoredPermission, "user_visible_reason");
+    features[@intFromEnum(ExtraFeature.dangerous_permission_lint_reason)] = manifest_linter.lint(.{
+        .bundle_id = "app.camera",
+        .display_name = "Camera",
+        .publisher = "zigos.dev",
+        .requested_permissions = &.{.{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{} },
+            .local_only = true,
+            .sensitivity = .private_user_data,
+        }},
+    }).count(.warning) != 0;
+    features[@intFromEnum(ExtraFeature.typed_privacy_budget_service)] = contractPresent("zigos.privacy.budget");
+    features[@intFromEnum(ExtraFeature.typed_diagnostics_export_service)] = contractPresent("zigos.diagnostics.export");
+    features[@intFromEnum(ExtraFeature.privacy_budget_policy)] = @hasField(policy_object.SensitiveEgressRequest, "remote_bytes");
+    features[@intFromEnum(ExtraFeature.camera_policy_gate)] = @hasField(policy_object.CreateRequest, "camera_allowed");
+    features[@intFromEnum(ExtraFeature.microphone_policy_gate)] = @hasField(policy_object.CreateRequest, "microphone_allowed");
+    features[@intFromEnum(ExtraFeature.location_policy_gate)] = @hasField(policy_object.CreateRequest, "location_allowed");
+    features[@intFromEnum(ExtraFeature.contacts_policy_gate)] = @hasField(policy_object.CreateRequest, "contacts_allowed");
+    features[@intFromEnum(ExtraFeature.sensor_policy_gate)] = @hasField(policy_object.CreateRequest, "sensors_allowed");
+    features[@intFromEnum(ExtraFeature.clipboard_policy_gate)] = @hasField(policy_object.CreateRequest, "clipboard_allowed");
+    features[@intFromEnum(ExtraFeature.peer_ipc_policy_gate)] = @hasField(policy_object.CreateRequest, "peer_ipc_allowed");
+    features[@intFromEnum(ExtraFeature.private_egress_budget_policy)] = @hasField(policy_object.CreateRequest, "max_remote_private_egress_bytes");
+    features[@intFromEnum(ExtraFeature.data_egress_ledger)] = event_ledger.EventKind.data_egress == .data_egress;
+    features[@intFromEnum(ExtraFeature.privacy_budget_ledger)] = event_ledger.EventKind.privacy_budget == .privacy_budget;
+    features[@intFromEnum(ExtraFeature.diagnostics_private_egress_summary)] = @hasField(event_ledger.DiagnosticSummary, "private_egress_denials");
+    features[@intFromEnum(ExtraFeature.remote_diagnostics_consent)] = true;
+    features[@intFromEnum(ExtraFeature.process_hidden_observability_denied)] = processHiddenObservabilityDeniedCheck();
+    features[@intFromEnum(ExtraFeature.process_continuous_observability_scope)] = processContinuousObservabilityScopeCheck();
+    features[@intFromEnum(ExtraFeature.ai_context_budget_policy)] = @hasField(policy_object.CreateRequest, "max_ai_context_bytes");
+    features[@intFromEnum(ExtraFeature.ai_training_audit_manifest)] = validationFailsWith(.{
+        .bundle_id = "app.training-ai",
+        .display_name = "Training AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .training_allowed = true,
+        },
+    }, error.AiTrainingRequiresAudit);
+    features[@intFromEnum(ExtraFeature.offline_ai_local_model_manifest)] = validationFailsWith(.{
+        .bundle_id = "app.offline-ai",
+        .display_name = "Offline AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .offline_required = true,
+        },
+    }, error.OfflineAiRequiresLocalModel);
+    features[@intFromEnum(ExtraFeature.private_ai_diagnostics_redaction)] = @hasField(event_ledger.DiagnosticSummary, "ai_remote_denials");
+    features[@intFromEnum(ExtraFeature.compatibility_lint_rejection)] = compat_report.hasErrors();
+    features[@intFromEnum(ExtraFeature.native_registry_privacy_discovery)] = typed_component_abi.interfaceId(.privacy_budget) == .privacy_budget;
+    features[@intFromEnum(ExtraFeature.no_secret_remote_permissions)] = validationFailsWith(.{
+        .bundle_id = "app.secret-egress",
+        .display_name = "Secret Egress",
+        .publisher = "zigos.dev",
+        .requested_permissions = &.{.{
+            .kind = .network_egress,
+            .resource = "relay.secret",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .sensitivity = .secret_user_data,
+        }},
+    }, error.SecretPermissionMustStayLocal);
+    features[@intFromEnum(ExtraFeature.sensitive_permission_reason_validation)] = validationFailsWith(.{
+        .bundle_id = "app.private-camera",
+        .display_name = "Private Camera",
+        .publisher = "zigos.dev",
+        .requested_permissions = &.{.{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{} },
+            .local_only = true,
+            .sensitivity = .private_user_data,
+        }},
+    }, error.SensitivePermissionRequiresReason);
+    features[@intFromEnum(ExtraFeature.typed_diagnostics_share_validation)] = contractOperationPresent("zigos.diagnostics.export", .diagnostics_share_remote);
+    features[@intFromEnum(ExtraFeature.local_first_sensitive_defaults)] = !manifest.isSensitive(default_permission.sensitivity) and default_permission.local_only;
+    return .{ .satisfied_features = features };
 }
 
 fn processContractTask(

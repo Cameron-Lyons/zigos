@@ -406,7 +406,7 @@ pub const ResidentState = struct {
 
     pub fn networkPolicyCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.network_policies.policies) |slot| {
+        for (self.persisted_state.network_policies.policies.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -470,7 +470,7 @@ pub const ResidentState = struct {
 
     pub fn nextPersistedPolicyId(self: *const ResidentState) u64 {
         var next_id: u64 = 1;
-        for (self.persisted_state.network_policies.policies) |slot| {
+        for (self.persisted_state.network_policies.policies.slots) |slot| {
             if (!slot.in_use) continue;
             next_id = @max(next_id, slot.policy.id + 1);
         }

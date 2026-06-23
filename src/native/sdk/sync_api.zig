@@ -7,7 +7,7 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const sync_service_facade = @import("../sync/sync_service.zig");
 
-const sync_service = sync_service_facade.api;
+const sync_service = sync_service_facade;
 
 pub const TransportMode = sync_service.TransportMode;
 pub const WorkspacePolicy = sync_service.WorkspacePolicy;

@@ -15,6 +15,9 @@ const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
 const PAGE_SIZE: u32 = 4096;
+// Sectors per single-PRP transfer: the bounce frame is one page, so a single NVMe
+// command moves at most this many sectors (8). The backend batches up to this.
+const BOUNCE_SECTORS: usize = PAGE_SIZE / SECTOR_BYTES;
 
 // Controller register offsets (bytes from BAR0).
 const REG_CAP: usize = 0x00; // 64-bit capabilities
@@ -56,6 +59,7 @@ pub const Error = error{
     CommandFailed,
     TransferTooLarge,
     EmptyTransfer,
+    LbaOutOfRange,
     NamespaceMissing,
     UnsupportedLbaFormat,
 };
@@ -285,6 +289,10 @@ fn ioCommand(self: *Controller, opcode: u32, lba: u64, buffer_phys: u32, sector_
     // underflow to 0xFFFF_FFFF and request a 4 GiB transfer.
     if (sector_count == 0) return error.EmptyTransfer;
     if (@as(usize, sector_count) * self.lba_bytes > PAGE_SIZE) return error.TransferTooLarge;
+    // Fail closed against the identified namespace size (NSZE) instead of trusting
+    // the controller to reject an out-of-range LBA. Overflow-safe: the `or`
+    // short-circuits so `namespace_sectors - lba` only runs once lba is in range.
+    if (lba > self.namespace_sectors or self.namespace_sectors - lba < sector_count) return error.LbaOutOfRange;
     var cmd = [_]u32{0} ** 16;
     cmd[0] = opcode;
     cmd[1] = self.nsid;
@@ -304,9 +312,10 @@ pub fn writeSectors(self: *Controller, lba: u64, buffer_phys: u32, sector_count:
 }
 
 fn zeroFrame(phys: u32) void {
-    const bytes: [*]volatile u8 = @ptrFromInt(phys);
-    var i: usize = 0;
-    while (i < PAGE_SIZE) : (i += 1) bytes[i] = 0;
+    // Freshly allocated normal-RAM frame, not yet handed to the controller, so a
+    // bulk non-volatile @memset is safe and far cheaper than a byte loop.
+    const bytes: [*]u8 = @ptrFromInt(phys);
+    @memset(bytes[0..PAGE_SIZE], 0);
 }
 
 // ---- Storage backend integration ----------------------------------------
@@ -315,7 +324,7 @@ fn zeroFrame(phys: u32) void {
 // that `callconv(.c) fn(start_lba, ptr, len) bool` contract with one global
 // active controller plus a page-aligned bounce buffer, so callers need no
 // alignment guarantees. (General sector-multiple lengths are handled by
-// looping a sector at a time.)
+// looping one page — BOUNCE_SECTORS — per NVMe command.)
 var active_controller: Controller = undefined;
 var active_present: bool = false;
 var bounce_phys: u32 = 0;
@@ -401,14 +410,18 @@ pub fn attachAsBackend(dev: pci.PCIDevice) Error!void {
 pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
     if (!active_present or bounce_phys == 0) return false;
     if (buffer_len == 0 or buffer_len % SECTOR_BYTES != 0) return false;
-    const bounce: [*]volatile u8 = @ptrFromInt(bounce_phys);
-    const sectors = buffer_len / SECTOR_BYTES;
+    // submit() polls completion before returning, and x86 DMA to normal RAM is
+    // cache-coherent, so the bounce frame is stable and can be read non-volatile.
+    const bounce: [*]u8 = @ptrFromInt(bounce_phys);
+    const total_sectors = buffer_len / SECTOR_BYTES;
     var sector: usize = 0;
-    while (sector < sectors) : (sector += 1) {
-        readSectors(&active_controller, start_lba + sector, bounce_phys, 1) catch return false;
-        const dst = buffer_ptr + sector * SECTOR_BYTES;
-        var i: usize = 0;
-        while (i < SECTOR_BYTES) : (i += 1) dst[i] = bounce[i];
+    while (sector < total_sectors) {
+        // One NVMe command per page (single-PRP limit), not per 512B sector.
+        const chunk = @min(total_sectors - sector, BOUNCE_SECTORS);
+        const chunk_bytes = chunk * SECTOR_BYTES;
+        readSectors(&active_controller, start_lba + sector, bounce_phys, @intCast(chunk)) catch return false;
+        @memcpy((buffer_ptr + sector * SECTOR_BYTES)[0..chunk_bytes], bounce[0..chunk_bytes]);
+        sector += chunk;
     }
     return true;
 }
@@ -416,14 +429,19 @@ pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callcon
 pub fn backendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
     if (!active_present or bounce_phys == 0) return false;
     if (buffer_len == 0 or buffer_len % SECTOR_BYTES != 0) return false;
-    const bounce: [*]volatile u8 = @ptrFromInt(bounce_phys);
-    const sectors = buffer_len / SECTOR_BYTES;
+    // Fill the bounce frame with a bulk @memcpy; the subsequent writeSectors()
+    // doorbell is a volatile MMIO store, and x86-TSO keeps these RAM stores
+    // ordered ahead of it so the controller observes the staged data.
+    const bounce: [*]u8 = @ptrFromInt(bounce_phys);
+    const total_sectors = buffer_len / SECTOR_BYTES;
     var sector: usize = 0;
-    while (sector < sectors) : (sector += 1) {
-        const src = buffer_ptr + sector * SECTOR_BYTES;
-        var i: usize = 0;
-        while (i < SECTOR_BYTES) : (i += 1) bounce[i] = src[i];
-        writeSectors(&active_controller, start_lba + sector, bounce_phys, 1) catch return false;
+    while (sector < total_sectors) {
+        // One NVMe command per page (single-PRP limit), not per 512B sector.
+        const chunk = @min(total_sectors - sector, BOUNCE_SECTORS);
+        const chunk_bytes = chunk * SECTOR_BYTES;
+        @memcpy(bounce[0..chunk_bytes], (buffer_ptr + sector * SECTOR_BYTES)[0..chunk_bytes]);
+        writeSectors(&active_controller, start_lba + sector, bounce_phys, @intCast(chunk)) catch return false;
+        sector += chunk;
     }
     return true;
 }

@@ -160,6 +160,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         secret_transfer_adapter: SecretTransferAdapter = sync_adapters.default_secret_transfer_adapter,
         database_sync_adapter: DatabaseSyncAdapter = sync_adapters.default_database_sync_adapter,
         transport_queue: TransportQueue = TransportQueue.init(),
+        // Coalesces the full-state checkpoint across an inbound replication burst:
+        // while a batch is open, acceptTransportFrame defers its checkpoint and one
+        // is flushed when the batch closes. Mirrors the outbound ack coalescing and
+        // the event_ledger persistence batch. Standalone callers (depth 0) stay
+        // durable per call.
+        replication_batch_depth: usize = 0,
+        replication_checkpoint_pending: bool = false,
 
         fn initDefault(service_id: u64, task_id: u64, owner: principal.PrincipalId) Self {
             return .{
@@ -789,19 +796,56 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 request.version_id,
                 request.workspace_generation,
             );
-            try self.checkpoint();
+            if (self.replication_batch_depth > 0) {
+                self.replication_checkpoint_pending = true;
+            } else {
+                try self.checkpoint();
+            }
             return accepted;
         }
 
-        pub fn ackOutboundTransportFrame(self: *Self, frame_id: u64) Error!bool {
-            for (&self.state().outbound_transport_frames) |*slot| {
-                if (!slot.in_use or slot.frame.id != frame_id) continue;
-                if (slot.acked) return false;
-                slot.acked = true;
-                try self.checkpoint();
-                return true;
+        // Open an inbound replication batch: subsequent acceptTransportFrame calls
+        // defer their checkpoint until endReplicationBatch closes the outermost batch.
+        pub fn beginReplicationBatch(self: *Self) void {
+            self.replication_batch_depth += 1;
+        }
+
+        // Close a batch and, when the outermost one closes, flush exactly one
+        // checkpoint if any inbound frame deferred it.
+        pub fn endReplicationBatch(self: *Self) Error!void {
+            if (self.replication_batch_depth != 0) self.replication_batch_depth -= 1;
+            if (self.replication_batch_depth != 0) return;
+            if (!self.replication_checkpoint_pending) return;
+            self.replication_checkpoint_pending = false;
+            try self.checkpoint();
+        }
+
+        // Abandon a batch without flushing (error path); clears the deferred
+        // checkpoint once the outermost batch is gone so it cannot leak forward.
+        pub fn cancelReplicationBatch(self: *Self) void {
+            if (self.replication_batch_depth != 0) self.replication_batch_depth -= 1;
+            if (self.replication_batch_depth == 0) self.replication_checkpoint_pending = false;
+        }
+
+        // Acknowledge a batch of delivered outbound frames with a single
+        // checkpoint at the end. The per-frame variant used to run a full state
+        // re-persist (encode every table + storage scan) for each frame; a
+        // replication pass delivers many frames at once, so coalescing collapses N
+        // full persists into one. Returns the count newly marked acked.
+        pub fn ackOutboundTransportFrames(self: *Self, frame_ids: []const u64) Error!usize {
+            var newly_acked: usize = 0;
+            for (frame_ids) |frame_id| {
+                for (&self.state().outbound_transport_frames) |*slot| {
+                    if (!slot.in_use or slot.frame.id != frame_id) continue;
+                    if (!slot.acked) {
+                        slot.acked = true;
+                        newly_acked += 1;
+                    }
+                    break;
+                }
             }
-            return false;
+            if (newly_acked > 0) try self.checkpoint();
+            return newly_acked;
         }
 
         pub fn transferSecretObject(
@@ -1361,7 +1405,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn enqueueTransportFrame(self: *Self, queue_kind: TransportQueueKind, request: TransportFrameRequest) Error!TransportFrame {
-            const slot = self.allocateTransportFrameSlot(queue_kind) orelse return error.TransportQueueFull;
+            const slot = self.allocateTransportFrameSlot(queue_kind) orelse
+                self.reclaimInboundTransportFrameSlot(queue_kind) orelse
+                return error.TransportQueueFull;
             const frame_id = self.nextTransportFrameId();
             slot.* = .{};
             slot.in_use = true;
@@ -1395,6 +1441,46 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 if (!slot.in_use) return slot;
             }
             return null;
+        }
+
+        // When the inbound table is full, reclaim the oldest frame that is already
+        // OUTSIDE its scope's replay window. Such a frame is redundant: a re-send of it
+        // is rejected by replayWindowRejects (its source_frame_id is at least
+        // TRANSPORT_REPLAY_WINDOW behind the scope's high-water), so dedup no longer
+        // needs it. Frames inside any scope's window are never evicted, and a scope's
+        // highest source_frame_id is never evicted, so both the duplicate set and the
+        // scan-derived replay floor stay sound. This turns the hard TransportQueueFull
+        // cliff (inbound sync permanently breaking after MAX_TRANSPORT_FRAMES distinct
+        // frames) into a bounded most-recent window. Only inbound evicts (outbound is
+        // reclaimed by acking). Returns null (fail closed) only in the pathological
+        // case where every resident frame is still within some scope's replay window.
+        fn reclaimInboundTransportFrameSlot(self: *Self, queue_kind: TransportQueueKind) ?*DurableTransportFrameSlot {
+            if (queue_kind != .inbound) return null;
+            const frames = &self.state().inbound_transport_frames;
+            var victim_index: ?usize = null;
+            var victim_source_frame_id: u64 = std.math.maxInt(u64);
+            for (frames, 0..) |slot, index| {
+                if (!slot.in_use) continue;
+                if (slot.frame.source_frame_id >= victim_source_frame_id) continue;
+                if (!self.inboundFrameOutsideReplayWindow(&slot.frame)) continue;
+                victim_index = index;
+                victim_source_frame_id = slot.frame.source_frame_id;
+            }
+            const index = victim_index orelse return null;
+            frames[index] = .{};
+            return &frames[index];
+        }
+
+        fn inboundFrameOutsideReplayWindow(self: *const Self, frame: *const state_support.TransportFrame) bool {
+            var high_water: u64 = 0;
+            for (self.stateConst().inbound_transport_frames) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.frame.workspace_id != frame.workspace_id) continue;
+                if (!slot.frame.source_device.eql(frame.source_device)) continue;
+                if (!slot.frame.target_device.eql(frame.target_device)) continue;
+                high_water = @max(high_water, slot.frame.source_frame_id);
+            }
+            return frame.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= high_water;
         }
 
         fn transportFrameSlotCount(self: *const Self, queue_kind: TransportQueueKind) usize {

@@ -58,7 +58,7 @@ install_macos() {
   fi
 
   log "Installing dependencies with Homebrew..."
-  brew install zig nasm qemu dosfstools e2fsprogs xorriso mtools i686-elf-grub
+  brew install zig nasm qemu dosfstools xorriso mtools i686-elf-grub
 }
 
 install_apt() {
@@ -67,7 +67,7 @@ install_apt() {
 
   log "Installing dependencies with apt..."
   ${s} apt-get update
-  ${s} apt-get install -y nasm qemu-system-x86 qemu-system-i386 ovmf grub-common grub-pc-bin dosfstools e2fsprogs xorriso mtools
+  ${s} apt-get install -y nasm qemu-system-x86 qemu-system-i386 ovmf grub-common grub-pc-bin dosfstools xorriso mtools
 
   if ! have_cmd zig; then
     if ! ${s} apt-get install -y zig; then
@@ -81,7 +81,7 @@ install_dnf() {
   s="$(sudo_cmd)"
 
   log "Installing dependencies with dnf..."
-  ${s} dnf install -y zig nasm qemu-system-x86 edk2-ovmf grub2-tools grub2-tools-extra dosfstools e2fsprogs xorriso mtools
+  ${s} dnf install -y zig nasm qemu-system-x86 edk2-ovmf grub2-tools grub2-tools-extra dosfstools xorriso mtools
 }
 
 install_pacman() {
@@ -89,7 +89,7 @@ install_pacman() {
   s="$(sudo_cmd)"
 
   log "Installing dependencies with pacman..."
-  ${s} pacman -Sy --noconfirm zig nasm grub edk2-ovmf dosfstools e2fsprogs xorriso mtools
+  ${s} pacman -Sy --noconfirm zig nasm grub edk2-ovmf dosfstools xorriso mtools
 
   if ! ${s} pacman -S --noconfirm qemu-full; then
     if ! ${s} pacman -S --noconfirm qemu-desktop; then
@@ -102,7 +102,7 @@ verify_tools() {
   log "Verifying toolchain..."
 
   local missing=0
-  for cmd in nasm qemu-system-x86_64 xorriso mformat mcopy mmd mkfs.fat mke2fs; do
+  for cmd in nasm qemu-system-x86_64 xorriso mformat mcopy mmd mkfs.fat; do
     if ! have_cmd "${cmd}"; then
       log "Missing command: ${cmd}"
       missing=1

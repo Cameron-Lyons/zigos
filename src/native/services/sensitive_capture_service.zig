@@ -97,11 +97,6 @@ pub const Session = struct {
     active: bool = false,
     revoked: bool = false,
     sensitivity: manifest.DataSensitivity = .internal_data,
-
-    pub fn samplesRemaining(self: *const Session) u32 {
-        if (self.sample_count >= self.sample_budget) return 0;
-        return self.sample_budget - self.sample_count;
-    }
 };
 
 const Slot = struct {

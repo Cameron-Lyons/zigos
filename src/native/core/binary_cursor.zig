@@ -14,7 +14,10 @@ pub fn Writer(comptime ErrorSet: type, comptime full_error: ErrorSet) type {
         }
 
         pub fn writeBytes(self: *Self, bytes: []const u8) ErrorSet!void {
-            if (self.offset + bytes.len > self.buffer.len) return full_error;
+            // Wrap-safe: offset <= buffer.len always holds (offset only advances
+            // after a passing check), so buffer.len - offset never underflows. The
+            // naive `offset + bytes.len` form can wrap on a hostile huge length.
+            if (bytes.len > self.buffer.len - self.offset) return full_error;
             @memcpy(self.buffer[self.offset .. self.offset + bytes.len], bytes);
             self.offset += bytes.len;
         }
@@ -54,13 +57,13 @@ pub fn Reader(comptime ErrorSet: type, comptime corrupt_error: ErrorSet) type {
         }
 
         pub fn readBytes(self: *Self, dest: []u8) ErrorSet!void {
-            if (self.offset + dest.len > self.buffer.len) return corrupt_error;
+            if (dest.len > self.buffer.len - self.offset) return corrupt_error;
             @memcpy(dest, self.buffer[self.offset .. self.offset + dest.len]);
             self.offset += dest.len;
         }
 
         pub fn readSlice(self: *Self, len: usize) ErrorSet![]const u8 {
-            if (self.offset + len > self.buffer.len) return corrupt_error;
+            if (len > self.buffer.len - self.offset) return corrupt_error;
             const slice = self.buffer[self.offset .. self.offset + len];
             self.offset += len;
             return slice;

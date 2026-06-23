@@ -38,6 +38,9 @@ const ATA_WORDS_PER_SECTOR: usize = storage_volume.sector_size / @sizeOf(u16);
 const ATA_DRIVE_SELECT_MASTER: u8 = 0xE0;
 const ATA_DRIVE_SELECT_SLAVE: u8 = 0xF0;
 const ATA_LBA28_HEAD_MASK: u64 = 0x0F;
+// LBA28 addresses 2^28 sectors; issueLba28Command only programs the low 28 bits,
+// so a transfer reaching past this would silently wrap to the wrong sector.
+const ATA_LBA28_SECTOR_LIMIT: u64 = 0x1000_0000;
 const ATA_ALT_STATUS_SETTLE_READS: usize = 4;
 const ATA_POLL_LIMIT: u32 = 100_000;
 
@@ -200,8 +203,18 @@ fn readSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []u8
     }
 }
 
+fn validateAtaTransferRange(session: *const AtaControllerSession, start_lba: u64, buffer_len: usize) AtaDriverError!void {
+    if (buffer_len == 0 or buffer_len % storage_volume.sector_size != 0) return error.InvalidParameter;
+    const total_sectors = buffer_len / storage_volume.sector_size;
+    // Fail closed before issuing any chunk: the transfer must fit the device and
+    // be addressable in 28-bit LBA. The `or` short-circuits each subtraction so
+    // the bound stays overflow-safe for a hostile start_lba.
+    if (start_lba > session.sector_count or session.sector_count - start_lba < total_sectors) return error.InvalidParameter;
+    if (start_lba >= ATA_LBA28_SECTOR_LIMIT or ATA_LBA28_SECTOR_LIMIT - start_lba < total_sectors) return error.InvalidParameter;
+}
+
 fn transferReadRangeChecked(session: *AtaControllerSession, start_lba: u64, buffer: []u8) AtaDriverError!void {
-    if (buffer.len == 0 or buffer.len % storage_volume.sector_size != 0) return error.InvalidParameter;
+    try validateAtaTransferRange(session, start_lba, buffer.len);
 
     var offset: usize = 0;
     var lba = start_lba;
@@ -238,7 +251,7 @@ fn writeSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []c
 }
 
 fn transferWriteRangeChecked(session: *AtaControllerSession, start_lba: u64, buffer: []const u8) AtaDriverError!void {
-    if (buffer.len == 0 or buffer.len % storage_volume.sector_size != 0) return error.InvalidParameter;
+    try validateAtaTransferRange(session, start_lba, buffer.len);
 
     var offset: usize = 0;
     var lba = start_lba;

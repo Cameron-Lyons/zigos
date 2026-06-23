@@ -14,6 +14,7 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
+const kinds = @import("event_kinds.zig");
 const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
 
@@ -43,88 +44,13 @@ const PersistentHeader = extern struct {
     next_sequence: u64 = 1,
 };
 
-pub const EventKind = enum(u8) {
-    permission_decision,
-    process_crash,
-    driver_restart,
-    update_transition,
-    sync_conflict,
-    device_trust_change,
-    permission_review,
-    capability_grant,
-    capability_revocation,
-    notification,
-    task_flow,
-    task_lifecycle,
-    policy_change,
-    suspicious_app_behavior,
-    session_posture,
-    ai_inference,
-    ai_model_attestation,
-    data_egress,
-    privacy_budget,
-    data_export,
-    data_deletion,
-    retention_policy,
-    permission_lease,
-    consent_receipt,
-    agent_delegation,
-    agent_session,
-    attention_policy,
-    accessibility_profile,
-    background_activity,
-    resource_governance,
-    network_session,
-    pasteboard_access,
-    object_resilience,
-    semantic_memory,
-    identity_credential,
-    sensitive_capture,
-    secret_vault,
-};
-
-pub const PolicyChangeAction = enum(u8) {
-    applied,
-    overridden,
-    revoked,
-};
-
-pub const PermissionLeaseAction = enum(u8) {
-    issued,
-    renewed,
-    expired,
-};
-
-pub const ConsentReceiptAction = enum(u8) {
-    recorded,
-    revoked,
-};
-
-pub const TaskLifecycleOperation = enum(u8) {
-    suspend_task,
-    resume_task,
-    terminate_task,
-};
-
-pub const NetworkSessionAction = enum(u8) {
-    open,
-    transfer,
-    revoke,
-    complete,
-};
-
-pub const NetworkSessionReason = enum(u8) {
-    none,
-    policy_denied,
-    capability_denied,
-    destination_mismatch,
-    attestation_required,
-    byte_limit_exceeded,
-    session_expired,
-    session_revoked,
-    session_completed,
-    source_mismatch,
-};
+pub const EventKind = kinds.EventKind;
+pub const PolicyChangeAction = kinds.PolicyChangeAction;
+pub const PermissionLeaseAction = kinds.PermissionLeaseAction;
+pub const ConsentReceiptAction = kinds.ConsentReceiptAction;
+pub const TaskLifecycleOperation = kinds.TaskLifecycleOperation;
+pub const NetworkSessionAction = kinds.NetworkSessionAction;
+pub const NetworkSessionReason = kinds.NetworkSessionReason;
 
 pub const ExportOptions = struct {
     include_protected_content: bool = false,
@@ -1802,7 +1728,17 @@ pub const Ledger = struct {
 
     fn appendEvent(self: *Ledger, event: *const Event) Error!void {
         const sequence = self.next_sequence;
-        const event_index = self.events.reserveIndex(sequence) orelse return error.EventTableFull;
+        const event_index = self.events.reserveIndex(sequence) orelse reserve: {
+            // The live arena is a bounded most-recent-N ring: the persistence layer
+            // already stages deletion of events older than MAX_PERSISTED_EVENTS
+            // (see persistRange), so when the in-memory arena fills we evict the
+            // oldest event rather than jamming with EventTableFull. Without this the
+            // tamper-evident audit ledger would permanently stop accepting capability,
+            // crash, and sensitive-capture records after MAX_EVENTS lifetime events.
+            if (!self.evictOldestEvent()) return error.EventTableFull;
+            try self.rebuildIndexes();
+            break :reserve self.events.reserveIndex(sequence) orelse return error.EventTableFull;
+        };
         const slot = &self.events.slots[event_index];
         slot.event = event.*;
         slot.event.sequence = sequence;
@@ -1817,6 +1753,26 @@ pub const Ledger = struct {
         } else {
             self.markPendingPersistence(&slot.event);
         }
+    }
+
+    fn evictOldestEvent(self: *Ledger) bool {
+        var oldest_index: ?usize = null;
+        var oldest_sequence: u64 = std.math.maxInt(u64);
+        for (&self.events.slots, 0..) |*slot, index| {
+            if (!slot.in_use) continue;
+            if (slot.event.sequence < oldest_sequence) {
+                oldest_sequence = slot.event.sequence;
+                oldest_index = index;
+            }
+        }
+        const index = oldest_index orelse return false;
+        const removed = self.events.removeIndex(index);
+        // The ledger persists by sequence number (see persistRange), not via the
+        // arena's dirty-id set, so that set is unused here. Clear it during eviction
+        // so a recycling ring cannot accumulate more distinct dirty keys than the
+        // arena's dirty-id capacity.
+        self.events.clearDirty();
+        return removed;
     }
 
     fn visitMatching(

@@ -101,30 +101,6 @@ qemu_harness_build_kernel_command() {
   QEMU_HARNESS_COMMAND+=("$@")
 }
 
-qemu_harness_build_cdrom_command() {
-  local iso_path="${1:?ISO path required}"
-  local memory_size="${2:?QEMU memory size required}"
-  local serial_target="${3:?serial target required}"
-
-  qemu_harness_require_binary
-  qemu_harness_load_extra_args
-
-  QEMU_HARNESS_COMMAND=(
-    "$(qemu_harness_binary)"
-    -cdrom "$iso_path"
-    -boot d
-    -m "$memory_size"
-    -display none
-    -serial "$serial_target"
-    -monitor none
-    -no-reboot
-    -no-shutdown
-  )
-  if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
-    QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
-  fi
-}
-
 qemu_harness_find_ovmf_code() {
   local path
 
@@ -374,30 +350,6 @@ qemu_harness_run_native_store_until_marker() {
     qemu_harness_print_qemu_log "$qemu_log_path"
     return 1
   fi
-}
-
-qemu_harness_run_cdrom_for_seconds() {
-  local iso_path="${1:?ISO path required}"
-  local serial_log_path="${2:?serial log path required}"
-  local timeout_seconds="${3:?timeout seconds required}"
-  local memory_size="${4:-$(qemu_harness_default_memory)}"
-  local qemu_log_path
-  local qemu_pid
-
-  mkdir -p "$(dirname "$serial_log_path")"
-  rm -f "$serial_log_path"
-  qemu_log_path="${serial_log_path%.log}.qemu.log"
-  rm -f "$qemu_log_path"
-
-  qemu_harness_build_cdrom_command "$iso_path" "$memory_size" "file:$serial_log_path"
-  "${QEMU_HARNESS_COMMAND[@]}" >"$qemu_log_path" 2>&1 &
-  qemu_pid=$!
-
-  sleep "$timeout_seconds"
-  if kill -0 "$qemu_pid" >/dev/null 2>&1; then
-    qemu_harness_stop_qemu "$qemu_pid"
-  fi
-  wait "$qemu_pid" >/dev/null 2>&1 || true
 }
 
 qemu_harness_run_uefi_cdrom_for_seconds() {

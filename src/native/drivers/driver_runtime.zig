@@ -219,13 +219,6 @@ pub const Runtime = struct {
         return slot.activation;
     }
 
-    fn findByServiceSlot(self: *Runtime, service_id: u64) ?*ActivationSlot {
-        for (&self.arena.slots) |*slot| {
-            if (slot.in_use and slot.activation.service_id == service_id) return slot;
-        }
-        return null;
-    }
-
     fn findByServiceClassSlot(self: *Runtime, service_id: u64, device_class: driver_service.DeviceClass) ?*ActivationSlot {
         return self.arena.get(activationKeyFor(service_id, device_class));
     }

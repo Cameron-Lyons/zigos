@@ -11,7 +11,6 @@ const bundle_digest = @import("package_service_digest.zig");
 const bundle_ops = @import("package_service_bundle_ops.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const model = @import("package_service_model.zig");
-const native_util = @import("../core/util.zig");
 const service_authority = @import("service_authority.zig");
 const signing = @import("../core/signing.zig");
 const units = @import("../core/units.zig");
@@ -110,14 +109,13 @@ pub const RemoveRequest = struct {
 
 const BundleSlot = model.BundleSlot;
 const BUNDLE_INDEX_CAPACITY: usize = MAX_INSTALLED_BUNDLES * 2;
-const BundleIndex = indexed_arena.MultimapIndex(MAX_INSTALLED_BUNDLES, MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY);
+const BundleArena = indexed_arena.IndexedArenaWithKey(u64, BundleSlot, MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY, bundleSlotKey);
 const zeroBundle = model.zeroBundle;
 
 pub const Service = struct {
     service_id: u64 = 0,
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
-    slots: [MAX_INSTALLED_BUNDLES]BundleSlot = [_]BundleSlot{BundleSlot{}} ** MAX_INSTALLED_BUNDLES,
-    bundle_index: BundleIndex = BundleIndex.init(),
+    slots: BundleArena = BundleArena.init(),
     trust_store: principal.Keyring = principal.Keyring.init(),
 
     pub fn init() Service {
@@ -220,10 +218,9 @@ pub const Service = struct {
             };
         }
 
-        const slot_index = self.firstFreeSlotIndex() orelse return error.BundleTableFull;
-        const slot = &self.slots[slot_index];
-        slot.in_use = true;
-        errdefer slot.* = .{};
+        const slot_index = self.slots.reserveIndex(bundleKey(request.bundle.bundle_id)) orelse return error.BundleTableFull;
+        errdefer _ = self.slots.removeIndex(slot_index);
+        const slot = &self.slots.slots[slot_index];
         slot.bundle = zeroBundle();
         try bundle_ops.installNewValidated(
             &slot.bundle,
@@ -233,7 +230,6 @@ pub const Service = struct {
             permission_digest,
         );
         slot.bundle.activeRevisionMut().release_transparency = request.release_transparency;
-        self.indexBundle(slot_index);
         return .{
             .installed_new = true,
             .updated_existing = false,
@@ -277,13 +273,10 @@ pub const Service = struct {
     }
 
     fn remove(self: *Service, request: RemoveRequest) Error!RemoveResult {
-        const slot_index = self.findSlotIndex(request.bundle_id) orelse return error.BundleNotFound;
-        const slot = &self.slots[slot_index];
-        try requireActiveRevisionDigest(&slot.bundle, request.expected_active_digest);
-        const removed_revision_count = slot.bundle.revision_count;
-        _ = self.bundle_index.remove(bundleKey(request.bundle_id), slot_index);
-        slot.in_use = false;
-        slot.bundle = zeroBundle();
+        const bundle = self.find(request.bundle_id) orelse return error.BundleNotFound;
+        try requireActiveRevisionDigest(bundle, request.expected_active_digest);
+        const removed_revision_count = bundle.revision_count;
+        _ = self.slots.remove(bundleKey(request.bundle_id));
         return .{
             .removed_existing = true,
             .removed_revision_count = removed_revision_count,
@@ -325,17 +318,13 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, bundle_id: []const u8) ?*InstalledBundle {
-        const slot_index = self.findSlotIndex(bundle_id) orelse return null;
-        const slot = &self.slots[slot_index];
+        const slot = self.slots.get(bundleKey(bundle_id)) orelse return null;
+        if (!std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return null;
         return &slot.bundle;
     }
 
     pub fn rebuildIndexes(self: *Service) void {
-        self.bundle_index.reset();
-        for (self.slots, 0..) |slot, slot_index| {
-            if (!slot.in_use) continue;
-            self.indexBundle(slot_index);
-        }
+        self.slots.rebuildPrimaryIndex();
     }
 
     pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
@@ -362,40 +351,9 @@ pub const Service = struct {
     }
 
     fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
-        const slot_index = self.findSlotIndexConst(bundle_id) orelse return null;
-        const slot = &self.slots[slot_index];
+        const slot = self.slots.getConst(bundleKey(bundle_id)) orelse return null;
+        if (!std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return null;
         return &slot.bundle;
-    }
-
-    fn firstFreeSlotIndex(self: *const Service) ?usize {
-        for (self.slots, 0..) |slot, slot_index| {
-            if (!slot.in_use) return slot_index;
-        }
-        return null;
-    }
-
-    fn findSlotIndex(self: *Service, bundle_id: []const u8) ?usize {
-        return self.findSlotIndexConst(bundle_id);
-    }
-
-    fn findSlotIndexConst(self: *const Service, bundle_id: []const u8) ?usize {
-        var cursor = self.bundle_index.head(bundleKey(bundle_id));
-        while (cursor != indexed_arena.no_index) : (cursor = self.bundle_index.next(cursor)) {
-            if (cursor >= MAX_INSTALLED_BUNDLES) native_util.impossibleByInvariant("package bundle index points outside slots");
-            const slot = &self.slots[cursor];
-            if (!slot.in_use) native_util.impossibleByInvariant("package bundle index points at a free slot");
-            if (std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return cursor;
-        }
-        return null;
-    }
-
-    fn indexBundle(self: *Service, slot_index: usize) void {
-        if (slot_index >= MAX_INSTALLED_BUNDLES) native_util.impossibleByInvariant("package bundle index update points outside slots");
-        const slot = &self.slots[slot_index];
-        if (!slot.in_use or slot.bundle.bundle_id_len == 0) native_util.impossibleByInvariant("package bundle index update requires a live bundle");
-        if (!self.bundle_index.append(bundleKey(slot.bundle.bundleIdSlice()), slot_index)) {
-            native_util.impossibleByInvariant("package bundle index capacity covers bundle slots");
-        }
     }
 };
 
@@ -781,6 +739,14 @@ fn bundleKey(bundle_id: []const u8) u64 {
     hasher.update(&len_bytes);
     hasher.update(bundle_id);
     return indexed_arena.nonZeroKey(hasher.final());
+}
+
+// Arena primary key for a live bundle slot. Only consulted for in-use slots, so
+// the empty-slot bundleKey("") is never indexed. install() dedups by bundle_id,
+// so the key is unique per slot; find()/findConst() still string-compare the
+// bundle_id to stay correct under the (astronomically rare) Wyhash collision.
+fn bundleSlotKey(slot: *const BundleSlot) u64 {
+    return bundleKey(slot.bundle.bundleIdSlice());
 }
 
 fn trustTestPublisher(
@@ -2080,8 +2046,8 @@ test "package service indexes rebuild after persisted slots are loaded" {
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
     try trustTestPublisher(&service, signer_identity, "Example Software");
 
-    service.slots[3].in_use = true;
-    try bundle_ops.installNew(&service.slots[3].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x11));
+    service.slots.slots[3].in_use = true;
+    try bundle_ops.installNew(&service.slots.slots[3].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x11));
     service.rebuildIndexes();
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
@@ -2148,9 +2114,9 @@ test "package bundle ops reject semantically invalid manifests before storage" {
 
     try std.testing.expectError(
         error.DuplicatePermissionRequest,
-        bundle_ops.installNew(&service.slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
+        bundle_ops.installNew(&service.slots.slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
     );
-    try std.testing.expectEqual(@as(u32, 0), service.slots[0].bundle.revision_count);
+    try std.testing.expectEqual(@as(u32, 0), service.slots.slots[0].bundle.revision_count);
 }
 
 test "package service rejects example writer manifest updates that widen permissions without declaration" {

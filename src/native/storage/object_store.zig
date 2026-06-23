@@ -1,8 +1,6 @@
 const builtin = @import("builtin");
 const store = @import("object_store/store.zig");
 
-pub const api = store;
-
 pub const ids = store.ids;
 
 pub const MAX_OBJECTS = store.MAX_OBJECTS;

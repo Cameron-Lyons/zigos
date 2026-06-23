@@ -305,17 +305,29 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             );
             transport_frames.sortById(frames[0..frame_count]);
 
+            var acked_ids: [MAX_TRANSPORT_FRAMES]u64 = undefined;
+            var acked_count: usize = 0;
+            // Coalesce the peer's per-frame inbound checkpoint into one persist for
+            // the whole delivered batch (the per-frame acceptTransportFrame otherwise
+            // re-encodes and re-persists the entire sync state for every frame).
+            peer.service.beginReplicationBatch();
+            errdefer peer.service.cancelReplicationBatch();
             for (frames[0..frame_count]) |frame| {
                 const delivery = try self.replicateFramePayloadToPeer(peer, request, frame);
                 result.accepted_frame_count += 1;
                 result.persisted_object_count += 1;
                 result.payload_bytes += delivery.payload_len;
-                _ = try self.service.ackOutboundTransportFrame(frame.id);
+                acked_ids[acked_count] = frame.id;
+                acked_count += 1;
                 if (delivery.used_booted_relay_service) {
                     result.used_booted_relay_service = true;
                     result.relay_delivery_count += delivery.relay_delivery_count;
                 }
             }
+            try peer.service.endReplicationBatch();
+            // Coalesce the sender's per-frame state persist into one checkpoint for
+            // the whole delivered batch.
+            _ = try self.service.ackOutboundTransportFrames(acked_ids[0..acked_count]);
             return result;
         }
 

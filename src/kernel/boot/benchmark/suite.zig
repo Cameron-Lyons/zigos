@@ -694,7 +694,7 @@ fn preparePackageFixture() void {
     package_context.signed_v1 = signedPackageBundle(package_bundle_v1);
     package_context.signed_v2 = signedPackageBundle(package_bundle_v2);
     trustBenchmarkPackagePublisher(&package_context.service);
-    const slot = &package_context.service.slots[0];
+    const slot = &package_context.service.slots.slots[0];
     slot.in_use = true;
     package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
     package_context.service.rebuildIndexes();
@@ -1157,7 +1157,7 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
 
 fn benchmarkPackageRevision(iteration: u32) u64 {
     _ = iteration;
-    const slot = &package_context.service.slots[0];
+    const slot = &package_context.service.slots.slots[0];
     package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
     package_service_bundle_ops.installRevision(
         &slot.bundle,
