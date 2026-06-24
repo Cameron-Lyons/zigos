@@ -416,7 +416,6 @@ pub const Service = struct {
         }
         return lease;
     }
-
 };
 
 pub fn verifyPackReceipt(

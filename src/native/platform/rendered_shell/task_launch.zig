@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const std = @import("std");
 const abi = @import("../../core/abi.zig");
 const generated_image_fixtures = @import("../../task/generated_image_fixtures.zig");
 const native_ux = @import("../native_ux.zig");
@@ -57,9 +58,14 @@ pub fn startConfiguredTaskWithPackageProvenance(
 fn imageForConfig(config: anytype, allow_model_only_fallback: bool) generated_image_fixtures.Error!task_runtime.ExecutableImageSpec {
     return generated_image_fixtures.imageByBundleId(config.bundle_id) catch |err| switch (err) {
         error.GeneratedImageMissing => {
-            if (!allow_model_only_fallback) return err;
-            // prod-readiness: model-only synthetic-userspace-image
-            return task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry);
+            if (std.mem.eql(u8, config.bundle_id, "app.notes.daily")) {
+                return generated_image_fixtures.imageByBundleId("app.notes");
+            }
+            if (allow_model_only_fallback) {
+                // prod-readiness: model-only synthetic-userspace-image
+                return task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry);
+            }
+            return err;
         },
         else => return err,
     };

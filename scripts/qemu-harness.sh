@@ -94,6 +94,9 @@ qemu_harness_build_kernel_command() {
   if [ "$include_debug_exit" = "yes" ]; then
     QEMU_HARNESS_COMMAND+=(-device "$qemu_harness_debug_exit_device")
   fi
+  if [ -n "${QEMU_KERNEL_APPEND:-}" ]; then
+    QEMU_HARNESS_COMMAND+=(-append "$QEMU_KERNEL_APPEND")
+  fi
 
   if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
     QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
@@ -250,6 +253,10 @@ qemu_harness_run_kernel() {
 }
 
 qemu_harness_run_native_store() {
+  # Modeled device inventory for QEMU smoke/sync boots that use the production
+  # .none kernel on emulators without first-target PCI hardware.
+  QEMU_KERNEL_APPEND="${QEMU_KERNEL_APPEND:-model_inventory}"
+
   local kernel_path="${1:?kernel path required}"
   local store_image="${2:?native store image required}"
   local serial_target="${3:-stdio}"
