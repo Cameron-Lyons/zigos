@@ -452,12 +452,8 @@ fn launchServices(
 }
 
 fn seedHostedModelDeviceInventory() void {
-    // Host (model) builds always seed; freestanding seeds only when the kernel
-    // enabled modeled-inventory mode (QEMU storage-durability proof). Real
-    // detected devices are preserved by the per-class `!detected` guards below,
-    // so a real QEMU NVMe controller still backs storage.
-    if (builtin.target.os.tag == .freestanding and !device_inventory.modelDeviceInventoryEnabled()) return;
-
+    // Seed absent classes for host builds and for freestanding boots that lack
+    // detected inventory. Per-class `!detected` guards preserve real hardware.
     const hosted_xhci_device_id = 0x8086_A0ED_0001;
 
     if (!device_inventory.recordForClass(.network_adapter).detected) {
@@ -745,7 +741,7 @@ fn publishBootedDeviceDataPlane(
     return false;
 }
 
-fn connectClient(
+pub fn connectClient(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,

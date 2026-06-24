@@ -33,8 +33,8 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(contract.default_services.len, session_manager.testing.countServices());
     try std.testing.expectEqual(service_contract.ordered_service_contracts.len, service_directory.bindingCount());
-    try std.testing.expectEqual(@as(usize, 19), session_manager.testing.countTasks());
-    try std.testing.expectEqual(@as(usize, 19), session_manager.testing.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 20), session_manager.testing.countTasks());
+    try std.testing.expectEqual(@as(usize, 20), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.terminated));
     try std.testing.expectEqual(@as(usize, 0), compositor.window_count);

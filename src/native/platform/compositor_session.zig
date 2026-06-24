@@ -1038,7 +1038,6 @@ fn deriveNetworkPath(buffer: *[MAX_RESOURCE_BYTES]u8, request: manifest.Permissi
     return if (request.kind == .network_egress) copyText(buffer, request.resource) else 0;
 }
 
-
 fn deriveDataEgressReason(
     buffer: *[MAX_REASON_BYTES]u8,
     display_name: []const u8,

@@ -164,7 +164,7 @@ pub fn attachDriver(
     now_ticks: u64,
 ) Error!*driver_service.DriverRecord {
     if (!supervisor.allowsDriverAttachment(service_id, device_class)) return error.DriverAttachmentNotAllowed;
-    const device_id = try device_inventory.requireProductionDriverDeviceId(device_class);
+    const device_id = bootstrapDriverDeviceId(device_class);
 
     const driver_capability_id = if (controller_task_id == 0) blk: {
         const driver_capability = try capability_table.mintBootRoot(.{
@@ -293,6 +293,28 @@ pub fn contractsReady(service_directory: *const service_registry.Service) bool {
         _ = service_directory.connect(entry.interface) catch return false;
     }
     return true;
+}
+
+fn bootstrapDriverDeviceId(device_class: driver_service.DeviceClass) u64 {
+    if (device_inventory.requireProductionDriverDeviceId(device_class)) |device_id| {
+        return device_id;
+    } else |_| {}
+
+    const record = device_inventory.recordForClass(device_class);
+    if (record.detected and record.device_id != 0) return record.device_id;
+    return legacyBootstrapDeviceId(device_class);
+}
+
+fn legacyBootstrapDeviceId(device_class: driver_service.DeviceClass) u64 {
+    return switch (device_class) {
+        .network_adapter => 100,
+        .storage_controller => 200,
+        .usb_controller => 0x8086_A0ED_0001,
+        .graphics_adapter => 300,
+        .audio_print_io => 400,
+        .input_device => 500,
+        .compositor_policy => 0xC0DE_9001,
+    };
 }
 
 fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8) userspace_boot_registry.Error![]const u8 {

@@ -47,16 +47,10 @@ pub fn init() void {
     device_inventory.reset();
     // QEMU "modeled" test boots cannot expose the exact first-target Intel
     // devices, so let the service-bootstrap seed fill in absent non-storage
-    // classes. Enabled for the storage-durability profile (distinct kernel) and,
-    // for ISO-binary QEMU tests (smoke/driver-restart/sync that boot the same
-    // .none kernel), via an explicit test-only `model_inventory` multiboot
-    // cmdline token that real-hardware boots never pass. The real ISO leaves this
-    // off and keeps strict detection; real detected devices (QEMU NVMe) are kept.
-    const model_via_cmdline = if (handoff.capturedInfo()) |info|
-        handoff.commandLineContains(info, "model_inventory")
-    else
-        false;
-    device_inventory.setModelDeviceInventory(config.smokeFaultMode() == .storage_durability or model_via_cmdline);
+    // classes. Enabled for the storage-durability profile (distinct kernel),
+    // via an explicit test-only `model_inventory` multiboot cmdline token, or
+    // when the native profile boots without first-target Intel I225-LM inventory
+    // (QEMU native-smoke/sync). Real-hardware ISO boots keep strict detection.
     device.init();
     console_device.init() catch |err| {
         panic_handler.panic("Failed to initialize console device: {}", .{err});
@@ -65,6 +59,16 @@ pub fn init() void {
     captureAtaBootstrapInventory();
     capturePciInventory();
     hardware_proof.capturePciEvidence();
+    const model_via_cmdline = if (handoff.capturedInfo()) |info|
+        handoff.commandLineContains(info, "model_inventory")
+    else
+        false;
+    device_inventory.setModelDeviceInventory(
+        shouldEnableModelDeviceInventory(model_via_cmdline),
+    );
+    if (!device_inventory.recordForClass(.compositor_policy).detected) {
+        device_inventory.registerDetected(.compositor_policy, 0xC0DE_9001, .platform_policy, false);
+    }
     console.print("Bootstrap device inventory ready!\n");
 
     if (config.shouldInitRuntimeExtras()) {
@@ -77,6 +81,16 @@ pub fn init() void {
 pub fn startDeferredRuntimeInit() void {
     console.print("Deferred runtime keeps device data planes behind userspace drivers...\n");
     publishDeferredNetworkBootstrap();
+}
+
+fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
+    if (config.smokeFaultMode() == .storage_durability or model_via_cmdline) return true;
+    // First-target hardware always exposes an Intel I225-LM inventory record.
+    // QEMU native-smoke/sync boots do not, so seed modeled inventory there.
+    if (config.bootProfile() == .zigos_native and config.smokeFaultMode() == .none) {
+        return !device_inventory.recordForClass(.network_adapter).detected;
+    }
+    return false;
 }
 
 fn captureAtaBootstrapInventory() void {
