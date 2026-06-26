@@ -46,11 +46,8 @@ pub fn init() void {
     bootstrap_driver_port.reset();
     device_inventory.reset();
     // QEMU "modeled" test boots cannot expose the exact first-target Intel
-    // devices, so let the service-bootstrap seed fill in absent non-storage
-    // classes. Enabled for the storage-durability profile (distinct kernel),
-    // via an explicit test-only `model_inventory` multiboot cmdline token, or
-    // when the native profile boots without first-target Intel I225-LM inventory
-    // (QEMU native-smoke/sync). Real-hardware ISO boots keep strict detection.
+    // devices, so explicit test profiles request a modeled inventory seed.
+    // Real freestanding boots keep strict detected-inventory binding.
     device.init();
     console_device.init() catch |err| {
         panic_handler.panic("Failed to initialize console device: {}", .{err});
@@ -84,10 +81,12 @@ pub fn startDeferredRuntimeInit() void {
 }
 
 fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
-    if (config.smokeFaultMode() == .storage_durability or model_via_cmdline) return true;
-    // First-target hardware always exposes an Intel I225-LM inventory record.
-    // QEMU native-smoke/sync boots do not, so seed modeled inventory there.
-    if (config.bootProfile() == .zigos_native and config.smokeFaultMode() == .none) {
+    if (config.smokeFaultMode() != .none or model_via_cmdline) return true;
+    // The direct multiboot QEMU path does not reliably surface `-append`
+    // before service bootstrap. The first supported hardware target exposes an
+    // Intel I225-LM inventory record, so a native profile without that record is
+    // treated as modeled QEMU inventory rather than production hardware proof.
+    if (config.bootProfile() == .zigos_native) {
         return !device_inventory.recordForClass(.network_adapter).detected;
     }
     return false;

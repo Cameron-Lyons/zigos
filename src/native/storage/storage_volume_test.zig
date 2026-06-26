@@ -75,6 +75,7 @@ test "storage quota policy rejects writes above the first supported envelope" {
         .metadata = try object_store.signMetadata(signer, "quota", "text/plain", .document, payload, 16),
     });
     const usage = storage_volume.productCapacityUsage(&store, &workspaces);
+    try std.testing.expectEqual(payload.len, store.maxBlobPayloadBytes());
     try std.testing.expectEqual(payload.len, usage.object_payload_bytes);
     try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
 }

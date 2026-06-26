@@ -62,6 +62,7 @@ pub const ObjectType = enum(u8) {
     model_artifact,
     event_stream,
 };
+const OBJECT_TYPE_COUNT: usize = @typeInfo(ObjectType).@"enum".fields.len;
 
 pub const BlobAddress = crypto_hash.Digest;
 pub const ChunkAddress = crypto_hash.Digest;
@@ -442,6 +443,56 @@ fn chunkSlotIndexId(slot: *const ChunkSlot) u64 {
 
 pub const Store = StoreWith(.{});
 
+fn ObjectTypeIndexWith(comptime capacity: usize) type {
+    return struct {
+        const Self = @This();
+
+        heads: [OBJECT_TYPE_COUNT]usize = [_]usize{indexed_arena.no_index} ** OBJECT_TYPE_COUNT,
+        tails: [OBJECT_TYPE_COUNT]usize = [_]usize{indexed_arena.no_index} ** OBJECT_TYPE_COUNT,
+        counts: [OBJECT_TYPE_COUNT]usize = [_]usize{0} ** OBJECT_TYPE_COUNT,
+        next_by_slot: [capacity]usize = [_]usize{indexed_arena.no_index} ** capacity,
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn reset(self: *Self) void {
+            self.* = Self.init();
+        }
+
+        pub fn count(self: *const Self, object_type: ObjectType) usize {
+            return self.counts[objectTypeBucket(object_type)];
+        }
+
+        pub fn head(self: *const Self, object_type: ObjectType) usize {
+            return self.heads[objectTypeBucket(object_type)];
+        }
+
+        pub fn next(self: *const Self, slot_index: usize) usize {
+            if (slot_index >= capacity) return indexed_arena.no_index;
+            return self.next_by_slot[slot_index];
+        }
+
+        pub fn append(self: *Self, object_type: ObjectType, slot_index: usize) bool {
+            if (slot_index >= capacity) return false;
+            const bucket = objectTypeBucket(object_type);
+            self.next_by_slot[slot_index] = indexed_arena.no_index;
+            if (self.tails[bucket] == indexed_arena.no_index) {
+                self.heads[bucket] = slot_index;
+            } else {
+                self.next_by_slot[self.tails[bucket]] = slot_index;
+            }
+            self.tails[bucket] = slot_index;
+            self.counts[bucket] += 1;
+            return true;
+        }
+    };
+}
+
+fn objectTypeBucket(object_type: ObjectType) usize {
+    return @intFromEnum(object_type);
+}
+
 pub fn StoreWith(comptime config: StoreConfig) type {
     config.validate();
     return struct {
@@ -457,6 +508,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         const STORE_BLOB_PAGE_COUNT = config.max_blobs / BLOB_PAGE_SIZE;
         const STORE_CHUNK_PAGE_COUNT = config.max_chunks / CHUNK_PAGE_SIZE;
         const ObjectArena = indexed_arena.IndexedArenaWithKey(ids.ObjectId, ObjectSlot, MAX_STORE_OBJECTS, STORE_OBJECT_INDEX_CAPACITY, objectSlotId);
+        const ObjectTypeIndex = ObjectTypeIndexWith(MAX_STORE_OBJECTS);
         const VersionArena = indexed_arena.IndexedArenaWithKey(ids.VersionId, VersionSlot, MAX_STORE_VERSIONS, STORE_VERSION_INDEX_CAPACITY, versionSlotId);
         const BlobArena = indexed_arena.PagedIndexedArena(BlobSlot, BLOB_PAGE_SIZE, STORE_BLOB_PAGE_COUNT, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId);
         const ChunkArena = indexed_arena.PagedIndexedArena(ChunkSlot, CHUNK_PAGE_SIZE, STORE_CHUNK_PAGE_COUNT, STORE_CHUNK_INDEX_CAPACITY, chunkSlotIndexId);
@@ -492,7 +544,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         next_object_id: u64 = 1,
         next_version_id: u64 = 1,
+        latest_inserted_version_id: ids.VersionId = ids.VersionId.zero,
+        max_blob_payload_bytes: usize = 0,
         objects: ObjectArena = ObjectArena.init(),
+        object_type_index: ObjectTypeIndex = ObjectTypeIndex.init(),
         versions: VersionArena = VersionArena.init(),
         blobs: BlobArena = BlobArena.init(),
         chunks: ChunkArena = ChunkArena.init(),
@@ -505,7 +560,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         pub fn reset(self: *Self) void {
             self.next_object_id = 1;
             self.next_version_id = 1;
+            self.latest_inserted_version_id = ids.VersionId.zero;
+            self.max_blob_payload_bytes = 0;
             self.objects.reset();
+            self.object_type_index.reset();
             self.versions.reset();
             self.blobs.reset();
             self.chunks.reset();
@@ -513,9 +571,12 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn rebuildIndexes(self: *Self) void {
             self.objects.rebuildPrimaryIndex();
+            self.rebuildObjectTypeIndex();
             self.versions.rebuildPrimaryIndex();
             self.blobs.rebuildPrimaryIndex();
             self.chunks.rebuildPrimaryIndex();
+            self.rebuildLatestInsertedVersionId();
+            self.rebuildMaxBlobPayloadBytes();
         }
 
         pub fn putVersion(self: *Self, request: PutRequest) Error!PutResult {
@@ -630,6 +691,11 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return &slot.version;
         }
 
+        pub fn latestInsertedVersionConst(self: *const Self) ?*const VersionRecord {
+            if (self.latest_inserted_version_id.isZero()) return null;
+            return self.versionConst(self.latest_inserted_version_id);
+        }
+
         pub fn latestVersion(self: *Self, object_id: anytype) ?*VersionRecord {
             const object_record = self.object(object_id) orelse return null;
             if (object_record.latest_version_id.isZero()) return null;
@@ -648,22 +714,43 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             output: []ObjectQueryResult,
         ) []const ObjectQueryResult {
             var count: usize = 0;
+            if (query.object_type) |object_type| {
+                var slot_index = self.object_type_index.head(object_type);
+                while (slot_index != indexed_arena.no_index) : (slot_index = self.object_type_index.next(slot_index)) {
+                    const slot = &self.objects.slots[slot_index];
+                    self.appendQueryObject(query, output, &count, &slot.object);
+                    if (count >= output.len) break;
+                }
+                std.sort.heap(ObjectQueryResult, output[0..count], {}, compareObjectQueryResults);
+                return output[0..count];
+            }
+
             for (&self.objects.slots) |*slot| {
                 if (!slot.in_use) continue;
-                const object_record = &slot.object;
-                if (query.object_type) |object_type| {
-                    if (object_record.object_type != object_type) continue;
-                }
-                if (object_record.provenance.updated_at_ticks < query.updated_since_ticks) continue;
-                const latest = self.versionConst(object_record.latest_version_id) orelse continue;
-                if (query.content_type.len != 0 and !std.mem.eql(u8, latest.metadata.contentTypeSlice(), query.content_type)) continue;
-                if (query.label_contains.len != 0 and indexOfFold(latest.metadata.labelSlice(), query.label_contains) == null) continue;
+                self.appendQueryObject(query, output, &count, &slot.object);
                 if (count >= output.len) break;
-                output[count] = queryResultFor(object_record, latest);
-                count += 1;
             }
             std.sort.heap(ObjectQueryResult, output[0..count], {}, compareObjectQueryResults);
             return output[0..count];
+        }
+
+        fn appendQueryObject(
+            self: *const Self,
+            query: ObjectQuery,
+            output: []ObjectQueryResult,
+            count: *usize,
+            object_record: *const ObjectRecord,
+        ) void {
+            if (query.object_type) |object_type| {
+                if (object_record.object_type != object_type) return;
+            }
+            if (object_record.provenance.updated_at_ticks < query.updated_since_ticks) return;
+            const latest = self.versionConst(object_record.latest_version_id) orelse return;
+            if (query.content_type.len != 0 and !std.mem.eql(u8, latest.metadata.contentTypeSlice(), query.content_type)) return;
+            if (query.label_contains.len != 0 and indexOfFold(latest.metadata.labelSlice(), query.label_contains) == null) return;
+            if (count.* >= output.len) return;
+            output[count.*] = queryResultFor(object_record, latest);
+            count.* += 1;
         }
 
         pub fn objectHistory(
@@ -763,6 +850,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return self.blobs.countInUse();
         }
 
+        pub fn maxBlobPayloadBytes(self: *const Self) usize {
+            return self.max_blob_payload_bytes;
+        }
+
         pub fn chunkCount(self: *const Self) usize {
             return self.chunks.countInUse();
         }
@@ -829,17 +920,35 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         fn createObject(self: *Self, object_id: ids.ObjectId, object_type: ObjectType) Error!*ObjectRecord {
-            const slot = self.objects.reserve(object_id) orelse return error.ObjectTableFull;
+            const slot_index = self.objects.reserveIndex(object_id) orelse return error.ObjectTableFull;
+            const slot = &self.objects.slots[slot_index];
             slot.object = .{
                 .id = object_id,
                 .object_type = object_type,
                 .latest_version_id = ids.VersionId.zero,
                 .version_count = 0,
             };
+            self.indexObjectTypeSlot(slot_index);
             if (object_id.raw() >= self.next_object_id) {
                 self.next_object_id = object_id.raw() + 1;
             }
             return &slot.object;
+        }
+
+        fn rebuildObjectTypeIndex(self: *Self) void {
+            self.object_type_index.reset();
+            for (&self.objects.slots, 0..) |*slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.indexObjectTypeSlot(slot_index);
+            }
+        }
+
+        fn indexObjectTypeSlot(self: *Self, slot_index: usize) void {
+            const slot = &self.objects.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("object type index points at a free object slot");
+            if (!self.object_type_index.append(slot.object.object_type, slot_index)) {
+                native_util.impossibleByInvariant("object type index capacity covers object slots");
+            }
         }
 
         fn insertVersion(self: *Self, request: struct {
@@ -868,6 +977,38 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.version.payload_len = request.payload_len;
             slot.version.blob_slot_index = request.blob_slot_index;
             slot.version.chunk_count = @intCast(chunkCountForLen(request.payload_len));
+            if (request.id.raw() >= self.next_version_id) {
+                self.next_version_id = request.id.raw() + 1;
+            }
+            self.recordLatestInsertedVersionId(request.id);
+        }
+
+        fn rebuildLatestInsertedVersionId(self: *Self) void {
+            self.latest_inserted_version_id = ids.VersionId.zero;
+            for (&self.versions.slots) |*slot| {
+                if (!slot.in_use) continue;
+                self.recordLatestInsertedVersionId(slot.version.id);
+            }
+        }
+
+        fn recordLatestInsertedVersionId(self: *Self, version_id: ids.VersionId) void {
+            if (version_id.raw() > self.latest_inserted_version_id.raw()) {
+                self.latest_inserted_version_id = version_id;
+            }
+        }
+
+        fn rebuildMaxBlobPayloadBytes(self: *Self) void {
+            self.max_blob_payload_bytes = 0;
+            var blob_slot_index: usize = 0;
+            while (blob_slot_index < self.blobSlotCapacity()) : (blob_slot_index += 1) {
+                const slot = self.blobSlotAtConst(blob_slot_index);
+                if (!slot.in_use) continue;
+                self.recordBlobPayloadBytes(slot.blob.payload_len);
+            }
+        }
+
+        fn recordBlobPayloadBytes(self: *Self, payload_len: usize) void {
+            self.max_blob_payload_bytes = @max(self.max_blob_payload_bytes, payload_len);
         }
 
         pub fn putBlob(self: *Self, address: BlobAddress, payload: []const u8) Error!usize {
@@ -881,6 +1022,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 const slot = self.blobSlotAt(slot_index);
                 if (!blobManifestMatches(slot.blob, payload.len, chunk_refs[0..chunk_count])) return error.CorruptBlob;
                 slot.blob.ref_count +|= 1;
+                self.recordBlobPayloadBytes(payload.len);
                 return slot_index;
             }
             const slot_index = self.blobs.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
@@ -892,6 +1034,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.blob.chunks = chunk_refs;
             slot.blob.ref_count = 1;
             slot.blob.manifest_verified = false;
+            self.recordBlobPayloadBytes(payload.len);
             return slot_index;
         }
 
