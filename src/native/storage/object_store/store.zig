@@ -1215,7 +1215,7 @@ fn metadataMessage(
     metadata: SignedMetadata,
 ) error{NoSpaceLeft}![]const u8 {
     var writer = BinaryWriter{ .buffer = buffer };
-    try writer.writeBytes("zigos.object.metadata.v2");
+    try writer.writeBytes("zigos.object.metadata");
     try writer.writeByte(@intFromEnum(object_type));
     try writeLengthPrefixed(&writer, metadata.labelSlice());
     try writeLengthPrefixed(&writer, metadata.contentTypeSlice());
