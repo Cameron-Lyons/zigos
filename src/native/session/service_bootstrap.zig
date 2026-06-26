@@ -302,10 +302,10 @@ fn bootstrapDriverDeviceId(device_class: driver_service.DeviceClass) u64 {
 
     const record = device_inventory.recordForClass(device_class);
     if (record.detected and record.device_id != 0) return record.device_id;
-    return legacyBootstrapDeviceId(device_class);
+    return bootstrapDeviceIdFallback(device_class);
 }
 
-fn legacyBootstrapDeviceId(device_class: driver_service.DeviceClass) u64 {
+fn bootstrapDeviceIdFallback(device_class: driver_service.DeviceClass) u64 {
     return switch (device_class) {
         .network_adapter => 100,
         .storage_controller => 200,
