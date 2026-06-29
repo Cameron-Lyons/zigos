@@ -29,6 +29,8 @@ pub const DeviceRecord = struct {
 };
 
 var records = defaultRecords();
+var captured_ata_bootstrap_device_id: u64 = 0;
+var captured_ata_bootstrap_grant: ?storage_driver_protocol.AtaBrokerGrant = null;
 
 // Modeled-inventory mode: set by the kernel for QEMU "modeled" test boots (e.g.
 // the storage-durability proof) where the emulator does not expose the exact
@@ -40,6 +42,8 @@ var model_device_inventory_enabled = false;
 
 pub fn reset() void {
     records = defaultRecords();
+    captured_ata_bootstrap_device_id = 0;
+    captured_ata_bootstrap_grant = null;
 }
 
 pub fn setModelDeviceInventory(enabled: bool) void {
@@ -82,12 +86,24 @@ pub fn recordAtaBootstrapGrant(device_id: u64, grant: storage_driver_protocol.At
     const record = recordForClassMut(.storage_controller);
     if (!record.detected or record.device_id != device_id or record.source != .ata_bootstrap) return;
     record.ata_bootstrap_grant = grant;
+    captured_ata_bootstrap_device_id = device_id;
+    captured_ata_bootstrap_grant = grant;
 }
 
 pub fn ataBootstrapGrant(device_id: u64) ?storage_driver_protocol.AtaBrokerGrant {
     const record = recordForClass(.storage_controller);
     if (!record.detected or record.device_id != device_id or record.source != .ata_bootstrap) return null;
     return record.ata_bootstrap_grant;
+}
+
+pub fn ataBootstrapBridgeGrant(device_id: u64) ?storage_driver_protocol.AtaBrokerGrant {
+    if (ataBootstrapGrant(device_id)) |grant| return grant;
+    if (!model_device_inventory_enabled) return null;
+    if (captured_ata_bootstrap_device_id == 0) return null;
+    const record = recordForClass(.storage_controller);
+    if (!record.detected or record.device_id != device_id) return null;
+    if (!sourceCanBindProductionDriver(.storage_controller, record.source, record.device_id)) return null;
+    return captured_ata_bootstrap_grant;
 }
 
 pub fn recordForClass(device_class: driver_service.DeviceClass) DeviceRecord {
@@ -330,7 +346,34 @@ test "device inventory promotes observed ATA storage to target NVMe production b
     try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), storage.device_id);
     try std.testing.expectEqual(DetectionSource.nvme_pci_inventory, storage.source);
     try std.testing.expect(storage.ata_bootstrap_grant == null);
+    try std.testing.expect(ataBootstrapBridgeGrant(storage.device_id) == null);
     try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), try requireProductionDriverDeviceId(.storage_controller));
+}
+
+test "modeled inventory keeps captured ATA grant as an explicit bridge" {
+    reset();
+    setModelDeviceInventory(true);
+    defer setModelDeviceInventory(false);
+
+    registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
+    recordAtaBootstrapGrant(0x1F001, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = 4096,
+    });
+    registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
+
+    const storage = recordForClass(.storage_controller);
+    try std.testing.expectEqual(DetectionSource.nvme_pci_inventory, storage.source);
+    try std.testing.expect(storage.ata_bootstrap_grant == null);
+    const bridge_grant = ataBootstrapBridgeGrant(storage.device_id) orelse return error.MissingBridgeGrant;
+    try std.testing.expectEqual(@as(u16, 0x1F0), bridge_grant.base_port);
+    try std.testing.expectEqual(@as(u64, 4096), bridge_grant.sector_count);
+
+    setModelDeviceInventory(false);
+    try std.testing.expect(ataBootstrapBridgeGrant(storage.device_id) == null);
 }
 
 test "device inventory records discovered hardware without overwriting the first handoff record" {
