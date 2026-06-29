@@ -1,4 +1,4 @@
-capability.derive.workspace_object 151369.21 65
+capability.derive.workspace_object 250000.00 70
 capability.mint_reuse_free_slot 3389951.11 50
 capability.target_generation_lookup 2042390.63 50
 permission.review.render_grants 203732.95 40
@@ -14,7 +14,7 @@ package_revision.rollforward_rollback 1151678.41 40
 indexing_service.query_ranked 202462.18 40
 media_print.submit_complete 136500.90 40
 event_ledger.export_redacted 635582.44 60
-secret_store.import_handle_export 96904.55 75
+secret_store.import_handle_export 96904.55 125
 denial_explanation.render_policy_hint 15283.87 60
 sync_service.overlay_session_flow 53125.25 60
 recovery_environment.reinstall_restore_repair 2250000000.00 100
