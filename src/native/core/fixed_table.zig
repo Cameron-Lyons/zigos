@@ -68,30 +68,6 @@ pub fn countMatching(
     return count;
 }
 
-pub fn findValue(
-    comptime Item: type,
-    items: []const Item,
-    context: anytype,
-    comptime matches: anytype,
-) ?*const Item {
-    for (items) |*item| {
-        if (matches(context, item)) return item;
-    }
-    return null;
-}
-
-pub fn findValueIndex(
-    comptime Item: type,
-    items: []const Item,
-    context: anytype,
-    comptime matches: anytype,
-) ?usize {
-    for (items, 0..) |*item, index| {
-        if (matches(context, item)) return index;
-    }
-    return null;
-}
-
 pub fn findIndexedSlot(
     comptime Slot: type,
     comptime capacity: usize,
@@ -192,10 +168,4 @@ test "fixed table helper allocates finds counts and uses id indexes" {
         @as(u64, 42),
         TestFind.byId,
     ).?.label);
-    const values = [_]u64{ 3, 5, 8 };
-    try std.testing.expectEqual(@as(u64, 5), findValue(u64, values[0..], @as(u64, 5), struct {
-        fn eql(needle: u64, item: *const u64) bool {
-            return item.* == needle;
-        }
-    }.eql).?.*);
 }
