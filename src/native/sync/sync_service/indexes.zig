@@ -43,6 +43,12 @@ pub const inbound_transport_duplicate_index_capacity: usize = state_support.MAX_
 pub const InboundTransportDuplicateIndex = indexed_arena.UniqueIndex(inbound_transport_duplicate_index_capacity);
 pub const inbound_transport_high_water_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
 pub const InboundTransportHighWaterIndex = indexed_arena.UniqueIndex(inbound_transport_high_water_index_capacity);
+pub const inbound_transport_target_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
+pub const InboundTransportTargetIndex = indexed_arena.MultimapIndex(
+    state_support.MAX_TRANSPORT_FRAMES,
+    state_support.MAX_TRANSPORT_FRAMES,
+    inbound_transport_target_index_capacity,
+);
 pub const outbound_transport_frame_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
 pub const OutboundTransportFrameIndex = indexed_arena.UniqueIndex(outbound_transport_frame_index_capacity);
 pub const outbound_transport_target_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
@@ -262,6 +268,10 @@ pub fn inboundTransportPathIndexLookupKey(workspace_id: u64, target_device: prin
     return outboundTransportPathIndexLookupKey(workspace_id, target_device, path);
 }
 
+pub fn inboundTransportTargetIndexLookupKey(workspace_id: u64, target_device: principal.PrincipalId) u64 {
+    return outboundTransportTargetIndexLookupKey(workspace_id, target_device);
+}
+
 fn inboundTransportScopeHash(
     workspace_id: u64,
     source_device: principal.PrincipalId,
@@ -355,6 +365,7 @@ test "sync service lookup indexes use nonzero workspace keys" {
         .{ .kind = .device, .serial = 2 },
         .{ .kind = .device, .serial = 3 },
     ) != 0);
+    try std.testing.expect(inboundTransportTargetIndexLookupKey(7, .{ .kind = .device, .serial = 3 }) != 0);
     try std.testing.expect(outboundTransportFrameIndexLookupKey(0) != 0);
     try std.testing.expect(outboundTransportTargetIndexLookupKey(7, .{ .kind = .device, .serial = 3 }) != 0);
     try std.testing.expect(outboundTransportPathIndexLookupKey(7, .{ .kind = .device, .serial = 3 }, "notes/today.md") != 0);
