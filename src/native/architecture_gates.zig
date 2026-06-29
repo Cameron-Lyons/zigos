@@ -148,6 +148,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_active_overlay_session_count = @hasField(sync_service.Service, "active_overlay_session_count"),
         .indexes_workspace_policies = @hasField(sync_service.Service, "workspace_policy_index"),
         .indexes_overlays = @hasField(sync_service.Service, "overlay_index"),
+        .indexes_database_contracts = @hasField(sync_service.Service, "database_contract_index"),
     },
     .sync_adapters = .{
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),

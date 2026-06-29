@@ -12,6 +12,8 @@ pub const workspace_policy_index_capacity: usize = state_support.MAX_WORKSPACE_P
 pub const WorkspacePolicyIndex = indexed_arena.UniqueIndex(workspace_policy_index_capacity);
 pub const overlay_index_capacity: usize = state_support.MAX_OVERLAYS * 2;
 pub const OverlayIndex = indexed_arena.UniqueIndex(overlay_index_capacity);
+pub const database_contract_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
+pub const DatabaseContractIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -34,10 +36,6 @@ const ReplicaIndexKey = struct {
     path_hash: u64 = 0,
 };
 
-pub const DatabaseContractLookup = struct {
-    id: u64,
-};
-
 pub const DatabaseContractEquivalentLookup = struct {
     workspace_id: u64,
     bundle_id: []const u8,
@@ -58,10 +56,6 @@ pub fn replicaSlotMatches(context: ReplicaLookup, slot: *const state_support.Rep
         slot.entry.device_id.eql(context.device_id) and
         slot.entry.pathHash() == context.path_hash and
         std.mem.eql(u8, slot.entry.pathSlice(), context.path);
-}
-
-pub fn databaseContractSlotMatches(context: DatabaseContractLookup, slot: *const state_support.DatabaseContractSlot) bool {
-    return slot.contract.id == context.id;
 }
 
 pub fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalentLookup, slot: *const state_support.DatabaseContractSlot) bool {
@@ -91,6 +85,10 @@ pub fn overlayIndexLookupKey(workspace_id: u64) u64 {
     return workspaceScopedIndexKey(workspace_id);
 }
 
+pub fn databaseContractIndexLookupKey(contract_id: u64) u64 {
+    return indexed_arena.nonZeroKey(contract_id);
+}
+
 fn replicaIndexHash(key: ReplicaIndexKey) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.workspace_id);
@@ -110,4 +108,5 @@ test "sync service lookup indexes use nonzero workspace keys" {
     try std.testing.expect(workspacePolicyIndexLookupKey(0) != 0);
     try std.testing.expect(overlayIndexLookupKey(42) != 0);
     try std.testing.expectEqual(workspacePolicyIndexLookupKey(42), overlayIndexLookupKey(42));
+    try std.testing.expect(databaseContractIndexLookupKey(0) != 0);
 }

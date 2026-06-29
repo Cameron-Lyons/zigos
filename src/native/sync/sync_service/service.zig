@@ -84,11 +84,11 @@ const zeroOverlay = state_support.zeroOverlay;
 const zeroWorkspacePolicy = state_support.zeroWorkspacePolicy;
 
 const OverlaySessionSlot = overlay_model.OverlaySessionSlot;
-const DatabaseContractLookup = sync_indexes.DatabaseContractLookup;
 const DatabaseContractEquivalentLookup = sync_indexes.DatabaseContractEquivalentLookup;
 const ReplicaIndex = sync_indexes.ReplicaIndex;
 const WorkspacePolicyIndex = sync_indexes.WorkspacePolicyIndex;
 const OverlayIndex = sync_indexes.OverlayIndex;
+const DatabaseContractIndex = sync_indexes.DatabaseContractIndex;
 pub const Service = ServiceWith(.{});
 
 const sync_port = @import("port.zig");
@@ -152,6 +152,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         owned_resident_state: ResidentState = .{},
         workspace_policy_index: WorkspacePolicyIndex = WorkspacePolicyIndex.init(),
         overlay_index: OverlayIndex = OverlayIndex.init(),
+        database_contract_index: DatabaseContractIndex = DatabaseContractIndex.init(),
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
@@ -653,14 +654,18 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 return existing;
             }
 
-            const slot = self.allocateDatabaseContract() orelse return error.DatabaseContractTableFull;
+            const slot_index = self.allocateDatabaseContractIndex() orelse return error.DatabaseContractTableFull;
+            var contract = zeroDatabaseContract();
+            contract.workspace_id = workspace_id;
+            contract.bundle_id_len = native_util.copyTextExact(&contract.bundle_id, bundle_id) catch return error.BundleIdTooLong;
+            contract.label_len = native_util.copyTextExact(&contract.label, label) catch return error.LabelTooLong;
+            contract.signature = signature;
+            contract.id = self.nextDatabaseContractId();
+
+            const slot = &self.state().database_contracts[slot_index];
             slot.in_use = true;
-            slot.contract = zeroDatabaseContract();
-            slot.contract.id = self.nextDatabaseContractId();
-            slot.contract.workspace_id = workspace_id;
-            slot.contract.bundle_id_len = native_util.copyTextExact(&slot.contract.bundle_id, bundle_id) catch return error.BundleIdTooLong;
-            slot.contract.label_len = native_util.copyTextExact(&slot.contract.label, label) catch return error.LabelTooLong;
-            slot.contract.signature = signature;
+            slot.contract = contract;
+            self.database_contract_index.insert(sync_indexes.databaseContractIndexLookupKey(slot.contract.id), slot_index);
 
             try self.checkpoint();
             return &slot.contract;
@@ -677,10 +682,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 return existing;
             }
 
-            const slot = self.allocateDatabaseContract() orelse return error.DatabaseContractTableFull;
+            const slot_index = self.allocateDatabaseContractIndex() orelse return error.DatabaseContractTableFull;
+            var contract = source.*;
+            contract.id = self.nextDatabaseContractId();
+
+            const slot = &self.state().database_contracts[slot_index];
             slot.in_use = true;
-            slot.contract = source.*;
-            slot.contract.id = self.nextDatabaseContractId();
+            slot.contract = contract;
+            self.database_contract_index.insert(sync_indexes.databaseContractIndexLookupKey(slot.contract.id), slot_index);
 
             try self.checkpoint();
             return &slot.contract;
@@ -1246,10 +1255,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn findDatabaseContract(self: *Self, contract_id: u64) ?*DatabaseContract {
-            const slot = fixed_table.findSlot(DatabaseContractSlot, MAX_DATABASE_CONTRACTS, &self.state().database_contracts, DatabaseContractLookup{
-                .id = contract_id,
-            }, sync_indexes.databaseContractSlotMatches) orelse return null;
-            return &slot.contract;
+            const slot_index = self.lookupDatabaseContractSlotIndex(contract_id) orelse return null;
+            return &self.state().database_contracts[slot_index].contract;
         }
 
         fn findDatabaseContractForEntry(self: *Self, workspace_id: u64, entry: workspace.Entry) ?*DatabaseContract {
@@ -1281,6 +1288,18 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .signature = signature,
             }, sync_indexes.equivalentDatabaseContractSlotMatches) orelse return null;
             return &slot.contract;
+        }
+
+        fn lookupDatabaseContractSlotIndex(self: *const Self, contract_id: u64) ?usize {
+            const slot_index = self.database_contract_index.lookup(sync_indexes.databaseContractIndexLookupKey(contract_id)) orelse {
+                self.debugAssertDatabaseContractIndexMissAbsent(contract_id);
+                return null;
+            };
+            if (slot_index >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract index points outside slots");
+            const slot = &self.stateConst().database_contracts[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("database contract index points at a free slot");
+            if (slot.contract.id != contract_id) native_util.impossibleByInvariant("database contract index points at the wrong slot");
+            return slot_index;
         }
 
         fn lookupWorkspacePolicySlotIndex(self: *const Self, workspace_id: u64) ?usize {
@@ -1430,6 +1449,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         fn rebuildLookupIndexes(self: *Self) void {
             self.rebuildWorkspacePolicyIndex();
             self.rebuildOverlayIndex();
+            self.rebuildDatabaseContractIndex();
             self.rebuildReplicaIndex();
         }
 
@@ -1446,6 +1466,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (self.stateConst().overlays, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.overlay_index.insert(sync_indexes.overlayIndexLookupKey(slot.overlay.workspace_id), slot_index);
+            }
+        }
+
+        fn rebuildDatabaseContractIndex(self: *Self) void {
+            self.database_contract_index.reset();
+            for (self.stateConst().database_contracts, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.database_contract_index.insert(sync_indexes.databaseContractIndexLookupKey(slot.contract.id), slot_index);
             }
         }
 
@@ -1469,12 +1497,22 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
         }
 
+        fn debugAssertDatabaseContractIndexMissAbsent(self: *const Self, contract_id: u64) void {
+            if (@import("builtin").mode != .Debug) return;
+            for (self.stateConst().database_contracts) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.contract.id == contract_id) {
+                    native_util.impossibleByInvariant("database contract index missed a live slot");
+                }
+            }
+        }
+
         fn allocateConflict(self: *Self) ?*ConflictSlot {
             return fixed_table.firstFreeSlot(ConflictSlot, MAX_CONFLICTS, &self.state().conflicts);
         }
 
-        fn allocateDatabaseContract(self: *Self) ?*DatabaseContractSlot {
-            return fixed_table.firstFreeSlot(DatabaseContractSlot, MAX_DATABASE_CONTRACTS, &self.state().database_contracts);
+        fn allocateDatabaseContractIndex(self: *const Self) ?usize {
+            return fixed_table.firstFreeSlotIndex(DatabaseContractSlot, MAX_DATABASE_CONTRACTS, &self.stateConst().database_contracts);
         }
 
         fn nextDatabaseContractId(self: *Self) u64 {
