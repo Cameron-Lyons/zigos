@@ -215,7 +215,6 @@ pub const Runtime = struct {
             }
             rebuildCapabilityIndex(&slot.task);
         }
-
     }
 
     pub fn createTask(self: *Runtime, request: TaskCreateRequest) Error!*TaskRecord {
