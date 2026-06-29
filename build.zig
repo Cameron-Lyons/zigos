@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) void {
 
     const zigos_native_smoke_test_step = b.step("zigos-native-smoke-test", "Run the Zigos native bootstrap smoke test in QEMU");
     zigos_native_smoke_test_step.dependOn(&zigos_native_smoke_test_cmd.step);
+    serializeRunCommands(zigos_native_smoke_test_cmd, &negative_smoke_cmds);
     dependOnRunCommands(zigos_native_smoke_test_step, &negative_smoke_cmds);
 
     const driver_restart_qemu_cmd = qemu_build.addNativeSmokeCommand(
@@ -203,6 +204,14 @@ pub fn build(b: *std.Build) void {
 fn dependOnRunCommands(step: *std.Build.Step, commands: []const *std.Build.Step.Run) void {
     for (commands) |command| {
         step.dependOn(&command.step);
+    }
+}
+
+fn serializeRunCommands(first: *std.Build.Step.Run, commands: []const *std.Build.Step.Run) void {
+    var previous = first;
+    for (commands) |command| {
+        command.step.dependOn(&previous.step);
+        previous = command;
     }
 }
 
