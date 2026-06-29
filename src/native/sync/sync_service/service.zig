@@ -87,6 +87,7 @@ const OverlaySessionSlot = overlay_model.OverlaySessionSlot;
 const ConflictLookup = sync_indexes.ConflictLookup;
 const DatabaseContractEquivalentLookup = sync_indexes.DatabaseContractEquivalentLookup;
 const InboundTransportDuplicateLookup = sync_indexes.InboundTransportDuplicateLookup;
+const InboundTransportScopeLookup = sync_indexes.InboundTransportScopeLookup;
 const ReplicaIndex = sync_indexes.ReplicaIndex;
 const WorkspacePolicyIndex = sync_indexes.WorkspacePolicyIndex;
 const OverlayIndex = sync_indexes.OverlayIndex;
@@ -95,6 +96,7 @@ const DatabaseContractEquivalentIndex = sync_indexes.DatabaseContractEquivalentI
 const DatabaseContractBundleIndex = sync_indexes.DatabaseContractBundleIndex;
 const ConflictIndex = sync_indexes.ConflictIndex;
 const InboundTransportDuplicateIndex = sync_indexes.InboundTransportDuplicateIndex;
+const InboundTransportHighWaterIndex = sync_indexes.InboundTransportHighWaterIndex;
 pub const Service = ServiceWith(.{});
 
 const sync_port = @import("port.zig");
@@ -163,6 +165,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         database_contract_bundle_index: DatabaseContractBundleIndex = DatabaseContractBundleIndex.init(),
         conflict_index: ConflictIndex = ConflictIndex.init(),
         inbound_transport_duplicate_index: InboundTransportDuplicateIndex = InboundTransportDuplicateIndex.init(),
+        inbound_transport_high_water_index: InboundTransportHighWaterIndex = InboundTransportHighWaterIndex.init(),
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
@@ -1543,6 +1546,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.rebuildDatabaseContractBundleIndex();
             self.rebuildConflictIndex();
             self.rebuildInboundTransportDuplicateIndex();
+            self.rebuildInboundTransportHighWaterIndex();
             self.rebuildReplicaIndex();
         }
 
@@ -1599,6 +1603,23 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (self.stateConst().inbound_transport_frames, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.inbound_transport_duplicate_index.insert(inboundTransportDuplicateIndexKeyForFrame(&slot.frame), slot_index);
+            }
+        }
+
+        fn rebuildInboundTransportHighWaterIndex(self: *Self) void {
+            self.inbound_transport_high_water_index.reset();
+            for (self.stateConst().inbound_transport_frames, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.indexInboundTransportHighWaterSlot(&slot, slot_index);
+            }
+        }
+
+        fn rebuildInboundTransportHighWaterScope(self: *Self, lookup: InboundTransportScopeLookup) void {
+            self.inbound_transport_high_water_index.remove(inboundTransportHighWaterIndexKeyForLookup(lookup));
+            for (self.stateConst().inbound_transport_frames, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                if (!sync_indexes.inboundTransportScopeSlotMatches(lookup, &slot)) continue;
+                self.indexInboundTransportHighWaterSlot(&slot, slot_index);
             }
         }
 
@@ -1672,6 +1693,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
         }
 
+        fn debugAssertInboundTransportHighWaterIndexMissAbsent(self: *const Self, lookup: InboundTransportScopeLookup) void {
+            if (@import("builtin").mode != .Debug) return;
+            for (self.stateConst().inbound_transport_frames) |slot| {
+                if (!slot.in_use) continue;
+                if (sync_indexes.inboundTransportScopeSlotMatches(lookup, &slot)) {
+                    native_util.impossibleByInvariant("inbound transport high-water index missed a live scope");
+                }
+            }
+        }
+
         fn conflictIndexKeyFor(conflict: *const ConflictRecord) u64 {
             return sync_indexes.conflictIndexLookupKey(conflict.workspace_id, conflict.device_id, workspace.pathHash(conflict.pathSlice()));
         }
@@ -1694,6 +1725,22 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             );
         }
 
+        fn inboundTransportHighWaterIndexKeyForLookup(lookup: InboundTransportScopeLookup) u64 {
+            return sync_indexes.inboundTransportHighWaterIndexLookupKey(
+                lookup.workspace_id,
+                lookup.source_device,
+                lookup.target_device,
+            );
+        }
+
+        fn inboundTransportScopeLookupForFrame(frame: *const TransportFrame) InboundTransportScopeLookup {
+            return .{
+                .workspace_id = frame.workspace_id,
+                .source_device = frame.source_device,
+                .target_device = frame.target_device,
+            };
+        }
+
         fn indexTransportFrameSlot(
             self: *Self,
             queue_kind: TransportQueueKind,
@@ -1702,10 +1749,33 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) void {
             if (queue_kind != .inbound) return;
             self.inbound_transport_duplicate_index.insert(inboundTransportDuplicateIndexKeyForFrame(&slot.frame), slot_index);
+            self.indexInboundTransportHighWaterSlot(slot, slot_index);
         }
 
-        fn removeInboundTransportFrameIndexes(self: *Self, frame: *const TransportFrame) void {
+        fn indexInboundTransportHighWaterSlot(self: *Self, slot: *const DurableTransportFrameSlot, slot_index: usize) void {
+            const lookup = inboundTransportScopeLookupForFrame(&slot.frame);
+            const key = inboundTransportHighWaterIndexKeyForLookup(lookup);
+            if (self.inbound_transport_high_water_index.lookup(key)) |existing_index| {
+                if (existing_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("inbound transport high-water index points outside slots");
+                const existing = &self.stateConst().inbound_transport_frames[existing_index];
+                if (!existing.in_use) native_util.impossibleByInvariant("inbound transport high-water index points at a free slot");
+                if (!sync_indexes.inboundTransportScopeSlotMatches(lookup, existing)) {
+                    native_util.impossibleByInvariant("inbound transport high-water index points at the wrong scope");
+                }
+                if (existing.frame.source_frame_id >= slot.frame.source_frame_id) return;
+            }
+            self.inbound_transport_high_water_index.insert(key, slot_index);
+        }
+
+        fn removeInboundTransportFrameIndexes(self: *Self, frame: *const TransportFrame, slot_index: usize) InboundTransportScopeLookup {
+            const lookup = inboundTransportScopeLookupForFrame(frame);
             self.inbound_transport_duplicate_index.remove(inboundTransportDuplicateIndexKeyForFrame(frame));
+            if (self.inbound_transport_high_water_index.lookup(inboundTransportHighWaterIndexKeyForLookup(lookup))) |high_water_index| {
+                if (high_water_index == slot_index) {
+                    self.inbound_transport_high_water_index.remove(inboundTransportHighWaterIndexKeyForLookup(lookup));
+                }
+            }
+            return lookup;
         }
 
         fn allocateConflictIndex(self: *const Self) ?usize {
@@ -1771,7 +1841,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         // TRANSPORT_REPLAY_WINDOW behind the scope's high-water), so dedup no longer
         // needs it. Frames inside any scope's window are never evicted, and a scope's
         // highest source_frame_id is never evicted, so both the duplicate set and the
-        // scan-derived replay floor stay sound. This turns the hard TransportQueueFull
+        // high-water replay floor stay sound. This turns the hard TransportQueueFull
         // cliff (inbound sync permanently breaking after MAX_TRANSPORT_FRAMES distinct
         // frames) into a bounded most-recent window. Only inbound evicts (outbound is
         // reclaimed by acking). Returns null (fail closed) only in the pathological
@@ -1789,20 +1859,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 victim_source_frame_id = slot.frame.source_frame_id;
             }
             const index = victim_index orelse return null;
-            self.removeInboundTransportFrameIndexes(&frames[index].frame);
+            const lookup = self.removeInboundTransportFrameIndexes(&frames[index].frame, index);
             frames[index] = .{};
+            self.rebuildInboundTransportHighWaterScope(lookup);
             return index;
         }
 
         fn inboundFrameOutsideReplayWindow(self: *const Self, frame: *const state_support.TransportFrame) bool {
-            var high_water: u64 = 0;
-            for (self.stateConst().inbound_transport_frames) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.frame.workspace_id != frame.workspace_id) continue;
-                if (!slot.frame.source_device.eql(frame.source_device)) continue;
-                if (!slot.frame.target_device.eql(frame.target_device)) continue;
-                high_water = @max(high_water, slot.frame.source_frame_id);
-            }
+            const high_water = self.latestInboundTransportSourceFrameId(inboundTransportScopeLookupForFrame(frame)) orelse 0;
             return frame.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= high_water;
         }
 
@@ -1862,6 +1926,20 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return latest;
         }
 
+        fn latestInboundTransportSourceFrameId(self: *const Self, lookup: InboundTransportScopeLookup) ?u64 {
+            const slot_index = self.inbound_transport_high_water_index.lookup(inboundTransportHighWaterIndexKeyForLookup(lookup)) orelse {
+                self.debugAssertInboundTransportHighWaterIndexMissAbsent(lookup);
+                return null;
+            };
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("inbound transport high-water index points outside slots");
+            const slot = &self.stateConst().inbound_transport_frames[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("inbound transport high-water index points at a free slot");
+            if (!sync_indexes.inboundTransportScopeSlotMatches(lookup, slot)) {
+                native_util.impossibleByInvariant("inbound transport high-water index points at the wrong scope");
+            }
+            return slot.frame.source_frame_id;
+        }
+
         fn findDuplicateInboundFrame(self: *Self, request: TransportFrameRequest) ?*DurableTransportFrameSlot {
             if (request.source_frame_id == 0) return null;
             const lookup = InboundTransportDuplicateLookup{
@@ -1892,14 +1970,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn replayWindowRejects(self: *const Self, request: TransportFrameRequest) bool {
             if (request.source_frame_id == 0) return false;
-            var latest_source_frame_id: u64 = 0;
-            for (self.stateConst().inbound_transport_frames) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.frame.workspace_id != request.workspace_id) continue;
-                if (!slot.frame.source_device.eql(request.source_device)) continue;
-                if (!slot.frame.target_device.eql(request.target_device)) continue;
-                latest_source_frame_id = @max(latest_source_frame_id, slot.frame.source_frame_id);
-            }
+            const latest_source_frame_id = self.latestInboundTransportSourceFrameId(.{
+                .workspace_id = request.workspace_id,
+                .source_device = request.source_device,
+                .target_device = request.target_device,
+            }) orelse return false;
             if (latest_source_frame_id < state_support.TRANSPORT_REPLAY_WINDOW) return false;
             return request.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= latest_source_frame_id;
         }
