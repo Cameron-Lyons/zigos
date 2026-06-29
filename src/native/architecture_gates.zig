@@ -150,6 +150,7 @@ pub const indexed_hot_path_tables = .{
         .indexes_overlays = @hasField(sync_service.Service, "overlay_index"),
         .indexes_database_contracts = @hasField(sync_service.Service, "database_contract_index"),
         .indexes_database_contract_equivalence = @hasField(sync_service.Service, "database_contract_equivalent_index"),
+        .indexes_database_contract_bundles = @hasField(sync_service.Service, "database_contract_bundle_index"),
     },
     .sync_adapters = .{
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),

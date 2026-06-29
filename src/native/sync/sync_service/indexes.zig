@@ -16,6 +16,12 @@ pub const database_contract_index_capacity: usize = state_support.MAX_DATABASE_C
 pub const DatabaseContractIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
 pub const database_contract_equivalent_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
 pub const DatabaseContractEquivalentIndex = indexed_arena.UniqueIndex(database_contract_equivalent_index_capacity);
+pub const database_contract_bundle_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
+pub const DatabaseContractBundleIndex = indexed_arena.MultimapIndex(
+    state_support.MAX_DATABASE_CONTRACTS,
+    state_support.MAX_DATABASE_CONTRACTS,
+    database_contract_bundle_index_capacity,
+);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -108,6 +114,13 @@ pub fn databaseContractEquivalentIndexLookupKey(
     return indexed_arena.nonZeroKey(hash);
 }
 
+pub fn databaseContractBundleIndexLookupKey(workspace_id: u64, bundle_id: []const u8) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendBytesWithLength(hash, bundle_id);
+    return indexed_arena.nonZeroKey(hash);
+}
+
 fn replicaIndexHash(key: ReplicaIndexKey) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.workspace_id);
@@ -136,4 +149,6 @@ test "sync service lookup indexes use nonzero workspace keys" {
     const signature = manifest.Signature{ .signer = "test-signer" };
     try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != 0);
     try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != databaseContractEquivalentIndexLookupKey(7, "app.notes", "other", signature));
+    try std.testing.expect(databaseContractBundleIndexLookupKey(7, "app.notes") != 0);
+    try std.testing.expect(databaseContractBundleIndexLookupKey(7, "app.notes") != databaseContractBundleIndexLookupKey(8, "app.notes"));
 }

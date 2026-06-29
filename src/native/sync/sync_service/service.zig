@@ -90,6 +90,7 @@ const WorkspacePolicyIndex = sync_indexes.WorkspacePolicyIndex;
 const OverlayIndex = sync_indexes.OverlayIndex;
 const DatabaseContractIndex = sync_indexes.DatabaseContractIndex;
 const DatabaseContractEquivalentIndex = sync_indexes.DatabaseContractEquivalentIndex;
+const DatabaseContractBundleIndex = sync_indexes.DatabaseContractBundleIndex;
 pub const Service = ServiceWith(.{});
 
 const sync_port = @import("port.zig");
@@ -155,6 +156,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         overlay_index: OverlayIndex = OverlayIndex.init(),
         database_contract_index: DatabaseContractIndex = DatabaseContractIndex.init(),
         database_contract_equivalent_index: DatabaseContractEquivalentIndex = DatabaseContractEquivalentIndex.init(),
+        database_contract_bundle_index: DatabaseContractBundleIndex = DatabaseContractBundleIndex.init(),
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
@@ -669,6 +671,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.contract = contract;
             self.database_contract_index.insert(sync_indexes.databaseContractIndexLookupKey(slot.contract.id), slot_index);
             self.database_contract_equivalent_index.insert(databaseContractEquivalentIndexKeyFor(&slot.contract), slot_index);
+            self.appendDatabaseContractBundleIndex(&slot.contract, slot_index);
 
             try self.checkpoint();
             return &slot.contract;
@@ -694,6 +697,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.contract = contract;
             self.database_contract_index.insert(sync_indexes.databaseContractIndexLookupKey(slot.contract.id), slot_index);
             self.database_contract_equivalent_index.insert(databaseContractEquivalentIndexKeyFor(&slot.contract), slot_index);
+            self.appendDatabaseContractBundleIndex(&slot.contract, slot_index);
 
             try self.checkpoint();
             return &slot.contract;
@@ -1269,13 +1273,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         pub fn findDatabaseContractForPath(self: *Self, workspace_id: u64, path: []const u8) ?*DatabaseContract {
             const bundle_id = sync_contracts.databaseBundleIdFromPath(path) orelse return null;
-            for (&self.state().database_contracts) |*slot| {
-                if (!slot.in_use) continue;
-                if (slot.contract.workspace_id != workspace_id) continue;
-                if (!std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) continue;
-                return &slot.contract;
-            }
-            return null;
+            const slot_index = self.lookupDatabaseContractBundleSlotIndex(workspace_id, bundle_id) orelse return null;
+            return &self.state().database_contracts[slot_index].contract;
         }
 
         fn findEquivalentDatabaseContract(
@@ -1325,6 +1324,21 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return slot_index;
         }
 
+        fn lookupDatabaseContractBundleSlotIndex(self: *const Self, workspace_id: u64, bundle_id: []const u8) ?usize {
+            const key = sync_indexes.databaseContractBundleIndexLookupKey(workspace_id, bundle_id);
+            var slot_index = self.database_contract_bundle_index.head(key);
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.database_contract_bundle_index.next(slot_index)) {
+                if (slot_index >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract bundle index points outside slots");
+                const slot = &self.stateConst().database_contracts[slot_index];
+                if (!slot.in_use) native_util.impossibleByInvariant("database contract bundle index points at a free slot");
+                if (slot.contract.workspace_id != workspace_id) native_util.impossibleByInvariant("database contract bundle index points at the wrong workspace");
+                if (std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) return slot_index;
+                native_util.impossibleByInvariant("database contract bundle index points at the wrong bundle");
+            }
+            self.debugAssertDatabaseContractBundleIndexMissAbsent(workspace_id, bundle_id);
+            return null;
+        }
+
         fn databaseContractEquivalentIndexKeyFor(contract: *const DatabaseContract) u64 {
             return sync_indexes.databaseContractEquivalentIndexLookupKey(
                 contract.workspace_id,
@@ -1332,6 +1346,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 contract.labelSlice(),
                 contract.signature,
             );
+        }
+
+        fn databaseContractBundleIndexKeyFor(contract: *const DatabaseContract) u64 {
+            return sync_indexes.databaseContractBundleIndexLookupKey(contract.workspace_id, contract.bundleIdSlice());
+        }
+
+        fn appendDatabaseContractBundleIndex(self: *Self, contract: *const DatabaseContract, slot_index: usize) void {
+            if (!self.database_contract_bundle_index.append(databaseContractBundleIndexKeyFor(contract), slot_index)) {
+                native_util.impossibleByInvariant("database contract bundle index capacity covers database contract slots");
+            }
         }
 
         fn lookupWorkspacePolicySlotIndex(self: *const Self, workspace_id: u64) ?usize {
@@ -1483,6 +1507,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.rebuildOverlayIndex();
             self.rebuildDatabaseContractIndex();
             self.rebuildDatabaseContractEquivalentIndex();
+            self.rebuildDatabaseContractBundleIndex();
             self.rebuildReplicaIndex();
         }
 
@@ -1515,6 +1540,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (self.stateConst().database_contracts, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.database_contract_equivalent_index.insert(databaseContractEquivalentIndexKeyFor(&slot.contract), slot_index);
+            }
+        }
+
+        fn rebuildDatabaseContractBundleIndex(self: *Self) void {
+            self.database_contract_bundle_index.reset();
+            for (self.stateConst().database_contracts, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.appendDatabaseContractBundleIndex(&slot.contract, slot_index);
             }
         }
 
@@ -1554,6 +1587,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 if (!slot.in_use) continue;
                 if (sync_indexes.equivalentDatabaseContractSlotMatches(lookup, &slot)) {
                     native_util.impossibleByInvariant("database contract equivalent index missed a live slot");
+                }
+            }
+        }
+
+        fn debugAssertDatabaseContractBundleIndexMissAbsent(self: *const Self, workspace_id: u64, bundle_id: []const u8) void {
+            if (@import("builtin").mode != .Debug) return;
+            for (self.stateConst().database_contracts) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.contract.workspace_id == workspace_id and std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) {
+                    native_util.impossibleByInvariant("database contract bundle index missed a live slot");
                 }
             }
         }
