@@ -1,5 +1,5 @@
 const std = @import("std");
-const archive = @import("userspace_archive");
+const archive_index = @import("userspace_archive_index.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const elf_image_inspector = @import("elf_image_inspector.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
@@ -23,12 +23,8 @@ pub const Error = task_runtime.Error || elf_image_inspector.Error || error{
 };
 
 pub fn imageByBundleId(bundle_id: []const u8) Error!task_runtime.ExecutableImageSpec {
-    for (archive.artifacts) |artifact| {
-        if (std.mem.eql(u8, artifact.bundle_id, bundle_id)) {
-            return validateArtifact(artifact);
-        }
-    }
-    return error.GeneratedImageMissing;
+    const artifact = archive_index.artifactFor(bundle_id) orelse return error.GeneratedImageMissing;
+    return validateArtifact(artifact);
 }
 
 pub fn appImage() Error!task_runtime.ExecutableImageSpec {
@@ -78,30 +74,30 @@ pub fn validateArtifact(artifact: anytype) Error!task_runtime.ExecutableImageSpe
 }
 
 pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
-    try std.testing.expect(archive.artifacts.len > 0);
-    _ = try validateArtifact(archive.artifacts[0]);
+    try std.testing.expect(archive_index.artifacts.len > 0);
+    _ = try validateArtifact(archive_index.artifacts[0]);
 
-    var missing_bytes = archive.artifacts[0];
+    var missing_bytes = archive_index.artifacts[0];
     missing_bytes.data = "";
     missing_bytes.file_size_bytes = 0;
     missing_bytes.file_sha256 = rawSha256(missing_bytes.data);
     try std.testing.expectError(error.GeneratedImageMissingBytes, validateArtifact(missing_bytes));
 
-    var unsigned = archive.artifacts[0];
+    var unsigned = archive_index.artifacts[0];
     unsigned.signed = false;
     try std.testing.expectError(error.GeneratedImageUnsigned, validateArtifact(unsigned));
 
-    var digest_mismatch = archive.artifacts[0];
+    var digest_mismatch = archive_index.artifacts[0];
     digest_mismatch.file_sha256[0] ^= 0x5A;
     try std.testing.expectError(error.GeneratedImageDigestMismatch, validateArtifact(digest_mismatch));
 
-    var truncated = archive.artifacts[0];
+    var truncated = archive_index.artifacts[0];
     truncated.data = truncated.data[0..@min(truncated.data.len, 8)];
     truncated.file_size_bytes = truncated.data.len;
     truncated.file_sha256 = rawSha256(truncated.data);
     try std.testing.expectError(error.InvalidElfHeader, validateArtifact(truncated));
 
-    var stale_metadata = archive.artifacts[0];
+    var stale_metadata = archive_index.artifacts[0];
     stale_metadata.entry_point +%= launch_helpers.SYNTHETIC_SEGMENT_ALIGNMENT;
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(stale_metadata));
 }
