@@ -156,6 +156,7 @@ pub const indexed_hot_path_tables = .{
         .indexes_inbound_transport_high_water = @hasField(sync_service.Service, "inbound_transport_high_water_index"),
         .indexes_outbound_transport_frames = @hasField(sync_service.Service, "outbound_transport_frame_index"),
         .indexes_outbound_transport_targets = @hasField(sync_service.Service, "outbound_transport_target_index"),
+        .indexes_outbound_transport_paths = @hasField(sync_service.Service, "outbound_transport_path_index"),
     },
     .sync_adapters = .{
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),

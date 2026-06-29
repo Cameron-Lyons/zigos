@@ -37,6 +37,12 @@ pub const OutboundTransportTargetIndex = indexed_arena.MultimapIndex(
     state_support.MAX_TRANSPORT_FRAMES,
     outbound_transport_target_index_capacity,
 );
+pub const outbound_transport_path_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
+pub const OutboundTransportPathIndex = indexed_arena.MultimapIndex(
+    state_support.MAX_TRANSPORT_FRAMES,
+    state_support.MAX_TRANSPORT_FRAMES,
+    outbound_transport_path_index_capacity,
+);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -175,6 +181,11 @@ pub fn outboundTransportTargetIndexLookupKey(workspace_id: u64, target_device: p
     return indexed_arena.nonZeroKey(hash);
 }
 
+pub fn outboundTransportPathIndexLookupKey(workspace_id: u64, target_device: principal.PrincipalId, path: []const u8) u64 {
+    const target_key = outboundTransportTargetIndexLookupKey(workspace_id, target_device);
+    return indexed_arena.nonZeroKey(native_util.fnv1a64WithSeed(target_key, path));
+}
+
 fn inboundTransportScopeHash(
     workspace_id: u64,
     source_device: principal.PrincipalId,
@@ -267,6 +278,7 @@ test "sync service lookup indexes use nonzero workspace keys" {
     ) != 0);
     try std.testing.expect(outboundTransportFrameIndexLookupKey(0) != 0);
     try std.testing.expect(outboundTransportTargetIndexLookupKey(7, .{ .kind = .device, .serial = 3 }) != 0);
+    try std.testing.expect(outboundTransportPathIndexLookupKey(7, .{ .kind = .device, .serial = 3 }, "notes/today.md") != 0);
     try std.testing.expect(databaseContractIndexLookupKey(0) != 0);
     const signature = manifest.Signature{ .signer = "test-signer" };
     try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != 0);
