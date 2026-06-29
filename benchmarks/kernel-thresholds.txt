@@ -1,4 +1,4 @@
-capability.derive.workspace_object 250000
+capability.derive.workspace_object 425000
 capability.mint_reuse_free_slot 5100000
 capability.target_generation_lookup 3100000
 permission.review.render_grants 300000
