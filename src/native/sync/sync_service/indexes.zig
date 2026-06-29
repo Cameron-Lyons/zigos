@@ -14,6 +14,8 @@ pub const overlay_index_capacity: usize = state_support.MAX_OVERLAYS * 2;
 pub const OverlayIndex = indexed_arena.UniqueIndex(overlay_index_capacity);
 pub const database_contract_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
 pub const DatabaseContractIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
+pub const database_contract_equivalent_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
+pub const DatabaseContractEquivalentIndex = indexed_arena.UniqueIndex(database_contract_equivalent_index_capacity);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -89,6 +91,23 @@ pub fn databaseContractIndexLookupKey(contract_id: u64) u64 {
     return indexed_arena.nonZeroKey(contract_id);
 }
 
+pub fn databaseContractEquivalentIndexLookupKey(
+    workspace_id: u64,
+    bundle_id: []const u8,
+    label: []const u8,
+    signature: manifest.Signature,
+) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendBytesWithLength(hash, bundle_id);
+    hash = appendBytesWithLength(hash, label);
+    hash = appendBytesWithLength(hash, signature.format);
+    hash = appendBytesWithLength(hash, signature.signer);
+    hash = appendBytesWithLength(hash, signature.publicKeySlice());
+    hash = appendBytesWithLength(hash, signature.valueSlice());
+    return indexed_arena.nonZeroKey(hash);
+}
+
 fn replicaIndexHash(key: ReplicaIndexKey) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.workspace_id);
@@ -104,9 +123,17 @@ fn workspaceScopedIndexKey(workspace_id: u64) u64 {
     return indexed_arena.nonZeroKey(hash);
 }
 
+fn appendBytesWithLength(hash: u64, bytes: []const u8) u64 {
+    const with_len = native_util.fnv1a64AppendU64LittleEndian(hash, @intCast(bytes.len));
+    return native_util.fnv1a64WithSeed(with_len, bytes);
+}
+
 test "sync service lookup indexes use nonzero workspace keys" {
     try std.testing.expect(workspacePolicyIndexLookupKey(0) != 0);
     try std.testing.expect(overlayIndexLookupKey(42) != 0);
     try std.testing.expectEqual(workspacePolicyIndexLookupKey(42), overlayIndexLookupKey(42));
     try std.testing.expect(databaseContractIndexLookupKey(0) != 0);
+    const signature = manifest.Signature{ .signer = "test-signer" };
+    try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != 0);
+    try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != databaseContractEquivalentIndexLookupKey(7, "app.notes", "other", signature));
 }
