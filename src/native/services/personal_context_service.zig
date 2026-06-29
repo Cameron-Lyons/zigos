@@ -571,14 +571,14 @@ fn privacyFlagsFromLease(lease: ContextLease) u16 {
 
 fn digestQuery(query: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "schema", "zigos.personal-context.query.v1");
+    crypto_hash.updateBytes(&hasher, "schema", "zigos.personal-context.query");
     crypto_hash.updateBytes(&hasher, "query", query);
     return crypto_hash.finalize(&hasher);
 }
 
 fn digestRequestEnvelope(request: QueryRequest) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "schema", "zigos.personal-context.request-envelope.v1");
+    crypto_hash.updateBytes(&hasher, "schema", "zigos.personal-context.request-envelope");
     const subject_key = request.subject.keyBytes();
     crypto_hash.updateBytes(&hasher, "subject", &subject_key);
     crypto_hash.updateInt(&hasher, "task-id", request.task_id);
@@ -594,7 +594,7 @@ fn digestRequestEnvelope(request: QueryRequest) crypto_hash.Digest {
 
 fn digestPacks(packs: []const ContextPack) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "schema", "zigos.personal-context.packs.v1");
+    crypto_hash.updateBytes(&hasher, "schema", "zigos.personal-context.packs");
     crypto_hash.updateInt(&hasher, "pack-count", packs.len);
     for (packs) |pack| {
         crypto_hash.updateInt(&hasher, "workspace-id", pack.workspace_id);
@@ -613,7 +613,7 @@ fn digestPacks(packs: []const ContextPack) crypto_hash.Digest {
 
 fn digestReceiptFields(receipt: ContextPackReceipt) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "schema", "zigos.personal-context.receipt.v6");
+    crypto_hash.updateBytes(&hasher, "schema", "zigos.personal-context.receipt");
     const subject_key = receipt.subject.keyBytes();
     crypto_hash.updateBytes(&hasher, "subject", &subject_key);
     crypto_hash.updateInt(&hasher, "task-id", receipt.task_id);

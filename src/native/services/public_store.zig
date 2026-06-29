@@ -438,7 +438,7 @@ fn transparencyRoot(
     data_schema_version: u32,
 ) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "schema", "zigos.public-store.transparency.v1");
+    crypto_hash.updateBytes(&hasher, "schema", "zigos.public-store.transparency");
     crypto_hash.updateBytes(&hasher, "source-identity", source_identity);
     crypto_hash.updateEnum(&hasher, "update-channel", update_channel);
     crypto_hash.updateInt(&hasher, "sequence", sequence);
