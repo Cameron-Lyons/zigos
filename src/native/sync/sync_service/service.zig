@@ -85,6 +85,7 @@ const zeroWorkspacePolicy = state_support.zeroWorkspacePolicy;
 
 const OverlaySessionSlot = overlay_model.OverlaySessionSlot;
 const ConflictLookup = sync_indexes.ConflictLookup;
+const ConflictObjectLookup = sync_indexes.ConflictObjectLookup;
 const DatabaseContractEquivalentLookup = sync_indexes.DatabaseContractEquivalentLookup;
 const InboundTransportDuplicateLookup = sync_indexes.InboundTransportDuplicateLookup;
 const InboundTransportScopeLookup = sync_indexes.InboundTransportScopeLookup;
@@ -95,6 +96,7 @@ const DatabaseContractIndex = sync_indexes.DatabaseContractIndex;
 const DatabaseContractEquivalentIndex = sync_indexes.DatabaseContractEquivalentIndex;
 const DatabaseContractBundleIndex = sync_indexes.DatabaseContractBundleIndex;
 const ConflictIndex = sync_indexes.ConflictIndex;
+const ConflictObjectIndex = sync_indexes.ConflictObjectIndex;
 const InboundTransportDuplicateIndex = sync_indexes.InboundTransportDuplicateIndex;
 const InboundTransportHighWaterIndex = sync_indexes.InboundTransportHighWaterIndex;
 const InboundTransportPathIndex = sync_indexes.InboundTransportPathIndex;
@@ -168,6 +170,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         database_contract_equivalent_index: DatabaseContractEquivalentIndex = DatabaseContractEquivalentIndex.init(),
         database_contract_bundle_index: DatabaseContractBundleIndex = DatabaseContractBundleIndex.init(),
         conflict_index: ConflictIndex = ConflictIndex.init(),
+        conflict_object_index: ConflictObjectIndex = ConflictObjectIndex.init(),
         inbound_transport_duplicate_index: InboundTransportDuplicateIndex = InboundTransportDuplicateIndex.init(),
         inbound_transport_high_water_index: InboundTransportHighWaterIndex = InboundTransportHighWaterIndex.init(),
         inbound_transport_path_index: InboundTransportPathIndex = InboundTransportPathIndex.init(),
@@ -976,16 +979,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             device_id: principal.PrincipalId,
             object_id: anytype,
         ) ?*ConflictRecord {
-            const workspace_key = object_store.ids.raw(workspace_id);
-            const object_key = object_store.ids.raw(object_id);
-            for (&self.state().conflicts) |*slot| {
-                if (!slot.in_use) continue;
-                if (slot.conflict.workspace_id != workspace_key) continue;
-                if (!slot.conflict.device_id.eql(device_id)) continue;
-                if (slot.conflict.object_id != object_key) continue;
-                return &slot.conflict;
-            }
-            return null;
+            const slot_index = self.findConflictObjectSlotIndex(object_store.ids.raw(workspace_id), device_id, object_store.ids.raw(object_id)) orelse return null;
+            return &self.state().conflicts[slot_index].conflict;
         }
 
         pub fn reviewConflict(
@@ -1034,7 +1029,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 selected_version_id,
                 0,
             );
-            self.conflict_index.remove(conflictIndexKeyFor(&conflict));
+            self.removeConflictIndexes(&conflict);
             slot.* = .{};
             try self.checkpoint();
             return conflictReviewRecord(&conflict, decision, true);
@@ -1202,9 +1197,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             conflict.semantic = semantic;
 
             const slot = &self.state().conflicts[slot_index];
+            if (slot.in_use) self.removeConflictIndexes(&slot.conflict);
             slot.in_use = true;
             slot.conflict = conflict;
-            self.conflict_index.insert(conflictIndexKeyFor(&slot.conflict), slot_index);
+            self.insertConflictIndexes(&slot.conflict, slot_index);
             self.resident().markDirty();
         }
 
@@ -1225,7 +1221,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 if (!slot.in_use) continue;
                 if (slot.conflict.workspace_id != workspace_id) continue;
                 if (!slot.conflict.device_id.eql(device_id)) continue;
-                self.conflict_index.remove(conflictIndexKeyFor(&slot.conflict));
+                self.removeConflictIndexes(&slot.conflict);
                 slot.* = .{};
                 cleared = true;
             }
@@ -1265,6 +1261,30 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (!slot.in_use) native_util.impossibleByInvariant("conflict index points at a free slot");
             if (!sync_indexes.conflictSlotMatches(lookup, slot)) {
                 native_util.impossibleByInvariant("conflict index points at the wrong slot");
+            }
+            return slot_index;
+        }
+
+        fn findConflictObjectSlotIndex(
+            self: *const Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            object_id: u64,
+        ) ?usize {
+            const lookup = ConflictObjectLookup{
+                .workspace_id = workspace_id,
+                .device_id = device_id,
+                .object_id = object_id,
+            };
+            const slot_index = self.conflict_object_index.lookup(sync_indexes.conflictObjectIndexLookupKey(workspace_id, device_id, object_id)) orelse {
+                self.debugAssertConflictObjectIndexMissAbsent(lookup);
+                return null;
+            };
+            if (slot_index >= MAX_CONFLICTS) native_util.impossibleByInvariant("conflict object index points outside slots");
+            const slot = &self.stateConst().conflicts[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("conflict object index points at a free slot");
+            if (!sync_indexes.conflictObjectSlotMatches(lookup, slot)) {
+                native_util.impossibleByInvariant("conflict object index points at the wrong slot");
             }
             return slot_index;
         }
@@ -1555,6 +1575,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.rebuildDatabaseContractEquivalentIndex();
             self.rebuildDatabaseContractBundleIndex();
             self.rebuildConflictIndex();
+            self.rebuildConflictObjectIndex();
             self.rebuildOutboundTransportFrameIndex();
             self.rebuildOutboundTransportTargetIndex();
             self.rebuildOutboundTransportPathIndex();
@@ -1609,6 +1630,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (self.stateConst().conflicts, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.conflict_index.insert(conflictIndexKeyFor(&slot.conflict), slot_index);
+            }
+        }
+
+        fn rebuildConflictObjectIndex(self: *Self) void {
+            self.conflict_object_index.reset();
+            for (self.stateConst().conflicts, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.conflict_object_index.insert(conflictObjectIndexKeyFor(&slot.conflict), slot_index);
             }
         }
 
@@ -1735,6 +1764,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
         }
 
+        fn debugAssertConflictObjectIndexMissAbsent(self: *const Self, lookup: ConflictObjectLookup) void {
+            if (@import("builtin").mode != .Debug) return;
+            for (self.stateConst().conflicts) |slot| {
+                if (!slot.in_use) continue;
+                if (sync_indexes.conflictObjectSlotMatches(lookup, &slot)) {
+                    native_util.impossibleByInvariant("conflict object index missed a live slot");
+                }
+            }
+        }
+
         fn debugAssertInboundTransportDuplicateIndexMissAbsent(self: *const Self, lookup: InboundTransportDuplicateLookup) void {
             if (@import("builtin").mode != .Debug) return;
             for (self.stateConst().inbound_transport_frames) |slot| {
@@ -1767,6 +1806,20 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn conflictIndexKeyFor(conflict: *const ConflictRecord) u64 {
             return sync_indexes.conflictIndexLookupKey(conflict.workspace_id, conflict.device_id, workspace.pathHash(conflict.pathSlice()));
+        }
+
+        fn conflictObjectIndexKeyFor(conflict: *const ConflictRecord) u64 {
+            return sync_indexes.conflictObjectIndexLookupKey(conflict.workspace_id, conflict.device_id, conflict.object_id);
+        }
+
+        fn insertConflictIndexes(self: *Self, conflict: *const ConflictRecord, slot_index: usize) void {
+            self.conflict_index.insert(conflictIndexKeyFor(conflict), slot_index);
+            self.conflict_object_index.insert(conflictObjectIndexKeyFor(conflict), slot_index);
+        }
+
+        fn removeConflictIndexes(self: *Self, conflict: *const ConflictRecord) void {
+            self.conflict_index.remove(conflictIndexKeyFor(conflict));
+            self.conflict_object_index.remove(conflictObjectIndexKeyFor(conflict));
         }
 
         fn outboundTransportFrameIndexKeyFor(frame: *const TransportFrame) u64 {
