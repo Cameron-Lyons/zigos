@@ -8,6 +8,10 @@ const contracts = @import("contracts.zig");
 
 pub const replica_index_capacity: usize = state_support.MAX_REPLICA_ENTRIES * 2;
 pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
+pub const workspace_policy_index_capacity: usize = state_support.MAX_WORKSPACE_POLICIES * 2;
+pub const WorkspacePolicyIndex = indexed_arena.UniqueIndex(workspace_policy_index_capacity);
+pub const overlay_index_capacity: usize = state_support.MAX_OVERLAYS * 2;
+pub const OverlayIndex = indexed_arena.UniqueIndex(overlay_index_capacity);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -79,6 +83,14 @@ pub fn replicaIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId
     return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, path_hash)));
 }
 
+pub fn workspacePolicyIndexLookupKey(workspace_id: u64) u64 {
+    return workspaceScopedIndexKey(workspace_id);
+}
+
+pub fn overlayIndexLookupKey(workspace_id: u64) u64 {
+    return workspaceScopedIndexKey(workspace_id);
+}
+
 fn replicaIndexHash(key: ReplicaIndexKey) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.workspace_id);
@@ -86,4 +98,16 @@ fn replicaIndexHash(key: ReplicaIndexKey) u64 {
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.device_id.serial);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.path_hash);
     return hash;
+}
+
+fn workspaceScopedIndexKey(workspace_id: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+test "sync service lookup indexes use nonzero workspace keys" {
+    try std.testing.expect(workspacePolicyIndexLookupKey(0) != 0);
+    try std.testing.expect(overlayIndexLookupKey(42) != 0);
+    try std.testing.expectEqual(workspacePolicyIndexLookupKey(42), overlayIndexLookupKey(42));
 }

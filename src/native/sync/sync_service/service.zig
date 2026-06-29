@@ -84,11 +84,11 @@ const zeroOverlay = state_support.zeroOverlay;
 const zeroWorkspacePolicy = state_support.zeroWorkspacePolicy;
 
 const OverlaySessionSlot = overlay_model.OverlaySessionSlot;
-const WorkspacePolicyLookup = sync_indexes.WorkspacePolicyLookup;
-const OverlayLookup = sync_indexes.OverlayLookup;
 const DatabaseContractLookup = sync_indexes.DatabaseContractLookup;
 const DatabaseContractEquivalentLookup = sync_indexes.DatabaseContractEquivalentLookup;
 const ReplicaIndex = sync_indexes.ReplicaIndex;
+const WorkspacePolicyIndex = sync_indexes.WorkspacePolicyIndex;
+const OverlayIndex = sync_indexes.OverlayIndex;
 pub const Service = ServiceWith(.{});
 
 const sync_port = @import("port.zig");
@@ -150,6 +150,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         state_workspace_id: u64 = 0,
         resident_store: ?*ResidentState = null,
         owned_resident_state: ResidentState = .{},
+        workspace_policy_index: WorkspacePolicyIndex = WorkspacePolicyIndex.init(),
+        overlay_index: OverlayIndex = OverlayIndex.init(),
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
@@ -186,7 +188,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var service = initDefault(service_id, task_id, owner);
             service.loaded_existing_state = loaded_existing_state;
             service.resident_store = resident_state;
-            service.rebuildReplicaIndex();
+            service.rebuildLookupIndexes();
             return service;
         }
 
@@ -413,7 +415,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) Error!*WorkspacePolicy {
             if (request.selective_prefixes.len > MAX_SELECTIVE_PREFIXES) return error.TooManySelectivePrefixes;
 
-            const slot = self.lookupWorkspacePolicySlot(request.workspace_id) orelse self.allocateWorkspacePolicy() orelse return error.WorkspacePolicyTableFull;
+            const slot_index = self.lookupWorkspacePolicySlotIndex(request.workspace_id) orelse self.allocateWorkspacePolicyIndex() orelse return error.WorkspacePolicyTableFull;
+            const slot = &self.state().workspace_policies[slot_index];
             slot.in_use = true;
             slot.policy = zeroWorkspacePolicy();
             slot.policy.workspace_id = request.workspace_id;
@@ -431,6 +434,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 slot.policy.selective_prefix_count += 1;
             }
 
+            self.workspace_policy_index.insert(sync_indexes.workspacePolicyIndexLookupKey(slot.policy.workspace_id), slot_index);
             try self.checkpoint();
             return &slot.policy;
         }
@@ -447,7 +451,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             service_identity: []const u8,
             remote_access_enabled: bool,
         ) Error!*OverlayRecord {
-            const slot = self.lookupOverlaySlot(workspace_id) orelse self.allocateOverlay() orelse return error.OverlayTableFull;
+            const slot_index = self.lookupOverlaySlotIndex(workspace_id) orelse self.allocateOverlayIndex() orelse return error.OverlayTableFull;
+            const slot = &self.state().overlays[slot_index];
             slot.in_use = true;
             if (slot.overlay.id == 0) {
                 slot.overlay = zeroOverlay();
@@ -457,6 +462,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.overlay.home_device = home_device;
             slot.overlay.service_identity_len = native_util.copyTextExact(&slot.overlay.service_identity, service_identity) catch return error.ServiceIdentityTooLong;
             slot.overlay.remote_access_enabled = remote_access_enabled;
+            self.overlay_index.insert(sync_indexes.overlayIndexLookupKey(slot.overlay.workspace_id), slot_index);
             try self.checkpoint();
             return &slot.overlay;
         }
@@ -1277,24 +1283,54 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &slot.contract;
         }
 
-        fn lookupWorkspacePolicySlot(self: *Self, workspace_id: u64) ?*WorkspacePolicySlot {
-            return fixed_table.findSlot(WorkspacePolicySlot, MAX_WORKSPACE_POLICIES, &self.state().workspace_policies, WorkspacePolicyLookup{
+        fn lookupWorkspacePolicySlotIndex(self: *const Self, workspace_id: u64) ?usize {
+            const slot_index = self.workspace_policy_index.lookup(sync_indexes.workspacePolicyIndexLookupKey(workspace_id)) orelse {
+                self.debugAssertWorkspacePolicyIndexMissAbsent(workspace_id);
+                return null;
+            };
+            if (slot_index >= MAX_WORKSPACE_POLICIES) native_util.impossibleByInvariant("workspace policy index points outside slots");
+            const slot = &self.stateConst().workspace_policies[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("workspace policy index points at a free slot");
+            if (!sync_indexes.workspacePolicySlotMatches(.{
                 .workspace_id = workspace_id,
-            }, sync_indexes.workspacePolicySlotMatches);
+            }, slot)) {
+                native_util.impossibleByInvariant("workspace policy index points at the wrong slot");
+            }
+            return slot_index;
         }
 
-        fn allocateWorkspacePolicy(self: *Self) ?*WorkspacePolicySlot {
-            return fixed_table.firstFreeSlot(WorkspacePolicySlot, MAX_WORKSPACE_POLICIES, &self.state().workspace_policies);
+        fn lookupWorkspacePolicySlot(self: *Self, workspace_id: u64) ?*WorkspacePolicySlot {
+            const slot_index = self.lookupWorkspacePolicySlotIndex(workspace_id) orelse return null;
+            return &self.state().workspace_policies[slot_index];
+        }
+
+        fn allocateWorkspacePolicyIndex(self: *const Self) ?usize {
+            return fixed_table.firstFreeSlotIndex(WorkspacePolicySlot, MAX_WORKSPACE_POLICIES, &self.stateConst().workspace_policies);
+        }
+
+        fn lookupOverlaySlotIndex(self: *const Self, workspace_id: u64) ?usize {
+            const slot_index = self.overlay_index.lookup(sync_indexes.overlayIndexLookupKey(workspace_id)) orelse {
+                self.debugAssertOverlayIndexMissAbsent(workspace_id);
+                return null;
+            };
+            if (slot_index >= MAX_OVERLAYS) native_util.impossibleByInvariant("overlay index points outside slots");
+            const slot = &self.stateConst().overlays[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("overlay index points at a free slot");
+            if (!sync_indexes.overlaySlotMatches(.{
+                .workspace_id = workspace_id,
+            }, slot)) {
+                native_util.impossibleByInvariant("overlay index points at the wrong slot");
+            }
+            return slot_index;
         }
 
         fn lookupOverlaySlot(self: *Self, workspace_id: u64) ?*OverlaySlot {
-            return fixed_table.findSlot(OverlaySlot, MAX_OVERLAYS, &self.state().overlays, OverlayLookup{
-                .workspace_id = workspace_id,
-            }, sync_indexes.overlaySlotMatches);
+            const slot_index = self.lookupOverlaySlotIndex(workspace_id) orelse return null;
+            return &self.state().overlays[slot_index];
         }
 
-        fn allocateOverlay(self: *Self) ?*OverlaySlot {
-            return fixed_table.firstFreeSlot(OverlaySlot, MAX_OVERLAYS, &self.state().overlays);
+        fn allocateOverlayIndex(self: *const Self) ?usize {
+            return fixed_table.firstFreeSlotIndex(OverlaySlot, MAX_OVERLAYS, &self.stateConst().overlays);
         }
 
         fn nextOverlayId(self: *Self) u64 {
@@ -1388,6 +1424,48 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (self.stateConst().replica_entries, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.replica_index.insert(sync_indexes.replicaIndexLookupKey(slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()), slot_index);
+            }
+        }
+
+        fn rebuildLookupIndexes(self: *Self) void {
+            self.rebuildWorkspacePolicyIndex();
+            self.rebuildOverlayIndex();
+            self.rebuildReplicaIndex();
+        }
+
+        fn rebuildWorkspacePolicyIndex(self: *Self) void {
+            self.workspace_policy_index.reset();
+            for (self.stateConst().workspace_policies, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.workspace_policy_index.insert(sync_indexes.workspacePolicyIndexLookupKey(slot.policy.workspace_id), slot_index);
+            }
+        }
+
+        fn rebuildOverlayIndex(self: *Self) void {
+            self.overlay_index.reset();
+            for (self.stateConst().overlays, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.overlay_index.insert(sync_indexes.overlayIndexLookupKey(slot.overlay.workspace_id), slot_index);
+            }
+        }
+
+        fn debugAssertWorkspacePolicyIndexMissAbsent(self: *const Self, workspace_id: u64) void {
+            if (@import("builtin").mode != .Debug) return;
+            for (self.stateConst().workspace_policies) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.policy.workspace_id == workspace_id) {
+                    native_util.impossibleByInvariant("workspace policy index missed a live slot");
+                }
+            }
+        }
+
+        fn debugAssertOverlayIndexMissAbsent(self: *const Self, workspace_id: u64) void {
+            if (@import("builtin").mode != .Debug) return;
+            for (self.stateConst().overlays) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.overlay.workspace_id == workspace_id) {
+                    native_util.impossibleByInvariant("overlay index missed a live slot");
+                }
             }
         }
 

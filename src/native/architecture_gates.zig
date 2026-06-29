@@ -146,6 +146,8 @@ pub const indexed_hot_path_tables = .{
         .uses_overlay_session_arena = @hasField(sync_service.Service, "overlay_sessions"),
         .tracks_closed_overlay_sessions = @hasField(sync_service.Service, "closed_overlay_sessions"),
         .tracks_active_overlay_session_count = @hasField(sync_service.Service, "active_overlay_session_count"),
+        .indexes_workspace_policies = @hasField(sync_service.Service, "workspace_policy_index"),
+        .indexes_overlays = @hasField(sync_service.Service, "overlay_index"),
     },
     .sync_adapters = .{
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),
