@@ -50,7 +50,8 @@ pub fn init() void {
     // classes. Enabled for the storage-durability profile (distinct kernel),
     // via an explicit test-only `model_inventory` multiboot cmdline token, or
     // when the native profile boots without first-target Intel I225-LM inventory
-    // (QEMU native-smoke/sync). Real-hardware ISO boots keep strict detection.
+    // (QEMU native-smoke/sync/fault proofs). Real-hardware ISO boots keep strict
+    // detection.
     device.init();
     console_device.init() catch |err| {
         panic_handler.panic("Failed to initialize console device: {}", .{err});
@@ -87,7 +88,7 @@ fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
     if (config.smokeFaultMode() == .storage_durability or model_via_cmdline) return true;
     // First-target hardware always exposes an Intel I225-LM inventory record.
     // QEMU native-smoke/sync boots do not, so seed modeled inventory there.
-    if (config.bootProfile() == .zigos_native and config.smokeFaultMode() == .none) {
+    if (config.bootProfile() == .zigos_native) {
         return !device_inventory.recordForClass(.network_adapter).detected;
     }
     return false;
