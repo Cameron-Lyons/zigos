@@ -1,11 +1,11 @@
 capability.derive.workspace_object 425000
-capability.mint_reuse_free_slot 8000000
-capability.target_generation_lookup 11000000
+capability.mint_reuse_free_slot 9000000
+capability.target_generation_lookup 13000000
 permission.review.render_grants 300000
 network_policy.authorize_connection 15000
 background_dispatch.allowed_sync 800000
 task_runtime.checkpoint.write_restore 9000000
-accelerator_scheduler.claim_release 500000
+accelerator_scheduler.claim_release 600000
 storage.file_bridge.resolve_view 22000
 storage.workspace.commit_overlay 11000000
 storage.volume.replay_segmented_log 500000000
@@ -19,4 +19,4 @@ denial_explanation.render_policy_hint 50000
 sync_service.overlay_session_flow 90000
 recovery_environment.reinstall_restore_repair 4500000000
 update_health.validate_pending_activation 2500000000
-driver_recovery.restart_driver 850000
+driver_recovery.restart_driver 1000000
