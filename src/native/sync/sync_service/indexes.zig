@@ -5,6 +5,7 @@ const native_util = @import("../../core/util.zig");
 const principal = @import("../../core/principal.zig");
 const state_support = @import("../sync_state_support.zig");
 const contracts = @import("contracts.zig");
+const workspace = @import("../../storage/workspace.zig");
 
 pub const replica_index_capacity: usize = state_support.MAX_REPLICA_ENTRIES * 2;
 pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
@@ -22,6 +23,8 @@ pub const DatabaseContractBundleIndex = indexed_arena.MultimapIndex(
     state_support.MAX_DATABASE_CONTRACTS,
     database_contract_bundle_index_capacity,
 );
+pub const conflict_index_capacity: usize = state_support.MAX_CONFLICTS * 2;
+pub const ConflictIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -32,6 +35,13 @@ pub const OverlayLookup = struct {
 };
 
 pub const ReplicaLookup = struct {
+    workspace_id: u64,
+    device_id: principal.PrincipalId,
+    path: []const u8,
+    path_hash: u64,
+};
+
+pub const ConflictLookup = struct {
     workspace_id: u64,
     device_id: principal.PrincipalId,
     path: []const u8,
@@ -66,6 +76,13 @@ pub fn replicaSlotMatches(context: ReplicaLookup, slot: *const state_support.Rep
         std.mem.eql(u8, slot.entry.pathSlice(), context.path);
 }
 
+pub fn conflictSlotMatches(context: ConflictLookup, slot: *const state_support.ConflictSlot) bool {
+    return slot.conflict.workspace_id == context.workspace_id and
+        slot.conflict.device_id.eql(context.device_id) and
+        conflictPathHash(&slot.conflict) == context.path_hash and
+        std.mem.eql(u8, slot.conflict.pathSlice(), context.path);
+}
+
 pub fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalentLookup, slot: *const state_support.DatabaseContractSlot) bool {
     return slot.contract.workspace_id == context.workspace_id and
         std.mem.eql(u8, slot.contract.bundleIdSlice(), context.bundle_id) and
@@ -82,6 +99,10 @@ fn replicaIndexKey(workspace_id: u64, device_id: principal.PrincipalId, path_has
 }
 
 pub fn replicaIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
+    return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, path_hash)));
+}
+
+pub fn conflictIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
     return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, path_hash)));
 }
 
@@ -141,10 +162,15 @@ fn appendBytesWithLength(hash: u64, bytes: []const u8) u64 {
     return native_util.fnv1a64WithSeed(with_len, bytes);
 }
 
+fn conflictPathHash(conflict: *const state_support.ConflictRecord) u64 {
+    return workspace.pathHash(conflict.pathSlice());
+}
+
 test "sync service lookup indexes use nonzero workspace keys" {
     try std.testing.expect(workspacePolicyIndexLookupKey(0) != 0);
     try std.testing.expect(overlayIndexLookupKey(42) != 0);
     try std.testing.expectEqual(workspacePolicyIndexLookupKey(42), overlayIndexLookupKey(42));
+    try std.testing.expect(conflictIndexLookupKey(7, .{ .kind = .device, .serial = 2 }, 99) != 0);
     try std.testing.expect(databaseContractIndexLookupKey(0) != 0);
     const signature = manifest.Signature{ .signer = "test-signer" };
     try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != 0);
