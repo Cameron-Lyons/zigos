@@ -1836,6 +1836,7 @@ fn validateNativeOnlyLaunchTrack(
     const linter_path = "src/native/sdk/manifest_linter.zig";
     const contract_path = "src/native/platform/os_contract_2026.zig";
     const boot_registry_path = "src/native/task/userspace_boot_registry.zig";
+    const archive_index_path = "src/native/task/userspace_archive_index.zig";
     const loader_path = "src/native/task/userspace_loader.zig";
     const launch_path = "src/native/task/userspace_launch.zig";
     const rendered_shell_launch_path = "src/native/platform/rendered_shell/task_launch.zig";
@@ -1844,6 +1845,7 @@ fn validateNativeOnlyLaunchTrack(
     const linter_source = try readRequiredSource(allocator, io, errors, linter_path) orelse return;
     const contract_source = try readRequiredSource(allocator, io, errors, contract_path) orelse return;
     const boot_registry_source = try readRequiredSource(allocator, io, errors, boot_registry_path) orelse return;
+    const archive_index_source = try readRequiredSource(allocator, io, errors, archive_index_path) orelse return;
     const loader_source = try readRequiredSource(allocator, io, errors, loader_path) orelse return;
     const launch_source = try readRequiredSource(allocator, io, errors, launch_path) orelse return;
     const rendered_shell_launch_source = try readRequiredSource(allocator, io, errors, rendered_shell_launch_path) orelse return;
@@ -1884,7 +1886,7 @@ fn validateNativeOnlyLaunchTrack(
     }
 
     const required_boot_registry_snippets = [_][]const u8{
-        "const archive = @import(\"userspace_archive\")",
+        "const archive_index = @import(\"userspace_archive_index.zig\")",
         "GeneratedArtifactMissing",
         "validateGeneratedArchiveHasOnlyRegisteredSpecs",
         "generatedArtifactFor(spec.bundle_id) orelse return error.GeneratedArtifactMissing",
@@ -1894,6 +1896,18 @@ fn validateNativeOnlyLaunchTrack(
     for (required_boot_registry_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_registry_source, snippet) == null) {
             try common.addError(errors, allocator, "Native-only launch track must keep archive-backed boot registry snippet: {s}", .{snippet});
+        }
+    }
+    const required_archive_index_snippets = [_][]const u8{
+        "const archive = @import(\"userspace_archive\")",
+        "const bundle_index = buildBundleIndex()",
+        "id_index.lookup",
+        "return artifact",
+        "test \"userspace archive index resolves every generated artifact bundle\"",
+    };
+    for (required_archive_index_snippets) |snippet| {
+        if (std.mem.indexOf(u8, archive_index_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only launch track must keep indexed archive lookup snippet: {s}", .{snippet});
         }
     }
 

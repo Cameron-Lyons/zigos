@@ -5,7 +5,7 @@ const registry = @import("userspace_registry.zig");
 const service_catalog = @import("../session/service_catalog.zig");
 const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
-const archive = @import("userspace_archive");
+const archive_index = @import("userspace_archive_index.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 const console = if (builtin.target.os.tag == .freestanding)
@@ -28,7 +28,7 @@ pub const Error = userspace_loader.Error || SigningError || error{
     UnknownBundleId,
 };
 
-const GeneratedArtifact = @TypeOf(archive.artifacts[0]);
+const GeneratedArtifact = archive_index.GeneratedArtifact;
 
 pub fn specCount() usize {
     return registry.boot_image_specs.len;
@@ -73,16 +73,13 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
 }
 
 fn validateGeneratedArchiveHasOnlyRegisteredSpecs() Error!void {
-    for (archive.artifacts) |artifact| {
+    for (archive_index.artifacts) |artifact| {
         _ = find(artifact.bundle_id) orelse return error.UnknownBundleId;
     }
 }
 
 fn generatedArtifactFor(bundle_id: []const u8) ?GeneratedArtifact {
-    for (archive.artifacts) |artifact| {
-        if (std.mem.eql(u8, artifact.bundle_id, bundle_id)) return artifact;
-    }
-    return null;
+    return archive_index.artifactFor(bundle_id);
 }
 
 pub fn validateGeneratedArtifactMatchesSpec(spec: *const registry.ImageSpec, artifact: anytype) Error!void {
@@ -215,48 +212,48 @@ test "boot registry definitions are unique and preload a userspace catalog" {
 }
 
 test "boot registry rejects generated archive records that diverge from registry specs" {
-    try std.testing.expect(archive.artifacts.len > 0);
-    const spec = find(archive.artifacts[0].bundle_id) orelse return error.UnknownBundleId;
+    try std.testing.expect(archive_index.artifacts.len > 0);
+    const spec = find(archive_index.artifacts[0].bundle_id) orelse return error.UnknownBundleId;
 
-    try validateGeneratedArtifactMatchesSpec(spec, archive.artifacts[0]);
-    _ = try embeddedElfInfoFromArtifact(archive.artifacts[0]);
+    try validateGeneratedArtifactMatchesSpec(spec, archive_index.artifacts[0]);
+    _ = try embeddedElfInfoFromArtifact(archive_index.artifacts[0]);
 
-    var stale_bundle_id = archive.artifacts[0];
+    var stale_bundle_id = archive_index.artifacts[0];
     stale_bundle_id.bundle_id = "zigos.system.stale-generated-record";
     try std.testing.expectError(
         error.GeneratedArtifactIdentityMismatch,
         validateGeneratedArtifactMatchesSpec(spec, stale_bundle_id),
     );
 
-    var stale_display_name = archive.artifacts[0];
+    var stale_display_name = archive_index.artifacts[0];
     stale_display_name.display_name = "Stale Display Name";
     try std.testing.expectError(
         error.GeneratedArtifactIdentityMismatch,
         validateGeneratedArtifactMatchesSpec(spec, stale_display_name),
     );
 
-    var unsigned = archive.artifacts[0];
+    var unsigned = archive_index.artifacts[0];
     unsigned.signed = !spec.signed;
     try std.testing.expectError(
         error.GeneratedArtifactSignatureMismatch,
         validateGeneratedArtifactMatchesSpec(spec, unsigned),
     );
 
-    var stale_contract = archive.artifacts[0];
+    var stale_contract = archive_index.artifacts[0];
     stale_contract.role_tag +%= 1;
     try std.testing.expectError(
         error.GeneratedArtifactContractMismatch,
         validateGeneratedArtifactMatchesSpec(spec, stale_contract),
     );
 
-    var stale_component_class = archive.artifacts[0];
+    var stale_component_class = archive_index.artifacts[0];
     stale_component_class.component_class +%= 1;
     try std.testing.expectError(
         error.GeneratedArtifactIdentityMismatch,
         validateGeneratedArtifactMatchesSpec(spec, stale_component_class),
     );
 
-    var too_many_segments = archive.artifacts[0];
+    var too_many_segments = archive_index.artifacts[0];
     too_many_segments.segment_count = task_runtime.MAX_EXECUTABLE_SEGMENTS + 1;
     try std.testing.expectError(
         error.GeneratedArtifactSegmentCountInvalid,
