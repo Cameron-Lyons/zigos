@@ -31,6 +31,12 @@ pub const inbound_transport_high_water_index_capacity: usize = state_support.MAX
 pub const InboundTransportHighWaterIndex = indexed_arena.UniqueIndex(inbound_transport_high_water_index_capacity);
 pub const outbound_transport_frame_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
 pub const OutboundTransportFrameIndex = indexed_arena.UniqueIndex(outbound_transport_frame_index_capacity);
+pub const outbound_transport_target_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
+pub const OutboundTransportTargetIndex = indexed_arena.MultimapIndex(
+    state_support.MAX_TRANSPORT_FRAMES,
+    state_support.MAX_TRANSPORT_FRAMES,
+    outbound_transport_target_index_capacity,
+);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -161,6 +167,14 @@ pub fn outboundTransportFrameIndexLookupKey(frame_id: u64) u64 {
     return indexed_arena.nonZeroKey(frame_id);
 }
 
+pub fn outboundTransportTargetIndexLookupKey(workspace_id: u64, target_device: principal.PrincipalId) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(target_device.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, target_device.serial);
+    return indexed_arena.nonZeroKey(hash);
+}
+
 fn inboundTransportScopeHash(
     workspace_id: u64,
     source_device: principal.PrincipalId,
@@ -252,6 +266,7 @@ test "sync service lookup indexes use nonzero workspace keys" {
         .{ .kind = .device, .serial = 3 },
     ) != 0);
     try std.testing.expect(outboundTransportFrameIndexLookupKey(0) != 0);
+    try std.testing.expect(outboundTransportTargetIndexLookupKey(7, .{ .kind = .device, .serial = 3 }) != 0);
     try std.testing.expect(databaseContractIndexLookupKey(0) != 0);
     const signature = manifest.Signature{ .signer = "test-signer" };
     try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != 0);

@@ -98,6 +98,7 @@ const ConflictIndex = sync_indexes.ConflictIndex;
 const InboundTransportDuplicateIndex = sync_indexes.InboundTransportDuplicateIndex;
 const InboundTransportHighWaterIndex = sync_indexes.InboundTransportHighWaterIndex;
 const OutboundTransportFrameIndex = sync_indexes.OutboundTransportFrameIndex;
+const OutboundTransportTargetIndex = sync_indexes.OutboundTransportTargetIndex;
 pub const Service = ServiceWith(.{});
 
 const sync_port = @import("port.zig");
@@ -168,6 +169,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         inbound_transport_duplicate_index: InboundTransportDuplicateIndex = InboundTransportDuplicateIndex.init(),
         inbound_transport_high_water_index: InboundTransportHighWaterIndex = InboundTransportHighWaterIndex.init(),
         outbound_transport_frame_index: OutboundTransportFrameIndex = OutboundTransportFrameIndex.init(),
+        outbound_transport_target_index: OutboundTransportTargetIndex = OutboundTransportTargetIndex.init(),
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
@@ -876,7 +878,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 if (!slot.acked) {
                     newly_acked += 1;
                 }
-                self.removeOutboundTransportFrameIndexes(&slot.frame);
+                self.removeOutboundTransportFrameIndexes(&slot.frame, slot_index);
                 slot.* = .{};
                 changed = true;
             }
@@ -1550,6 +1552,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.rebuildDatabaseContractBundleIndex();
             self.rebuildConflictIndex();
             self.rebuildOutboundTransportFrameIndex();
+            self.rebuildOutboundTransportTargetIndex();
             self.rebuildInboundTransportDuplicateIndex();
             self.rebuildInboundTransportHighWaterIndex();
             self.rebuildReplicaIndex();
@@ -1608,6 +1611,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (self.stateConst().outbound_transport_frames, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.outbound_transport_frame_index.insert(outboundTransportFrameIndexKeyFor(&slot.frame), slot_index);
+            }
+        }
+
+        fn rebuildOutboundTransportTargetIndex(self: *Self) void {
+            self.outbound_transport_target_index.reset();
+            for (self.stateConst().outbound_transport_frames, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                if (!self.outbound_transport_target_index.append(outboundTransportTargetIndexKeyFor(&slot.frame), slot_index)) {
+                    native_util.impossibleByInvariant("outbound transport target index rebuild exceeded capacity");
+                }
             }
         }
 
@@ -1734,6 +1747,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return sync_indexes.outboundTransportFrameIndexLookupKey(frame.id);
         }
 
+        fn outboundTransportTargetIndexKeyFor(frame: *const TransportFrame) u64 {
+            return sync_indexes.outboundTransportTargetIndexLookupKey(frame.workspace_id, frame.target_device);
+        }
+
+        fn outboundTransportTargetIndexKeyForLookup(workspace_id: u64, target_device: principal.PrincipalId) u64 {
+            return sync_indexes.outboundTransportTargetIndexLookupKey(workspace_id, target_device);
+        }
+
         fn inboundTransportDuplicateIndexKeyForFrame(frame: *const TransportFrame) u64 {
             return sync_indexes.inboundTransportDuplicateIndexLookupKey(
                 frame.workspace_id,
@@ -1773,9 +1794,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             queue_kind: TransportQueueKind,
             slot: *const DurableTransportFrameSlot,
             slot_index: usize,
-        ) void {
+        ) Error!void {
             switch (queue_kind) {
-                .outbound => self.outbound_transport_frame_index.insert(outboundTransportFrameIndexKeyFor(&slot.frame), slot_index),
+                .outbound => {
+                    self.outbound_transport_frame_index.insert(outboundTransportFrameIndexKeyFor(&slot.frame), slot_index);
+                    if (!self.outbound_transport_target_index.append(outboundTransportTargetIndexKeyFor(&slot.frame), slot_index)) {
+                        self.outbound_transport_frame_index.remove(outboundTransportFrameIndexKeyFor(&slot.frame));
+                        return error.TransportQueueFull;
+                    }
+                },
                 .inbound => {
                     self.inbound_transport_duplicate_index.insert(inboundTransportDuplicateIndexKeyForFrame(&slot.frame), slot_index);
                     self.indexInboundTransportHighWaterSlot(slot, slot_index);
@@ -1809,8 +1836,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return lookup;
         }
 
-        fn removeOutboundTransportFrameIndexes(self: *Self, frame: *const TransportFrame) void {
+        fn removeOutboundTransportFrameIndexes(self: *Self, frame: *const TransportFrame, slot_index: usize) void {
             self.outbound_transport_frame_index.remove(outboundTransportFrameIndexKeyFor(frame));
+            _ = self.outbound_transport_target_index.remove(outboundTransportTargetIndexKeyFor(frame), slot_index);
         }
 
         fn allocateConflictIndex(self: *const Self) ?usize {
@@ -1852,7 +1880,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.* = .{};
             slot.in_use = true;
             slot.frame = frame;
-            self.indexTransportFrameSlot(queue_kind, slot, slot_index);
+            self.indexTransportFrameSlot(queue_kind, slot, slot_index) catch |err| {
+                slot.* = .{};
+                return err;
+            };
             self.resident().markDirty();
             return slot.frame;
         }
@@ -1875,7 +1906,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (queue_kind != .outbound) return null;
             for (&self.state().outbound_transport_frames, 0..) |*slot, slot_index| {
                 if (!slot.in_use or !slot.acked) continue;
-                self.removeOutboundTransportFrameIndexes(&slot.frame);
+                self.removeOutboundTransportFrameIndexes(&slot.frame, slot_index);
                 slot.* = .{};
                 return slot_index;
             }
@@ -1926,6 +1957,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn transportFrameSlotCountFor(self: *const Self, queue_kind: TransportQueueKind, workspace_id: u64, target_device: principal.PrincipalId) usize {
+            if (queue_kind == .outbound) return self.outboundTransportFrameSlotCountFor(workspace_id, target_device);
             var count: usize = 0;
             for (self.transportFrameSlotsConst(queue_kind)) |slot| {
                 if (!slot.in_use) continue;
@@ -1944,6 +1976,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             min_frame_id: u64,
             out: []TransportFrame,
         ) usize {
+            if (queue_kind == .outbound) return self.copyOutboundTransportFrameSlotsForSince(workspace_id, target_device, min_frame_id, out);
             var copied: usize = 0;
             for (self.transportFrameSlotsConst(queue_kind)) |slot| {
                 if (!slot.in_use or slot.acked) continue;
@@ -1954,6 +1987,53 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 copied += 1;
             }
             return copied;
+        }
+
+        fn outboundTransportFrameSlotCountFor(self: *const Self, workspace_id: u64, target_device: principal.PrincipalId) usize {
+            var count: usize = 0;
+            var slot_index = self.outbound_transport_target_index.head(outboundTransportTargetIndexKeyForLookup(workspace_id, target_device));
+            while (slot_index != indexed_arena.no_index) {
+                const slot = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
+                if (!slot.acked) count += 1;
+                slot_index = self.outbound_transport_target_index.next(slot_index);
+            }
+            return count;
+        }
+
+        fn copyOutboundTransportFrameSlotsForSince(
+            self: *const Self,
+            workspace_id: u64,
+            target_device: principal.PrincipalId,
+            min_frame_id: u64,
+            out: []TransportFrame,
+        ) usize {
+            var copied: usize = 0;
+            var slot_index = self.outbound_transport_target_index.head(outboundTransportTargetIndexKeyForLookup(workspace_id, target_device));
+            while (slot_index != indexed_arena.no_index) {
+                const slot = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
+                if (!slot.acked and slot.frame.id > min_frame_id) {
+                    if (copied >= out.len) return copied;
+                    out[copied] = slot.frame;
+                    copied += 1;
+                }
+                slot_index = self.outbound_transport_target_index.next(slot_index);
+            }
+            return copied;
+        }
+
+        fn outboundTransportTargetIndexSlot(
+            self: *const Self,
+            slot_index: usize,
+            workspace_id: u64,
+            target_device: principal.PrincipalId,
+        ) *const DurableTransportFrameSlot {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("outbound transport target index points outside slots");
+            const slot = &self.stateConst().outbound_transport_frames[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("outbound transport target index points at a free slot");
+            if (slot.frame.workspace_id != workspace_id or !slot.frame.target_device.eql(target_device)) {
+                native_util.impossibleByInvariant("outbound transport target index points at the wrong slot");
+            }
+            return slot;
         }
 
         fn latestTransportFrameSlotForPath(
