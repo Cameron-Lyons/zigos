@@ -97,6 +97,7 @@ const DatabaseContractBundleIndex = sync_indexes.DatabaseContractBundleIndex;
 const ConflictIndex = sync_indexes.ConflictIndex;
 const InboundTransportDuplicateIndex = sync_indexes.InboundTransportDuplicateIndex;
 const InboundTransportHighWaterIndex = sync_indexes.InboundTransportHighWaterIndex;
+const OutboundTransportFrameIndex = sync_indexes.OutboundTransportFrameIndex;
 pub const Service = ServiceWith(.{});
 
 const sync_port = @import("port.zig");
@@ -166,6 +167,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         conflict_index: ConflictIndex = ConflictIndex.init(),
         inbound_transport_duplicate_index: InboundTransportDuplicateIndex = InboundTransportDuplicateIndex.init(),
         inbound_transport_high_water_index: InboundTransportHighWaterIndex = InboundTransportHighWaterIndex.init(),
+        outbound_transport_frame_index: OutboundTransportFrameIndex = OutboundTransportFrameIndex.init(),
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
@@ -863,20 +865,22 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         // checkpoint at the end. The per-frame variant used to run a full state
         // re-persist (encode every table + storage scan) for each frame; a
         // replication pass delivers many frames at once, so coalescing collapses N
-        // full persists into one. Returns the count newly marked acked.
+        // full persists into one. Returns the count newly acknowledged and
+        // reclaims delivered outbound slots immediately.
         pub fn ackOutboundTransportFrames(self: *Self, frame_ids: []const u64) Error!usize {
             var newly_acked: usize = 0;
+            var changed = false;
             for (frame_ids) |frame_id| {
-                for (&self.state().outbound_transport_frames) |*slot| {
-                    if (!slot.in_use or slot.frame.id != frame_id) continue;
-                    if (!slot.acked) {
-                        slot.acked = true;
-                        newly_acked += 1;
-                    }
-                    break;
+                const slot_index = self.lookupOutboundTransportFrameSlotIndex(frame_id) orelse continue;
+                const slot = &self.state().outbound_transport_frames[slot_index];
+                if (!slot.acked) {
+                    newly_acked += 1;
                 }
+                self.removeOutboundTransportFrameIndexes(&slot.frame);
+                slot.* = .{};
+                changed = true;
             }
-            if (newly_acked > 0) try self.checkpoint();
+            if (changed) try self.checkpoint();
             return newly_acked;
         }
 
@@ -1545,6 +1549,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.rebuildDatabaseContractEquivalentIndex();
             self.rebuildDatabaseContractBundleIndex();
             self.rebuildConflictIndex();
+            self.rebuildOutboundTransportFrameIndex();
             self.rebuildInboundTransportDuplicateIndex();
             self.rebuildInboundTransportHighWaterIndex();
             self.rebuildReplicaIndex();
@@ -1595,6 +1600,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (self.stateConst().conflicts, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.conflict_index.insert(conflictIndexKeyFor(&slot.conflict), slot_index);
+            }
+        }
+
+        fn rebuildOutboundTransportFrameIndex(self: *Self) void {
+            self.outbound_transport_frame_index.reset();
+            for (self.stateConst().outbound_transport_frames, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.outbound_transport_frame_index.insert(outboundTransportFrameIndexKeyFor(&slot.frame), slot_index);
             }
         }
 
@@ -1703,8 +1716,22 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
         }
 
+        fn debugAssertOutboundTransportFrameIndexMissAbsent(self: *const Self, frame_id: u64) void {
+            if (@import("builtin").mode != .Debug) return;
+            for (self.stateConst().outbound_transport_frames) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.frame.id == frame_id) {
+                    native_util.impossibleByInvariant("outbound transport frame index missed a live slot");
+                }
+            }
+        }
+
         fn conflictIndexKeyFor(conflict: *const ConflictRecord) u64 {
             return sync_indexes.conflictIndexLookupKey(conflict.workspace_id, conflict.device_id, workspace.pathHash(conflict.pathSlice()));
+        }
+
+        fn outboundTransportFrameIndexKeyFor(frame: *const TransportFrame) u64 {
+            return sync_indexes.outboundTransportFrameIndexLookupKey(frame.id);
         }
 
         fn inboundTransportDuplicateIndexKeyForFrame(frame: *const TransportFrame) u64 {
@@ -1747,9 +1774,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot: *const DurableTransportFrameSlot,
             slot_index: usize,
         ) void {
-            if (queue_kind != .inbound) return;
-            self.inbound_transport_duplicate_index.insert(inboundTransportDuplicateIndexKeyForFrame(&slot.frame), slot_index);
-            self.indexInboundTransportHighWaterSlot(slot, slot_index);
+            switch (queue_kind) {
+                .outbound => self.outbound_transport_frame_index.insert(outboundTransportFrameIndexKeyFor(&slot.frame), slot_index),
+                .inbound => {
+                    self.inbound_transport_duplicate_index.insert(inboundTransportDuplicateIndexKeyForFrame(&slot.frame), slot_index);
+                    self.indexInboundTransportHighWaterSlot(slot, slot_index);
+                },
+            }
         }
 
         fn indexInboundTransportHighWaterSlot(self: *Self, slot: *const DurableTransportFrameSlot, slot_index: usize) void {
@@ -1778,6 +1809,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return lookup;
         }
 
+        fn removeOutboundTransportFrameIndexes(self: *Self, frame: *const TransportFrame) void {
+            self.outbound_transport_frame_index.remove(outboundTransportFrameIndexKeyFor(frame));
+        }
+
         fn allocateConflictIndex(self: *const Self) ?usize {
             return fixed_table.firstFreeSlotIndex(ConflictSlot, MAX_CONFLICTS, &self.stateConst().conflicts);
         }
@@ -1794,6 +1829,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         fn enqueueTransportFrame(self: *Self, queue_kind: TransportQueueKind, request: TransportFrameRequest) Error!TransportFrame {
             if (request.path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
             const slot_index = self.allocateTransportFrameSlotIndex(queue_kind) orelse
+                self.reclaimOutboundTransportFrameSlotIndex(queue_kind) orelse
                 self.reclaimInboundTransportFrameSlotIndex(queue_kind) orelse
                 return error.TransportQueueFull;
             const frame_id = self.nextTransportFrameId();
@@ -1831,6 +1867,17 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         fn allocateTransportFrameSlotIndex(self: *const Self, queue_kind: TransportQueueKind) ?usize {
             for (self.transportFrameSlotsConst(queue_kind), 0..) |slot, slot_index| {
                 if (!slot.in_use) return slot_index;
+            }
+            return null;
+        }
+
+        fn reclaimOutboundTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind) ?usize {
+            if (queue_kind != .outbound) return null;
+            for (&self.state().outbound_transport_frames, 0..) |*slot, slot_index| {
+                if (!slot.in_use or !slot.acked) continue;
+                self.removeOutboundTransportFrameIndexes(&slot.frame);
+                slot.* = .{};
+                return slot_index;
             }
             return null;
         }
@@ -1938,6 +1985,18 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 native_util.impossibleByInvariant("inbound transport high-water index points at the wrong scope");
             }
             return slot.frame.source_frame_id;
+        }
+
+        fn lookupOutboundTransportFrameSlotIndex(self: *const Self, frame_id: u64) ?usize {
+            const slot_index = self.outbound_transport_frame_index.lookup(sync_indexes.outboundTransportFrameIndexLookupKey(frame_id)) orelse {
+                self.debugAssertOutboundTransportFrameIndexMissAbsent(frame_id);
+                return null;
+            };
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("outbound transport frame index points outside slots");
+            const slot = &self.stateConst().outbound_transport_frames[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("outbound transport frame index points at a free slot");
+            if (slot.frame.id != frame_id) native_util.impossibleByInvariant("outbound transport frame index points at the wrong slot");
+            return slot_index;
         }
 
         fn findDuplicateInboundFrame(self: *Self, request: TransportFrameRequest) ?*DurableTransportFrameSlot {
