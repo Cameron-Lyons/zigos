@@ -27,6 +27,12 @@ pub const conflict_index_capacity: usize = state_support.MAX_CONFLICTS * 2;
 pub const ConflictIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
 pub const conflict_object_index_capacity: usize = state_support.MAX_CONFLICTS * 2;
 pub const ConflictObjectIndex = indexed_arena.UniqueIndex(conflict_object_index_capacity);
+pub const conflict_scope_index_capacity: usize = state_support.MAX_CONFLICTS * 2;
+pub const ConflictScopeIndex = indexed_arena.MultimapIndex(
+    state_support.MAX_CONFLICTS,
+    state_support.MAX_CONFLICTS,
+    conflict_scope_index_capacity,
+);
 pub const inbound_transport_duplicate_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
 pub const InboundTransportDuplicateIndex = indexed_arena.UniqueIndex(inbound_transport_duplicate_index_capacity);
 pub const inbound_transport_high_water_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
@@ -78,6 +84,11 @@ pub const ConflictObjectLookup = struct {
     workspace_id: u64,
     device_id: principal.PrincipalId,
     object_id: u64,
+};
+
+pub const ConflictScopeLookup = struct {
+    workspace_id: u64,
+    device_id: principal.PrincipalId,
 };
 
 pub const InboundTransportDuplicateLookup = struct {
@@ -134,6 +145,11 @@ pub fn conflictObjectSlotMatches(context: ConflictObjectLookup, slot: *const sta
         slot.conflict.object_id == context.object_id;
 }
 
+pub fn conflictScopeSlotMatches(context: ConflictScopeLookup, slot: *const state_support.ConflictSlot) bool {
+    return slot.conflict.workspace_id == context.workspace_id and
+        slot.conflict.device_id.eql(context.device_id);
+}
+
 pub fn inboundTransportDuplicateSlotMatches(context: InboundTransportDuplicateLookup, slot: *const state_support.DurableTransportFrameSlot) bool {
     return slot.frame.workspace_id == context.workspace_id and
         slot.frame.source_frame_id == context.source_frame_id and
@@ -172,6 +188,14 @@ pub fn conflictIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalI
 
 pub fn conflictObjectIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, object_id: u64) u64 {
     return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, object_id)));
+}
+
+pub fn conflictScopeIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(device_id.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_id.serial);
+    return indexed_arena.nonZeroKey(hash);
 }
 
 pub fn inboundTransportDuplicateIndexLookupKey(
@@ -294,6 +318,7 @@ test "sync service lookup indexes use nonzero workspace keys" {
     try std.testing.expectEqual(workspacePolicyIndexLookupKey(42), overlayIndexLookupKey(42));
     try std.testing.expect(conflictIndexLookupKey(7, .{ .kind = .device, .serial = 2 }, 99) != 0);
     try std.testing.expect(conflictObjectIndexLookupKey(7, .{ .kind = .device, .serial = 2 }, 99) != 0);
+    try std.testing.expect(conflictScopeIndexLookupKey(7, .{ .kind = .device, .serial = 2 }) != 0);
     try std.testing.expect(inboundTransportDuplicateIndexLookupKey(
         7,
         .{ .kind = .device, .serial = 2 },
