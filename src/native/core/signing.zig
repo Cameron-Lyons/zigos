@@ -270,7 +270,7 @@ pub const ReleaseVerifierMetadata = struct {
 
     pub fn digest(self: ReleaseVerifierMetadata) crypto_hash.Digest {
         var hasher = crypto_hash.init();
-        crypto_hash.updateBytes(&hasher, "schema", "zigos.release-verifier-metadata.v1");
+        crypto_hash.updateBytes(&hasher, "schema", "zigos.release-verifier-metadata");
         crypto_hash.updateBytes(&hasher, "provider-name", self.provider_name);
         crypto_hash.updateBytes(&hasher, "key-id", self.key_id);
         crypto_hash.updateBytes(&hasher, "label", self.label);
@@ -789,7 +789,7 @@ fn signingProfileMatches(signature: manifest.Signature, profile: SignatureProfil
 
 fn hybridPublicCommitment(ed25519_public_key: []const u8, signer: []const u8) [manifest.ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("zigos.ml-dsa65-preview.public.v1");
+    hasher.update("zigos.ml-dsa65-preview.public");
     hasher.update(ed25519_public_key);
     hasher.update(signer);
     var digest: [manifest.ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES]u8 = undefined;
@@ -803,7 +803,7 @@ fn hybridSignatureBinding(
     message: []const u8,
 ) [manifest.ML_DSA65_PREVIEW_SIGNATURE_BINDING_BYTES]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("zigos.ml-dsa65-preview.signature.v1");
+    hasher.update("zigos.ml-dsa65-preview.signature");
     hasher.update(pq_public_commitment);
     hasher.update(ed25519_signature);
     hasher.update(message);
