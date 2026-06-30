@@ -29,10 +29,11 @@ pub const USB_ENDPOINT_TRANSFER_INTERRUPT: u8 = 0x03;
 pub const DEFAULT_BOOT_KEYBOARD_DEVICE_ID: u64 = 0x8086_A0ED_0001;
 pub const DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID: u8 = 1;
 pub const DEFAULT_BOOT_KEYBOARD_PORT_ID: u8 = 1;
-pub const MAX_BOOT_PORTS: usize = 16;
-pub const MAX_DEVICE_SLOTS: usize = 8;
+pub const MAX_BOOT_PORTS: usize = 32;
+pub const MAX_DEVICE_SLOTS: usize = 32;
 
 const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
+const DEVICE_SLOT_TABLE_ENTRIES: usize = MAX_DEVICE_SLOTS + 1;
 const MIN_CAPABILITY_LENGTH: u8 = 0x20;
 const MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0090;
 const CAPABILITY_LENGTH_OFFSET: usize = 0x00;
@@ -64,6 +65,7 @@ pub const Error = error{
     TooSmall,
     InvalidCapabilityLength,
     UnsupportedVersion,
+    MissingDeviceSlots,
     MissingPorts,
     MissingInterrupters,
     RingTooSmall,
@@ -327,7 +329,9 @@ pub const HidController = struct {
     count: usize = 0,
     boot_keyboard: ?HidBootKeyboardDevice = null,
     ports: [MAX_BOOT_PORTS]PortState = [_]PortState{.{}} ** MAX_BOOT_PORTS,
-    slots: [MAX_DEVICE_SLOTS]DeviceSlot = [_]DeviceSlot{.{}} ** MAX_DEVICE_SLOTS,
+    slots: [DEVICE_SLOT_TABLE_ENTRIES]DeviceSlot = [_]DeviceSlot{.{}} ** DEVICE_SLOT_TABLE_ENTRIES,
+    port_limit: u8 = maxBootPortsU8(),
+    device_slot_limit: u8 = maxDeviceSlotsU8(),
     input_events_delivered: usize = 0,
     reports: [HID_EVENT_QUEUE_CAPACITY]HidReport = [_]HidReport{emptyHidReport()} ** HID_EVENT_QUEUE_CAPACITY,
     mmio: ?MmioState = null,
@@ -338,9 +342,14 @@ pub const HidController = struct {
     }
 
     pub fn initWithMmio(capabilities: CapabilityRegisters, ring_plan: RingPlan) Error!HidController {
+        if (capabilities.max_device_slots == 0) return error.MissingDeviceSlots;
+        if (capabilities.max_ports == 0) return error.MissingPorts;
+        if (capabilities.max_interrupters == 0) return error.MissingInterrupters;
         if (capabilities.doorbell_offset == 0) return error.MissingDoorbellRegisters;
         if (capabilities.runtime_register_offset == 0) return error.MissingRuntimeRegisters;
         var controller = try HidController.init(ring_plan);
+        controller.port_limit = @min(capabilities.max_ports, maxBootPortsU8());
+        controller.device_slot_limit = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
         const device_context_bytes = @as(u32, capabilities.max_device_slots) * CONTEXT_BYTES;
         const input_context_bytes = CONTEXT_BYTES * 2;
         const device_context_base_address = alignForward(
@@ -393,9 +402,10 @@ pub const HidController = struct {
         if (!port.connected or !port.enabled) return error.PortNotConnected;
         if (port.assigned_slot != 0) return error.PortAlreadyAssigned;
 
-        for (self.slots[1..], 1..) |*slot, index| {
+        var slot_id: u8 = 1;
+        while (slot_id <= self.device_slot_limit) : (slot_id += 1) {
+            const slot = &self.slots[@as(usize, slot_id)];
             if (slot.enabled) continue;
-            const slot_id: u8 = @intCast(index);
             slot.* = .{
                 .enabled = true,
                 .port_id = port_id,
@@ -521,12 +531,12 @@ pub const HidController = struct {
     }
 
     fn portPtr(self: *HidController, port_id: u8) ?*PortState {
-        if (port_id == 0 or port_id > self.ports.len) return null;
+        if (port_id == 0 or port_id > self.port_limit) return null;
         return &self.ports[port_id - 1];
     }
 
     fn slotPtr(self: *HidController, slot_id: u8) ?*DeviceSlot {
-        if (slot_id == 0 or slot_id >= self.slots.len) return null;
+        if (slot_id == 0 or slot_id > self.device_slot_limit) return null;
         return &self.slots[slot_id];
     }
 };
@@ -626,6 +636,7 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
     const max_device_slots: u8 = @truncate(hcsparams1);
     const max_interrupters: u16 = @truncate(hcsparams1 >> HCSPARAMS1_MAX_INTERRUPTERS_SHIFT);
     const max_ports: u8 = @truncate(hcsparams1 >> HCSPARAMS1_MAX_PORTS_SHIFT);
+    if (max_device_slots == 0) return error.MissingDeviceSlots;
     if (max_ports == 0) return error.MissingPorts;
     if (max_interrupters == 0) return error.MissingInterrupters;
 
@@ -686,6 +697,14 @@ fn aligned(address: u64, alignment: u64) bool {
     return alignment != 0 and (address % alignment) == 0;
 }
 
+fn maxBootPortsU8() u8 {
+    return @intCast(MAX_BOOT_PORTS);
+}
+
+fn maxDeviceSlotsU8() u8 {
+    return @intCast(MAX_DEVICE_SLOTS);
+}
+
 fn emptyHidReport() HidReport {
     return .{
         .device_id = 0,
@@ -726,6 +745,14 @@ test "xHCI capability parser rejects unsupported controllers" {
     var mmio = validCapabilityRegisters();
     writeU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], TEST_UNSUPPORTED_INTERFACE_VERSION);
     try std.testing.expectError(error.UnsupportedVersion, parseCapabilityRegisters(mmio[0..]));
+
+    mmio = validCapabilityRegisters();
+    writeU32Le(
+        mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES],
+        (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
+            (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT),
+    );
+    try std.testing.expectError(error.MissingDeviceSlots, parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
     writeU32Le(
@@ -908,6 +935,48 @@ test "xHCI HID controller requires port slot address and event delivery for inpu
     try std.testing.expectEqual(slot_id, proof.keyboard.slot_id);
     try std.testing.expectEqual(@as(u32, 2), proof.mmio.device_context_writes);
     try std.testing.expectEqual(@as(u32, 1), proof.mmio.endpoint_context_writes);
+}
+
+test "xHCI HID controller exposes all modeled 32 device slot ids" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_device_slots = maxDeviceSlotsU8();
+    capabilities.max_ports = maxBootPortsU8();
+    var controller = try HidController.initWithMmio(capabilities, .{
+        .command_ring_trbs = TEST_RING_TRBS,
+        .event_ring_trbs = TEST_RING_TRBS,
+        .command_ring_address = TEST_COMMAND_RING_ADDRESS,
+        .event_ring_address = TEST_EVENT_RING_ADDRESS,
+    });
+
+    for (1..MAX_DEVICE_SLOTS + 1) |port_value| {
+        const port_id: u8 = @intCast(port_value);
+        try controller.connectPort(port_id, .high);
+        const slot_id = try controller.enableDeviceSlot(port_id);
+        try std.testing.expectEqual(port_id, slot_id);
+    }
+
+    const last_slot_id = maxDeviceSlotsU8();
+    try controller.addressDevice(last_slot_id, DEFAULT_BOOT_KEYBOARD_DEVICE_ID + MAX_DEVICE_SLOTS);
+    try std.testing.expectError(error.InvalidDeviceSlot, controller.addressDevice(last_slot_id + 1, DEFAULT_BOOT_KEYBOARD_DEVICE_ID));
+}
+
+test "xHCI HID controller clamps ports and slots to MMIO capabilities" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_device_slots = 1;
+    capabilities.max_ports = 2;
+    var controller = try HidController.initWithMmio(capabilities, .{
+        .command_ring_trbs = TEST_RING_TRBS,
+        .event_ring_trbs = TEST_RING_TRBS,
+        .command_ring_address = TEST_COMMAND_RING_ADDRESS,
+        .event_ring_address = TEST_EVENT_RING_ADDRESS,
+    });
+
+    try controller.connectPort(1, .high);
+    try std.testing.expectEqual(@as(u8, 1), try controller.enableDeviceSlot(1));
+    try controller.connectPort(2, .high);
+    try std.testing.expectError(error.DeviceSlotUnavailable, controller.enableDeviceSlot(2));
+    try std.testing.expectError(error.InvalidPort, controller.connectPort(3, .high));
+    try std.testing.expectError(error.InvalidDeviceSlot, controller.addressDevice(2, DEFAULT_BOOT_KEYBOARD_DEVICE_ID));
 }
 
 test "xHCI HID controller queues interrupt keyboard reports" {

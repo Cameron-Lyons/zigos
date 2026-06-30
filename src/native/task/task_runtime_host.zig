@@ -92,8 +92,8 @@ pub fn zeroAddressSpace(AddressSpaceType: type, RegionType: type, comptime regio
     };
 }
 
-pub fn findAddressSpaceSlot(runtime: anytype, address_space_id: u64) ?*@TypeOf(runtime.address_spaces[0]) {
-    const RuntimeType = @typeInfo(@TypeOf(runtime)).pointer.child;
+pub fn findAddressSpaceSlot(runtime: anytype, address_space_id: u64) ?*AddressSpaceSlotType(@TypeOf(runtime)) {
+    const RuntimeType = runtimeType(@TypeOf(runtime));
     if (@hasDecl(RuntimeType, "indexedAddressSpaceSlot")) {
         return runtime.indexedAddressSpaceSlot(address_space_id);
     }
@@ -110,6 +110,12 @@ pub fn installAddressSpace(
     replace_address_space_id: ?u64,
     address_space: anytype,
 ) ErrorSet!void {
+    const RuntimeType = runtimeType(@TypeOf(runtime));
+    if (@hasDecl(RuntimeType, "installAddressSpaceRecord")) {
+        if (runtime.installAddressSpaceRecord(replace_address_space_id, address_space)) return;
+        return error.AddressSpaceTableFull;
+    }
+
     if (replace_address_space_id) |old_id| {
         if (findAddressSpaceSlot(runtime, old_id)) |slot| {
             slot.in_use = true;
@@ -131,14 +137,14 @@ pub fn installAddressSpace(
 }
 
 fn noteAddressSpaceIndexInstalled(runtime: anytype, address_space_id: u64, slot_index: usize) void {
-    const RuntimeType = @typeInfo(@TypeOf(runtime)).pointer.child;
+    const RuntimeType = runtimeType(@TypeOf(runtime));
     if (@hasDecl(RuntimeType, "noteAddressSpaceInstalled")) {
         runtime.noteAddressSpaceInstalled(address_space_id, slot_index);
     }
 }
 
 fn noteAddressSpaceIndexRemoved(runtime: anytype, address_space_id: u64) void {
-    const RuntimeType = @typeInfo(@TypeOf(runtime)).pointer.child;
+    const RuntimeType = runtimeType(@TypeOf(runtime));
     if (@hasDecl(RuntimeType, "removeAddressSpaceIndex")) {
         runtime.removeAddressSpaceIndex(address_space_id);
     }
@@ -166,8 +172,8 @@ fn assignHost(
     const namespace_id = runtime.next_namespace_id;
     runtime.next_namespace_id += 1;
 
-    const AddressSpaceType = @TypeOf(runtime.address_spaces[0].address_space);
-    const RegionType = @TypeOf(runtime.address_spaces[0].address_space.regions[0]);
+    const AddressSpaceType = AddressSpaceRecordType(@TypeOf(runtime));
+    const RegionType = AddressSpaceRegionType(@TypeOf(runtime));
     try installAddressSpace(
         ErrorSet,
         runtime,
@@ -175,7 +181,7 @@ fn assignHost(
         makeAddressSpace(
             AddressSpaceType,
             RegionType,
-            runtime.address_spaces[0].address_space.regions.len,
+            addressSpaceRegionCapacity(@TypeOf(runtime)),
             address_space_id,
             owner_task_id,
             process_id,
@@ -254,4 +260,40 @@ fn makeAddressSpace(
     };
     record.region_count = userspace_image.segment_count + 1;
     return record;
+}
+
+fn runtimeType(comptime RuntimePtrType: type) type {
+    return switch (@typeInfo(RuntimePtrType)) {
+        .pointer => |pointer| pointer.child,
+        else => @compileError("task runtime host helpers expect a runtime pointer"),
+    };
+}
+
+fn AddressSpaceSlotType(comptime RuntimePtrType: type) type {
+    const RuntimeType = runtimeType(RuntimePtrType);
+    if (@hasDecl(RuntimeType, "AddressSpaceSlotType")) return RuntimeType.AddressSpaceSlotType;
+    return switch (@typeInfo(@FieldType(RuntimeType, "address_spaces"))) {
+        .array => |array| array.child,
+        else => @compileError("legacy runtimes must expose an address_spaces array"),
+    };
+}
+
+fn AddressSpaceRecordType(comptime RuntimePtrType: type) type {
+    const RuntimeType = runtimeType(RuntimePtrType);
+    if (@hasDecl(RuntimeType, "AddressSpaceRecordType")) return RuntimeType.AddressSpaceRecordType;
+    return @FieldType(AddressSpaceSlotType(RuntimePtrType), "address_space");
+}
+
+fn AddressSpaceRegionType(comptime RuntimePtrType: type) type {
+    return switch (@typeInfo(@FieldType(AddressSpaceRecordType(RuntimePtrType), "regions"))) {
+        .array => |array| array.child,
+        else => @compileError("address spaces must expose fixed-size region arrays"),
+    };
+}
+
+fn addressSpaceRegionCapacity(comptime RuntimePtrType: type) usize {
+    return switch (@typeInfo(@FieldType(AddressSpaceRecordType(RuntimePtrType), "regions"))) {
+        .array => |array| array.len,
+        else => @compileError("address spaces must expose fixed-size region arrays"),
+    };
 }
