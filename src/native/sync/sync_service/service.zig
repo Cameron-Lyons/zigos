@@ -174,6 +174,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         inbound_transport_path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
         outbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
         inbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
+        outbound_transport_frame_count: usize = 0,
+        inbound_transport_frame_count: usize = 0,
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
         closed_overlay_sessions: ClosedOverlaySessionIndex = ClosedOverlaySessionIndex.init(),
@@ -901,6 +903,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 self.unindexTransportFramePathSlot(.outbound, slot_index);
                 self.unindexOutboundTransportTargetSlot(slot_index);
                 _ = frames.removeIndex(slot_index);
+                self.decrementTransportFrameSlotCount(.outbound);
                 changed = true;
             }
             if (changed) try self.checkpoint();
@@ -1664,15 +1667,19 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.inbound_transport_path_index.reset();
             self.outbound_transport_target_index.reset();
             self.inbound_transport_target_index.reset();
+            self.outbound_transport_frame_count = 0;
+            self.inbound_transport_frame_count = 0;
             for (self.stateConst().outbound_transport_frames.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.indexTransportFramePathSlot(.outbound, slot_index);
                 self.indexOutboundTransportTargetSlot(slot_index);
+                self.outbound_transport_frame_count += 1;
             }
             for (self.stateConst().inbound_transport_frames.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.indexTransportFramePathSlot(.inbound, slot_index);
                 self.indexInboundTransportTargetSlot(slot_index);
+                self.inbound_transport_frame_count += 1;
             }
         }
 
@@ -1713,6 +1720,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .outbound => self.indexOutboundTransportTargetSlot(slot_index),
                 .inbound => self.indexInboundTransportTargetSlot(slot_index),
             }
+            self.incrementTransportFrameSlotCount(queue_kind);
             self.resident().markDirty();
             return slot.frame;
         }
@@ -1758,6 +1766,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.unindexTransportFramePathSlot(.inbound, index);
             self.unindexInboundTransportTargetSlot(index);
             _ = frames.removeIndex(index);
+            self.decrementTransportFrameSlotCount(.inbound);
             frames.clearDirty();
             const slot_index = frames.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), index) orelse return null;
             frames.clearDirty();
@@ -1777,11 +1786,29 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn transportFrameSlotCount(self: *const Self, queue_kind: TransportQueueKind) usize {
-            var count: usize = 0;
-            for (self.transportFrameSlotsConst(queue_kind)) |slot| {
-                if (slot.in_use) count += 1;
-            }
-            return count;
+            return switch (queue_kind) {
+                .outbound => self.outbound_transport_frame_count,
+                .inbound => self.inbound_transport_frame_count,
+            };
+        }
+
+        fn incrementTransportFrameSlotCount(self: *Self, queue_kind: TransportQueueKind) void {
+            const count = self.transportFrameSlotCountPtr(queue_kind);
+            if (count.* == MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport frame count exceeded queue capacity");
+            count.* += 1;
+        }
+
+        fn decrementTransportFrameSlotCount(self: *Self, queue_kind: TransportQueueKind) void {
+            const count = self.transportFrameSlotCountPtr(queue_kind);
+            if (count.* == 0) native_util.impossibleByInvariant("transport frame count underflow");
+            count.* -= 1;
+        }
+
+        fn transportFrameSlotCountPtr(self: *Self, queue_kind: TransportQueueKind) *usize {
+            return switch (queue_kind) {
+                .outbound => &self.outbound_transport_frame_count,
+                .inbound => &self.inbound_transport_frame_count,
+            };
         }
 
         fn transportFrameSlotCountFor(self: *const Self, queue_kind: TransportQueueKind, workspace_id: u64, target_device: principal.PrincipalId) usize {
