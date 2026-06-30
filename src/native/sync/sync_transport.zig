@@ -7,6 +7,7 @@ const device_graph = @import("device_graph.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
 const hardware_target = @import("../platform/hardware_target.zig");
 const ids = @import("../core/ids.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
@@ -123,6 +124,7 @@ fn sameRingPlan(left: intel_i225.RingPlan, right: intel_i225.RingPlan) bool {
 
 pub const CapturedPacket = struct {
     in_use: bool = false,
+    packet_id: u64 = 0,
     len: usize = 0,
     bytes: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES,
 
@@ -131,31 +133,38 @@ pub const CapturedPacket = struct {
     }
 };
 
+fn capturedPacketSlotId(slot: *const CapturedPacket) u64 {
+    return slot.packet_id;
+}
+
+const CapturedPacketArena = indexed_arena.IndexedArenaWithKey(u64, CapturedPacket, MAX_CAPTURED_PACKETS, MAX_CAPTURED_PACKETS * 2, capturedPacketSlotId);
+
 pub const PacketCapture = struct {
-    packets: [MAX_CAPTURED_PACKETS]CapturedPacket = [_]CapturedPacket{.{}} ** MAX_CAPTURED_PACKETS,
+    packets: CapturedPacketArena = CapturedPacketArena.init(),
+    next_packet_id: u64 = 1,
+    last_packet_id: u64 = 0,
     captured_count: usize = 0,
     dropped_count: usize = 0,
 
     pub fn ensureCapacity(self: *PacketCapture) Error!void {
-        for (&self.packets) |*slot| {
-            if (!slot.in_use) return;
-        }
+        if (self.packets.countInUse() < MAX_CAPTURED_PACKETS) return;
         self.dropped_count += 1;
         return error.PacketCaptureFull;
     }
 
     pub fn record(self: *PacketCapture, frame: []const u8) Error!void {
         if (frame.len > network_driver_task.MAX_NATIVE_FRAME_BYTES) return error.PacketTooLarge;
-        for (&self.packets) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.len = frame.len;
-            @memcpy(slot.bytes[0..frame.len], frame);
-            self.captured_count += 1;
-            return;
-        }
-        self.dropped_count += 1;
-        return error.PacketCaptureFull;
+        const packet_id = self.allocatePacketId();
+        const slot_index = self.packets.reserveIndex(packet_id) orelse {
+            self.dropped_count += 1;
+            return error.PacketCaptureFull;
+        };
+        const slot = &self.packets.slots[slot_index];
+        slot.packet_id = packet_id;
+        slot.len = frame.len;
+        @memcpy(slot.bytes[0..frame.len], frame);
+        self.last_packet_id = packet_id;
+        self.captured_count += 1;
     }
 
     pub fn last(self: *const PacketCapture) ?CapturedPacket {
@@ -164,12 +173,15 @@ pub const PacketCapture = struct {
     }
 
     pub fn lastPtr(self: *const PacketCapture) ?*const CapturedPacket {
-        var index = self.packets.len;
-        while (index > 0) {
-            index -= 1;
-            if (self.packets[index].in_use) return &self.packets[index];
-        }
-        return null;
+        if (self.last_packet_id == 0) return null;
+        return self.packets.getConst(self.last_packet_id);
+    }
+
+    fn allocatePacketId(self: *PacketCapture) u64 {
+        const packet_id = self.next_packet_id;
+        self.next_packet_id +%= 1;
+        if (self.next_packet_id == 0) self.next_packet_id = 1;
+        return packet_id;
     }
 };
 
@@ -1082,8 +1094,8 @@ test "native sync transport captures encrypted driver packets and handles replay
     native_transport.acknowledge(&connection, 4);
     try std.testing.expectEqual(@as(usize, 0), connection.in_flight_frames);
 
-    for (&native_transport.capture.packets) |*slot| {
-        slot.in_use = true;
+    while (native_transport.capture.packets.countInUse() < MAX_CAPTURED_PACKETS) {
+        try native_transport.capture.record("capacity-fill");
     }
     const endpoint_frames_before_capture_full = native_transport.endpoint_frame_count;
     const network_frames_before_capture_full = native_transport.network_frame_count;

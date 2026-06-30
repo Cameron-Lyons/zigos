@@ -1,7 +1,6 @@
 const abi = @import("../core/abi.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
-const fixed_table = @import("../core/fixed_table.zig");
-const id_index = @import("../core/id_index.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const elf_image_inspector = @import("elf_image_inspector.zig");
@@ -165,11 +164,13 @@ const ImageSlot = struct {
     image: ImageRecord = zeroImage(),
 };
 
+const ImageArena = indexed_arena.IndexedArenaWithKey(u64, ImageSlot, MAX_IMAGES, IMAGE_ID_INDEX_CAPACITY, imageSlotImageIdKey);
+const BundleIndex = indexed_arena.UniqueIndex(BUNDLE_INDEX_CAPACITY);
+
 pub const Catalog = struct {
     next_image_id: u64 = 1,
-    bundle_index_slots: [BUNDLE_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(BUNDLE_INDEX_CAPACITY),
-    image_id_index_slots: [IMAGE_ID_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(IMAGE_ID_INDEX_CAPACITY),
-    images: [MAX_IMAGES]ImageSlot = [_]ImageSlot{ImageSlot{}} ** MAX_IMAGES,
+    bundle_index: BundleIndex = BundleIndex.init(),
+    images: ImageArena = ImageArena.init(),
 
     pub fn init() Catalog {
         return Catalog{};
@@ -204,14 +205,9 @@ pub const Catalog = struct {
 
     pub fn findByBundleId(self: *Catalog, bundle_id: []const u8) ?*const ImageRecord {
         const key = bundleIndexKey(bundle_id);
-        const slot = fixed_table.findIndexedConstSlot(
-            ImageSlot,
-            MAX_IMAGES,
-            BUNDLE_INDEX_CAPACITY,
-            &self.images,
-            &self.bundle_index_slots,
+        const slot = self.images.findConstByUniqueIndex(
+            &self.bundle_index,
             key,
-            imageSlotBundleKey,
             bundle_id,
             imageSlotMatchesBundleId,
         ) orelse return null;
@@ -220,26 +216,12 @@ pub const Catalog = struct {
 
     pub fn findById(self: *Catalog, image_id: u64) ?*const ImageRecord {
         if (image_id == 0) return null;
-        const slot = fixed_table.findIndexedConstSlot(
-            ImageSlot,
-            MAX_IMAGES,
-            IMAGE_ID_INDEX_CAPACITY,
-            &self.images,
-            &self.image_id_index_slots,
-            image_id,
-            imageSlotImageIdKey,
-            image_id,
-            imageSlotMatchesImageId,
-        ) orelse return null;
+        const slot = self.images.getConst(image_id) orelse return null;
         return &slot.image;
     }
 
     pub fn imageCount(self: *const Catalog) usize {
-        var count: usize = 0;
-        for (self.images) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return self.images.countInUse();
     }
 
     pub fn launchDirect(
@@ -288,44 +270,39 @@ pub const Catalog = struct {
             return existing;
         }
 
-        if (fixed_table.firstFreeSlotIndex(ImageSlot, MAX_IMAGES, &self.images)) |slot_index| {
-            const slot = &self.images[slot_index];
+        const embedded_info = embedded orelse return error.EmbeddedArtifactRequired;
 
-            const embedded_info = embedded orelse return error.EmbeddedArtifactRequired;
+        var image = zeroImage();
+        const executable_image = embedded_info.executable_image;
+        image.id = self.next_image_id;
+        image.component_class = request.component_class;
+        image.component_abi_version = componentAbiVersion(request.initial_component.substrate);
+        image.bundle_signed = request.bundle.signature.isPresent();
+        image.role_tag = request.role_tag;
+        image.heartbeat_increment = request.heartbeat_increment;
+        image.contract_flags = request.contract_flags;
+        image.substrate = request.initial_component.substrate;
+        image.artifact_source = .embedded_elf;
+        image.entry_point = executable_image.entry_point;
+        image.loadable_segment_count = @intCast(executable_image.segment_count);
+        image.byte_len = executable_image.file_size_bytes;
+        image.bootstrap_mailbox_address = embedded_info.bootstrap_mailbox_address;
+        image.file_sha256 = executable_image.file_sha256;
+        image.executable_image = executable_image;
+        image.elf_bytes = elf_bytes;
+        image.bundle_id_len = copyTextExact(image.bundle_id[0..], request.bundle.bundle_id) catch return error.BundleIdTooLong;
+        image.display_name_len = copyTextExact(image.display_name[0..], request.bundle.display_name) catch return error.DisplayNameTooLong;
+        image.publisher_len = copyTextExact(image.publisher[0..], request.bundle.publisher) catch return error.PublisherTooLong;
+        image.label_len = copyTextExact(image.label[0..], request.initial_component.label) catch return error.InitialComponentLabelTooLong;
+        image.entry_len = copyTextExact(image.entry[0..], request.initial_component.entry) catch return error.InitialComponentEntryTooLong;
 
-            var image = zeroImage();
-            const executable_image = embedded_info.executable_image;
-            image.id = self.next_image_id;
-            image.component_class = request.component_class;
-            image.component_abi_version = componentAbiVersion(request.initial_component.substrate);
-            image.bundle_signed = request.bundle.signature.isPresent();
-            image.role_tag = request.role_tag;
-            image.heartbeat_increment = request.heartbeat_increment;
-            image.contract_flags = request.contract_flags;
-            image.substrate = request.initial_component.substrate;
-            image.artifact_source = .embedded_elf;
-            image.entry_point = executable_image.entry_point;
-            image.loadable_segment_count = @intCast(executable_image.segment_count);
-            image.byte_len = executable_image.file_size_bytes;
-            image.bootstrap_mailbox_address = embedded_info.bootstrap_mailbox_address;
-            image.file_sha256 = executable_image.file_sha256;
-            image.executable_image = executable_image;
-            image.elf_bytes = elf_bytes;
-            image.bundle_id_len = copyTextExact(image.bundle_id[0..], request.bundle.bundle_id) catch return error.BundleIdTooLong;
-            image.display_name_len = copyTextExact(image.display_name[0..], request.bundle.display_name) catch return error.DisplayNameTooLong;
-            image.publisher_len = copyTextExact(image.publisher[0..], request.bundle.publisher) catch return error.PublisherTooLong;
-            image.label_len = copyTextExact(image.label[0..], request.initial_component.label) catch return error.InitialComponentLabelTooLong;
-            image.entry_len = copyTextExact(image.entry[0..], request.initial_component.entry) catch return error.InitialComponentEntryTooLong;
-
-            slot.in_use = true;
-            slot.image = image;
-            id_index.insert(BUNDLE_INDEX_CAPACITY, &self.bundle_index_slots, bundleIndexKey(slot.image.bundleIdSlice()), slot_index, "userspace bundle id index covers image table");
-            id_index.insert(IMAGE_ID_INDEX_CAPACITY, &self.image_id_index_slots, slot.image.id, slot_index, "userspace image id index covers image table");
-            self.next_image_id += 1;
-            return &slot.image;
-        }
-
-        return error.ImageTableFull;
+        const slot_index = self.images.reserveIndex(image.id) orelse return error.ImageTableFull;
+        const slot = &self.images.slots[slot_index];
+        slot.image = image;
+        self.bundle_index.insert(bundleIndexKey(slot.image.bundleIdSlice()), slot_index);
+        self.images.clearDirty();
+        self.next_image_id += 1;
+        return &slot.image;
     }
 };
 
@@ -334,16 +311,8 @@ fn bundleIndexKey(bundle_id: []const u8) u64 {
     return if (hash == 0) 1 else hash;
 }
 
-fn imageSlotBundleKey(slot: *const ImageSlot) u64 {
-    return bundleIndexKey(slot.image.bundleIdSlice());
-}
-
 fn imageSlotImageIdKey(slot: *const ImageSlot) u64 {
     return slot.image.id;
-}
-
-fn imageSlotMatchesImageId(image_id: u64, slot: *const ImageSlot) bool {
-    return slot.image.id == image_id;
 }
 
 fn imageSlotMatchesBundleId(bundle_id: []const u8, slot: *const ImageSlot) bool {

@@ -1,5 +1,4 @@
 const std = @import("std");
-const fixed_table = @import("../core/fixed_table.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const driver_service = @import("../drivers/driver_service.zig");
@@ -43,6 +42,8 @@ pub const ServiceClass = enum(u8) {
     sensitive_capture,
     secret_vault,
 };
+
+const SERVICE_CLASS_COUNT: usize = @typeInfo(ServiceClass).@"enum".fields.len;
 
 pub const ServiceBoundary = enum(u8) {
     kernel_tcb,
@@ -899,9 +900,39 @@ pub const ordered_published_native_service_contracts = blk: {
     break :blk derived;
 };
 
+const catalog_index_by_class: [SERVICE_CLASS_COUNT]?usize = blk: {
+    var indexes = [_]?usize{null} ** SERVICE_CLASS_COUNT;
+    for (catalog, 0..) |entry, index| {
+        indexes[classIndex(entry.class)] = index;
+    }
+    break :blk indexes;
+};
+
+const service_contract_index_by_class: [SERVICE_CLASS_COUNT]?usize = blk: {
+    var indexes = [_]?usize{null} ** SERVICE_CLASS_COUNT;
+    for (ordered_service_contracts, 0..) |entry, index| {
+        indexes[classIndex(entry.class)] = index;
+    }
+    break :blk indexes;
+};
+
+const published_native_contract_index_by_class: [SERVICE_CLASS_COUNT]?usize = blk: {
+    var indexes = [_]?usize{null} ** SERVICE_CLASS_COUNT;
+    for (ordered_published_native_service_contracts, 0..) |entry, index| {
+        indexes[classIndex(entry.class)] = index;
+    }
+    break :blk indexes;
+};
+
+pub const service_catalog_indexing = .{
+    .uses_catalog_class_index = @TypeOf(catalog_index_by_class) == [SERVICE_CLASS_COUNT]?usize,
+    .uses_service_contract_class_index = @TypeOf(service_contract_index_by_class) == [SERVICE_CLASS_COUNT]?usize,
+    .uses_published_contract_class_index = @TypeOf(published_native_contract_index_by_class) == [SERVICE_CLASS_COUNT]?usize,
+};
+
 pub fn entryForClass(class: ServiceClass) ?ServiceCatalogEntry {
-    const entry = fixed_table.findValue(ServiceCatalogEntry, catalog[0..], class, catalogEntryMatchesClass) orelse return null;
-    return entry.*;
+    const index = catalog_index_by_class[classIndex(class)] orelse return null;
+    return catalog[index];
 }
 
 pub fn serviceDescriptor(class: ServiceClass) ?ServiceDescriptor {
@@ -910,21 +941,21 @@ pub fn serviceDescriptor(class: ServiceClass) ?ServiceDescriptor {
 }
 
 pub fn serviceContractForClass(class: ServiceClass) ?ServiceContract {
-    const entry = fixed_table.findValue(ServiceContract, ordered_service_contracts[0..], class, serviceContractMatchesClass) orelse return null;
-    return entry.*;
+    const index = service_contract_index_by_class[classIndex(class)] orelse return null;
+    return ordered_service_contracts[index];
 }
 
 pub fn publishedNativeServiceContractForClass(class: ServiceClass) ?PublishedNativeServiceContract {
-    const entry = fixed_table.findValue(PublishedNativeServiceContract, ordered_published_native_service_contracts[0..], class, publishedNativeContractMatchesClass) orelse return null;
-    return entry.*;
+    const index = published_native_contract_index_by_class[classIndex(class)] orelse return null;
+    return ordered_published_native_service_contracts[index];
 }
 
 pub fn orderedServiceIndex(class: ServiceClass) ?usize {
-    return fixed_table.findValueIndex(ServiceContract, ordered_service_contracts[0..], class, serviceContractMatchesClass);
+    return service_contract_index_by_class[classIndex(class)];
 }
 
 pub fn orderedPublishedNativeServiceIndex(class: ServiceClass) ?usize {
-    return fixed_table.findValueIndex(PublishedNativeServiceContract, ordered_published_native_service_contracts[0..], class, publishedNativeContractMatchesClass);
+    return published_native_contract_index_by_class[classIndex(class)];
 }
 
 pub fn imageForClass(class: ServiceClass) ?UserspaceImageIdentity {
@@ -997,16 +1028,8 @@ pub fn allowsDriverClass(class: ServiceClass, device_class: driver_service.Devic
     return expected == device_class;
 }
 
-fn catalogEntryMatchesClass(class: ServiceClass, entry: *const ServiceCatalogEntry) bool {
-    return entry.class == class;
-}
-
-fn serviceContractMatchesClass(class: ServiceClass, entry: *const ServiceContract) bool {
-    return entry.class == class;
-}
-
-fn publishedNativeContractMatchesClass(class: ServiceClass, entry: *const PublishedNativeServiceContract) bool {
-    return entry.class == class;
+fn classIndex(class: ServiceClass) usize {
+    return @intFromEnum(class);
 }
 
 pub fn tcbName(component: KernelTcbComponent) []const u8 {
@@ -1136,6 +1159,11 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expectEqual(ServiceClass.secret_vault, ordered_published_native_service_contracts[14].class);
     try std.testing.expectEqualStrings(component_abi_schema.interfaceForService(.storage_object).name, entryForClass(.storage_object).?.interface.name);
     try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);
+    try std.testing.expectEqual(@as(usize, 0), orderedServiceIndex(.service_registry).?);
+    try std.testing.expectEqual(@as(usize, 1), orderedServiceIndex(.policy_mediation).?);
+    try std.testing.expectEqual(@as(usize, 1), orderedPublishedNativeServiceIndex(.attention_broker).?);
+    try std.testing.expectEqual(@as(?usize, null), orderedServiceIndex(.task_runtime));
+    try std.testing.expectEqual(@as(?usize, null), orderedPublishedNativeServiceIndex(.session_manager));
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
     try std.testing.expect(allowsDriverClass(.compositor_ui_session, .usb_controller));
     try std.testing.expect(allowsDriverClass(.compositor_ui_session, .graphics_adapter));
@@ -1152,6 +1180,7 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
 
 test "service catalog interfaces remain unique and dependencies point at catalog entries" {
     for (catalog, 0..) |entry, index| {
+        try std.testing.expectEqual(entry.class, entryForClass(entry.class).?.class);
         try std.testing.expect(entry.required_capabilities.len != 0);
         for (entry.dependencies) |dependency| {
             try std.testing.expect(entryForClass(dependency) != null);
