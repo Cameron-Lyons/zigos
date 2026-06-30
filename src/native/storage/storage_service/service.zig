@@ -399,23 +399,11 @@ pub const StorageCore = struct {
     }
 
     pub fn findEntryForObject(self: *const Service, workspace_id: anytype, object_id: anytype) workspace.Error!workspace.Entry {
-        const entries_slice = try self.entries(workspace_id);
-        const key = objectId(object_id);
-        for (entries_slice) |entry| {
-            if (entry.object_id.eql(key)) return entry;
-        }
-        return error.EntryNotFound;
+        return self.workspaces.resolveObject(workspaceId(workspace_id), objectId(object_id));
     }
 
     pub fn latestInsertedVersion(self: *const Service) ?*const object_store.VersionRecord {
-        var latest: ?*const object_store.VersionRecord = null;
-        for (&self.store.versions.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (latest == null or slot.version.id.raw() > latest.?.id.raw()) {
-                latest = &slot.version;
-            }
-        }
-        return latest;
+        return self.store.latestInsertedVersionConst();
     }
 
     pub fn objectCount(self: *const Service) usize {
@@ -457,17 +445,11 @@ pub const StorageCore = struct {
     }
 
     pub fn hasAnySnapshots(self: *const Service) bool {
-        for (&self.workspaces.snapshots.slots) |*slot| {
-            if (slot.in_use) return true;
-        }
-        return false;
+        return self.workspaces.snapshotCount() != 0;
     }
 
     pub fn hasAnyWorkspaceRecords(self: *const Service) bool {
-        for (&self.workspaces.workspaces.slots) |*slot| {
-            if (slot.in_use) return true;
-        }
-        return false;
+        return self.workspaces.workspaceCount() != 0;
     }
 
     fn noteMutation(self: *const Service, durable_boundary: bool) void {
@@ -1092,17 +1074,13 @@ fn snapshotId(value: anytype) ids.SnapshotId {
 }
 
 fn shareSlotAvailable(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) bool {
-    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
-        if (grant.principal_id.eql(principal_id)) return true;
-    }
+    if (workspace.shareGrantSlotIndex(record, principal_id) != null) return true;
     return record.share_table.share_grant_count < workspace.MAX_SHARE_GRANTS;
 }
 
 fn findGrantInRecord(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) ?workspace.ShareGrant {
-    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
-        if (grant.principal_id.eql(principal_id)) return grant;
-    }
-    return null;
+    const grant_index = workspace.shareGrantSlotIndex(record, principal_id) orelse return null;
+    return record.share_table.share_grants[grant_index];
 }
 
 fn boundedGrantExpiry(requested_expiry: u64, authority_expiry: u64) u64 {
@@ -1169,8 +1147,6 @@ fn auditVisibilityRank(visibility: workspace.AuditVisibility) u8 {
 }
 
 fn shareAuditGeneration(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) u32 {
-    for (record.share_table.share_grants[0..record.share_table.share_grant_count], 0..) |grant, index| {
-        if (grant.principal_id.eql(principal_id)) return @intCast(index + 1);
-    }
+    if (workspace.shareGrantSlotIndex(record, principal_id)) |index| return @intCast(index + 1);
     return @intCast(record.share_table.share_grant_count + 1);
 }
