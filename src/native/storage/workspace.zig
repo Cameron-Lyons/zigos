@@ -35,6 +35,8 @@ pub const Directory = directory.Directory;
 
 pub const emptyWorkspaceRecord = directory.emptyWorkspaceRecord;
 pub const pathHash = directory.pathHash;
+pub const shareGrantPrincipalKey = directory.shareGrantPrincipalKey;
+pub const shareGrantSlotIndex = directory.shareGrantSlotIndex;
 pub const workspaceRootAddress = directory.workspaceRootAddress;
 pub const emptySnapshotRecord = directory.emptySnapshotRecord;
 pub const emptyExportPackage = directory.emptyExportPackage;

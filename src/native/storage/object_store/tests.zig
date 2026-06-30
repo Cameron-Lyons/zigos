@@ -9,6 +9,7 @@ const ChunkSlot = object_store.ChunkSlot;
 const Error = object_store.Error;
 const MAX_BLOB_CHUNKS = object_store.MAX_BLOB_CHUNKS;
 const MAX_CHUNK_BYTES = object_store.MAX_CHUNK_BYTES;
+const MAX_OBJECT_QUERY_RESULTS = object_store.MAX_OBJECT_QUERY_RESULTS;
 const MAX_PAYLOAD_BYTES = object_store.MAX_PAYLOAD_BYTES;
 const PAGE_SIZE_BYTES = object_store.PAGE_SIZE_BYTES;
 const ObjectType = object_store.ObjectType;
@@ -23,6 +24,8 @@ const signMetadata = object_store.signMetadata;
 
 test "object store keeps immutable signed versions with stable version addresses" {
     var store = Store.init();
+    try std.testing.expect(store.latestInsertedVersionConst() == null);
+
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
         .seed = signing.seedFromByte(0x21),
@@ -36,6 +39,8 @@ test "object store keeps immutable signed versions with stable version addresses
         .payload = "hello",
         .metadata = metadata_v1,
     });
+    try std.testing.expectEqual(first.version_id, store.latestInsertedVersionConst().?.id);
+
     const second = try store.putVersion(.{
         .preferred_object_id = ids.object(900),
         .object_type = .document,
@@ -43,6 +48,9 @@ test "object store keeps immutable signed versions with stable version addresses
         .metadata = metadata_v2,
         .parent_version_id = first.version_id,
     });
+    try std.testing.expectEqual(second.version_id, store.latestInsertedVersionConst().?.id);
+    store.rebuildIndexes();
+    try std.testing.expectEqual(second.version_id, store.latestInsertedVersionConst().?.id);
 
     try std.testing.expectEqual(@as(usize, 1), store.objectCount());
     try std.testing.expectEqual(@as(usize, 2), store.versionCount());
@@ -133,6 +141,7 @@ test "object store splits blob and version addresses" {
 
 test "object store indexes full blob addresses authoritatively" {
     var store = Store.init();
+    try std.testing.expectEqual(@as(usize, 0), store.maxBlobPayloadBytes());
 
     const first_address = computeBlobAddress("first");
     const second_address = computeBlobAddress("second");
@@ -141,9 +150,12 @@ test "object store indexes full blob addresses authoritatively" {
     const second_slot = try store.putBlob(second_address, "second");
     try std.testing.expect(first_slot != second_slot);
     try std.testing.expectEqual(@as(usize, 2), store.blobCount());
+    try std.testing.expectEqual(@as(usize, "second".len), store.maxBlobPayloadBytes());
 
     const first_again = try store.putBlob(first_address, "first");
     try std.testing.expectEqual(first_slot, first_again);
+    store.rebuildIndexes();
+    try std.testing.expectEqual(@as(usize, "second".len), store.maxBlobPayloadBytes());
     try std.testing.expectEqual(@as(usize, 2), store.blobCount());
     try std.testing.expectEqual(@as(usize, 2), store.chunkCount());
     try std.testing.expectEqual(@as(u16, 2), store.blobSlotAtConst(first_slot).blob.ref_count);
@@ -289,6 +301,16 @@ test "object store supports every native object type and rejects unsigned metada
     }
 
     try std.testing.expectEqual(object_types.len, store.objectCount());
+    var query_buffer: [MAX_OBJECT_QUERY_RESULTS]object_store.ObjectQueryResult = undefined;
+    const secret_results = store.queryObjects(.{ .object_type = .secret }, &query_buffer);
+    try std.testing.expectEqual(@as(usize, 1), secret_results.len);
+    try std.testing.expectEqual(ObjectType.secret, secret_results[0].object_type);
+    try std.testing.expectEqual(@as(usize, 1), store.object_type_index.count(.secret));
+    store.rebuildIndexes();
+    const media_results = store.queryObjects(.{ .object_type = .media_asset }, &query_buffer);
+    try std.testing.expectEqual(@as(usize, 1), media_results.len);
+    try std.testing.expectEqual(ObjectType.media_asset, media_results[0].object_type);
+
     try std.testing.expectError(error.UnsignedMetadata, store.putVersion(.{
         .object_type = .blob,
         .payload = "unsigned",
