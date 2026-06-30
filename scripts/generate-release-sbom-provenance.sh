@@ -350,7 +350,7 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
       "verifier_protocol": "dsse_in_toto_slsa",
       "public_key_encoding": "$(json_escape "$release_public_key_encoding")",
       "public_key": "$(json_escape "$release_public_key")",
-      "verifier_metadata_schema": "zigos.release-verifier-metadata.v1",
+      "verifier_metadata_schema": "zigos.release-verifier-metadata",
       "verifier_metadata_digest": "$(json_escape "$release_verifier_metadata_digest")",
       "rotation_policy": "new release key generation before not_after or immediately after suspected exposure",
       "revocation_source": "$OUTPUT_DIR/revoked-release-keys.json"
