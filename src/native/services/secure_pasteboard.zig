@@ -27,6 +27,7 @@ pub const Error = event_ledger.Error || error{
     PayloadTooLarge,
     PurposeMismatch,
     PurposeRequired,
+    PurposeTooLong,
     SourceMismatch,
 };
 
@@ -132,6 +133,10 @@ pub const Service = struct {
             try recordOffer(ledger, request, 0, false, "pasteboard offer denied: missing purpose");
             return error.PurposeRequired;
         }
+        if (request.purpose.len > MAX_PURPOSE_BYTES) {
+            try recordOffer(ledger, request, 0, false, "pasteboard offer denied: purpose too long");
+            return error.PurposeTooLong;
+        }
         if (request.payload.len == 0) {
             try recordOffer(ledger, request, 0, false, "pasteboard offer denied: empty payload");
             return error.EmptyPayload;
@@ -141,12 +146,9 @@ pub const Service = struct {
             return error.PayloadTooLarge;
         }
 
-        const slot = self.slots.reserve(self.next_token_id) orelse {
-            try recordOffer(ledger, request, 0, false, "pasteboard offer denied: grant table full");
-            return error.GrantTableFull;
-        };
-        slot.grant = .{
-            .token_id = self.next_token_id,
+        const token_id = self.next_token_id;
+        const grant = Grant{
+            .token_id = token_id,
             .subject = request.subject,
             .destination = request.destination,
             .source_task_id = request.source_task_id,
@@ -158,11 +160,18 @@ pub const Service = struct {
             .read_once = request.read_once,
             .payload_len = request.payload.len,
             .payload = copyPayloadInto(request.payload),
-            .purpose_len = clampedPurposeLen(request.purpose),
+            .purpose_len = request.purpose.len,
             .purpose = copyPurposeInto(request.purpose),
         };
+
+        const slot = self.slots.reserve(token_id) orelse {
+            try recordOffer(ledger, request, 0, false, "pasteboard offer denied: grant table full");
+            return error.GrantTableFull;
+        };
+        errdefer _ = self.slots.remove(token_id);
+        try recordOffer(ledger, request, token_id, true, request.detail);
+        slot.grant = grant;
         self.next_token_id += 1;
-        try recordOffer(ledger, request, slot.grant.token_id, true, request.detail);
         return &slot.grant;
     }
 
@@ -286,10 +295,6 @@ fn recordRevoke(ledger: ?*event_ledger.Ledger, request: RevokeRequest, allowed: 
     }
 }
 
-fn clampedPurposeLen(purpose: []const u8) usize {
-    return @min(purpose.len, MAX_PURPOSE_BYTES);
-}
-
 fn copyPayloadInto(payload: []const u8) [MAX_PAYLOAD_BYTES]u8 {
     var buffer: [MAX_PAYLOAD_BYTES]u8 = [_]u8{0} ** MAX_PAYLOAD_BYTES;
     _ = copyText(&buffer, payload);
@@ -300,6 +305,45 @@ fn copyPurposeInto(purpose: []const u8) [MAX_PURPOSE_BYTES]u8 {
     var buffer: [MAX_PURPOSE_BYTES]u8 = [_]u8{0} ** MAX_PURPOSE_BYTES;
     _ = copyText(&buffer, purpose);
     return buffer;
+}
+
+test "secure pasteboard rejects overlong purposes without issuing grants" {
+    var service = Service.init();
+    const source = principal.PrincipalId{ .kind = .app, .serial = 7101 };
+    const destination = principal.PrincipalId{ .kind = .app, .serial = 7102 };
+    const oversized_purpose = [_]u8{'p'} ** (MAX_PURPOSE_BYTES + 1);
+
+    try std.testing.expectError(error.PurposeTooLong, service.offer(.{
+        .subject = source,
+        .destination = destination,
+        .source_task_id = 71,
+        .destination_task_id = 72,
+        .user_gesture_id = 5,
+        .foreground_session_id = 8,
+        .expires_at_ticks = 50,
+        .now_ticks = 10,
+        .purpose = oversized_purpose[0..],
+        .payload = "private pasteboard payload",
+    }, null));
+    try std.testing.expectEqual(@as(usize, 0), service.slots.countInUse());
+    try std.testing.expect(service.find(1) == null);
+    try std.testing.expectEqual(@as(u64, 1), service.next_token_id);
+
+    const grant = try service.offer(.{
+        .subject = source,
+        .destination = destination,
+        .source_task_id = 71,
+        .destination_task_id = 72,
+        .user_gesture_id = 5,
+        .foreground_session_id = 8,
+        .expires_at_ticks = 50,
+        .now_ticks = 11,
+        .purpose = "paste into note",
+        .payload = "private pasteboard payload",
+    }, null);
+    try std.testing.expectEqual(@as(u64, 1), grant.token_id);
+    try std.testing.expectEqualStrings("paste into note", grant.purposeSlice());
+    try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
 }
 
 test "secure pasteboard requires foreground gestures destination scope expiry and read once" {
