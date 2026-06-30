@@ -272,6 +272,8 @@ pub const boot_image_specs = [_]ImageSpec{
 
 const BUNDLE_INDEX_CAPACITY: usize = boot_image_specs.len * 2;
 const bundle_index = buildBundleIndex();
+const SERVICE_CLASS_INDEX_CAPACITY: usize = boot_image_specs.len * 2;
+const service_class_index = buildServiceClassIndex();
 
 pub fn find(bundle_id: []const u8) ?*const ImageSpec {
     const key = bundleIndexKey(bundle_id);
@@ -294,10 +296,23 @@ pub fn contractFor(bundle_id: []const u8) ?ContractSpec {
 }
 
 pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
-    for (&boot_image_specs) |*spec| {
-        if (spec.service_class == class) return spec;
+    const key = serviceClassIndexKey(class);
+    const spec_index = id_index.lookup(SERVICE_CLASS_INDEX_CAPACITY, &service_class_index, key) orelse {
+        debugAssertServiceClassIndexMissAbsent(class);
+        return null;
+    };
+    if (spec_index >= boot_image_specs.len) {
+        native_util.impossibleByInvariant("boot service class index points outside registry specs");
     }
-    return null;
+    const spec = &boot_image_specs[spec_index];
+    if (spec.service_class) |spec_class| {
+        if (spec_class != class) {
+            native_util.impossibleByInvariant("boot service class index points at the wrong registry spec");
+        }
+    } else {
+        native_util.impossibleByInvariant("boot service class index points at a non-service registry spec");
+    }
+    return spec;
 }
 
 pub fn contractForSpec(spec: *const ImageSpec) ContractSpec {
@@ -312,6 +327,10 @@ pub fn contractForSpec(spec: *const ImageSpec) ContractSpec {
 pub fn bundleIndexKey(bundle_id: []const u8) u64 {
     const hash = native_util.fnv1a64(bundle_id);
     return if (hash == 0) 1 else hash;
+}
+
+pub fn serviceClassIndexKey(class: contract.ServiceClass) u64 {
+    return @as(u64, @intFromEnum(class)) + 1;
 }
 
 fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot {
@@ -332,15 +351,45 @@ fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
     }
 }
 
+fn buildServiceClassIndex() [SERVICE_CLASS_INDEX_CAPACITY]id_index.Slot {
+    @setEvalBranchQuota(10_000);
+    var index = id_index.emptyTable(SERVICE_CLASS_INDEX_CAPACITY);
+    for (boot_image_specs, 0..) |spec, spec_index| {
+        const class = spec.service_class orelse continue;
+        id_index.insert(SERVICE_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(class), spec_index, "boot service class index covers userspace registry");
+    }
+    return index;
+}
+
+fn debugAssertServiceClassIndexMissAbsent(class: contract.ServiceClass) void {
+    if (@import("builtin").mode != .Debug) return;
+    for (boot_image_specs) |spec| {
+        if (spec.service_class) |spec_class| {
+            if (spec_class == class) {
+                native_util.impossibleByInvariant("boot service class index missed a registry spec");
+            }
+        }
+    }
+}
+
 test "userspace registry definitions stay unique and keep typed contract metadata attached" {
     for (boot_image_specs, 0..) |spec, index| {
         try std.testing.expect(spec.role_tag != 0);
         try std.testing.expect(spec.heartbeat_increment != 0);
+        if (spec.service_class) |class| {
+            const indexed = findByServiceClass(class) orelse return error.MissingServiceClassIndexEntry;
+            try std.testing.expectEqualStrings(spec.bundle_id, indexed.bundle_id);
+        }
 
         var peer_index: usize = 0;
         while (peer_index < index) : (peer_index += 1) {
             try std.testing.expect(!std.mem.eql(u8, boot_image_specs[peer_index].bundle_id, spec.bundle_id));
             try std.testing.expect(boot_image_specs[peer_index].role_tag != spec.role_tag);
+            if (spec.service_class) |class| {
+                if (boot_image_specs[peer_index].service_class) |peer_class| {
+                    try std.testing.expect(peer_class != class);
+                }
+            }
         }
     }
 
