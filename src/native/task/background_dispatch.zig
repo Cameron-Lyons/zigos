@@ -343,11 +343,12 @@ pub const Controller = struct {
         reason: DecisionReason,
         tick: u64,
     ) Error!DispatchRecord {
-        const record = try makeRecord(self.next_record_id, task_id, background_task_id, trigger, background_task, reason, tick);
+        const record_id = self.nextReservableRecordId() orelse return error.DispatchTableFull;
         const slot = self.allocateRecordSlot() orelse return error.DispatchTableFull;
-        slot.in_use = true;
+        const record = try makeRecord(record_id, task_id, background_task_id, trigger, background_task, reason, tick);
         slot.record = record;
-        self.next_record_id += 1;
+        slot.in_use = true;
+        self.advanceNextRecordIdFrom(record_id);
         return slot.record;
     }
 
@@ -360,7 +361,50 @@ pub const Controller = struct {
         }
         return null;
     }
+
+    fn nextReservableRecordId(self: *Controller) ?u64 {
+        if (!self.hasReusableRecordSlot()) return null;
+
+        var record_id = normalizeRecordId(self.next_record_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_RECORDS) : (attempts += 1) {
+            if (self.findActiveRecord(record_id) == null) return record_id;
+            record_id = nextRecordIdAfter(record_id);
+        }
+        return null;
+    }
+
+    fn advanceNextRecordIdFrom(self: *Controller, record_id: u64) void {
+        self.next_record_id = nextRecordIdAfter(record_id);
+    }
+
+    fn hasReusableRecordSlot(self: *const Controller) bool {
+        for (self.records) |slot| {
+            if (!slot.in_use) return true;
+        }
+        for (self.records) |slot| {
+            if (slot.record.state != .running) return true;
+        }
+        return false;
+    }
+
+    fn findActiveRecord(self: *Controller, record_id: u64) ?*DispatchRecord {
+        for (&self.records) |*slot| {
+            if (!slot.in_use) continue;
+            if (slot.record.id == record_id and slot.record.state == .running) return &slot.record;
+        }
+        return null;
+    }
 };
+
+fn normalizeRecordId(record_id: u64) u64 {
+    return if (record_id == 0) 1 else record_id;
+}
+
+fn nextRecordIdAfter(record_id: u64) u64 {
+    const next = record_id +% 1;
+    return normalizeRecordId(next);
+}
 
 fn budgetWithinPolicy(task: manifest.BackgroundTaskDecl, policy: DispatchPolicy) bool {
     return task.expected_duration_seconds <= policy.max_expected_duration_seconds and
@@ -792,6 +836,61 @@ test "background dispatch reuses completed and denied record slots" {
     }
     try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
     try std.testing.expectEqual(task.budget.cpu_time_ticks, task.background_cpu_consumed_ticks);
+}
+
+test "background dispatch record ids wrap without zero and skip active records" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createActiveTestTask(&runtime, .{ .serial = 306, .local_only = true });
+
+    const permissions = [_]manifest.PermissionRequest{
+        backgroundRunPermission(TEST_SYNC_BACKGROUND_ID),
+    };
+    const tasks = [_]manifest.BackgroundTaskDecl{
+        syncBackgroundTask(),
+    };
+    const bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &permissions, &tasks);
+
+    var controller = Controller.init();
+    controller.next_record_id = std.math.maxInt(u64);
+    const max = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 60);
+    try std.testing.expectEqual(std.math.maxInt(u64), max.record_id.?);
+    try std.testing.expectEqual(@as(u64, 1), controller.next_record_id);
+    try std.testing.expect(controller.findActiveRecord(0) == null);
+
+    const wrapped = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 61);
+    try std.testing.expectEqual(@as(u64, 1), wrapped.record_id.?);
+    try std.testing.expectEqual(@as(u64, 2), controller.next_record_id);
+    try std.testing.expect(controller.findActiveRecord(0) == null);
+
+    controller.next_record_id = 1;
+    const skipped = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 62);
+    try std.testing.expectEqual(@as(u64, 2), skipped.record_id.?);
+    try std.testing.expectEqual(@as(u64, 3), controller.next_record_id);
+    try std.testing.expect(controller.findActiveRecord(0) == null);
+
+    var full_controller = Controller.init();
+    var full_runtime = task_runtime.Runtime.init();
+    const full_task = try createActiveTestTask(&full_runtime, .{
+        .serial = 307,
+        .local_only = true,
+        .memory_bytes = mebibytes(64),
+    });
+    full_controller.configure(.{ .max_active_jobs = MAX_RECORDS });
+    for (0..MAX_RECORDS) |index| {
+        const decision = try full_controller.dispatch(&full_runtime, full_task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 70 + index);
+        try std.testing.expect(decision.allowed);
+    }
+    const next_before_full = full_controller.next_record_id;
+    try std.testing.expectError(error.DispatchTableFull, full_controller.dispatch(
+        &full_runtime,
+        full_task.id,
+        bundle,
+        TEST_SYNC_BACKGROUND_ID,
+        .sync_completion,
+        90,
+    ));
+    try std.testing.expectEqual(next_before_full, full_controller.next_record_id);
+    try std.testing.expectEqual(MAX_RECORDS, full_controller.activeRecordCount());
 }
 
 test "background dispatch expires overdue work and releases reservations" {
