@@ -6,7 +6,7 @@ const units = @import("../core/units.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
 
-const copyText = native_util.copyText;
+const copyTextExact = native_util.copyTextExact;
 const kibibytes = units.kibibytes;
 const mebibytes = units.mebibytes;
 
@@ -98,6 +98,7 @@ pub const CompleteRequest = struct {
 };
 
 pub const Error = task_runtime.Error || error{
+    BackgroundTaskIdTooLong,
     DispatchTableFull,
     DispatchRecordNotFound,
     DispatchRecordBindingMismatch,
@@ -342,28 +343,11 @@ pub const Controller = struct {
         reason: DecisionReason,
         tick: u64,
     ) Error!DispatchRecord {
+        const record = try makeRecord(self.next_record_id, task_id, background_task_id, trigger, background_task, reason, tick);
         const slot = self.allocateRecordSlot() orelse return error.DispatchTableFull;
         slot.in_use = true;
-        slot.record = zeroRecord();
-        slot.record.id = self.next_record_id;
+        slot.record = record;
         self.next_record_id += 1;
-        slot.record.task_id = task_id;
-        slot.record.background_task_id_len = copyText(&slot.record.background_task_id, background_task_id);
-        slot.record.trigger = trigger;
-        slot.record.state = switch (reason) {
-            .allowed => .running,
-            .throttled => .delayed,
-            .expired => .expired,
-            else => .denied,
-        };
-        slot.record.reason = reason;
-        slot.record.tick = tick;
-        if (background_task) |task| {
-            slot.record.expected_duration_seconds = task.expected_duration_seconds;
-            slot.record.budget = task.budget;
-            slot.record.network = task.network;
-            slot.record.visibility = task.visibility;
-        }
         return slot.record;
     }
 
@@ -414,6 +398,37 @@ fn zeroRecord() DispatchRecord {
         .reason = .allowed,
         .tick = 0,
     };
+}
+
+fn makeRecord(
+    record_id: u64,
+    task_id: u64,
+    background_task_id: []const u8,
+    trigger: manifest.BackgroundTrigger,
+    background_task: ?manifest.BackgroundTaskDecl,
+    reason: DecisionReason,
+    tick: u64,
+) Error!DispatchRecord {
+    var record = zeroRecord();
+    record.id = record_id;
+    record.task_id = task_id;
+    record.background_task_id_len = copyTextExact(&record.background_task_id, background_task_id) catch return error.BackgroundTaskIdTooLong;
+    record.trigger = trigger;
+    record.state = switch (reason) {
+        .allowed => .running,
+        .throttled => .delayed,
+        .expired => .expired,
+        else => .denied,
+    };
+    record.reason = reason;
+    record.tick = tick;
+    if (background_task) |task| {
+        record.expected_duration_seconds = task.expected_duration_seconds;
+        record.budget = task.budget;
+        record.network = task.network;
+        record.visibility = task.visibility;
+    }
+    return record;
 }
 
 const TEST_APP_MEMORY_BYTES: usize = mebibytes(2);
@@ -725,6 +740,29 @@ test "background dispatch requires the launched bundle and explicit run rights" 
 
     const missing_right = try controller.dispatch(&runtime, task.id, missing_right_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 31);
     try std.testing.expectEqual(DecisionReason.background_permission_missing, missing_right.reason);
+}
+
+test "background dispatch rejects overlong task ids without publishing records" {
+    var runtime = task_runtime.Runtime.init();
+    var controller = Controller.init();
+    const oversized_id = [_]u8{'b'} ** (MAX_TASK_ID_BYTES + 1);
+    const empty_bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &.{}, &.{});
+
+    try std.testing.expectError(error.BackgroundTaskIdTooLong, controller.dispatch(
+        &runtime,
+        404,
+        empty_bundle,
+        oversized_id[0..],
+        .sync_completion,
+        32,
+    ));
+    try std.testing.expectEqual(@as(u64, 1), controller.next_record_id);
+    try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
+    try std.testing.expect(!controller.records[0].in_use);
+
+    const missing = try controller.dispatch(&runtime, 404, empty_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 33);
+    try std.testing.expectEqual(DecisionReason.task_not_found, missing.reason);
+    try std.testing.expectEqual(@as(u64, 1), missing.record_id.?);
 }
 
 test "background dispatch reuses completed and denied record slots" {
