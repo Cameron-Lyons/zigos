@@ -882,17 +882,22 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         // checkpoint at the end. The per-frame variant used to run a full state
         // re-persist (encode every table + storage scan) for each frame; a
         // replication pass delivers many frames at once, so coalescing collapses N
-        // full persists into one. Returns the count newly marked acked.
+        // full persists into one. Returns the count newly acknowledged and
+        // reclaims delivered outbound slots immediately.
         pub fn ackOutboundTransportFrames(self: *Self, frame_ids: []const u64) Error!usize {
             var newly_acked: usize = 0;
+            var changed = false;
             for (frame_ids) |frame_id| {
-                const slot = self.state().outbound_transport_frames.get(state_support.transportFrameArenaKey(frame_id)) orelse continue;
-                if (!slot.acked) {
-                    slot.acked = true;
+                const frames = &self.state().outbound_transport_frames;
+                const slot_index = frames.slotIndexOf(state_support.transportFrameArenaKey(frame_id)) orelse continue;
+                if (!frames.slots[slot_index].acked) {
                     newly_acked += 1;
                 }
+                self.unindexTransportFramePathSlot(.outbound, slot_index);
+                _ = frames.removeIndex(slot_index);
+                changed = true;
             }
-            if (newly_acked > 0) try self.checkpoint();
+            if (changed) try self.checkpoint();
             return newly_acked;
         }
 

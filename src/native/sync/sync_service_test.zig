@@ -1398,6 +1398,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
         0,
         pending_after_ack[0..],
     ));
+    try std.testing.expectEqual(@as(usize, 0), source_resident.outboundTransportFrameCount());
 
     const replicated_entry = try target_storage.resolve(target_workspace.id, document_path);
     const replicated_version = target_storage.version(replicated_entry.version_id) orelse return error.VersionNotFound;
@@ -1405,28 +1406,28 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expectEqualStrings("source edit", replicated_payload);
     try std.testing.expectEqual(target_conflict.version_id, replicated_version.previous_version_id);
     try std.testing.expectEqual(replicated_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, document_path).?);
-    try std.testing.expectEqual(SyncSemantic.mergeable_crdt, source_sync.latestTransportFrameForPath(workspace_id, tablet, document_path).?.semantic);
+    try std.testing.expect(source_sync.latestTransportFrameForPath(workspace_id, tablet, document_path) == null);
 
     const replicated_media_entry = try target_storage.resolve(target_workspace.id, media_path);
     const replicated_media_version = target_storage.version(replicated_media_entry.version_id) orelse return error.VersionNotFound;
     const replicated_media_payload = try target_storage.versionPayload(replicated_media_version);
     try std.testing.expectEqualSlices(u8, media_payload[0..], replicated_media_payload);
     try std.testing.expectEqual(replicated_media_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, media_path).?);
-    try std.testing.expectEqual(SyncSemantic.chunked_snapshot, source_sync.latestTransportFrameForPath(workspace_id, tablet, media_path).?.semantic);
+    try std.testing.expect(source_sync.latestTransportFrameForPath(workspace_id, tablet, media_path) == null);
 
     const replicated_secret_entry = try target_storage.resolve(target_workspace.id, secret_path);
     const replicated_secret_version = target_storage.version(replicated_secret_entry.version_id) orelse return error.VersionNotFound;
     const replicated_secret_payload = try target_storage.versionPayload(replicated_secret_version);
     try std.testing.expectEqualStrings(secret_payload, replicated_secret_payload);
     try std.testing.expectEqual(replicated_secret_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, secret_path).?);
-    try std.testing.expectEqual(SyncSemantic.secure_transfer, source_sync.latestTransportFrameForPath(workspace_id, tablet, secret_path).?.semantic);
+    try std.testing.expect(source_sync.latestTransportFrameForPath(workspace_id, tablet, secret_path) == null);
 
     const replicated_database_entry = try target_storage.resolve(target_workspace.id, database_path);
     const replicated_database_version = target_storage.version(replicated_database_entry.version_id) orelse return error.VersionNotFound;
     const replicated_database_payload = try target_storage.versionPayload(replicated_database_version);
     try std.testing.expectEqualStrings(database_payload, replicated_database_payload);
     try std.testing.expectEqual(replicated_database_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, database_path).?);
-    try std.testing.expectEqual(SyncSemantic.transactional_contract, source_sync.latestTransportFrameForPath(workspace_id, tablet, database_path).?.semantic);
+    try std.testing.expect(source_sync.latestTransportFrameForPath(workspace_id, tablet, database_path) == null);
 
     var restarted_target_storage = storage_service.Service.initWithStore(9_584, 9_585, storage_owner, &target_checkpoint_store);
     var restarted_target_resident = ResidentState{};
