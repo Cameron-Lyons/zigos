@@ -197,12 +197,9 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const slot = self.slots.reserve(self.next_lease_id) orelse {
-            try recordSemantic(ledger, request.subject, request.task_id, false, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
-            return error.LeaseTableFull;
-        };
-        slot.lease = .{
-            .id = self.next_lease_id,
+        const lease_id = self.next_lease_id;
+        const lease = ContextLease{
+            .id = lease_id,
             .subject = request.subject,
             .task_id = request.task_id,
             .workspace_id = request.workspace_id,
@@ -213,8 +210,15 @@ pub const Service = struct {
             .encrypted_index = request.encrypted_index,
             .redacted_snippets = request.redacted_snippets,
         };
-        self.next_lease_id += 1;
+
+        const slot = self.slots.reserve(lease_id) orelse {
+            try recordSemantic(ledger, request.subject, request.task_id, false, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
+            return error.LeaseTableFull;
+        };
+        errdefer _ = self.slots.remove(lease_id);
         try recordSemantic(ledger, request.subject, request.task_id, true, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
+        slot.lease = lease;
+        self.advanceNextLeaseId();
         return &slot.lease;
     }
 
@@ -240,8 +244,8 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        lease.bytes_used += query_bytes;
         try recordSemantic(ledger, request.subject, request.task_id, true, request.local_model, request.encrypted_index, request.redacted_snippets, query_bytes, request.now_ticks, request.detail);
+        lease.bytes_used += query_bytes;
         return .{
             .lease_id = lease.id,
             .workspace_id = lease.workspace_id,
@@ -327,9 +331,9 @@ pub const Service = struct {
             try recordSemantic(ledger, request.subject, request.task_id, false, lease.local_model, lease.encrypted_index, lease.redacted_snippets, 0, request.now_ticks, request.detail);
             return error.SourceMismatch;
         }
+        try recordSemantic(ledger, request.subject, request.task_id, true, lease.local_model, lease.encrypted_index, lease.redacted_snippets, 0, request.now_ticks, request.detail);
         lease.revoked = true;
         lease.revocation_generation +|= 1;
-        try recordSemantic(ledger, request.subject, request.task_id, true, lease.local_model, lease.encrypted_index, lease.redacted_snippets, 0, request.now_ticks, request.detail);
     }
 
     pub fn find(self: *Service, lease_id: u64) ?*ContextLease {
@@ -340,6 +344,11 @@ pub const Service = struct {
     pub fn findConst(self: *const Service, lease_id: u64) ?*const ContextLease {
         const slot = self.slots.getConst(lease_id) orelse return null;
         return &slot.lease;
+    }
+
+    fn advanceNextLeaseId(self: *Service) void {
+        self.next_lease_id +%= 1;
+        if (self.next_lease_id == 0) self.next_lease_id = 1;
     }
 
     pub fn consumePackReceipt(
@@ -1295,4 +1304,54 @@ test "personal context service leases local semantic memory with scoped audit" {
     try std.testing.expectEqual(@as(usize, 1), empty_summary.semantic_memory_denials);
     try std.testing.expectEqual(@as(usize, 2), empty_summary.semantic_memory_receipt_events);
     try std.testing.expectEqual(@as(usize, 1), empty_summary.semantic_memory_receipt_denials);
+}
+
+test "personal context lease ids wrap without publishing id zero" {
+    var policies = policy_object.Directory.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 920 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 921 };
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = user.serial,
+        .issuer = .{ .kind = .policy_authority, .serial = 92 },
+        .label = "personal context wrap policy",
+        .semantic_memory_allowed = true,
+        .require_local_semantic_model = true,
+        .require_encrypted_semantic_index = true,
+        .require_redacted_semantic_snippets = true,
+        .max_semantic_query_bytes = 64,
+    }, signing.SignerIdentity{
+        .label = "personal-context-wrap-policy",
+        .seed = signing.seedFromByte(0x96),
+    });
+
+    const subjects = policy_object.SubjectSet{ .user_id = user.serial };
+    var service = Service.init();
+    service.next_lease_id = std.math.maxInt(u64);
+
+    const first = try service.issueLease(&policies, subjects, .{
+        .subject = app,
+        .task_id = 720,
+        .workspace_id = 42,
+        .max_query_bytes = 64,
+        .expires_at_ticks = 100,
+        .now_ticks = 10,
+        .detail = "private personal context lease",
+    }, null);
+    try std.testing.expectEqual(std.math.maxInt(u64), first.id);
+    try std.testing.expectEqual(@as(u64, 1), service.next_lease_id);
+    try std.testing.expect(service.find(0) == null);
+
+    const second = try service.issueLease(&policies, subjects, .{
+        .subject = app,
+        .task_id = 721,
+        .workspace_id = 43,
+        .max_query_bytes = 64,
+        .expires_at_ticks = 100,
+        .now_ticks = 11,
+        .detail = "private personal context lease",
+    }, null);
+    try std.testing.expectEqual(@as(u64, 1), second.id);
+    try std.testing.expectEqual(@as(u64, 2), service.next_lease_id);
+    try std.testing.expectEqual(@as(usize, 2), service.slots.countInUse());
 }
