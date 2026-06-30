@@ -143,8 +143,8 @@ fn printProviderPolicy(writer: anytype) !void {
         \\production_ml_dsa_profile=ml-dsa-65
         \\production_ml_dsa_required_boundary=hardware key handle through TPM, secure enclave, HSM, or KMS backed by a FIPS 140 validated module
         \\production_ml_dsa_required_metadata=FIPS 204 algorithm, ML-DSA-65 parameter set, validation certificate, rotation, revocation, DSSE verifier support
-        \\release_verifier_metadata_schema=zigos.release-verifier-metadata.v1
-        \\attestation_verifier_metadata_schema=zigos.attestation-verifier-metadata.v1
+        \\release_verifier_metadata_schema=zigos.release-verifier-metadata
+        \\attestation_verifier_metadata_schema=zigos.attestation-verifier-metadata
         \\
     , .{
         if ((registry.find(.ed25519) orelse unreachable).releaseEligible()) "yes" else "no",

@@ -40,6 +40,9 @@ test "workspace transactions, snapshot restore, delete recovery, and signed expo
         .owner = .{ .kind = .user, .serial = 1 },
         .label = "notes",
     });
+    try std.testing.expectEqual(@as(usize, 1), directory.workspaceCount());
+    try std.testing.expectEqual(@as(usize, 0), directory.snapshotCount());
+    try std.testing.expect(directory.findConst(workspace.id).?.oldestSnapshotGeneration() == null);
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "documents/notes.md", first.object_id, first.version_id, .document);
     try std.testing.expectEqual(@as(u32, 1), try directory.commit(workspace.id, 20));
@@ -53,6 +56,12 @@ test "workspace transactions, snapshot restore, delete recovery, and signed expo
         .seed = signing.seedFromByte(0x63),
     };
     const baseline = try directory.snapshot(workspace.id, "baseline", snapshot_identity);
+    try std.testing.expectEqual(@as(usize, 1), directory.snapshotCount());
+    try std.testing.expectEqual(baseline.id, directory.findSnapshotConst(baseline.id).?.id);
+    try std.testing.expectEqual(@as(u32, 1), directory.findConst(workspace.id).?.oldestSnapshotGeneration().?);
+    directory.rebuildIndexes();
+    try std.testing.expectEqual(baseline.id, directory.findSnapshotConst(baseline.id).?.id);
+    try std.testing.expectEqual(@as(u32, 1), directory.findConst(workspace.id).?.oldestSnapshotGeneration().?);
     try std.testing.expect(!std.mem.eql(u8, &baseline.root_address, &workspace_merkle.zeroRootAddress()));
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "documents/notes.md", second.object_id, second.version_id, .document);
@@ -206,6 +215,7 @@ test "workspace path index keeps cached root and lookups current" {
     const record_after_put = directory.find(workspace.id).?;
     try std.testing.expectEqual(workspaceRootAddress(entries_after_put), record_after_put.rootAddress());
     try std.testing.expectEqual(ids.version(301), (try directory.resolve(workspace.id, "a.md")).version_id);
+    try std.testing.expectEqual(ids.version(301), (try directory.resolveObject(workspace.id, ids.object(31))).version_id);
 
     const signer = signing.SignerIdentity{
         .label = "zigos-workspace-key",
@@ -223,7 +233,9 @@ test "workspace path index keeps cached root and lookups current" {
     const record_after_delta = directory.find(workspace.id).?;
     try std.testing.expectEqual(workspaceRootAddress(entries_after_delta), record_after_delta.rootAddress());
     try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "a.md"));
+    try std.testing.expectError(error.EntryNotFound, directory.resolveObject(workspace.id, ids.object(31)));
     try std.testing.expectEqual(ids.version(302), (try directory.resolve(workspace.id, "m.md")).version_id);
+    try std.testing.expectEqualStrings("m.md", (try directory.resolveObject(workspace.id, ids.object(32))).pathSlice());
 }
 
 test "workspace snapshots and exports must stay signed" {
@@ -309,6 +321,8 @@ test "workspace sharing acts as a mutable policy container" {
         .reshare_policy = .admin_only,
         .audit_visibility = .shared_participants,
     });
+    const app_grant_key = workspace_model.shareGrantPrincipalKey(.{ .kind = .app, .serial = 7 });
+    try std.testing.expectEqual(@as(usize, 1), notes.share_table.share_grant_principal_index.count(app_grant_key));
     const initial = directory.findShareGrant(notes.id, .{ .kind = .app, .serial = 7 }).?;
     try std.testing.expectEqual(ShareNetworkScope.trusted_overlay, initial.network_scope);
     try std.testing.expectEqual(ResharePolicy.admin_only, initial.reshare_policy);
@@ -339,6 +353,7 @@ test "workspace sharing acts as a mutable policy container" {
         .reshare_policy = .owner_only,
         .audit_visibility = .organization_policy,
     });
+    try std.testing.expectEqual(@as(usize, 1), notes.share_table.share_grant_principal_index.count(app_grant_key));
     const updated = directory.findShareGrant(notes.id, .{ .kind = .app, .serial = 7 }).?;
     try std.testing.expectEqual(ShareNetworkScope.local_only, updated.network_scope);
     try std.testing.expectEqual(ResharePolicy.owner_only, updated.reshare_policy);
