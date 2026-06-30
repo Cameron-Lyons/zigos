@@ -210,7 +210,6 @@ pub const Store = struct {
         const slot = self.allocateCredential() orelse return error.CredentialTableFull;
         var credential = zeroCredential();
         credential.id = self.next_credential_id;
-        self.next_credential_id += 1;
         credential.owner = request.owner;
         credential.primary_device = request.device;
         credential.scope = request.scope;
@@ -243,6 +242,7 @@ pub const Store = struct {
 
         slot.in_use = true;
         slot.credential = credential;
+        self.next_credential_id += 1;
         return &slot.credential;
     }
 
@@ -732,6 +732,67 @@ test "os identity creates passkey credentials and rejects phishing origins" {
         .credential_identity = credential_identity,
         .tick = 5,
     }));
+}
+
+test "os identity registration rejects overlong text without consuming credential ids" {
+    var graph = device_graph.Graph.init();
+    var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(testHardwareProvider());
+    var identities = Store.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 751 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 761 };
+    const user_identity = signing.SignerIdentity{
+        .label = "oversized-user",
+        .seed = signing.seedFromByte(0xD1),
+    };
+    const laptop_identity = signing.SignerIdentity{
+        .label = "oversized-laptop",
+        .seed = signing.seedFromByte(0xD2),
+    };
+    const credential_identity = signing.SignerIdentity{
+        .label = "oversized-passkey",
+        .seed = signing.seedFromByte(0xD3),
+    };
+    const oversized_relying_party = [_]u8{'r'} ** (MAX_RP_ID_BYTES + 1);
+    const oversized_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
+
+    _ = try graph.ensureUserRoot(user, "owner", user_identity);
+    _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
+
+    try std.testing.expectError(error.RelyingPartyTooLong, identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = oversized_relying_party[0..],
+        .label = "accounts-passkey",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 2,
+    }));
+    try std.testing.expectError(error.LabelTooLong, identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "accounts.example",
+        .label = oversized_label[0..],
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 3,
+    }));
+    try std.testing.expectEqual(@as(u64, 1), identities.next_credential_id);
+    try std.testing.expect(identities.findCredential(1) == null);
+    try std.testing.expectEqual(@as(u64, 1), secrets.next_secret_id);
+
+    const credential = try identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "accounts.example",
+        .label = "accounts-passkey",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 4,
+    });
+    try std.testing.expectEqual(@as(u64, 1), credential.id);
+    try std.testing.expectEqual(@as(u64, 2), identities.next_credential_id);
+    try std.testing.expectEqual(@as(u64, 2), secrets.next_secret_id);
 }
 
 test "os identity recovers synced credentials through trusted device graph" {
