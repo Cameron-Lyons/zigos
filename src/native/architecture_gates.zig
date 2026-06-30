@@ -164,6 +164,8 @@ pub const indexed_hot_path_tables = .{
         .indexes_outbound_transport_paths = @hasField(sync_service.Service, "outbound_transport_path_index"),
         .tracks_transport_frame_counts = @hasField(sync_service.Service, "outbound_transport_frame_count") and
             @hasField(sync_service.Service, "inbound_transport_frame_count"),
+        .tracks_transport_frame_allocation_cursors = @hasField(sync_service.Service, "next_outbound_transport_frame_slot_index") and
+            @hasField(sync_service.Service, "next_inbound_transport_frame_slot_index"),
     },
     .sync_adapters = .{
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),

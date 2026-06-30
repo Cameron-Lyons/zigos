@@ -185,6 +185,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         outbound_transport_path_index: OutboundTransportPathIndex = OutboundTransportPathIndex.init(),
         outbound_transport_frame_count: usize = 0,
         inbound_transport_frame_count: usize = 0,
+        next_outbound_transport_frame_slot_index: usize = 0,
+        next_inbound_transport_frame_slot_index: usize = 0,
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         replica_scope_index: ReplicaScopeIndex = ReplicaScopeIndex.init(),
         next_overlay_session_id: u64 = 1,
@@ -2138,11 +2140,20 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return frame_id;
         }
 
-        fn allocateTransportFrameSlotIndex(self: *const Self, queue_kind: TransportQueueKind) ?usize {
-            for (self.transportFrameSlotsConst(queue_kind), 0..) |slot, slot_index| {
-                if (!slot.in_use) return slot_index;
+        fn allocateTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind) ?usize {
+            if (self.transportFrameSlotCount(queue_kind) == MAX_TRANSPORT_FRAMES) return null;
+
+            const slots = self.transportFrameSlotsConst(queue_kind);
+            const cursor = self.transportFrameSlotCursorPtr(queue_kind);
+            const start_index = cursor.*;
+            var offset: usize = 0;
+            while (offset < MAX_TRANSPORT_FRAMES) : (offset += 1) {
+                const slot_index = (start_index + offset) % MAX_TRANSPORT_FRAMES;
+                if (slots[slot_index].in_use) continue;
+                cursor.* = (slot_index + 1) % MAX_TRANSPORT_FRAMES;
+                return slot_index;
             }
-            return null;
+            native_util.impossibleByInvariant("transport frame count found a free slot but allocation cursor did not");
         }
 
         fn reclaimOutboundTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind) ?usize {
@@ -2216,6 +2227,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return switch (queue_kind) {
                 .outbound => &self.outbound_transport_frame_count,
                 .inbound => &self.inbound_transport_frame_count,
+            };
+        }
+
+        fn transportFrameSlotCursorPtr(self: *Self, queue_kind: TransportQueueKind) *usize {
+            return switch (queue_kind) {
+                .outbound => &self.next_outbound_transport_frame_slot_index,
+                .inbound => &self.next_inbound_transport_frame_slot_index,
             };
         }
 
