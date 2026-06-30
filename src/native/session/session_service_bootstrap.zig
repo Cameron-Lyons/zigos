@@ -452,36 +452,39 @@ fn launchServices(
 }
 
 fn seedHostedModelDeviceInventory() void {
-    // Seed absent classes for host builds and for freestanding boots that lack
-    // detected inventory. Per-class `!detected` guards preserve real hardware.
+    // Seed absent classes for host builds and explicitly modeled freestanding
+    // boots. Real hardware keeps strict detected-inventory binding.
+    if (builtin.target.os.tag == .freestanding and !device_inventory.modelDeviceInventoryEnabled()) return;
+
     const hosted_xhci_device_id = 0x8086_A0ED_0001;
     const hosted_nvme_device_id = 0x8086_9A0B_0001;
 
-    if (!device_inventory.recordForClass(.network_adapter).detected) {
-        device_inventory.registerDetected(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory, false);
-    }
+    ensureHostedModelProductionDevice(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory);
     const storage_record = device_inventory.recordForClass(.storage_controller);
     if (!storage_record.detected or
         (device_inventory.modelDeviceInventoryEnabled() and
-            !device_inventory.sourceCanBindProductionDriver(.storage_controller, storage_record.source, storage_record.device_id)))
+            !device_inventory.sourceCanBindProductionDriver(storage_record.device_class, storage_record.source, storage_record.device_id)))
     {
         device_inventory.registerDetected(.storage_controller, hosted_nvme_device_id, .nvme_pci_inventory, false);
     }
-    if (!device_inventory.recordForClass(.usb_controller).detected) {
-        device_inventory.registerDetected(.usb_controller, hosted_xhci_device_id, .xhci_inventory, false);
-    }
-    if (!device_inventory.recordForClass(.graphics_adapter).detected) {
-        device_inventory.registerDetected(.graphics_adapter, 0x8086_9A49_0001, .pci_inventory, false);
-    }
-    if (!device_inventory.recordForClass(.audio_print_io).detected) {
-        device_inventory.registerDetected(.audio_print_io, 0x8086_A0C8_0001, .pci_inventory, false);
-    }
-    if (!device_inventory.recordForClass(.input_device).detected) {
+    ensureHostedModelProductionDevice(.usb_controller, hosted_xhci_device_id, .xhci_inventory);
+    ensureHostedModelProductionDevice(.graphics_adapter, 0x8086_9A49_0001, .pci_inventory);
+    ensureHostedModelProductionDevice(.audio_print_io, 0x8086_A0C8_0001, .pci_inventory);
+    const input_record = device_inventory.recordForClass(.input_device);
+    if (!device_inventory.sourceCanBindProductionDriver(input_record.device_class, input_record.source, input_record.device_id)) {
         device_inventory.registerDetected(.input_device, hosted_xhci_device_id, .xhci_inventory, false);
     }
-    if (!device_inventory.recordForClass(.compositor_policy).detected) {
-        device_inventory.registerDetected(.compositor_policy, 0xC0DE_9001, .platform_policy, false);
-    }
+    ensureHostedModelProductionDevice(.compositor_policy, 0xC0DE_9001, .platform_policy);
+}
+
+fn ensureHostedModelProductionDevice(
+    device_class: driver_service.DeviceClass,
+    device_id: u64,
+    source: device_inventory.DetectionSource,
+) void {
+    const record = device_inventory.recordForClass(device_class);
+    if (device_inventory.sourceCanBindProductionDriver(record.device_class, record.source, record.device_id)) return;
+    device_inventory.registerDetected(device_class, device_id, source, false);
 }
 
 fn launchService(
