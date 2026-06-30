@@ -72,122 +72,122 @@ pub const Directory = struct {
         if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
 
         const slot_index = self.firstFreeSlotIndex() orelse return error.PolicyTableFull;
-        const slot = &self.slots[slot_index];
-        slot.in_use = true;
-        errdefer slot.* = .{};
-        slot.policy = zeroPolicy();
-        slot.policy.id = self.next_policy_id;
-        self.next_policy_id += 1;
-        slot.policy.generation = nextGeneration(self, request.scope, request.subject_id);
-        slot.policy.scope = request.scope;
-        slot.policy.subject_id = request.subject_id;
-        slot.policy.issuer = request.issuer;
-        slot.policy.label_len = native_util.copyTextExact(&slot.policy.label, request.label) catch return error.LabelTooLong;
-        slot.policy.install_source_mode = request.install_source_mode;
-        slot.policy.network_egress_mode = request.network_egress_mode;
-        slot.policy.removable_storage_allowed = request.removable_storage_allowed;
-        slot.policy.screen_capture_allowed = request.screen_capture_allowed;
-        slot.policy.clipboard_allowed = request.clipboard_allowed;
-        slot.policy.camera_allowed = request.camera_allowed;
-        slot.policy.microphone_allowed = request.microphone_allowed;
-        slot.policy.location_allowed = request.location_allowed;
-        slot.policy.contacts_allowed = request.contacts_allowed;
-        slot.policy.sensors_allowed = request.sensors_allowed;
-        slot.policy.peer_ipc_allowed = request.peer_ipc_allowed;
-        slot.policy.remote_ai_allowed = request.remote_ai_allowed;
-        slot.policy.ai_training_allowed = request.ai_training_allowed;
-        slot.policy.max_ai_context_bytes = request.max_ai_context_bytes;
-        slot.policy.require_ai_model_measurement = request.require_ai_model_measurement;
-        slot.policy.require_trusted_ai_model_source = request.require_trusted_ai_model_source;
-        slot.policy.max_ai_model_age_days = request.max_ai_model_age_days;
-        slot.policy.require_hardware_backed_session = request.require_hardware_backed_session;
-        slot.policy.require_platform_backed_device_session = request.require_platform_backed_device_session;
-        slot.policy.require_primary_device_session = request.require_primary_device_session;
-        slot.policy.max_session_unlock_age_ticks = request.max_session_unlock_age_ticks;
-        slot.policy.require_package_sbom = request.require_package_sbom;
-        slot.policy.require_reproducible_package_build = request.require_reproducible_package_build;
-        slot.policy.require_trusted_package_builder = request.require_trusted_package_builder;
-        slot.policy.require_vulnerability_scan = request.require_vulnerability_scan;
-        slot.policy.agent_delegation_allowed = request.agent_delegation_allowed;
-        slot.policy.max_agent_actions_per_session = request.max_agent_actions_per_session;
-        slot.policy.max_agent_remote_calls_per_session = request.max_agent_remote_calls_per_session;
-        slot.policy.require_agent_user_confirmation = request.require_agent_user_confirmation;
-        slot.policy.require_agent_audit = request.require_agent_audit;
-        slot.policy.require_agent_session_binding = request.require_agent_session_binding;
-        slot.policy.require_agent_local_context = request.require_agent_local_context;
-        slot.policy.max_agent_context_bytes = request.max_agent_context_bytes;
-        slot.policy.min_agent_delegation_generation = request.min_agent_delegation_generation;
-        slot.policy.require_agent_visible_plan = request.require_agent_visible_plan;
-        slot.policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
-        slot.policy.data_export_allowed = request.data_export_allowed;
-        slot.policy.data_deletion_allowed = request.data_deletion_allowed;
-        slot.policy.require_data_deletion_receipt = request.require_data_deletion_receipt;
-        slot.policy.max_data_export_bytes = request.max_data_export_bytes;
-        slot.policy.object_backup_allowed = request.object_backup_allowed;
-        slot.policy.object_restore_allowed = request.object_restore_allowed;
-        slot.policy.require_encrypted_object_backup = request.require_encrypted_object_backup;
-        slot.policy.require_backup_recovery_key = request.require_backup_recovery_key;
-        slot.policy.require_restore_device_trust = request.require_restore_device_trust;
-        slot.policy.max_object_backup_bytes = request.max_object_backup_bytes;
-        slot.policy.max_object_restore_age_days = request.max_object_restore_age_days;
-        slot.policy.semantic_memory_allowed = request.semantic_memory_allowed;
-        slot.policy.require_local_semantic_model = request.require_local_semantic_model;
-        slot.policy.require_encrypted_semantic_index = request.require_encrypted_semantic_index;
-        slot.policy.require_redacted_semantic_snippets = request.require_redacted_semantic_snippets;
-        slot.policy.max_semantic_query_bytes = request.max_semantic_query_bytes;
-        slot.policy.credential_assertions_allowed = request.credential_assertions_allowed;
-        slot.policy.deny_credential_password_fallback = request.deny_credential_password_fallback;
-        slot.policy.require_phishing_resistant_credential = request.require_phishing_resistant_credential;
-        slot.policy.require_hardware_backed_credential = request.require_hardware_backed_credential;
-        slot.policy.require_local_credential_unlock = request.require_local_credential_unlock;
-        slot.policy.max_credential_unlock_age_ticks = request.max_credential_unlock_age_ticks;
-        slot.policy.secret_vault_allowed = request.secret_vault_allowed;
-        slot.policy.require_hardware_backed_secrets = request.require_hardware_backed_secrets;
-        slot.policy.deny_secret_raw_export = request.deny_secret_raw_export;
-        slot.policy.max_secret_handle_lease_ticks = request.max_secret_handle_lease_ticks;
-        slot.policy.task_lifecycle_allowed = request.task_lifecycle_allowed;
-        slot.policy.require_lifecycle_checkpoint_before_terminate = request.require_lifecycle_checkpoint_before_terminate;
-        slot.policy.quiet_until_tick = request.quiet_until_tick;
-        slot.policy.max_visible_notifications = request.max_visible_notifications;
-        slot.policy.max_interruptive_notifications = request.max_interruptive_notifications;
-        slot.policy.allow_critical_interruption = request.allow_critical_interruption;
-        slot.policy.require_adaptive_ui = request.require_adaptive_ui;
-        slot.policy.require_screen_reader_support = request.require_screen_reader_support;
-        slot.policy.require_keyboard_navigation = request.require_keyboard_navigation;
-        slot.policy.require_reduced_motion_support = request.require_reduced_motion_support;
-        slot.policy.require_high_contrast_support = request.require_high_contrast_support;
-        slot.policy.max_background_duration_seconds = request.max_background_duration_seconds;
-        slot.policy.max_background_cpu_time_ticks = request.max_background_cpu_time_ticks;
-        slot.policy.max_background_memory_bytes = request.max_background_memory_bytes;
-        slot.policy.max_background_shared_memory_bytes = request.max_background_shared_memory_bytes;
-        slot.policy.allow_remote_background_network = request.allow_remote_background_network;
-        slot.policy.require_visible_background_activity = request.require_visible_background_activity;
-        slot.policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
-        slot.policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
-        slot.policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
-        slot.policy.require_sensitive_capture_foreground = request.require_sensitive_capture_foreground;
-        slot.policy.require_capture_indicator = request.require_capture_indicator;
-        slot.policy.allow_background_capture = request.allow_background_capture;
-        slot.policy.max_sensitive_capture_lease_ticks = request.max_sensitive_capture_lease_ticks;
-        slot.policy.max_sensitive_capture_samples = request.max_sensitive_capture_samples;
-        slot.policy.retention_days = request.retention_days;
-        slot.policy.audit_export_required = request.audit_export_required;
+        var policy = zeroPolicy();
+        policy.id = self.next_policy_id;
+        policy.generation = nextGeneration(self, request.scope, request.subject_id);
+        policy.scope = request.scope;
+        policy.subject_id = request.subject_id;
+        policy.issuer = request.issuer;
+        policy.label_len = native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong;
+        policy.install_source_mode = request.install_source_mode;
+        policy.network_egress_mode = request.network_egress_mode;
+        policy.removable_storage_allowed = request.removable_storage_allowed;
+        policy.screen_capture_allowed = request.screen_capture_allowed;
+        policy.clipboard_allowed = request.clipboard_allowed;
+        policy.camera_allowed = request.camera_allowed;
+        policy.microphone_allowed = request.microphone_allowed;
+        policy.location_allowed = request.location_allowed;
+        policy.contacts_allowed = request.contacts_allowed;
+        policy.sensors_allowed = request.sensors_allowed;
+        policy.peer_ipc_allowed = request.peer_ipc_allowed;
+        policy.remote_ai_allowed = request.remote_ai_allowed;
+        policy.ai_training_allowed = request.ai_training_allowed;
+        policy.max_ai_context_bytes = request.max_ai_context_bytes;
+        policy.require_ai_model_measurement = request.require_ai_model_measurement;
+        policy.require_trusted_ai_model_source = request.require_trusted_ai_model_source;
+        policy.max_ai_model_age_days = request.max_ai_model_age_days;
+        policy.require_hardware_backed_session = request.require_hardware_backed_session;
+        policy.require_platform_backed_device_session = request.require_platform_backed_device_session;
+        policy.require_primary_device_session = request.require_primary_device_session;
+        policy.max_session_unlock_age_ticks = request.max_session_unlock_age_ticks;
+        policy.require_package_sbom = request.require_package_sbom;
+        policy.require_reproducible_package_build = request.require_reproducible_package_build;
+        policy.require_trusted_package_builder = request.require_trusted_package_builder;
+        policy.require_vulnerability_scan = request.require_vulnerability_scan;
+        policy.agent_delegation_allowed = request.agent_delegation_allowed;
+        policy.max_agent_actions_per_session = request.max_agent_actions_per_session;
+        policy.max_agent_remote_calls_per_session = request.max_agent_remote_calls_per_session;
+        policy.require_agent_user_confirmation = request.require_agent_user_confirmation;
+        policy.require_agent_audit = request.require_agent_audit;
+        policy.require_agent_session_binding = request.require_agent_session_binding;
+        policy.require_agent_local_context = request.require_agent_local_context;
+        policy.max_agent_context_bytes = request.max_agent_context_bytes;
+        policy.min_agent_delegation_generation = request.min_agent_delegation_generation;
+        policy.require_agent_visible_plan = request.require_agent_visible_plan;
+        policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
+        policy.data_export_allowed = request.data_export_allowed;
+        policy.data_deletion_allowed = request.data_deletion_allowed;
+        policy.require_data_deletion_receipt = request.require_data_deletion_receipt;
+        policy.max_data_export_bytes = request.max_data_export_bytes;
+        policy.object_backup_allowed = request.object_backup_allowed;
+        policy.object_restore_allowed = request.object_restore_allowed;
+        policy.require_encrypted_object_backup = request.require_encrypted_object_backup;
+        policy.require_backup_recovery_key = request.require_backup_recovery_key;
+        policy.require_restore_device_trust = request.require_restore_device_trust;
+        policy.max_object_backup_bytes = request.max_object_backup_bytes;
+        policy.max_object_restore_age_days = request.max_object_restore_age_days;
+        policy.semantic_memory_allowed = request.semantic_memory_allowed;
+        policy.require_local_semantic_model = request.require_local_semantic_model;
+        policy.require_encrypted_semantic_index = request.require_encrypted_semantic_index;
+        policy.require_redacted_semantic_snippets = request.require_redacted_semantic_snippets;
+        policy.max_semantic_query_bytes = request.max_semantic_query_bytes;
+        policy.credential_assertions_allowed = request.credential_assertions_allowed;
+        policy.deny_credential_password_fallback = request.deny_credential_password_fallback;
+        policy.require_phishing_resistant_credential = request.require_phishing_resistant_credential;
+        policy.require_hardware_backed_credential = request.require_hardware_backed_credential;
+        policy.require_local_credential_unlock = request.require_local_credential_unlock;
+        policy.max_credential_unlock_age_ticks = request.max_credential_unlock_age_ticks;
+        policy.secret_vault_allowed = request.secret_vault_allowed;
+        policy.require_hardware_backed_secrets = request.require_hardware_backed_secrets;
+        policy.deny_secret_raw_export = request.deny_secret_raw_export;
+        policy.max_secret_handle_lease_ticks = request.max_secret_handle_lease_ticks;
+        policy.task_lifecycle_allowed = request.task_lifecycle_allowed;
+        policy.require_lifecycle_checkpoint_before_terminate = request.require_lifecycle_checkpoint_before_terminate;
+        policy.quiet_until_tick = request.quiet_until_tick;
+        policy.max_visible_notifications = request.max_visible_notifications;
+        policy.max_interruptive_notifications = request.max_interruptive_notifications;
+        policy.allow_critical_interruption = request.allow_critical_interruption;
+        policy.require_adaptive_ui = request.require_adaptive_ui;
+        policy.require_screen_reader_support = request.require_screen_reader_support;
+        policy.require_keyboard_navigation = request.require_keyboard_navigation;
+        policy.require_reduced_motion_support = request.require_reduced_motion_support;
+        policy.require_high_contrast_support = request.require_high_contrast_support;
+        policy.max_background_duration_seconds = request.max_background_duration_seconds;
+        policy.max_background_cpu_time_ticks = request.max_background_cpu_time_ticks;
+        policy.max_background_memory_bytes = request.max_background_memory_bytes;
+        policy.max_background_shared_memory_bytes = request.max_background_shared_memory_bytes;
+        policy.allow_remote_background_network = request.allow_remote_background_network;
+        policy.require_visible_background_activity = request.require_visible_background_activity;
+        policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
+        policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
+        policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
+        policy.require_sensitive_capture_foreground = request.require_sensitive_capture_foreground;
+        policy.require_capture_indicator = request.require_capture_indicator;
+        policy.allow_background_capture = request.allow_background_capture;
+        policy.max_sensitive_capture_lease_ticks = request.max_sensitive_capture_lease_ticks;
+        policy.max_sensitive_capture_samples = request.max_sensitive_capture_samples;
+        policy.retention_days = request.retention_days;
+        policy.audit_export_required = request.audit_export_required;
 
         for (request.allowed_install_sources, 0..) |source_identity, index| {
-            slot.policy.allowed_install_source_lens[index] = native_util.copyTextExact(&slot.policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong;
-            slot.policy.allowed_install_source_count += 1;
+            policy.allowed_install_source_lens[index] = native_util.copyTextExact(&policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong;
+            policy.allowed_install_source_count += 1;
         }
         for (request.allowed_network_destinations, 0..) |destination, index| {
-            slot.policy.allowed_network_destination_lens[index] = native_util.copyTextExact(&slot.policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong;
-            slot.policy.allowed_network_destination_count += 1;
+            policy.allowed_network_destination_lens[index] = native_util.copyTextExact(&policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong;
+            policy.allowed_network_destination_count += 1;
         }
         for (request.allowed_sync_destinations, 0..) |destination, index| {
-            slot.policy.allowed_sync_destination_lens[index] = native_util.copyTextExact(&slot.policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong;
-            slot.policy.allowed_sync_destination_count += 1;
+            policy.allowed_sync_destination_lens[index] = native_util.copyTextExact(&policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong;
+            policy.allowed_sync_destination_count += 1;
         }
 
-        const digest = policyDigest(&slot.policy);
-        slot.policy.signature = try signing.sign(signer, &digest);
+        const digest = policyDigest(&policy);
+        policy.signature = try signing.sign(signer, &digest);
+        const slot = &self.slots[slot_index];
+        slot.in_use = true;
+        slot.policy = policy;
+        self.next_policy_id += 1;
         self.indexPolicy(slot_index);
         return &slot.policy;
     }
@@ -848,9 +848,10 @@ pub const Directory = struct {
     fn indexPolicy(self: *Directory, slot_index: usize) void {
         if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy index update points outside slots");
         const slot = &self.slots[slot_index];
-        if (!slot.in_use or slot.policy.id == 0) native_util.impossibleByInvariant("policy index update requires a live policy");
-        self.policy_id_index.insert(slot.policy.id, slot_index);
-        if (!self.scope_index.append(policyScopeKey(slot.policy.scope, slot.policy.subject_id), slot_index)) {
+        const policy = &slot.policy;
+        if (!slot.in_use or policy.id == 0) native_util.impossibleByInvariant("policy index update requires a live policy");
+        self.policy_id_index.insert(policy.id, slot_index);
+        if (!self.scope_index.append(policyScopeKey(policy.scope, policy.subject_id), slot_index)) {
             native_util.impossibleByInvariant("policy scope index capacity covers policy slots");
         }
     }
@@ -2131,6 +2132,18 @@ test "policy directory gates sensitive permission retention and leases" {
 
 test "policy objects reject oversized lists and refuse authorization after tampering" {
     var directory = Directory.init();
+    const oversized_label = [_]u8{'x'} ** (MAX_LABEL_BYTES + 1);
+    try std.testing.expectError(error.LabelTooLong, directory.create(.{
+        .scope = .user,
+        .subject_id = 5,
+        .issuer = .{ .kind = .policy_authority, .serial = 2 },
+        .label = oversized_label[0..],
+    }, .{
+        .label = "policy-key",
+        .seed = signing.seedFromByte(0x51),
+    }));
+    try std.testing.expect(directory.activeForScope(.user, 5) == null);
+
     const too_many = [_][]const u8{
         "a", "b", "c", "d", "e", "f", "g", "h", "i",
     };
@@ -2156,6 +2169,7 @@ test "policy objects reject oversized lists and refuse authorization after tampe
         .label = "device-policy-key",
         .seed = signing.seedFromByte(0x53),
     });
+    try std.testing.expectEqual(@as(u64, 1), policy.id);
     try std.testing.expect(directory.verify(policy.id));
 
     policy.signature.value[0] ^=
