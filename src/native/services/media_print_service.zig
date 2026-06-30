@@ -102,31 +102,29 @@ pub const Service = struct {
         if (request.label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
         if (request.printer_identity.len > MAX_LABEL_BYTES) return error.PrinterIdentityTooLong;
 
+        if (self.jobs.countInUse() >= MAX_JOBS) return error.JobTableFull;
+
+        var job = zeroJob();
         const job_id = self.next_job_id;
-        const slot_index = self.jobs.reserveIndex(job_id) orelse return error.JobTableFull;
-        errdefer _ = self.jobs.removeIndex(slot_index);
-        const slot = &self.jobs.slots[slot_index];
-        slot.job = zeroJob();
-        slot.job.id = job_id;
+        job.id = job_id;
+        job.kind = request.kind;
+        job.task_id = request.task_id;
+        job.workspace_id = request.workspace_id;
+        job.source_principal = request.source_principal;
+        job.state = .running;
+        job.visibility = request.visibility;
+        job.local_only = request.local_only;
+        job.label_len = native_util.copyTextExact(&job.label, request.label) catch return error.LabelTooLong;
+        job.printer_identity_len = native_util.copyTextExact(&job.printer_identity, request.printer_identity) catch return error.PrinterIdentityTooLong;
 
         const claim = try scheduler.claim(.{
             .task_id = request.task_id,
             .request = schedulerRequest(request.kind),
             .require_accelerator = request.kind == .media_export,
         });
-
-        slot.job.kind = request.kind;
-        slot.job.task_id = request.task_id;
-        slot.job.workspace_id = request.workspace_id;
-        slot.job.source_principal = request.source_principal;
-        slot.job.state = .running;
-        slot.job.visibility = request.visibility;
-        slot.job.local_only = request.local_only;
-        slot.job.engine = claim.engine;
-        slot.job.claim_id = claim.id;
-        slot.job.label_len = native_util.copyTextExact(&slot.job.label, request.label) catch return error.LabelTooLong;
-        slot.job.printer_identity_len = native_util.copyTextExact(&slot.job.printer_identity, request.printer_identity) catch return error.PrinterIdentityTooLong;
-        if (slot.job.visibility == .task or slot.job.visibility == .user) {
+        job.engine = claim.engine;
+        job.claim_id = claim.id;
+        if (job.visibility == .task or job.visibility == .user) {
             const notice = notifications.post(.{
                 .source = request.source_principal,
                 .reason = .policy_notice,
@@ -135,11 +133,16 @@ pub const Service = struct {
                 .detail = request.label,
                 .suppression_policy = .replace_same_source_reason_task,
             }) catch |err| {
-                _ = scheduler.releaseClaim(claim.id, null) catch |release_err| return release_err;
+                _ = try scheduler.releaseClaim(claim.id, null);
                 return err;
             };
-            slot.job.notification_id = notice.id;
+            job.notification_id = notice.id;
         }
+
+        const slot_index = self.jobs.reserveIndex(job_id) orelse
+            native_util.impossibleByInvariant("prechecked print job slot reservation must succeed");
+        const slot = &self.jobs.slots[slot_index];
+        slot.job = job;
         self.next_job_id += 1;
         self.jobs.clearDirty();
         return &slot.job;
@@ -261,6 +264,8 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 13 };
+    const too_long_label = [_]u8{'x'} ** (MAX_LABEL_BYTES + 1);
+    const too_long_printer = [_]u8{'p'} ** (MAX_LABEL_BYTES + 1);
 
     try std.testing.expectError(error.PrinterRequiresLocalOnly, service.submit(.{
         .kind = .print_document,
@@ -272,17 +277,36 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
         .local_only = false,
     }, &scheduler, &notifications, 5));
 
-    const hidden = try service.submit(.{
+    try std.testing.expectError(error.LabelTooLong, service.submit(.{
         .kind = .media_export,
         .task_id = 81,
         .workspace_id = 6,
         .source_principal = source,
+        .label = too_long_label[0..],
+    }, &scheduler, &notifications, 6));
+    try std.testing.expectError(error.PrinterIdentityTooLong, service.submit(.{
+        .kind = .print_document,
+        .task_id = 82,
+        .workspace_id = 6,
+        .source_principal = source,
+        .label = "local print",
+        .printer_identity = too_long_printer[0..],
+    }, &scheduler, &notifications, 7));
+    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
+    try std.testing.expect(service.find(1) == null);
+
+    const hidden = try service.submit(.{
+        .kind = .media_export,
+        .task_id = 83,
+        .workspace_id = 6,
+        .source_principal = source,
         .label = "background render",
         .visibility = .hidden,
-    }, &scheduler, &notifications, 6);
+    }, &scheduler, &notifications, 8);
+    try std.testing.expectEqual(@as(u64, 1), hidden.id);
     try std.testing.expectEqual(@as(?u64, null), hidden.notification_id);
-    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 7));
-    try std.testing.expectEqual(@as(usize, 0), notifications.activeCount(7));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 9));
+    try std.testing.expectEqual(@as(usize, 0), notifications.activeCount(9));
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
