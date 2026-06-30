@@ -167,16 +167,16 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
+        const slot = self.firstFreeHandleSlot() orelse return error.HandleTableFull;
+        const handle_id = self.next_handle_id;
         const store_handle = try self.store.lendHandle(
             request.secret_id,
             request.holder,
             request.task_id,
             request.allow_raw_export,
         );
-        const slot = self.firstFreeHandleSlot() orelse return error.HandleTableFull;
-        slot.in_use = true;
-        slot.handle = .{
-            .id = self.next_handle_id,
+        const handle = VaultHandle{
+            .id = handle_id,
             .store_handle_id = store_handle.id,
             .secret_id = request.secret_id,
             .holder = request.holder,
@@ -186,8 +186,10 @@ pub const Service = struct {
             .raw_export_allowed = store_handle.export_allowed,
             .generation = self.generation,
         };
-        self.next_handle_id += 1;
-        try recordLend(ledger, request, slot.handle.id, true);
+        try recordLend(ledger, request, handle.id, true);
+        slot.in_use = true;
+        slot.handle = handle;
+        self.advanceNextHandleId();
         return &slot.handle;
     }
 
@@ -348,6 +350,11 @@ pub const Service = struct {
             if (!slot.in_use) return slot;
         }
         return null;
+    }
+
+    fn advanceNextHandleId(self: *Service) void {
+        self.next_handle_id +%= 1;
+        if (self.next_handle_id == 0) self.next_handle_id = 1;
     }
 
     fn revokeSecretHandles(self: *Service, secret_id: u64) usize {
@@ -811,4 +818,92 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "private api token") == null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=secret_vault") != null);
+}
+
+test "secret vault lending stages capacity before lower store handles and wraps ids" {
+    const signing = @import("../core/signing.zig");
+
+    var policies = policy_object.Directory.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 621 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 622 };
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = user.serial,
+        .issuer = .{ .kind = .policy_authority, .serial = 3 },
+        .label = "secret vault lending policy",
+        .secret_vault_allowed = true,
+        .require_hardware_backed_secrets = false,
+        .deny_secret_raw_export = false,
+        .max_secret_handle_lease_ticks = 100,
+    }, signing.SignerIdentity{
+        .label = "secret-vault-lending-policy",
+        .seed = signing.seedFromByte(0xd9),
+    });
+    const subjects = policy_object.SubjectSet{ .user_id = user.serial };
+
+    var wrap_service = Service.init();
+    const wrap_secret = try wrap_service.store.importSecret(user, "wrap-token", "private wrap token", false, true);
+    wrap_service.next_handle_id = std.math.maxInt(u64);
+    const max_handle = try wrap_service.lendHandle(&policies, subjects, .{
+        .owner = user,
+        .holder = app,
+        .task_id = 81,
+        .secret_id = wrap_secret.id,
+        .expires_at_ticks = 20,
+        .now_ticks = 10,
+        .allow_raw_export = true,
+        .hardware_backed = false,
+        .detail = "private wrap token lent at max handle id",
+    }, null);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_handle.id);
+    try std.testing.expectEqual(@as(u64, 1), wrap_service.next_handle_id);
+    try std.testing.expect(wrap_service.findHandle(0) == null);
+
+    const wrapped_handle = try wrap_service.lendHandle(&policies, subjects, .{
+        .owner = user,
+        .holder = app,
+        .task_id = 82,
+        .secret_id = wrap_secret.id,
+        .expires_at_ticks = 21,
+        .now_ticks = 11,
+        .allow_raw_export = true,
+        .hardware_backed = false,
+        .detail = "private wrap token lent after handle id wrap",
+    }, null);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_handle.id);
+    try std.testing.expectEqual(@as(u64, 2), wrap_service.next_handle_id);
+    try std.testing.expect(wrap_service.findHandle(0) == null);
+
+    var full_service = Service.init();
+    const full_secret = try full_service.store.importSecret(user, "full-token", "private full token", false, true);
+    for (&full_service.handles, 0..) |*slot, index| {
+        const handle_id: u64 = @intCast(index + 1);
+        slot.in_use = true;
+        slot.handle = .{
+            .id = handle_id,
+            .store_handle_id = handle_id,
+            .secret_id = full_secret.id,
+            .holder = app,
+            .task_id = 90 + handle_id,
+            .expires_at_ticks = 100,
+            .hardware_backed = false,
+            .raw_export_allowed = true,
+            .generation = full_service.generation,
+        };
+    }
+
+    const store_next_before = full_service.store.next_handle_id;
+    try std.testing.expectError(error.HandleTableFull, full_service.lendHandle(&policies, subjects, .{
+        .owner = user,
+        .holder = app,
+        .task_id = 91,
+        .secret_id = full_secret.id,
+        .expires_at_ticks = 30,
+        .now_ticks = 20,
+        .allow_raw_export = true,
+        .hardware_backed = false,
+        .detail = "private full token rejected before lower store handle",
+    }, null));
+    try std.testing.expectEqual(store_next_before, full_service.store.next_handle_id);
+    try std.testing.expect(full_service.store.describeHandle(store_next_before) == null);
 }
