@@ -1,5 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 
@@ -80,12 +81,15 @@ const HandleSlot = struct {
     },
 };
 
+const SecretArena = indexed_arena.IndexedArenaWithKey(u64, SecretSlot, MAX_SECRETS, MAX_SECRETS * 2, secretSlotId);
+const HandleArena = indexed_arena.IndexedArenaWithKey(u64, HandleSlot, MAX_HANDLES, MAX_HANDLES * 2, secretHandleSlotId);
+
 pub const Store = struct {
     next_secret_id: u64 = 1,
     next_handle_id: u64 = 1,
     hardware_provider: HardwareSealProvider = .{},
-    secrets: [MAX_SECRETS]SecretSlot = [_]SecretSlot{SecretSlot{}} ** MAX_SECRETS,
-    handles: [MAX_HANDLES]HandleSlot = [_]HandleSlot{HandleSlot{}} ** MAX_HANDLES,
+    secrets: SecretArena = SecretArena.init(),
+    handles: HandleArena = HandleArena.init(),
 
     pub fn init() Store {
         return .{};
@@ -109,32 +113,29 @@ pub const Store = struct {
             self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable
         else
             crypto_hash.zero_digest;
-        for (&self.secrets) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.secret = zeroSecret();
-            slot.secret.id = self.next_secret_id;
-            self.next_secret_id += 1;
-            slot.secret.owner = owner;
-            slot.secret.hardware_backed = hardware_backed;
-            slot.secret.exportable = exportable;
-            slot.secret.resident_material = true;
-            slot.secret.label_len = native_util.copyTextExact(&slot.secret.label, label) catch return error.LabelTooLong;
-            if (hardware_backed) {
-                slot.secret.hardware_provider_used = true;
-                slot.secret.sealed_digest_present = true;
-                slot.secret.sealed_digest = hardware_sealed_digest;
-            }
-            if (hardware_backed and !exportable) {
-                slot.secret.resident_material = false;
-                slot.secret.value_len = 0;
-                @memset(&slot.secret.value, 0);
-            } else {
-                slot.secret.value_len = native_util.copyTextExact(&slot.secret.value, raw) catch unreachable;
-            }
-            return &slot.secret;
+        const secret_id = self.next_secret_id;
+        const slot = self.secrets.reserve(secret_id) orelse return error.SecretTableFull;
+        slot.secret = zeroSecret();
+        slot.secret.id = secret_id;
+        slot.secret.owner = owner;
+        slot.secret.hardware_backed = hardware_backed;
+        slot.secret.exportable = exportable;
+        slot.secret.resident_material = true;
+        slot.secret.label_len = native_util.copyTextExact(&slot.secret.label, label) catch unreachable;
+        if (hardware_backed) {
+            slot.secret.hardware_provider_used = true;
+            slot.secret.sealed_digest_present = true;
+            slot.secret.sealed_digest = hardware_sealed_digest;
         }
-        return error.SecretTableFull;
+        if (hardware_backed and !exportable) {
+            slot.secret.resident_material = false;
+            slot.secret.value_len = 0;
+            @memset(&slot.secret.value, 0);
+        } else {
+            slot.secret.value_len = native_util.copyTextExact(&slot.secret.value, raw) catch unreachable;
+        }
+        self.next_secret_id += 1;
+        return &slot.secret;
     }
 
     pub fn lendHandle(
@@ -145,28 +146,23 @@ pub const Store = struct {
         allow_raw_export: bool,
     ) Error!SecretHandle {
         const secret = self.findSecret(secret_id) orelse return error.SecretNotFound;
-        for (&self.handles) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.handle = .{
-                .id = self.next_handle_id,
-                .secret_id = secret_id,
-                .holder = holder,
-                .task_id = task_id,
-                .hardware_backed = secret.hardware_backed,
-                .export_allowed = allow_raw_export and secret.exportable,
-            };
-            self.next_handle_id += 1;
-            return slot.handle;
-        }
-        return error.HandleTableFull;
+        const handle_id = self.next_handle_id;
+        const slot = self.handles.reserve(handle_id) orelse return error.HandleTableFull;
+        slot.handle = .{
+            .id = handle_id,
+            .secret_id = secret_id,
+            .holder = holder,
+            .task_id = task_id,
+            .hardware_backed = secret.hardware_backed,
+            .export_allowed = allow_raw_export and secret.exportable,
+        };
+        self.next_handle_id += 1;
+        return slot.handle;
     }
 
     pub fn describeHandle(self: *const Store, handle_id: u64) ?SecretHandle {
-        for (self.handles) |slot| {
-            if (slot.in_use and slot.handle.id == handle_id) return slot.handle;
-        }
-        return null;
+        const slot = self.handles.getConst(handle_id) orelse return null;
+        return slot.handle;
     }
 
     pub fn describeSecret(self: *const Store, secret_id: u64) ?*const SecretRecord {
@@ -182,19 +178,23 @@ pub const Store = struct {
     }
 
     fn findSecret(self: *Store, secret_id: u64) ?*SecretRecord {
-        for (&self.secrets) |*slot| {
-            if (slot.in_use and slot.secret.id == secret_id) return &slot.secret;
-        }
-        return null;
+        const slot = self.secrets.get(secret_id) orelse return null;
+        return &slot.secret;
     }
 
     fn findSecretConst(self: *const Store, secret_id: u64) ?*const SecretRecord {
-        for (&self.secrets) |*slot| {
-            if (slot.in_use and slot.secret.id == secret_id) return &slot.secret;
-        }
-        return null;
+        const slot = self.secrets.getConst(secret_id) orelse return null;
+        return &slot.secret;
     }
 };
+
+fn secretSlotId(slot: *const SecretSlot) u64 {
+    return slot.secret.id;
+}
+
+fn secretHandleSlotId(slot: *const HandleSlot) u64 {
+    return slot.handle.id;
+}
 
 fn zeroSecret() SecretRecord {
     return .{
@@ -302,4 +302,38 @@ test "secure secret store reports missing handles and oversized secrets" {
         .holder = holder,
         .task_id = 1,
     }));
+}
+
+test "secure secret store indexes secrets and handles through full tables" {
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 4 };
+    const holder = principal.PrincipalId{ .kind = .app, .serial = 46 };
+
+    var first_secret_id: u64 = 0;
+    var last_secret_id: u64 = 0;
+    var index: usize = 0;
+    while (index < MAX_SECRETS) : (index += 1) {
+        const secret = try store.importSecret(owner, "indexed-secret", "portable material", false, true);
+        if (index == 0) first_secret_id = secret.id;
+        last_secret_id = secret.id;
+    }
+    try std.testing.expect(store.describeSecret(first_secret_id) != null);
+    try std.testing.expect(store.describeSecret(last_secret_id) != null);
+    try std.testing.expectError(error.SecretTableFull, store.importSecret(owner, "overflow-secret", "portable material", false, true));
+
+    var first_handle_id: u64 = 0;
+    var last_handle_id: u64 = 0;
+    index = 0;
+    while (index < MAX_HANDLES) : (index += 1) {
+        const handle = try store.lendHandle(first_secret_id, holder, 200 + @as(u64, @intCast(index)), true);
+        if (index == 0) first_handle_id = handle.id;
+        last_handle_id = handle.id;
+    }
+    try std.testing.expect(store.describeHandle(first_handle_id) != null);
+    try std.testing.expect(store.describeHandle(last_handle_id) != null);
+    try std.testing.expectEqualStrings("portable material", try store.exportRaw(last_handle_id, .{
+        .holder = holder,
+        .task_id = 200 + @as(u64, @intCast(MAX_HANDLES - 1)),
+    }));
+    try std.testing.expectError(error.HandleTableFull, store.lendHandle(first_secret_id, holder, 999, true));
 }

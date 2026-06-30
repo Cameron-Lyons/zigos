@@ -195,9 +195,9 @@ pub fn claimStorageAtaBootstrapInventory(driver: *const driver_service.DriverRec
 
     const inventory = device_inventory.recordForClass(.storage_controller);
     if (!inventory.detected or inventory.device_id != driver.device_id) return false;
-    if (inventory.source != .ata_bootstrap or !inventory.kernel_bootstrap) return false;
+    if (inventory.source == .ata_bootstrap and !inventory.kernel_bootstrap) return false;
 
-    const grant = device_inventory.ataBootstrapGrant(driver.device_id) orelse return false;
+    const grant = device_inventory.ataBootstrapBridgeGrant(driver.device_id) orelse return false;
     if (!device_broker.publishAtaController(driver.device_id, grant)) return false;
     return publishStorageAtaBootstrap(driver.device_id, publisher, false);
 }
@@ -494,7 +494,7 @@ fn establishAtaPublicationSession(
 
 fn ensureAtaControllerPublished(device_id: u64) bool {
     if (device_broker.brokerGeneration(device_id) != null) return true;
-    const grant = device_inventory.ataBootstrapGrant(device_id) orelse return false;
+    const grant = device_inventory.ataBootstrapBridgeGrant(device_id) orelse return false;
     return device_broker.publishAtaController(device_id, grant);
 }
 
@@ -777,6 +777,52 @@ test "storage backend activation requires target nvme inventory" {
     try std.testing.expect(try publishStorageBackend(ata_device_id, "test-storage", backend, false));
     try std.testing.expect(!activateStorageBackend(ata_device_id, 0x5204, 0, 0, 1, 0, null));
     try std.testing.expect(!storage_volume.hasAttachedDevice());
+}
+
+test "modeled storage driver claims captured ATA handoff as bridge" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+
+    reset();
+    defer reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
+    device_inventory.setModelDeviceInventory(true);
+    defer device_inventory.setModelDeviceInventory(false);
+
+    const ata_device_id: u64 = 0x0000_1F00_0000_5301;
+    const nvme_device_id: u64 = 0x0000_8086_9A0B_5302;
+    device_inventory.registerDetected(.storage_controller, ata_device_id, .ata_bootstrap, true);
+    device_inventory.recordAtaBootstrapGrant(ata_device_id, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = storage_volume.required_device_sectors,
+    });
+    device_inventory.registerDetected(.storage_controller, nvme_device_id, .nvme_pci_inventory, false);
+
+    const empty_ranges = [_]driver_service.DmaRange{.{ .base = 0, .length = 0 }} ** driver_service.MAX_DMA_RANGES;
+    const driver = driver_service.DriverRecord{
+        .service_id = 0x5303,
+        .owner_task_id = 0x5304,
+        .device_id = nvme_device_id,
+        .device_class = .storage_controller,
+        .authority_capability_id = 0x5305,
+        .restart_generation = 1,
+        .bootstrap_transport = .kernel_bootstrap_broker,
+        .dma_domain_id = 0x5306,
+        .dma_protection = .iommu_enforced,
+        .dma_range_count = 0,
+        .dma_ranges = empty_ranges,
+        .signer_len = 0,
+        .signer = [_]u8{0} ** driver_service.MAX_SIGNER_BYTES,
+    };
+
+    try std.testing.expect(try claimStorageAtaBootstrapInventory(&driver, "zigos.system.storage-driver"));
+    const publication = storagePublication() orelse return error.MissingStoragePublication;
+    try std.testing.expectEqual(StoragePublicationKind.ata_bootstrap_bridge, publication.kind);
+    try std.testing.expectEqual(nvme_device_id, publication.device_id);
+    try std.testing.expect(device_broker.brokerGeneration(nvme_device_id) != null);
 }
 
 test "active ata bootstrap refresh repairs a revoked broker publication" {

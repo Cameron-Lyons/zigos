@@ -61,11 +61,9 @@ fn imageForConfig(config: anytype, allow_model_only_fallback: bool) generated_im
             if (std.mem.eql(u8, config.bundle_id, "app.notes.daily")) {
                 return generated_image_fixtures.imageByBundleId("app.notes");
             }
-            if (allow_model_only_fallback) {
-                // prod-readiness: model-only synthetic-userspace-image
-                return task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry);
-            }
-            return err;
+            if (!allow_model_only_fallback) return err;
+            // prod-readiness: model-only synthetic-userspace-image
+            return task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry);
         },
         else => return err,
     };
@@ -86,6 +84,17 @@ test "rendered shell task launch resolves generated archive images for registere
         .task_label = "notes",
         .task_entry = "app.notes",
         .bundle_id = "app.notes",
+    };
+
+    const image = try imageForConfig(config, false);
+    try @import("std").testing.expect(image.isPresent());
+}
+
+test "rendered shell task launch resolves daily driver bundle without model fallback" {
+    const config = .{
+        .task_label = "notes-daily",
+        .task_entry = "app.notes",
+        .bundle_id = "app.notes.daily",
     };
 
     const image = try imageForConfig(config, false);

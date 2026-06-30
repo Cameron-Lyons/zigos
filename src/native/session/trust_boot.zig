@@ -538,7 +538,7 @@ pub const TrustBoot = struct {
             crypto_hash.updateInt(&hasher, "binding-task-id", binding.task_id);
             crypto_hash.updateInt(&hasher, "binding-endpoint-id", binding.endpoint_id);
         }
-        for (self.userspace_catalog.images) |slot| {
+        for (self.userspace_catalog.images.slots) |slot| {
             if (!slot.in_use) continue;
             const image = &slot.image;
             crypto_hash.updateBytes(&hasher, "image-bundle", image.bundleIdSlice());
@@ -573,7 +573,7 @@ pub const TrustBoot = struct {
         hashCapability(&hasher, "session-capability", &graph.state.session_capability);
         hashCapability(&hasher, "policy-capability", &graph.state.policy_capability);
 
-        for (self.capability_table.slots) |slot| {
+        for (self.capability_table.slots.slots) |slot| {
             if (!slot.in_use) continue;
             hashCapability(&hasher, "capability", &slot.capability);
         }
@@ -963,12 +963,16 @@ fn rejectDirectArtifactTamper(
         measured_boot.production_artifact_manifest_signer,
     )) |_| {
         return false;
-    } else |err| switch (err) {
-        error.ManifestMismatch => {
-            common.printBootMarker(marker);
-            return true;
-        },
-        else => return false,
+    } else |err| {
+        switch (err) {
+            error.ManifestMismatch,
+            error.UntrustedArtifactManifest,
+            error.UntrustedRootProvenance,
+            => {},
+            else => return false,
+        }
+        common.printBootMarker(marker);
+        return true;
     }
 }
 
