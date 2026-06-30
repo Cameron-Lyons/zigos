@@ -307,6 +307,10 @@ qemu_harness_stop_qemu() {
 }
 
 qemu_harness_run_native_store_until_marker() {
+  # Marker-driven QEMU boots need modeled inventory for production driver
+  # binding unless a caller supplied a stricter kernel command line.
+  QEMU_KERNEL_APPEND="${QEMU_KERNEL_APPEND:-model_inventory}"
+
   local kernel_path="${1:?kernel path required}"
   local store_image="${2:?native store image required}"
   local serial_log_path="${3:?serial log path required}"

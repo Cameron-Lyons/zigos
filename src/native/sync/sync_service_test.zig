@@ -8,6 +8,7 @@ const generated_image_fixtures = if (@import("builtin").is_test) @import("../tas
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("sync_service.zig");
+const sync_indexes = @import("sync_service/indexes.zig");
 const sync_transport = @import("sync_transport.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
@@ -423,6 +424,9 @@ test "sync service persists durable transport queues and enforces replay and wor
     try std.testing.expectEqual(@as(usize, 1), summary.selected_entry_count);
     try std.testing.expectEqual(@as(usize, 1), summary.transport_frame_count);
     try std.testing.expectEqual(@as(usize, 1), resident.outboundTransportFrameCount());
+    const frame_path_key = sync_indexes.transportFramePathLookupKey(workspace_record.id.raw(), tablet, path);
+    try std.testing.expectEqual(@as(usize, 1), service.outbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(usize, 0), service.inbound_transport_path_index.count(frame_path_key));
 
     const outbound = service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, path).?;
     var request = sync_service.TransportFrameRequest{
@@ -441,13 +445,18 @@ test "sync service persists durable transport queues and enforces replay and wor
     const accepted = try port.acceptTransportFrame(authority, &storage, request);
     try std.testing.expectEqual(outbound.id, accepted.source_frame_id);
     try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(workspace_record.id.raw(), tablet));
+    try std.testing.expectEqual(@as(usize, 1), service.outbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_transport_path_index.count(frame_path_key));
 
     const duplicate = try port.acceptTransportFrame(authority, &storage, request);
     try std.testing.expectEqual(accepted.id, duplicate.id);
     try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(workspace_record.id.raw(), tablet));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_transport_path_index.count(frame_path_key));
 
     request.source_frame_id = 100;
     _ = try port.acceptTransportFrame(authority, &storage, request);
+    try std.testing.expectEqual(@as(usize, 2), service.inbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(u64, 100), service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, path).?.source_frame_id);
     request.source_frame_id = 2;
     try std.testing.expectError(error.TransportReplayRejected, port.acceptTransportFrame(authority, &storage, request));
 
@@ -457,9 +466,12 @@ test "sync service persists durable transport queues and enforces replay and wor
     try std.testing.expectEqual(@as(usize, 1), restarted_resident.outboundTransportFrameCount());
     try std.testing.expectEqual(@as(usize, 2), restarted_resident.inboundTransportFrameCount());
     try std.testing.expectEqual(@as(usize, 3), restarted.transportFrameCountFor(workspace_record.id.raw(), tablet));
+    try std.testing.expectEqual(@as(usize, 1), restarted.outbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(usize, 2), restarted.inbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(u64, 100), restarted.latestTransportFrameForPath(workspace_record.id.raw(), tablet, path).?.source_frame_id);
 
     var saw_duplicate_count = false;
-    for (restarted_resident.persisted_state.inbound_transport_frames) |slot| {
+    for (restarted_resident.persisted_state.inbound_transport_frames.slots) |slot| {
         if (!slot.in_use or slot.frame.source_frame_id != outbound.id) continue;
         try std.testing.expectEqual(@as(u16, 1), slot.duplicate_count);
         saw_duplicate_count = true;
@@ -1683,7 +1695,7 @@ test "sync service covers device graph policy replication semantics and restart 
         const path = entry.pathSlice();
         try std.testing.expect(!std.mem.eql(u8, path, "state/index"));
         try std.testing.expect(!std.mem.startsWith(u8, path, "state/chunks/"));
-        if (std.mem.startsWith(u8, path, "state/v5/")) sync_record_count += 1;
+        if (std.mem.startsWith(u8, path, "state/")) sync_record_count += 1;
     }
     try std.testing.expect(sync_record_count >= 10);
 

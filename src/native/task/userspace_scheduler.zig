@@ -4,6 +4,7 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const capability = @import("../kernel_api/capability.zig");
+const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
 const userspace_executor = @import("userspace_executor.zig");
@@ -114,11 +115,15 @@ const Slot = struct {
 const AcceleratorClaimSlot = struct {
     in_use: bool = false,
     record: AcceleratorClaimRecord = zeroAcceleratorClaim(),
+    prev_claim_index: usize = no_index,
     next_claim_index: usize = no_index,
+    prev_deadline_index: usize = no_index,
+    next_deadline_index: usize = no_index,
 };
 
 const SchedulerSlotArena = indexed_arena.IndexedArenaWithKey(u64, Slot, task_runtime.MAX_TASKS, task_runtime.MAX_TASKS * 2, schedulerSlotTaskId);
 const AcceleratorClaimArena = indexed_arena.IndexedArenaWithKey(u64, AcceleratorClaimSlot, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2, acceleratorClaimSlotId);
+const AcceleratorClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2);
 
 pub const Scheduler = struct {
     executor: *userspace_executor.Executor,
@@ -132,8 +137,11 @@ pub const Scheduler = struct {
     ready_counts: [RESOURCE_CLASS_COUNT]usize = [_]usize{0} ** RESOURCE_CLASS_COUNT,
     ready_task_count: usize = 0,
     accelerator_claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),
+    accelerator_claim_task_index: AcceleratorClaimTaskIndex = AcceleratorClaimTaskIndex.init(),
     accelerator_claim_heads: [ENGINE_COUNT]usize = [_]usize{no_index} ** ENGINE_COUNT,
     accelerator_claim_tails: [ENGINE_COUNT]usize = [_]usize{no_index} ** ENGINE_COUNT,
+    accelerator_deadline_heads: [ENGINE_COUNT]usize = [_]usize{no_index} ** ENGINE_COUNT,
+    accelerator_deadline_tails: [ENGINE_COUNT]usize = [_]usize{no_index} ** ENGINE_COUNT,
     accelerator_claim_counts: [ENGINE_COUNT]usize = [_]usize{0} ** ENGINE_COUNT,
     engine_dispatch_counts: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
     engine_denial_counts: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
@@ -161,8 +169,11 @@ pub const Scheduler = struct {
         self.ready_counts = [_]usize{0} ** RESOURCE_CLASS_COUNT;
         self.ready_task_count = 0;
         self.accelerator_claims = AcceleratorClaimArena.init();
+        self.accelerator_claim_task_index = AcceleratorClaimTaskIndex.init();
         self.accelerator_claim_heads = [_]usize{no_index} ** ENGINE_COUNT;
         self.accelerator_claim_tails = [_]usize{no_index} ** ENGINE_COUNT;
+        self.accelerator_deadline_heads = [_]usize{no_index} ** ENGINE_COUNT;
+        self.accelerator_deadline_tails = [_]usize{no_index} ** ENGINE_COUNT;
         self.accelerator_claim_counts = [_]usize{0} ** ENGINE_COUNT;
         self.engine_dispatch_counts = [_]u64{0} ** ENGINE_COUNT;
         self.engine_denial_counts = [_]u64{0} ** ENGINE_COUNT;
@@ -349,7 +360,11 @@ pub const Scheduler = struct {
             .deadline_tick = request.deadline_tick,
             .shared_memory_bytes = request.shared_memory_bytes,
         };
-        self.appendAcceleratorClaimIndex(request.engine, claim_index);
+        if (!self.accelerator_claim_task_index.append(acceleratorClaimTaskKey(request.task_id), claim_index)) {
+            _ = self.accelerator_claims.removeIndex(claim_index);
+            return null;
+        }
+        self.insertAcceleratorClaimIndex(request.engine, claim_index);
         if (task_slot.pending_accelerator_claim_id == 0) {
             task_slot.pending_accelerator_claim_id = claim_id;
             task_slot.pending_accelerator_engine = request.engine;
@@ -363,7 +378,7 @@ pub const Scheduler = struct {
         now_ticks: u64,
     ) ?AcceleratorClaimRecord {
         if (!self.physicalEngineAvailable(engine)) return null;
-        const claim_index = self.popAcceleratorClaimIndex(engine) orelse return null;
+        const claim_index = self.popBestAcceleratorClaimIndex(engine, now_ticks) orelse return null;
         const record = self.accelerator_claims.slots[claim_index].record;
         _ = self.accelerator_claims.removeIndex(claim_index);
         if (self.slots.get(record.task_id)) |slot| {
@@ -791,60 +806,230 @@ pub const Scheduler = struct {
         return self.slots.removeIndex(slot_index);
     }
 
-    fn appendAcceleratorClaimIndex(self: *Scheduler, engine: accelerator_scheduler.Engine, claim_index: usize) void {
+    fn insertAcceleratorClaimIndex(self: *Scheduler, engine: accelerator_scheduler.Engine, claim_index: usize) void {
         const queue_index = engineIndex(engine);
         const claim = &self.accelerator_claims.slots[claim_index];
+        claim.prev_claim_index = no_index;
         claim.next_claim_index = no_index;
+        claim.prev_deadline_index = no_index;
+        claim.next_deadline_index = no_index;
+
+        var current = self.accelerator_claim_heads[queue_index];
+        while (current != no_index) : (current = self.accelerator_claims.slots[current].next_claim_index) {
+            if (self.acceleratorClaimPriorityBeats(claim_index, current)) {
+                self.linkAcceleratorClaimBefore(queue_index, claim_index, current);
+                self.insertAcceleratorDeadlineIndex(queue_index, claim_index);
+                self.accelerator_claim_counts[queue_index] += 1;
+                return;
+            }
+        }
+
         if (self.accelerator_claim_tails[queue_index] == no_index) {
             self.accelerator_claim_heads[queue_index] = claim_index;
         } else {
+            claim.prev_claim_index = self.accelerator_claim_tails[queue_index];
             self.accelerator_claims.slots[self.accelerator_claim_tails[queue_index]].next_claim_index = claim_index;
         }
         self.accelerator_claim_tails[queue_index] = claim_index;
+        self.insertAcceleratorDeadlineIndex(queue_index, claim_index);
         self.accelerator_claim_counts[queue_index] += 1;
     }
 
-    fn popAcceleratorClaimIndex(self: *Scheduler, engine: accelerator_scheduler.Engine) ?usize {
-        const queue_index = engineIndex(engine);
-        const claim_index = self.accelerator_claim_heads[queue_index];
-        if (claim_index == no_index) return null;
-        if (claim_index >= self.accelerator_claims.slots.len) return null;
+    fn linkAcceleratorClaimBefore(
+        self: *Scheduler,
+        queue_index: usize,
+        claim_index: usize,
+        before_index: usize,
+    ) void {
+        const previous = self.accelerator_claims.slots[before_index].prev_claim_index;
+        self.accelerator_claims.slots[claim_index].prev_claim_index = previous;
+        self.accelerator_claims.slots[claim_index].next_claim_index = before_index;
+        self.accelerator_claims.slots[before_index].prev_claim_index = claim_index;
+        if (previous == no_index) {
+            self.accelerator_claim_heads[queue_index] = claim_index;
+        } else {
+            self.accelerator_claims.slots[previous].next_claim_index = claim_index;
+        }
+    }
+
+    fn insertAcceleratorDeadlineIndex(self: *Scheduler, queue_index: usize, claim_index: usize) void {
         const claim = &self.accelerator_claims.slots[claim_index];
-        self.accelerator_claim_heads[queue_index] = claim.next_claim_index;
-        if (self.accelerator_claim_heads[queue_index] == no_index) self.accelerator_claim_tails[queue_index] = no_index;
-        claim.next_claim_index = no_index;
+        if (claim.record.deadline_tick == 0) return;
+
+        var current = self.accelerator_deadline_heads[queue_index];
+        while (current != no_index) : (current = self.accelerator_claims.slots[current].next_deadline_index) {
+            if (self.acceleratorClaimDeadlineBeats(claim_index, current)) {
+                self.linkAcceleratorDeadlineBefore(queue_index, claim_index, current);
+                return;
+            }
+        }
+
+        if (self.accelerator_deadline_tails[queue_index] == no_index) {
+            self.accelerator_deadline_heads[queue_index] = claim_index;
+        } else {
+            claim.prev_deadline_index = self.accelerator_deadline_tails[queue_index];
+            self.accelerator_claims.slots[self.accelerator_deadline_tails[queue_index]].next_deadline_index = claim_index;
+        }
+        self.accelerator_deadline_tails[queue_index] = claim_index;
+    }
+
+    fn linkAcceleratorDeadlineBefore(
+        self: *Scheduler,
+        queue_index: usize,
+        claim_index: usize,
+        before_index: usize,
+    ) void {
+        const previous = self.accelerator_claims.slots[before_index].prev_deadline_index;
+        self.accelerator_claims.slots[claim_index].prev_deadline_index = previous;
+        self.accelerator_claims.slots[claim_index].next_deadline_index = before_index;
+        self.accelerator_claims.slots[before_index].prev_deadline_index = claim_index;
+        if (previous == no_index) {
+            self.accelerator_deadline_heads[queue_index] = claim_index;
+        } else {
+            self.accelerator_claims.slots[previous].next_deadline_index = claim_index;
+        }
+    }
+
+    fn popBestAcceleratorClaimIndex(
+        self: *Scheduler,
+        engine: accelerator_scheduler.Engine,
+        now_ticks: u64,
+    ) ?usize {
+        const queue_index = engineIndex(engine);
+        const deadline_head = self.accelerator_deadline_heads[queue_index];
+        const best = if (deadline_head != no_index and
+            claimDeadlineExpired(self.accelerator_claims.slots[deadline_head].record, now_ticks))
+            deadline_head
+        else
+            self.accelerator_claim_heads[queue_index];
+        if (best == no_index or best >= self.accelerator_claims.slots.len) return null;
+
+        self.unlinkAcceleratorClaimIndex(engine, best);
         self.accelerator_claim_counts[queue_index] -= 1;
-        return claim_index;
+        return best;
+    }
+
+    fn unlinkAcceleratorClaimIndex(
+        self: *Scheduler,
+        engine: accelerator_scheduler.Engine,
+        claim_index: usize,
+    ) void {
+        const queue_index = engineIndex(engine);
+        const previous = self.accelerator_claims.slots[claim_index].prev_claim_index;
+        const next = self.accelerator_claims.slots[claim_index].next_claim_index;
+        if (previous == no_index) {
+            self.accelerator_claim_heads[queue_index] = next;
+        } else {
+            self.accelerator_claims.slots[previous].next_claim_index = next;
+        }
+        if (next == no_index) {
+            self.accelerator_claim_tails[queue_index] = previous;
+        } else {
+            self.accelerator_claims.slots[next].prev_claim_index = previous;
+        }
+
+        const previous_deadline = self.accelerator_claims.slots[claim_index].prev_deadline_index;
+        const next_deadline = self.accelerator_claims.slots[claim_index].next_deadline_index;
+        if (self.accelerator_claims.slots[claim_index].record.deadline_tick != 0) {
+            if (previous_deadline == no_index) {
+                self.accelerator_deadline_heads[queue_index] = next_deadline;
+            } else {
+                self.accelerator_claims.slots[previous_deadline].next_deadline_index = next_deadline;
+            }
+            if (next_deadline == no_index) {
+                self.accelerator_deadline_tails[queue_index] = previous_deadline;
+            } else {
+                self.accelerator_claims.slots[next_deadline].prev_deadline_index = previous_deadline;
+            }
+        }
+
+        _ = self.accelerator_claim_task_index.remove(
+            acceleratorClaimTaskKey(self.accelerator_claims.slots[claim_index].record.task_id),
+            claim_index,
+        );
+        self.accelerator_claims.slots[claim_index].prev_claim_index = no_index;
+        self.accelerator_claims.slots[claim_index].next_claim_index = no_index;
+        self.accelerator_claims.slots[claim_index].prev_deadline_index = no_index;
+        self.accelerator_claims.slots[claim_index].next_deadline_index = no_index;
+    }
+
+    fn acceleratorClaimPriorityBeats(
+        self: *const Scheduler,
+        candidate_index: usize,
+        selected_index: usize,
+    ) bool {
+        const candidate = self.accelerator_claims.slots[candidate_index].record;
+        const selected = self.accelerator_claims.slots[selected_index].record;
+
+        const candidate_priority = resourceClassPriorityRank(candidate.resource_class);
+        const selected_priority = resourceClassPriorityRank(selected.resource_class);
+        if (candidate_priority < selected_priority) return true;
+        if (candidate_priority > selected_priority) return false;
+
+        if (candidate.deadline_tick != 0 and selected.deadline_tick != 0) {
+            if (candidate.deadline_tick < selected.deadline_tick) return true;
+            if (candidate.deadline_tick > selected.deadline_tick) return false;
+        } else if (candidate.deadline_tick != selected.deadline_tick) {
+            return candidate.deadline_tick != 0;
+        }
+
+        const candidate_dispatches = self.taskDispatchCount(candidate.task_id);
+        const selected_dispatches = self.taskDispatchCount(selected.task_id);
+        if (candidate_dispatches < selected_dispatches) return true;
+        if (candidate_dispatches > selected_dispatches) return false;
+
+        const candidate_last_dispatch = self.taskLastDispatchTick(candidate.task_id);
+        const selected_last_dispatch = self.taskLastDispatchTick(selected.task_id);
+        if (candidate_last_dispatch < selected_last_dispatch) return true;
+        if (candidate_last_dispatch > selected_last_dispatch) return false;
+
+        return candidate.requested_at_tick < selected.requested_at_tick;
+    }
+
+    fn acceleratorClaimDeadlineBeats(
+        self: *const Scheduler,
+        candidate_index: usize,
+        selected_index: usize,
+    ) bool {
+        const candidate = self.accelerator_claims.slots[candidate_index].record;
+        const selected = self.accelerator_claims.slots[selected_index].record;
+        if (candidate.deadline_tick < selected.deadline_tick) return true;
+        if (candidate.deadline_tick > selected.deadline_tick) return false;
+        return self.acceleratorClaimPriorityBeats(candidate_index, selected_index);
+    }
+
+    fn taskDispatchCount(self: *const Scheduler, task_id: u64) u64 {
+        return if (self.slots.getConst(task_id)) |slot| slot.dispatch_count else std.math.maxInt(u64);
+    }
+
+    fn taskLastDispatchTick(self: *const Scheduler, task_id: u64) u64 {
+        return if (self.slots.getConst(task_id)) |slot| slot.last_dispatch_tick else std.math.maxInt(u64);
     }
 
     fn removeAcceleratorClaimsForTask(self: *Scheduler, task_id: u64) void {
-        for (engine_priority_order) |engine| {
-            const queue_index = engineIndex(engine);
-            var previous: usize = no_index;
-            var current = self.accelerator_claim_heads[queue_index];
-            while (current != no_index) {
-                const next = self.accelerator_claims.slots[current].next_claim_index;
-                if (self.accelerator_claims.slots[current].record.task_id == task_id) {
-                    if (previous == no_index) {
-                        self.accelerator_claim_heads[queue_index] = next;
-                    } else {
-                        self.accelerator_claims.slots[previous].next_claim_index = next;
-                    }
-                    if (self.accelerator_claim_tails[queue_index] == current) self.accelerator_claim_tails[queue_index] = previous;
-                    self.accelerator_claims.slots[current].next_claim_index = no_index;
-                    self.accelerator_claim_counts[queue_index] -= 1;
-                    if (self.slots.get(task_id)) |slot| {
-                        if (slot.pending_accelerator_claim_id == self.accelerator_claims.slots[current].record.id) {
-                            slot.pending_accelerator_claim_id = 0;
-                            slot.pending_accelerator_engine = .cpu;
-                        }
-                    }
-                    _ = self.accelerator_claims.removeIndex(current);
-                } else {
-                    previous = current;
-                }
-                current = next;
+        const task_key = acceleratorClaimTaskKey(task_id);
+        var current = self.accelerator_claim_task_index.head(task_key);
+        while (current != no_index) {
+            if (current >= self.accelerator_claims.slots.len) {
+                native_util.impossibleByInvariant("accelerator claim task index points outside claim slots");
             }
+            const next = self.accelerator_claim_task_index.next(current);
+            const claim_slot = &self.accelerator_claims.slots[current];
+            if (!claim_slot.in_use) native_util.impossibleByInvariant("accelerator claim task index points at a free slot");
+            if (claim_slot.record.task_id != task_id) {
+                native_util.impossibleByInvariant("accelerator claim task index points at the wrong task");
+            }
+            const record = claim_slot.record;
+            self.unlinkAcceleratorClaimIndex(record.engine, current);
+            self.accelerator_claim_counts[engineIndex(record.engine)] -= 1;
+            if (self.slots.get(task_id)) |slot| {
+                if (slot.pending_accelerator_claim_id == record.id) {
+                    slot.pending_accelerator_claim_id = 0;
+                    slot.pending_accelerator_engine = .cpu;
+                }
+            }
+            _ = self.accelerator_claims.removeIndex(current);
+            current = next;
         }
     }
 
@@ -853,13 +1038,17 @@ pub const Scheduler = struct {
         task_id: u64,
         engine: accelerator_scheduler.Engine,
     ) ?u64 {
-        const queue_index = engineIndex(engine);
-        var current = self.accelerator_claim_heads[queue_index];
-        while (current != no_index) {
-            if (current >= self.accelerator_claims.slots.len) return null;
-            const record = self.accelerator_claims.slots[current].record;
+        const task_key = acceleratorClaimTaskKey(task_id);
+        var current = self.accelerator_claim_task_index.head(task_key);
+        while (current != no_index) : (current = self.accelerator_claim_task_index.next(current)) {
+            if (current >= self.accelerator_claims.slots.len) {
+                native_util.impossibleByInvariant("accelerator claim task index points outside claim slots");
+            }
+            const slot = &self.accelerator_claims.slots[current];
+            if (!slot.in_use) native_util.impossibleByInvariant("accelerator claim task index points at a free slot");
+            const record = slot.record;
+            if (record.task_id != task_id) native_util.impossibleByInvariant("accelerator claim task index points at the wrong task");
             if (record.task_id == task_id and record.engine == engine) return record.id;
-            current = self.accelerator_claims.slots[current].next_claim_index;
         }
         return null;
     }
@@ -878,6 +1067,10 @@ fn schedulerSlotTaskId(slot: *const Slot) u64 {
 
 fn acceleratorClaimSlotId(slot: *const AcceleratorClaimSlot) u64 {
     return slot.record.id;
+}
+
+fn acceleratorClaimTaskKey(task_id: u64) u64 {
+    return task_id;
 }
 
 fn hasDispatchBudget(slot: *const Slot, task: *const task_runtime.TaskRecord) bool {
@@ -965,6 +1158,13 @@ fn resourceClassIndex(class: accelerator_scheduler.ResourceClass) usize {
     };
 }
 
+fn resourceClassPriorityRank(class: accelerator_scheduler.ResourceClass) usize {
+    for (resource_priority_order, 0..) |priority_class, priority| {
+        if (priority_class == class) return priority;
+    }
+    return resource_priority_order.len;
+}
+
 fn engineIndex(engine: accelerator_scheduler.Engine) usize {
     return switch (engine) {
         .cpu => 0,
@@ -1002,6 +1202,10 @@ fn expiredReadyCandidateBeats(
     if (slot.dispatch_count < selected_dispatch_count) return true;
     if (slot.dispatch_count > selected_dispatch_count) return false;
     return slot.last_dispatch_tick < selected_last_dispatch_tick;
+}
+
+fn claimDeadlineExpired(record: AcceleratorClaimRecord, now_ticks: u64) bool {
+    return record.deadline_tick != 0 and record.deadline_tick <= now_ticks;
 }
 
 fn zeroAcceleratorClaim() AcceleratorClaimRecord {
@@ -1390,6 +1594,219 @@ test "userspace scheduler separates accelerator claim queues from cpu ready queu
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.gpu));
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.media_export));
+}
+
+test "userspace scheduler indexes accelerator claims by task across grants and unregister" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+
+    const task = try createRunnableSchedulerTask(
+        &runtime,
+        250,
+        .media_export,
+        "indexed-claim-task",
+        "app.example.indexed-claim-task",
+        250,
+    );
+
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(task.id));
+
+    const first_gpu_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = task.id,
+        .engine = .gpu,
+        .resource_class = .media_export,
+        .requested_at_tick = 1,
+        .deadline_tick = 40,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+    const duplicate_gpu_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = task.id,
+        .engine = .gpu,
+        .resource_class = .media_export,
+        .requested_at_tick = 2,
+        .deadline_tick = 30,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+    try std.testing.expectEqual(first_gpu_claim, duplicate_gpu_claim);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.accelerator_claim_task_index.count(acceleratorClaimTaskKey(task.id)));
+
+    const granted_gpu = scheduler.grantNextAcceleratorClaim(.gpu, 3).?;
+    try std.testing.expectEqual(first_gpu_claim, granted_gpu.id);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.accelerator_claim_task_index.count(acceleratorClaimTaskKey(task.id)));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.gpu));
+
+    try std.testing.expect(scheduler.parkTaskUntilEvent(task.id));
+    const second_gpu_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = task.id,
+        .engine = .gpu,
+        .resource_class = .media_export,
+        .requested_at_tick = 4,
+        .deadline_tick = 45,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+    try std.testing.expect(first_gpu_claim != second_gpu_claim);
+    _ = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = task.id,
+        .engine = .media,
+        .resource_class = .media_export,
+        .requested_at_tick = 5,
+        .deadline_tick = 46,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+    try std.testing.expectEqual(@as(usize, 2), scheduler.accelerator_claim_task_index.count(acceleratorClaimTaskKey(task.id)));
+
+    try std.testing.expect(scheduler.unregisterTask(task.id));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.accelerator_claim_task_index.count(acceleratorClaimTaskKey(task.id)));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.gpu));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
+}
+
+test "userspace scheduler grants expired high-priority accelerator claims before older batch claims" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+
+    const batch = try createRunnableSchedulerTask(
+        &runtime,
+        260,
+        .batch_compute,
+        "queued-batch-gpu",
+        "app.example.queued-batch-gpu",
+        null,
+    );
+    const foreground = try createRunnableSchedulerTask(
+        &runtime,
+        261,
+        .foreground_interactive,
+        "urgent-foreground-gpu",
+        "app.example.urgent-foreground-gpu",
+        261,
+    );
+
+    try std.testing.expect(scheduler.registerTask(batch.id));
+    try std.testing.expect(scheduler.registerTask(foreground.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(batch.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(foreground.id));
+
+    const batch_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = batch.id,
+        .engine = .gpu,
+        .resource_class = .batch_compute,
+        .requested_at_tick = 1,
+        .deadline_tick = 200,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+    const foreground_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = foreground.id,
+        .engine = .gpu,
+        .resource_class = .foreground_interactive,
+        .requested_at_tick = 2,
+        .deadline_tick = 20,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+
+    try std.testing.expectEqual(@as(usize, 2), scheduler.acceleratorClaimQueueDepth(.gpu));
+    const granted_foreground = scheduler.grantNextAcceleratorClaim(.gpu, 20).?;
+    try std.testing.expectEqual(foreground_claim, granted_foreground.id);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.readyQueueDepth(.batch_compute));
+    try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.gpu));
+
+    const granted_batch = scheduler.grantNextAcceleratorClaim(.gpu, 21).?;
+    try std.testing.expectEqual(batch_claim, granted_batch.id);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.batch_compute));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.gpu));
+}
+
+test "userspace scheduler grants expired accelerator deadlines before unexpired foreground claims" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+
+    const batch = try createRunnableSchedulerTask(
+        &runtime,
+        262,
+        .batch_compute,
+        "expired-batch-gpu",
+        "app.example.expired-batch-gpu",
+        null,
+    );
+    const foreground = try createRunnableSchedulerTask(
+        &runtime,
+        263,
+        .foreground_interactive,
+        "unexpired-foreground-gpu",
+        "app.example.unexpired-foreground-gpu",
+        263,
+    );
+
+    try std.testing.expect(scheduler.registerTask(batch.id));
+    try std.testing.expect(scheduler.registerTask(foreground.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(batch.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(foreground.id));
+
+    const foreground_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = foreground.id,
+        .engine = .gpu,
+        .resource_class = .foreground_interactive,
+        .requested_at_tick = 1,
+        .deadline_tick = 200,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+    const batch_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = batch.id,
+        .engine = .gpu,
+        .resource_class = .batch_compute,
+        .requested_at_tick = 2,
+        .deadline_tick = 20,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }).?;
+
+    try std.testing.expectEqual(@as(usize, 2), scheduler.acceleratorClaimQueueDepth(.gpu));
+    const granted_batch = scheduler.grantNextAcceleratorClaim(.gpu, 20).?;
+    try std.testing.expectEqual(batch_claim, granted_batch.id);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.batch_compute));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.readyQueueDepth(.foreground_interactive));
+
+    const granted_foreground = scheduler.grantNextAcceleratorClaim(.gpu, 21).?;
+    try std.testing.expectEqual(foreground_claim, granted_foreground.id);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.gpu));
 }
 
 test "userspace scheduler requires complete hardware telemetry before waking hardware queues" {
