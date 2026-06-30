@@ -1,8 +1,10 @@
 const std = @import("std");
+const id_index = @import("../core/id_index.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
+const native_util = @import("../core/util.zig");
 const units = @import("../core/units.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const userspace_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
@@ -42,8 +44,6 @@ pub const ServiceClass = enum(u8) {
     sensitive_capture,
     secret_vault,
 };
-
-const SERVICE_CLASS_COUNT: usize = @typeInfo(ServiceClass).@"enum".fields.len;
 
 pub const ServiceBoundary = enum(u8) {
     kernel_tcb,
@@ -900,39 +900,22 @@ pub const ordered_published_native_service_contracts = blk: {
     break :blk derived;
 };
 
-const catalog_index_by_class: [SERVICE_CLASS_COUNT]?usize = blk: {
-    var indexes = [_]?usize{null} ** SERVICE_CLASS_COUNT;
-    for (catalog, 0..) |entry, index| {
-        indexes[classIndex(entry.class)] = index;
-    }
-    break :blk indexes;
-};
-
-const service_contract_index_by_class: [SERVICE_CLASS_COUNT]?usize = blk: {
-    var indexes = [_]?usize{null} ** SERVICE_CLASS_COUNT;
-    for (ordered_service_contracts, 0..) |entry, index| {
-        indexes[classIndex(entry.class)] = index;
-    }
-    break :blk indexes;
-};
-
-const published_native_contract_index_by_class: [SERVICE_CLASS_COUNT]?usize = blk: {
-    var indexes = [_]?usize{null} ** SERVICE_CLASS_COUNT;
-    for (ordered_published_native_service_contracts, 0..) |entry, index| {
-        indexes[classIndex(entry.class)] = index;
-    }
-    break :blk indexes;
-};
+const CATALOG_CLASS_INDEX_CAPACITY: usize = catalog.len * 2;
+const catalog_class_index = buildCatalogClassIndex();
+const SERVICE_CONTRACT_CLASS_INDEX_CAPACITY: usize = ordered_service_contracts.len * 2;
+const service_contract_class_index = buildServiceContractClassIndex();
+const PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY: usize = ordered_published_native_service_contracts.len * 2;
+const published_native_class_index = buildPublishedNativeClassIndex();
 
 pub const service_catalog_indexing = .{
-    .uses_catalog_class_index = @TypeOf(catalog_index_by_class) == [SERVICE_CLASS_COUNT]?usize,
-    .uses_service_contract_class_index = @TypeOf(service_contract_index_by_class) == [SERVICE_CLASS_COUNT]?usize,
-    .uses_published_contract_class_index = @TypeOf(published_native_contract_index_by_class) == [SERVICE_CLASS_COUNT]?usize,
+    .uses_catalog_class_index = @TypeOf(catalog_class_index) == [CATALOG_CLASS_INDEX_CAPACITY]id_index.Slot,
+    .uses_service_contract_class_index = @TypeOf(service_contract_class_index) == [SERVICE_CONTRACT_CLASS_INDEX_CAPACITY]id_index.Slot,
+    .uses_published_contract_class_index = @TypeOf(published_native_class_index) == [PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY]id_index.Slot,
 };
 
 pub fn entryForClass(class: ServiceClass) ?ServiceCatalogEntry {
-    const index = catalog_index_by_class[classIndex(class)] orelse return null;
-    return catalog[index];
+    const entry_index = catalogClassIndex(class) orelse return null;
+    return catalog[entry_index];
 }
 
 pub fn serviceDescriptor(class: ServiceClass) ?ServiceDescriptor {
@@ -941,21 +924,41 @@ pub fn serviceDescriptor(class: ServiceClass) ?ServiceDescriptor {
 }
 
 pub fn serviceContractForClass(class: ServiceClass) ?ServiceContract {
-    const index = service_contract_index_by_class[classIndex(class)] orelse return null;
-    return ordered_service_contracts[index];
+    const entry_index = orderedServiceIndex(class) orelse return null;
+    return ordered_service_contracts[entry_index];
 }
 
 pub fn publishedNativeServiceContractForClass(class: ServiceClass) ?PublishedNativeServiceContract {
-    const index = published_native_contract_index_by_class[classIndex(class)] orelse return null;
-    return ordered_published_native_service_contracts[index];
+    const entry_index = orderedPublishedNativeServiceIndex(class) orelse return null;
+    return ordered_published_native_service_contracts[entry_index];
 }
 
 pub fn orderedServiceIndex(class: ServiceClass) ?usize {
-    return service_contract_index_by_class[classIndex(class)];
+    const entry_index = id_index.lookup(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY, &service_contract_class_index, serviceClassIndexKey(class)) orelse {
+        debugAssertServiceContractClassIndexMissAbsent(class);
+        return null;
+    };
+    if (entry_index >= ordered_service_contracts.len) {
+        native_util.impossibleByInvariant("service contract class index points outside ordered contracts");
+    }
+    if (ordered_service_contracts[entry_index].class != class) {
+        native_util.impossibleByInvariant("service contract class index points at the wrong contract");
+    }
+    return entry_index;
 }
 
 pub fn orderedPublishedNativeServiceIndex(class: ServiceClass) ?usize {
-    return published_native_contract_index_by_class[classIndex(class)];
+    const entry_index = id_index.lookup(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY, &published_native_class_index, serviceClassIndexKey(class)) orelse {
+        debugAssertPublishedNativeClassIndexMissAbsent(class);
+        return null;
+    };
+    if (entry_index >= ordered_published_native_service_contracts.len) {
+        native_util.impossibleByInvariant("published native service class index points outside ordered contracts");
+    }
+    if (ordered_published_native_service_contracts[entry_index].class != class) {
+        native_util.impossibleByInvariant("published native service class index points at the wrong contract");
+    }
+    return entry_index;
 }
 
 pub fn imageForClass(class: ServiceClass) ?UserspaceImageIdentity {
@@ -1028,8 +1031,76 @@ pub fn allowsDriverClass(class: ServiceClass, device_class: driver_service.Devic
     return expected == device_class;
 }
 
-fn classIndex(class: ServiceClass) usize {
-    return @intFromEnum(class);
+fn serviceClassIndexKey(class: ServiceClass) u64 {
+    return @as(u64, @intFromEnum(class)) + 1;
+}
+
+fn catalogClassIndex(class: ServiceClass) ?usize {
+    const entry_index = id_index.lookup(CATALOG_CLASS_INDEX_CAPACITY, &catalog_class_index, serviceClassIndexKey(class)) orelse {
+        debugAssertCatalogClassIndexMissAbsent(class);
+        return null;
+    };
+    if (entry_index >= catalog.len) {
+        native_util.impossibleByInvariant("service catalog class index points outside catalog");
+    }
+    if (catalog[entry_index].class != class) {
+        native_util.impossibleByInvariant("service catalog class index points at the wrong entry");
+    }
+    return entry_index;
+}
+
+fn buildCatalogClassIndex() [CATALOG_CLASS_INDEX_CAPACITY]id_index.Slot {
+    @setEvalBranchQuota(10_000);
+    var index = id_index.emptyTable(CATALOG_CLASS_INDEX_CAPACITY);
+    for (catalog, 0..) |entry, entry_index| {
+        id_index.insert(CATALOG_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(entry.class), entry_index, "service catalog class index covers catalog entries");
+    }
+    return index;
+}
+
+fn buildServiceContractClassIndex() [SERVICE_CONTRACT_CLASS_INDEX_CAPACITY]id_index.Slot {
+    @setEvalBranchQuota(10_000);
+    var index = id_index.emptyTable(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY);
+    for (ordered_service_contracts, 0..) |entry, entry_index| {
+        id_index.insert(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(entry.class), entry_index, "service contract class index covers ordered contracts");
+    }
+    return index;
+}
+
+fn buildPublishedNativeClassIndex() [PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY]id_index.Slot {
+    @setEvalBranchQuota(10_000);
+    var index = id_index.emptyTable(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY);
+    for (ordered_published_native_service_contracts, 0..) |entry, entry_index| {
+        id_index.insert(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(entry.class), entry_index, "published native service class index covers ordered contracts");
+    }
+    return index;
+}
+
+fn debugAssertCatalogClassIndexMissAbsent(class: ServiceClass) void {
+    if (@import("builtin").mode != .Debug) return;
+    for (catalog) |entry| {
+        if (entry.class == class) {
+            native_util.impossibleByInvariant("service catalog class index missed an entry");
+        }
+    }
+}
+
+fn debugAssertServiceContractClassIndexMissAbsent(class: ServiceClass) void {
+    if (@import("builtin").mode != .Debug) return;
+    for (ordered_service_contracts) |entry| {
+        if (entry.class == class) {
+            native_util.impossibleByInvariant("service contract class index missed an entry");
+        }
+    }
+}
+
+fn debugAssertPublishedNativeClassIndexMissAbsent(class: ServiceClass) void {
+    if (@import("builtin").mode != .Debug) return;
+    for (ordered_published_native_service_contracts) |entry| {
+        if (entry.class == class) {
+            native_util.impossibleByInvariant("published native service class index missed an entry");
+        }
+    }
 }
 
 pub fn tcbName(component: KernelTcbComponent) []const u8 {
@@ -1188,6 +1259,7 @@ test "service catalog interfaces remain unique and dependencies point at catalog
 
         var peer_index: usize = index + 1;
         while (peer_index < catalog.len) : (peer_index += 1) {
+            try std.testing.expect(entry.class != catalog[peer_index].class);
             try std.testing.expect(!std.mem.eql(u8, entry.interface.name, catalog[peer_index].interface.name));
         }
     }
