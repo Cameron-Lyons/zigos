@@ -112,23 +112,23 @@ pub const Center = struct {
     }
 
     pub fn post(self: *Center, request: PostRequest) Error!*Notification {
+        const notification_id = self.nextReservableNotificationId() orelse return error.NotificationTableFull;
+        const slot = self.firstFreeNotificationSlot() orelse return error.NotificationTableFull;
+        var notification = zeroNotification();
+        notification.id = notification_id;
+        notification.reason = request.reason;
+        notification.urgency = request.urgency;
+        notification.source = request.source;
+        notification.task_id = request.task_id;
+        notification.expires_at_ticks = request.expires_at_ticks;
+        notification.suppression_policy = request.suppression_policy;
+        notification.detail_len = copyText(&notification.detail, request.detail);
+
         self.applySuppressionPolicy(request);
-        for (&self.notifications) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.notification = zeroNotification();
-            slot.notification.id = self.next_notification_id;
-            self.next_notification_id += 1;
-            slot.notification.reason = request.reason;
-            slot.notification.urgency = request.urgency;
-            slot.notification.source = request.source;
-            slot.notification.task_id = request.task_id;
-            slot.notification.expires_at_ticks = request.expires_at_ticks;
-            slot.notification.suppression_policy = request.suppression_policy;
-            slot.notification.detail_len = copyText(&slot.notification.detail, request.detail);
-            return &slot.notification;
-        }
-        return error.NotificationTableFull;
+        slot.notification = notification;
+        slot.in_use = true;
+        self.advanceNextNotificationIdFrom(notification_id);
+        return &slot.notification;
     }
 
     pub fn postWithAttentionPolicy(
@@ -237,6 +237,37 @@ pub const Center = struct {
         return null;
     }
 
+    fn firstFreeNotificationSlot(self: *Center) ?*NotificationSlot {
+        for (&self.notifications) |*slot| {
+            if (!slot.in_use) return slot;
+        }
+        return null;
+    }
+
+    fn nextReservableNotificationId(self: *Center) ?u64 {
+        if (self.countNotifications() >= MAX_NOTIFICATIONS) return null;
+
+        var notification_id = normalizeNotificationId(self.next_notification_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_NOTIFICATIONS) : (attempts += 1) {
+            if (self.find(notification_id) == null) return notification_id;
+            notification_id = nextNotificationIdAfter(notification_id);
+        }
+        return null;
+    }
+
+    fn advanceNextNotificationIdFrom(self: *Center, notification_id: u64) void {
+        self.next_notification_id = nextNotificationIdAfter(notification_id);
+    }
+
+    fn countNotifications(self: *const Center) usize {
+        var count: usize = 0;
+        for (self.notifications) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
     fn applySuppressionPolicy(self: *Center, request: PostRequest) void {
         switch (request.suppression_policy) {
             .allow_repeat => {},
@@ -255,6 +286,15 @@ pub const Center = struct {
         }
     }
 };
+
+fn normalizeNotificationId(notification_id: u64) u64 {
+    return if (notification_id == 0) 1 else notification_id;
+}
+
+fn nextNotificationIdAfter(notification_id: u64) u64 {
+    const next = notification_id +% 1;
+    return normalizeNotificationId(next);
+}
 
 fn deny(
     reason: AttentionDecisionReason,
@@ -374,6 +414,66 @@ test "notification center applies structured suppression policies before posting
     try std.testing.expectEqualStrings("other task survives", center.latestVisible(1).?.detailSlice());
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason, replacement.suppression_policy);
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason_task, task_replacement.suppression_policy);
+}
+
+test "notification center ids wrap without zero and full posts do not suppress" {
+    var center = Center.init();
+    const source = principal.PrincipalId{ .kind = .service, .serial = 10 };
+
+    center.next_notification_id = std.math.maxInt(u64);
+    const max_notification = try center.post(.{
+        .source = source,
+        .reason = .sync_conflict,
+        .urgency = .high,
+        .detail = "max id notification",
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), max_notification.id);
+    try std.testing.expectEqual(@as(u64, 1), center.next_notification_id);
+    try std.testing.expect(center.find(0) == null);
+
+    const wrapped_notification = try center.post(.{
+        .source = source,
+        .reason = .sync_conflict,
+        .urgency = .high,
+        .detail = "wrapped id notification",
+    });
+    try std.testing.expectEqual(@as(u64, 1), wrapped_notification.id);
+    try std.testing.expectEqual(@as(u64, 2), center.next_notification_id);
+    try std.testing.expect(center.find(0) == null);
+
+    center.next_notification_id = 1;
+    const skipped_notification = try center.post(.{
+        .source = source,
+        .reason = .sync_conflict,
+        .urgency = .high,
+        .detail = "skipped id notification",
+    });
+    try std.testing.expectEqual(@as(u64, 2), skipped_notification.id);
+    try std.testing.expectEqual(@as(u64, 3), center.next_notification_id);
+    try std.testing.expect(center.find(0) == null);
+
+    var full_center = Center.init();
+    for (0..MAX_NOTIFICATIONS) |index| {
+        _ = try full_center.post(.{
+            .source = source,
+            .reason = .policy_notice,
+            .urgency = .normal,
+            .task_id = @intCast(index + 1),
+            .detail = "full table notification",
+        });
+    }
+    const next_before_full = full_center.next_notification_id;
+    try std.testing.expectEqual(MAX_NOTIFICATIONS, full_center.activeCount(1));
+    try std.testing.expectError(error.NotificationTableFull, full_center.post(.{
+        .source = source,
+        .reason = .policy_notice,
+        .urgency = .normal,
+        .task_id = 1,
+        .detail = "replacement without capacity",
+        .suppression_policy = .replace_same_source_reason_task,
+    }));
+    try std.testing.expectEqual(next_before_full, full_center.next_notification_id);
+    try std.testing.expectEqual(MAX_NOTIFICATIONS, full_center.activeCount(1));
 }
 
 test "notification center enforces quiet mode and interruption budgets" {
