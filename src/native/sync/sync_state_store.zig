@@ -18,7 +18,7 @@ const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 const record_magic = "ZGSYNCR";
 const record_version: u16 = 5;
-const record_prefix = "state/v5/";
+const record_prefix = "state/";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
 const max_record_bytes: usize = 2048;
@@ -124,11 +124,11 @@ pub fn persist(
 fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
 
-    for (resident.persisted_state.graph.user_roots) |slot| {
+    for (resident.persisted_state.graph.user_roots.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try userRootPath(path_buffer[0..], slot.root.principal_id));
     }
-    for (resident.persisted_state.graph.devices) |slot| {
+    for (resident.persisted_state.graph.devices.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try devicePath(path_buffer[0..], slot.device.principal_id));
     }
@@ -136,31 +136,31 @@ fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet)
         if (!slot.in_use) continue;
         try out.add(try networkPolicyPath(path_buffer[0..], slot.policy.id));
     }
-    for (resident.persisted_state.workspace_policies) |slot| {
+    for (resident.persisted_state.workspace_policies.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try workspacePolicyPath(path_buffer[0..], slot.policy.workspace_id));
     }
-    for (resident.persisted_state.replica_entries) |slot| {
+    for (resident.persisted_state.replica_entries.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try replicaPath(path_buffer[0..], slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()));
     }
-    for (resident.persisted_state.conflicts) |slot| {
+    for (resident.persisted_state.conflicts.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try conflictPath(path_buffer[0..], slot.conflict.workspace_id, slot.conflict.device_id, workspace.pathHash(slot.conflict.pathSlice())));
     }
-    for (resident.persisted_state.database_contracts) |slot| {
+    for (resident.persisted_state.database_contracts.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try databaseContractPath(path_buffer[0..], slot.contract.id));
     }
-    for (resident.persisted_state.overlays) |slot| {
+    for (resident.persisted_state.overlays.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try overlayPath(path_buffer[0..], slot.overlay.workspace_id));
     }
-    for (resident.persisted_state.outbound_transport_frames) |slot| {
+    for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try transportFramePath(path_buffer[0..], .outbound, slot.frame.id));
     }
-    for (resident.persisted_state.inbound_transport_frames) |slot| {
+    for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
         if (!slot.in_use) continue;
         try out.add(try transportFramePath(path_buffer[0..], .inbound, slot.frame.id));
     }
@@ -193,7 +193,7 @@ fn deleteStaleRecords(
 fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.graph.user_roots) |slot| {
+    for (resident.persisted_state.graph.user_roots.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try userRootPath(path_buffer[0..], slot.root.principal_id);
         const bytes = try encodeUserRoot(payload[0..], &slot.root);
@@ -204,7 +204,7 @@ fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, reside
 fn persistDevices(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.graph.devices) |slot| {
+    for (resident.persisted_state.graph.devices.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try devicePath(path_buffer[0..], slot.device.principal_id);
         const bytes = try encodeDevice(payload[0..], &slot.device);
@@ -226,7 +226,7 @@ fn persistNetworkPolicies(storage: *storage_service.Service, workspace_id: u64, 
 fn persistWorkspacePolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.workspace_policies) |slot| {
+    for (resident.persisted_state.workspace_policies.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try workspacePolicyPath(path_buffer[0..], slot.policy.workspace_id);
         const bytes = try encodeWorkspacePolicy(payload[0..], &slot.policy);
@@ -237,7 +237,7 @@ fn persistWorkspacePolicies(storage: *storage_service.Service, workspace_id: u64
 fn persistReplicas(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.replica_entries) |slot| {
+    for (resident.persisted_state.replica_entries.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try replicaPath(path_buffer[0..], slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash());
         const bytes = try encodeReplica(payload[0..], &slot.entry);
@@ -248,7 +248,7 @@ fn persistReplicas(storage: *storage_service.Service, workspace_id: u64, residen
 fn persistConflicts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.conflicts) |slot| {
+    for (resident.persisted_state.conflicts.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try conflictPath(path_buffer[0..], slot.conflict.workspace_id, slot.conflict.device_id, workspace.pathHash(slot.conflict.pathSlice()));
         const bytes = try encodeConflict(payload[0..], &slot.conflict);
@@ -259,7 +259,7 @@ fn persistConflicts(storage: *storage_service.Service, workspace_id: u64, reside
 fn persistDatabaseContracts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.database_contracts) |slot| {
+    for (resident.persisted_state.database_contracts.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try databaseContractPath(path_buffer[0..], slot.contract.id);
         const bytes = try encodeDatabaseContract(payload[0..], &slot.contract);
@@ -270,7 +270,7 @@ fn persistDatabaseContracts(storage: *storage_service.Service, workspace_id: u64
 fn persistOverlays(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.overlays) |slot| {
+    for (resident.persisted_state.overlays.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try overlayPath(path_buffer[0..], slot.overlay.workspace_id);
         const bytes = try encodeOverlay(payload[0..], &slot.overlay);
@@ -281,13 +281,13 @@ fn persistOverlays(storage: *storage_service.Service, workspace_id: u64, residen
 fn persistTransportFrames(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.outbound_transport_frames) |slot| {
+    for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try transportFramePath(path_buffer[0..], .outbound, slot.frame.id);
         const bytes = try encodeTransportFrame(payload[0..], .outbound, &slot);
         try putRecord(storage, workspace_id, path, bytes, tick);
     }
-    for (resident.persisted_state.inbound_transport_frames) |slot| {
+    for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
         if (!slot.in_use) continue;
         const path = try transportFramePath(path_buffer[0..], .inbound, slot.frame.id);
         const bytes = try encodeTransportFrame(payload[0..], .inbound, &slot);
@@ -495,31 +495,28 @@ fn encodeTransportFrame(
 }
 
 fn decodeUserRoot(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const slot_index = firstFreeUserRootIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.graph.user_roots[slot_index];
-    slot.in_use = true;
-    slot.root = .{
+    var root = device_graph.UserRootRecord{
         .principal_id = try readPrincipal(reader),
         .label_len = 0,
         .label = [_]u8{0} ** device_graph.MAX_LABEL_BYTES,
         .root_signature = .{},
     };
-    try readTextInto(reader, &slot.root.label, &slot.root.label_len);
-    slot.root.root_signature = try readSignature(reader, &resident.user_root_signers[slot_index]);
+    try readTextInto(reader, &root.label, &root.label_len);
+    const slot_index = resident.persisted_state.graph.installUserRootRecord(root) orelse return error.CorruptState;
+    resident.persisted_state.graph.user_roots.slots[slot_index].root.root_signature = try readSignature(reader, &resident.user_root_signers[slot_index]);
 }
 
 fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const slot_index = firstFreeDeviceIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.graph.devices[slot_index];
-    slot.in_use = true;
-    slot.device = state_support.zeroDeviceGraphRecord();
-    slot.device.principal_id = try readPrincipal(reader);
-    slot.device.owner = try readPrincipal(reader);
-    try readTextInto(reader, &slot.device.label, &slot.device.label_len);
-    slot.device.overlay_id = try reader.readU64();
-    slot.device.status = try parseDeviceStatus(try reader.readByte());
-    slot.device.trust_generation = try reader.readU32();
-    slot.device.key_rotation_generation = try reader.readU32();
+    var device = state_support.zeroDeviceGraphRecord();
+    device.principal_id = try readPrincipal(reader);
+    device.owner = try readPrincipal(reader);
+    try readTextInto(reader, &device.label, &device.label_len);
+    device.overlay_id = try reader.readU64();
+    device.status = try parseDeviceStatus(try reader.readByte());
+    device.trust_generation = try reader.readU32();
+    device.key_rotation_generation = try reader.readU32();
+    const slot_index = resident.persisted_state.graph.installDeviceRecord(device) orelse return error.CorruptState;
+    const slot = &resident.persisted_state.graph.devices.slots[slot_index];
     slot.device.device_signature = try readSignature(reader, &resident.device_signature_signers[slot_index][0]);
     slot.device.enrollment_signature = try readSignature(reader, &resident.device_signature_signers[slot_index][1]);
     slot.device.rotation_signature = try readSignature(reader, &resident.device_signature_signers[slot_index][2]);
@@ -541,10 +538,7 @@ fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader) E
 }
 
 fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const slot_index = firstFreeNetworkPolicyIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.network_policies.policies.slots[slot_index];
-    slot.in_use = true;
-    slot.policy = .{
+    var policy = network_policy.PolicyRecord{
         .id = try reader.readU64(),
         .owner = try readPrincipal(reader),
         .workspace_id = null,
@@ -561,117 +555,112 @@ fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorRe
         .pinned_attestation_verifier_metadata_digest = crypto_hash.zero_digest,
     };
     const workspace_id = try reader.readU64();
-    slot.policy.workspace_id = if (workspace_id == 0) null else workspace_id;
-    try readTextInto(reader, &slot.policy.label, &slot.policy.label_len);
-    slot.policy.mode = try parsePolicyMode(try reader.readByte());
-    try readTextInto(reader, &slot.policy.target, &slot.policy.target_len);
-    slot.policy.explicit_internet_grant = (try reader.readByte()) != 0;
-    slot.policy.require_remote_attestation = (try reader.readByte()) != 0;
-    slot.policy.pinned_root_digest_present = (try reader.readByte()) != 0;
-    if (slot.policy.pinned_root_digest_present) try reader.readBytes(&slot.policy.pinned_root_digest);
-    slot.policy.pinned_attestation_verifier_metadata_digest_present = (try reader.readByte()) != 0;
-    if (slot.policy.pinned_attestation_verifier_metadata_digest_present) {
-        try reader.readBytes(&slot.policy.pinned_attestation_verifier_metadata_digest);
+    policy.workspace_id = if (workspace_id == 0) null else workspace_id;
+    try readTextInto(reader, &policy.label, &policy.label_len);
+    policy.mode = try parsePolicyMode(try reader.readByte());
+    try readTextInto(reader, &policy.target, &policy.target_len);
+    policy.explicit_internet_grant = (try reader.readByte()) != 0;
+    policy.require_remote_attestation = (try reader.readByte()) != 0;
+    policy.pinned_root_digest_present = (try reader.readByte()) != 0;
+    if (policy.pinned_root_digest_present) try reader.readBytes(&policy.pinned_root_digest);
+    policy.pinned_attestation_verifier_metadata_digest_present = (try reader.readByte()) != 0;
+    if (policy.pinned_attestation_verifier_metadata_digest_present) {
+        try reader.readBytes(&policy.pinned_attestation_verifier_metadata_digest);
     }
+    const slot_index = resident.persisted_state.network_policies.policies.reserveIndex(policy.id) orelse return error.CorruptState;
+    resident.persisted_state.network_policies.policies.slots[slot_index].policy = policy;
 }
 
 fn decodeWorkspacePolicy(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const slot_index = firstFreeWorkspacePolicyIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.workspace_policies[slot_index];
-    slot.in_use = true;
-    slot.policy = state_support.zeroWorkspacePolicy();
-    slot.policy.workspace_id = try reader.readU64();
-    slot.policy.owner = try readPrincipal(reader);
-    slot.policy.offline_first = (try reader.readByte()) != 0;
-    slot.policy.personal_e2ee = (try reader.readByte()) != 0;
-    slot.policy.device_to_device_policy_id = state_support.readOptionalU64(try reader.readU64());
-    slot.policy.relay_policy_id = state_support.readOptionalU64(try reader.readU64());
-    slot.policy.overlay_policy_id = state_support.readOptionalU64(try reader.readU64());
-    try readTextInto(reader, &slot.policy.relay_domain, &slot.policy.relay_domain_len);
+    var policy = state_support.zeroWorkspacePolicy();
+    policy.workspace_id = try reader.readU64();
+    policy.owner = try readPrincipal(reader);
+    policy.offline_first = (try reader.readByte()) != 0;
+    policy.personal_e2ee = (try reader.readByte()) != 0;
+    policy.device_to_device_policy_id = state_support.readOptionalU64(try reader.readU64());
+    policy.relay_policy_id = state_support.readOptionalU64(try reader.readU64());
+    policy.overlay_policy_id = state_support.readOptionalU64(try reader.readU64());
+    try readTextInto(reader, &policy.relay_domain, &policy.relay_domain_len);
     const prefix_count = try reader.readU16();
     if (prefix_count > state_support.MAX_SELECTIVE_PREFIXES) return error.CorruptState;
-    slot.policy.selective_prefix_count = prefix_count;
+    policy.selective_prefix_count = prefix_count;
     var prefix_index: usize = 0;
     while (prefix_index < prefix_count) : (prefix_index += 1) {
-        try readTextInto(reader, &slot.policy.selective_prefixes[prefix_index], &slot.policy.selective_prefix_lens[prefix_index]);
+        try readTextInto(reader, &policy.selective_prefixes[prefix_index], &policy.selective_prefix_lens[prefix_index]);
     }
-    slot.policy.require_shared_access = (try reader.readByte()) != 0;
+    policy.require_shared_access = (try reader.readByte()) != 0;
+    const slot_index = resident.persisted_state.workspace_policies.reserveIndex(state_support.workspacePolicyArenaKey(policy.workspace_id)) orelse return error.CorruptState;
+    resident.persisted_state.workspace_policies.slots[slot_index].policy = policy;
 }
 
 fn decodeReplica(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const slot_index = firstFreeReplicaIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.replica_entries[slot_index];
-    slot.in_use = true;
-    slot.entry = state_support.zeroReplicaEntry();
-    slot.entry.workspace_id = try reader.readU64();
-    slot.entry.device_id = try readPrincipal(reader);
-    slot.entry.workspace_generation = try reader.readU32();
-    try readTextInto(reader, &slot.entry.path, &slot.entry.path_len);
-    slot.entry.object_id = try reader.readU64();
-    slot.entry.version_id = try reader.readU64();
+    var entry = state_support.zeroReplicaEntry();
+    entry.workspace_id = try reader.readU64();
+    entry.device_id = try readPrincipal(reader);
+    entry.workspace_generation = try reader.readU32();
+    try readTextInto(reader, &entry.path, &entry.path_len);
+    entry.object_id = try reader.readU64();
+    entry.version_id = try reader.readU64();
+    const slot_index = resident.persisted_state.replica_entries.reserveIndex(state_support.replicaArenaKey(entry.workspace_id, entry.device_id, entry.pathHash())) orelse return error.CorruptState;
+    resident.persisted_state.replica_entries.slots[slot_index].entry = entry;
 }
 
 fn decodeConflict(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const slot_index = firstFreeConflictIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.conflicts[slot_index];
-    slot.in_use = true;
-    slot.conflict = state_support.zeroConflict();
-    slot.conflict.workspace_id = try reader.readU64();
-    slot.conflict.device_id = try readPrincipal(reader);
-    slot.conflict.object_id = try reader.readU64();
-    try readTextInto(reader, &slot.conflict.path, &slot.conflict.path_len);
-    slot.conflict.local_version_id = try reader.readU64();
-    slot.conflict.remote_version_id = try reader.readU64();
-    slot.conflict.semantic = try parseSyncSemantic(try reader.readByte());
+    var conflict = state_support.zeroConflict();
+    conflict.workspace_id = try reader.readU64();
+    conflict.device_id = try readPrincipal(reader);
+    conflict.object_id = try reader.readU64();
+    try readTextInto(reader, &conflict.path, &conflict.path_len);
+    conflict.local_version_id = try reader.readU64();
+    conflict.remote_version_id = try reader.readU64();
+    conflict.semantic = try parseSyncSemantic(try reader.readByte());
+    const slot_index = resident.persisted_state.conflicts.reserveIndex(state_support.conflictArenaKey(conflict.workspace_id, conflict.device_id, conflict.pathSlice())) orelse return error.CorruptState;
+    resident.persisted_state.conflicts.slots[slot_index].conflict = conflict;
 }
 
 fn decodeDatabaseContract(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const slot_index = firstFreeDatabaseContractIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.database_contracts[slot_index];
-    slot.in_use = true;
-    slot.contract = state_support.zeroDatabaseContract();
-    slot.contract.id = try reader.readU64();
-    slot.contract.workspace_id = try reader.readU64();
-    try readTextInto(reader, &slot.contract.bundle_id, &slot.contract.bundle_id_len);
-    try readTextInto(reader, &slot.contract.label, &slot.contract.label_len);
-    slot.contract.signature = try readSignature(reader, &resident.database_contract_signers[slot_index]);
+    var contract = state_support.zeroDatabaseContract();
+    contract.id = try reader.readU64();
+    contract.workspace_id = try reader.readU64();
+    try readTextInto(reader, &contract.bundle_id, &contract.bundle_id_len);
+    try readTextInto(reader, &contract.label, &contract.label_len);
+    const slot_index = resident.persisted_state.database_contracts.reserveIndex(state_support.databaseContractArenaKey(contract.id)) orelse return error.CorruptState;
+    resident.persisted_state.database_contracts.slots[slot_index].contract = contract;
+    resident.persisted_state.database_contracts.slots[slot_index].contract.signature = try readSignature(reader, &resident.database_contract_signers[slot_index]);
 }
 
 fn decodeOverlay(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const slot_index = firstFreeOverlayIndex(resident) orelse return error.CorruptState;
-    const slot = &resident.persisted_state.overlays[slot_index];
-    slot.in_use = true;
-    slot.overlay = state_support.zeroOverlay();
-    slot.overlay.id = try reader.readU64();
-    slot.overlay.workspace_id = try reader.readU64();
-    slot.overlay.home_device = try readPrincipal(reader);
-    try readTextInto(reader, &slot.overlay.service_identity, &slot.overlay.service_identity_len);
-    slot.overlay.remote_access_enabled = (try reader.readByte()) != 0;
+    var overlay = state_support.zeroOverlay();
+    overlay.id = try reader.readU64();
+    overlay.workspace_id = try reader.readU64();
+    overlay.home_device = try readPrincipal(reader);
+    try readTextInto(reader, &overlay.service_identity, &overlay.service_identity_len);
+    overlay.remote_access_enabled = (try reader.readByte()) != 0;
     const private_service_count = try reader.readU16();
     if (private_service_count > state_support.MAX_PRIVATE_SERVICES) return error.CorruptState;
-    slot.overlay.private_service_count = private_service_count;
+    overlay.private_service_count = private_service_count;
     var service_index: usize = 0;
     while (service_index < private_service_count) : (service_index += 1) {
-        try readTextInto(reader, &slot.overlay.private_services[service_index], &slot.overlay.private_service_lens[service_index]);
+        try readTextInto(reader, &overlay.private_services[service_index], &overlay.private_service_lens[service_index]);
     }
+    const slot_index = resident.persisted_state.overlays.reserveIndex(state_support.overlayArenaKey(overlay.workspace_id)) orelse return error.CorruptState;
+    resident.persisted_state.overlays.slots[slot_index].overlay = overlay;
 }
 
 fn decodeTransportFrame(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
     const queue_kind = try parseTransportQueueKind(try reader.readByte());
-    const slot = switch (queue_kind) {
-        .outbound => blk: {
-            const slot_index = firstFreeOutboundTransportFrameIndex(resident) orelse return error.CorruptState;
-            break :blk &resident.persisted_state.outbound_transport_frames[slot_index];
-        },
-        .inbound => blk: {
-            const slot_index = firstFreeInboundTransportFrameIndex(resident) orelse return error.CorruptState;
-            break :blk &resident.persisted_state.inbound_transport_frames[slot_index];
-        },
+    const decoded = state_support.DurableTransportFrameSlot{
+        .in_use = true,
+        .acked = (try reader.readByte()) != 0,
+        .duplicate_count = try reader.readU16(),
+        .frame = try readTransportFrame(reader),
     };
-    slot.in_use = true;
-    slot.acked = (try reader.readByte()) != 0;
-    slot.duplicate_count = try reader.readU16();
-    slot.frame = try readTransportFrame(reader);
+    const frame_key = state_support.transportFrameArenaKey(decoded.frame.id);
+    const slot = switch (queue_kind) {
+        .outbound => resident.persisted_state.outbound_transport_frames.reserve(frame_key) orelse return error.CorruptState,
+        .inbound => resident.persisted_state.inbound_transport_frames.reserve(frame_key) orelse return error.CorruptState,
+    };
+    slot.* = decoded;
 }
 
 fn writeTransportFrame(writer: *CursorWriter, frame: *const state_support.TransportFrame) Error!void {
@@ -717,9 +706,7 @@ fn readEnvelope(reader: *CursorReader) Error!Envelope {
     try reader.readBytes(&magic_buffer);
     if (!std.mem.eql(u8, &magic_buffer, record_magic)) return error.CorruptState;
     const version = try reader.readU16();
-    // Single-version on-disk format: only the current record_version is written, so
-    // any other version is corrupt/forged and must fail closed (the prior v1-v4
-    // compat branches were dead and have been removed under the ignore-compat directive).
+    // Single-version on-disk format: only the current record_version is accepted.
     if (version != record_version) return error.UnsupportedStateVersion;
     return .{
         .kind = try parseRecordKind(try reader.readByte()),
@@ -865,96 +852,27 @@ fn recordObjectId(workspace_id: u64, path: []const u8) u64 {
 
 fn repairNextIds(resident: *state_support.ResidentState) void {
     var next_overlay_id: u64 = 1;
-    for (resident.persisted_state.overlays) |slot| {
+    for (resident.persisted_state.overlays.slots) |slot| {
         if (slot.in_use) next_overlay_id = @max(next_overlay_id, slot.overlay.id + 1);
     }
     resident.persisted_state.next_overlay_id = next_overlay_id;
 
     var next_contract_id: u64 = 1;
-    for (resident.persisted_state.database_contracts) |slot| {
+    for (resident.persisted_state.database_contracts.slots) |slot| {
         if (slot.in_use) next_contract_id = @max(next_contract_id, slot.contract.id + 1);
     }
     resident.persisted_state.next_contract_id = next_contract_id;
+    resident.persisted_state.graph.rebuildIndexes();
     resident.persisted_state.network_policies.next_policy_id = resident.nextPersistedPolicyId();
     resident.persisted_state.network_policies.rebuildIndexes();
     var next_transport_frame_id: u64 = 1;
-    for (resident.persisted_state.outbound_transport_frames) |slot| {
+    for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
         if (slot.in_use) next_transport_frame_id = @max(next_transport_frame_id, slot.frame.id + 1);
     }
-    for (resident.persisted_state.inbound_transport_frames) |slot| {
+    for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
         if (slot.in_use) next_transport_frame_id = @max(next_transport_frame_id, slot.frame.id + 1);
     }
     resident.persisted_state.next_transport_frame_id = next_transport_frame_id;
-}
-
-fn firstFreeUserRootIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.graph.user_roots, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeDeviceIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.graph.devices, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeNetworkPolicyIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.network_policies.policies.slots, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeWorkspacePolicyIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.workspace_policies, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeReplicaIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.replica_entries, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeConflictIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.conflicts, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeDatabaseContractIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.database_contracts, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeOverlayIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.overlays, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeOutboundTransportFrameIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.outbound_transport_frames, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
-}
-
-fn firstFreeInboundTransportFrameIndex(resident: *const state_support.ResidentState) ?usize {
-    for (resident.persisted_state.inbound_transport_frames, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
 }
 
 fn parseRecordKind(raw: u8) Error!RecordKind {
