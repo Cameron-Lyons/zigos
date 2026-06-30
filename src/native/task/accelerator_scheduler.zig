@@ -557,8 +557,9 @@ pub const Controller = struct {
         }
         if (!request.require_accelerator and preferred_engine != .cpu and self.activeEngineClaimId(preferred_engine) != 0) {
             if (request.shared_memory_object_id != null) return error.ZeroCopyUnavailable;
+            const claim_id = self.nextReservableClaimId() orelse return error.ClaimTableFull;
             var fallback = zeroClaim();
-            fallback.id = self.allocateClaimId();
+            fallback.id = claim_id;
             fallback.task_id = request.task_id;
             fallback.class = request.request.class;
             fallback.engine = .cpu;
@@ -566,6 +567,7 @@ pub const Controller = struct {
             fallback.reason = .accelerator_unavailable;
             fallback.active = true;
             const record_claim = try self.upsertClaim(fallback);
+            self.advanceNextClaimIdFrom(claim_id);
             self.markClaimActive(record_claim);
             return record_claim;
         }
@@ -587,14 +589,22 @@ pub const Controller = struct {
             decision.reason = .accelerator_unavailable;
         }
 
+        const claim_id = self.nextReservableClaimId() orelse return error.ClaimTableFull;
+        var attached_object_id: ?ids.SharedMemoryId = null;
+        errdefer if (attached_object_id) |object_id| {
+            if (shared) |shared_table| {
+                _ = shared_table.detachAccelerator(object_id, computeTargetFor(decision.engine)) catch false;
+            }
+        };
         if (request.shared_memory_object_id) |object_id| {
             if (decision.engine == .cpu or !decision.zero_copy_allowed) return error.ZeroCopyUnavailable;
             const shared_table = shared orelse return error.SharedMemoryTableRequired;
             try shared_table.attachAccelerator(object_id, computeTargetFor(decision.engine));
+            attached_object_id = object_id;
         }
 
         var record = zeroClaim();
-        record.id = self.allocateClaimId();
+        record.id = claim_id;
         record.task_id = request.task_id;
         record.class = decision.class;
         record.engine = decision.engine;
@@ -610,6 +620,8 @@ pub const Controller = struct {
             record.queue_completion_sequence = queue.completion_sequence;
         }
         const record_claim = try self.upsertClaim(record);
+        attached_object_id = null;
+        self.advanceNextClaimIdFrom(claim_id);
         self.markClaimActive(record_claim);
         return record_claim;
     }
@@ -700,9 +712,20 @@ pub const Controller = struct {
         return slot.claim;
     }
 
-    fn allocateClaimId(self: *Controller) u64 {
-        defer self.next_claim_id += 1;
-        return self.next_claim_id;
+    fn nextReservableClaimId(self: *Controller) ?u64 {
+        if (self.claims.countInUse() >= MAX_ENGINE_CLAIMS) return null;
+
+        var claim_id = normalizeClaimId(self.next_claim_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_ENGINE_CLAIMS) : (attempts += 1) {
+            if (self.claims.get(claim_id) == null) return claim_id;
+            claim_id = nextClaimIdAfter(claim_id);
+        }
+        return null;
+    }
+
+    fn advanceNextClaimIdFrom(self: *Controller, claim_id: u64) void {
+        self.next_claim_id = nextClaimIdAfter(claim_id);
     }
 
     fn availableEngines(self: *const Controller) EngineAvailability {
@@ -754,6 +777,15 @@ pub const Controller = struct {
         }
     }
 };
+
+fn normalizeClaimId(claim_id: u64) u64 {
+    return if (claim_id == 0) 1 else claim_id;
+}
+
+fn nextClaimIdAfter(claim_id: u64) u64 {
+    const next = claim_id +% 1;
+    return normalizeClaimId(next);
+}
 
 pub fn planWithState(state: SystemState, availability: EngineAvailability, request: Request) Decision {
     var decision = Decision{
@@ -1656,4 +1688,76 @@ test "accelerator scheduler reuses released claim slots and revokes through task
     try std.testing.expectEqual(@as(u16, 3), controller.activeClaimCount());
     try std.testing.expectEqual(@as(u16, 2), try controller.revokeTaskClaims(71, null));
     try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
+}
+
+test "accelerator scheduler claim ids wrap without zero and skip active claims" {
+    var controller = Controller.init();
+    controller.next_claim_id = std.math.maxInt(u64);
+
+    const max_claim = try controller.claim(.{
+        .task_id = 90,
+        .request = .{ .class = .background_light },
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), max_claim.id);
+    try std.testing.expectEqual(@as(u64, 1), controller.next_claim_id);
+    try std.testing.expect(controller.findActiveClaim(0) == null);
+
+    const wrapped_claim = try controller.claim(.{
+        .task_id = 91,
+        .request = .{ .class = .batch_compute },
+    });
+    try std.testing.expectEqual(@as(u64, 1), wrapped_claim.id);
+    try std.testing.expectEqual(@as(u64, 2), controller.next_claim_id);
+    try std.testing.expect(controller.findActiveClaim(0) == null);
+
+    controller.next_claim_id = 1;
+    const skipped_claim = try controller.claim(.{
+        .task_id = 92,
+        .request = .{ .class = .foreground_interactive },
+    });
+    try std.testing.expectEqual(@as(u64, 2), skipped_claim.id);
+    try std.testing.expectEqual(@as(u64, 3), controller.next_claim_id);
+    try std.testing.expect(controller.findActiveClaim(0) == null);
+
+    var full_controller = Controller.init();
+    for (0..MAX_ENGINE_CLAIMS) |index| {
+        _ = try full_controller.claim(.{
+            .task_id = @intCast(900 + index),
+            .request = .{ .class = .background_light },
+        });
+    }
+    const next_before_full = full_controller.next_claim_id;
+    try std.testing.expectError(error.ClaimTableFull, full_controller.claim(.{
+        .task_id = 999,
+        .request = .{ .class = .background_light },
+    }));
+    try std.testing.expectEqual(next_before_full, full_controller.next_claim_id);
+}
+
+test "accelerator scheduler claim capacity preflights shared memory attachment" {
+    var controller = Controller.init();
+    for (0..MAX_ENGINE_CLAIMS) |index| {
+        _ = try controller.claim(.{
+            .task_id = @intCast(1000 + index),
+            .request = .{ .class = .background_light },
+        });
+    }
+
+    var shared = shared_memory.Table.init();
+    const object = try shared.createWithAccess(ids.task(1001), units.kibibytes(32), .{
+        .media = true,
+    });
+    const next_before_full = controller.next_claim_id;
+    try std.testing.expectError(error.ClaimTableFull, controller.claimWithSharedMemory(.{
+        .task_id = 1001,
+        .request = .{
+            .class = .media_export,
+            .wants_media_engine = true,
+            .shared_memory_bytes = units.kibibytes(32),
+        },
+        .require_accelerator = true,
+        .shared_memory_object_id = object.id,
+    }, &shared));
+    try std.testing.expectEqual(next_before_full, controller.next_claim_id);
+    try std.testing.expect(!(try shared.isAcceleratorAttached(object.id, .media)));
 }
