@@ -1192,7 +1192,7 @@ fn snapshotMessage(
     entry_count: usize,
 ) error{NoSpaceLeft}![]const u8 {
     var writer = BinaryWriter{ .buffer = buffer };
-    try writer.writeBytes("zigos.workspace.snapshot-root.v3");
+    try writer.writeBytes("zigos.workspace.snapshot-root");
     try writeLengthPrefixed(&writer, tag);
     try writer.writeU64(workspace_id.raw());
     try writer.writeU32(generation);

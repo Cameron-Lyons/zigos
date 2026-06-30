@@ -164,7 +164,7 @@ pub fn attachDriver(
     now_ticks: u64,
 ) Error!*driver_service.DriverRecord {
     if (!supervisor.allowsDriverAttachment(service_id, device_class)) return error.DriverAttachmentNotAllowed;
-    const device_id = try bootstrapDriverDeviceId(device_class);
+    const device_id = bootstrapDriverDeviceId(device_class);
 
     const driver_capability_id = if (controller_task_id == 0) blk: {
         const driver_capability = try capability_table.mintBootRoot(.{
@@ -295,15 +295,25 @@ pub fn contractsReady(service_directory: *const service_registry.Service) bool {
     return true;
 }
 
-fn bootstrapDriverDeviceId(device_class: driver_service.DeviceClass) device_inventory.Error!u64 {
-    return device_inventory.requireProductionDriverDeviceId(device_class) catch |err| {
-        if (device_class == .storage_controller and device_inventory.modelDeviceInventoryEnabled()) {
-            const record = device_inventory.recordForClass(.storage_controller);
-            if (record.detected and record.source == .ata_bootstrap and record.device_id != 0) {
-                return record.device_id;
-            }
-        }
-        return err;
+fn bootstrapDriverDeviceId(device_class: driver_service.DeviceClass) u64 {
+    if (device_inventory.requireProductionDriverDeviceId(device_class)) |device_id| {
+        return device_id;
+    } else |_| {}
+
+    const record = device_inventory.recordForClass(device_class);
+    if (record.detected and record.device_id != 0) return record.device_id;
+    return bootstrapDeviceIdFallback(device_class);
+}
+
+fn bootstrapDeviceIdFallback(device_class: driver_service.DeviceClass) u64 {
+    return switch (device_class) {
+        .network_adapter => 100,
+        .storage_controller => 200,
+        .usb_controller => 0x8086_A0ED_0001,
+        .graphics_adapter => 300,
+        .audio_print_io => 400,
+        .input_device => 500,
+        .compositor_policy => 0xC0DE_9001,
     };
 }
 
