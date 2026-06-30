@@ -1,4 +1,5 @@
 const std = @import("std");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -74,19 +75,28 @@ pub const DocumentVectorClock = struct {
     lamport: u64 = 0,
 };
 
+const DOCUMENT_OPERATION_INDEX_CAPACITY: usize = MAX_DOCUMENT_OPERATIONS * 2;
+const DOCUMENT_VECTOR_CLOCK_INDEX_CAPACITY: usize = MAX_DOCUMENT_VECTOR_CLOCKS * 2;
+const DocumentOperationIndex = indexed_arena.UniqueIndex(DOCUMENT_OPERATION_INDEX_CAPACITY);
+const DocumentVectorClockIndex = indexed_arena.UniqueIndex(DOCUMENT_VECTOR_CLOCK_INDEX_CAPACITY);
+
 pub const DocumentOperationLog = struct {
     operations: [MAX_DOCUMENT_OPERATIONS]DocumentOperation = undefined,
     operation_count: usize = 0,
+    operation_index: DocumentOperationIndex = DocumentOperationIndex.init(),
     clocks: [MAX_DOCUMENT_VECTOR_CLOCKS]DocumentVectorClock = [_]DocumentVectorClock{.{}} ** MAX_DOCUMENT_VECTOR_CLOCKS,
     clock_count: usize = 0,
+    clock_index: DocumentVectorClockIndex = DocumentVectorClockIndex.init(),
 
     pub fn append(self: *DocumentOperationLog, operation: DocumentOperation) Error!void {
         const id = operationId(operation);
         if (self.contains(id)) return error.DuplicateDocumentOperation;
         if (self.operation_count >= self.operations.len) return error.DocumentOperationLogFull;
-        self.operations[self.operation_count] = operation;
-        self.operation_count += 1;
         try self.observe(operation.actor, operation.lamport);
+        const slot_index = self.operation_count;
+        self.operations[slot_index] = operation;
+        self.operation_count += 1;
+        self.operation_index.insert(operationIdIndexKey(id), slot_index);
     }
 
     pub fn mergeFrom(self: *DocumentOperationLog, remote: *const DocumentOperationLog) Error!void {
@@ -105,10 +115,8 @@ pub const DocumentOperationLog = struct {
     }
 
     pub fn clockFor(self: *const DocumentOperationLog, actor: principal.PrincipalId) u64 {
-        for (self.clocks[0..self.clock_count]) |clock| {
-            if (clock.actor.eql(actor)) return clock.lamport;
-        }
-        return 0;
+        const slot_index = self.clockIndexFor(actor) orelse return 0;
+        return self.clocks[slot_index].lamport;
     }
 
     pub fn apply(self: *const DocumentOperationLog, base_document: []const u8, output: []u8) Error![]const u8 {
@@ -116,6 +124,15 @@ pub const DocumentOperationLog = struct {
     }
 
     fn contains(self: *const DocumentOperationLog, id: DocumentOperationId) bool {
+        const key = operationIdIndexKey(id);
+        if (self.operation_index.lookup(key)) |slot_index| {
+            if (slot_index < self.operation_count and operationId(self.operations[slot_index]).eql(id)) return true;
+            return self.containsByScan(id);
+        }
+        return false;
+    }
+
+    fn containsByScan(self: *const DocumentOperationLog, id: DocumentOperationId) bool {
         for (self.slice()) |operation| {
             if (operationId(operation).eql(id)) return true;
         }
@@ -123,19 +140,50 @@ pub const DocumentOperationLog = struct {
     }
 
     fn observe(self: *DocumentOperationLog, actor: principal.PrincipalId, lamport: u64) Error!void {
-        for (self.clocks[0..self.clock_count]) |*clock| {
-            if (!clock.actor.eql(actor)) continue;
+        if (self.clockIndexFor(actor)) |slot_index| {
+            const clock = &self.clocks[slot_index];
             clock.lamport = @max(clock.lamport, lamport);
             return;
         }
         if (self.clock_count >= self.clocks.len) return error.DocumentOperationLogFull;
-        self.clocks[self.clock_count] = .{ .actor = actor, .lamport = lamport };
+        const slot_index = self.clock_count;
+        self.clocks[slot_index] = .{ .actor = actor, .lamport = lamport };
         self.clock_count += 1;
+        self.clock_index.insert(actorClockIndexKey(actor), slot_index);
+    }
+
+    fn clockIndexFor(self: *const DocumentOperationLog, actor: principal.PrincipalId) ?usize {
+        const key = actorClockIndexKey(actor);
+        if (self.clock_index.lookup(key)) |slot_index| {
+            if (slot_index < self.clock_count and self.clocks[slot_index].actor.eql(actor)) return slot_index;
+            return self.clockIndexByScan(actor);
+        }
+        return null;
+    }
+
+    fn clockIndexByScan(self: *const DocumentOperationLog, actor: principal.PrincipalId) ?usize {
+        for (self.clocks[0..self.clock_count], 0..) |clock, slot_index| {
+            if (clock.actor.eql(actor)) return slot_index;
+        }
+        return null;
     }
 };
 
 fn operationId(operation: DocumentOperation) DocumentOperationId {
     return .{ .actor = operation.actor, .lamport = operation.lamport };
+}
+
+fn operationIdIndexKey(id: DocumentOperationId) u64 {
+    const actor_bytes = id.actor.keyBytes();
+    var bytes: [principal.PrincipalId.key_bytes + @sizeOf(u64)]u8 = undefined;
+    @memcpy(bytes[0..actor_bytes.len], actor_bytes[0..]);
+    std.mem.writeInt(u64, bytes[actor_bytes.len..][0..@sizeOf(u64)], id.lamport, .little);
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.sync_document_operation_key, &bytes));
+}
+
+fn actorClockIndexKey(actor: principal.PrincipalId) u64 {
+    const actor_bytes = actor.keyBytes();
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.sync_document_clock_key, actor_bytes[0..]));
 }
 
 pub const MergeRequest = struct {
@@ -672,10 +720,17 @@ test "document operation log merges CRDT operations idempotently with vector clo
     var merge_buffer: [DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
     const merged = try mergeDocumentOperationLogs("hello ", &laptop_log, &tablet_log, &merged_log, merge_buffer[0..]);
     try std.testing.expectEqualStrings("hello from tablet todayfrom laptop ", merged);
+    try std.testing.expectEqual(@as(usize, 4), merged_log.operation_count);
+    try std.testing.expectEqual(@as(usize, 2), merged_log.clock_count);
     try std.testing.expectEqual(@as(u64, 2), merged_log.clockFor(laptop));
     try std.testing.expectEqual(@as(u64, 2), merged_log.clockFor(tablet));
+    try std.testing.expect(merged_log.operation_index.lookup(operationIdIndexKey(operationId(laptop_log.slice()[0]))) != null);
+    try std.testing.expect(merged_log.operation_index.lookup(operationIdIndexKey(operationId(tablet_log.slice()[0]))) != null);
+    try std.testing.expect(merged_log.clock_index.lookup(actorClockIndexKey(laptop)) != null);
+    try std.testing.expect(merged_log.clock_index.lookup(actorClockIndexKey(tablet)) != null);
 
     try merged_log.mergeFrom(&tablet_log);
+    try std.testing.expectEqual(@as(usize, 4), merged_log.operation_count);
     var replay_buffer: [DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
     const replayed = try merged_log.apply("hello ", replay_buffer[0..]);
     try std.testing.expectEqualStrings(merged, replayed);
