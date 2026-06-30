@@ -176,6 +176,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         inbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
         outbound_transport_frame_count: usize = 0,
         inbound_transport_frame_count: usize = 0,
+        next_outbound_transport_frame_slot_index: usize = 0,
+        next_inbound_transport_frame_slot_index: usize = 0,
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
         closed_overlay_sessions: ClosedOverlaySessionIndex = ClosedOverlaySessionIndex.init(),
@@ -1733,10 +1735,20 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn allocateTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind, frame_id: u64) ?usize {
+            if (self.transportFrameSlotCount(queue_kind) == MAX_TRANSPORT_FRAMES) return null;
             const arena = self.transportFrameArena(queue_kind);
-            const slot_index = arena.reserveIndex(state_support.transportFrameArenaKey(frame_id)) orelse return null;
-            arena.clearDirty();
-            return slot_index;
+            const cursor = self.transportFrameSlotCursorPtr(queue_kind);
+            const start_index = cursor.*;
+            var offset: usize = 0;
+            while (offset < MAX_TRANSPORT_FRAMES) : (offset += 1) {
+                const slot_index = (start_index + offset) % MAX_TRANSPORT_FRAMES;
+                if (arena.slots[slot_index].in_use) continue;
+                const reserved_index = arena.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), slot_index) orelse continue;
+                arena.clearDirty();
+                cursor.* = (reserved_index + 1) % MAX_TRANSPORT_FRAMES;
+                return reserved_index;
+            }
+            native_util.impossibleByInvariant("transport frame count found a free slot but allocation cursor did not");
         }
 
         // When the inbound table is full, reclaim the oldest frame that is already
@@ -1770,6 +1782,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             frames.clearDirty();
             const slot_index = frames.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), index) orelse return null;
             frames.clearDirty();
+            self.transportFrameSlotCursorPtr(.inbound).* = (slot_index + 1) % MAX_TRANSPORT_FRAMES;
             return slot_index;
         }
 
@@ -1808,6 +1821,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return switch (queue_kind) {
                 .outbound => &self.outbound_transport_frame_count,
                 .inbound => &self.inbound_transport_frame_count,
+            };
+        }
+
+        fn transportFrameSlotCursorPtr(self: *Self, queue_kind: TransportQueueKind) *usize {
+            return switch (queue_kind) {
+                .outbound => &self.next_outbound_transport_frame_slot_index,
+                .inbound => &self.next_inbound_transport_frame_slot_index,
             };
         }
 
