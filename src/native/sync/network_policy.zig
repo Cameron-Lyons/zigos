@@ -226,26 +226,29 @@ pub const Directory = struct {
         if (self.findByRequestKey(request_key, request)) |policy| return policy;
 
         if (self.policies.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
-        const policy_id = self.nextPolicyId();
-        const slot_index = self.policies.reserveIndex(policy_id) orelse return error.PolicyTableFull;
-        const slot = &self.policies.slots[slot_index];
-        slot.policy = zeroPolicy();
-        slot.policy.id = policy_id;
-        slot.policy.owner = request.owner;
-        slot.policy.workspace_id = request.workspace_id;
-        slot.policy.label_len = native_util.copyTextExact(&slot.policy.label, request.label) catch return error.LabelTooLong;
-        slot.policy.mode = request.mode;
-        slot.policy.target_len = native_util.copyTextExact(&slot.policy.target, request.target) catch return error.TargetTooLong;
-        slot.policy.explicit_internet_grant = request.explicit_internet_grant;
-        slot.policy.require_remote_attestation = request.require_remote_attestation;
+        const policy_id = self.next_policy_id;
+        var policy = zeroPolicy();
+        policy.id = policy_id;
+        policy.owner = request.owner;
+        policy.workspace_id = request.workspace_id;
+        policy.label_len = native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong;
+        policy.mode = request.mode;
+        policy.target_len = native_util.copyTextExact(&policy.target, request.target) catch return error.TargetTooLong;
+        policy.explicit_internet_grant = request.explicit_internet_grant;
+        policy.require_remote_attestation = request.require_remote_attestation;
         if (request.pinned_root_digest) |digest| {
-            slot.policy.pinned_root_digest_present = true;
-            slot.policy.pinned_root_digest = digest;
+            policy.pinned_root_digest_present = true;
+            policy.pinned_root_digest = digest;
         }
         if (request.pinned_attestation_verifier_metadata_digest) |digest| {
-            slot.policy.pinned_attestation_verifier_metadata_digest_present = true;
-            slot.policy.pinned_attestation_verifier_metadata_digest = digest;
+            policy.pinned_attestation_verifier_metadata_digest_present = true;
+            policy.pinned_attestation_verifier_metadata_digest = digest;
         }
+
+        const slot_index = self.policies.reserveIndex(policy_id) orelse return error.PolicyTableFull;
+        const slot = &self.policies.slots[slot_index];
+        slot.policy = policy;
+        self.next_policy_id += 1;
         self.indexPolicy(slot_index);
         return &slot.policy;
     }
@@ -419,11 +422,6 @@ pub const Directory = struct {
             policy.pinned_root_digest_present or
             policy.pinned_attestation_verifier_metadata_digest_present;
         return decision;
-    }
-
-    fn nextPolicyId(self: *Directory) u64 {
-        defer self.next_policy_id += 1;
-        return self.next_policy_id;
     }
 
     fn findByRequestKey(
@@ -757,19 +755,43 @@ test "network policy objects enforce discovery inbound service domain and explic
     try std.testing.expect((try directory.authorize(internet_policy.id, .public_internet)).allowed);
 }
 
-test "network policy targets reject overlong values instead of truncating" {
+test "network policy text rejects overlong values without publishing slots" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 80 };
+    const oversized_label = [_]u8{'x'} ** (MAX_LABEL_BYTES + 1);
+    const oversized_target = [_]u8{'a'} ** (MAX_TARGET_BYTES + 1);
+
+    try std.testing.expectError(
+        error.LabelTooLong,
+        directory.create(.{
+            .owner = owner,
+            .label = oversized_label[0..],
+            .mode = .local_network,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), directory.policies.countInUse());
+    try std.testing.expect(directory.find(1) == null);
 
     try std.testing.expectError(
         error.TargetTooLong,
         directory.create(.{
             .owner = owner,
             .label = "egress",
-            .mode = .named_domain,
-            .target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.zigos.example",
+            .mode = .named_service_identity,
+            .target = oversized_target[0..],
         }),
     );
+    try std.testing.expectEqual(@as(usize, 0), directory.policies.countInUse());
+    try std.testing.expect(directory.find(1) == null);
+
+    const policy = try directory.create(.{
+        .owner = owner,
+        .label = "egress",
+        .mode = .named_service_identity,
+        .target = "overlay.notes.sync",
+    });
+    try std.testing.expectEqual(@as(u64, 1), policy.id);
+    try std.testing.expectEqual(@as(usize, 1), directory.policies.countInUse());
 }
 
 test "network policy objects require explicit targets for scoped discovery and inbound policies" {
