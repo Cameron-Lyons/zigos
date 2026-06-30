@@ -727,7 +727,7 @@ fn validateReleaseKeyringRoot(
         const not_after = try common.expectStringField(allocator, errors, key, key_id, "not_after") orelse "";
         const encoding = try common.expectStringField(allocator, errors, key, key_id, "public_key_encoding") orelse "";
         const public_key = try common.expectStringField(allocator, errors, key, key_id, "public_key") orelse "";
-        try expectStringValue(allocator, errors, key, key_id, "verifier_metadata_schema", "zigos.release-verifier-metadata.v1");
+        try expectStringValue(allocator, errors, key, key_id, "verifier_metadata_schema", "zigos.release-verifier-metadata");
         const verifier_metadata_digest = try common.expectStringField(allocator, errors, key, key_id, "verifier_metadata_digest") orelse "";
         const provider_name = try common.expectStringField(allocator, errors, key, key_id, "provider_name") orelse "";
         const provider_boundary = try common.expectStringField(allocator, errors, key, key_id, "provider_boundary") orelse "";
@@ -918,7 +918,7 @@ const release_keyring_fixture =
     \\      "not_after": "TBD",
     \\      "public_key_encoding": "hex-ed25519-raw",
     \\      "public_key": "TBD",
-    \\      "verifier_metadata_schema": "zigos.release-verifier-metadata.v1",
+    \\      "verifier_metadata_schema": "zigos.release-verifier-metadata",
     \\      "verifier_metadata_digest": "TBD",
     \\      "provider_name": "TBD",
     \\      "provider_boundary": "tpm-secure-enclave-hsm-or-kms-required",
