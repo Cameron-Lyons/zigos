@@ -301,7 +301,7 @@ const StorageRestartProbe = struct {
         if (!self.broker_revoke_rejected) return false;
         if (storage_driver_task_mod.brokeredDmaBufferReady(&session)) return false;
 
-        const grant = device_inventory.ataBootstrapGrant(session.device_id) orelse return false;
+        const grant = device_inventory.ataBootstrapBridgeGrant(session.device_id) orelse return false;
         if (!device_broker.publishAtaController(session.device_id, grant)) return false;
         var stale_broker_session = session;
         storage_driver_task_mod.readAtaBootstrapSessionChecked(&stale_broker_session, storage_restart_scratch_lba, revoked_read[0..]) catch |err| {
@@ -457,14 +457,15 @@ fn seedHostedModelDeviceInventory() void {
     if (builtin.target.os.tag == .freestanding and !device_inventory.modelDeviceInventoryEnabled()) return;
 
     const hosted_xhci_device_id = 0x8086_A0ED_0001;
+    const hosted_nvme_device_id = 0x8086_9A0B_0001;
 
     ensureHostedModelProductionDevice(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory);
     const storage_record = device_inventory.recordForClass(.storage_controller);
     if (!storage_record.detected or
-        (!device_inventory.sourceCanBindProductionDriver(storage_record.device_class, storage_record.source, storage_record.device_id) and
-            storage_record.source != .ata_bootstrap))
+        (device_inventory.modelDeviceInventoryEnabled() and
+            !device_inventory.sourceCanBindProductionDriver(storage_record.device_class, storage_record.source, storage_record.device_id)))
     {
-        device_inventory.registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
+        device_inventory.registerDetected(.storage_controller, hosted_nvme_device_id, .nvme_pci_inventory, false);
     }
     ensureHostedModelProductionDevice(.usb_controller, hosted_xhci_device_id, .xhci_inventory);
     ensureHostedModelProductionDevice(.graphics_adapter, 0x8086_9A49_0001, .pci_inventory);
@@ -554,10 +555,12 @@ fn activateDrivers(
         54,
     ) orelse return false;
     const storage_inventory = device_inventory.recordForClass(.storage_controller);
-    if (bootstrap_driver_port.storagePublication() == null and
-        storage_inventory.detected and
-        storage_inventory.source == .ata_bootstrap)
-    {
+    const can_claim_storage_bootstrap = storage_inventory.detected and
+        (storage_inventory.source == .ata_bootstrap or
+            (device_inventory.modelDeviceInventoryEnabled() and
+                !nvme_bridge.attached() and
+                device_inventory.ataBootstrapBridgeGrant(storage_driver.device_id) != null));
+    if (bootstrap_driver_port.storagePublication() == null and can_claim_storage_bootstrap) {
         const claimed_storage_bootstrap = bootstrap_driver_port.claimStorageAtaBootstrapInventory(
             storage_driver,
             "zigos.system.storage-driver",
@@ -1050,6 +1053,33 @@ fn proveAcceleratorDriverQueueEvents(
 
     common.printBootMarker(boot_markers.service_boot_accelerator_completion_interrupt);
     return true;
+}
+
+test "hosted model inventory promotes ATA bootstrap storage only for modeled boots" {
+    device_inventory.reset();
+    device_inventory.setModelDeviceInventory(false);
+    device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
+    seedHostedModelDeviceInventory();
+    try std.testing.expectEqual(device_inventory.DetectionSource.ata_bootstrap, device_inventory.recordForClass(.storage_controller).source);
+    try std.testing.expectError(error.NonProductionDeviceBinding, device_inventory.requireProductionDriverDeviceId(.storage_controller));
+
+    device_inventory.reset();
+    device_inventory.setModelDeviceInventory(true);
+    device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
+    device_inventory.recordAtaBootstrapGrant(0x1F001, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = 4096,
+    });
+    seedHostedModelDeviceInventory();
+    const modeled_storage = device_inventory.recordForClass(.storage_controller);
+    try std.testing.expectEqual(device_inventory.DetectionSource.nvme_pci_inventory, modeled_storage.source);
+    try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), try device_inventory.requireProductionDriverDeviceId(.storage_controller));
+    try std.testing.expect(device_inventory.ataBootstrapBridgeGrant(modeled_storage.device_id) != null);
+
+    device_inventory.setModelDeviceInventory(false);
 }
 
 fn bootFailureCode(err: anyerror) u32 {

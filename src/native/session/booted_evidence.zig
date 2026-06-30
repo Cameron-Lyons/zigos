@@ -304,7 +304,7 @@ fn runNotesDailyDriverJourney(
             .workspace_label = "Notes Workspace",
             .document_path = "documents/notes.md",
             .task_label = "notes-daily",
-            .task_entry = "app.notes.daily",
+            .task_entry = "app.notes",
             .task_title = "Notes",
             .bundle_id = "app.notes.daily",
             .display_name = "Notes",
@@ -349,6 +349,7 @@ fn runNotesDailyDriverJourney(
     for (controls, 0..) |control, index| {
         const tick = 230 + @as(u64, @intCast(index));
         if (journey.dispatch(.{ .control = control, .tick = tick }).status != .ok) {
+            printJourneyControlRejected(control);
             return false;
         }
     }
@@ -357,6 +358,27 @@ fn runNotesDailyDriverJourney(
     if (!snapshot.complete()) return false;
     emitNotesDailyDriverMarkers(snapshot);
     return true;
+}
+
+fn printJourneyControlRejected(control: production_journey.ProductionJourneyControl) void {
+    common.printBootMarker(switch (control) {
+        .apply_policy => "ZIGOS:NOTES_DAILY:APPLY_POLICY:REJECTED",
+        .trust_device => "ZIGOS:NOTES_DAILY:TRUST_DEVICE:REJECTED",
+        .install_app => "ZIGOS:NOTES_DAILY:INSTALL_APP:REJECTED",
+        .start_task => "ZIGOS:NOTES_DAILY:START_TASK:REJECTED",
+        .open_workspace => "ZIGOS:NOTES_DAILY:OPEN_WORKSPACE:REJECTED",
+        .open_document => "ZIGOS:NOTES_DAILY:OPEN_DOCUMENT:REJECTED",
+        .edit_document => "ZIGOS:NOTES_DAILY:EDIT_DOCUMENT:REJECTED",
+        .review_permission => "ZIGOS:NOTES_DAILY:REVIEW_PERMISSION:REJECTED",
+        .share_document => "ZIGOS:NOTES_DAILY:SHARE_DOCUMENT:REJECTED",
+        .sync_workspace => "ZIGOS:NOTES_DAILY:SYNC_WORKSPACE:REJECTED",
+        .update_app => "ZIGOS:NOTES_DAILY:UPDATE_APP:REJECTED",
+        .rollback_update => "ZIGOS:NOTES_DAILY:ROLLBACK_UPDATE:REJECTED",
+        .recover_system => "ZIGOS:NOTES_DAILY:RECOVER_SYSTEM:REJECTED",
+        .remove_app => "ZIGOS:NOTES_DAILY:REMOVE_APP:REJECTED",
+        .revoke_device => "ZIGOS:NOTES_DAILY:REVOKE_DEVICE:REJECTED",
+        .revoke_policy => "ZIGOS:NOTES_DAILY:REVOKE_POLICY:REJECTED",
+    });
 }
 
 fn runBootedNotesTypedInputLoop(

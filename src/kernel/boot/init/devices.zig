@@ -47,7 +47,9 @@ pub fn init() void {
     device_inventory.reset();
     // QEMU "modeled" test boots cannot expose the exact first-target Intel
     // devices, so explicit test profiles request a modeled inventory seed.
-    // Real freestanding boots keep strict detected-inventory binding.
+    // Native QEMU paths that cannot pass `-append` reliably also fall back to
+    // modeled inventory only when first-target network hardware is absent.
+    // Real freestanding hardware keeps strict detected-inventory binding.
     device.init();
     console_device.init() catch |err| {
         panic_handler.panic("Failed to initialize console device: {}", .{err});

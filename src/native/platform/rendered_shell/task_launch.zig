@@ -89,3 +89,14 @@ test "rendered shell task launch resolves generated archive images for registere
     const image = try imageForConfig(config, false);
     try @import("std").testing.expect(image.isPresent());
 }
+
+test "rendered shell task launch resolves daily driver bundle without model fallback" {
+    const config = .{
+        .task_label = "notes-daily",
+        .task_entry = "app.notes",
+        .bundle_id = "app.notes.daily",
+    };
+
+    const image = try imageForConfig(config, false);
+    try @import("std").testing.expect(image.isPresent());
+}
