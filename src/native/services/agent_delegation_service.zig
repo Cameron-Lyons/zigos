@@ -1,11 +1,13 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
+const native_util = @import("../core/util.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 
 pub const MAX_DELEGATIONS: usize = 16;
+const NO_ACTIVE_GENERATION: u32 = std.math.maxInt(u32);
 
 pub const Error = event_ledger.Error || error{
     ActionBudgetExceeded,
@@ -83,11 +85,22 @@ fn slotDelegationKey(slot: *const Slot) u64 {
 }
 
 const DelegationArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_DELEGATIONS, MAX_DELEGATIONS * 2, slotDelegationKey);
+const DelegationGenerationIndex = indexed_arena.MultimapIndex(MAX_DELEGATIONS, MAX_DELEGATIONS, MAX_DELEGATIONS * 2);
+
+const ActiveGenerationBucket = struct {
+    in_use: bool = false,
+    generation: u32 = 0,
+    active_count: usize = 0,
+};
 
 pub const Service = struct {
     next_delegation_id: u64 = 1,
     minimum_generation: u32 = 1,
     slots: DelegationArena = DelegationArena.init(),
+    active_delegation_count: usize = 0,
+    lowest_active_generation: u32 = NO_ACTIVE_GENERATION,
+    delegation_generation_index: DelegationGenerationIndex = DelegationGenerationIndex.init(),
+    active_generation_buckets: [MAX_DELEGATIONS]ActiveGenerationBucket = [_]ActiveGenerationBucket{.{}} ** MAX_DELEGATIONS,
 
     pub fn init() Service {
         return .{};
@@ -122,7 +135,8 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const slot = self.slots.reserve(self.next_delegation_id) orelse return error.DelegationTableFull;
+        const slot_index = self.slots.reserveIndex(self.next_delegation_id) orelse return error.DelegationTableFull;
+        const slot = &self.slots.slots[slot_index];
         slot.delegation = .{
             .id = self.next_delegation_id,
             .subject = request.subject,
@@ -136,6 +150,7 @@ pub const Service = struct {
             .user_confirmed = request.user_confirmed,
             .audit_enabled = request.audit_enabled,
         };
+        self.accountActiveDelegation(slot_index, &slot.delegation);
         self.next_delegation_id += 1;
         try recordSessionBoundary(ledger, request, true, false);
         if (ledger) |active_ledger| {
@@ -221,13 +236,57 @@ pub const Service = struct {
     ) Error!usize {
         if (minimum_generation <= self.minimum_generation) return 0;
         self.minimum_generation = minimum_generation;
+        if (self.active_delegation_count == 0 or self.lowest_active_generation >= self.minimum_generation) return 0;
+
         var revoked_count: usize = 0;
-        for (&self.slots.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.delegation.revoked) continue;
-            if (slot.delegation.delegation_generation >= self.minimum_generation) continue;
-            slot.delegation.revoked = true;
-            revoked_count += 1;
+        var bucket_index: usize = 0;
+        while (bucket_index < self.active_generation_buckets.len) : (bucket_index += 1) {
+            const bucket = self.active_generation_buckets[bucket_index];
+            if (!bucket.in_use) continue;
+            if (bucket.generation >= self.minimum_generation) continue;
+            revoked_count += try self.revokeActiveGeneration(bucket.generation, ledger, subject, tick, detail);
+        }
+        return revoked_count;
+    }
+
+    pub fn find(self: *Service, delegation_id: u64) ?*Delegation {
+        const slot = self.slots.get(delegation_id) orelse return null;
+        return &slot.delegation;
+    }
+
+    pub fn activeCount(self: *const Service) usize {
+        return self.active_delegation_count;
+    }
+
+    fn accountActiveDelegation(self: *Service, slot_index: usize, delegation: *const Delegation) void {
+        if (delegation.revoked) return;
+        if (!self.delegation_generation_index.append(generationKey(delegation.delegation_generation), slot_index)) {
+            native_util.impossibleByInvariant("agent delegation generation index covers active delegations");
+        }
+        self.accountGeneration(delegation.delegation_generation);
+        self.active_delegation_count += 1;
+        self.lowest_active_generation = @min(self.lowest_active_generation, delegation.delegation_generation);
+    }
+
+    fn revokeActiveGeneration(
+        self: *Service,
+        delegation_generation: u32,
+        ledger: ?*event_ledger.Ledger,
+        subject: principal.PrincipalId,
+        tick: u64,
+        detail: []const u8,
+    ) Error!usize {
+        var revoked_count: usize = 0;
+        var slot_index = self.delegation_generation_index.head(generationKey(delegation_generation));
+        while (slot_index != indexed_arena.no_index) {
+            const next_slot_index = self.delegation_generation_index.next(slot_index);
+            if (slot_index >= MAX_DELEGATIONS) native_util.impossibleByInvariant("agent delegation generation index points outside slots");
+            const slot = &self.slots.slots[slot_index];
+            if (!slot.in_use or slot.delegation.revoked) native_util.impossibleByInvariant("agent delegation generation index points at inactive delegation");
+            if (slot.delegation.delegation_generation != delegation_generation) native_util.impossibleByInvariant("agent delegation generation index points at wrong generation");
+            if (slot.delegation.delegation_generation >= self.minimum_generation) native_util.impossibleByInvariant("agent delegation stale-generation index selected current delegation");
+
+            if (self.revokeDelegation(slot_index, &slot.delegation)) revoked_count += 1;
             if (ledger) |active_ledger| {
                 try active_ledger.recordAgentSessionBoundary(
                     subject,
@@ -241,23 +300,73 @@ pub const Service = struct {
                     detail,
                 );
             }
+            slot_index = next_slot_index;
         }
         return revoked_count;
     }
 
-    pub fn find(self: *Service, delegation_id: u64) ?*Delegation {
-        const slot = self.slots.get(delegation_id) orelse return null;
-        return &slot.delegation;
+    fn revokeDelegation(self: *Service, slot_index: usize, delegation: *Delegation) bool {
+        if (delegation.revoked) return false;
+        delegation.revoked = true;
+        self.unaccountActiveDelegation(slot_index, delegation);
+        self.refreshLowestActiveGenerationFromBuckets();
+        return true;
     }
 
-    pub fn activeCount(self: *const Service) usize {
-        var count: usize = 0;
-        for (&self.slots.slots) |*slot| {
-            if (slot.in_use and !slot.delegation.revoked) count += 1;
+    fn unaccountActiveDelegation(self: *Service, slot_index: usize, delegation: *const Delegation) void {
+        if (!self.delegation_generation_index.remove(generationKey(delegation.delegation_generation), slot_index)) {
+            native_util.impossibleByInvariant("agent delegation generation index missing active delegation");
         }
-        return count;
+        self.unaccountGeneration(delegation.delegation_generation);
+        if (self.active_delegation_count == 0) native_util.impossibleByInvariant("agent delegation active count underflow");
+        self.active_delegation_count -= 1;
+    }
+
+    fn accountGeneration(self: *Service, generation: u32) void {
+        if (self.findGenerationBucket(generation)) |bucket| {
+            bucket.active_count += 1;
+            return;
+        }
+        for (&self.active_generation_buckets) |*bucket| {
+            if (bucket.in_use) continue;
+            bucket.* = .{
+                .in_use = true,
+                .generation = generation,
+                .active_count = 1,
+            };
+            return;
+        }
+        native_util.impossibleByInvariant("agent delegation active generation buckets cover active delegations");
+    }
+
+    fn unaccountGeneration(self: *Service, generation: u32) void {
+        const bucket = self.findGenerationBucket(generation) orelse native_util.impossibleByInvariant("agent delegation active generation bucket missing");
+        if (bucket.active_count == 0) native_util.impossibleByInvariant("agent delegation active generation bucket underflow");
+        bucket.active_count -= 1;
+        if (bucket.active_count == 0) bucket.* = .{};
+    }
+
+    fn findGenerationBucket(self: *Service, generation: u32) ?*ActiveGenerationBucket {
+        for (&self.active_generation_buckets) |*bucket| {
+            if (!bucket.in_use or bucket.generation != generation) continue;
+            return bucket;
+        }
+        return null;
+    }
+
+    fn refreshLowestActiveGenerationFromBuckets(self: *Service) void {
+        var lowest = NO_ACTIVE_GENERATION;
+        for (&self.active_generation_buckets) |*bucket| {
+            if (!bucket.in_use) continue;
+            lowest = @min(lowest, bucket.generation);
+        }
+        self.lowest_active_generation = lowest;
     }
 };
+
+fn generationKey(generation: u32) u64 {
+    return @as(u64, generation) + 1;
+}
 
 fn recordSessionBoundary(
     ledger: ?*event_ledger.Ledger,
@@ -471,6 +580,7 @@ test "agent delegation service kill switch revokes stale generations and blocks 
 
     try std.testing.expectEqual(@as(usize, 1), try service.killSwitch(2, &ledger, subject, 21, "private kill switch"));
     try std.testing.expectEqual(@as(usize, 0), service.activeCount());
+    try std.testing.expectEqual(NO_ACTIVE_GENERATION, service.lowest_active_generation);
     try std.testing.expectError(error.DelegationRevoked, service.recordAction(.{
         .subject = subject,
         .task_id = 3033,
@@ -497,6 +607,124 @@ test "agent delegation service kill switch revokes stale generations and blocks 
     try std.testing.expectEqual(@as(usize, 3), summary.agent_session_events);
     try std.testing.expectEqual(@as(usize, 2), summary.agent_session_denials);
     try std.testing.expectEqual(@as(usize, 2), summary.agent_kill_switch_denials);
+
+    const current = try service.authorize(&policies, subjects, .{
+        .subject = subject,
+        .task_id = 3035,
+        .session_id = 5052,
+        .autonomous_actions = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 512,
+        .delegation_generation = 3,
+        .user_visible_plan = true,
+        .now_tick = 23,
+        .detail = "private current delegation",
+    }, null);
+    try std.testing.expectEqual(@as(usize, 1), service.activeCount());
+    try std.testing.expectEqual(@as(u32, 3), service.lowest_active_generation);
+    try std.testing.expectEqual(@as(usize, 0), try service.killSwitch(3, null, subject, 24, "private no-op kill switch"));
+    try std.testing.expectEqual(@as(usize, 1), service.activeCount());
+    try std.testing.expect(!current.revoked);
+}
+
+test "agent delegation service kill switch walks active generation index" {
+    var policies = policy_object.Directory.init();
+    _ = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 2034,
+        .issuer = .{ .kind = .policy_authority, .serial = 2034 },
+        .label = "agent-session-indexed-kill",
+        .agent_delegation_allowed = true,
+        .max_agent_actions_per_session = 4,
+        .require_agent_user_confirmation = true,
+        .require_agent_audit = true,
+        .require_agent_session_binding = true,
+        .require_agent_local_context = true,
+        .max_agent_context_bytes = 4096,
+        .min_agent_delegation_generation = 1,
+        .require_agent_visible_plan = true,
+    }, .{
+        .label = "agent-service-index-key",
+        .seed = signing.seedFromByte(0xA4),
+    });
+
+    var service = Service.init();
+    var ledger = event_ledger.Ledger.init();
+    const subjects = policy_object.SubjectSet{ .organization_id = 2034 };
+    const subject = principal.PrincipalId{ .kind = .app, .serial = 3038 };
+
+    const stale_one = try service.authorize(&policies, subjects, .{
+        .subject = subject,
+        .task_id = 6101,
+        .session_id = 7101,
+        .autonomous_actions = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 512,
+        .delegation_generation = 1,
+        .user_visible_plan = true,
+    }, null);
+    const stale_two_a = try service.authorize(&policies, subjects, .{
+        .subject = subject,
+        .task_id = 6102,
+        .session_id = 7102,
+        .autonomous_actions = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 512,
+        .delegation_generation = 2,
+        .user_visible_plan = true,
+    }, null);
+    const stale_two_b = try service.authorize(&policies, subjects, .{
+        .subject = subject,
+        .task_id = 6103,
+        .session_id = 7103,
+        .autonomous_actions = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 512,
+        .delegation_generation = 2,
+        .user_visible_plan = true,
+    }, null);
+    const current = try service.authorize(&policies, subjects, .{
+        .subject = subject,
+        .task_id = 6104,
+        .session_id = 7104,
+        .autonomous_actions = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 512,
+        .delegation_generation = 5,
+        .user_visible_plan = true,
+    }, null);
+
+    try std.testing.expectEqual(@as(usize, 4), service.activeCount());
+    try std.testing.expectEqual(@as(u32, 1), service.lowest_active_generation);
+    try std.testing.expectEqual(@as(usize, 1), service.delegation_generation_index.count(generationKey(1)));
+    try std.testing.expectEqual(@as(usize, 2), service.delegation_generation_index.count(generationKey(2)));
+    try std.testing.expectEqual(@as(usize, 1), service.delegation_generation_index.count(generationKey(5)));
+
+    try std.testing.expectEqual(@as(usize, 3), try service.killSwitch(3, &ledger, subject, 41, "private indexed kill switch"));
+    try std.testing.expect(stale_one.revoked);
+    try std.testing.expect(stale_two_a.revoked);
+    try std.testing.expect(stale_two_b.revoked);
+    try std.testing.expect(!current.revoked);
+    try std.testing.expectEqual(@as(usize, 1), service.activeCount());
+    try std.testing.expectEqual(@as(u32, 5), service.lowest_active_generation);
+    try std.testing.expectEqual(@as(usize, 0), service.delegation_generation_index.count(generationKey(1)));
+    try std.testing.expectEqual(@as(usize, 0), service.delegation_generation_index.count(generationKey(2)));
+    try std.testing.expectEqual(@as(usize, 1), service.delegation_generation_index.count(generationKey(5)));
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 3), summary.agent_session_events);
+    try std.testing.expectEqual(@as(usize, 3), summary.agent_session_denials);
+    try std.testing.expectEqual(@as(usize, 3), summary.agent_kill_switch_denials);
 }
 
 test "agent delegation service audits denied actions and enforces cumulative context budget" {
