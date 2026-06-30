@@ -282,6 +282,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_active_overlay_session_count = @hasField(sync_service.Service, "active_overlay_session_count"),
         .indexes_workspace_policies = @hasField(sync_service.Service, "workspace_policy_index"),
         .indexes_overlays = @hasField(sync_service.Service, "overlay_index"),
+        .indexes_replica_scopes = @hasField(sync_service.Service, "replica_scope_index"),
         .indexes_database_contracts = @hasField(sync_service.Service, "database_contract_index"),
         .indexes_database_contract_equivalence = @hasField(sync_service.Service, "database_contract_equivalent_index"),
         .indexes_database_contract_bundles = @hasField(sync_service.Service, "database_contract_bundle_index"),

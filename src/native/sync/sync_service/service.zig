@@ -96,6 +96,7 @@ const ConflictPathIndex = sync_indexes.ConflictPathIndex;
 const ConflictObjectIndex = sync_indexes.ConflictObjectIndex;
 const ConflictScopeIndex = sync_indexes.ConflictScopeIndex;
 const ReplicaIndex = sync_indexes.ReplicaIndex;
+const ReplicaScopeIndex = sync_indexes.ReplicaScopeIndex;
 const TransportFramePathIndex = sync_indexes.TransportFramePathIndex;
 const TransportFrameTargetIndex = sync_indexes.TransportFrameTargetIndex;
 pub const Service = ServiceWith(.{});
@@ -168,6 +169,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         conflict_object_index: ConflictObjectIndex = ConflictObjectIndex.init(),
         conflict_scope_index: ConflictScopeIndex = ConflictScopeIndex.init(),
         replica_index: ReplicaIndex = ReplicaIndex.init(),
+        replica_scope_index: ReplicaScopeIndex = ReplicaScopeIndex.init(),
         outbound_transport_path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
         inbound_transport_path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
         outbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
@@ -210,7 +212,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             service.rebuildOverlayIndex();
             service.rebuildDatabaseContractIndexes();
             service.rebuildConflictIndexes();
-            service.rebuildReplicaIndex();
+            service.rebuildReplicaIndexes();
             service.rebuildTransportFrameIndexes();
             return service;
         }
@@ -1492,10 +1494,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             workspace_generation: u32,
         ) Error!void {
             if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
+            var inserted = false;
             const slot_index = if (self.lookupReplicaSlotIndex(workspace_id, device_id, path, path_hash)) |existing_index|
                 existing_index
-            else
-                self.state().replica_entries.reserveIndex(state_support.replicaArenaKey(workspace_id, device_id, path_hash)) orelse return error.ReplicaTableFull;
+            else blk: {
+                inserted = true;
+                break :blk self.state().replica_entries.reserveIndex(state_support.replicaArenaKey(workspace_id, device_id, path_hash)) orelse return error.ReplicaTableFull;
+            };
             const slot = &self.state().replica_entries.slots[slot_index];
             slot.in_use = true;
             slot.entry.workspace_id = workspace_id;
@@ -1505,14 +1510,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.entry.version_id = object_store.ids.raw(version_id);
             slot.entry.workspace_generation = workspace_generation;
             self.replica_index.insert(sync_indexes.replicaIndexLookupKey(workspace_id, device_id, path_hash), slot_index);
+            if (inserted) self.indexReplicaScopeSlot(slot_index);
             self.resident().markDirty();
         }
 
         fn replicaWorkspaceGeneration(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) u32 {
             var generation: u32 = 0;
-            for (self.stateConst().replica_entries.slots) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.entry.workspace_id != workspace_id or !slot.entry.device_id.eql(device_id)) continue;
+            var slot_index = self.replica_scope_index.head(sync_indexes.replicaScopeLookupKey(workspace_id, device_id));
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.replica_scope_index.next(slot_index)) {
+                const slot = self.replicaScopeIndexSlot(slot_index, workspace_id, device_id);
                 generation = @max(generation, slot.entry.workspace_generation);
             }
             return generation;
@@ -1615,12 +1621,41 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             );
         }
 
-        fn rebuildReplicaIndex(self: *Self) void {
+        fn rebuildReplicaIndexes(self: *Self) void {
             self.replica_index.reset();
+            self.replica_scope_index.reset();
             for (self.stateConst().replica_entries.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.replica_index.insert(sync_indexes.replicaIndexLookupKey(slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()), slot_index);
+                self.indexReplicaScopeSlot(slot_index);
             }
+        }
+
+        fn indexReplicaScopeSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= MAX_REPLICA_ENTRIES) native_util.impossibleByInvariant("replica scope index update points outside slots");
+            const slot = &self.stateConst().replica_entries.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("replica scope index update requires a live replica");
+            if (!self.replica_scope_index.append(
+                sync_indexes.replicaScopeLookupKey(slot.entry.workspace_id, slot.entry.device_id),
+                slot_index,
+            )) {
+                native_util.impossibleByInvariant("replica scope index capacity covers replica slots");
+            }
+        }
+
+        fn replicaScopeIndexSlot(
+            self: *const Self,
+            slot_index: usize,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+        ) *const ReplicaSlot {
+            if (slot_index >= MAX_REPLICA_ENTRIES) native_util.impossibleByInvariant("replica scope index points outside slots");
+            const slot = &self.stateConst().replica_entries.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("replica scope index points at a free slot");
+            if (!sync_indexes.replicaScopeSlotMatches(.{ .workspace_id = workspace_id, .device_id = device_id }, slot)) {
+                native_util.impossibleByInvariant("replica scope index points at the wrong slot");
+            }
+            return slot;
         }
 
         fn rebuildTransportFrameIndexes(self: *Self) void {

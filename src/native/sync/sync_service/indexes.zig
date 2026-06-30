@@ -21,7 +21,8 @@ pub const ConflictPathIndex = indexed_arena.UniqueIndex(conflict_index_capacity)
 pub const ConflictObjectIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
 pub const ConflictScopeIndex = indexed_arena.MultimapIndex(state_support.MAX_CONFLICTS, state_support.MAX_CONFLICTS, conflict_index_capacity);
 pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
-pub const TransportFramePathIndex = indexed_arena.MultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES, transport_frame_index_capacity);
+pub const ReplicaScopeIndex = CompactMultimapIndex(state_support.MAX_REPLICA_ENTRIES, state_support.MAX_REPLICA_ENTRIES);
+pub const TransportFramePathIndex = CompactMultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES);
 pub const TransportFrameTargetIndex = CompactMultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES);
 
 pub const WorkspacePolicyLookup = struct {
@@ -37,6 +38,11 @@ pub const ReplicaLookup = struct {
     device_id: principal.PrincipalId,
     path: []const u8,
     path_hash: u64,
+};
+
+pub const ReplicaScopeLookup = struct {
+    workspace_id: u64,
+    device_id: principal.PrincipalId,
 };
 
 pub const DatabaseContractLookup = struct {
@@ -65,6 +71,11 @@ pub fn replicaSlotMatches(context: ReplicaLookup, slot: *const state_support.Rep
         std.mem.eql(u8, slot.entry.pathSlice(), context.path);
 }
 
+pub fn replicaScopeSlotMatches(context: ReplicaScopeLookup, slot: *const state_support.ReplicaSlot) bool {
+    return slot.entry.workspace_id == context.workspace_id and
+        slot.entry.device_id.eql(context.device_id);
+}
+
 pub fn databaseContractSlotMatches(context: DatabaseContractLookup, slot: *const state_support.DatabaseContractSlot) bool {
     return slot.contract.id == context.id;
 }
@@ -78,6 +89,14 @@ pub fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalent
 
 pub fn replicaIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
     return state_support.replicaArenaKey(workspace_id, device_id, path_hash);
+}
+
+pub fn replicaScopeLookupKey(workspace_id: u64, device_id: principal.PrincipalId) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5250_4C43_5343_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, device_id);
+    return indexed_arena.nonZeroKey(hash);
 }
 
 pub fn workspacePolicyLookupKey(workspace_id: u64) u64 {
