@@ -55,7 +55,7 @@ qemu_harness_append_native_store_drive() {
   )
   # ZIGOS_NATIVE_STORE_BUS=nvme exposes the native store as a real NVMe
   # controller so the kernel NVMe data-plane driver can drive it (the
-  # storage-durability proof opts in); default stays legacy IDE/ATA.
+  # storage-durability proof opts in); default stays IDE/ATA.
   if [ "${ZIGOS_NATIVE_STORE_BUS:-ide}" = "nvme" ]; then
     QEMU_HARNESS_COMMAND+=(
       -device "nvme,drive=disk0,serial=zigosnvme0"

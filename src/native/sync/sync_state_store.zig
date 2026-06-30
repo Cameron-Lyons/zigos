@@ -18,7 +18,7 @@ const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 const record_magic = "ZGSYNCR";
 const record_version: u16 = 5;
-const record_prefix = "state/v5/";
+const record_prefix = "state/";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
 const max_record_bytes: usize = 2048;
@@ -717,9 +717,7 @@ fn readEnvelope(reader: *CursorReader) Error!Envelope {
     try reader.readBytes(&magic_buffer);
     if (!std.mem.eql(u8, &magic_buffer, record_magic)) return error.CorruptState;
     const version = try reader.readU16();
-    // Single-version on-disk format: only the current record_version is written, so
-    // any other version is corrupt/forged and must fail closed (the prior v1-v4
-    // compat branches were dead and have been removed under the ignore-compat directive).
+    // Single-version on-disk format: only the current record_version is accepted.
     if (version != record_version) return error.UnsupportedStateVersion;
     return .{
         .kind = try parseRecordKind(try reader.readByte()),

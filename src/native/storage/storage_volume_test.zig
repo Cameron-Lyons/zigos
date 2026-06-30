@@ -119,10 +119,10 @@ test "storage volume separates generic, target nvme, and brokered ata attachment
     try std.testing.expect(!volume.hasProductionStorageBackend());
 }
 
-test "storage volume rejects undersized legacy images without mutating state" {
-    const legacy_image = try std.testing.allocator.alloc(u8, image_bytes - storage_volume.sector_size);
-    defer std.testing.allocator.free(legacy_image);
-    @memset(legacy_image, 0xA5);
+test "storage volume rejects undersized images without mutating state" {
+    const undersized_image = try std.testing.allocator.alloc(u8, image_bytes - storage_volume.sector_size);
+    defer std.testing.allocator.free(undersized_image);
+    @memset(undersized_image, 0xA5);
 
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();
@@ -137,7 +137,7 @@ test "storage volume rejects undersized legacy images without mutating state" {
         .metadata = try object_store.signMetadata(signer, "preexisting", "text/plain", .document, "preexisting", 17),
     });
 
-    try std.testing.expectError(error.ImageTooSmall, loadFromImage(legacy_image, &loaded_store, &loaded_workspaces));
+    try std.testing.expectError(error.ImageTooSmall, loadFromImage(undersized_image, &loaded_store, &loaded_workspaces));
     try std.testing.expectEqual(@as(usize, 1), loaded_store.objectCount());
     try std.testing.expectEqual(@as(usize, 0), loaded_workspaces.workspaces.countInUse());
 }

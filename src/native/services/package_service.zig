@@ -549,7 +549,7 @@ fn launchProvenance(
 }
 
 pub fn activeRevisionDigest(bundle: *const InstalledBundle) Digest {
-    return installedBundleRevisionDigest(bundle, "zigos.package.active-revision.v1");
+    return installedBundleRevisionDigest(bundle, "zigos.package.active-revision");
 }
 
 pub fn rollbackRequestForActive(bundle: *const InstalledBundle) RollbackRequest {
@@ -567,7 +567,7 @@ pub fn removeRequestForActive(bundle: *const InstalledBundle) RemoveRequest {
 }
 
 pub fn offboardRemovedBundleDigest(bundle: *const InstalledBundle) Digest {
-    return installedBundleRevisionDigest(bundle, "zigos.package.offboard.removed-bundle.v2");
+    return installedBundleRevisionDigest(bundle, "zigos.package.offboard.removed-bundle");
 }
 
 fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const u8) Digest {

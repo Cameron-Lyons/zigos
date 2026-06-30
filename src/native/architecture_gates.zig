@@ -3,7 +3,7 @@
 // holds, so removing or renaming a gated arena/index/decl makes the corresponding
 // flag false and fails the gate.
 //
-// Absence claims ("removed legacy fixed-table scan", "removed monolithic codec",
+// Absence claims ("removed fixed-table scan", "removed monolithic codec",
 // etc.) are intentionally NOT modeled: the removal of a pattern cannot be proven
 // by introspection, and the positive presence checks below already prove the
 // indexed replacements exist. This file is test-only (imported solely by
