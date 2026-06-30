@@ -187,6 +187,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         inbound_transport_frame_count: usize = 0,
         next_outbound_transport_frame_slot_index: usize = 0,
         next_inbound_transport_frame_slot_index: usize = 0,
+        next_workspace_policy_slot_index: usize = 0,
+        next_overlay_slot_index: usize = 0,
+        next_replica_slot_index: usize = 0,
+        next_conflict_slot_index: usize = 0,
+        next_database_contract_slot_index: usize = 0,
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         replica_scope_index: ReplicaScopeIndex = ReplicaScopeIndex.init(),
         next_overlay_session_id: u64 = 1,
@@ -1459,8 +1464,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &self.state().workspace_policies[slot_index];
         }
 
-        fn allocateWorkspacePolicyIndex(self: *const Self) ?usize {
-            return fixed_table.firstFreeSlotIndex(WorkspacePolicySlot, MAX_WORKSPACE_POLICIES, &self.stateConst().workspace_policies);
+        fn allocateWorkspacePolicyIndex(self: *Self) ?usize {
+            return allocateFixedSlotIndex(
+                WorkspacePolicySlot,
+                MAX_WORKSPACE_POLICIES,
+                &self.stateConst().workspace_policies,
+                &self.next_workspace_policy_slot_index,
+            );
         }
 
         fn lookupOverlaySlotIndex(self: *const Self, workspace_id: u64) ?usize {
@@ -1484,8 +1494,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &self.state().overlays[slot_index];
         }
 
-        fn allocateOverlayIndex(self: *const Self) ?usize {
-            return fixed_table.firstFreeSlotIndex(OverlaySlot, MAX_OVERLAYS, &self.stateConst().overlays);
+        fn allocateOverlayIndex(self: *Self) ?usize {
+            return allocateFixedSlotIndex(
+                OverlaySlot,
+                MAX_OVERLAYS,
+                &self.stateConst().overlays,
+                &self.next_overlay_slot_index,
+            );
         }
 
         fn nextOverlayId(self: *Self) u64 {
@@ -1562,7 +1577,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 existing_index
             else blk: {
                 inserted = true;
-                break :blk fixed_table.firstFreeSlotIndex(ReplicaSlot, MAX_REPLICA_ENTRIES, &self.stateConst().replica_entries) orelse return error.ReplicaTableFull;
+                break :blk self.allocateReplicaIndex() orelse return error.ReplicaTableFull;
             };
             const slot = &self.state().replica_entries[slot_index];
             slot.in_use = true;
@@ -2085,12 +2100,42 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             _ = self.outbound_transport_path_index.remove(outboundTransportPathIndexKeyFor(frame), slot_index);
         }
 
-        fn allocateConflictIndex(self: *const Self) ?usize {
-            return fixed_table.firstFreeSlotIndex(ConflictSlot, MAX_CONFLICTS, &self.stateConst().conflicts);
+        fn allocateReplicaIndex(self: *Self) ?usize {
+            return allocateFixedSlotIndex(
+                ReplicaSlot,
+                MAX_REPLICA_ENTRIES,
+                &self.stateConst().replica_entries,
+                &self.next_replica_slot_index,
+            );
         }
 
-        fn allocateDatabaseContractIndex(self: *const Self) ?usize {
-            return fixed_table.firstFreeSlotIndex(DatabaseContractSlot, MAX_DATABASE_CONTRACTS, &self.stateConst().database_contracts);
+        fn allocateConflictIndex(self: *Self) ?usize {
+            return allocateFixedSlotIndex(
+                ConflictSlot,
+                MAX_CONFLICTS,
+                &self.stateConst().conflicts,
+                &self.next_conflict_slot_index,
+            );
+        }
+
+        fn allocateDatabaseContractIndex(self: *Self) ?usize {
+            return allocateFixedSlotIndex(
+                DatabaseContractSlot,
+                MAX_DATABASE_CONTRACTS,
+                &self.stateConst().database_contracts,
+                &self.next_database_contract_slot_index,
+            );
+        }
+
+        fn allocateFixedSlotIndex(
+            comptime Slot: type,
+            comptime capacity: usize,
+            slots: *const [capacity]Slot,
+            cursor: *usize,
+        ) ?usize {
+            const slot_index = fixed_table.firstFreeSlotIndexFrom(Slot, capacity, slots, cursor.*) orelse return null;
+            cursor.* = (slot_index + 1) % capacity;
+            return slot_index;
         }
 
         fn nextDatabaseContractId(self: *Self) u64 {

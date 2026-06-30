@@ -166,6 +166,11 @@ pub const indexed_hot_path_tables = .{
             @hasField(sync_service.Service, "inbound_transport_frame_count"),
         .tracks_transport_frame_allocation_cursors = @hasField(sync_service.Service, "next_outbound_transport_frame_slot_index") and
             @hasField(sync_service.Service, "next_inbound_transport_frame_slot_index"),
+        .tracks_sync_table_allocation_cursors = @hasField(sync_service.Service, "next_workspace_policy_slot_index") and
+            @hasField(sync_service.Service, "next_overlay_slot_index") and
+            @hasField(sync_service.Service, "next_replica_slot_index") and
+            @hasField(sync_service.Service, "next_conflict_slot_index") and
+            @hasField(sync_service.Service, "next_database_contract_slot_index"),
     },
     .sync_adapters = .{
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),

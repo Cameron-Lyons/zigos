@@ -11,8 +11,16 @@ pub fn firstFreeSlot(comptime Slot: type, comptime capacity: usize, slots: *[cap
 }
 
 pub fn firstFreeSlotIndex(comptime Slot: type, comptime capacity: usize, slots: *const [capacity]Slot) ?usize {
-    for (slots, 0..) |slot, index| {
-        if (!slot.in_use) return index;
+    return firstFreeSlotIndexFrom(Slot, capacity, slots, 0);
+}
+
+pub fn firstFreeSlotIndexFrom(comptime Slot: type, comptime capacity: usize, slots: *const [capacity]Slot, start_index: usize) ?usize {
+    if (capacity == 0) return null;
+    const bounded_start = start_index % capacity;
+    var offset: usize = 0;
+    while (offset < capacity) : (offset += 1) {
+        const index = (bounded_start + offset) % capacity;
+        if (!slots[index].in_use) return index;
     }
     return null;
 }
@@ -153,6 +161,11 @@ test "fixed table helper allocates finds counts and uses id indexes" {
     const second_index = firstFreeSlotIndex(TestSlot, slots.len, &slots).?;
     slots[second_index] = .{ .in_use = true, .id = 42, .label = "beta" };
     id_index.insert(index.len, &index, slots[second_index].id, second_index, "test index covers slots");
+
+    try std.testing.expectEqual(@as(usize, 3), firstFreeSlotIndexFrom(TestSlot, slots.len, &slots, 3).?);
+    slots[3] = .{ .in_use = true, .id = 43, .label = "gamma" };
+    try std.testing.expectEqual(@as(usize, 2), firstFreeSlotIndexFrom(TestSlot, slots.len, &slots, 3).?);
+    slots[3] = .{};
 
     try std.testing.expectEqual(@as(usize, 2), countInUse(TestSlot, slots.len, &slots));
     try std.testing.expectEqual(@as(usize, 1), countMatching(TestSlot, slots.len, &slots, "beta", TestFind.byLabel));
