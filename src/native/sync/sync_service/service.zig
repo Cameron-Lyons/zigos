@@ -173,6 +173,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         outbound_transport_path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
         inbound_transport_path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
         outbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
+        inbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
         closed_overlay_sessions: ClosedOverlaySessionIndex = ClosedOverlaySessionIndex.init(),
@@ -1662,6 +1663,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.outbound_transport_path_index.reset();
             self.inbound_transport_path_index.reset();
             self.outbound_transport_target_index.reset();
+            self.inbound_transport_target_index.reset();
             for (self.stateConst().outbound_transport_frames.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.indexTransportFramePathSlot(.outbound, slot_index);
@@ -1670,6 +1672,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (self.stateConst().inbound_transport_frames.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
                 self.indexTransportFramePathSlot(.inbound, slot_index);
+                self.indexInboundTransportTargetSlot(slot_index);
             }
         }
 
@@ -1706,7 +1709,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             };
             slot.frame.path_len = try state_support.copyTransportPath(&slot.frame.path, request.path);
             self.indexTransportFramePathSlot(queue_kind, slot_index);
-            if (queue_kind == .outbound) self.indexOutboundTransportTargetSlot(slot_index);
+            switch (queue_kind) {
+                .outbound => self.indexOutboundTransportTargetSlot(slot_index),
+                .inbound => self.indexInboundTransportTargetSlot(slot_index),
+            }
             self.resident().markDirty();
             return slot.frame;
         }
@@ -1750,6 +1756,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
             const index = victim_index orelse return null;
             self.unindexTransportFramePathSlot(.inbound, index);
+            self.unindexInboundTransportTargetSlot(index);
             _ = frames.removeIndex(index);
             frames.clearDirty();
             const slot_index = frames.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), index) orelse return null;
@@ -1779,14 +1786,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn transportFrameSlotCountFor(self: *const Self, queue_kind: TransportQueueKind, workspace_id: u64, target_device: principal.PrincipalId) usize {
             if (queue_kind == .outbound) return self.outboundTransportFrameSlotCountFor(workspace_id, target_device);
-            var count: usize = 0;
-            for (self.transportFrameSlotsConst(queue_kind)) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.frame.workspace_id == workspace_id and slot.frame.target_device.eql(target_device)) {
-                    count += 1;
-                }
-            }
-            return count;
+            return self.inboundTransportFrameSlotCountFor(workspace_id, target_device);
         }
 
         fn copyTransportFrameSlotsForSince(
@@ -1816,6 +1816,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             while (slot_index != indexed_arena.no_index) : (slot_index = self.outbound_transport_target_index.next(slot_index)) {
                 const slot = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
                 if (!slot.acked) count += 1;
+            }
+            return count;
+        }
+
+        fn inboundTransportFrameSlotCountFor(self: *const Self, workspace_id: u64, target_device: principal.PrincipalId) usize {
+            var count: usize = 0;
+            var slot_index = self.inbound_transport_target_index.head(sync_indexes.transportFrameTargetLookupKey(workspace_id, target_device));
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.inbound_transport_target_index.next(slot_index)) {
+                _ = self.inboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
+                count += 1;
             }
             return count;
         }
@@ -1851,6 +1861,21 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (!slot.in_use) native_util.impossibleByInvariant("outbound transport target index points at a free slot");
             if (slot.frame.workspace_id != workspace_id or !slot.frame.target_device.eql(target_device)) {
                 native_util.impossibleByInvariant("outbound transport target index points at the wrong slot");
+            }
+            return slot;
+        }
+
+        fn inboundTransportTargetIndexSlot(
+            self: *const Self,
+            slot_index: usize,
+            workspace_id: u64,
+            target_device: principal.PrincipalId,
+        ) *const DurableTransportFrameSlot {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("inbound transport target index points outside slots");
+            const slot = &self.stateConst().inbound_transport_frames.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("inbound transport target index points at a free slot");
+            if (slot.frame.workspace_id != workspace_id or !slot.frame.target_device.eql(target_device)) {
+                native_util.impossibleByInvariant("inbound transport target index points at the wrong slot");
             }
             return slot;
         }
@@ -1968,6 +1993,30 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 slot_index,
             )) {
                 native_util.impossibleByInvariant("outbound transport target index missing live slot");
+            }
+        }
+
+        fn indexInboundTransportTargetSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("inbound transport target index update points outside slots");
+            const slot = &self.stateConst().inbound_transport_frames.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("inbound transport target index update requires a live slot");
+            if (!self.inbound_transport_target_index.append(
+                sync_indexes.transportFrameTargetLookupKey(slot.frame.workspace_id, slot.frame.target_device),
+                slot_index,
+            )) {
+                native_util.impossibleByInvariant("inbound transport target index capacity covers transport frame slots");
+            }
+        }
+
+        fn unindexInboundTransportTargetSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("inbound transport target index removal points outside slots");
+            const slot = &self.stateConst().inbound_transport_frames.slots[slot_index];
+            if (!slot.in_use) return;
+            if (!self.inbound_transport_target_index.remove(
+                sync_indexes.transportFrameTargetLookupKey(slot.frame.workspace_id, slot.frame.target_device),
+                slot_index,
+            )) {
+                native_util.impossibleByInvariant("inbound transport target index missing live slot");
             }
         }
 
