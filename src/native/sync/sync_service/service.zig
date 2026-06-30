@@ -1,7 +1,6 @@
 const std = @import("std");
 const capability = @import("../../kernel_api/capability.zig");
 const device_graph = @import("../device_graph.zig");
-const fixed_table = @import("../../core/fixed_table.zig");
 const indexed_arena = @import("../../core/indexed_arena.zig");
 const manifest = @import("../../policy/manifest.zig");
 const native_util = @import("../../core/util.zig");
@@ -84,15 +83,20 @@ const zeroOverlay = state_support.zeroOverlay;
 const zeroWorkspacePolicy = state_support.zeroWorkspacePolicy;
 
 const OverlaySessionSlot = overlay_model.OverlaySessionSlot;
-const ConflictLookup = sync_indexes.ConflictLookup;
+const WorkspacePolicyLookup = sync_indexes.WorkspacePolicyLookup;
+const OverlayLookup = sync_indexes.OverlayLookup;
+const DatabaseContractLookup = sync_indexes.DatabaseContractLookup;
 const DatabaseContractEquivalentLookup = sync_indexes.DatabaseContractEquivalentLookup;
-const ReplicaIndex = sync_indexes.ReplicaIndex;
 const WorkspacePolicyIndex = sync_indexes.WorkspacePolicyIndex;
 const OverlayIndex = sync_indexes.OverlayIndex;
-const DatabaseContractIndex = sync_indexes.DatabaseContractIndex;
-const DatabaseContractEquivalentIndex = sync_indexes.DatabaseContractEquivalentIndex;
+const DatabaseContractIdIndex = sync_indexes.DatabaseContractIdIndex;
 const DatabaseContractBundleIndex = sync_indexes.DatabaseContractBundleIndex;
-const ConflictIndex = sync_indexes.ConflictIndex;
+const DatabaseContractEquivalentIndex = sync_indexes.DatabaseContractEquivalentIndex;
+const ConflictPathIndex = sync_indexes.ConflictPathIndex;
+const ConflictObjectIndex = sync_indexes.ConflictObjectIndex;
+const ConflictScopeIndex = sync_indexes.ConflictScopeIndex;
+const ReplicaIndex = sync_indexes.ReplicaIndex;
+const TransportFramePathIndex = sync_indexes.TransportFramePathIndex;
 pub const Service = ServiceWith(.{});
 
 const sync_port = @import("port.zig");
@@ -156,11 +160,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         owned_resident_state: ResidentState = .{},
         workspace_policy_index: WorkspacePolicyIndex = WorkspacePolicyIndex.init(),
         overlay_index: OverlayIndex = OverlayIndex.init(),
-        database_contract_index: DatabaseContractIndex = DatabaseContractIndex.init(),
-        database_contract_equivalent_index: DatabaseContractEquivalentIndex = DatabaseContractEquivalentIndex.init(),
+        database_contract_id_index: DatabaseContractIdIndex = DatabaseContractIdIndex.init(),
         database_contract_bundle_index: DatabaseContractBundleIndex = DatabaseContractBundleIndex.init(),
-        conflict_index: ConflictIndex = ConflictIndex.init(),
+        database_contract_equivalent_index: DatabaseContractEquivalentIndex = DatabaseContractEquivalentIndex.init(),
+        conflict_path_index: ConflictPathIndex = ConflictPathIndex.init(),
+        conflict_object_index: ConflictObjectIndex = ConflictObjectIndex.init(),
+        conflict_scope_index: ConflictScopeIndex = ConflictScopeIndex.init(),
         replica_index: ReplicaIndex = ReplicaIndex.init(),
+        outbound_transport_path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
+        inbound_transport_path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
         closed_overlay_sessions: ClosedOverlaySessionIndex = ClosedOverlaySessionIndex.init(),
@@ -196,7 +204,12 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var service = initDefault(service_id, task_id, owner);
             service.loaded_existing_state = loaded_existing_state;
             service.resident_store = resident_state;
-            service.rebuildLookupIndexes();
+            service.rebuildWorkspacePolicyIndex();
+            service.rebuildOverlayIndex();
+            service.rebuildDatabaseContractIndexes();
+            service.rebuildConflictIndexes();
+            service.rebuildReplicaIndex();
+            service.rebuildTransportFramePathIndexes();
             return service;
         }
 
@@ -422,9 +435,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             request: WorkspacePolicyRequest,
         ) Error!*WorkspacePolicy {
             if (request.selective_prefixes.len > MAX_SELECTIVE_PREFIXES) return error.TooManySelectivePrefixes;
+            if (request.relay_domain.len > MAX_LABEL_BYTES) return error.NetworkTargetTooLong;
+            for (request.selective_prefixes) |prefix| {
+                if (prefix.len > MAX_PREFIX_BYTES) return error.PathTooLong;
+            }
 
-            const slot_index = self.lookupWorkspacePolicySlotIndex(request.workspace_id) orelse self.allocateWorkspacePolicyIndex() orelse return error.WorkspacePolicyTableFull;
-            const slot = &self.state().workspace_policies[slot_index];
+            const slot_index = self.lookupWorkspacePolicySlotIndex(request.workspace_id) orelse
+                self.allocateWorkspacePolicyIndex(request.workspace_id) orelse return error.WorkspacePolicyTableFull;
+            const slot = &self.state().workspace_policies.slots[slot_index];
             slot.in_use = true;
             slot.policy = zeroWorkspacePolicy();
             slot.policy.workspace_id = request.workspace_id;
@@ -442,7 +460,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 slot.policy.selective_prefix_count += 1;
             }
 
-            self.workspace_policy_index.insert(sync_indexes.workspacePolicyIndexLookupKey(slot.policy.workspace_id), slot_index);
+            self.workspace_policy_index.insert(sync_indexes.workspacePolicyLookupKey(request.workspace_id), slot_index);
             try self.checkpoint();
             return &slot.policy;
         }
@@ -459,8 +477,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             service_identity: []const u8,
             remote_access_enabled: bool,
         ) Error!*OverlayRecord {
-            const slot_index = self.lookupOverlaySlotIndex(workspace_id) orelse self.allocateOverlayIndex() orelse return error.OverlayTableFull;
-            const slot = &self.state().overlays[slot_index];
+            if (service_identity.len > MAX_LABEL_BYTES) return error.ServiceIdentityTooLong;
+
+            const slot_index = self.lookupOverlaySlotIndex(workspace_id) orelse
+                self.allocateOverlayIndex(workspace_id) orelse return error.OverlayTableFull;
+            const slot = &self.state().overlays.slots[slot_index];
             slot.in_use = true;
             if (slot.overlay.id == 0) {
                 slot.overlay = zeroOverlay();
@@ -470,7 +491,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.overlay.home_device = home_device;
             slot.overlay.service_identity_len = native_util.copyTextExact(&slot.overlay.service_identity, service_identity) catch return error.ServiceIdentityTooLong;
             slot.overlay.remote_access_enabled = remote_access_enabled;
-            self.overlay_index.insert(sync_indexes.overlayIndexLookupKey(slot.overlay.workspace_id), slot_index);
+            self.overlay_index.insert(sync_indexes.overlayLookupKey(workspace_id), slot_index);
             try self.checkpoint();
             return &slot.overlay;
         }
@@ -652,6 +673,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             label: []const u8,
             identity: signing.SignerIdentity,
         ) Error!*DatabaseContract {
+            if (bundle_id.len > MAX_LABEL_BYTES) return error.BundleIdTooLong;
+            if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
+
             var message_buffer: [DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES]u8 = undefined;
             const message = state_support.databaseContractMessage(&message_buffer, workspace_id, bundle_id, label) catch return error.InvalidContractSignature;
             const signature = signing.sign(identity, message) catch return error.InvalidContractSignature;
@@ -661,20 +685,21 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 return existing;
             }
 
-            const slot_index = self.allocateDatabaseContractIndex() orelse return error.DatabaseContractTableFull;
             var contract = zeroDatabaseContract();
+            contract.id = self.stateConst().next_contract_id;
             contract.workspace_id = workspace_id;
-            contract.bundle_id_len = native_util.copyTextExact(&contract.bundle_id, bundle_id) catch return error.BundleIdTooLong;
-            contract.label_len = native_util.copyTextExact(&contract.label, label) catch return error.LabelTooLong;
+            contract.bundle_id_len = native_util.copyTextExact(&contract.bundle_id, bundle_id) catch unreachable;
+            contract.label_len = native_util.copyTextExact(&contract.label, label) catch unreachable;
             contract.signature = signature;
-            contract.id = self.nextDatabaseContractId();
 
-            const slot = &self.state().database_contracts[slot_index];
-            slot.in_use = true;
-            slot.contract = contract;
-            self.database_contract_index.insert(sync_indexes.databaseContractIndexLookupKey(slot.contract.id), slot_index);
-            self.database_contract_equivalent_index.insert(databaseContractEquivalentIndexKeyFor(&slot.contract), slot_index);
-            self.appendDatabaseContractBundleIndex(&slot.contract, slot_index);
+            const slot_index = self.allocateDatabaseContractIndex(contract.id) orelse return error.DatabaseContractTableFull;
+            const slot = &self.state().database_contracts.slots[slot_index];
+            slot.* = .{
+                .in_use = true,
+                .contract = contract,
+            };
+            self.state().next_contract_id += 1;
+            self.indexDatabaseContractSlot(slot_index);
 
             try self.checkpoint();
             return &slot.contract;
@@ -691,16 +716,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 return existing;
             }
 
-            const slot_index = self.allocateDatabaseContractIndex() orelse return error.DatabaseContractTableFull;
             var contract = source.*;
-            contract.id = self.nextDatabaseContractId();
-
-            const slot = &self.state().database_contracts[slot_index];
-            slot.in_use = true;
-            slot.contract = contract;
-            self.database_contract_index.insert(sync_indexes.databaseContractIndexLookupKey(slot.contract.id), slot_index);
-            self.database_contract_equivalent_index.insert(databaseContractEquivalentIndexKeyFor(&slot.contract), slot_index);
-            self.appendDatabaseContractBundleIndex(&slot.contract, slot_index);
+            contract.id = self.stateConst().next_contract_id;
+            const slot_index = self.allocateDatabaseContractIndex(contract.id) orelse return error.DatabaseContractTableFull;
+            const slot = &self.state().database_contracts.slots[slot_index];
+            slot.* = .{
+                .in_use = true,
+                .contract = contract,
+            };
+            self.state().next_contract_id += 1;
+            self.indexDatabaseContractSlot(slot_index);
 
             try self.checkpoint();
             return &slot.contract;
@@ -861,13 +886,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         pub fn ackOutboundTransportFrames(self: *Self, frame_ids: []const u64) Error!usize {
             var newly_acked: usize = 0;
             for (frame_ids) |frame_id| {
-                for (&self.state().outbound_transport_frames) |*slot| {
-                    if (!slot.in_use or slot.frame.id != frame_id) continue;
-                    if (!slot.acked) {
-                        slot.acked = true;
-                        newly_acked += 1;
-                    }
-                    break;
+                const slot = self.state().outbound_transport_frames.get(state_support.transportFrameArenaKey(frame_id)) orelse continue;
+                if (!slot.acked) {
+                    slot.acked = true;
+                    newly_acked += 1;
                 }
             }
             if (newly_acked > 0) try self.checkpoint();
@@ -962,14 +984,17 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) ?*ConflictRecord {
             const workspace_key = object_store.ids.raw(workspace_id);
             const object_key = object_store.ids.raw(object_id);
-            for (&self.state().conflicts) |*slot| {
-                if (!slot.in_use) continue;
-                if (slot.conflict.workspace_id != workspace_key) continue;
-                if (!slot.conflict.device_id.eql(device_id)) continue;
-                if (slot.conflict.object_id != object_key) continue;
-                return &slot.conflict;
+            const slot_index = self.conflict_object_index.lookup(sync_indexes.conflictObjectLookupKey(workspace_key, device_id, object_key)) orelse return null;
+            if (slot_index >= MAX_CONFLICTS) native_util.impossibleByInvariant("conflict object index points outside slots");
+            const slot = &self.state().conflicts.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("conflict object index points at a free slot");
+            if (slot.conflict.workspace_id != workspace_key or
+                !slot.conflict.device_id.eql(device_id) or
+                slot.conflict.object_id != object_key)
+            {
+                native_util.impossibleByInvariant("conflict object index points at the wrong slot");
             }
-            return null;
+            return &slot.conflict;
         }
 
         pub fn reviewConflict(
@@ -1000,7 +1025,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             decision: ConflictReviewDecision,
         ) Error!ConflictReviewRecord {
             const slot_index = self.findConflictSlotIndex(workspace_id, device_id, path) orelse return error.ConflictNotFound;
-            const slot = &self.state().conflicts[slot_index];
+            const slot = &self.state().conflicts.slots[slot_index];
             const conflict = slot.conflict;
             const selected_version_id = switch (decision) {
                 .keep_local, .keep_both => conflict.local_version_id,
@@ -1018,8 +1043,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 selected_version_id,
                 0,
             );
-            self.conflict_index.remove(conflictIndexKeyFor(&conflict));
-            slot.* = .{};
+            self.unindexConflictSlot(slot_index);
+            _ = self.state().conflicts.removeIndex(slot_index);
             try self.checkpoint();
             return conflictReviewRecord(&conflict, decision, true);
         }
@@ -1175,29 +1200,39 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             remote_version_id: u64,
             semantic: SyncSemantic,
         ) Error!void {
-            const slot_index = self.findConflictSlotIndex(workspace_id, device_id, path) orelse self.allocateConflictIndex() orelse return error.ConflictTableFull;
+            if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
+
+            const slot_index = self.findConflictSlotIndex(workspace_id, device_id, path) orelse
+                self.allocateConflictIndex(workspace_id, device_id, path) orelse return error.ConflictTableFull;
+            if (self.stateConst().conflicts.slots[slot_index].in_use) self.unindexConflictSlot(slot_index);
+
             var conflict = zeroConflict();
             conflict.workspace_id = workspace_id;
             conflict.device_id = device_id;
             conflict.object_id = object_id;
-            conflict.path_len = native_util.copyTextExact(&conflict.path, path) catch return error.PathTooLong;
+            conflict.path_len = native_util.copyTextExact(&conflict.path, path) catch unreachable;
             conflict.local_version_id = local_version_id;
             conflict.remote_version_id = remote_version_id;
             conflict.semantic = semantic;
 
-            const slot = &self.state().conflicts[slot_index];
-            slot.in_use = true;
-            slot.conflict = conflict;
-            self.conflict_index.insert(conflictIndexKeyFor(&slot.conflict), slot_index);
+            self.state().conflicts.slots[slot_index] = .{
+                .in_use = true,
+                .conflict = conflict,
+            };
+            self.indexConflictSlot(slot_index);
             self.resident().markDirty();
         }
 
         fn countConflictsFor(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) usize {
             var count: usize = 0;
-            for (self.stateConst().conflicts) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.conflict.workspace_id != workspace_id) continue;
-                if (!slot.conflict.device_id.eql(device_id)) continue;
+            var cursor = self.conflict_scope_index.head(sync_indexes.conflictScopeLookupKey(workspace_id, device_id));
+            while (cursor != indexed_arena.no_index) : (cursor = self.conflict_scope_index.next(cursor)) {
+                if (cursor >= MAX_CONFLICTS) native_util.impossibleByInvariant("conflict scope index points outside slots");
+                const slot = &self.stateConst().conflicts.slots[cursor];
+                if (!slot.in_use) native_util.impossibleByInvariant("conflict scope index points at a free slot");
+                if (slot.conflict.workspace_id != workspace_id or !slot.conflict.device_id.eql(device_id)) {
+                    native_util.impossibleByInvariant("conflict scope index points at the wrong slot");
+                }
                 count += 1;
             }
             return count;
@@ -1205,12 +1240,19 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn clearConflictsFor(self: *Self, workspace_id: u64, device_id: principal.PrincipalId) Error!bool {
             var cleared = false;
-            for (&self.state().conflicts) |*slot| {
-                if (!slot.in_use) continue;
-                if (slot.conflict.workspace_id != workspace_id) continue;
-                if (!slot.conflict.device_id.eql(device_id)) continue;
-                self.conflict_index.remove(conflictIndexKeyFor(&slot.conflict));
-                slot.* = .{};
+            const key = sync_indexes.conflictScopeLookupKey(workspace_id, device_id);
+            var cursor = self.conflict_scope_index.head(key);
+            while (cursor != indexed_arena.no_index) {
+                const slot_index = cursor;
+                cursor = self.conflict_scope_index.next(slot_index);
+                if (slot_index >= MAX_CONFLICTS) native_util.impossibleByInvariant("conflict scope index points outside slots");
+                const slot = &self.stateConst().conflicts.slots[slot_index];
+                if (!slot.in_use) native_util.impossibleByInvariant("conflict scope index points at a free slot");
+                if (slot.conflict.workspace_id != workspace_id or !slot.conflict.device_id.eql(device_id)) {
+                    native_util.impossibleByInvariant("conflict scope index points at the wrong slot");
+                }
+                self.unindexConflictSlot(slot_index);
+                _ = self.state().conflicts.removeIndex(slot_index);
                 cleared = true;
             }
             if (cleared) self.resident().markDirty();
@@ -1224,7 +1266,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             path: []const u8,
         ) ?*ConflictSlot {
             const slot_index = self.findConflictSlotIndex(workspace_id, device_id, path) orelse return null;
-            return &self.state().conflicts[slot_index];
+            return &self.state().conflicts.slots[slot_index];
         }
 
         fn findConflictSlotIndex(
@@ -1233,22 +1275,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             device_id: principal.PrincipalId,
             path: []const u8,
         ) ?usize {
-            const path_hash = workspace.pathHash(path);
-            const lookup = ConflictLookup{
-                .workspace_id = workspace_id,
-                .device_id = device_id,
-                .path = path,
-                .path_hash = path_hash,
-            };
-            const slot_index = self.conflict_index.lookup(sync_indexes.conflictIndexLookupKey(workspace_id, device_id, path_hash)) orelse {
-                self.debugAssertConflictIndexMissAbsent(lookup);
-                return null;
-            };
-            if (slot_index >= MAX_CONFLICTS) native_util.impossibleByInvariant("conflict index points outside slots");
-            const slot = &self.stateConst().conflicts[slot_index];
-            if (!slot.in_use) native_util.impossibleByInvariant("conflict index points at a free slot");
-            if (!sync_indexes.conflictSlotMatches(lookup, slot)) {
-                native_util.impossibleByInvariant("conflict index points at the wrong slot");
+            const slot_index = self.conflict_path_index.lookup(sync_indexes.conflictPathLookupKey(workspace_id, device_id, path)) orelse return null;
+            if (slot_index >= MAX_CONFLICTS) native_util.impossibleByInvariant("conflict path index points outside slots");
+            const slot = &self.stateConst().conflicts.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("conflict path index points at a free slot");
+            if (slot.conflict.workspace_id != workspace_id or
+                !slot.conflict.device_id.eql(device_id) or
+                !std.mem.eql(u8, slot.conflict.pathSlice(), path))
+            {
+                native_util.impossibleByInvariant("conflict path index points at the wrong slot");
             }
             return slot_index;
         }
@@ -1293,8 +1328,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn findDatabaseContract(self: *Self, contract_id: u64) ?*DatabaseContract {
-            const slot_index = self.lookupDatabaseContractSlotIndex(contract_id) orelse return null;
-            return &self.state().database_contracts[slot_index].contract;
+            const slot_index = self.database_contract_id_index.lookup(sync_indexes.databaseContractIdLookupKey(contract_id)) orelse return null;
+            if (slot_index >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract id index points outside slots");
+            const slot = &self.state().database_contracts.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("database contract id index points at a free slot");
+            if (!sync_indexes.databaseContractSlotMatches(DatabaseContractLookup{
+                .id = contract_id,
+            }, slot)) {
+                native_util.impossibleByInvariant("database contract id index points at the wrong slot");
+            }
+            return &slot.contract;
         }
 
         fn findDatabaseContractForEntry(self: *Self, workspace_id: u64, entry: workspace.Entry) ?*DatabaseContract {
@@ -1303,8 +1346,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         pub fn findDatabaseContractForPath(self: *Self, workspace_id: u64, path: []const u8) ?*DatabaseContract {
             const bundle_id = sync_contracts.databaseBundleIdFromPath(path) orelse return null;
-            const slot_index = self.lookupDatabaseContractBundleSlotIndex(workspace_id, bundle_id) orelse return null;
-            return &self.state().database_contracts[slot_index].contract;
+            var cursor = self.database_contract_bundle_index.head(sync_indexes.databaseContractBundleLookupKey(workspace_id, bundle_id));
+            while (cursor != indexed_arena.no_index) : (cursor = self.database_contract_bundle_index.next(cursor)) {
+                if (cursor >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract bundle index points outside slots");
+                const slot = &self.state().database_contracts.slots[cursor];
+                if (!slot.in_use) native_util.impossibleByInvariant("database contract bundle index points at a free slot");
+                if (slot.contract.workspace_id != workspace_id) native_util.impossibleByInvariant("database contract bundle index points at the wrong workspace");
+                if (!std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) native_util.impossibleByInvariant("database contract bundle index points at the wrong bundle");
+                return &slot.contract;
+            }
+            return null;
         }
 
         fn findEquivalentDatabaseContract(
@@ -1314,89 +1365,32 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             label: []const u8,
             signature: manifest.Signature,
         ) ?*DatabaseContract {
-            const slot_index = self.lookupEquivalentDatabaseContractSlotIndex(.{
+            const slot_index = self.database_contract_equivalent_index.lookup(sync_indexes.databaseContractEquivalentLookupKey(workspace_id, bundle_id, label, signature)) orelse return null;
+            if (slot_index >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract equivalent index points outside slots");
+            const slot = &self.state().database_contracts.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("database contract equivalent index points at a free slot");
+            if (!sync_indexes.equivalentDatabaseContractSlotMatches(DatabaseContractEquivalentLookup{
                 .workspace_id = workspace_id,
                 .bundle_id = bundle_id,
                 .label = label,
                 .signature = signature,
-            }) orelse return null;
-            return &self.state().database_contracts[slot_index].contract;
-        }
-
-        fn lookupDatabaseContractSlotIndex(self: *const Self, contract_id: u64) ?usize {
-            const slot_index = self.database_contract_index.lookup(sync_indexes.databaseContractIndexLookupKey(contract_id)) orelse {
-                self.debugAssertDatabaseContractIndexMissAbsent(contract_id);
-                return null;
-            };
-            if (slot_index >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract index points outside slots");
-            const slot = &self.stateConst().database_contracts[slot_index];
-            if (!slot.in_use) native_util.impossibleByInvariant("database contract index points at a free slot");
-            if (slot.contract.id != contract_id) native_util.impossibleByInvariant("database contract index points at the wrong slot");
-            return slot_index;
-        }
-
-        fn lookupEquivalentDatabaseContractSlotIndex(self: *const Self, lookup: DatabaseContractEquivalentLookup) ?usize {
-            const slot_index = self.database_contract_equivalent_index.lookup(sync_indexes.databaseContractEquivalentIndexLookupKey(
-                lookup.workspace_id,
-                lookup.bundle_id,
-                lookup.label,
-                lookup.signature,
-            )) orelse {
-                self.debugAssertDatabaseContractEquivalentIndexMissAbsent(lookup);
-                return null;
-            };
-            if (slot_index >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract equivalent index points outside slots");
-            const slot = &self.stateConst().database_contracts[slot_index];
-            if (!slot.in_use) native_util.impossibleByInvariant("database contract equivalent index points at a free slot");
-            if (!sync_indexes.equivalentDatabaseContractSlotMatches(lookup, slot)) {
+            }, slot)) {
                 native_util.impossibleByInvariant("database contract equivalent index points at the wrong slot");
             }
-            return slot_index;
+            return &slot.contract;
         }
 
-        fn lookupDatabaseContractBundleSlotIndex(self: *const Self, workspace_id: u64, bundle_id: []const u8) ?usize {
-            const key = sync_indexes.databaseContractBundleIndexLookupKey(workspace_id, bundle_id);
-            var slot_index = self.database_contract_bundle_index.head(key);
-            while (slot_index != indexed_arena.no_index) : (slot_index = self.database_contract_bundle_index.next(slot_index)) {
-                if (slot_index >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract bundle index points outside slots");
-                const slot = &self.stateConst().database_contracts[slot_index];
-                if (!slot.in_use) native_util.impossibleByInvariant("database contract bundle index points at a free slot");
-                if (slot.contract.workspace_id != workspace_id) native_util.impossibleByInvariant("database contract bundle index points at the wrong workspace");
-                if (std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) return slot_index;
-                native_util.impossibleByInvariant("database contract bundle index points at the wrong bundle");
-            }
-            self.debugAssertDatabaseContractBundleIndexMissAbsent(workspace_id, bundle_id);
-            return null;
-        }
-
-        fn databaseContractEquivalentIndexKeyFor(contract: *const DatabaseContract) u64 {
-            return sync_indexes.databaseContractEquivalentIndexLookupKey(
-                contract.workspace_id,
-                contract.bundleIdSlice(),
-                contract.labelSlice(),
-                contract.signature,
-            );
-        }
-
-        fn databaseContractBundleIndexKeyFor(contract: *const DatabaseContract) u64 {
-            return sync_indexes.databaseContractBundleIndexLookupKey(contract.workspace_id, contract.bundleIdSlice());
-        }
-
-        fn appendDatabaseContractBundleIndex(self: *Self, contract: *const DatabaseContract, slot_index: usize) void {
-            if (!self.database_contract_bundle_index.append(databaseContractBundleIndexKeyFor(contract), slot_index)) {
-                native_util.impossibleByInvariant("database contract bundle index capacity covers database contract slots");
-            }
+        fn lookupWorkspacePolicySlot(self: *Self, workspace_id: u64) ?*WorkspacePolicySlot {
+            const slot_index = self.lookupWorkspacePolicySlotIndex(workspace_id) orelse return null;
+            return &self.state().workspace_policies.slots[slot_index];
         }
 
         fn lookupWorkspacePolicySlotIndex(self: *const Self, workspace_id: u64) ?usize {
-            const slot_index = self.workspace_policy_index.lookup(sync_indexes.workspacePolicyIndexLookupKey(workspace_id)) orelse {
-                self.debugAssertWorkspacePolicyIndexMissAbsent(workspace_id);
-                return null;
-            };
+            const slot_index = self.workspace_policy_index.lookup(sync_indexes.workspacePolicyLookupKey(workspace_id)) orelse return null;
             if (slot_index >= MAX_WORKSPACE_POLICIES) native_util.impossibleByInvariant("workspace policy index points outside slots");
-            const slot = &self.stateConst().workspace_policies[slot_index];
+            const slot = &self.stateConst().workspace_policies.slots[slot_index];
             if (!slot.in_use) native_util.impossibleByInvariant("workspace policy index points at a free slot");
-            if (!sync_indexes.workspacePolicySlotMatches(.{
+            if (!sync_indexes.workspacePolicySlotMatches(WorkspacePolicyLookup{
                 .workspace_id = workspace_id,
             }, slot)) {
                 native_util.impossibleByInvariant("workspace policy index points at the wrong slot");
@@ -1404,24 +1398,21 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return slot_index;
         }
 
-        fn lookupWorkspacePolicySlot(self: *Self, workspace_id: u64) ?*WorkspacePolicySlot {
-            const slot_index = self.lookupWorkspacePolicySlotIndex(workspace_id) orelse return null;
-            return &self.state().workspace_policies[slot_index];
+        fn allocateWorkspacePolicyIndex(self: *Self, workspace_id: u64) ?usize {
+            return self.state().workspace_policies.reserveIndex(state_support.workspacePolicyArenaKey(workspace_id));
         }
 
-        fn allocateWorkspacePolicyIndex(self: *const Self) ?usize {
-            return fixed_table.firstFreeSlotIndex(WorkspacePolicySlot, MAX_WORKSPACE_POLICIES, &self.stateConst().workspace_policies);
+        fn lookupOverlaySlot(self: *Self, workspace_id: u64) ?*OverlaySlot {
+            const slot_index = self.lookupOverlaySlotIndex(workspace_id) orelse return null;
+            return &self.state().overlays.slots[slot_index];
         }
 
         fn lookupOverlaySlotIndex(self: *const Self, workspace_id: u64) ?usize {
-            const slot_index = self.overlay_index.lookup(sync_indexes.overlayIndexLookupKey(workspace_id)) orelse {
-                self.debugAssertOverlayIndexMissAbsent(workspace_id);
-                return null;
-            };
+            const slot_index = self.overlay_index.lookup(sync_indexes.overlayLookupKey(workspace_id)) orelse return null;
             if (slot_index >= MAX_OVERLAYS) native_util.impossibleByInvariant("overlay index points outside slots");
-            const slot = &self.stateConst().overlays[slot_index];
+            const slot = &self.stateConst().overlays.slots[slot_index];
             if (!slot.in_use) native_util.impossibleByInvariant("overlay index points at a free slot");
-            if (!sync_indexes.overlaySlotMatches(.{
+            if (!sync_indexes.overlaySlotMatches(OverlayLookup{
                 .workspace_id = workspace_id,
             }, slot)) {
                 native_util.impossibleByInvariant("overlay index points at the wrong slot");
@@ -1429,13 +1420,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return slot_index;
         }
 
-        fn lookupOverlaySlot(self: *Self, workspace_id: u64) ?*OverlaySlot {
-            const slot_index = self.lookupOverlaySlotIndex(workspace_id) orelse return null;
-            return &self.state().overlays[slot_index];
-        }
-
-        fn allocateOverlayIndex(self: *const Self) ?usize {
-            return fixed_table.firstFreeSlotIndex(OverlaySlot, MAX_OVERLAYS, &self.stateConst().overlays);
+        fn allocateOverlayIndex(self: *Self, workspace_id: u64) ?usize {
+            return self.state().overlays.reserveIndex(state_support.overlayArenaKey(workspace_id));
         }
 
         fn nextOverlayId(self: *Self) u64 {
@@ -1452,7 +1438,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) ?usize {
             const slot_index = self.replica_index.lookup(sync_indexes.replicaIndexLookupKey(workspace_id, device_id, path_hash)) orelse return null;
             if (slot_index >= MAX_REPLICA_ENTRIES) native_util.impossibleByInvariant("replica index points outside slots");
-            const slot = &self.stateConst().replica_entries[slot_index];
+            const slot = &self.stateConst().replica_entries.slots[slot_index];
             if (!slot.in_use) native_util.impossibleByInvariant("replica index points at a free slot");
             if (!sync_indexes.replicaSlotMatches(.{
                 .workspace_id = workspace_id,
@@ -1473,7 +1459,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             path_hash: u64,
         ) ?*const ReplicaSlot {
             const slot_index = self.lookupReplicaSlotIndex(workspace_id, device_id, path, path_hash) orelse return null;
-            return &self.stateConst().replica_entries[slot_index];
+            return &self.stateConst().replica_entries.slots[slot_index];
         }
 
         fn replicaVersionForPathHash(
@@ -1501,8 +1487,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const slot_index = if (self.lookupReplicaSlotIndex(workspace_id, device_id, path, path_hash)) |existing_index|
                 existing_index
             else
-                fixed_table.firstFreeSlotIndex(ReplicaSlot, MAX_REPLICA_ENTRIES, &self.stateConst().replica_entries) orelse return error.ReplicaTableFull;
-            const slot = &self.state().replica_entries[slot_index];
+                self.state().replica_entries.reserveIndex(state_support.replicaArenaKey(workspace_id, device_id, path_hash)) orelse return error.ReplicaTableFull;
+            const slot = &self.state().replica_entries.slots[slot_index];
             slot.in_use = true;
             slot.entry.workspace_id = workspace_id;
             slot.entry.device_id = device_id;
@@ -1516,7 +1502,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn replicaWorkspaceGeneration(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) u32 {
             var generation: u32 = 0;
-            for (self.stateConst().replica_entries) |slot| {
+            for (self.stateConst().replica_entries.slots) |slot| {
                 if (!slot.in_use) continue;
                 if (slot.entry.workspace_id != workspace_id or !slot.entry.device_id.eql(device_id)) continue;
                 generation = @max(generation, slot.entry.workspace_generation);
@@ -1524,156 +1510,142 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return generation;
         }
 
-        fn rebuildReplicaIndex(self: *Self) void {
-            self.replica_index.reset();
-            for (self.stateConst().replica_entries, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
-                self.replica_index.insert(sync_indexes.replicaIndexLookupKey(slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()), slot_index);
-            }
-        }
-
-        fn rebuildLookupIndexes(self: *Self) void {
-            self.rebuildWorkspacePolicyIndex();
-            self.rebuildOverlayIndex();
-            self.rebuildDatabaseContractIndex();
-            self.rebuildDatabaseContractEquivalentIndex();
-            self.rebuildDatabaseContractBundleIndex();
-            self.rebuildConflictIndex();
-            self.rebuildReplicaIndex();
-        }
-
         fn rebuildWorkspacePolicyIndex(self: *Self) void {
             self.workspace_policy_index.reset();
-            for (self.stateConst().workspace_policies, 0..) |slot, slot_index| {
+            for (self.stateConst().workspace_policies.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                self.workspace_policy_index.insert(sync_indexes.workspacePolicyIndexLookupKey(slot.policy.workspace_id), slot_index);
+                self.workspace_policy_index.insert(sync_indexes.workspacePolicyLookupKey(slot.policy.workspace_id), slot_index);
             }
         }
 
         fn rebuildOverlayIndex(self: *Self) void {
             self.overlay_index.reset();
-            for (self.stateConst().overlays, 0..) |slot, slot_index| {
+            for (self.stateConst().overlays.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                self.overlay_index.insert(sync_indexes.overlayIndexLookupKey(slot.overlay.workspace_id), slot_index);
+                self.overlay_index.insert(sync_indexes.overlayLookupKey(slot.overlay.workspace_id), slot_index);
             }
         }
 
-        fn rebuildDatabaseContractIndex(self: *Self) void {
-            self.database_contract_index.reset();
-            for (self.stateConst().database_contracts, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
-                self.database_contract_index.insert(sync_indexes.databaseContractIndexLookupKey(slot.contract.id), slot_index);
-            }
-        }
-
-        fn rebuildDatabaseContractEquivalentIndex(self: *Self) void {
-            self.database_contract_equivalent_index.reset();
-            for (self.stateConst().database_contracts, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
-                self.database_contract_equivalent_index.insert(databaseContractEquivalentIndexKeyFor(&slot.contract), slot_index);
-            }
-        }
-
-        fn rebuildDatabaseContractBundleIndex(self: *Self) void {
+        fn rebuildDatabaseContractIndexes(self: *Self) void {
+            self.database_contract_id_index.reset();
             self.database_contract_bundle_index.reset();
-            for (self.stateConst().database_contracts, 0..) |slot, slot_index| {
+            self.database_contract_equivalent_index.reset();
+            for (self.stateConst().database_contracts.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                self.appendDatabaseContractBundleIndex(&slot.contract, slot_index);
+                self.indexDatabaseContractSlot(slot_index);
             }
         }
 
-        fn rebuildConflictIndex(self: *Self) void {
-            self.conflict_index.reset();
-            for (self.stateConst().conflicts, 0..) |slot, slot_index| {
+        fn indexDatabaseContractSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= MAX_DATABASE_CONTRACTS) native_util.impossibleByInvariant("database contract index update points outside slots");
+            const slot = &self.stateConst().database_contracts.slots[slot_index];
+            if (!slot.in_use or slot.contract.id == 0) native_util.impossibleByInvariant("database contract index update requires a live contract");
+            self.database_contract_id_index.insert(sync_indexes.databaseContractIdLookupKey(slot.contract.id), slot_index);
+            if (!self.database_contract_bundle_index.append(
+                sync_indexes.databaseContractBundleLookupKey(slot.contract.workspace_id, slot.contract.bundleIdSlice()),
+                slot_index,
+            )) {
+                native_util.impossibleByInvariant("database contract bundle index capacity covers contract slots");
+            }
+            self.database_contract_equivalent_index.insert(sync_indexes.databaseContractEquivalentLookupKey(
+                slot.contract.workspace_id,
+                slot.contract.bundleIdSlice(),
+                slot.contract.labelSlice(),
+                slot.contract.signature,
+            ), slot_index);
+        }
+
+        fn rebuildConflictIndexes(self: *Self) void {
+            self.conflict_path_index.reset();
+            self.conflict_object_index.reset();
+            self.conflict_scope_index.reset();
+            for (self.stateConst().conflicts.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                self.conflict_index.insert(conflictIndexKeyFor(&slot.conflict), slot_index);
+                self.indexConflictSlot(slot_index);
             }
         }
 
-        fn debugAssertWorkspacePolicyIndexMissAbsent(self: *const Self, workspace_id: u64) void {
-            if (@import("builtin").mode != .Debug) return;
-            for (self.stateConst().workspace_policies) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.policy.workspace_id == workspace_id) {
-                    native_util.impossibleByInvariant("workspace policy index missed a live slot");
-                }
+        fn indexConflictSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= MAX_CONFLICTS) native_util.impossibleByInvariant("conflict index update points outside slots");
+            const slot = &self.stateConst().conflicts.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("conflict index update requires a live conflict");
+            self.conflict_path_index.insert(sync_indexes.conflictPathLookupKey(
+                slot.conflict.workspace_id,
+                slot.conflict.device_id,
+                slot.conflict.pathSlice(),
+            ), slot_index);
+            self.conflict_object_index.insert(sync_indexes.conflictObjectLookupKey(
+                slot.conflict.workspace_id,
+                slot.conflict.device_id,
+                slot.conflict.object_id,
+            ), slot_index);
+            if (!self.conflict_scope_index.append(
+                sync_indexes.conflictScopeLookupKey(slot.conflict.workspace_id, slot.conflict.device_id),
+                slot_index,
+            )) {
+                native_util.impossibleByInvariant("conflict scope index capacity covers conflict slots");
             }
         }
 
-        fn debugAssertOverlayIndexMissAbsent(self: *const Self, workspace_id: u64) void {
-            if (@import("builtin").mode != .Debug) return;
-            for (self.stateConst().overlays) |slot| {
+        fn unindexConflictSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= MAX_CONFLICTS) native_util.impossibleByInvariant("conflict index removal points outside slots");
+            const slot = &self.stateConst().conflicts.slots[slot_index];
+            if (!slot.in_use) return;
+            self.conflict_path_index.remove(sync_indexes.conflictPathLookupKey(
+                slot.conflict.workspace_id,
+                slot.conflict.device_id,
+                slot.conflict.pathSlice(),
+            ));
+            self.conflict_object_index.remove(sync_indexes.conflictObjectLookupKey(
+                slot.conflict.workspace_id,
+                slot.conflict.device_id,
+                slot.conflict.object_id,
+            ));
+            _ = self.conflict_scope_index.remove(
+                sync_indexes.conflictScopeLookupKey(slot.conflict.workspace_id, slot.conflict.device_id),
+                slot_index,
+            );
+        }
+
+        fn rebuildReplicaIndex(self: *Self) void {
+            self.replica_index.reset();
+            for (self.stateConst().replica_entries.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                if (slot.overlay.workspace_id == workspace_id) {
-                    native_util.impossibleByInvariant("overlay index missed a live slot");
-                }
+                self.replica_index.insert(sync_indexes.replicaIndexLookupKey(slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()), slot_index);
             }
         }
 
-        fn debugAssertDatabaseContractIndexMissAbsent(self: *const Self, contract_id: u64) void {
-            if (@import("builtin").mode != .Debug) return;
-            for (self.stateConst().database_contracts) |slot| {
+        fn rebuildTransportFramePathIndexes(self: *Self) void {
+            self.outbound_transport_path_index.reset();
+            self.inbound_transport_path_index.reset();
+            for (self.stateConst().outbound_transport_frames.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                if (slot.contract.id == contract_id) {
-                    native_util.impossibleByInvariant("database contract index missed a live slot");
-                }
+                self.indexTransportFramePathSlot(.outbound, slot_index);
+            }
+            for (self.stateConst().inbound_transport_frames.slots, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                self.indexTransportFramePathSlot(.inbound, slot_index);
             }
         }
 
-        fn debugAssertDatabaseContractEquivalentIndexMissAbsent(self: *const Self, lookup: DatabaseContractEquivalentLookup) void {
-            if (@import("builtin").mode != .Debug) return;
-            for (self.stateConst().database_contracts) |slot| {
-                if (!slot.in_use) continue;
-                if (sync_indexes.equivalentDatabaseContractSlotMatches(lookup, &slot)) {
-                    native_util.impossibleByInvariant("database contract equivalent index missed a live slot");
-                }
-            }
+        fn allocateConflictIndex(self: *Self, workspace_id: u64, device_id: principal.PrincipalId, path: []const u8) ?usize {
+            return self.state().conflicts.reserveIndex(state_support.conflictArenaKey(workspace_id, device_id, path));
         }
 
-        fn debugAssertDatabaseContractBundleIndexMissAbsent(self: *const Self, workspace_id: u64, bundle_id: []const u8) void {
-            if (@import("builtin").mode != .Debug) return;
-            for (self.stateConst().database_contracts) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.contract.workspace_id == workspace_id and std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) {
-                    native_util.impossibleByInvariant("database contract bundle index missed a live slot");
-                }
-            }
-        }
-
-        fn debugAssertConflictIndexMissAbsent(self: *const Self, lookup: ConflictLookup) void {
-            if (@import("builtin").mode != .Debug) return;
-            for (self.stateConst().conflicts) |slot| {
-                if (!slot.in_use) continue;
-                if (sync_indexes.conflictSlotMatches(lookup, &slot)) {
-                    native_util.impossibleByInvariant("conflict index missed a live slot");
-                }
-            }
-        }
-
-        fn conflictIndexKeyFor(conflict: *const ConflictRecord) u64 {
-            return sync_indexes.conflictIndexLookupKey(conflict.workspace_id, conflict.device_id, workspace.pathHash(conflict.pathSlice()));
-        }
-
-        fn allocateConflictIndex(self: *const Self) ?usize {
-            return fixed_table.firstFreeSlotIndex(ConflictSlot, MAX_CONFLICTS, &self.stateConst().conflicts);
-        }
-
-        fn allocateDatabaseContractIndex(self: *const Self) ?usize {
-            return fixed_table.firstFreeSlotIndex(DatabaseContractSlot, MAX_DATABASE_CONTRACTS, &self.stateConst().database_contracts);
-        }
-
-        fn nextDatabaseContractId(self: *Self) u64 {
-            defer self.state().next_contract_id += 1;
-            return self.stateConst().next_contract_id;
+        fn allocateDatabaseContractIndex(self: *Self, contract_id: u64) ?usize {
+            return self.state().database_contracts.reserveIndex(state_support.databaseContractArenaKey(contract_id));
         }
 
         fn enqueueTransportFrame(self: *Self, queue_kind: TransportQueueKind, request: TransportFrameRequest) Error!TransportFrame {
-            const slot = self.allocateTransportFrameSlot(queue_kind) orelse
-                self.reclaimInboundTransportFrameSlot(queue_kind) orelse
-                return error.TransportQueueFull;
             const frame_id = self.nextTransportFrameId();
-            slot.* = .{};
+            const slot_index = self.allocateTransportFrameSlotIndex(queue_kind, frame_id) orelse
+                self.reclaimInboundTransportFrameSlotIndex(queue_kind, frame_id) orelse
+                return error.TransportQueueFull;
+            const slot = &self.transportFrameArena(queue_kind).slots[slot_index];
+            errdefer _ = self.transportFrameArena(queue_kind).removeIndex(slot_index);
             slot.in_use = true;
+            slot.acked = false;
+            slot.duplicate_count = 0;
             slot.frame = .{
                 .id = frame_id,
                 .source_frame_id = if (request.source_frame_id == 0) frame_id else request.source_frame_id,
@@ -1688,6 +1660,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .workspace_generation = request.workspace_generation,
             };
             slot.frame.path_len = try state_support.copyTransportPath(&slot.frame.path, request.path);
+            self.indexTransportFramePathSlot(queue_kind, slot_index);
             self.resident().markDirty();
             return slot.frame;
         }
@@ -1699,11 +1672,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return frame_id;
         }
 
-        fn allocateTransportFrameSlot(self: *Self, queue_kind: TransportQueueKind) ?*DurableTransportFrameSlot {
-            for (self.transportFrameSlots(queue_kind)) |*slot| {
-                if (!slot.in_use) return slot;
-            }
-            return null;
+        fn allocateTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind, frame_id: u64) ?usize {
+            const arena = self.transportFrameArena(queue_kind);
+            const slot_index = arena.reserveIndex(state_support.transportFrameArenaKey(frame_id)) orelse return null;
+            arena.clearDirty();
+            return slot_index;
         }
 
         // When the inbound table is full, reclaim the oldest frame that is already
@@ -1717,12 +1690,12 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         // frames) into a bounded most-recent window. Only inbound evicts (outbound is
         // reclaimed by acking). Returns null (fail closed) only in the pathological
         // case where every resident frame is still within some scope's replay window.
-        fn reclaimInboundTransportFrameSlot(self: *Self, queue_kind: TransportQueueKind) ?*DurableTransportFrameSlot {
+        fn reclaimInboundTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind, frame_id: u64) ?usize {
             if (queue_kind != .inbound) return null;
             const frames = &self.state().inbound_transport_frames;
             var victim_index: ?usize = null;
             var victim_source_frame_id: u64 = std.math.maxInt(u64);
-            for (frames, 0..) |slot, index| {
+            for (frames.slots, 0..) |slot, index| {
                 if (!slot.in_use) continue;
                 if (slot.frame.source_frame_id >= victim_source_frame_id) continue;
                 if (!self.inboundFrameOutsideReplayWindow(&slot.frame)) continue;
@@ -1730,13 +1703,17 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 victim_source_frame_id = slot.frame.source_frame_id;
             }
             const index = victim_index orelse return null;
-            frames[index] = .{};
-            return &frames[index];
+            self.unindexTransportFramePathSlot(.inbound, index);
+            _ = frames.removeIndex(index);
+            frames.clearDirty();
+            const slot_index = frames.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), index) orelse return null;
+            frames.clearDirty();
+            return slot_index;
         }
 
         fn inboundFrameOutsideReplayWindow(self: *const Self, frame: *const state_support.TransportFrame) bool {
             var high_water: u64 = 0;
-            for (self.stateConst().inbound_transport_frames) |slot| {
+            for (self.stateConst().inbound_transport_frames.slots) |slot| {
                 if (!slot.in_use) continue;
                 if (slot.frame.workspace_id != frame.workspace_id) continue;
                 if (!slot.frame.source_device.eql(frame.source_device)) continue;
@@ -1793,8 +1770,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             path: []const u8,
         ) ?TransportFrame {
             var latest: ?TransportFrame = null;
-            for (self.transportFrameSlotsConst(queue_kind)) |slot| {
-                if (!slot.in_use) continue;
+            const key = sync_indexes.transportFramePathLookupKey(workspace_id, target_device, path);
+            const index = self.transportFramePathIndexConst(queue_kind);
+            var slot_index = index.head(key);
+            while (slot_index != indexed_arena.no_index) : (slot_index = index.next(slot_index)) {
+                if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport frame path index points outside slots");
+                const slot = self.transportFrameSlotsConst(queue_kind)[slot_index];
+                if (!slot.in_use) native_util.impossibleByInvariant("transport frame path index points at a free slot");
                 if (slot.frame.workspace_id != workspace_id or !slot.frame.target_device.eql(target_device)) continue;
                 if (!std.mem.eql(u8, slot.frame.pathSlice(), path)) continue;
                 if (latest == null or slot.frame.id > latest.?.id) latest = slot.frame;
@@ -1804,7 +1786,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn findDuplicateInboundFrame(self: *Self, request: TransportFrameRequest) ?*DurableTransportFrameSlot {
             if (request.source_frame_id == 0) return null;
-            for (&self.state().inbound_transport_frames) |*slot| {
+            for (&self.state().inbound_transport_frames.slots) |*slot| {
                 if (!slot.in_use) continue;
                 if (slot.frame.source_frame_id != request.source_frame_id) continue;
                 if (slot.frame.workspace_id != request.workspace_id) continue;
@@ -1816,20 +1798,17 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn recordDuplicateInboundFrame(self: *Self, frame_id: u64) Error!void {
-            for (&self.state().inbound_transport_frames) |*slot| {
-                if (!slot.in_use or slot.frame.id != frame_id) continue;
-                if (slot.duplicate_count != std.math.maxInt(u16)) {
-                    slot.duplicate_count += 1;
-                }
-                try self.checkpoint();
-                return;
+            const slot = self.state().inbound_transport_frames.get(state_support.transportFrameArenaKey(frame_id)) orelse return;
+            if (slot.duplicate_count != std.math.maxInt(u16)) {
+                slot.duplicate_count += 1;
             }
+            try self.checkpoint();
         }
 
         fn replayWindowRejects(self: *const Self, request: TransportFrameRequest) bool {
             if (request.source_frame_id == 0) return false;
             var latest_source_frame_id: u64 = 0;
-            for (self.stateConst().inbound_transport_frames) |slot| {
+            for (self.stateConst().inbound_transport_frames.slots) |slot| {
                 if (!slot.in_use) continue;
                 if (slot.frame.workspace_id != request.workspace_id) continue;
                 if (!slot.frame.source_device.eql(request.source_device)) continue;
@@ -1842,16 +1821,61 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn transportFrameSlots(self: *Self, queue_kind: TransportQueueKind) []DurableTransportFrameSlot {
             return switch (queue_kind) {
-                .outbound => self.state().outbound_transport_frames[0..],
-                .inbound => self.state().inbound_transport_frames[0..],
+                .outbound => self.state().outbound_transport_frames.slots[0..],
+                .inbound => self.state().inbound_transport_frames.slots[0..],
             };
         }
 
         fn transportFrameSlotsConst(self: *const Self, queue_kind: TransportQueueKind) []const DurableTransportFrameSlot {
             return switch (queue_kind) {
-                .outbound => self.stateConst().outbound_transport_frames[0..],
-                .inbound => self.stateConst().inbound_transport_frames[0..],
+                .outbound => self.stateConst().outbound_transport_frames.slots[0..],
+                .inbound => self.stateConst().inbound_transport_frames.slots[0..],
             };
+        }
+
+        fn transportFrameArena(self: *Self, queue_kind: TransportQueueKind) *state_support.TransportFrameArena {
+            return switch (queue_kind) {
+                .outbound => &self.state().outbound_transport_frames,
+                .inbound => &self.state().inbound_transport_frames,
+            };
+        }
+
+        fn transportFramePathIndex(self: *Self, queue_kind: TransportQueueKind) *TransportFramePathIndex {
+            return switch (queue_kind) {
+                .outbound => &self.outbound_transport_path_index,
+                .inbound => &self.inbound_transport_path_index,
+            };
+        }
+
+        fn transportFramePathIndexConst(self: *const Self, queue_kind: TransportQueueKind) *const TransportFramePathIndex {
+            return switch (queue_kind) {
+                .outbound => &self.outbound_transport_path_index,
+                .inbound => &self.inbound_transport_path_index,
+            };
+        }
+
+        fn indexTransportFramePathSlot(self: *Self, queue_kind: TransportQueueKind, slot_index: usize) void {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport frame path index update points outside slots");
+            const slot = &self.transportFrameSlotsConst(queue_kind)[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("transport frame path index update requires a live slot");
+            if (!self.transportFramePathIndex(queue_kind).append(
+                sync_indexes.transportFramePathLookupKey(slot.frame.workspace_id, slot.frame.target_device, slot.frame.pathSlice()),
+                slot_index,
+            )) {
+                native_util.impossibleByInvariant("transport frame path index capacity covers transport frame slots");
+            }
+        }
+
+        fn unindexTransportFramePathSlot(self: *Self, queue_kind: TransportQueueKind, slot_index: usize) void {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport frame path index removal points outside slots");
+            const slot = &self.transportFrameSlotsConst(queue_kind)[slot_index];
+            if (!slot.in_use) return;
+            if (!self.transportFramePathIndex(queue_kind).remove(
+                sync_indexes.transportFramePathLookupKey(slot.frame.workspace_id, slot.frame.target_device, slot.frame.pathSlice()),
+                slot_index,
+            )) {
+                native_util.impossibleByInvariant("transport frame path index missing live slot");
+            }
         }
 
         fn resident(self: *Self) *ResidentState {

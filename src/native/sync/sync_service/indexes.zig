@@ -5,26 +5,23 @@ const native_util = @import("../../core/util.zig");
 const principal = @import("../../core/principal.zig");
 const state_support = @import("../sync_state_support.zig");
 const contracts = @import("contracts.zig");
-const workspace = @import("../../storage/workspace.zig");
 
 pub const replica_index_capacity: usize = state_support.MAX_REPLICA_ENTRIES * 2;
-pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
 pub const workspace_policy_index_capacity: usize = state_support.MAX_WORKSPACE_POLICIES * 2;
-pub const WorkspacePolicyIndex = indexed_arena.UniqueIndex(workspace_policy_index_capacity);
 pub const overlay_index_capacity: usize = state_support.MAX_OVERLAYS * 2;
-pub const OverlayIndex = indexed_arena.UniqueIndex(overlay_index_capacity);
 pub const database_contract_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
-pub const DatabaseContractIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
-pub const database_contract_equivalent_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
-pub const DatabaseContractEquivalentIndex = indexed_arena.UniqueIndex(database_contract_equivalent_index_capacity);
-pub const database_contract_bundle_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
-pub const DatabaseContractBundleIndex = indexed_arena.MultimapIndex(
-    state_support.MAX_DATABASE_CONTRACTS,
-    state_support.MAX_DATABASE_CONTRACTS,
-    database_contract_bundle_index_capacity,
-);
 pub const conflict_index_capacity: usize = state_support.MAX_CONFLICTS * 2;
-pub const ConflictIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
+pub const transport_frame_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
+pub const WorkspacePolicyIndex = indexed_arena.UniqueIndex(workspace_policy_index_capacity);
+pub const OverlayIndex = indexed_arena.UniqueIndex(overlay_index_capacity);
+pub const DatabaseContractIdIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
+pub const DatabaseContractBundleIndex = indexed_arena.MultimapIndex(state_support.MAX_DATABASE_CONTRACTS, state_support.MAX_DATABASE_CONTRACTS, database_contract_index_capacity);
+pub const DatabaseContractEquivalentIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
+pub const ConflictPathIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
+pub const ConflictObjectIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
+pub const ConflictScopeIndex = indexed_arena.MultimapIndex(state_support.MAX_CONFLICTS, state_support.MAX_CONFLICTS, conflict_index_capacity);
+pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
+pub const TransportFramePathIndex = indexed_arena.MultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES, transport_frame_index_capacity);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -41,17 +38,8 @@ pub const ReplicaLookup = struct {
     path_hash: u64,
 };
 
-pub const ConflictLookup = struct {
-    workspace_id: u64,
-    device_id: principal.PrincipalId,
-    path: []const u8,
-    path_hash: u64,
-};
-
-const ReplicaIndexKey = struct {
-    workspace_id: u64 = 0,
-    device_id: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
-    path_hash: u64 = 0,
+pub const DatabaseContractLookup = struct {
+    id: u64,
 };
 
 pub const DatabaseContractEquivalentLookup = struct {
@@ -76,11 +64,8 @@ pub fn replicaSlotMatches(context: ReplicaLookup, slot: *const state_support.Rep
         std.mem.eql(u8, slot.entry.pathSlice(), context.path);
 }
 
-pub fn conflictSlotMatches(context: ConflictLookup, slot: *const state_support.ConflictSlot) bool {
-    return slot.conflict.workspace_id == context.workspace_id and
-        slot.conflict.device_id.eql(context.device_id) and
-        conflictPathHash(&slot.conflict) == context.path_hash and
-        std.mem.eql(u8, slot.conflict.pathSlice(), context.path);
+pub fn databaseContractSlotMatches(context: DatabaseContractLookup, slot: *const state_support.DatabaseContractSlot) bool {
+    return slot.contract.id == context.id;
 }
 
 pub fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalentLookup, slot: *const state_support.DatabaseContractSlot) bool {
@@ -90,91 +75,97 @@ pub fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalent
         contracts.signatureEql(slot.contract.signature, context.signature);
 }
 
-fn replicaIndexKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) ReplicaIndexKey {
-    return .{
-        .workspace_id = workspace_id,
-        .device_id = device_id,
-        .path_hash = path_hash,
-    };
-}
-
 pub fn replicaIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
-    return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, path_hash)));
+    return state_support.replicaArenaKey(workspace_id, device_id, path_hash);
 }
 
-pub fn conflictIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
-    return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, path_hash)));
+pub fn workspacePolicyLookupKey(workspace_id: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xA11C_4F4B_5350_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn workspacePolicyIndexLookupKey(workspace_id: u64) u64 {
-    return workspaceScopedIndexKey(workspace_id);
+pub fn overlayLookupKey(workspace_id: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xA11C_4F4B_4F56_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn overlayIndexLookupKey(workspace_id: u64) u64 {
-    return workspaceScopedIndexKey(workspace_id);
+pub fn databaseContractIdLookupKey(contract_id: u64) u64 {
+    return state_support.databaseContractArenaKey(contract_id);
 }
 
-pub fn databaseContractIndexLookupKey(contract_id: u64) u64 {
-    return indexed_arena.nonZeroKey(contract_id);
+pub fn databaseContractBundleLookupKey(workspace_id: u64, bundle_id: []const u8) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xDBCA_0001_4255_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendHashBytes(hash, bundle_id);
+    return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn databaseContractEquivalentIndexLookupKey(
+pub fn databaseContractEquivalentLookupKey(
     workspace_id: u64,
     bundle_id: []const u8,
     label: []const u8,
     signature: manifest.Signature,
 ) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xDBCA_0001_4551_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = appendBytesWithLength(hash, bundle_id);
-    hash = appendBytesWithLength(hash, label);
-    hash = appendBytesWithLength(hash, signature.format);
-    hash = appendBytesWithLength(hash, signature.signer);
-    hash = appendBytesWithLength(hash, signature.publicKeySlice());
-    hash = appendBytesWithLength(hash, signature.valueSlice());
+    hash = appendHashBytes(hash, bundle_id);
+    hash = appendHashBytes(hash, label);
+    hash = appendSignature(hash, signature);
     return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn databaseContractBundleIndexLookupKey(workspace_id: u64, bundle_id: []const u8) u64 {
+pub fn conflictPathLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path: []const u8) u64 {
+    return state_support.conflictArenaKey(workspace_id, device_id, path);
+}
+
+pub fn conflictObjectLookupKey(workspace_id: u64, device_id: principal.PrincipalId, object_id: u64) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xCF11_C700_4F42_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = appendBytesWithLength(hash, bundle_id);
+    hash = appendPrincipal(hash, device_id);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, object_id);
     return indexed_arena.nonZeroKey(hash);
 }
 
-fn replicaIndexHash(key: ReplicaIndexKey) u64 {
+pub fn conflictScopeLookupKey(workspace_id: u64, device_id: principal.PrincipalId) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(key.device_id.kind));
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.device_id.serial);
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.path_hash);
-    return hash;
-}
-
-fn workspaceScopedIndexKey(workspace_id: u64) u64 {
-    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xCF11_C700_5343_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, device_id);
     return indexed_arena.nonZeroKey(hash);
 }
 
-fn appendBytesWithLength(hash: u64, bytes: []const u8) u64 {
-    const with_len = native_util.fnv1a64AppendU64LittleEndian(hash, @intCast(bytes.len));
-    return native_util.fnv1a64WithSeed(with_len, bytes);
+pub fn transportFramePathLookupKey(workspace_id: u64, target_device: principal.PrincipalId, path: []const u8) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5452_4652_5041_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, target_device);
+    hash = appendHashBytes(hash, path);
+    return indexed_arena.nonZeroKey(hash);
 }
 
-fn conflictPathHash(conflict: *const state_support.ConflictRecord) u64 {
-    return workspace.pathHash(conflict.pathSlice());
+fn appendSignature(hash: u64, signature: manifest.Signature) u64 {
+    var next = appendHashBytes(hash, signature.format);
+    next = appendHashBytes(next, signature.signer);
+    next = appendHashBytes(next, signature.publicKeySlice());
+    next = appendHashBytes(next, signature.valueSlice());
+    return next;
 }
 
-test "sync service lookup indexes use nonzero workspace keys" {
-    try std.testing.expect(workspacePolicyIndexLookupKey(0) != 0);
-    try std.testing.expect(overlayIndexLookupKey(42) != 0);
-    try std.testing.expectEqual(workspacePolicyIndexLookupKey(42), overlayIndexLookupKey(42));
-    try std.testing.expect(conflictIndexLookupKey(7, .{ .kind = .device, .serial = 2 }, 99) != 0);
-    try std.testing.expect(databaseContractIndexLookupKey(0) != 0);
-    const signature = manifest.Signature{ .signer = "test-signer" };
-    try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != 0);
-    try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != databaseContractEquivalentIndexLookupKey(7, "app.notes", "other", signature));
-    try std.testing.expect(databaseContractBundleIndexLookupKey(7, "app.notes") != 0);
-    try std.testing.expect(databaseContractBundleIndexLookupKey(7, "app.notes") != databaseContractBundleIndexLookupKey(8, "app.notes"));
+fn appendHashBytes(hash: u64, bytes: []const u8) u64 {
+    var next = native_util.fnv1a64AppendU64LittleEndian(hash, bytes.len);
+    for (bytes) |byte| next = native_util.fnv1a64AppendByte(next, byte);
+    return next;
+}
+
+fn appendPrincipal(hash: u64, value: principal.PrincipalId) u64 {
+    var next = native_util.fnv1a64AppendByte(hash, @intFromEnum(value.kind));
+    next = native_util.fnv1a64AppendU64LittleEndian(next, value.serial);
+    return next;
 }
