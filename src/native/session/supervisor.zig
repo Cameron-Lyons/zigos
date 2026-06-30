@@ -6,6 +6,7 @@ const event_ledger = @import("../platform/event_ledger.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const notification_center = @import("../services/notification_center.zig");
+const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 
 pub const MAX_SERVICES: usize = 24;
@@ -99,6 +100,15 @@ const ServiceSlot = struct {
 
 const ServiceArena = indexed_arena.IndexedArena(ServiceSlot, MAX_SERVICES, SERVICE_INDEX_CAPACITY, serviceSlotId);
 const ServiceClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
+const DiagnosticServiceIndex = indexed_arena.MultimapIndex(MAX_DIAGNOSTICS, MAX_DIAGNOSTICS, MAX_DIAGNOSTICS * 2);
+const DiagnosticServiceKindIndex = indexed_arena.MultimapIndex(MAX_DIAGNOSTICS, MAX_DIAGNOSTICS, MAX_DIAGNOSTICS * 2);
+
+pub const supervisor_indexing = .{
+    .uses_service_arena = @hasDecl(ServiceArena, "reserveIndex"),
+    .uses_service_class_index = @hasDecl(ServiceClassIndex, "lookup"),
+    .uses_diagnostic_service_index = @hasDecl(DiagnosticServiceIndex, "append"),
+    .uses_diagnostic_service_kind_index = @hasDecl(DiagnosticServiceKindIndex, "append"),
+};
 
 pub const Supervisor = struct {
     next_service_id: u64 = 1,
@@ -108,6 +118,9 @@ pub const Supervisor = struct {
     next_diagnostic_sequence: u64 = 1,
     diagnostics: [MAX_DIAGNOSTICS]DiagnosticEvent = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
     diagnostic_count: usize = 0,
+    next_diagnostic_slot: usize = 0,
+    diagnostic_service_index: DiagnosticServiceIndex = DiagnosticServiceIndex.init(),
+    diagnostic_service_kind_index: DiagnosticServiceKindIndex = DiagnosticServiceKindIndex.init(),
 
     pub fn init() Supervisor {
         return Supervisor{};
@@ -354,20 +367,19 @@ pub const Supervisor = struct {
     }
 
     pub fn hasDiagnostic(self: *const Supervisor, service_id: u64, kind: DiagnosticKind) bool {
-        for (self.diagnostics[0..self.diagnostic_count]) |event| {
+        var slot_index = self.diagnostic_service_kind_index.head(diagnosticServiceKindKey(service_id, kind));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.diagnostic_service_kind_index.next(slot_index)) {
+            const event = self.diagnosticAt(slot_index) orelse continue;
             if (event.service_id == service_id and event.kind == kind) return true;
         }
         return false;
     }
 
     pub fn latestDiagnostic(self: *const Supervisor, service_id: u64) ?DiagnosticEvent {
-        var index = self.diagnostic_count;
-        while (index > 0) {
-            index -= 1;
-            const event = self.diagnostics[index];
-            if (event.service_id == service_id) return event;
-        }
-        return null;
+        const slot_index = self.diagnostic_service_index.tail(diagnosticServiceKey(service_id));
+        const event = self.diagnosticAt(slot_index) orelse return null;
+        if (event.service_id != service_id) return null;
+        return event;
     }
 
     fn nextServiceId(self: *Supervisor) u64 {
@@ -398,17 +410,41 @@ pub const Supervisor = struct {
             .detail = detail,
         };
 
-        if (self.diagnostic_count < MAX_DIAGNOSTICS) {
-            self.diagnostics[self.diagnostic_count] = event;
-            self.diagnostic_count += 1;
-            return;
-        }
+        const slot_index = self.nextDiagnosticSlot();
+        if (slot_index >= self.diagnostic_count) self.diagnostic_count = slot_index + 1;
+        self.removeDiagnosticIndexes(slot_index);
+        self.diagnostics[slot_index] = event;
+        self.indexDiagnostic(slot_index, event);
+    }
 
-        var index: usize = 1;
-        while (index < MAX_DIAGNOSTICS) : (index += 1) {
-            self.diagnostics[index - 1] = self.diagnostics[index];
+    fn nextDiagnosticSlot(self: *Supervisor) usize {
+        const slot_index = self.next_diagnostic_slot;
+        self.next_diagnostic_slot = (self.next_diagnostic_slot + 1) % MAX_DIAGNOSTICS;
+        return slot_index;
+    }
+
+    fn indexDiagnostic(self: *Supervisor, slot_index: usize, event: DiagnosticEvent) void {
+        if (!self.diagnostic_service_index.append(diagnosticServiceKey(event.service_id), slot_index)) {
+            native_util.impossibleByInvariant("supervisor diagnostic service index capacity covers diagnostic slots");
         }
-        self.diagnostics[MAX_DIAGNOSTICS - 1] = event;
+        if (!self.diagnostic_service_kind_index.append(diagnosticServiceKindKey(event.service_id, event.kind), slot_index)) {
+            native_util.impossibleByInvariant("supervisor diagnostic service-kind index capacity covers diagnostic slots");
+        }
+    }
+
+    fn removeDiagnosticIndexes(self: *Supervisor, slot_index: usize) void {
+        if (slot_index >= self.diagnostic_count) return;
+        const old = self.diagnostics[slot_index];
+        if (old.sequence == 0) return;
+        _ = self.diagnostic_service_index.remove(diagnosticServiceKey(old.service_id), slot_index);
+        _ = self.diagnostic_service_kind_index.remove(diagnosticServiceKindKey(old.service_id, old.kind), slot_index);
+    }
+
+    fn diagnosticAt(self: *const Supervisor, slot_index: usize) ?DiagnosticEvent {
+        if (slot_index == indexed_arena.no_index or slot_index >= self.diagnostic_count) return null;
+        const event = self.diagnostics[slot_index];
+        if (event.sequence == 0) return null;
+        return event;
     }
 
     fn nextDiagnosticSequence(self: *Supervisor) u64 {
@@ -436,6 +472,15 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
 
 fn serviceClassKey(class: contract.ServiceClass) u64 {
     return @as(u64, @intFromEnum(class)) + 1;
+}
+
+fn diagnosticServiceKey(service_id: u64) u64 {
+    return indexed_arena.nonZeroKey(service_id);
+}
+
+fn diagnosticServiceKindKey(service_id: u64, kind: DiagnosticKind) u64 {
+    const kind_value = @as(u64, @intFromEnum(kind)) + 1;
+    return indexed_arena.nonZeroKey((service_id *% 16) ^ kind_value);
 }
 
 fn zeroService() ServiceRecord {
@@ -603,6 +648,26 @@ test "supervisor emits structured crash and restart diagnostics" {
     try std.testing.expectEqual(ServiceState.healthy, network.state);
     try std.testing.expectEqual(@as(u16, 1), network.restart_count);
     try std.testing.expectEqual(@as(u64, 9), supervisor.latestDiagnostic(network.id).?.tick);
+}
+
+test "supervisor keeps diagnostics indexed while recycling the bounded ring" {
+    var supervisor = Supervisor.init();
+    const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 40 });
+    try std.testing.expect(supervisor.hasDiagnostic(network.id, .registered));
+
+    var index: usize = 0;
+    while (index < MAX_DIAGNOSTICS) : (index += 1) {
+        try std.testing.expect(supervisor.markHealthy(network.id, 100 + @as(u64, @intCast(index))));
+    }
+
+    try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_count);
+    try std.testing.expectEqual(@as(usize, 1), supervisor.next_diagnostic_slot);
+    try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_service_index.count(diagnosticServiceKey(network.id)));
+    try std.testing.expectEqual(@as(usize, 0), supervisor.diagnostic_service_kind_index.count(diagnosticServiceKindKey(network.id, .registered)));
+    try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_service_kind_index.count(diagnosticServiceKindKey(network.id, .healthy)));
+    try std.testing.expect(!supervisor.hasDiagnostic(network.id, .registered));
+    try std.testing.expect(supervisor.hasDiagnostic(network.id, .healthy));
+    try std.testing.expectEqual(@as(u64, 100 + MAX_DIAGNOSTICS - 1), supervisor.latestDiagnostic(network.id).?.tick);
 }
 
 test "services can be located by class for mediated routing" {

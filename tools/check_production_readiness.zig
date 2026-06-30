@@ -140,7 +140,7 @@ const CRITICAL_SYNTHETIC_IMAGE_PATHS = [_][]const u8{
     "src/native/session/service_path_proofs.zig",
     "src/native/storage/storage_service_ipc.zig",
     "src/native/sync/sync_service_test.zig",
-    "src/native/platform/os_contract_2026.zig",
+    "src/native/platform/os_contract.zig",
     "src/native/platform/compositor_session.zig",
     "src/native/platform/rendered_shell/task_launch.zig",
     "src/native/task/process_isolation.zig",
@@ -1485,7 +1485,7 @@ fn validateStorageModernOnlyTrack(
     }
 
     const retired_manifest_claims = [_][]const u8{
-        "legacy demo-image migration",
+        "demo-image migration",
         "migration inputs",
     };
     for (retired_manifest_claims) |claim| {
@@ -1493,7 +1493,7 @@ fn validateStorageModernOnlyTrack(
             trackListContains(track, "graduation_criteria", claim) or
             trackListContains(track, "next_actions", claim))
         {
-            try common.addError(errors, allocator, "Storage production track must not claim legacy migration support: {s}", .{claim});
+            try common.addError(errors, allocator, "Storage production track must not claim migration support: {s}", .{claim});
         }
     }
 }
@@ -1607,7 +1607,7 @@ fn validateSecretVaultHardwareProviderBoundary(
         }
     }
 
-    const contract_path = "src/native/platform/os_contract_2026.zig";
+    const contract_path = "src/native/platform/os_contract.zig";
     const contract_source = try readRequiredSource(allocator, io, errors, contract_path) orelse return;
     const contract_snippets = [_][]const u8{
         "credentialContractHardwareProvider",
@@ -1834,7 +1834,7 @@ fn validateNativeOnlyLaunchTrack(
 ) !void {
     const manifest_path = "src/native/policy/manifest.zig";
     const linter_path = "src/native/sdk/manifest_linter.zig";
-    const contract_path = "src/native/platform/os_contract_2026.zig";
+    const contract_path = "src/native/platform/os_contract.zig";
     const boot_registry_path = "src/native/task/userspace_boot_registry.zig";
     const archive_index_path = "src/native/task/userspace_archive_index.zig";
     const loader_path = "src/native/task/userspace_loader.zig";
@@ -1881,7 +1881,7 @@ fn validateNativeOnlyLaunchTrack(
     };
     for (required_contract_snippets) |snippet| {
         if (std.mem.indexOf(u8, contract_source, snippet) == null) {
-            try common.addError(errors, allocator, "Native-only launch track must keep 2026 contract snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "Native-only launch track must keep OS contract snippet: {s}", .{snippet});
         }
     }
 
