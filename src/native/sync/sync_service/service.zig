@@ -449,26 +449,26 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 if (prefix.len > MAX_PREFIX_BYTES) return error.PathTooLong;
             }
 
+            var policy = zeroWorkspacePolicy();
+            policy.workspace_id = request.workspace_id;
+            policy.owner = request.owner;
+            policy.offline_first = request.offline_first;
+            policy.personal_e2ee = request.personal_e2ee;
+            policy.require_shared_access = request.require_shared_access;
+            policy.device_to_device_policy_id = request.device_to_device_policy_id;
+            policy.relay_policy_id = request.relay_policy_id;
+            policy.overlay_policy_id = request.overlay_policy_id;
+            policy.relay_domain_len = native_util.copyTextExact(&policy.relay_domain, request.relay_domain) catch return error.NetworkTargetTooLong;
+            for (request.selective_prefixes, 0..) |prefix, index| {
+                policy.selective_prefix_lens[index] = native_util.copyTextExact(&policy.selective_prefixes[index], prefix) catch return error.PathTooLong;
+                policy.selective_prefix_count += 1;
+            }
+
             const slot_index = self.lookupWorkspacePolicySlotIndex(request.workspace_id) orelse
                 self.allocateWorkspacePolicyIndex(request.workspace_id) orelse return error.WorkspacePolicyTableFull;
             const slot = &self.state().workspace_policies.slots[slot_index];
             slot.in_use = true;
-            slot.policy = zeroWorkspacePolicy();
-            slot.policy.workspace_id = request.workspace_id;
-            slot.policy.owner = request.owner;
-            slot.policy.offline_first = request.offline_first;
-            slot.policy.personal_e2ee = request.personal_e2ee;
-            slot.policy.require_shared_access = request.require_shared_access;
-            slot.policy.device_to_device_policy_id = request.device_to_device_policy_id;
-            slot.policy.relay_policy_id = request.relay_policy_id;
-            slot.policy.overlay_policy_id = request.overlay_policy_id;
-            slot.policy.relay_domain_len = native_util.copyTextExact(&slot.policy.relay_domain, request.relay_domain) catch return error.NetworkTargetTooLong;
-
-            for (request.selective_prefixes, 0..) |prefix, index| {
-                slot.policy.selective_prefix_lens[index] = native_util.copyTextExact(&slot.policy.selective_prefixes[index], prefix) catch return error.PathTooLong;
-                slot.policy.selective_prefix_count += 1;
-            }
-
+            slot.policy = policy;
             self.workspace_policy_index.insert(sync_indexes.workspacePolicyLookupKey(request.workspace_id), slot_index);
             try self.checkpoint();
             return &slot.policy;
@@ -488,18 +488,24 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) Error!*OverlayRecord {
             if (service_identity.len > MAX_LABEL_BYTES) return error.ServiceIdentityTooLong;
 
-            const slot_index = self.lookupOverlaySlotIndex(workspace_id) orelse
+            const existing_slot_index = self.lookupOverlaySlotIndex(workspace_id);
+            var overlay = if (existing_slot_index) |slot_index|
+                self.stateConst().overlays.slots[slot_index].overlay
+            else
+                zeroOverlay();
+            overlay.home_device = home_device;
+            overlay.service_identity_len = native_util.copyTextExact(&overlay.service_identity, service_identity) catch return error.ServiceIdentityTooLong;
+            overlay.remote_access_enabled = remote_access_enabled;
+
+            const slot_index = existing_slot_index orelse
                 self.allocateOverlayIndex(workspace_id) orelse return error.OverlayTableFull;
+            if (overlay.id == 0) {
+                overlay.id = self.nextOverlayId();
+                overlay.workspace_id = workspace_id;
+            }
             const slot = &self.state().overlays.slots[slot_index];
             slot.in_use = true;
-            if (slot.overlay.id == 0) {
-                slot.overlay = zeroOverlay();
-                slot.overlay.id = self.nextOverlayId();
-                slot.overlay.workspace_id = workspace_id;
-            }
-            slot.overlay.home_device = home_device;
-            slot.overlay.service_identity_len = native_util.copyTextExact(&slot.overlay.service_identity, service_identity) catch return error.ServiceIdentityTooLong;
-            slot.overlay.remote_access_enabled = remote_access_enabled;
+            slot.overlay = overlay;
             self.overlay_index.insert(sync_indexes.overlayLookupKey(workspace_id), slot_index);
             try self.checkpoint();
             return &slot.overlay;
@@ -518,8 +524,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 }
             }
             if (overlay.private_service_count >= MAX_PRIVATE_SERVICES) return error.TooManyPrivateServices;
+            var service_label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES;
+            const service_label_len = native_util.copyTextExact(&service_label, label) catch return error.ServiceIdentityTooLong;
             const slot_index = overlay.private_service_count;
-            overlay.private_service_lens[slot_index] = native_util.copyTextExact(&overlay.private_services[slot_index], label) catch return error.ServiceIdentityTooLong;
+            overlay.private_services[slot_index] = service_label;
+            overlay.private_service_lens[slot_index] = service_label_len;
             overlay.private_service_count += 1;
             try self.checkpoint();
             return overlay;

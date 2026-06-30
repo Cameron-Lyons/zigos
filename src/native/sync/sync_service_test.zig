@@ -144,6 +144,46 @@ test "sync port requires service-scoped authority before device graph mutation" 
     try std.testing.expectEqualStrings("owner", root.labelSlice());
 }
 
+test "sync service configuration errors preserve live policy and overlay records" {
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_250 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 8_251 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 8_252 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 8_253 };
+    const workspace_id: u64 = 8_254;
+    const too_long_label = "0123456789012345678901234567890123456789012345678";
+
+    var service = Service.init(8_255, 8_256, sync_owner);
+    _ = try service.configureWorkspacePolicy(.{
+        .workspace_id = workspace_id,
+        .owner = user,
+        .selective_prefixes = &.{"documents/"},
+        .relay_domain = "relay.valid",
+    });
+    try std.testing.expectError(error.NetworkTargetTooLong, service.configureWorkspacePolicy(.{
+        .workspace_id = workspace_id,
+        .owner = user,
+        .selective_prefixes = &.{"secrets/"},
+        .relay_domain = too_long_label,
+    }));
+    const policy = service.findWorkspacePolicy(workspace_id).?;
+    try std.testing.expectEqualStrings("relay.valid", policy.relayDomainSlice());
+    try std.testing.expect(policy.matchesPath("documents/notes.md"));
+    try std.testing.expect(!policy.matchesPath("secrets/notes.md"));
+
+    _ = try service.configureOverlay(workspace_id, laptop, "overlay.valid", true);
+    try std.testing.expectError(error.ServiceIdentityTooLong, service.configureOverlay(workspace_id, tablet, too_long_label, false));
+    const overlay = service.findOverlay(workspace_id).?;
+    try std.testing.expectEqualStrings("overlay.valid", overlay.serviceIdentitySlice());
+    try std.testing.expect(overlay.home_device.eql(laptop));
+    try std.testing.expect(overlay.remote_access_enabled);
+
+    _ = try service.publishPrivateService(workspace_id, "notes.remote");
+    try std.testing.expectError(error.ServiceIdentityTooLong, service.publishPrivateService(workspace_id, too_long_label));
+    const overlay_with_service = service.findOverlay(workspace_id).?;
+    try std.testing.expectEqual(@as(usize, 1), overlay_with_service.private_service_count);
+    try std.testing.expect(overlay_with_service.hasPrivateService("notes.remote"));
+}
+
 test "sync service persists platform-backed device key bindings across restart" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
