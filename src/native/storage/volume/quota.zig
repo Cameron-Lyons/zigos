@@ -34,6 +34,7 @@ pub fn productCapacityUsage(store: *const object_store.Store, workspaces: *const
         .chunk_records = store.chunkCount(),
         .workspaces = workspaceCount(workspaces),
         .snapshots = snapshotCount(workspaces),
+        .object_payload_bytes = store.maxBlobPayloadBytes(),
     };
 
     for (&workspaces.workspaces.slots) |*slot| {
@@ -44,13 +45,6 @@ pub fn productCapacityUsage(store: *const object_store.Store, workspaces: *const
         if (!persistableSnapshotSlot(slot)) continue;
         usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.snapshot.entry_count);
     }
-    var blob_slot_index: usize = 0;
-    while (blob_slot_index < store.blobSlotCapacity()) : (blob_slot_index += 1) {
-        const slot = store.blobSlotAtConst(blob_slot_index);
-        if (!slot.in_use) continue;
-        usage.object_payload_bytes = @max(usage.object_payload_bytes, slot.blob.payload_len);
-    }
-
     return usage;
 }
 

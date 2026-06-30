@@ -73,10 +73,12 @@ const DocumentSlot = struct {
 };
 
 const DocumentArena = indexed_arena.IndexedArenaWithKey(u64, DocumentSlot, MAX_DOCUMENTS, MAX_DOCUMENTS * 2, documentSlotKey);
+const DocumentWorkspaceIndex = indexed_arena.MultimapIndex(MAX_DOCUMENTS, MAX_DOCUMENTS, MAX_DOCUMENTS * 2);
 
 pub const Service = struct {
     generation: u64 = 1,
     documents: DocumentArena = DocumentArena.init(),
+    workspace_index: DocumentWorkspaceIndex = DocumentWorkspaceIndex.init(),
 
     pub fn init() Service {
         return .{};
@@ -111,7 +113,13 @@ pub const Service = struct {
             return;
         }
 
-        const slot = self.documents.reserve(documentKey(workspace_id, object_id)) orelse return error.DocumentTableFull;
+        const key = documentKey(workspace_id, object_id);
+        const slot_index = self.documents.reserveIndex(key) orelse return error.DocumentTableFull;
+        if (!self.workspace_index.append(workspace_id, slot_index)) {
+            _ = self.documents.removeIndex(slot_index);
+            return error.DocumentTableFull;
+        }
+        const slot = &self.documents.slots[slot_index];
         slot.record.workspace_id = workspace_id;
         slot.record.object_id = object_id;
         slot.record.version_id = version_id;
@@ -122,7 +130,16 @@ pub const Service = struct {
     }
 
     pub fn remove(self: *Service, workspace_id: u64, object_id: u64) bool {
-        if (!self.documents.remove(documentKey(workspace_id, object_id))) return false;
+        const key = documentKey(workspace_id, object_id);
+        const slot_index = self.documents.slotIndexOf(key) orelse return false;
+        const slot = &self.documents.slots[slot_index];
+        if (slot.record.workspace_id != workspace_id or slot.record.object_id != object_id) {
+            native_util.impossibleByInvariant("indexing service document key points at the wrong document");
+        }
+        _ = self.workspace_index.remove(workspace_id, slot_index);
+        if (!self.documents.removeIndex(slot_index)) {
+            native_util.impossibleByInvariant("indexed document slot disappeared during removal");
+        }
         self.bumpGeneration();
         return true;
     }
@@ -137,36 +154,13 @@ pub const Service = struct {
 
         const snapshot_generation = self.generation;
         var count: usize = 0;
-        for (&self.documents.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (!workspaceAllowed(permitted_workspaces, slot.record.workspace_id)) continue;
-
-            const title_hits = countOccurrencesFold(slot.record.titleSlice(), needle);
-            const body_hits = countOccurrencesFold(slot.record.bodySlice(), needle);
-            const score = title_hits * 4 + body_hits;
-            if (score == 0) continue;
-
-            const candidate = SearchResult{
-                .workspace_id = slot.record.workspace_id,
-                .object_id = slot.record.object_id,
-                .version_id = slot.record.version_id,
-                .index_generation = snapshot_generation,
-                .score = @intCast(score),
-                .title_hits = @intCast(@min(title_hits, std.math.maxInt(u16))),
-                .body_hits = @intCast(@min(body_hits, std.math.maxInt(u16))),
-                .sensitivity = slot.record.sensitivity,
-                .title_fingerprint = hashTitle(slot.record.titleSlice()),
-                .title_len = slot.record.title_len,
-                .title = slot.record.title,
-            };
-            if (count < output.len) {
-                output[count] = candidate;
-                count += 1;
-            } else {
-                const worst_index = worstResultIndex(output[0..count]);
-                if (compareResults({}, candidate, output[worst_index])) {
-                    output[worst_index] = candidate;
-                }
+        for (permitted_workspaces, 0..) |workspace_id, workspace_scope_index| {
+            if (workspaceAlreadyVisited(permitted_workspaces[0..workspace_scope_index], workspace_id)) continue;
+            var slot_index = self.workspace_index.head(workspace_id);
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.workspace_index.next(slot_index)) {
+                const slot = self.documentSlotForWorkspaceIndex(workspace_id, slot_index);
+                const candidate = scoreDocument(&slot.record, needle, snapshot_generation) orelse continue;
+                retainRankedResult(output, &count, candidate);
             }
         }
 
@@ -204,10 +198,13 @@ pub const Service = struct {
 
     pub fn permittedWorkspaceSensitivity(self: *const Service, permitted_workspaces: []const u64) manifest.DataSensitivity {
         var result: manifest.DataSensitivity = .public_data;
-        for (&self.documents.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (!workspaceAllowed(permitted_workspaces, slot.record.workspace_id)) continue;
-            result = maxSensitivity(result, slot.record.sensitivity);
+        for (permitted_workspaces, 0..) |workspace_id, workspace_scope_index| {
+            if (workspaceAlreadyVisited(permitted_workspaces[0..workspace_scope_index], workspace_id)) continue;
+            var slot_index = self.workspace_index.head(workspace_id);
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.workspace_index.next(slot_index)) {
+                const slot = self.documentSlotForWorkspaceIndex(workspace_id, slot_index);
+                result = maxSensitivity(result, slot.record.sensitivity);
+            }
         }
         return result;
     }
@@ -222,6 +219,20 @@ pub const Service = struct {
 
     fn bumpGeneration(self: *Service) void {
         self.generation +|= 1;
+    }
+
+    fn documentSlotForWorkspaceIndex(self: *const Service, workspace_id: u64, slot_index: usize) *const DocumentSlot {
+        if (slot_index >= self.documents.slots.len) {
+            native_util.impossibleByInvariant("indexing service workspace index points outside document slots");
+        }
+        const slot = &self.documents.slots[slot_index];
+        if (!slot.in_use) {
+            native_util.impossibleByInvariant("indexing service workspace index points at a free document slot");
+        }
+        if (slot.record.workspace_id != workspace_id) {
+            native_util.impossibleByInvariant("indexing service workspace index points at the wrong workspace");
+        }
+        return slot;
     }
 };
 
@@ -270,9 +281,43 @@ fn worstResultIndex(results: []const SearchResult) usize {
     return worst_index;
 }
 
-fn workspaceAllowed(permitted_workspaces: []const u64, workspace_id: u64) bool {
-    for (permitted_workspaces) |allowed| {
-        if (allowed == workspace_id) return true;
+fn scoreDocument(record: *const DocumentRecord, needle: []const u8, generation: u64) ?SearchResult {
+    const title_hits = countOccurrencesFold(record.titleSlice(), needle);
+    const body_hits = countOccurrencesFold(record.bodySlice(), needle);
+    const score = title_hits * 4 + body_hits;
+    if (score == 0) return null;
+
+    return .{
+        .workspace_id = record.workspace_id,
+        .object_id = record.object_id,
+        .version_id = record.version_id,
+        .index_generation = generation,
+        .score = @intCast(score),
+        .title_hits = @intCast(@min(title_hits, std.math.maxInt(u16))),
+        .body_hits = @intCast(@min(body_hits, std.math.maxInt(u16))),
+        .sensitivity = record.sensitivity,
+        .title_fingerprint = hashTitle(record.titleSlice()),
+        .title_len = record.title_len,
+        .title = record.title,
+    };
+}
+
+fn retainRankedResult(output: *[MAX_RESULTS]SearchResult, count: *usize, candidate: SearchResult) void {
+    if (count.* < output.len) {
+        output[count.*] = candidate;
+        count.* += 1;
+        return;
+    }
+
+    const worst_index = worstResultIndex(output[0..count.*]);
+    if (compareResults({}, candidate, output[worst_index])) {
+        output[worst_index] = candidate;
+    }
+}
+
+fn workspaceAlreadyVisited(previous_workspaces: []const u64, workspace_id: u64) bool {
+    for (previous_workspaces) |visited| {
+        if (visited == workspace_id) return true;
     }
     return false;
 }
@@ -330,6 +375,8 @@ test "indexing service remains permission aware and updates ranked results" {
     try service.upsert(2, 200, 1, "Private Contract", "alpha restricted");
     try std.testing.expectEqual(@as(u64, 4), service.generation);
     try std.testing.expectEqual(@as(usize, 3), service.documents.countInUse());
+    try std.testing.expectEqual(@as(usize, 2), service.workspace_index.count(1));
+    try std.testing.expectEqual(@as(usize, 1), service.workspace_index.count(2));
 
     var results_buffer: [MAX_RESULTS]SearchResult = undefined;
     const workspace_one = [_]u64{1};
@@ -340,10 +387,14 @@ test "indexing service remains permission aware and updates ranked results" {
     try std.testing.expectEqualStrings("Alpha Notes", results[0].titleSlice());
     try std.testing.expect(results[0].title_fingerprint != 0);
     try std.testing.expectEqual(@as(u64, 101), results[1].object_id);
+    const duplicate_workspace_scope = [_]u64{ 1, 1 };
+    const deduped_results = service.query(&duplicate_workspace_scope, "alpha", &results_buffer);
+    try std.testing.expectEqual(@as(usize, 2), deduped_results.len);
 
     try std.testing.expect(service.remove(1, 100));
     try std.testing.expectEqual(@as(u64, 5), service.generation);
     try std.testing.expectEqual(@as(usize, 2), service.documents.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.workspace_index.count(1));
     const updated = service.query(&workspace_one, "alpha", &results_buffer);
     try std.testing.expectEqual(@as(usize, 1), updated.len);
     try std.testing.expectEqual(@as(u64, 101), updated[0].object_id);
