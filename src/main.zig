@@ -32,7 +32,7 @@ pub fn publishUserspaceActiveTaskId(task_id: u64) void {
 
 pub fn bootloaderMeasurementDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot-v1");
+    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot");
     crypto_hash.updateBytes(&hasher, "boot-profile", config.name());
     crypto_hash.updateBytes(&hasher, "entry-assembly", "src/boot/boot64.S");
     return crypto_hash.finalize(&hasher);

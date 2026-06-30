@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const ids = @import("../../core/ids.zig");
@@ -27,12 +28,77 @@ pub const MAX_WORKSPACE_LABEL_BYTES: usize = 48;
 pub const MAX_SHARE_GRANTS: usize = 8;
 pub const MAX_EXPORT_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_EXPORT_SIGNATURE_SIGNER_BYTES: usize = MAX_WORKSPACE_LABEL_BYTES;
+pub const NO_SNAPSHOT_GENERATION: u32 = std.math.maxInt(u32);
 const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
 const SNAPSHOT_INDEX_CAPACITY: usize = MAX_SNAPSHOTS * 2;
+const SHARE_GRANT_INDEX_CAPACITY: usize = MAX_SHARE_GRANTS * 2;
 const ENTRY_INDEX_CAPACITY: usize = MAX_WORKSPACE_ENTRIES * 2;
+const ENTRY_OBJECT_INDEX_CAPACITY: usize = MAX_WORKSPACE_ENTRIES;
 pub const SnapshotRootAddress = workspace_merkle.RootAddress;
 const snapshot_message_buffer_bytes: usize = 4096;
 const EntryIndexSlot = workspace_index.EntryIndexSlot;
+const EntryObjectIndexSlot = workspace_index.EntryObjectIndexSlot;
+
+const ShareGrantPrincipalIndexSlot = struct {
+    in_use: bool = false,
+    principal_id: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
+    grant_index: usize = 0,
+};
+
+pub const ShareGrantPrincipalIndex = struct {
+    slots: [SHARE_GRANT_INDEX_CAPACITY]ShareGrantPrincipalIndexSlot =
+        [_]ShareGrantPrincipalIndexSlot{ShareGrantPrincipalIndexSlot{}} ** SHARE_GRANT_INDEX_CAPACITY,
+
+    pub fn init() ShareGrantPrincipalIndex {
+        return .{};
+    }
+
+    pub fn reset(self: *ShareGrantPrincipalIndex) void {
+        self.* = ShareGrantPrincipalIndex.init();
+    }
+
+    pub fn count(self: *const ShareGrantPrincipalIndex, key: u64) usize {
+        var matches: usize = 0;
+        for (self.slots) |slot| {
+            if (!slot.in_use) continue;
+            if (shareGrantPrincipalKey(slot.principal_id) == key) matches += 1;
+        }
+        return matches;
+    }
+
+    fn lookup(self: *const ShareGrantPrincipalIndex, principal_id: principal.PrincipalId) ?usize {
+        const key = shareGrantPrincipalKey(principal_id);
+        var slot_index = shareGrantProbeIndex(key);
+        var attempts: usize = 0;
+        while (attempts < SHARE_GRANT_INDEX_CAPACITY) : (attempts += 1) {
+            const slot = self.slots[slot_index];
+            if (!slot.in_use) return null;
+            if (slot.principal_id.eql(principal_id)) return slot.grant_index;
+            slot_index = (slot_index + 1) % SHARE_GRANT_INDEX_CAPACITY;
+        }
+        return null;
+    }
+
+    fn insert(self: *ShareGrantPrincipalIndex, principal_id: principal.PrincipalId, grant_index: usize) bool {
+        if (grant_index >= MAX_SHARE_GRANTS) return false;
+        const key = shareGrantPrincipalKey(principal_id);
+        var slot_index = shareGrantProbeIndex(key);
+        var attempts: usize = 0;
+        while (attempts < SHARE_GRANT_INDEX_CAPACITY) : (attempts += 1) {
+            const slot = &self.slots[slot_index];
+            if (!slot.in_use or slot.principal_id.eql(principal_id)) {
+                slot.* = .{
+                    .in_use = true,
+                    .principal_id = principal_id,
+                    .grant_index = grant_index,
+                };
+                return true;
+            }
+            slot_index = (slot_index + 1) % SHARE_GRANT_INDEX_CAPACITY;
+        }
+        return false;
+    }
+};
 
 pub const Entry = struct {
     path_len: usize = 0,
@@ -195,6 +261,7 @@ pub const WorkspacePathIndex = struct {
     entry_count: usize = 0,
     entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
     path_slots: [ENTRY_INDEX_CAPACITY]EntryIndexSlot = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY),
+    object_slots: [ENTRY_OBJECT_INDEX_CAPACITY]EntryObjectIndexSlot = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY),
     leaf_hashes: [MAX_WORKSPACE_ENTRIES]SnapshotRootAddress =
         [_]SnapshotRootAddress{workspace_merkle.zeroRootAddress()} ** MAX_WORKSPACE_ENTRIES,
     root_address: SnapshotRootAddress = workspace_merkle.zeroRootAddress(),
@@ -210,6 +277,7 @@ pub const WorkspaceShareTable = struct {
     share_grants: [MAX_SHARE_GRANTS]ShareGrant = [_]ShareGrant{ShareGrant{
         .principal_id = .{ .kind = .service, .serial = 0 },
     }} ** MAX_SHARE_GRANTS,
+    share_grant_principal_index: ShareGrantPrincipalIndex = ShareGrantPrincipalIndex.init(),
 };
 
 pub const WorkspaceStagingState = struct {
@@ -236,6 +304,7 @@ pub const WorkspaceRecord = struct {
     share_table: WorkspaceShareTable,
     staging: WorkspaceStagingState,
     recoverable_deletes: RecoverableDeleteLog,
+    oldest_snapshot_generation: u32 = NO_SNAPSHOT_GENERATION,
 
     pub fn labelSlice(self: *const WorkspaceRecord) []const u8 {
         return self.label[0..@min(self.label_len, self.label.len)];
@@ -251,6 +320,11 @@ pub const WorkspaceRecord = struct {
 
     pub fn rootAddress(self: *const WorkspaceRecord) SnapshotRootAddress {
         return self.path_index.root_address;
+    }
+
+    pub fn oldestSnapshotGeneration(self: *const WorkspaceRecord) ?u32 {
+        if (self.oldest_snapshot_generation == NO_SNAPSHOT_GENERATION) return null;
+        return self.oldest_snapshot_generation;
     }
 };
 
@@ -335,6 +409,21 @@ fn snapshotLabelKey(workspace_id: ids.WorkspaceId, label: []const u8) u64 {
     return indexed_arena.nonZeroKey(hash);
 }
 
+pub fn shareGrantPrincipalKey(principal_id: principal.PrincipalId) u64 {
+    var hash: u64 = 0x5753_4752_414e_5401;
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(principal_id.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, principal_id.serial);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+pub fn shareGrantSlotIndex(record: *const WorkspaceRecord, principal_id: principal.PrincipalId) ?usize {
+    return findShareGrantIndex(record, principal_id);
+}
+
+fn shareGrantProbeIndex(key: u64) usize {
+    return @intCast((key *% 0x9E37_79B9_7F4A_7C15) % SHARE_GRANT_INDEX_CAPACITY);
+}
+
 const WorkspaceArena = indexed_arena.IndexedArenaWithKey(ids.WorkspaceId, WorkspaceSlot, MAX_WORKSPACES, WORKSPACE_INDEX_CAPACITY, workspaceSlotId);
 const SnapshotArena = indexed_arena.IndexedArenaWithKey(ids.SnapshotId, SnapshotSlot, MAX_SNAPSHOTS, SNAPSHOT_INDEX_CAPACITY, snapshotSlotId);
 const WorkspaceOwnerLabelIndex = indexed_arena.UniqueIndex(WORKSPACE_INDEX_CAPACITY);
@@ -379,6 +468,7 @@ pub const Directory = struct {
         for (self.snapshots.slots, 0..) |slot, slot_index| {
             if (!slot.in_use) continue;
             self.snapshot_label_index.insert(snapshotLabelKey(slot.snapshot.workspace_id, slot.snapshot.labelSlice()), slot_index);
+            self.recordWorkspaceSnapshotGeneration(slot.snapshot.workspace_id, slot.snapshot.generation);
         }
     }
 
@@ -450,6 +540,16 @@ pub const Directory = struct {
             .label = label,
         };
         const slot = self.lookupSnapshotLabelConst(lookup) orelse return null;
+        return &slot.snapshot;
+    }
+
+    pub fn findSnapshot(self: *Directory, snapshot_id: ids.SnapshotId) ?*SnapshotRecord {
+        const slot = self.snapshots.get(snapshot_id) orelse return null;
+        return &slot.snapshot;
+    }
+
+    pub fn findSnapshotConst(self: *const Directory, snapshot_id: ids.SnapshotId) ?*const SnapshotRecord {
+        const slot = self.snapshots.getConst(snapshot_id) orelse return null;
         return &slot.snapshot;
     }
 
@@ -526,7 +626,7 @@ pub const Directory = struct {
 
         try applyTransactionDelta(workspace);
         clearTransactionState(workspace);
-        self.compactMutationLogIfSafe(workspace_id, workspace);
+        compactMutationLogIfSafe(workspace);
         self.markWorkspaceDirty(workspace_id);
         return workspace.generation;
     }
@@ -539,32 +639,24 @@ pub const Directory = struct {
     // behind the collapsed generation receives the full current set, which
     // replicateWorkspace re-deduplicates by remote version. The workspace generation
     // is preserved, so peer replication cursors stay valid.
-    fn compactMutationLogIfSafe(self: *Directory, workspace_id: ids.WorkspaceId, workspace: *WorkspaceRecord) void {
+    fn compactMutationLogIfSafe(workspace: *WorkspaceRecord) void {
         if (workspace.mutation_log.entry_mutation_count <= MUTATION_LOG_COMPACTION_THRESHOLD) return;
-        if (self.hasSnapshotBelowGeneration(workspace_id, workspace.generation)) return;
+        if (workspace.oldest_snapshot_generation < workspace.generation) return;
         compactMutationLogToCurrentEntries(workspace) catch return;
-    }
-
-    fn hasSnapshotBelowGeneration(self: *const Directory, workspace_id: ids.WorkspaceId, generation: u32) bool {
-        for (self.snapshots.slots) |slot| {
-            if (!slot.in_use) continue;
-            if (!slot.snapshot.workspace_id.eql(workspace_id)) continue;
-            if (slot.snapshot.generation < generation) return true;
-        }
-        return false;
     }
 
     pub fn share(self: *Directory, workspace_id: ids.WorkspaceId, request: ShareRequest) Error!void {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
-        for (workspace.share_table.share_grants[0..workspace.share_table.share_grant_count]) |*grant| {
-            if (!grant.principal_id.eql(request.principal_id)) continue;
-            grant.* = request;
+        if (findShareGrantIndex(workspace, request.principal_id)) |grant_index| {
+            workspace.share_table.share_grants[grant_index] = request;
             self.markWorkspaceDirty(workspace_id);
             return;
         }
         if (workspace.share_table.share_grant_count >= MAX_SHARE_GRANTS) return error.ShareTableFull;
-        workspace.share_table.share_grants[workspace.share_table.share_grant_count] = request;
+        const grant_index = workspace.share_table.share_grant_count;
+        workspace.share_table.share_grants[grant_index] = request;
         workspace.share_table.share_grant_count += 1;
+        indexShareGrant(workspace, grant_index);
         self.markWorkspaceDirty(workspace_id);
     }
 
@@ -574,10 +666,8 @@ pub const Directory = struct {
         principal_id: principal.PrincipalId,
     ) ?ShareGrant {
         const workspace = self.lookupConst(workspace_id) orelse return null;
-        for (workspace.share_table.share_grants[0..workspace.share_table.share_grant_count]) |grant| {
-            if (grant.principal_id.eql(principal_id)) return grant;
-        }
-        return null;
+        const grant_index = findShareGrantIndex(workspace, principal_id) orelse return null;
+        return workspace.share_table.share_grants[grant_index];
     }
 
     pub fn hasAccess(self: *const Directory, workspace_id: ids.WorkspaceId, request: AccessRequest) bool {
@@ -635,6 +725,12 @@ pub const Directory = struct {
         return workspace.path_index.entries[index];
     }
 
+    pub fn resolveObject(self: *const Directory, workspace_id: ids.WorkspaceId, object_id: ids.ObjectId) Error!Entry {
+        const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
+        const index = findWorkspaceEntryObjectIndex(workspace, object_id) orelse return error.EntryNotFound;
+        return workspace.path_index.entries[index];
+    }
+
     pub fn entries(self: *const Directory, workspace_id: ids.WorkspaceId) Error![]const Entry {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
         return workspace.path_index.entries[0..workspace.path_index.entry_count];
@@ -668,6 +764,7 @@ pub const Directory = struct {
         self.next_snapshot_id += 1;
         slot.snapshot = snapshot_record;
         self.snapshot_label_index.insert(snapshotLabelKey(slot.snapshot.workspace_id, slot.snapshot.labelSlice()), slot_index);
+        self.recordWorkspaceSnapshotGeneration(slot.snapshot.workspace_id, slot.snapshot.generation);
         return &slot.snapshot;
     }
 
@@ -817,6 +914,14 @@ pub const Directory = struct {
         return self.snapshots.dirtyIds();
     }
 
+    pub fn workspaceCount(self: *const Directory) usize {
+        return self.workspaces.countInUse();
+    }
+
+    pub fn snapshotCount(self: *const Directory) usize {
+        return self.snapshots.countInUse();
+    }
+
     pub fn entryChangesSince(self: *const Directory, workspace_id: ids.WorkspaceId, generation: u32) Error![]const EntryMutation {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
         var start_index: usize = 0;
@@ -834,13 +939,13 @@ pub const Directory = struct {
         return &slot.workspace;
     }
 
-    fn findSnapshot(self: *Directory, snapshot_id: ids.SnapshotId) ?*SnapshotRecord {
-        const slot = self.snapshots.get(snapshot_id) orelse return null;
-        return &slot.snapshot;
-    }
-
     fn markWorkspaceDirty(self: *Directory, workspace_id: ids.WorkspaceId) void {
         self.workspaces.markDirty(workspace_id);
+    }
+
+    fn recordWorkspaceSnapshotGeneration(self: *Directory, workspace_id: ids.WorkspaceId, generation: u32) void {
+        const workspace = self.find(workspace_id) orelse return;
+        recordSnapshotGeneration(workspace, generation);
     }
 
     fn indexWorkspace(self: *Directory, slot_index: usize) void {
@@ -926,6 +1031,7 @@ fn zeroWorkspace() WorkspaceRecord {
         .share_table = .{},
         .staging = .{},
         .recoverable_deletes = .{},
+        .oldest_snapshot_generation = NO_SNAPSHOT_GENERATION,
     };
 }
 
@@ -1086,7 +1192,7 @@ fn snapshotMessage(
     entry_count: usize,
 ) error{NoSpaceLeft}![]const u8 {
     var writer = BinaryWriter{ .buffer = buffer };
-    try writer.writeBytes("zigos.workspace.snapshot-root.v3");
+    try writer.writeBytes("zigos.workspace.snapshot-root");
     try writeLengthPrefixed(&writer, tag);
     try writer.writeU64(workspace_id.raw());
     try writer.writeU32(generation);
@@ -1107,6 +1213,53 @@ fn writeLengthPrefixed(writer: *BinaryWriter, bytes: []const u8) error{NoSpaceLe
 fn rebuildWorkspaceIndexes(workspace: *WorkspaceRecord) void {
     rebuildWorkspaceEntryIndex(workspace);
     rebuildStagedEntryIndex(workspace);
+    rebuildShareGrantIndex(workspace);
+    workspace.oldest_snapshot_generation = NO_SNAPSHOT_GENERATION;
+}
+
+fn recordSnapshotGeneration(workspace: *WorkspaceRecord, generation: u32) void {
+    if (generation < workspace.oldest_snapshot_generation) {
+        workspace.oldest_snapshot_generation = generation;
+    }
+}
+
+fn rebuildShareGrantIndex(workspace: *WorkspaceRecord) void {
+    workspace.share_table.share_grant_principal_index.reset();
+    var grant_index: usize = 0;
+    while (grant_index < workspace.share_table.share_grant_count) : (grant_index += 1) {
+        indexShareGrant(workspace, grant_index);
+    }
+}
+
+fn indexShareGrant(workspace: *WorkspaceRecord, grant_index: usize) void {
+    if (grant_index >= workspace.share_table.share_grant_count) {
+        native_util.impossibleByInvariant("share grant index points outside active grants");
+    }
+    const grant = workspace.share_table.share_grants[grant_index];
+    if (!workspace.share_table.share_grant_principal_index.insert(grant.principal_id, grant_index)) {
+        native_util.impossibleByInvariant("share grant index capacity covers share grant table");
+    }
+}
+
+fn findShareGrantIndex(workspace: *const WorkspaceRecord, principal_id: principal.PrincipalId) ?usize {
+    if (workspace.share_table.share_grant_principal_index.lookup(principal_id)) |grant_index| {
+        if (grant_index >= MAX_SHARE_GRANTS) native_util.impossibleByInvariant("share grant index points outside grant slots");
+        if (grant_index >= workspace.share_table.share_grant_count) native_util.impossibleByInvariant("share grant index points outside active grants");
+        const grant = workspace.share_table.share_grants[grant_index];
+        if (!grant.principal_id.eql(principal_id)) native_util.impossibleByInvariant("share grant index points at the wrong grant");
+        return grant_index;
+    }
+    debugAssertShareGrantIndexMissAbsent(workspace, principal_id);
+    return null;
+}
+
+fn debugAssertShareGrantIndexMissAbsent(workspace: *const WorkspaceRecord, principal_id: principal.PrincipalId) void {
+    if (!debugIndexChecksEnabled()) return;
+    for (workspace.share_table.share_grants[0..workspace.share_table.share_grant_count]) |grant| {
+        if (grant.principal_id.eql(principal_id)) {
+            native_util.impossibleByInvariant("share grant index missed a live grant");
+        }
+    }
 }
 
 fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
@@ -1114,6 +1267,11 @@ fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
     workspace_index.rebuildPathSlots(
         ENTRY_INDEX_CAPACITY,
         &workspace.path_index.path_slots,
+        workspace.path_index.entries[0..workspace.path_index.entry_count],
+    );
+    workspace_index.rebuildObjectSlots(
+        ENTRY_OBJECT_INDEX_CAPACITY,
+        &workspace.path_index.object_slots,
         workspace.path_index.entries[0..workspace.path_index.entry_count],
     );
     workspace_merkle.rebuildPathMerkle(&workspace.path_index, MAX_WORKSPACE_ENTRIES);
@@ -1134,6 +1292,13 @@ fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) 
     return findEntryIndex(entries, path);
 }
 
+fn findWorkspaceEntryObjectIndex(workspace: *const WorkspaceRecord, object_id: ids.ObjectId) ?usize {
+    const entries = workspace.path_index.entries[0..workspace.path_index.entry_count];
+    if (workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, object_id)) |index| return index;
+    debugAssertObjectIndexMissAbsent(entries, object_id);
+    return null;
+}
+
 fn findStagedEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
     const entries = workspace.staging.staged_entries[0..workspace.staging.staged_entry_count];
     if (workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.staging.staged_entry_index_slots, entries, path)) |index| return index;
@@ -1152,6 +1317,15 @@ fn findEntryIndex(entries: []const Entry, path: []const u8) ?usize {
     const index = lowerBoundEntry(entries, path);
     if (index < entries.len and compareEntryPath(entries[index].pathSlice(), path) == .eq) return index;
     return null;
+}
+
+fn debugAssertObjectIndexMissAbsent(entries: []const Entry, object_id: ids.ObjectId) void {
+    if (!debugIndexChecksEnabled()) return;
+    for (entries) |entry| {
+        if (entry.object_id.eql(object_id)) {
+            native_util.impossibleByInvariant("workspace object index missed a live entry");
+        }
+    }
 }
 
 fn removeEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: *usize, index: usize) void {
@@ -1238,6 +1412,7 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
     workspace.path_index.entry_count = 0;
     workspace.mutation_log.entry_mutation_count = 0;
     workspace.path_index.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
+    workspace.path_index.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
     clearEntries(&workspace.path_index.entries);
     for (&workspace.mutation_log.entry_mutations) |*mutation| {
         mutation.* = EntryMutation{};
@@ -1405,4 +1580,8 @@ fn clearTransactionState(workspace: *WorkspaceRecord) void {
     workspace.staging.staged_effective_entry_count = 0;
     workspace.staging.staged_entry_index_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
     clearEntries(&workspace.staging.staged_entries);
+}
+
+fn debugIndexChecksEnabled() bool {
+    return builtin.mode == .Debug;
 }

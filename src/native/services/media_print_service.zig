@@ -1,5 +1,6 @@
 const std = @import("std");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const notification_center = @import("notification_center.zig");
 const principal = @import("../core/principal.zig");
@@ -75,9 +76,15 @@ const JobSlot = struct {
     job: JobRecord = zeroJob(),
 };
 
+fn jobSlotId(slot: *const JobSlot) u64 {
+    return slot.job.id;
+}
+
+const JobArena = indexed_arena.IndexedArenaWithKey(u64, JobSlot, MAX_JOBS, MAX_JOBS * 2, jobSlotId);
+
 pub const Service = struct {
     next_job_id: u64 = 1,
-    jobs: [MAX_JOBS]JobSlot = [_]JobSlot{JobSlot{}} ** MAX_JOBS,
+    jobs: JobArena = JobArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -92,10 +99,14 @@ pub const Service = struct {
     ) Error!*JobRecord {
         _ = now_ticks;
         if (request.kind == .print_document and !request.local_only) return error.PrinterRequiresLocalOnly;
+        if (request.label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
+        if (request.printer_identity.len > MAX_LABEL_BYTES) return error.PrinterIdentityTooLong;
 
-        const slot = self.firstFreeJobSlot() orelse return error.JobTableFull;
+        if (self.jobs.countInUse() >= MAX_JOBS) return error.JobTableFull;
+
         var job = zeroJob();
-        job.id = self.next_job_id;
+        const job_id = self.next_job_id;
+        job.id = job_id;
         job.kind = request.kind;
         job.task_id = request.task_id;
         job.workspace_id = request.workspace_id;
@@ -128,9 +139,12 @@ pub const Service = struct {
             job.notification_id = notice.id;
         }
 
-        slot.in_use = true;
+        const slot_index = self.jobs.reserveIndex(job_id) orelse
+            native_util.impossibleByInvariant("prechecked print job slot reservation must succeed");
+        const slot = &self.jobs.slots[slot_index];
         slot.job = job;
         self.next_job_id += 1;
+        self.jobs.clearDirty();
         return &slot.job;
     }
 
@@ -167,17 +181,8 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, job_id: u64) ?*JobRecord {
-        for (&self.jobs) |*slot| {
-            if (slot.in_use and slot.job.id == job_id) return &slot.job;
-        }
-        return null;
-    }
-
-    fn firstFreeJobSlot(self: *Service) ?*JobSlot {
-        for (&self.jobs) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
+        const slot = self.jobs.get(job_id) orelse return null;
+        return &slot.job;
     }
 };
 
@@ -302,5 +307,44 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
     try std.testing.expectEqual(@as(?u64, null), hidden.notification_id);
     try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 9));
     try std.testing.expectEqual(@as(usize, 0), notifications.activeCount(9));
+    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
+}
+
+test "media print service indexes completed jobs and rejects full tables before claiming" {
+    var scheduler = accelerator_scheduler.Controller.init();
+    var notifications = notification_center.Center.init();
+    var service = Service.init();
+    const source = principal.PrincipalId{ .kind = .app, .serial = 14 };
+
+    var first_job_id: u64 = 0;
+    var job_index: usize = 0;
+    while (job_index < MAX_JOBS) : (job_index += 1) {
+        const job = try service.submit(.{
+            .kind = .print_document,
+            .task_id = 90 + job_index,
+            .workspace_id = 7,
+            .source_principal = source,
+            .label = "quiet print",
+            .printer_identity = "printer://local",
+            .local_only = true,
+            .visibility = .hidden,
+        }, &scheduler, &notifications, 30 + job_index);
+        if (job_index == 0) first_job_id = job.id;
+        try std.testing.expectEqual(@as(?u64, null), try service.complete(job.id, &scheduler, &notifications, 60 + job_index));
+    }
+
+    try std.testing.expectEqual(@as(usize, MAX_JOBS), service.jobs.countInUse());
+    try std.testing.expectEqual(JobState.completed, service.find(first_job_id).?.state);
+    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
+    try std.testing.expectError(error.JobTableFull, service.submit(.{
+        .kind = .print_document,
+        .task_id = 200,
+        .workspace_id = 7,
+        .source_principal = source,
+        .label = "overflow",
+        .printer_identity = "printer://local",
+        .local_only = true,
+        .visibility = .hidden,
+    }, &scheduler, &notifications, 99));
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }

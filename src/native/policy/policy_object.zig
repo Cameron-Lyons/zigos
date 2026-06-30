@@ -49,13 +49,16 @@ const PolicySlot = struct {
     policy: PolicyObject = zeroPolicy(),
 };
 
-const PolicyIdIndex = indexed_arena.UniqueIndex(POLICY_INDEX_CAPACITY);
+fn policySlotId(slot: *const PolicySlot) u64 {
+    return slot.policy.id;
+}
+
+const PolicyArena = indexed_arena.IndexedArena(PolicySlot, MAX_POLICIES, POLICY_INDEX_CAPACITY, policySlotId);
 const PolicyScopeIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_INDEX_CAPACITY);
 
 pub const Directory = struct {
     next_policy_id: u64 = 1,
-    slots: [MAX_POLICIES]PolicySlot = [_]PolicySlot{PolicySlot{}} ** MAX_POLICIES,
-    policy_id_index: PolicyIdIndex = PolicyIdIndex.init(),
+    policies: PolicyArena = PolicyArena.init(),
     scope_index: PolicyScopeIndex = PolicyScopeIndex.init(),
 
     pub fn init() Directory {
@@ -71,9 +74,11 @@ pub const Directory = struct {
         if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
         if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
 
-        const slot_index = self.firstFreeSlotIndex() orelse return error.PolicyTableFull;
+        if (self.policies.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
+
+        const policy_id = self.next_policy_id;
         var policy = zeroPolicy();
-        policy.id = self.next_policy_id;
+        policy.id = policy_id;
         policy.generation = nextGeneration(self, request.scope, request.subject_id);
         policy.scope = request.scope;
         policy.subject_id = request.subject_id;
@@ -184,11 +189,12 @@ pub const Directory = struct {
 
         const digest = policyDigest(&policy);
         policy.signature = try signing.sign(signer, &digest);
-        const slot = &self.slots[slot_index];
-        slot.in_use = true;
+        const slot_index = self.policies.reserveIndex(policy_id) orelse
+            native_util.impossibleByInvariant("prechecked policy slot reservation must succeed");
+        const slot = &self.policies.slots[slot_index];
         slot.policy = policy;
-        self.next_policy_id += 1;
         self.indexPolicy(slot_index);
+        self.next_policy_id += 1;
         return &slot.policy;
     }
 
@@ -198,7 +204,7 @@ pub const Directory = struct {
         var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
         while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
             if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.slots[cursor];
+            const slot = &self.policies.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.revoked) continue;
@@ -216,12 +222,11 @@ pub const Directory = struct {
     }
 
     pub fn revokePolicy(self: *Directory, policy_id: u64) Error!void {
-        const slot_index = self.policy_id_index.lookup(policy_id) orelse return error.PolicyNotFound;
-        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy id index points outside slots");
-        const slot = &self.slots[slot_index];
-        if (!slot.in_use or slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
+        const slot = self.policies.get(policy_id) orelse return error.PolicyNotFound;
+        if (slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
         if (slot.policy.revoked) return error.PolicyAlreadyRevoked;
         slot.policy.revoked = true;
+        self.policies.markDirty(policy_id);
     }
 
     pub fn revokePoliciesForScope(self: *Directory, scope: Scope, subject_id: u64) usize {
@@ -229,11 +234,12 @@ pub const Directory = struct {
         var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
         while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
             if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.slots[cursor];
+            const slot = &self.policies.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.revoked) continue;
             slot.policy.revoked = true;
+            self.policies.markDirty(slot.policy.id);
             revoked_count += 1;
         }
         return revoked_count;
@@ -802,10 +808,8 @@ pub const Directory = struct {
 
     fn findConst(self: *const Directory, policy_id: u64) ?*const PolicyObject {
         if (policy_id == 0) return null;
-        const slot_index = self.policy_id_index.lookup(policy_id) orelse return null;
-        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy id index points outside slots");
-        const slot = &self.slots[slot_index];
-        if (!slot.in_use or slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
+        const slot = self.policies.getConst(policy_id) orelse return null;
+        if (slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
         return &slot.policy;
     }
 
@@ -815,7 +819,7 @@ pub const Directory = struct {
         var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
         while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
             if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.slots[cursor];
+            const slot = &self.policies.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.revoked) continue;
@@ -838,19 +842,11 @@ pub const Directory = struct {
         return block(policy, .unsigned_policy);
     }
 
-    fn firstFreeSlotIndex(self: *const Directory) ?usize {
-        for (self.slots, 0..) |slot, slot_index| {
-            if (!slot.in_use) return slot_index;
-        }
-        return null;
-    }
-
     fn indexPolicy(self: *Directory, slot_index: usize) void {
         if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy index update points outside slots");
-        const slot = &self.slots[slot_index];
+        const slot = &self.policies.slots[slot_index];
         const policy = &slot.policy;
         if (!slot.in_use or policy.id == 0) native_util.impossibleByInvariant("policy index update requires a live policy");
-        self.policy_id_index.insert(policy.id, slot_index);
         if (!self.scope_index.append(policyScopeKey(policy.scope, policy.subject_id), slot_index)) {
             native_util.impossibleByInvariant("policy scope index capacity covers policy slots");
         }
@@ -1049,7 +1045,7 @@ fn latestGenerationForScope(self: *const Directory, scope: Scope, subject_id: u6
     var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
     while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
         if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-        const slot = &self.slots[cursor];
+        const slot = &self.policies.slots[cursor];
         if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
         if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
         if (slot.policy.generation > best_generation) best_generation = slot.policy.generation;
@@ -2176,4 +2172,45 @@ test "policy objects reject oversized lists and refuse authorization after tampe
         0x5A;
     try std.testing.expect(!directory.verify(policy.id));
     try std.testing.expect(!directory.installSourceAllowed(.device, 8, "store:zigos"));
+}
+
+test "policy directory indexes policy slots by id and scope through a full table" {
+    var directory = Directory.init();
+    const subject_id: u64 = 0xCAFE;
+    const signer = signing.SignerIdentity{
+        .label = "full-policy-table-key",
+        .seed = signing.seedFromByte(0x64),
+    };
+
+    var first_policy_id: u64 = 0;
+    var policy_index: usize = 0;
+    while (policy_index < MAX_POLICIES) : (policy_index += 1) {
+        var label_buffer: [32]u8 = undefined;
+        const label = try std.fmt.bufPrint(&label_buffer, "indexed-policy-{d}", .{policy_index});
+        const policy = try directory.create(.{
+            .scope = .workspace,
+            .subject_id = subject_id,
+            .issuer = .{ .kind = .policy_authority, .serial = 44 },
+            .label = label,
+            .screen_capture_allowed = policy_index % 2 == 0,
+        }, signer);
+        if (policy_index == 0) first_policy_id = policy.id;
+        try std.testing.expect(directory.verify(policy.id));
+    }
+
+    const active = directory.activeForScope(.workspace, subject_id) orelse return error.TestExpectedPolicy;
+    try std.testing.expectEqual(@as(u32, @intCast(MAX_POLICIES)), active.generation);
+
+    try std.testing.expectError(error.PolicyTableFull, directory.create(.{
+        .scope = .workspace,
+        .subject_id = subject_id + 1,
+        .issuer = .{ .kind = .policy_authority, .serial = 45 },
+        .label = "overflow-policy",
+    }, signer));
+
+    try directory.revokePolicy(first_policy_id);
+    try std.testing.expectError(error.PolicyAlreadyRevoked, directory.revokePolicy(first_policy_id));
+    const revoked_count = directory.revokePoliciesForScope(.workspace, subject_id);
+    try std.testing.expectEqual(@as(usize, MAX_POLICIES - 1), revoked_count);
+    try std.testing.expect(directory.activeForScope(.workspace, subject_id) == null);
 }
