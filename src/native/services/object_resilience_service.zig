@@ -105,12 +105,9 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const slot = self.slots.reserve(self.next_snapshot_id) orelse {
-            try recordBackup(ledger, request, 0, false);
-            return error.SnapshotTableFull;
-        };
-        slot.snapshot = .{
-            .id = self.next_snapshot_id,
+        const snapshot_id = self.next_snapshot_id;
+        const snapshot = Snapshot{
+            .id = snapshot_id,
             .subject = request.subject,
             .source_task_id = request.task_id,
             .workspace_id = request.workspace_id,
@@ -121,8 +118,15 @@ pub const Service = struct {
             .encrypted = request.encrypted,
             .recovery_key_present = request.recovery_key_present,
         };
-        self.next_snapshot_id += 1;
-        try recordBackup(ledger, request, slot.snapshot.id, true);
+
+        const slot = self.slots.reserve(snapshot_id) orelse {
+            try recordBackup(ledger, request, 0, false);
+            return error.SnapshotTableFull;
+        };
+        errdefer _ = self.slots.remove(snapshot_id);
+        try recordBackup(ledger, request, snapshot_id, true);
+        slot.snapshot = snapshot;
+        self.advanceNextSnapshotId();
         return &slot.snapshot;
     }
 
@@ -164,8 +168,8 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        snapshot.restore_count += 1;
         try recordRestore(ledger, request, true, snapshot.encrypted);
+        snapshot.restore_count += 1;
         return snapshot;
     }
 
@@ -182,13 +186,18 @@ pub const Service = struct {
             try recordRevoke(ledger, request, false, snapshot.encrypted);
             return error.SourceTaskMismatch;
         }
-        snapshot.revoked = true;
         try recordRevoke(ledger, request, true, snapshot.encrypted);
+        snapshot.revoked = true;
     }
 
     pub fn find(self: *Service, snapshot_id: u64) ?*Snapshot {
         const slot = self.slots.get(snapshot_id) orelse return null;
         return &slot.snapshot;
+    }
+
+    fn advanceNextSnapshotId(self: *Service) void {
+        self.next_snapshot_id +%= 1;
+        if (self.next_snapshot_id == 0) self.next_snapshot_id = 1;
     }
 };
 
@@ -372,4 +381,62 @@ test "object resilience binds restore and revoke to snapshot subject and source 
     const exported = try ledger.exportText(&buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "private object backup") == null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=object_resilience") != null);
+}
+
+test "object resilience snapshot ids wrap without publishing id zero" {
+    var directory = policy_object.Directory.init();
+    _ = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 740,
+        .issuer = .{ .kind = .policy_authority, .serial = 740 },
+        .label = "object resilience wrap policy",
+        .object_backup_allowed = true,
+        .object_restore_allowed = true,
+        .require_encrypted_object_backup = true,
+        .require_backup_recovery_key = true,
+        .require_restore_device_trust = true,
+        .max_object_backup_bytes = 1_048_576,
+        .max_object_restore_age_days = 30,
+    }, signing.SignerIdentity{
+        .label = "object-resilience-wrap-policy",
+        .seed = signing.seedFromByte(0xb8),
+    });
+    const subjects = policy_object.SubjectSet{ .organization_id = 740 };
+    const owner = principal.PrincipalId{ .kind = .app, .serial = 741 };
+    var service = Service.init();
+    service.next_snapshot_id = std.math.maxInt(u64);
+
+    const first = try service.prepareBackup(&directory, subjects, .{
+        .subject = owner,
+        .task_id = 900,
+        .workspace_id = 11,
+        .object_id = 22,
+        .restore_device_id = 333,
+        .bytes = 4096,
+        .sensitivity = .private_user_data,
+        .encrypted = true,
+        .recovery_key_present = true,
+        .now_ticks = 10,
+        .detail = "private object backup contents",
+    }, null);
+    try std.testing.expectEqual(std.math.maxInt(u64), first.id);
+    try std.testing.expectEqual(@as(u64, 1), service.next_snapshot_id);
+    try std.testing.expect(service.find(0) == null);
+
+    const second = try service.prepareBackup(&directory, subjects, .{
+        .subject = owner,
+        .task_id = 901,
+        .workspace_id = 11,
+        .object_id = 23,
+        .restore_device_id = 333,
+        .bytes = 4096,
+        .sensitivity = .private_user_data,
+        .encrypted = true,
+        .recovery_key_present = true,
+        .now_ticks = 11,
+        .detail = "private object backup contents",
+    }, null);
+    try std.testing.expectEqual(@as(u64, 1), second.id);
+    try std.testing.expectEqual(@as(u64, 2), service.next_snapshot_id);
+    try std.testing.expectEqual(@as(usize, 2), service.slots.countInUse());
 }
