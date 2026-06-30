@@ -519,6 +519,20 @@ test "event ledger evicts oldest events instead of jamming past MAX_EVENTS" {
     const latest = ledger.latestKind(.permission_decision).?;
     try std.testing.expectEqual(total, latest.sequence);
     try std.testing.expectEqual(total, latest.task_id);
+
+    var recycled_task_ledger = Ledger.init();
+    const recycled_total: u64 = @as(u64, event_ledger.MAX_EVENTS) + 1;
+    var sequence: u64 = 1;
+    while (sequence <= recycled_total) : (sequence += 1) {
+        const recycled_task_id = if (sequence == recycled_total) 1 else sequence;
+        try recycled_task_ledger.recordPermissionDecision(user, recycled_task_id, .screen_capture, false, .policy_denied, sequence, "denied", true);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), recycled_task_ledger.countMatching(.{ .task_id = 1 }));
+    var records: [QUERY_EVENT_RECORD_CAPACITY]Event = undefined;
+    const recycled_matches = recycled_task_ledger.queryEvents(.{ .task_id = 1 }, &records);
+    try std.testing.expectEqual(@as(usize, 1), recycled_matches.len);
+    try std.testing.expectEqual(recycled_total, recycled_matches[0].sequence);
 }
 
 test "event ledger renders what an app knows about a document" {
