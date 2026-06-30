@@ -300,6 +300,11 @@ pub const indexed_hot_path_tables = .{
             @hasField(sync_service.Service, "inbound_transport_frame_count"),
         .tracks_transport_frame_allocation_cursors = @hasField(sync_service.Service, "next_outbound_transport_frame_slot_index") and
             @hasField(sync_service.Service, "next_inbound_transport_frame_slot_index"),
+        .tracks_sync_table_allocation_cursors = @hasField(@FieldType(sync_state_support.PersistentState, "workspace_policies"), "next_unclaimed_index") and
+            @hasField(@FieldType(sync_state_support.PersistentState, "overlays"), "next_unclaimed_index") and
+            @hasField(@FieldType(sync_state_support.PersistentState, "replica_entries"), "next_unclaimed_index") and
+            @hasField(@FieldType(sync_state_support.PersistentState, "conflicts"), "next_unclaimed_index") and
+            @hasField(@FieldType(sync_state_support.PersistentState, "database_contracts"), "next_unclaimed_index"),
     },
     .sync_adapters = .{
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),
