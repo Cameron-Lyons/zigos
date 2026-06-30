@@ -1,6 +1,8 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
+const native_util = @import("../core/util.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const secure_secret_store = @import("../platform/secure_secret_store.zig");
@@ -94,11 +96,19 @@ const HandleSlot = struct {
     handle: VaultHandle = .{},
 };
 
+const HandleArena = indexed_arena.IndexedArenaWithKey(u64, HandleSlot, MAX_HANDLES, MAX_HANDLES * 2, handleSlotId);
+const SecretHandleIndex = indexed_arena.MultimapIndex(MAX_HANDLES, MAX_HANDLES, MAX_HANDLES * 2);
+const ActiveHandleIndex = indexed_arena.MultimapIndex(MAX_HANDLES, 1, 2);
+const ACTIVE_HANDLE_KEY: u64 = 1;
+
 pub const Service = struct {
     store: secure_secret_store.Store = secure_secret_store.Store.init(),
     next_handle_id: u64 = 1,
     generation: u32 = 1,
-    handles: [MAX_HANDLES]HandleSlot = [_]HandleSlot{HandleSlot{}} ** MAX_HANDLES,
+    handles: HandleArena = HandleArena.init(),
+    secret_handle_index: SecretHandleIndex = SecretHandleIndex.init(),
+    active_handle_index: ActiveHandleIndex = ActiveHandleIndex.init(),
+    active_handle_count: usize = 0,
 
     pub fn init() Service {
         return .{};
@@ -167,16 +177,26 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
+        if (self.handles.used_count >= MAX_HANDLES) {
+            try recordLend(ledger, request, 0, false);
+            return error.HandleTableFull;
+        }
+
         const store_handle = try self.store.lendHandle(
             request.secret_id,
             request.holder,
             request.task_id,
             request.allow_raw_export,
         );
-        const slot = self.firstFreeHandleSlot() orelse return error.HandleTableFull;
-        slot.in_use = true;
+        const handle_id = self.next_handle_id;
+        const slot_index = self.handles.reserveIndex(handle_id) orelse return error.HandleTableFull;
+        if (!self.secret_handle_index.append(request.secret_id, slot_index)) {
+            _ = self.handles.remove(handle_id);
+            return error.HandleTableFull;
+        }
+        const slot = &self.handles.slots[slot_index];
         slot.handle = .{
-            .id = self.next_handle_id,
+            .id = handle_id,
             .store_handle_id = store_handle.id,
             .secret_id = request.secret_id,
             .holder = request.holder,
@@ -186,7 +206,11 @@ pub const Service = struct {
             .raw_export_allowed = store_handle.export_allowed,
             .generation = self.generation,
         };
+        if (!self.active_handle_index.append(ACTIVE_HANDLE_KEY, slot_index)) {
+            native_util.impossibleByInvariant("secret vault active-handle index covers handle slots");
+        }
         self.next_handle_id += 1;
+        self.active_handle_count += 1;
         try recordLend(ledger, request, slot.handle.id, true);
         return &slot.handle;
     }
@@ -297,7 +321,7 @@ pub const Service = struct {
                 try recordRevoke(ledger, request, handle.hardware_backed, false);
                 return error.SecretOwnerMismatch;
             }
-            handle.revoked = true;
+            _ = self.markRevoked(handle);
             try recordRevoke(ledger, request, handle.hardware_backed, true);
             return;
         }
@@ -320,48 +344,63 @@ pub const Service = struct {
     }
 
     pub fn findHandle(self: *Service, handle_id: u64) ?*VaultHandle {
-        for (&self.handles) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.handle.id == handle_id) return &slot.handle;
-        }
-        return null;
+        const slot = self.handles.get(handle_id) orelse return null;
+        return &slot.handle;
     }
 
     pub fn activeHandleCount(self: *const Service) usize {
-        var count: usize = 0;
-        for (&self.handles) |*slot| {
-            if (slot.in_use and !slot.handle.revoked) count += 1;
-        }
-        return count;
+        return self.active_handle_count;
     }
 
     pub fn activeHandleCountAt(self: *const Service, now_ticks: u64) usize {
+        if (self.active_handle_count == 0) return 0;
         var count: usize = 0;
-        for (&self.handles) |*slot| {
-            if (slot.in_use and !slot.handle.revoked and !slot.handle.expired(now_ticks)) count += 1;
+        var slot_index = self.active_handle_index.head(ACTIVE_HANDLE_KEY);
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.active_handle_index.next(slot_index)) {
+            const slot = self.activeHandleSlotAt(slot_index);
+            if (!slot.handle.expired(now_ticks)) count += 1;
         }
         return count;
-    }
-
-    fn firstFreeHandleSlot(self: *Service) ?*HandleSlot {
-        for (&self.handles) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
     }
 
     fn revokeSecretHandles(self: *Service, secret_id: u64) usize {
         var revoked_count: usize = 0;
-        for (&self.handles) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.handle.secret_id != secret_id) continue;
-            if (slot.handle.revoked) continue;
-            slot.handle.revoked = true;
-            revoked_count += 1;
+        var slot_index = self.secret_handle_index.head(secret_id);
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.secret_handle_index.next(slot_index)) {
+            if (slot_index >= self.handles.slots.len) continue;
+            const slot = &self.handles.slots[slot_index];
+            if (!slot.in_use or slot.handle.secret_id != secret_id) continue;
+            if (self.markRevoked(&slot.handle)) revoked_count += 1;
         }
         return revoked_count;
     }
+
+    fn markRevoked(self: *Service, handle: *VaultHandle) bool {
+        if (handle.revoked) return false;
+        const slot_index = self.handles.slotIndexOf(handle.id) orelse {
+            native_util.impossibleByInvariant("secret vault active handle has an arena slot");
+        };
+        if (!self.active_handle_index.remove(ACTIVE_HANDLE_KEY, slot_index)) {
+            native_util.impossibleByInvariant("secret vault active-handle index missing live handle");
+        }
+        handle.revoked = true;
+        if (self.active_handle_count == 0) native_util.impossibleByInvariant("secret vault active handle count underflow");
+        self.active_handle_count -= 1;
+        return true;
+    }
+
+    fn activeHandleSlotAt(self: *const Service, slot_index: usize) *const HandleSlot {
+        if (slot_index >= MAX_HANDLES) native_util.impossibleByInvariant("secret vault active-handle index points outside slots");
+        const slot = &self.handles.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("secret vault active-handle index points at free slot");
+        if (slot.handle.revoked) native_util.impossibleByInvariant("secret vault active-handle index points at revoked handle");
+        return slot;
+    }
 };
+
+fn handleSlotId(slot: *const HandleSlot) u64 {
+    return slot.handle.id;
+}
 
 fn recordImport(
     ledger: ?*event_ledger.Ledger,
@@ -594,6 +633,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
     try std.testing.expect(handle.hardware_backed);
     try std.testing.expect(!handle.raw_export_allowed);
     try std.testing.expectEqual(@as(usize, 1), service.activeHandleCount());
+    try std.testing.expectEqual(@as(usize, 1), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
 
     try std.testing.expectError(error.PolicyDenied, service.exportRaw(&policies, subjects, .{
         .holder = app,
@@ -615,6 +655,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
     }, &ledger);
     try std.testing.expect(rotated.id != secret.id);
     try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
+    try std.testing.expectEqual(@as(usize, 0), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
     try std.testing.expectError(error.HandleRevoked, service.exportRaw(&policies, subjects, .{
         .holder = app,
         .task_id = 72,
@@ -663,6 +704,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .detail = "private api token wrong holder task revoke",
     }, &ledger));
     try std.testing.expectEqual(@as(usize, 1), service.activeHandleCount());
+    try std.testing.expectEqual(@as(usize, 1), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
     try service.revoke(.{
         .subject = user,
         .task_id = 71,
@@ -679,6 +721,53 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .handle_id = rotated_handle.id,
         .now_ticks = 10,
         .detail = "private api token v2 raw export denied",
+    }, &ledger));
+    try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
+    try std.testing.expectEqual(@as(usize, 0), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
+
+    const first_secret_revoke_handle = try service.lendHandle(&policies, subjects, .{
+        .owner = user,
+        .holder = app,
+        .task_id = 72,
+        .secret_id = rotated.id,
+        .expires_at_ticks = 24,
+        .now_ticks = 11,
+        .detail = "private api token v2 relend first",
+    }, &ledger);
+    const second_secret_revoke_handle = try service.lendHandle(&policies, subjects, .{
+        .owner = user,
+        .holder = app,
+        .task_id = 73,
+        .secret_id = rotated.id,
+        .expires_at_ticks = 24,
+        .now_ticks = 12,
+        .detail = "private api token v2 relend second",
+    }, &ledger);
+    try std.testing.expectEqual(@as(usize, 2), service.activeHandleCount());
+    try std.testing.expectEqual(@as(usize, 2), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
+    try std.testing.expectEqual(@as(usize, 3), service.secret_handle_index.count(rotated.id));
+    try service.revoke(.{
+        .subject = user,
+        .task_id = 71,
+        .secret_id = rotated.id,
+        .now_ticks = 13,
+        .detail = "private api token v2 secret revoked",
+    }, &ledger);
+    try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
+    try std.testing.expectEqual(@as(usize, 0), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
+    try std.testing.expectError(error.HandleRevoked, service.exportRaw(&policies, subjects, .{
+        .holder = app,
+        .task_id = 72,
+        .handle_id = first_secret_revoke_handle.id,
+        .now_ticks = 14,
+        .detail = "private api token v2 first raw export denied",
+    }, &ledger));
+    try std.testing.expectError(error.HandleRevoked, service.exportRaw(&policies, subjects, .{
+        .holder = app,
+        .task_id = 73,
+        .handle_id = second_secret_revoke_handle.id,
+        .now_ticks = 14,
+        .detail = "private api token v2 second raw export denied",
     }, &ledger));
 
     var expiry_service = Service.init();
@@ -703,6 +792,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .now_ticks = 12,
         .detail = "private expiring token lent",
     }, &expiry_ledger);
+    try std.testing.expectEqual(@as(usize, 1), expiry_service.active_handle_index.count(ACTIVE_HANDLE_KEY));
     try std.testing.expectEqual(@as(usize, 1), expiry_service.activeHandleCountAt(19));
     try std.testing.expectEqual(@as(usize, 0), expiry_service.activeHandleCountAt(20));
     try std.testing.expectError(error.HandleExpired, expiry_service.exportRaw(&policies, subjects, .{
