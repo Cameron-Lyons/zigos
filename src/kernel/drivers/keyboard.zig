@@ -1,3 +1,4 @@
+const std = @import("std");
 const vga = @import("vga.zig");
 const io = @import("../utils/io.zig");
 
@@ -26,7 +27,6 @@ var buffer_start: usize = 0;
 var buffer_end: usize = 0;
 
 const KEYBOARD_DATA_PORT: u16 = 0x60;
-const KEYBOARD_STATUS_PORT: u16 = 0x64;
 
 const KeyboardScancode = enum(u8) {
     escape = 0x01,
@@ -254,11 +254,14 @@ fn isAlpha(ch: u8) bool {
     return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z');
 }
 
-pub fn recordBootstrapInventoryOnly() void {
+pub fn deferInputDataPlaneToUserspace() void {
     kernel_input_data_plane_enabled = false;
-    while (io.inb(KEYBOARD_STATUS_PORT) & 0x01 != 0) {
-        _ = io.inb(KEYBOARD_DATA_PORT);
-    }
+    shift_pressed = false;
+    ctrl_pressed = false;
+    alt_pressed = false;
+    caps_lock = false;
+    buffer_start = 0;
+    buffer_end = 0;
 }
 
 pub fn setLineDiscipline(line_discipline: LineDiscipline) void {
@@ -289,4 +292,24 @@ fn put_char_buffer(ch: u8) void {
         char_buffer[buffer_end] = ch;
         buffer_end = next_end;
     }
+}
+
+test "bootstrap handoff clears kernel keyboard state without PS/2 drain" {
+    kernel_input_data_plane_enabled = true;
+    shift_pressed = true;
+    ctrl_pressed = true;
+    alt_pressed = true;
+    caps_lock = true;
+    buffer_start = 0;
+    buffer_end = 0;
+    put_char_buffer('x');
+
+    deferInputDataPlaneToUserspace();
+
+    try std.testing.expect(!kernel_input_data_plane_enabled);
+    try std.testing.expect(!shift_pressed);
+    try std.testing.expect(!ctrl_pressed);
+    try std.testing.expect(!alt_pressed);
+    try std.testing.expect(!caps_lock);
+    try std.testing.expect(!has_char());
 }
