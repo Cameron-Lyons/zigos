@@ -61,11 +61,9 @@ fn imageForConfig(config: anytype, allow_model_only_fallback: bool) generated_im
             if (std.mem.eql(u8, config.bundle_id, "app.notes.daily")) {
                 return generated_image_fixtures.imageByBundleId("app.notes");
             }
-            if (allow_model_only_fallback) {
-                // prod-readiness: model-only synthetic-userspace-image
-                return task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry);
-            }
-            return err;
+            if (!allow_model_only_fallback) return err;
+            // prod-readiness: model-only synthetic-userspace-image
+            return task_runtime.syntheticUserspaceImage(config.task_label, config.task_entry);
         },
         else => return err,
     };

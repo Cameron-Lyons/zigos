@@ -301,6 +301,10 @@ qemu_harness_stop_qemu() {
 }
 
 qemu_harness_run_native_store_until_marker() {
+  # Modeled device inventory for QEMU smoke profiles that use production driver
+  # binding but run on emulators without first-target PCI hardware.
+  QEMU_KERNEL_APPEND="${QEMU_KERNEL_APPEND:-model_inventory}"
+
   local kernel_path="${1:?kernel path required}"
   local store_image="${2:?native store image required}"
   local serial_log_path="${3:?serial log path required}"
