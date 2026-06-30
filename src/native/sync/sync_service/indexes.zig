@@ -22,6 +22,7 @@ pub const ConflictObjectIndex = indexed_arena.UniqueIndex(conflict_index_capacit
 pub const ConflictScopeIndex = indexed_arena.MultimapIndex(state_support.MAX_CONFLICTS, state_support.MAX_CONFLICTS, conflict_index_capacity);
 pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
 pub const TransportFramePathIndex = indexed_arena.MultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES, transport_frame_index_capacity);
+pub const TransportFrameTargetIndex = CompactMultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -150,6 +151,14 @@ pub fn transportFramePathLookupKey(workspace_id: u64, target_device: principal.P
     return indexed_arena.nonZeroKey(hash);
 }
 
+pub fn transportFrameTargetLookupKey(workspace_id: u64, target_device: principal.PrincipalId) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5452_4652_5447_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, target_device);
+    return indexed_arena.nonZeroKey(hash);
+}
+
 fn appendSignature(hash: u64, signature: manifest.Signature) u64 {
     var next = appendHashBytes(hash, signature.format);
     next = appendHashBytes(next, signature.signer);
@@ -168,4 +177,124 @@ fn appendPrincipal(hash: u64, value: principal.PrincipalId) u64 {
     var next = native_util.fnv1a64AppendByte(hash, @intFromEnum(value.kind));
     next = native_util.fnv1a64AppendU64LittleEndian(next, value.serial);
     return next;
+}
+
+fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity: usize) type {
+    if (link_capacity == 0) @compileError("compact multimap index requires at least one linked slot");
+    if (bucket_capacity == 0) @compileError("compact multimap index requires at least one bucket");
+    if (link_capacity >= std.math.maxInt(u8)) @compileError("compact multimap index stores links as u8");
+
+    return struct {
+        const Self = @This();
+        const empty_link = std.math.maxInt(u8);
+
+        const Bucket = struct {
+            key: u64 = 0,
+            head: u8 = empty_link,
+            tail: u8 = empty_link,
+            count: u8 = 0,
+        };
+
+        buckets: [bucket_capacity]Bucket = [_]Bucket{Bucket{}} ** bucket_capacity,
+        next_by_slot: [link_capacity]u8 = [_]u8{empty_link} ** link_capacity,
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn reset(self: *Self) void {
+            self.* = Self.init();
+        }
+
+        pub fn count(self: *const Self, key: u64) usize {
+            const entry = self.bucketConst(key) orelse return 0;
+            return entry.count;
+        }
+
+        pub fn head(self: *const Self, key: u64) usize {
+            const entry = self.bucketConst(key) orelse return indexed_arena.no_index;
+            return decode(entry.head);
+        }
+
+        pub fn next(self: *const Self, slot_index: usize) usize {
+            if (slot_index >= link_capacity) return indexed_arena.no_index;
+            return decode(self.next_by_slot[slot_index]);
+        }
+
+        pub fn append(self: *Self, key: u64, slot_index: usize) bool {
+            if (key == 0 or slot_index >= link_capacity) return false;
+            const entry = self.findOrCreateBucket(key) orelse return false;
+            const encoded = encode(slot_index);
+            self.next_by_slot[slot_index] = empty_link;
+            if (entry.tail == empty_link) {
+                entry.head = encoded;
+            } else {
+                self.next_by_slot[decode(entry.tail)] = encoded;
+            }
+            entry.tail = encoded;
+            entry.count += 1;
+            return true;
+        }
+
+        pub fn remove(self: *Self, key: u64, slot_index: usize) bool {
+            if (key == 0 or slot_index >= link_capacity) return false;
+            const entry = self.bucket(key) orelse return false;
+            const encoded = encode(slot_index);
+            var previous: u8 = empty_link;
+            var current = entry.head;
+            while (current != empty_link) : (current = self.next_by_slot[decode(current)]) {
+                if (current == encoded) {
+                    const next_link = self.next_by_slot[decode(current)];
+                    if (previous == empty_link) {
+                        entry.head = next_link;
+                    } else {
+                        self.next_by_slot[decode(previous)] = next_link;
+                    }
+                    if (entry.tail == current) entry.tail = previous;
+                    self.next_by_slot[decode(current)] = empty_link;
+                    entry.count -= 1;
+                    if (entry.count == 0) entry.* = .{};
+                    return true;
+                }
+                previous = current;
+            }
+            return false;
+        }
+
+        fn bucket(self: *Self, key: u64) ?*Bucket {
+            const index = self.bucketIndex(key) orelse return null;
+            return &self.buckets[index];
+        }
+
+        fn bucketConst(self: *const Self, key: u64) ?*const Bucket {
+            const index = self.bucketIndex(key) orelse return null;
+            return &self.buckets[index];
+        }
+
+        fn bucketIndex(self: *const Self, key: u64) ?usize {
+            if (key == 0) return null;
+            for (self.buckets, 0..) |bucket_slot, bucket_index| {
+                if (bucket_slot.key == key) return bucket_index;
+            }
+            return null;
+        }
+
+        fn findOrCreateBucket(self: *Self, key: u64) ?*Bucket {
+            if (self.bucket(key)) |slot| return slot;
+            for (&self.buckets) |*slot| {
+                if (slot.key != 0) continue;
+                slot.* = .{ .key = key };
+                return slot;
+            }
+            return null;
+        }
+
+        fn encode(slot_index: usize) u8 {
+            return @intCast(slot_index);
+        }
+
+        fn decode(link: u8) usize {
+            return if (link == empty_link) indexed_arena.no_index else @as(usize, link);
+        }
+    };
 }
