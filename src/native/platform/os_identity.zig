@@ -207,9 +207,10 @@ pub const Store = struct {
     ) Error!*CredentialRecord {
         _ = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
 
+        const credential_id = self.nextReservableCredentialId() orelse return error.CredentialTableFull;
         const slot = self.allocateCredential() orelse return error.CredentialTableFull;
         var credential = zeroCredential();
-        credential.id = self.next_credential_id;
+        credential.id = credential_id;
         credential.owner = request.owner;
         credential.primary_device = request.device;
         credential.scope = request.scope;
@@ -242,7 +243,7 @@ pub const Store = struct {
 
         slot.in_use = true;
         slot.credential = credential;
-        self.next_credential_id += 1;
+        self.advanceNextCredentialIdFrom(credential_id);
         return &slot.credential;
     }
 
@@ -369,7 +370,40 @@ pub const Store = struct {
         }
         return null;
     }
+
+    fn nextReservableCredentialId(self: *Store) ?u64 {
+        if (self.countCredentials() >= MAX_CREDENTIALS) return null;
+
+        var credential_id = normalizeCredentialId(self.next_credential_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_CREDENTIALS) : (attempts += 1) {
+            if (self.findCredential(credential_id) == null) return credential_id;
+            credential_id = nextCredentialIdAfter(credential_id);
+        }
+        return null;
+    }
+
+    fn advanceNextCredentialIdFrom(self: *Store, credential_id: u64) void {
+        self.next_credential_id = nextCredentialIdAfter(credential_id);
+    }
+
+    fn countCredentials(self: *const Store) usize {
+        var count: usize = 0;
+        for (&self.credentials) |*slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
 };
+
+fn normalizeCredentialId(credential_id: u64) u64 {
+    return if (credential_id == 0) 1 else credential_id;
+}
+
+fn nextCredentialIdAfter(credential_id: u64) u64 {
+    const next = credential_id +% 1;
+    return normalizeCredentialId(next);
+}
 
 pub fn createLocalUnlockProof(
     owner: principal.PrincipalId,
@@ -793,6 +827,93 @@ test "os identity registration rejects overlong text without consuming credentia
     try std.testing.expectEqual(@as(u64, 1), credential.id);
     try std.testing.expectEqual(@as(u64, 2), identities.next_credential_id);
     try std.testing.expectEqual(@as(u64, 2), secrets.next_secret_id);
+}
+
+test "os identity credential ids wrap without zero and skip active credentials" {
+    var graph = device_graph.Graph.init();
+    var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(testHardwareProvider());
+    var identities = Store.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 771 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 781 };
+    const user_identity = signing.SignerIdentity{
+        .label = "wrap-user",
+        .seed = signing.seedFromByte(0xE1),
+    };
+    const laptop_identity = signing.SignerIdentity{
+        .label = "wrap-laptop",
+        .seed = signing.seedFromByte(0xE2),
+    };
+    const credential_identity = signing.SignerIdentity{
+        .label = "wrap-passkey",
+        .seed = signing.seedFromByte(0xE3),
+    };
+
+    _ = try graph.ensureUserRoot(user, "owner", user_identity);
+    _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
+
+    identities.next_credential_id = std.math.maxInt(u64);
+    const max_credential = try identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "wrap.example",
+        .label = "wrap-passkey-max",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 2,
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), max_credential.id);
+    try std.testing.expectEqual(@as(u64, 1), identities.next_credential_id);
+    try std.testing.expect(identities.findCredential(0) == null);
+
+    const wrapped_credential = try identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "wrap.example",
+        .label = "wrap-passkey-one",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 3,
+    });
+    try std.testing.expectEqual(@as(u64, 1), wrapped_credential.id);
+    try std.testing.expectEqual(@as(u64, 2), identities.next_credential_id);
+    try std.testing.expect(identities.findCredential(0) == null);
+
+    identities.next_credential_id = 1;
+    const skipped_credential = try identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "wrap.example",
+        .label = "wrap-passkey-two",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 4,
+    });
+    try std.testing.expectEqual(@as(u64, 2), skipped_credential.id);
+    try std.testing.expectEqual(@as(u64, 3), identities.next_credential_id);
+    try std.testing.expect(identities.findCredential(0) == null);
+
+    var full_identities = Store.init();
+    var full_secrets = secure_secret_store.Store.init();
+    for (&full_identities.credentials, 0..) |*slot, index| {
+        slot.credential = zeroCredential();
+        slot.credential.id = @intCast(index + 1);
+        slot.in_use = true;
+    }
+
+    const credential_next_before = full_identities.next_credential_id;
+    const secret_next_before = full_secrets.next_secret_id;
+    try std.testing.expectError(error.CredentialTableFull, full_identities.registerCredential(&graph, &full_secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "wrap.example",
+        .label = "wrap-passkey-full",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 5,
+    }));
+    try std.testing.expectEqual(credential_next_before, full_identities.next_credential_id);
+    try std.testing.expectEqual(secret_next_before, full_secrets.next_secret_id);
 }
 
 test "os identity recovers synced credentials through trusted device graph" {
