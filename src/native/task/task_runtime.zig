@@ -835,6 +835,66 @@ test "task runtime ids wrap without zero and skip active tasks" {
     try std.testing.expectEqual(MAX_TASKS, full_runtime.taskCount());
 }
 
+test "task runtime host ids wrap without zero and skip active hosts" {
+    var runtime = Runtime.init();
+
+    runtime.next_process_id = std.math.maxInt(u64);
+    runtime.next_address_space_id = std.math.maxInt(u64);
+    runtime.next_namespace_id = std.math.maxInt(u64);
+    const max_host_task = try createTaskIdTestTask(&runtime, 20);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_host_task.process_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_host_task.address_space_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_host_task.namespace_id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_process_id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_address_space_id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_namespace_id);
+    try std.testing.expect(runtime.findAddressSpaceConst(0) == null);
+
+    const wrapped_host_task = try createTaskIdTestTask(&runtime, 21);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_host_task.process_id);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_host_task.address_space_id);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_host_task.namespace_id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_process_id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_address_space_id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_namespace_id);
+    try std.testing.expect(runtime.findAddressSpaceConst(0) == null);
+
+    runtime.next_process_id = 1;
+    runtime.next_address_space_id = 1;
+    runtime.next_namespace_id = 1;
+    const skipped_host_task = try createTaskIdTestTask(&runtime, 22);
+    try std.testing.expectEqual(@as(u64, 2), skipped_host_task.process_id);
+    try std.testing.expectEqual(@as(u64, 2), skipped_host_task.address_space_id);
+    try std.testing.expectEqual(@as(u64, 2), skipped_host_task.namespace_id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_process_id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_address_space_id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_namespace_id);
+    try std.testing.expect(runtime.findAddressSpaceConst(0) == null);
+}
+
+test "task runtime host ids do not advance when address space installation fails" {
+    var runtime = Runtime.init();
+    for (&runtime.address_spaces, 0..) |*slot, index| {
+        slot.in_use = true;
+        slot.address_space = model.zeroAddressSpace();
+        slot.address_space.id = @intCast(index + 1_000);
+    }
+    runtime.rebuildIndexes();
+
+    runtime.next_process_id = 80;
+    runtime.next_address_space_id = 81;
+    runtime.next_namespace_id = 82;
+    const next_process_before = runtime.next_process_id;
+    const next_address_space_before = runtime.next_address_space_id;
+    const next_namespace_before = runtime.next_namespace_id;
+
+    try std.testing.expectError(error.AddressSpaceTableFull, createTaskIdTestTask(&runtime, 23));
+    try std.testing.expectEqual(next_process_before, runtime.next_process_id);
+    try std.testing.expectEqual(next_address_space_before, runtime.next_address_space_id);
+    try std.testing.expectEqual(next_namespace_before, runtime.next_namespace_id);
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+}
+
 test "granting and revoking capabilities updates the task table" {
     var runtime = Runtime.init();
     const task = try runtime.createTask(.{
