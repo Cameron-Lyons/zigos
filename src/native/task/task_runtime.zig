@@ -222,7 +222,7 @@ pub const Runtime = struct {
             try validateUserspaceImage(requested_userspace_image)
         else
             ExecutableImageSpec{};
-        const task_id = self.next_task_id;
+        const task_id = self.nextReservableTaskId() orelse return error.TaskTableFull;
         const slot_index = self.tasks.reserveIndex(task_id) orelse return error.TaskTableFull;
         errdefer _ = self.tasks.removeIndex(slot_index);
 
@@ -235,7 +235,6 @@ pub const Runtime = struct {
             userspace_image,
         );
 
-        self.next_task_id += 1;
         const slot = self.tasks.slotAt(slot_index);
         resetTaskCold(&self.task_cold[slot_index]);
         slot.task = .{
@@ -281,6 +280,7 @@ pub const Runtime = struct {
         if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
             native_util.impossibleByInvariant("task owner index capacity covers task slots");
         }
+        self.advanceNextTaskIdFrom(task_id);
         return &slot.task;
     }
 
@@ -379,6 +379,22 @@ pub const Runtime = struct {
 
     fn indexedTaskSlotConst(self: *const Runtime, task_id: u64) ?*const TaskSlot {
         return self.tasks.getConst(task_id);
+    }
+
+    fn nextReservableTaskId(self: *const Runtime) ?u64 {
+        if (self.taskCount() >= MAX_TASKS) return null;
+
+        var task_id = normalizeTaskId(self.next_task_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_TASKS) : (attempts += 1) {
+            if (self.indexedTaskSlotConst(task_id) == null) return task_id;
+            task_id = nextTaskIdAfter(task_id);
+        }
+        return null;
+    }
+
+    fn advanceNextTaskIdFrom(self: *Runtime, task_id: u64) void {
+        self.next_task_id = nextTaskIdAfter(task_id);
     }
 
     pub fn noteAddressSpaceInstalled(self: *Runtime, address_space_id: u64, slot_index: usize) void {
@@ -686,6 +702,15 @@ pub const Runtime = struct {
     }
 };
 
+fn normalizeTaskId(task_id: u64) u64 {
+    return if (task_id == 0) 1 else task_id;
+}
+
+fn nextTaskIdAfter(task_id: u64) u64 {
+    const next = task_id +% 1;
+    return normalizeTaskId(next);
+}
+
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
@@ -701,6 +726,20 @@ fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
 
     cold.provenance_trail[task.provenance_start] = event;
     task.provenance_start = (task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS;
+}
+
+fn createTaskIdTestTask(runtime: *Runtime, owner_serial: u64) Error!*TaskRecord {
+    return runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = owner_serial },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = TEST_MINIMAL_MEMORY_BYTES,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+        },
+        .local_only = true,
+    });
 }
 
 test "new tasks start with zero ambient authority and no capabilities" {
@@ -764,6 +803,36 @@ test "task runtime crosses the first task slab page with indexed handles" {
     try std.testing.expect(runtime.find(last_task_id) != null);
     try std.testing.expectEqual(last_task_id, runtime.findByOwner(last_owner).?.id);
     try std.testing.expect(runtime.taskHandle(last_task_id) != null);
+}
+
+test "task runtime ids wrap without zero and skip active tasks" {
+    var runtime = Runtime.init();
+
+    runtime.next_task_id = std.math.maxInt(u64);
+    const max_task = try createTaskIdTestTask(&runtime, 1);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_task.id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_task_id);
+    try std.testing.expect(runtime.find(0) == null);
+
+    const wrapped_task = try createTaskIdTestTask(&runtime, 2);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_task.id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_task_id);
+    try std.testing.expect(runtime.find(0) == null);
+
+    runtime.next_task_id = 1;
+    const skipped_task = try createTaskIdTestTask(&runtime, 3);
+    try std.testing.expectEqual(@as(u64, 2), skipped_task.id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_task_id);
+    try std.testing.expect(runtime.find(0) == null);
+
+    var full_runtime = Runtime.init();
+    for (0..MAX_TASKS) |index| {
+        _ = try createTaskIdTestTask(&full_runtime, @intCast(index + 10));
+    }
+    const next_before_full = full_runtime.next_task_id;
+    try std.testing.expectError(error.TaskTableFull, createTaskIdTestTask(&full_runtime, 1_000));
+    try std.testing.expectEqual(next_before_full, full_runtime.next_task_id);
+    try std.testing.expectEqual(MAX_TASKS, full_runtime.taskCount());
 }
 
 test "granting and revoking capabilities updates the task table" {
