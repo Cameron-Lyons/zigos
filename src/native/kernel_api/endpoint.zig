@@ -75,7 +75,7 @@ pub const Table = struct {
     }
 
     pub fn create(self: *Table, owner_task_id: ids.TaskId, label: []const u8, flags: EndpointFlags) Error!Endpoint {
-        const endpoint_id = self.allocateEndpointId();
+        const endpoint_id = self.nextReservableEndpointId() orelse return error.TableFull;
         const slot_index = self.arena.reserveIndex(endpoint_id) orelse return error.TableFull;
         const slot = &self.arena.slots[slot_index];
         slot.endpoint = .{
@@ -89,6 +89,7 @@ pub const Table = struct {
         if (!self.owner_index.append(owner_task_id.raw(), slot_index)) {
             native_util.impossibleByInvariant("endpoint owner index capacity covers endpoint slots");
         }
+        self.advanceNextEndpointIdFrom(endpoint_id);
         return slot.endpoint;
     }
 
@@ -180,9 +181,21 @@ pub const Table = struct {
         return @intCast(self.owner_index.count(task_id.raw()));
     }
 
-    fn allocateEndpointId(self: *Table) ids.EndpointId {
-        defer self.next_endpoint_id += 1;
-        return ids.endpoint(self.next_endpoint_id);
+    fn nextReservableEndpointId(self: *const Table) ?ids.EndpointId {
+        if (self.arena.countInUse() >= MAX_ENDPOINTS) return null;
+
+        var endpoint_id = normalizeEndpointId(self.next_endpoint_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_ENDPOINTS) : (attempts += 1) {
+            const candidate = ids.endpoint(endpoint_id);
+            if (self.findConst(candidate) == null) return candidate;
+            endpoint_id = nextEndpointIdAfter(endpoint_id);
+        }
+        return null;
+    }
+
+    fn advanceNextEndpointIdFrom(self: *Table, endpoint_id: ids.EndpointId) void {
+        self.next_endpoint_id = nextEndpointIdAfter(endpoint_id.raw());
     }
 
     fn find(self: *Table, endpoint_id: ids.EndpointId) ?*Endpoint {
@@ -198,6 +211,15 @@ pub const Table = struct {
 
 fn endpointSlotId(slot: *const EndpointSlot) ids.EndpointId {
     return slot.endpoint.id;
+}
+
+fn normalizeEndpointId(endpoint_id: u64) u64 {
+    return if (endpoint_id == 0) 1 else endpoint_id;
+}
+
+fn nextEndpointIdAfter(endpoint_id: u64) u64 {
+    const next = endpoint_id +% 1;
+    return normalizeEndpointId(next);
 }
 
 fn zeroMessage() Message {
@@ -248,6 +270,39 @@ test "endpoint descriptors track peer links and queue depth" {
     try std.testing.expectEqual(left.id.raw(), descriptor.peer_endpoint_id);
     try std.testing.expectEqual(@as(u16, 1), descriptor.queued_messages);
     try std.testing.expect(descriptor.label_hash != 0);
+}
+
+test "endpoint ids wrap without zero and skip active endpoints" {
+    var table = Table.init();
+
+    table.next_endpoint_id = std.math.maxInt(u64);
+    const max_endpoint = try table.create(ids.task(10), "max", .{});
+    try std.testing.expectEqual(std.math.maxInt(u64), max_endpoint.id.raw());
+    try std.testing.expectEqual(@as(u64, 1), table.next_endpoint_id);
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(ids.EndpointId.zero));
+
+    const wrapped_endpoint = try table.create(ids.task(11), "wrapped", .{});
+    try std.testing.expectEqual(@as(u64, 1), wrapped_endpoint.id.raw());
+    try std.testing.expectEqual(@as(u64, 2), table.next_endpoint_id);
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(ids.EndpointId.zero));
+
+    table.next_endpoint_id = 1;
+    const skipped_endpoint = try table.create(ids.task(12), "skipped", .{});
+    try std.testing.expectEqual(@as(u64, 2), skipped_endpoint.id.raw());
+    try std.testing.expectEqual(@as(u64, 3), table.next_endpoint_id);
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(ids.EndpointId.zero));
+}
+
+test "endpoint ids do not advance when the table is full" {
+    var table = Table.init();
+    for (0..MAX_ENDPOINTS) |index| {
+        _ = try table.create(ids.task(@intCast(index + 100)), "endpoint", .{});
+    }
+
+    const next_before_full = table.next_endpoint_id;
+    try std.testing.expectError(error.TableFull, table.create(ids.task(1_000), "rejected", .{}));
+    try std.testing.expectEqual(next_before_full, table.next_endpoint_id);
+    try std.testing.expectEqual(@as(u16, 1), table.activeForTask(ids.task(100)));
 }
 
 test "service ports accept multiple client connections without blocking later binds" {
