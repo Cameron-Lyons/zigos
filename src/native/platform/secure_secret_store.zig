@@ -106,13 +106,14 @@ pub const Store = struct {
         if (raw.len > MAX_VALUE_BYTES) return error.SecretTooLarge;
         if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
         const slot = self.firstFreeSecretSlot() orelse return error.SecretTableFull;
+        const secret_id = self.nextReservableSecretId() orelse return error.SecretTableFull;
         const hardware_sealed_digest = if (hardware_backed)
             self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable
         else
             crypto_hash.zero_digest;
 
         var secret = zeroSecret();
-        secret.id = self.next_secret_id;
+        secret.id = secret_id;
         secret.owner = owner;
         secret.hardware_backed = hardware_backed;
         secret.exportable = exportable;
@@ -133,7 +134,7 @@ pub const Store = struct {
 
         slot.secret = secret;
         slot.in_use = true;
-        self.advanceNextSecretId();
+        self.advanceNextSecretIdFrom(secret_id);
         return &slot.secret;
     }
 
@@ -146,8 +147,9 @@ pub const Store = struct {
     ) Error!SecretHandle {
         const secret = self.findSecret(secret_id) orelse return error.SecretNotFound;
         const slot = self.firstFreeHandleSlot() orelse return error.HandleTableFull;
+        const handle_id = self.nextReservableHandleId() orelse return error.HandleTableFull;
         const handle = SecretHandle{
-            .id = self.next_handle_id,
+            .id = handle_id,
             .secret_id = secret_id,
             .holder = holder,
             .task_id = task_id,
@@ -156,7 +158,7 @@ pub const Store = struct {
         };
         slot.handle = handle;
         slot.in_use = true;
-        self.advanceNextHandleId();
+        self.advanceNextHandleIdFrom(handle_id);
         return handle;
     }
 
@@ -193,14 +195,32 @@ pub const Store = struct {
         return null;
     }
 
-    fn advanceNextSecretId(self: *Store) void {
-        self.next_secret_id +%= 1;
-        if (self.next_secret_id == 0) self.next_secret_id = 1;
+    fn nextReservableSecretId(self: *const Store) ?u64 {
+        var secret_id = normalizeSecretStoreId(self.next_secret_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_SECRETS) : (attempts += 1) {
+            if (self.describeSecret(secret_id) == null) return secret_id;
+            secret_id = nextSecretStoreIdAfter(secret_id);
+        }
+        return null;
     }
 
-    fn advanceNextHandleId(self: *Store) void {
-        self.next_handle_id +%= 1;
-        if (self.next_handle_id == 0) self.next_handle_id = 1;
+    fn nextReservableHandleId(self: *const Store) ?u64 {
+        var handle_id = normalizeSecretStoreId(self.next_handle_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_HANDLES) : (attempts += 1) {
+            if (self.describeHandle(handle_id) == null) return handle_id;
+            handle_id = nextSecretStoreIdAfter(handle_id);
+        }
+        return null;
+    }
+
+    fn advanceNextSecretIdFrom(self: *Store, secret_id: u64) void {
+        self.next_secret_id = nextSecretStoreIdAfter(secret_id);
+    }
+
+    fn advanceNextHandleIdFrom(self: *Store, handle_id: u64) void {
+        self.next_handle_id = nextSecretStoreIdAfter(handle_id);
     }
 
     fn findSecret(self: *Store, secret_id: u64) ?*SecretRecord {
@@ -233,6 +253,15 @@ fn zeroSecret() SecretRecord {
         .value_len = 0,
         .value = [_]u8{0} ** MAX_VALUE_BYTES,
     };
+}
+
+fn normalizeSecretStoreId(id: u64) u64 {
+    return if (id == 0) 1 else id;
+}
+
+fn nextSecretStoreIdAfter(id: u64) u64 {
+    const next = id +% 1;
+    return normalizeSecretStoreId(next);
 }
 
 fn defaultSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
@@ -342,6 +371,12 @@ test "secure secret store stages records and wraps ids without publishing zero" 
     try std.testing.expectEqual(@as(u64, 2), store.next_secret_id);
     try std.testing.expect(store.describeSecret(0) == null);
 
+    store.next_secret_id = 1;
+    const skipped_secret = try store.importSecret(owner, "skipped-secret", "private skipped secret", false, true);
+    try std.testing.expectEqual(@as(u64, 2), skipped_secret.id);
+    try std.testing.expectEqual(@as(u64, 3), store.next_secret_id);
+    try std.testing.expect(store.describeSecret(0) == null);
+
     store.next_handle_id = std.math.maxInt(u64);
     const max_handle = try store.lendHandle(max_secret.id, holder, 92, true);
     try std.testing.expectEqual(std.math.maxInt(u64), max_handle.id);
@@ -351,6 +386,12 @@ test "secure secret store stages records and wraps ids without publishing zero" 
     const wrapped_handle = try store.lendHandle(wrapped_secret.id, holder, 93, true);
     try std.testing.expectEqual(@as(u64, 1), wrapped_handle.id);
     try std.testing.expectEqual(@as(u64, 2), store.next_handle_id);
+    try std.testing.expect(store.describeHandle(0) == null);
+
+    store.next_handle_id = 1;
+    const skipped_handle = try store.lendHandle(skipped_secret.id, holder, 94, true);
+    try std.testing.expectEqual(@as(u64, 2), skipped_handle.id);
+    try std.testing.expectEqual(@as(u64, 3), store.next_handle_id);
     try std.testing.expect(store.describeHandle(0) == null);
 
     var full_secrets = Store.init();
