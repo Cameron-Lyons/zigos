@@ -907,9 +907,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (frame_ids) |frame_id| {
                 const slot_index = self.lookupOutboundTransportFrameSlotIndex(frame_id) orelse continue;
                 const slot = &self.state().outbound_transport_frames[slot_index];
-                if (!slot.acked) {
-                    newly_acked += 1;
-                }
+                newly_acked += 1;
                 self.removeOutboundTransportFrameIndexes(&slot.frame, slot_index);
                 slot.* = .{};
                 self.decrementTransportFrameSlotCount(.outbound);
@@ -2155,7 +2153,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         fn enqueueTransportFrame(self: *Self, queue_kind: TransportQueueKind, request: TransportFrameRequest) Error!TransportFrame {
             if (request.path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
             const slot_index = self.allocateTransportFrameSlotIndex(queue_kind) orelse
-                self.reclaimOutboundTransportFrameSlotIndex(queue_kind) orelse
                 self.reclaimInboundTransportFrameSlotIndex(queue_kind) orelse
                 return error.TransportQueueFull;
             const frame_id = self.nextTransportFrameId();
@@ -2208,18 +2205,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 return slot_index;
             }
             native_util.impossibleByInvariant("transport frame count found a free slot but allocation cursor did not");
-        }
-
-        fn reclaimOutboundTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind) ?usize {
-            if (queue_kind != .outbound) return null;
-            for (&self.state().outbound_transport_frames, 0..) |*slot, slot_index| {
-                if (!slot.in_use or !slot.acked) continue;
-                self.removeOutboundTransportFrameIndexes(&slot.frame, slot_index);
-                slot.* = .{};
-                self.decrementTransportFrameSlotCount(.outbound);
-                return slot_index;
-            }
-            return null;
         }
 
         // When the inbound table is full, reclaim the oldest frame that is already
@@ -2330,7 +2315,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var slot_index = self.inbound_transport_target_index.head(inboundTransportTargetIndexKeyForLookup(workspace_id, target_device));
             while (slot_index != indexed_arena.no_index) {
                 const slot = self.inboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
-                if (!slot.acked and slot.frame.id > min_frame_id) {
+                if (slot.frame.id > min_frame_id) {
                     if (copied >= out.len) return copied;
                     out[copied] = slot.frame;
                     copied += 1;
@@ -2344,8 +2329,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var count: usize = 0;
             var slot_index = self.outbound_transport_target_index.head(outboundTransportTargetIndexKeyForLookup(workspace_id, target_device));
             while (slot_index != indexed_arena.no_index) {
-                const slot = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
-                if (!slot.acked) count += 1;
+                _ = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
+                count += 1;
                 slot_index = self.outbound_transport_target_index.next(slot_index);
             }
             return count;
@@ -2362,7 +2347,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var slot_index = self.outbound_transport_target_index.head(outboundTransportTargetIndexKeyForLookup(workspace_id, target_device));
             while (slot_index != indexed_arena.no_index) {
                 const slot = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
-                if (!slot.acked and slot.frame.id > min_frame_id) {
+                if (slot.frame.id > min_frame_id) {
                     if (copied >= out.len) return copied;
                     out[copied] = slot.frame;
                     copied += 1;
@@ -2462,7 +2447,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var slot_index = self.outbound_transport_path_index.head(outboundTransportPathIndexKeyForLookup(workspace_id, target_device, path));
             while (slot_index != indexed_arena.no_index) {
                 const slot = self.outboundTransportPathIndexSlot(slot_index, workspace_id, target_device, path);
-                if (!slot.acked and (latest == null or slot.frame.id > latest.?.id)) {
+                if (latest == null or slot.frame.id > latest.?.id) {
                     latest = slot.frame;
                 }
                 slot_index = self.outbound_transport_path_index.next(slot_index);

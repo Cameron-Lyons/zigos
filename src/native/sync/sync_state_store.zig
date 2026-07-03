@@ -17,8 +17,8 @@ const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 const record_magic = "ZGSYNCR";
-const record_version: u16 = 5;
-const record_prefix = "state/v5/";
+const record_version: u16 = 6;
+const record_prefix = "state/v6/";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
 const max_record_bytes: usize = 2048;
@@ -488,7 +488,6 @@ fn encodeTransportFrame(
     var writer = CursorWriter{ .buffer = buffer };
     try writeEnvelope(&writer, .transport_frame);
     try writer.writeByte(@intFromEnum(queue_kind));
-    try writer.writeByte(@intFromBool(slot.acked));
     try writer.writeU16(slot.duplicate_count);
     try writeTransportFrame(&writer, &slot.frame);
     return buffer[0..writer.offset];
@@ -669,7 +668,6 @@ fn decodeTransportFrame(resident: *state_support.ResidentState, reader: *CursorR
         },
     };
     slot.in_use = true;
-    slot.acked = (try reader.readByte()) != 0;
     slot.duplicate_count = try reader.readU16();
     slot.frame = try readTransportFrame(reader);
 }
