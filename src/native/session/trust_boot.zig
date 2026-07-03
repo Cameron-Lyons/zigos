@@ -538,7 +538,7 @@ pub const TrustBoot = struct {
             crypto_hash.updateInt(&hasher, "binding-task-id", binding.task_id);
             crypto_hash.updateInt(&hasher, "binding-endpoint-id", binding.endpoint_id);
         }
-        for (self.userspace_catalog.images) |slot| {
+        for (self.userspace_catalog.images.slots) |slot| {
             if (!slot.in_use) continue;
             const image = &slot.image;
             crypto_hash.updateBytes(&hasher, "image-bundle", image.bundleIdSlice());
