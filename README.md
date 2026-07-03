@@ -57,11 +57,10 @@ requests.
   in-toto/SLSA provenance is generated through a hardware-backed
   TPM/secure-enclave/HSM/KMS signing command, and customers get a native
   `zigos-verify-release` verifier for signatures, revocation, subjects,
-  reproducible digests, measurements, and post-quantum rollout policy. The
-  `ed25519+ml-dsa65` path remains a preview, not a production FIPS 204
-  implementation; production PQC is represented by a separate ML-DSA-65
-  provider boundary with FIPS validation metadata and fail-closed verifier
-  requirements.
+  reproducible digests, measurements, and post-quantum rollout policy.
+  Ed25519 is the classical signing baseline; production PQC is represented
+  by a separate ML-DSA-65 provider boundary with FIPS validation metadata
+  and fail-closed verifier requirements.
 
 The spec contract is now the machine-readable manifest in
 `spec/coverage.json`; this checkout does not require a separate prose spec

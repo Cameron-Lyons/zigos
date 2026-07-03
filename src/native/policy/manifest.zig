@@ -247,18 +247,13 @@ pub const UpdateChannel = enum(u8) {
 };
 
 pub const SIGNATURE_FORMAT_ED25519 = "ed25519";
-pub const SIGNATURE_FORMAT_ED25519_ML_DSA65 = "ed25519+ml-dsa65";
 pub const SIGNATURE_FORMAT_ML_DSA65 = "ml-dsa-65";
 pub const ED25519_PUBLIC_KEY_BYTES: usize = 32;
 pub const ED25519_SIGNATURE_BYTES: usize = 64;
-pub const ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES: usize = 32;
-pub const ML_DSA65_PREVIEW_SIGNATURE_BINDING_BYTES: usize = 32;
 pub const ML_DSA65_PUBLIC_KEY_BYTES: usize = 1952;
 pub const ML_DSA65_SIGNATURE_BYTES: usize = 3309;
-pub const HYBRID_PUBLIC_KEY_BYTES: usize = ED25519_PUBLIC_KEY_BYTES + ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES;
-pub const HYBRID_SIGNATURE_BYTES: usize = ED25519_SIGNATURE_BYTES + ML_DSA65_PREVIEW_SIGNATURE_BINDING_BYTES;
-pub const MAX_SIGNATURE_PUBLIC_KEY_BYTES: usize = HYBRID_PUBLIC_KEY_BYTES;
-pub const MAX_SIGNATURE_VALUE_BYTES: usize = HYBRID_SIGNATURE_BYTES;
+pub const MAX_SIGNATURE_PUBLIC_KEY_BYTES: usize = ED25519_PUBLIC_KEY_BYTES;
+pub const MAX_SIGNATURE_VALUE_BYTES: usize = ED25519_SIGNATURE_BYTES;
 
 pub const Signature = struct {
     format: []const u8 = SIGNATURE_FORMAT_ED25519,
@@ -300,19 +295,6 @@ pub const Signature = struct {
         return self.value[0..ED25519_SIGNATURE_BYTES];
     }
 
-    pub fn hybridPostQuantumCommitmentSlice(self: *const Signature) []const u8 {
-        if (self.public_key_len < HYBRID_PUBLIC_KEY_BYTES) return self.public_key[0..0];
-        return self.public_key[ED25519_PUBLIC_KEY_BYTES..HYBRID_PUBLIC_KEY_BYTES];
-    }
-
-    pub fn hybridPostQuantumBindingSlice(self: *const Signature) []const u8 {
-        if (self.value_len < HYBRID_SIGNATURE_BYTES) return self.value[0..0];
-        return self.value[ED25519_SIGNATURE_BYTES..HYBRID_SIGNATURE_BYTES];
-    }
-
-    pub fn usesHybridPostQuantumProfile(self: *const Signature) bool {
-        return std.mem.eql(u8, self.format, SIGNATURE_FORMAT_ED25519_ML_DSA65);
-    }
 };
 
 pub const SignatureLayout = struct {
@@ -325,12 +307,6 @@ pub fn layoutForFormat(format: []const u8) ?SignatureLayout {
         return .{
             .public_key_bytes = ED25519_PUBLIC_KEY_BYTES,
             .value_bytes = ED25519_SIGNATURE_BYTES,
-        };
-    }
-    if (std.mem.eql(u8, format, SIGNATURE_FORMAT_ED25519_ML_DSA65)) {
-        return .{
-            .public_key_bytes = HYBRID_PUBLIC_KEY_BYTES,
-            .value_bytes = HYBRID_SIGNATURE_BYTES,
         };
     }
     return null;

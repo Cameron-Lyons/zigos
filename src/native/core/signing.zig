@@ -10,7 +10,6 @@ pub const SIGNATURE_BYTES = Ed25519.Signature.encoded_length;
 pub const Seed = [SEED_BYTES]u8;
 pub const PublicKey = [PUBLIC_KEY_BYTES]u8;
 pub const SIGNATURE_FORMAT_ED25519 = manifest.SIGNATURE_FORMAT_ED25519;
-pub const SIGNATURE_FORMAT_ED25519_ML_DSA65 = manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65;
 pub const SIGNATURE_FORMAT_ML_DSA65 = manifest.SIGNATURE_FORMAT_ML_DSA65;
 pub const ED25519_PUBLIC_KEY_BYTES = manifest.ED25519_PUBLIC_KEY_BYTES;
 pub const ED25519_SIGNATURE_BYTES = manifest.ED25519_SIGNATURE_BYTES;
@@ -20,7 +19,6 @@ pub const MAX_SIGNATURE_PROVIDERS: usize = 6;
 
 pub const SignatureProfile = enum {
     ed25519,
-    ed25519_ml_dsa65_hybrid_preview,
     ml_dsa65_fips204,
 };
 
@@ -67,7 +65,6 @@ pub const PostQuantumAlgorithm = enum {
 
 pub const Fips204Implementation = enum {
     not_applicable,
-    preview_commitment,
     validated_provider,
 };
 
@@ -116,9 +113,7 @@ pub const SignatureProviderDescriptor = struct {
         if (!self.customer_verifiable) return false;
         if (self.verifier_protocol != .dsse_in_toto_slsa) return false;
         return switch (self.profile) {
-            .ed25519 => self.fips_204 != .preview_commitment and
-                self.post_quantum_algorithm == .not_applicable,
-            .ed25519_ml_dsa65_hybrid_preview => false,
+            .ed25519 => self.post_quantum_algorithm == .not_applicable,
             .ml_dsa65_fips204 => self.fips_standard == .fips_204 and
                 self.post_quantum_algorithm == .ml_dsa_65 and
                 self.fips_204 == .validated_provider and
@@ -224,7 +219,6 @@ pub const ReleaseVerifierMetadata = struct {
             .ed25519 => {
                 if (self.public_key_len != ED25519_PUBLIC_KEY_BYTES) return false;
             },
-            .ed25519_ml_dsa65_hybrid_preview => return false,
             .ml_dsa65_fips204 => {
                 if (self.public_key_len != ML_DSA65_PUBLIC_KEY_BYTES) return false;
             },
@@ -615,30 +609,6 @@ pub const SoftwareEd25519Provider = struct {
     }
 };
 
-pub const HybridPreviewProvider = struct {
-    pub const descriptor = SignatureProviderDescriptor{
-        .name = "software-ed25519-ml-dsa65-preview",
-        .profile = .ed25519_ml_dsa65_hybrid_preview,
-        .role = .preview,
-        .custody = .software_seed,
-        .fips_204 = .preview_commitment,
-    };
-
-    pub fn provider(self: *HybridPreviewProvider) SignatureProvider {
-        return SignatureProvider.init(HybridPreviewProvider, self, descriptor);
-    }
-
-    pub fn sign(self: *HybridPreviewProvider, identity: SignerIdentity, message: []const u8) !manifest.Signature {
-        _ = self;
-        return signWithProfile(identity, message, .ed25519_ml_dsa65_hybrid_preview);
-    }
-
-    pub fn verify(self: *HybridPreviewProvider, signature: manifest.Signature, message: []const u8) bool {
-        _ = self;
-        return signingProfileMatches(signature, .ed25519_ml_dsa65_hybrid_preview) and verifySignature(signature, message);
-    }
-};
-
 pub fn publicKey(identity: SignerIdentity) !PublicKey {
     const key_pair = try Ed25519.KeyPair.generateDeterministic(identity.seed);
     return key_pair.public_key.toBytes();
@@ -661,8 +631,7 @@ pub fn signWithDefaultRegistry(
     message: []const u8,
 ) !manifest.Signature {
     var ed25519_provider_impl = SoftwareEd25519Provider{};
-    var hybrid_provider_impl = HybridPreviewProvider{};
-    var registry = try defaultSoftwareRegistry(&ed25519_provider_impl, &hybrid_provider_impl);
+    var registry = try defaultSoftwareRegistry(&ed25519_provider_impl);
     return registry.sign(profile, identity, message);
 }
 
@@ -682,16 +651,6 @@ pub fn signWithProfile(identity: SignerIdentity, message: []const u8, profile: S
     };
     @memcpy(result.public_key[0..PUBLIC_KEY_BYTES], public_key[0..]);
     @memcpy(result.value[0..SIGNATURE_BYTES], signature_bytes[0..]);
-
-    if (profile == .ed25519_ml_dsa65_hybrid_preview) {
-        const pq_public_commitment = hybridPublicCommitment(public_key[0..], identity.label);
-        const pq_signature_binding = hybridSignatureBinding(&pq_public_commitment, signature_bytes[0..], message);
-        @memcpy(result.public_key[PUBLIC_KEY_BYTES..manifest.HYBRID_PUBLIC_KEY_BYTES], pq_public_commitment[0..]);
-        @memcpy(result.value[SIGNATURE_BYTES..manifest.HYBRID_SIGNATURE_BYTES], pq_signature_binding[0..]);
-        result.public_key_len = manifest.HYBRID_PUBLIC_KEY_BYTES;
-        result.value_len = manifest.HYBRID_SIGNATURE_BYTES;
-    }
-
     return result;
 }
 
@@ -701,8 +660,7 @@ pub fn verify(signature: manifest.Signature, message: []const u8) bool {
 
 pub fn verifyWithDefaultRegistry(signature: manifest.Signature, message: []const u8) bool {
     var ed25519_provider_impl = SoftwareEd25519Provider{};
-    var hybrid_provider_impl = HybridPreviewProvider{};
-    var registry = defaultSoftwareRegistry(&ed25519_provider_impl, &hybrid_provider_impl) catch return false;
+    var registry = defaultSoftwareRegistry(&ed25519_provider_impl) catch return false;
     return registry.verify(signature, message);
 }
 
@@ -710,19 +668,7 @@ fn verifySignature(signature: manifest.Signature, message: []const u8) bool {
     if (!signature.isComplete()) return false;
 
     if (!verifyEd25519(signature.ed25519PublicKeySlice(), signature.ed25519SignatureSlice(), message)) return false;
-    if (std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ED25519)) return true;
-    if (std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65)) {
-        const expected_public_commitment = hybridPublicCommitment(signature.ed25519PublicKeySlice(), signature.signer);
-        if (!std.mem.eql(u8, signature.hybridPostQuantumCommitmentSlice(), &expected_public_commitment)) return false;
-        const expected_signature_binding = hybridSignatureBinding(
-            &expected_public_commitment,
-            signature.ed25519SignatureSlice(),
-            message,
-        );
-        return std.mem.eql(u8, signature.hybridPostQuantumBindingSlice(), &expected_signature_binding);
-    }
-    if (std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ML_DSA65)) return false;
-    return false;
+    return std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ED25519);
 }
 
 fn verifyEd25519(public_key_bytes: []const u8, signature_bytes: []const u8, message: []const u8) bool {
@@ -761,55 +707,26 @@ pub fn verifyTrustedPublicKey(
 fn formatForProfile(profile: SignatureProfile) []const u8 {
     return switch (profile) {
         .ed25519 => manifest.SIGNATURE_FORMAT_ED25519,
-        .ed25519_ml_dsa65_hybrid_preview => manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65,
         .ml_dsa65_fips204 => manifest.SIGNATURE_FORMAT_ML_DSA65,
     };
 }
 
 pub fn profileForFormat(format: []const u8) ?SignatureProfile {
     if (std.mem.eql(u8, format, manifest.SIGNATURE_FORMAT_ED25519)) return .ed25519;
-    if (std.mem.eql(u8, format, manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65)) return .ed25519_ml_dsa65_hybrid_preview;
     if (std.mem.eql(u8, format, manifest.SIGNATURE_FORMAT_ML_DSA65)) return .ml_dsa65_fips204;
     return null;
 }
 
 pub fn defaultSoftwareRegistry(
     ed25519_provider_impl: *SoftwareEd25519Provider,
-    hybrid_provider_impl: *HybridPreviewProvider,
 ) !SignatureProviderRegistry {
     var registry = SignatureProviderRegistry.init();
     try registry.register(ed25519_provider_impl.provider());
-    try registry.register(hybrid_provider_impl.provider());
     return registry;
 }
 
 fn signingProfileMatches(signature: manifest.Signature, profile: SignatureProfile) bool {
     return std.mem.eql(u8, signature.format, formatForProfile(profile));
-}
-
-fn hybridPublicCommitment(ed25519_public_key: []const u8, signer: []const u8) [manifest.ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("zigos.ml-dsa65-preview.public.v1");
-    hasher.update(ed25519_public_key);
-    hasher.update(signer);
-    var digest: [manifest.ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
-}
-
-fn hybridSignatureBinding(
-    pq_public_commitment: *const [manifest.ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES]u8,
-    ed25519_signature: []const u8,
-    message: []const u8,
-) [manifest.ML_DSA65_PREVIEW_SIGNATURE_BINDING_BYTES]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("zigos.ml-dsa65-preview.signature.v1");
-    hasher.update(pq_public_commitment);
-    hasher.update(ed25519_signature);
-    hasher.update(message);
-    var digest: [manifest.ML_DSA65_PREVIEW_SIGNATURE_BINDING_BYTES]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
 }
 
 test "ed25519 signing produces verifiable native signatures" {
@@ -832,28 +749,6 @@ test "ed25519 signing produces verifiable native signatures" {
     try std.testing.expect(!verifyTrusted(signature, "storage-state", wrong_identity));
 }
 
-test "hybrid post-quantum preview signatures bind ed25519 signatures to a second verification slot" {
-    const identity = SignerIdentity{
-        .label = "zigos.hybrid",
-        .seed = seedFromByte(0x51),
-    };
-    var signature = try signWithProfile(identity, "release-artifact", .ed25519_ml_dsa65_hybrid_preview);
-
-    try std.testing.expect(signature.isComplete());
-    try std.testing.expect(signature.usesHybridPostQuantumProfile());
-    try std.testing.expectEqual(@as(usize, manifest.HYBRID_PUBLIC_KEY_BYTES), signature.publicKeySlice().len);
-    try std.testing.expectEqual(@as(usize, manifest.HYBRID_SIGNATURE_BYTES), signature.valueSlice().len);
-    try std.testing.expect(verify(signature, "release-artifact"));
-    try std.testing.expect(verifyTrusted(signature, "release-artifact", identity));
-
-    signature.value[manifest.ED25519_SIGNATURE_BYTES] ^= 0x80;
-    try std.testing.expect(!verify(signature, "release-artifact"));
-
-    signature = try signWithProfile(identity, "release-artifact", .ed25519_ml_dsa65_hybrid_preview);
-    signature.public_key[manifest.ED25519_PUBLIC_KEY_BYTES] ^= 0x40;
-    try std.testing.expect(!verify(signature, "release-artifact"));
-}
-
 test "signature providers expose release eligibility and reject mismatched profiles" {
     const identity = SignerIdentity{
         .label = "zigos.provider",
@@ -861,27 +756,20 @@ test "signature providers expose release eligibility and reject mismatched profi
     };
     var ed25519_provider_impl = SoftwareEd25519Provider{};
     const ed25519_provider = ed25519_provider_impl.provider();
-    var hybrid_provider_impl = HybridPreviewProvider{};
-    const hybrid_provider = hybrid_provider_impl.provider();
 
     try std.testing.expect(!ed25519_provider.releaseEligible());
-    try std.testing.expect(!hybrid_provider.releaseEligible());
     try std.testing.expectEqual(SignatureProviderRole.test_only, ed25519_provider.descriptor.role);
-    try std.testing.expectEqual(SignatureProviderRole.preview, hybrid_provider.descriptor.role);
     try std.testing.expectEqual(SignatureProviderBoundary.local_software, ed25519_provider.descriptor.provider_boundary);
-    try std.testing.expectEqual(SignatureProviderBoundary.local_software, hybrid_provider.descriptor.provider_boundary);
-    try std.testing.expectEqual(Fips204Implementation.preview_commitment, hybrid_provider.descriptor.fips_204);
     try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519, ed25519_provider.descriptor.format());
-    try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65, hybrid_provider.descriptor.format());
     try std.testing.expectEqual(SignatureProfile.ml_dsa65_fips204, profileForFormat(manifest.SIGNATURE_FORMAT_ML_DSA65).?);
+    try std.testing.expect(profileForFormat("ed25519+ml-dsa65") == null);
 
     const ed25519_signature = try ed25519_provider.sign(identity, "provider-message");
-    const hybrid_signature = try hybrid_provider.sign(identity, "provider-message");
-
     try std.testing.expect(ed25519_provider.verify(ed25519_signature, "provider-message"));
-    try std.testing.expect(hybrid_provider.verify(hybrid_signature, "provider-message"));
-    try std.testing.expect(!ed25519_provider.verify(hybrid_signature, "provider-message"));
-    try std.testing.expect(!hybrid_provider.verify(ed25519_signature, "provider-message"));
+
+    var wrong_format = ed25519_signature;
+    wrong_format.format = manifest.SIGNATURE_FORMAT_ML_DSA65;
+    try std.testing.expect(!ed25519_provider.verify(wrong_format, "provider-message"));
 }
 
 test "release eligibility requires hardware custody lifecycle controls and verifier protocol" {
@@ -931,12 +819,6 @@ test "release eligibility requires hardware custody lifecycle controls and verif
     var no_rotation = operational;
     no_rotation.rotation_supported = false;
     try std.testing.expect(!no_rotation.releaseEligible());
-
-    var preview_hybrid = operational;
-    preview_hybrid.profile = .ed25519_ml_dsa65_hybrid_preview;
-    preview_hybrid.fips_204 = .preview_commitment;
-    preview_hybrid.fips_validated = true;
-    try std.testing.expect(!preview_hybrid.releaseEligible());
 
     var pqc_without_validation = operational;
     pqc_without_validation.name = "release-hsm-ml-dsa65-unvalidated";
@@ -1137,7 +1019,7 @@ test "signature provider fails closed when implementation returns the wrong prof
         fn provider(self: *@This()) SignatureProvider {
             return SignatureProvider.init(@This(), self, .{
                 .name = "bad-provider",
-                .profile = .ed25519_ml_dsa65_hybrid_preview,
+                .profile = .ml_dsa65_fips204,
                 .role = .test_only,
             });
         }
@@ -1172,23 +1054,17 @@ test "signature provider registry selects providers by profile and release eligi
         .seed = seedFromByte(0x63),
     };
     var ed25519_provider_impl = SoftwareEd25519Provider{};
-    var hybrid_provider_impl = HybridPreviewProvider{};
     var registry = SignatureProviderRegistry.init();
     try registry.register(ed25519_provider_impl.provider());
-    try registry.register(hybrid_provider_impl.provider());
 
     try std.testing.expect(registry.find(.ed25519) != null);
-    try std.testing.expect(registry.find(.ed25519_ml_dsa65_hybrid_preview) != null);
     try std.testing.expect(registry.find(.ml_dsa65_fips204) == null);
     try std.testing.expect(registry.findReleaseEligible(.ed25519) == null);
-    try std.testing.expect(registry.findReleaseEligible(.ed25519_ml_dsa65_hybrid_preview) == null);
     try std.testing.expect(registry.findReleaseEligible(.ml_dsa65_fips204) == null);
     try std.testing.expectError(error.SignatureProviderUnavailable, registry.sign(.ml_dsa65_fips204, identity, "registry-message"));
 
     const ed25519_signature = try registry.sign(.ed25519, identity, "registry-message");
-    const hybrid_signature = try registry.sign(.ed25519_ml_dsa65_hybrid_preview, identity, "registry-message");
     try std.testing.expect(registry.verify(ed25519_signature, "registry-message"));
-    try std.testing.expect(registry.verify(hybrid_signature, "registry-message"));
 
     var unsupported = ed25519_signature;
     unsupported.format = "unknown";

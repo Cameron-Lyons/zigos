@@ -11,7 +11,7 @@
     "production_signature_algorithm": "ml-dsa-65",
     "key_establishment_algorithm": "ml-kem-768",
     "backup_signature_algorithm": "slh-dsa-sha2-128s",
-    "hybrid_transition": "Ed25519 remains the classical DSSE baseline during migration; ed25519+ml-dsa65 stays preview-only and never satisfies production FIPS 204 ML-DSA; required mode needs a separately verified ML-DSA signature from a validated provider.",
+    "classical_baseline": "Ed25519 remains the classical DSSE baseline during migration; required mode needs a separately verified FIPS 204 ML-DSA signature from a validated provider.",
     "standards": [
       {
         "fips": "FIPS 203",
@@ -68,14 +68,6 @@
       "verifier_metadata_schema": "zigos.release-verifier-metadata.v1",
       "verifier_metadata_digest": "provider-required",
       "verifier_status": "zigos-verify-release fails closed until a validated ML-DSA provider is linked"
-    }
-  ],
-  "preview_profiles": [
-    {
-      "profile": "ed25519+ml-dsa65",
-      "status": "preview-only",
-      "release_allowed": false,
-      "fips_204_status": "not a production FIPS 204 ML-DSA implementation"
     }
   ]
 }

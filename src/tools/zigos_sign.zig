@@ -39,11 +39,6 @@ pub fn main(init: std.process.Init) !void {
         const seed = try hex.decodeFixed(signing.SEED_BYTES, args[3]);
         const digest = try hex.decodeFixed(crypto_hash.digest_bytes, args[4]);
         try printSignature(&stdout_writer.interface, args[2], seed, digest, .ed25519);
-    } else if (std.mem.eql(u8, args[1], "sign-hybrid-digest")) {
-        if (args.len != 5) return error.InvalidHexLength;
-        const seed = try hex.decodeFixed(signing.SEED_BYTES, args[3]);
-        const digest = try hex.decodeFixed(crypto_hash.digest_bytes, args[4]);
-        try printSignature(&stdout_writer.interface, args[2], seed, digest, .ed25519_ml_dsa65_hybrid_preview);
     } else if (std.mem.eql(u8, args[1], "provider-policy")) {
         if (args.len != 2) return error.UnknownCommand;
         try printProviderPolicy(&stdout_writer.interface);
@@ -61,7 +56,6 @@ fn printUsage(writer: anytype) !void {
         \\  zigos-sign sign-example writer|viewer|zigos-writer|zigos-workbench|zigos-studio
         \\  zigos-sign verify-example writer|viewer|zigos-writer|zigos-workbench|zigos-studio
         \\  zigos-sign sign-digest <label> <seed-hex-64> <digest-hex-64>
-        \\  zigos-sign sign-hybrid-digest <label> <seed-hex-64> <digest-hex-64>
         \\  zigos-sign provider-policy
         \\
     , .{});
@@ -98,10 +92,8 @@ fn printSignature(
         .seed = seed,
     };
     var ed25519_provider_impl = signing.SoftwareEd25519Provider{};
-    var hybrid_provider_impl = signing.HybridPreviewProvider{};
     var registry = signing.SignatureProviderRegistry.init();
     try registry.register(ed25519_provider_impl.provider());
-    try registry.register(hybrid_provider_impl.provider());
     const provider = registry.find(profile) orelse return error.UnknownCommand;
     const signature = try registry.sign(profile, identity, &digest);
     var public_key_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES)]u8 = undefined;
@@ -130,16 +122,13 @@ fn printSignature(
 
 fn printProviderPolicy(writer: anytype) !void {
     var ed25519_provider_impl = signing.SoftwareEd25519Provider{};
-    var hybrid_provider_impl = signing.HybridPreviewProvider{};
     var registry = signing.SignatureProviderRegistry.init();
     try registry.register(ed25519_provider_impl.provider());
-    try registry.register(hybrid_provider_impl.provider());
 
     try writer.print(
         \\standards=FIPS 203 ML-KEM key establishment; FIPS 204 ML-DSA signatures; FIPS 205 SLH-DSA hash-based signature fallback
-        \\hybrid_transition=ed25519 remains the classical DSSE baseline; ed25519+ml-dsa65 is preview-only; production PQC requires a separate ml-dsa-65 FIPS 204 provider
+        \\classical_baseline=ed25519 is the classical DSSE baseline; production PQC requires a separate ml-dsa-65 FIPS 204 provider
         \\default_ed25519_release_eligible={s}
-        \\default_hybrid_release_eligible={s}
         \\production_ml_dsa_profile=ml-dsa-65
         \\production_ml_dsa_required_boundary=hardware key handle through TPM, secure enclave, HSM, or KMS backed by a FIPS 140 validated module
         \\production_ml_dsa_required_metadata=FIPS 204 algorithm, ML-DSA-65 parameter set, validation certificate, rotation, revocation, DSSE verifier support
@@ -148,7 +137,6 @@ fn printProviderPolicy(writer: anytype) !void {
         \\
     , .{
         if ((registry.find(.ed25519) orelse unreachable).releaseEligible()) "yes" else "no",
-        if ((registry.find(.ed25519_ml_dsa65_hybrid_preview) orelse unreachable).releaseEligible()) "yes" else "no",
     });
 }
 
@@ -157,10 +145,6 @@ test "signing CLI helpers encode decode and verify manifest digests" {
     const digest = package_service.digestBundle(package.bundle);
     const signature = try signing.signWithDefaultRegistry(.ed25519, package.signer, &digest);
     try std.testing.expect(signing.verifyWithDefaultRegistry(signature, &digest));
-
-    const hybrid_signature = try signing.signWithDefaultRegistry(.ed25519_ml_dsa65_hybrid_preview, package.signer, &digest);
-    try std.testing.expect(signing.verifyWithDefaultRegistry(hybrid_signature, &digest));
-    try std.testing.expect(hybrid_signature.usesHybridPostQuantumProfile());
 
     var digest_hex: [crypto_hash.hex_digest_bytes]u8 = undefined;
     const encoded = try hex.encodeLower(&digest, &digest_hex);
