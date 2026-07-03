@@ -49,13 +49,16 @@ const PolicySlot = struct {
     policy: PolicyObject = zeroPolicy(),
 };
 
-const PolicyIdIndex = indexed_arena.UniqueIndex(POLICY_INDEX_CAPACITY);
+fn policySlotKey(slot: *const PolicySlot) u64 {
+    return slot.policy.id;
+}
+
+const PolicyArena = indexed_arena.IndexedArenaWithKey(u64, PolicySlot, MAX_POLICIES, POLICY_INDEX_CAPACITY, policySlotKey);
 const PolicyScopeIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_INDEX_CAPACITY);
 
 pub const Directory = struct {
     next_policy_id: u64 = 1,
-    slots: [MAX_POLICIES]PolicySlot = [_]PolicySlot{PolicySlot{}} ** MAX_POLICIES,
-    policy_id_index: PolicyIdIndex = PolicyIdIndex.init(),
+    slots: PolicyArena = PolicyArena.init(),
     scope_index: PolicyScopeIndex = PolicyScopeIndex.init(),
 
     pub fn init() Directory {
@@ -71,7 +74,7 @@ pub const Directory = struct {
         if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
         if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
 
-        const slot_index = self.firstFreeSlotIndex() orelse return error.PolicyTableFull;
+        if (self.slots.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
         var policy = zeroPolicy();
         policy.id = self.next_policy_id;
         policy.generation = nextGeneration(self, request.scope, request.subject_id);
@@ -184,8 +187,8 @@ pub const Directory = struct {
 
         const digest = policyDigest(&policy);
         policy.signature = try signing.sign(signer, &digest);
-        const slot = &self.slots[slot_index];
-        slot.in_use = true;
+        const slot_index = self.slots.reserveIndex(policy.id) orelse return error.PolicyTableFull;
+        const slot = &self.slots.slots[slot_index];
         slot.policy = policy;
         self.next_policy_id += 1;
         self.indexPolicy(slot_index);
@@ -198,7 +201,7 @@ pub const Directory = struct {
         var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
         while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
             if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.slots[cursor];
+            const slot = &self.slots.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.revoked) continue;
@@ -216,10 +219,8 @@ pub const Directory = struct {
     }
 
     pub fn revokePolicy(self: *Directory, policy_id: u64) Error!void {
-        const slot_index = self.policy_id_index.lookup(policy_id) orelse return error.PolicyNotFound;
-        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy id index points outside slots");
-        const slot = &self.slots[slot_index];
-        if (!slot.in_use or slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
+        const slot = self.slots.get(policy_id) orelse return error.PolicyNotFound;
+        if (slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
         if (slot.policy.revoked) return error.PolicyAlreadyRevoked;
         slot.policy.revoked = true;
     }
@@ -229,7 +230,7 @@ pub const Directory = struct {
         var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
         while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
             if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.slots[cursor];
+            const slot = &self.slots.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.revoked) continue;
@@ -801,11 +802,8 @@ pub const Directory = struct {
     }
 
     fn findConst(self: *const Directory, policy_id: u64) ?*const PolicyObject {
-        if (policy_id == 0) return null;
-        const slot_index = self.policy_id_index.lookup(policy_id) orelse return null;
-        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy id index points outside slots");
-        const slot = &self.slots[slot_index];
-        if (!slot.in_use or slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
+        const slot = self.slots.getConst(policy_id) orelse return null;
+        if (slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
         return &slot.policy;
     }
 
@@ -815,7 +813,7 @@ pub const Directory = struct {
         var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
         while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
             if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.slots[cursor];
+            const slot = &self.slots.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.revoked) continue;
@@ -838,19 +836,11 @@ pub const Directory = struct {
         return block(policy, .unsigned_policy);
     }
 
-    fn firstFreeSlotIndex(self: *const Directory) ?usize {
-        for (self.slots, 0..) |slot, slot_index| {
-            if (!slot.in_use) return slot_index;
-        }
-        return null;
-    }
-
     fn indexPolicy(self: *Directory, slot_index: usize) void {
         if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy index update points outside slots");
-        const slot = &self.slots[slot_index];
+        const slot = &self.slots.slots[slot_index];
         const policy = &slot.policy;
         if (!slot.in_use or policy.id == 0) native_util.impossibleByInvariant("policy index update requires a live policy");
-        self.policy_id_index.insert(policy.id, slot_index);
         if (!self.scope_index.append(policyScopeKey(policy.scope, policy.subject_id), slot_index)) {
             native_util.impossibleByInvariant("policy scope index capacity covers policy slots");
         }
@@ -1049,7 +1039,7 @@ fn latestGenerationForScope(self: *const Directory, scope: Scope, subject_id: u6
     var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
     while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
         if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-        const slot = &self.slots[cursor];
+        const slot = &self.slots.slots[cursor];
         if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
         if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
         if (slot.policy.generation > best_generation) best_generation = slot.policy.generation;

@@ -35,6 +35,7 @@ const personal_context_service = @import("services/personal_context_service.zig"
 const package_service = @import("services/package_service.zig");
 const driver_service = @import("drivers/driver_service.zig");
 const network_policy = @import("sync/network_policy.zig");
+const policy_object = @import("policy/policy_object.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
@@ -122,6 +123,9 @@ pub const indexed_hot_path_tables = .{
     },
     .network_policy = .{
         .uses_policy_arena = @hasDecl(@FieldType(network_policy.Directory, "policies"), "reserve"),
+    },
+    .policy_object = .{
+        .uses_policy_arena = @hasDecl(@FieldType(policy_object.Directory, "slots"), "reserve"),
     },
     .event_ledger = .{
         .uses_event_arena = @hasField(event_ledger.Ledger, "events"),
