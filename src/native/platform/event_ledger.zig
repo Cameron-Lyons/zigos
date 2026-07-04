@@ -1736,7 +1736,6 @@ pub const Ledger = struct {
             // tamper-evident audit ledger would permanently stop accepting capability,
             // crash, and sensitive-capture records after MAX_EVENTS lifetime events.
             if (!self.evictOldestEvent()) return error.EventTableFull;
-            try self.rebuildIndexes();
             break :reserve self.events.reserveIndex(sequence) orelse return error.EventTableFull;
         };
         const slot = &self.events.slots[event_index];
@@ -1766,6 +1765,7 @@ pub const Ledger = struct {
             }
         }
         const index = oldest_index orelse return false;
+        self.removeEventIndexes(index, &self.events.slots[index].event);
         return self.events.removeIndex(index);
     }
 
@@ -1839,6 +1839,18 @@ pub const Ledger = struct {
         const slot = &self.events.slots[cursor];
         if (!slot.in_use) native_util.impossibleByInvariant("event task index points at a free slot");
         return &slot.event;
+    }
+
+    pub fn removeEventIndexes(self: *Ledger, event_index: usize, event: *const Event) void {
+        if (!self.kind_index.remove(kindKey(event.kind), event_index)) {
+            native_util.impossibleByInvariant("event kind index missing live event");
+        }
+        if (!self.subject_index.remove(subjectKey(event.subject), event_index)) {
+            native_util.impossibleByInvariant("event subject index missing live event");
+        }
+        if (event.task_id != 0 and !self.task_index.remove(taskKey(event.task_id), event_index)) {
+            native_util.impossibleByInvariant("event task index missing live event");
+        }
     }
 
     fn indexEvent(self: *Ledger, event_index: usize) Error!void {

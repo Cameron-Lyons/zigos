@@ -392,6 +392,12 @@ pub const AddressSpaceSlot = struct {
     address_space: AddressSpaceRecord = zeroAddressSpace(),
 };
 
+fn addressSpaceSlotId(slot: *const AddressSpaceSlot) u64 {
+    return slot.address_space.id;
+}
+
+pub const AddressSpaceArena = indexed_arena.IndexedArenaWithKey(u64, AddressSpaceSlot, MAX_TASKS, INDEX_CAPACITY, addressSpaceSlotId);
+
 pub const Snapshot = struct {
     next_task_id: u64 = 1,
     next_process_id: u64 = 1,
@@ -657,7 +663,7 @@ pub fn installAddressSpace(
     return runtime_host.installAddressSpace(Error, self, replace_address_space_id, address_space);
 }
 
-pub fn findAddressSpaceSlot(self: anytype, address_space_id: u64) ?*@TypeOf(self.address_spaces[0]) {
+pub fn findAddressSpaceSlot(self: anytype, address_space_id: u64) ?*AddressSpaceSlot {
     return runtime_host.findAddressSpaceSlot(self, address_space_id);
 }
 

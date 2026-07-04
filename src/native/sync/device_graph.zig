@@ -1,6 +1,7 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const hex = @import("../core/hex.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
@@ -160,20 +161,46 @@ const DeviceSlot = struct {
     device: DeviceRecord = zeroDevice(),
 };
 
+const USER_ROOT_INDEX_CAPACITY = MAX_USER_ROOTS * 2;
+const DEVICE_INDEX_CAPACITY = MAX_DEVICES * 2;
+
+fn graphPrincipalKey(id: principal.PrincipalId) u64 {
+    const bytes = id.keyBytes();
+    return indexed_arena.nonZeroKey(native_util.fnv1a64(&bytes));
+}
+
+fn userRootSlotKey(slot: *const UserRootSlot) u64 {
+    return graphPrincipalKey(slot.root.principal_id);
+}
+
+fn deviceSlotKey(slot: *const DeviceSlot) u64 {
+    return graphPrincipalKey(slot.device.principal_id);
+}
+
+const UserRootArena = indexed_arena.IndexedArenaWithKey(u64, UserRootSlot, MAX_USER_ROOTS, USER_ROOT_INDEX_CAPACITY, userRootSlotKey);
+const DeviceArena = indexed_arena.IndexedArenaWithKey(u64, DeviceSlot, MAX_DEVICES, DEVICE_INDEX_CAPACITY, deviceSlotKey);
+
 pub const Graph = struct {
-    user_roots: [MAX_USER_ROOTS]UserRootSlot = [_]UserRootSlot{UserRootSlot{}} ** MAX_USER_ROOTS,
-    devices: [MAX_DEVICES]DeviceSlot = [_]DeviceSlot{DeviceSlot{}} ** MAX_DEVICES,
+    user_roots: UserRootArena = UserRootArena.init(),
+    devices: DeviceArena = DeviceArena.init(),
+    trusted_device_count: usize = 0,
 
     pub fn init() Graph {
         return .{};
     }
 
     pub fn reset(self: *Graph) void {
-        for (&self.user_roots) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.devices) |*slot| {
-            slot.* = .{};
+        self.user_roots.reset();
+        self.devices.reset();
+        self.trusted_device_count = 0;
+    }
+
+    pub fn rebuildIndexes(self: *Graph) void {
+        self.user_roots.rebuildPrimaryIndex();
+        self.devices.rebuildPrimaryIndex();
+        self.trusted_device_count = 0;
+        for (self.devices.slots) |slot| {
+            if (slot.in_use and slot.device.status == .trusted) self.trusted_device_count += 1;
         }
     }
 
@@ -185,8 +212,8 @@ pub const Graph = struct {
     ) Error!*UserRootRecord {
         if (user_principal.kind != .user) return error.InvalidPrincipalKind;
         if (self.findUserRoot(user_principal)) |existing| return existing;
+        if (self.user_roots.countInUse() >= MAX_USER_ROOTS) return error.UserRootTableFull;
 
-        const slot = self.allocateUserRoot() orelse return error.UserRootTableFull;
         var root = zeroUserRoot();
         root.principal_id = user_principal;
         root.label_len = native_util.copyTextExact(&root.label, label) catch return error.LabelTooLong;
@@ -196,9 +223,8 @@ pub const Graph = struct {
         root.root_signature = signing.sign(identity, message) catch return error.InvalidRootSignature;
         if (!signing.verify(root.root_signature, message)) return error.InvalidRootSignature;
 
-        slot.in_use = true;
-        slot.root = root;
-        return &slot.root;
+        const slot_index = self.installUserRootRecord(root) orelse return error.UserRootTableFull;
+        return &self.user_roots.slots[slot_index].root;
     }
 
     pub fn enrollDevice(
@@ -243,8 +269,8 @@ pub const Graph = struct {
             if (existing.status == .revoked) return error.AlreadyRevoked;
             return existing;
         }
+        if (self.devices.countInUse() >= MAX_DEVICES) return error.DeviceTableFull;
 
-        const slot = self.allocateDevice() orelse return error.DeviceTableFull;
         const overlay_id = deriveOverlayId(device_principal, device_identity.label);
         var device = zeroDevice();
         device.principal_id = device_principal;
@@ -280,9 +306,8 @@ pub const Graph = struct {
         if (!signing.verify(device.enrollment_signature, enrollment_message)) return error.InvalidEnrollmentSignature;
 
         device.last_rotated_at_ticks = tick;
-        slot.in_use = true;
-        slot.device = device;
-        return &slot.device;
+        const slot_index = self.installDeviceRecord(device) orelse return error.DeviceTableFull;
+        return &self.devices.slots[slot_index].device;
     }
 
     pub fn rotateDeviceKey(
@@ -389,27 +414,26 @@ pub const Graph = struct {
         record.status = .revoked;
         record.trust_generation += 1;
         record.revoked_at_ticks = tick;
+        if (self.trusted_device_count == 0) native_util.impossibleByInvariant("trusted device count covers trusted records");
+        self.trusted_device_count -= 1;
     }
 
     pub fn findUserRoot(self: *Graph, user_principal: principal.PrincipalId) ?*UserRootRecord {
-        for (&self.user_roots) |*slot| {
-            if (slot.in_use and slot.root.principal_id.eql(user_principal)) return &slot.root;
-        }
-        return null;
+        const slot = self.user_roots.get(graphPrincipalKey(user_principal)) orelse return null;
+        if (!slot.root.principal_id.eql(user_principal)) return null;
+        return &slot.root;
     }
 
     pub fn findDevice(self: *Graph, device_principal: principal.PrincipalId) ?*DeviceRecord {
-        for (&self.devices) |*slot| {
-            if (slot.in_use and slot.device.principal_id.eql(device_principal)) return &slot.device;
-        }
-        return null;
+        const slot = self.devices.get(graphPrincipalKey(device_principal)) orelse return null;
+        if (!slot.device.principal_id.eql(device_principal)) return null;
+        return &slot.device;
     }
 
     pub fn findDeviceConst(self: *const Graph, device_principal: principal.PrincipalId) ?*const DeviceRecord {
-        for (&self.devices) |*slot| {
-            if (slot.in_use and slot.device.principal_id.eql(device_principal)) return &slot.device;
-        }
-        return null;
+        const slot = self.devices.getConst(graphPrincipalKey(device_principal)) orelse return null;
+        if (!slot.device.principal_id.eql(device_principal)) return null;
+        return &slot.device;
     }
 
     pub fn isTrusted(self: *const Graph, device_principal: principal.PrincipalId) bool {
@@ -424,25 +448,20 @@ pub const Graph = struct {
     }
 
     pub fn trustedDeviceCount(self: *const Graph) usize {
-        var count: usize = 0;
-        for (self.devices) |slot| {
-            if (slot.in_use and slot.device.status == .trusted) count += 1;
-        }
-        return count;
+        return self.trusted_device_count;
     }
 
-    fn allocateUserRoot(self: *Graph) ?*UserRootSlot {
-        for (&self.user_roots) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
+    pub fn installUserRootRecord(self: *Graph, root: UserRootRecord) ?usize {
+        const slot_index = self.user_roots.reserveIndex(graphPrincipalKey(root.principal_id)) orelse return null;
+        self.user_roots.slots[slot_index].root = root;
+        return slot_index;
     }
 
-    fn allocateDevice(self: *Graph) ?*DeviceSlot {
-        for (&self.devices) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
+    pub fn installDeviceRecord(self: *Graph, device: DeviceRecord) ?usize {
+        const slot_index = self.devices.reserveIndex(graphPrincipalKey(device.principal_id)) orelse return null;
+        self.devices.slots[slot_index].device = device;
+        if (device.status == .trusted) self.trusted_device_count += 1;
+        return slot_index;
     }
 };
 
