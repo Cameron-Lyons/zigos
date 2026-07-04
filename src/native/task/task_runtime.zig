@@ -82,7 +82,7 @@ const TaskInitialComponentLabelIndex = indexed_arena.MultimapIndex(MAX_TASKS, MA
 const findAddressSpaceSlot = model.findAddressSpaceSlot;
 const defaultInitialComponent = model.defaultInitialComponent;
 const makeLaunchProvenance = model.makeLaunchProvenance;
-const makeExecutionComponent = model.makeExecutionComponent;
+const zeroExecutionComponent = model.zeroExecutionComponent;
 
 pub const Runtime = struct {
     pub const AddressSpaceSlotType = AddressSpaceSlot;
@@ -226,11 +226,11 @@ pub const Runtime = struct {
             try validateUserspaceImage(requested_userspace_image)
         else
             ExecutableImageSpec{};
-        const task_id = self.next_task_id;
+        const task_id = self.nextReservableTaskId() orelse return error.TaskTableFull;
         const slot_index = self.tasks.reserveIndex(task_id) orelse return error.TaskTableFull;
         errdefer _ = self.tasks.removeIndex(slot_index);
 
-        const initial_component = makeExecutionComponent(self, defaultInitialComponent(request));
+        const initial_component = try self.makeExecutionComponent(defaultInitialComponent(request));
         const host = try allocateHost(
             self,
             request.component_class,
@@ -239,7 +239,6 @@ pub const Runtime = struct {
             userspace_image,
         );
 
-        self.next_task_id += 1;
         const slot = self.tasks.slotAt(slot_index);
         resetTaskCold(&self.task_cold[slot_index]);
         slot.task = .{
@@ -289,6 +288,8 @@ pub const Runtime = struct {
             native_util.impossibleByInvariant("task label index capacity covers task slots");
         }
         self.task_state_counts[taskStateIndex(slot.task.state)] += 1;
+        self.advanceNextComponentIdFrom(initial_component.id);
+        self.advanceNextTaskIdFrom(task_id);
         return &slot.task;
     }
 
@@ -398,6 +399,60 @@ pub const Runtime = struct {
 
     fn indexedTaskSlotConst(self: *const Runtime, task_id: u64) ?*const TaskSlot {
         return self.tasks.getConst(task_id);
+    }
+
+    fn nextReservableTaskId(self: *const Runtime) ?u64 {
+        if (self.taskCount() >= MAX_TASKS) return null;
+
+        var task_id = normalizeTaskId(self.next_task_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_TASKS) : (attempts += 1) {
+            if (self.indexedTaskSlotConst(task_id) == null) return task_id;
+            task_id = nextTaskIdAfter(task_id);
+        }
+        return null;
+    }
+
+    fn advanceNextTaskIdFrom(self: *Runtime, task_id: u64) void {
+        self.next_task_id = nextTaskIdAfter(task_id);
+    }
+
+    fn makeExecutionComponent(self: *Runtime, component: ExecutionComponentSpec) Error!ExecutionComponentRecord {
+        const component_id = self.nextReservableComponentId() orelse return error.ComponentTableFull;
+        var record = zeroExecutionComponent();
+        record.id = component_id;
+        record.substrate = component.substrate;
+        record.label_len = native_util.copyTextWithReserve(record.label[0..], component.label, 1);
+        record.entry_len = native_util.copyTextWithReserve(record.entry[0..], component.entry, 1);
+        return record;
+    }
+
+    fn nextReservableComponentId(self: *const Runtime) ?u64 {
+        var component_id = normalizeComponentId(self.next_component_id);
+        var attempts: usize = 0;
+        while (attempts <= maxLiveExecutionComponents()) : (attempts += 1) {
+            if (!self.componentIdInUse(component_id)) return component_id;
+            component_id = nextComponentIdAfter(component_id);
+        }
+        return null;
+    }
+
+    fn advanceNextComponentIdFrom(self: *Runtime, component_id: u64) void {
+        self.next_component_id = nextComponentIdAfter(component_id);
+    }
+
+    fn componentIdInUse(self: *const Runtime, component_id: u64) bool {
+        var slot_index: usize = 0;
+        while (slot_index < MAX_TASKS) : (slot_index += 1) {
+            const slot = self.tasks.slotAtConst(slot_index);
+            if (!slot.in_use) continue;
+            const components = slot.task.executionComponents();
+            var component_index: usize = 0;
+            while (component_index < components.len) : (component_index += 1) {
+                if (components[component_index].id == component_id) return true;
+            }
+        }
+        return false;
     }
 
     pub fn installAddressSpaceRecord(self: *Runtime, replace_address_space_id: ?u64, address_space: AddressSpaceRecord) bool {
@@ -528,7 +583,7 @@ pub const Runtime = struct {
         const cold = taskCold(task);
         if (task.execution_component_count >= MAX_TASK_COMPONENTS) return error.ComponentTableFull;
 
-        const record = makeExecutionComponent(self, component);
+        const record = try self.makeExecutionComponent(component);
         cold.execution_components[task.execution_component_count] = record;
         task.execution_component_count += 1;
         try self.audit(task_id, .{
@@ -536,6 +591,7 @@ pub const Runtime = struct {
             .detail = @intFromEnum(record.substrate),
             .tick = tick,
         });
+        self.advanceNextComponentIdFrom(record.id);
         return record;
     }
 
@@ -776,6 +832,28 @@ pub const Runtime = struct {
     }
 };
 
+fn normalizeTaskId(task_id: u64) u64 {
+    return if (task_id == 0) 1 else task_id;
+}
+
+fn nextTaskIdAfter(task_id: u64) u64 {
+    const next = task_id +% 1;
+    return normalizeTaskId(next);
+}
+
+fn maxLiveExecutionComponents() usize {
+    return MAX_TASKS * MAX_TASK_COMPONENTS;
+}
+
+fn normalizeComponentId(component_id: u64) u64 {
+    return if (component_id == 0) 1 else component_id;
+}
+
+fn nextComponentIdAfter(component_id: u64) u64 {
+    const next = component_id +% 1;
+    return normalizeComponentId(next);
+}
+
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
@@ -806,6 +884,20 @@ fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
 
     cold.provenance_trail[task.provenance_start] = event;
     task.provenance_start = (task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS;
+}
+
+fn createTaskIdTestTask(runtime: *Runtime, owner_serial: u64) Error!*TaskRecord {
+    return runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = owner_serial },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = TEST_MINIMAL_MEMORY_BYTES,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+        },
+        .local_only = true,
+    });
 }
 
 test "new tasks start with zero ambient authority and no capabilities" {
@@ -869,6 +961,151 @@ test "task runtime crosses the first task slab page with indexed handles" {
     try std.testing.expect(runtime.find(last_task_id) != null);
     try std.testing.expectEqual(last_task_id, runtime.findByOwner(last_owner).?.id);
     try std.testing.expect(runtime.taskHandle(last_task_id) != null);
+}
+
+test "task runtime ids wrap without zero and skip active tasks" {
+    var runtime = Runtime.init();
+
+    runtime.next_task_id = std.math.maxInt(u64);
+    const max_task = try createTaskIdTestTask(&runtime, 1);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_task.id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_task_id);
+    try std.testing.expect(runtime.find(0) == null);
+
+    const wrapped_task = try createTaskIdTestTask(&runtime, 2);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_task.id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_task_id);
+    try std.testing.expect(runtime.find(0) == null);
+
+    runtime.next_task_id = 1;
+    const skipped_task = try createTaskIdTestTask(&runtime, 3);
+    try std.testing.expectEqual(@as(u64, 2), skipped_task.id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_task_id);
+    try std.testing.expect(runtime.find(0) == null);
+
+    var full_runtime = Runtime.init();
+    for (0..MAX_TASKS) |index| {
+        _ = try createTaskIdTestTask(&full_runtime, @intCast(index + 10));
+    }
+    const next_before_full = full_runtime.next_task_id;
+    try std.testing.expectError(error.TaskTableFull, createTaskIdTestTask(&full_runtime, 1_000));
+    try std.testing.expectEqual(next_before_full, full_runtime.next_task_id);
+    try std.testing.expectEqual(MAX_TASKS, full_runtime.taskCount());
+}
+
+test "task runtime host ids wrap without zero and skip active hosts" {
+    var runtime = Runtime.init();
+
+    runtime.next_process_id = std.math.maxInt(u64);
+    runtime.next_address_space_id = std.math.maxInt(u64);
+    runtime.next_namespace_id = std.math.maxInt(u64);
+    const max_host_task = try createTaskIdTestTask(&runtime, 20);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_host_task.process_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_host_task.address_space_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_host_task.namespace_id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_process_id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_address_space_id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_namespace_id);
+    try std.testing.expect(runtime.findAddressSpaceConst(0) == null);
+
+    const wrapped_host_task = try createTaskIdTestTask(&runtime, 21);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_host_task.process_id);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_host_task.address_space_id);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_host_task.namespace_id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_process_id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_address_space_id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_namespace_id);
+    try std.testing.expect(runtime.findAddressSpaceConst(0) == null);
+
+    runtime.next_process_id = 1;
+    runtime.next_address_space_id = 1;
+    runtime.next_namespace_id = 1;
+    const skipped_host_task = try createTaskIdTestTask(&runtime, 22);
+    try std.testing.expectEqual(@as(u64, 2), skipped_host_task.process_id);
+    try std.testing.expectEqual(@as(u64, 2), skipped_host_task.address_space_id);
+    try std.testing.expectEqual(@as(u64, 2), skipped_host_task.namespace_id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_process_id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_address_space_id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_namespace_id);
+    try std.testing.expect(runtime.findAddressSpaceConst(0) == null);
+}
+
+test "task runtime host ids do not advance when address space installation fails" {
+    var runtime = Runtime.init();
+    for (0..runtime.address_spaces.slots.len) |index| {
+        const address_space_id: u64 = @intCast(index + 1_000);
+        const slot_index = runtime.address_spaces.reserveIndex(address_space_id) orelse unreachable;
+        const slot = &runtime.address_spaces.slots[slot_index];
+        slot.address_space = model.zeroAddressSpace();
+        slot.address_space.id = address_space_id;
+    }
+    runtime.address_spaces.clearDirty();
+    runtime.rebuildIndexes();
+
+    runtime.next_process_id = 80;
+    runtime.next_address_space_id = 81;
+    runtime.next_namespace_id = 82;
+    const next_process_before = runtime.next_process_id;
+    const next_address_space_before = runtime.next_address_space_id;
+    const next_namespace_before = runtime.next_namespace_id;
+
+    try std.testing.expectError(error.AddressSpaceTableFull, createTaskIdTestTask(&runtime, 23));
+    try std.testing.expectEqual(next_process_before, runtime.next_process_id);
+    try std.testing.expectEqual(next_address_space_before, runtime.next_address_space_id);
+    try std.testing.expectEqual(next_namespace_before, runtime.next_namespace_id);
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+}
+
+test "task runtime component ids wrap without zero and skip active components" {
+    var runtime = Runtime.init();
+
+    runtime.next_component_id = std.math.maxInt(u64);
+    const max_component_task = try createTaskIdTestTask(&runtime, 30);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_component_task.executionComponents()[0].id);
+    try std.testing.expectEqual(@as(u64, 1), runtime.next_component_id);
+
+    const wrapped_component_task = try createTaskIdTestTask(&runtime, 31);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_component_task.executionComponents()[0].id);
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_component_id);
+
+    runtime.next_component_id = 1;
+    const skipped_component_task = try createTaskIdTestTask(&runtime, 32);
+    try std.testing.expectEqual(@as(u64, 2), skipped_component_task.executionComponents()[0].id);
+    try std.testing.expectEqual(@as(u64, 3), runtime.next_component_id);
+
+    runtime.next_component_id = 1;
+    const attached = try runtime.attachComponent(max_component_task.id, .{
+        .substrate = .early_elf_runner,
+        .label = "component-id-skip",
+        .entry = "/system/components/component-id-skip.elf",
+    }, 40);
+    try std.testing.expectEqual(@as(u64, 3), attached.id);
+    try std.testing.expectEqual(@as(u64, 4), runtime.next_component_id);
+
+    try std.testing.expect(max_component_task.executionComponents()[0].id != 0);
+    try std.testing.expect(wrapped_component_task.executionComponents()[0].id != 0);
+    try std.testing.expect(skipped_component_task.executionComponents()[0].id != 0);
+    try std.testing.expect(attached.id != 0);
+}
+
+test "task runtime component ids do not advance when host allocation fails" {
+    var runtime = Runtime.init();
+    for (0..runtime.address_spaces.slots.len) |index| {
+        const address_space_id: u64 = @intCast(index + 2_000);
+        const slot_index = runtime.address_spaces.reserveIndex(address_space_id) orelse unreachable;
+        const slot = &runtime.address_spaces.slots[slot_index];
+        slot.address_space = model.zeroAddressSpace();
+        slot.address_space.id = address_space_id;
+    }
+    runtime.address_spaces.clearDirty();
+    runtime.rebuildIndexes();
+
+    runtime.next_component_id = 90;
+    const next_component_before = runtime.next_component_id;
+
+    try std.testing.expectError(error.AddressSpaceTableFull, createTaskIdTestTask(&runtime, 33));
+    try std.testing.expectEqual(next_component_before, runtime.next_component_id);
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
 }
 
 test "granting and revoking capabilities updates the task table" {

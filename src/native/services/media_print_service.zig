@@ -104,8 +104,8 @@ pub const Service = struct {
 
         if (self.jobs.countInUse() >= MAX_JOBS) return error.JobTableFull;
 
+        const job_id = self.nextReservableJobId() orelse return error.JobTableFull;
         var job = zeroJob();
-        const job_id = self.next_job_id;
         job.id = job_id;
         job.kind = request.kind;
         job.task_id = request.task_id;
@@ -143,8 +143,8 @@ pub const Service = struct {
             native_util.impossibleByInvariant("prechecked print job slot reservation must succeed");
         const slot = &self.jobs.slots[slot_index];
         slot.job = job;
-        self.next_job_id += 1;
         self.jobs.clearDirty();
+        self.advanceNextJobIdFrom(job_id);
         return &slot.job;
     }
 
@@ -156,12 +156,14 @@ pub const Service = struct {
         now_ticks: u64,
     ) Error!?u64 {
         const job = self.find(job_id) orelse return error.JobNotFound;
-        job.state = .completed;
-        if (job.claim_id) |claim_id| {
-            _ = try scheduler.releaseClaim(claim_id, null);
+        if (job.visibility == .hidden) {
+            if (job.claim_id) |claim_id| {
+                _ = try scheduler.releaseClaim(claim_id, null);
+            }
             job.claim_id = null;
+            job.state = .completed;
+            return null;
         }
-        if (job.visibility == .hidden) return null;
 
         const reason: notification_center.Reason = switch (job.kind) {
             .media_export => .media_export_complete,
@@ -176,6 +178,11 @@ pub const Service = struct {
             .expires_at_ticks = now_ticks + 100,
             .suppression_policy = .replace_same_source_reason_task,
         });
+        if (job.claim_id) |claim_id| {
+            _ = try scheduler.releaseClaim(claim_id, null);
+        }
+        job.claim_id = null;
+        job.state = .completed;
         job.notification_id = notice.id;
         return notice.id;
     }
@@ -184,7 +191,36 @@ pub const Service = struct {
         const slot = self.jobs.get(job_id) orelse return null;
         return &slot.job;
     }
+
+    fn nextReservableJobId(self: *Service) ?u64 {
+        if (self.countJobs() >= MAX_JOBS) return null;
+
+        var job_id = normalizeJobId(self.next_job_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_JOBS) : (attempts += 1) {
+            if (self.find(job_id) == null) return job_id;
+            job_id = nextJobIdAfter(job_id);
+        }
+        return null;
+    }
+
+    fn advanceNextJobIdFrom(self: *Service, job_id: u64) void {
+        self.next_job_id = nextJobIdAfter(job_id);
+    }
+
+    fn countJobs(self: *const Service) usize {
+        return self.jobs.countInUse();
+    }
 };
+
+fn normalizeJobId(job_id: u64) u64 {
+    return if (job_id == 0) 1 else job_id;
+}
+
+fn nextJobIdAfter(job_id: u64) u64 {
+    const next = job_id +% 1;
+    return normalizeJobId(next);
+}
 
 fn schedulerRequest(kind: JobKind) accelerator_scheduler.Request {
     return switch (kind) {
@@ -310,6 +346,75 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
+test "media print service job ids wrap without zero and full tables do not consume ids" {
+    var scheduler = accelerator_scheduler.Controller.init();
+    var notifications = notification_center.Center.init();
+    var service = Service.init();
+    const source = principal.PrincipalId{ .kind = .app, .serial = 14 };
+
+    service.next_job_id = std.math.maxInt(u64);
+    const max_job = try service.submit(.{
+        .kind = .print_document,
+        .task_id = 90,
+        .workspace_id = 7,
+        .source_principal = source,
+        .label = "max id print",
+        .visibility = .hidden,
+    }, &scheduler, &notifications, 10);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_job.id);
+    try std.testing.expectEqual(@as(u64, 1), service.next_job_id);
+    try std.testing.expect(service.find(0) == null);
+
+    const wrapped_job = try service.submit(.{
+        .kind = .print_document,
+        .task_id = 91,
+        .workspace_id = 7,
+        .source_principal = source,
+        .label = "wrapped id print",
+        .visibility = .hidden,
+    }, &scheduler, &notifications, 11);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_job.id);
+    try std.testing.expectEqual(@as(u64, 2), service.next_job_id);
+    try std.testing.expect(service.find(0) == null);
+
+    service.next_job_id = 1;
+    const skipped_job = try service.submit(.{
+        .kind = .print_document,
+        .task_id = 92,
+        .workspace_id = 7,
+        .source_principal = source,
+        .label = "skipped id print",
+        .visibility = .hidden,
+    }, &scheduler, &notifications, 12);
+    try std.testing.expectEqual(@as(u64, 2), skipped_job.id);
+    try std.testing.expectEqual(@as(u64, 3), service.next_job_id);
+    try std.testing.expect(service.find(0) == null);
+
+    var full_scheduler = accelerator_scheduler.Controller.init();
+    var full_notifications = notification_center.Center.init();
+    var full_service = Service.init();
+    for (0..MAX_JOBS) |index| {
+        _ = try full_service.submit(.{
+            .kind = .print_document,
+            .task_id = @intCast(100 + index),
+            .workspace_id = 8,
+            .source_principal = source,
+            .label = "full table print",
+            .visibility = .hidden,
+        }, &full_scheduler, &full_notifications, 20);
+    }
+    const next_before_full = full_service.next_job_id;
+    try std.testing.expectError(error.JobTableFull, full_service.submit(.{
+        .kind = .print_document,
+        .task_id = 200,
+        .workspace_id = 8,
+        .source_principal = source,
+        .label = "rejected full table print",
+        .visibility = .hidden,
+    }, &full_scheduler, &full_notifications, 21));
+    try std.testing.expectEqual(next_before_full, full_service.next_job_id);
+}
+
 test "media print service indexes completed jobs and rejects full tables before claiming" {
     var scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
@@ -347,4 +452,38 @@ test "media print service indexes completed jobs and rejects full tables before 
         .visibility = .hidden,
     }, &scheduler, &notifications, 99));
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
+}
+
+test "media print service visible completion waits for completion notification capacity" {
+    var scheduler = accelerator_scheduler.Controller.init();
+    var notifications = notification_center.Center.init();
+    var service = Service.init();
+    const source = principal.PrincipalId{ .kind = .app, .serial = 15 };
+
+    const job = try service.submit(.{
+        .kind = .print_document,
+        .task_id = 210,
+        .workspace_id = 9,
+        .source_principal = source,
+        .label = "visible print",
+        .visibility = .task,
+    }, &scheduler, &notifications, 30);
+    try std.testing.expectEqual(JobState.running, job.state);
+    try std.testing.expect(job.claim_id != null);
+    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
+
+    for (0..notification_center.MAX_NOTIFICATIONS - notifications.activeCount(30)) |index| {
+        _ = try notifications.post(.{
+            .source = source,
+            .reason = .policy_notice,
+            .urgency = .normal,
+            .task_id = @intCast(300 + index),
+            .detail = "filler notice",
+        });
+    }
+
+    try std.testing.expectError(error.NotificationTableFull, service.complete(job.id, &scheduler, &notifications, 31));
+    try std.testing.expectEqual(JobState.running, job.state);
+    try std.testing.expect(job.claim_id != null);
+    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
 }

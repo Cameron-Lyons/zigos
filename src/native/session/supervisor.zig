@@ -129,13 +129,14 @@ pub const Supervisor = struct {
     pub fn register(self: *Supervisor, class: contract.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
         const descriptor = contract.serviceDescriptor(class) orelse return error.UnknownServiceClass;
 
-        const service_id = self.nextServiceId();
+        const service_id = self.nextReservableServiceId() orelse return error.ServiceTableFull;
+        const isolation_domain_id = self.nextReservableIsolationDomainId() orelse return error.ServiceTableFull;
         const slot_index = self.service_arena.reserveIndex(service_id) orelse return error.ServiceTableFull;
         const slot = &self.service_arena.slots[slot_index];
 
         slot.service = .{
             .id = service_id,
-            .isolation_domain_id = self.nextIsolationDomainId(),
+            .isolation_domain_id = isolation_domain_id,
             .class = class,
             .boundary = descriptor.boundary,
             .owner = owner,
@@ -150,6 +151,8 @@ pub const Supervisor = struct {
         };
         self.service_class_index.insert(serviceClassKey(class), slot_index);
         self.record(slot.service, .registered, 0, 0, 0);
+        self.advanceNextServiceIdFrom(service_id);
+        self.advanceNextIsolationDomainIdFrom(isolation_domain_id);
         return &slot.service;
     }
 
@@ -382,14 +385,43 @@ pub const Supervisor = struct {
         return event;
     }
 
-    fn nextServiceId(self: *Supervisor) u64 {
-        defer self.next_service_id += 1;
-        return self.next_service_id;
+    fn nextReservableServiceId(self: *const Supervisor) ?u64 {
+        if (self.serviceCount() >= MAX_SERVICES) return null;
+
+        var service_id = normalizeServiceId(self.next_service_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_SERVICES) : (attempts += 1) {
+            if (self.findConst(service_id) == null) return service_id;
+            service_id = nextServiceIdAfter(service_id);
+        }
+        return null;
     }
 
-    fn nextIsolationDomainId(self: *Supervisor) u64 {
-        defer self.next_isolation_domain_id += 1;
-        return self.next_isolation_domain_id;
+    fn advanceNextServiceIdFrom(self: *Supervisor, service_id: u64) void {
+        self.next_service_id = nextServiceIdAfter(service_id);
+    }
+
+    fn nextReservableIsolationDomainId(self: *const Supervisor) ?u64 {
+        if (self.serviceCount() >= MAX_SERVICES) return null;
+
+        var isolation_domain_id = normalizeIsolationDomainId(self.next_isolation_domain_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_SERVICES) : (attempts += 1) {
+            if (!self.isolationDomainInUse(isolation_domain_id)) return isolation_domain_id;
+            isolation_domain_id = nextIsolationDomainIdAfter(isolation_domain_id);
+        }
+        return null;
+    }
+
+    fn advanceNextIsolationDomainIdFrom(self: *Supervisor, isolation_domain_id: u64) void {
+        self.next_isolation_domain_id = nextIsolationDomainIdAfter(isolation_domain_id);
+    }
+
+    fn isolationDomainInUse(self: *const Supervisor, isolation_domain_id: u64) bool {
+        for (self.service_arena.slots) |slot| {
+            if (slot.in_use and slot.service.isolation_domain_id == isolation_domain_id) return true;
+        }
+        return false;
     }
 
     fn record(
@@ -448,8 +480,26 @@ pub const Supervisor = struct {
     }
 
     fn nextDiagnosticSequence(self: *Supervisor) u64 {
-        defer self.next_diagnostic_sequence += 1;
-        return self.next_diagnostic_sequence;
+        const sequence = self.nextReservableDiagnosticSequence() orelse unreachable;
+        self.next_diagnostic_sequence = nextDiagnosticSequenceAfter(sequence);
+        return sequence;
+    }
+
+    fn nextReservableDiagnosticSequence(self: *const Supervisor) ?u64 {
+        var sequence = normalizeDiagnosticSequence(self.next_diagnostic_sequence);
+        var attempts: usize = 0;
+        while (attempts <= MAX_DIAGNOSTICS) : (attempts += 1) {
+            if (!self.diagnosticSequenceInUse(sequence)) return sequence;
+            sequence = nextDiagnosticSequenceAfter(sequence);
+        }
+        return null;
+    }
+
+    fn diagnosticSequenceInUse(self: *const Supervisor, sequence: u64) bool {
+        for (self.diagnostics[0..self.diagnostic_count]) |event| {
+            if (event.sequence == sequence) return true;
+        }
+        return false;
     }
 
     fn findConst(self: *const Supervisor, service_id: u64) ?*const ServiceRecord {
@@ -472,6 +522,33 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
 
 fn serviceClassKey(class: contract.ServiceClass) u64 {
     return @as(u64, @intFromEnum(class)) + 1;
+}
+
+fn normalizeServiceId(service_id: u64) u64 {
+    return if (service_id == 0) 1 else service_id;
+}
+
+fn nextServiceIdAfter(service_id: u64) u64 {
+    const next = service_id +% 1;
+    return normalizeServiceId(next);
+}
+
+fn normalizeIsolationDomainId(isolation_domain_id: u64) u64 {
+    return if (isolation_domain_id == 0) 1 else isolation_domain_id;
+}
+
+fn nextIsolationDomainIdAfter(isolation_domain_id: u64) u64 {
+    const next = isolation_domain_id +% 1;
+    return normalizeIsolationDomainId(next);
+}
+
+fn normalizeDiagnosticSequence(sequence: u64) u64 {
+    return if (sequence == 0) 1 else sequence;
+}
+
+fn nextDiagnosticSequenceAfter(sequence: u64) u64 {
+    const next = sequence +% 1;
+    return normalizeDiagnosticSequence(next);
 }
 
 fn diagnosticServiceKey(service_id: u64) u64 {
@@ -616,6 +693,71 @@ test "supervisor registers services using the contract boundary map" {
     try std.testing.expect(service.restartable);
     try std.testing.expect(supervisor.markHealthy(service.id, 10));
     try std.testing.expectEqual(ServiceState.healthy, service.state);
+}
+
+test "supervisor service ids wrap without zero and skip active records" {
+    var supervisor = Supervisor.init();
+
+    supervisor.next_service_id = std.math.maxInt(u64);
+    supervisor.next_isolation_domain_id = std.math.maxInt(u64);
+    const max_service = try supervisor.register(.session_manager, .{ .kind = .service, .serial = 10 });
+    try std.testing.expectEqual(std.math.maxInt(u64), max_service.id);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_service.isolation_domain_id);
+    try std.testing.expectEqual(@as(u64, 1), supervisor.next_service_id);
+    try std.testing.expectEqual(@as(u64, 1), supervisor.next_isolation_domain_id);
+    try std.testing.expect(supervisor.find(0) == null);
+
+    const wrapped_service = try supervisor.register(.task_runtime, .{ .kind = .service, .serial = 11 });
+    try std.testing.expectEqual(@as(u64, 1), wrapped_service.id);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_service.isolation_domain_id);
+    try std.testing.expectEqual(@as(u64, 2), supervisor.next_service_id);
+    try std.testing.expectEqual(@as(u64, 2), supervisor.next_isolation_domain_id);
+    try std.testing.expect(supervisor.find(0) == null);
+
+    supervisor.next_service_id = 1;
+    supervisor.next_isolation_domain_id = 1;
+    const skipped_service = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 12 });
+    try std.testing.expectEqual(@as(u64, 2), skipped_service.id);
+    try std.testing.expectEqual(@as(u64, 2), skipped_service.isolation_domain_id);
+    try std.testing.expectEqual(@as(u64, 3), supervisor.next_service_id);
+    try std.testing.expectEqual(@as(u64, 3), supervisor.next_isolation_domain_id);
+    try std.testing.expect(supervisor.find(0) == null);
+}
+
+test "supervisor service ids do not advance when the table is full" {
+    var supervisor = Supervisor.init();
+    for (0..MAX_SERVICES) |index| {
+        _ = try supervisor.register(.task_runtime, .{ .kind = .service, .serial = @intCast(index + 100) });
+    }
+
+    const next_service_before = supervisor.next_service_id;
+    const next_isolation_before = supervisor.next_isolation_domain_id;
+    try std.testing.expectError(error.ServiceTableFull, supervisor.register(.session_manager, .{ .kind = .service, .serial = 200 }));
+    try std.testing.expectEqual(next_service_before, supervisor.next_service_id);
+    try std.testing.expectEqual(next_isolation_before, supervisor.next_isolation_domain_id);
+    try std.testing.expectEqual(MAX_SERVICES, supervisor.serviceCount());
+}
+
+test "supervisor diagnostic sequences wrap without zero and skip retained diagnostics" {
+    var supervisor = Supervisor.init();
+
+    supervisor.next_diagnostic_sequence = std.math.maxInt(u64);
+    const service = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 20 });
+    try std.testing.expectEqual(std.math.maxInt(u64), supervisor.latestDiagnostic(service.id).?.sequence);
+    try std.testing.expectEqual(@as(u64, 1), supervisor.next_diagnostic_sequence);
+
+    try std.testing.expect(supervisor.markHealthy(service.id, 10));
+    try std.testing.expectEqual(@as(u64, 1), supervisor.latestDiagnostic(service.id).?.sequence);
+    try std.testing.expectEqual(@as(u64, 2), supervisor.next_diagnostic_sequence);
+
+    supervisor.next_diagnostic_sequence = 1;
+    try std.testing.expect(supervisor.recordCrash(service.id, 11, 0xD1));
+    try std.testing.expectEqual(@as(u64, 2), supervisor.latestDiagnostic(service.id).?.sequence);
+    try std.testing.expectEqual(@as(u64, 3), supervisor.next_diagnostic_sequence);
+
+    for (supervisor.diagnostics[0..supervisor.diagnostic_count]) |event| {
+        try std.testing.expect(event.sequence != 0);
+    }
 }
 
 test "restart requests only succeed for restartable services" {

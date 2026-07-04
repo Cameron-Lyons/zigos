@@ -172,9 +172,7 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const session_id = self.nextSessionId();
-        const slot_index = self.sessions.reserveIndex(session_id) orelse return error.SessionTableFull;
-        const slot = &self.sessions.slots[slot_index];
+        const session_id = self.next_session_id;
         var record = zeroSession();
         record.id = session_id;
         record.subject = request.subject;
@@ -189,7 +187,9 @@ pub const Service = struct {
         record.expires_at_ticks = request.expires_at_ticks;
         record.attested = request.evidence.hasVerifiedRemoteAttestation();
         record.identity_pinned = decision.policy_decision.identity_pinned;
-        slot.record = record;
+
+        const slot_index = self.sessions.reserveIndex(session_id) orelse return error.SessionTableFull;
+        errdefer _ = self.sessions.removeIndex(slot_index);
         try recordNetworkSession(
             ledger,
             request.subject,
@@ -198,12 +198,15 @@ pub const Service = struct {
             .open,
             .none,
             true,
-            slot.record.attested,
-            slot.record.identity_pinned,
+            record.attested,
+            record.identity_pinned,
             private_data,
             request.now_ticks,
             request.detail,
         );
+        const slot = &self.sessions.slots[slot_index];
+        slot.record = record;
+        self.advanceNextSessionId();
         return &slot.record;
     }
 
@@ -369,11 +372,9 @@ pub const Service = struct {
         return session;
     }
 
-    fn nextSessionId(self: *Service) u64 {
-        const session_id = self.next_session_id;
+    fn advanceNextSessionId(self: *Service) void {
         self.next_session_id +%= 1;
         if (self.next_session_id == 0) self.next_session_id = 1;
-        return session_id;
     }
 };
 
@@ -464,6 +465,94 @@ fn recordNetworkSession(
             detail,
         );
     }
+}
+
+test "network session open rejects long destinations without publishing slots" {
+    const signing = @import("../core/signing.zig");
+
+    var network_policies = network_policy.Directory.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 901 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 902 };
+    const internet = try network_policies.create(.{
+        .owner = owner,
+        .label = "internet",
+        .mode = .unrestricted_internet,
+        .explicit_internet_grant = true,
+    });
+
+    var capabilities = capability.CapabilityTable.init();
+    const network_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 901 },
+        .target = .{ .kind = .network_policy, .id = internet.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 9902 },
+        .lease = .{
+            .issued_at_ticks = 1,
+            .expires_at_ticks = 100,
+        },
+    });
+
+    var policies = policy_object.Directory.init();
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = 900,
+        .issuer = .{ .kind = .policy_authority, .serial = 901 },
+        .label = "network-session-egress",
+        .network_egress_mode = .unrestricted,
+    }, signing.SignerIdentity{
+        .label = "network-session-egress",
+        .seed = signing.seedFromByte(0x91),
+    });
+    const subjects = policy_object.SubjectSet{ .user_id = 900 };
+
+    var service = Service.init();
+    const oversized_destination = [_]u8{'a'} ** (MAX_DESTINATION_BYTES + 1);
+    try std.testing.expectError(error.DestinationTooLong, service.open(
+        &network_policies,
+        &capabilities,
+        &policies,
+        subjects,
+        .{
+            .subject = app,
+            .task_id = 9902,
+            .policy_id = internet.id,
+            .capability_id = network_capability.id,
+            .evidence = .{ .destination = .{ .domain = oversized_destination[0..] } },
+            .remote_bytes = 16,
+            .max_session_bytes = 16,
+            .expires_at_ticks = 40,
+            .now_ticks = 10,
+            .detail = "long destination rejected",
+        },
+        null,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), service.sessions.countInUse());
+    try std.testing.expect(service.find(1) == null);
+    try std.testing.expectEqual(@as(u64, 1), service.next_session_id);
+
+    const session = try service.open(
+        &network_policies,
+        &capabilities,
+        &policies,
+        subjects,
+        .{
+            .subject = app,
+            .task_id = 9902,
+            .policy_id = internet.id,
+            .capability_id = network_capability.id,
+            .evidence = .{ .destination = .{ .domain = "updates.example" } },
+            .remote_bytes = 16,
+            .max_session_bytes = 16,
+            .expires_at_ticks = 40,
+            .now_ticks = 11,
+            .detail = "valid destination opened",
+        },
+        null,
+    );
+    try std.testing.expectEqual(@as(u64, 1), session.id);
+    try std.testing.expectEqualStrings("updates.example", session.destinationSlice());
+    try std.testing.expectEqual(@as(usize, 1), service.sessions.countInUse());
 }
 
 test "network session service opens leased attested sessions and audits revocation" {

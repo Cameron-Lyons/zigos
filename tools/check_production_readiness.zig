@@ -1570,7 +1570,8 @@ fn validateSecretVaultHardwareProviderBoundary(
     const store_snippets = [_][]const u8{
         "HardwareProviderUnavailable",
         "self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable",
-        "slot.secret.hardware_provider_used = true",
+        "secret.hardware_provider_used = true",
+        "slot.secret = secret",
         "secure secret store requires a hardware provider before hardware-backed imports",
     };
     for (store_snippets) |snippet| {

@@ -12,9 +12,9 @@ storage.volume.replay_segmented_log 250000000.00 100
 storage.volume.compact_checkpoint 600000000.00 100
 package_revision.rollforward_rollback 1151678.41 40
 indexing_service.query_ranked 202462.18 40
-media_print.submit_complete 136500.90 70
+media_print.submit_complete 136500.90 310
 event_ledger.export_redacted 635582.44 60
-secret_store.import_handle_export 96904.55 125
+secret_store.import_handle_export 96904.55 210
 denial_explanation.render_policy_hint 15283.87 60
 sync_service.overlay_session_flow 53125.25 70
 recovery_environment.reinstall_restore_repair 2250000000.00 100
