@@ -908,13 +908,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             for (frame_ids) |frame_id| {
                 const frames = &self.state().outbound_transport_frames;
                 const slot_index = frames.slotIndexOf(state_support.transportFrameArenaKey(frame_id)) orelse continue;
-                if (!frames.slots[slot_index].acked) {
-                    newly_acked += 1;
-                }
                 self.unindexTransportFramePathSlot(.outbound, slot_index);
                 self.unindexOutboundTransportTargetSlot(slot_index);
                 _ = frames.removeIndex(slot_index);
                 self.decrementTransportFrameSlotCount(.outbound);
+                newly_acked += 1;
                 changed = true;
             }
             if (changed) try self.checkpoint();
@@ -1703,6 +1701,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn enqueueTransportFrame(self: *Self, queue_kind: TransportQueueKind, request: TransportFrameRequest) Error!TransportFrame {
+            if (request.path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
             const frame_id = self.nextTransportFrameId();
             const slot_index = self.allocateTransportFrameSlotIndex(queue_kind, frame_id) orelse
                 self.reclaimInboundTransportFrameSlotIndex(queue_kind, frame_id) orelse
@@ -1710,7 +1709,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const slot = &self.transportFrameArena(queue_kind).slots[slot_index];
             errdefer _ = self.transportFrameArena(queue_kind).removeIndex(slot_index);
             slot.in_use = true;
-            slot.acked = false;
             slot.duplicate_count = 0;
             slot.frame = .{
                 .id = frame_id,
@@ -1855,9 +1853,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) usize {
             if (queue_kind == .outbound) return self.copyOutboundTransportFrameSlotsForSince(workspace_id, target_device, min_frame_id, out);
             var copied: usize = 0;
-            for (self.transportFrameSlotsConst(queue_kind)) |slot| {
-                if (!slot.in_use or slot.acked) continue;
-                if (slot.frame.workspace_id != workspace_id or !slot.frame.target_device.eql(target_device)) continue;
+            var slot_index = self.inbound_transport_target_index.head(sync_indexes.transportFrameTargetLookupKey(workspace_id, target_device));
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.inbound_transport_target_index.next(slot_index)) {
+                const slot = self.inboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
                 if (slot.frame.id <= min_frame_id) continue;
                 if (copied >= out.len) return copied;
                 out[copied] = slot.frame;
@@ -1870,8 +1868,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var count: usize = 0;
             var slot_index = self.outbound_transport_target_index.head(sync_indexes.transportFrameTargetLookupKey(workspace_id, target_device));
             while (slot_index != indexed_arena.no_index) : (slot_index = self.outbound_transport_target_index.next(slot_index)) {
-                const slot = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
-                if (!slot.acked) count += 1;
+                _ = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
+                count += 1;
             }
             return count;
         }
@@ -1897,7 +1895,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var slot_index = self.outbound_transport_target_index.head(sync_indexes.transportFrameTargetLookupKey(workspace_id, target_device));
             while (slot_index != indexed_arena.no_index) : (slot_index = self.outbound_transport_target_index.next(slot_index)) {
                 const slot = self.outboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
-                if (!slot.acked and slot.frame.id > min_frame_id) {
+                if (slot.frame.id > min_frame_id) {
                     if (copied >= out.len) return copied;
                     out[copied] = slot.frame;
                     copied += 1;
