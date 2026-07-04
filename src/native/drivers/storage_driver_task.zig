@@ -144,6 +144,21 @@ pub fn constrainedProgrammedIoFirstTarget(session: *const AtaControllerSession) 
         brokeredDmaBufferReady(session);
 }
 
+// The first-target storage data plane is constrained in one of two accepted
+// shapes: the modeled ATA bridge (programmed I/O, no bus mastering) or the
+// real NVMe engine (bus mastering confined to its declared queue/bounce
+// windows alongside the staging window). Both require brokered-buffer mode,
+// IOMMU programming evidence, and a live staging-buffer authorization;
+// unconfined bus mastering is never accepted.
+pub fn constrainedStorageDataPlane(session: *const AtaControllerSession) bool {
+    if (constrainedProgrammedIoFirstTarget(session)) return true;
+    return session.dma_isolation.mode == .brokered_dma_buffers and
+        session.dma_isolation.hardware_iommu_programmed and
+        session.dma_isolation.bus_master_dma_enabled and
+        session.dma_isolation.window_count > 1 and
+        brokeredDmaBufferReady(session);
+}
+
 pub fn brokeredDmaBufferReady(session: *const AtaControllerSession) bool {
     return device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
 }

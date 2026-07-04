@@ -1726,19 +1726,27 @@ fn validateUserspaceDriverDataPathTrack(
 
     const broker_snippets = [_][]const u8{
         "UnsupportedBusMasterDma",
-        "if (request.bus_master_dma_enabled) return error.UnsupportedBusMasterDma",
-        "device broker records AMD-Vi programming evidence and rejects bus-master DMA",
+        "if (request.bus_master_dma_enabled and request.mode != .brokered_dma_buffers)",
+        "device broker records AMD-Vi programming evidence and confines bus-master DMA",
         "try std.testing.expectError(error.UnsupportedBusMasterDma, programDmaIsolation",
         "try std.testing.expect(!status.bus_master_dma_enabled)",
+        "pub fn programBusMasterStorageDmaIsolation",
     };
     for (broker_snippets) |snippet| {
         if (std.mem.indexOf(u8, broker_source, snippet) == null) {
-            try common.addError(errors, allocator, "Userspace driver data path must keep bus-master DMA fail-closed snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "Userspace driver data path must keep bus-master DMA confinement snippet: {s}", .{snippet});
         }
     }
 
-    if (std.mem.indexOf(u8, broker_source, "try std.testing.expect(status.bus_master_dma_enabled)") != null) {
-        try common.addError(errors, allocator, "Userspace driver data path must not treat bus-master DMA as test-accepted production evidence", .{});
+    const storage_dma_wiring_snippets = [_][]const u8{
+        "fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool",
+        "device_broker.programBusMasterStorageDmaIsolation(device_id, dma_domain_id, windows[0..count])",
+        "windows[0] = device_broker.defaultBrokeredDmaWindow(device_id)",
+    };
+    for (storage_dma_wiring_snippets) |snippet| {
+        if (std.mem.indexOf(u8, bootstrap_driver_port_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace driver data path must confine the real storage DMA engine through the broker: {s}", .{snippet});
+        }
     }
 
     const network_activation_snippets = [_][]const u8{

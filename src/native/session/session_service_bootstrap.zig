@@ -175,7 +175,7 @@ const StorageRestartProbe = struct {
             self.old_process_generation = session.process_generation;
             self.old_dma_domain_id = session.dma_domain_id;
             if (self.old_authority_capability_id == 0 or self.old_process_generation == 0 or self.old_dma_domain_id == 0) return false;
-            self.old_dma_domain_programmed = storage_driver_task_mod.constrainedProgrammedIoFirstTarget(&session);
+            self.old_dma_domain_programmed = storage_driver_task_mod.constrainedStorageDataPlane(&session);
             self.old_brokered_dma_buffer_ready = storage_driver_task_mod.brokeredDmaBufferReady(&session);
         }
         if (builtin.target.os.tag == .freestanding and self.old_session == null) return false;
@@ -253,7 +253,7 @@ const StorageRestartProbe = struct {
         if (session.process_generation <= self.old_process_generation) return false;
         if (session.dma_domain_id != driver.dma_domain_id) return false;
         if (session.dma_domain_id == self.old_dma_domain_id) return false;
-        self.rebound_dma_domain_programmed = storage_driver_task_mod.constrainedProgrammedIoFirstTarget(&session);
+        self.rebound_dma_domain_programmed = storage_driver_task_mod.constrainedStorageDataPlane(&session);
         self.rebound_brokered_dma_buffer_ready = storage_driver_task_mod.brokeredDmaBufferReady(&session);
         if (!self.rebound_dma_domain_programmed or !self.rebound_brokered_dma_buffer_ready) return false;
         self.rebind_observed = true;
@@ -324,7 +324,7 @@ const StorageRestartProbe = struct {
         const republished_session = bootstrap_driver_port.activeStorageAtaSession(service_id) orelse return false;
         self.republished_session_ready = republished_session.client.broker_generation != broker_generation_before and
             republished_session.process_generation == session.process_generation and
-            storage_driver_task_mod.constrainedProgrammedIoFirstTarget(&republished_session) and
+            storage_driver_task_mod.constrainedStorageDataPlane(&republished_session) and
             storage_driver_task_mod.brokeredDmaBufferReady(&republished_session);
         return self.republished_session_ready;
     }

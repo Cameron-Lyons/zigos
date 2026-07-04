@@ -25,6 +25,30 @@ const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(r
 else
     @import("../storage/storage_volume.zig");
 
+// Bridge to the kernel NVMe driver's DMA footprint (nvme_hw.zig). When the
+// real NVMe engine backs storage, its bus-master DMA program is confined to
+// exactly these queue/bounce frames. Host builds report no windows.
+const nvme_dma_bridge = if (builtin.target.os.tag == .freestanding)
+    struct {
+        extern fn zigosStorageBootstrapNvmeDmaWindow(
+            index: u32,
+            base_out: *u64,
+            length_out: *u64,
+            device_readable_out: *bool,
+            device_writable_out: *bool,
+        ) callconv(.c) bool;
+
+        pub fn window(index: u32, base_out: *u64, length_out: *u64, device_readable_out: *bool, device_writable_out: *bool) bool {
+            return zigosStorageBootstrapNvmeDmaWindow(index, base_out, length_out, device_readable_out, device_writable_out);
+        }
+    }
+else
+    struct {
+        pub fn window(_: u32, _: *u64, _: *u64, _: *bool, _: *bool) bool {
+            return false;
+        }
+    };
+
 pub const NetworkDevice = network_driver_task.NetworkDevice;
 pub const EgressRequest = network_driver_task.EgressRequest;
 pub const EgressDecision = network_driver_task.EgressDecision;
@@ -480,7 +504,7 @@ fn establishAtaPublicationSession(
     kernel_port: *component_port.KernelPort,
 ) bool {
     if (!ensureAtaControllerPublished(publication.device_id)) return false;
-    _ = device_broker.programBrokeredDmaIsolation(publication.device_id, dma_domain_id) catch return false;
+    if (!programStorageDmaIsolation(publication.device_id, dma_domain_id)) return false;
     publication.ata_session = storage_driver_task.establishAtaBootstrapSession(
         kernel_port,
         publication.device_id,
@@ -489,6 +513,37 @@ fn establishAtaPublicationSession(
         dma_domain_id,
         now_ticks,
     ) orelse return false;
+    return true;
+}
+
+// Program the storage device's DMA isolation to match its real data plane.
+// When the kernel NVMe engine is attached, the program is a window-confined
+// bus-master one: the ATA-session staging window plus the NVMe queue and
+// bounce frames the device actually masters. Otherwise (host builds, modeled
+// ATA bridge) it stays the synthetic non-bus-master brokered window.
+fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
+    var windows: [device_broker.MAX_DMA_WINDOWS]device_broker.DmaWindow = undefined;
+    windows[0] = device_broker.defaultBrokeredDmaWindow(device_id);
+    var count: usize = 1;
+    while (count < windows.len) : (count += 1) {
+        var base: u64 = 0;
+        var length: u64 = 0;
+        var device_readable = false;
+        var device_writable = false;
+        if (!nvme_dma_bridge.window(@intCast(count - 1), &base, &length, &device_readable, &device_writable)) break;
+        windows[count] = .{
+            .base = base,
+            .length = length,
+            .readable_by_device = device_readable,
+            .writable_by_device = device_writable,
+            .executable = false,
+        };
+    }
+    if (count == 1) {
+        _ = device_broker.programBrokeredDmaIsolation(device_id, dma_domain_id) catch return false;
+        return true;
+    }
+    _ = device_broker.programBusMasterStorageDmaIsolation(device_id, dma_domain_id, windows[0..count]) catch return false;
     return true;
 }
 

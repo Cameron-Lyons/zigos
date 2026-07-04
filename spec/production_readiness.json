@@ -842,8 +842,8 @@
         "src/kernel/boot/init/data_plane_boundary.zig"
       ],
       "current_evidence": [
-        "Driver registration checks signed bundles, device-class authority, DMA range metadata, restart generations, and a constrained first target of brokered programmed-I/O ATA with programmed DMA domains rather than bus-master DMA.",
-        "The device broker now indexes controller slots and programmed DMA domains by device using arena/index-backed tables, rejects bus-master DMA enable requests even when modeled IOMMU tables are valid, and keeps brokered DMA buffers plus programmed-I/O as the only accepted driver data-plane mode until real VT-d or AMD-Vi programming and fault evidence are captured.",
+        "Driver registration checks signed bundles, device-class authority, DMA range metadata, restart generations, and a constrained first target of brokered storage DMA domains: programmed-I/O ATA or window-confined NVMe bus mastering, never unconfined bus-master DMA.",
+        "The device broker now indexes controller slots and programmed DMA domains by device using arena/index-backed tables; unconfined bus mastering is rejected, and bus mastering is accepted only as a brokered-buffer program whose declared windows enumerate the exact queue or bounce frames the real NVMe engine may touch.",
         "Storage driver tasks attach through the kernel device broker and the ATA bootstrap path exports checked read/write bridges for freestanding volume access.",
         "The driver boundary spec gate exercises brokered ATA read/write I/O, programs an IOMMU-style DMA domain, authorizes brokered DMA buffers, and rejects stale task authority, stale DMA buffers, stale broker sessions, expired leases, invalid ports, explicit broker revocation, and post-restart target generation mismatches.",
         "The storage data-plane gate covers timeout propagation, active-I/O restart, and partial-transfer recovery by proving incomplete ATA writes are discarded before a restarted userspace driver reissues I/O.",
@@ -860,12 +860,12 @@
       "graduation_criteria": [
         "Add broker-mediated data-plane tests for at least storage and network that run in QEMU and prove no kernel direct publication for excluded subsystems.",
         "Replace the native IOMMU model with real hardware programming and fault evidence before broadening the first production target beyond brokered programmed-I/O storage.",
-        "Keep bus-master DMA enablement fail-closed until hardware IOMMU programming, queued invalidation, interrupt remapping, and captured device-fault records are present in the hardware proof bundle.",
+        "Keep unconfined bus-master DMA fail-closed, and keep confined bus-master programs (the NVMe queue/bounce windows) modeled-evidence-only, until hardware IOMMU programming, queued invalidation, interrupt remapping, and captured device-fault records are present in the hardware proof bundle.",
         "Gate driver restart on active I/O recovery, broker revocation, rebind, and no stale DMA or port access after generation change."
       ],
       "next_actions": [
         "Capture hardware packet/block I/O traces for timeout, mid-transfer fault, and post-restart recovery on the first production target.",
-        "Bind the native DMA-domain model to real VT-d/AMD-Vi programming and archive device-fault evidence before enabling bus-master DMA targets.",
+        "Bind the native DMA-domain model, including the confined NVMe bus-master windows, to real VT-d/AMD-Vi programming and archive device-fault evidence before treating DMA isolation as hardware-enforced.",
         "Capture the expanded driver restart/rebind marker group, including DMA-domain and brokered-buffer markers, in the NUC11TNKi5 hardware proof bundle."
       ],
       "verification_commands": [

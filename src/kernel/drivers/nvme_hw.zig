@@ -467,6 +467,36 @@ export fn zigosStorageBootstrapNvmeWrite(start_lba: u64, buffer_ptr: [*]const u8
     return backendWrite(start_lba, buffer_ptr, buffer_len);
 }
 
+// The steady-state DMA footprint of the active controller, one page per index:
+// the four queue frames the device fetches commands from (device-read) or posts
+// completions into (device-write), plus the bidirectional bounce frame that all
+// data transfers stage through. Exported so the native device broker can
+// confine the NVMe bus-master DMA program to exactly these windows. Returns
+// false past the last window or when no controller is attached.
+export fn zigosStorageBootstrapNvmeDmaWindow(
+    index: u32,
+    base_out: *u64,
+    length_out: *u64,
+    device_readable_out: *bool,
+    device_writable_out: *bool,
+) callconv(.c) bool {
+    if (!active_present) return false;
+    const Window = struct { phys: u32, readable: bool, writable: bool };
+    const window: Window = switch (index) {
+        0 => .{ .phys = active_controller.admin.sq_phys, .readable = true, .writable = false },
+        1 => .{ .phys = active_controller.admin.cq_phys, .readable = false, .writable = true },
+        2 => .{ .phys = active_controller.io.sq_phys, .readable = true, .writable = false },
+        3 => .{ .phys = active_controller.io.cq_phys, .readable = false, .writable = true },
+        4 => .{ .phys = bounce_phys, .readable = true, .writable = true },
+        else => return false,
+    };
+    base_out.* = window.phys;
+    length_out.* = PAGE_SIZE;
+    device_readable_out.* = window.readable;
+    device_writable_out.* = window.writable;
+    return true;
+}
+
 // Diagnostic probe used to validate the MMIO foundation in QEMU. Brings the
 // controller and I/O queues online (non-destructive) and prints the capability
 // and version registers. Safe to call only when a real NVMe controller exists.
