@@ -1,6 +1,7 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("../sync/device_graph.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -8,6 +9,7 @@ const secure_secret_store = @import("secure_secret_store.zig");
 const signing = @import("../core/signing.zig");
 
 pub const MAX_CREDENTIALS: usize = 16;
+const CREDENTIAL_ID_INDEX_CAPACITY: usize = MAX_CREDENTIALS * 2;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_RP_ID_BYTES: usize = 64;
 pub const MAX_ORIGIN_BYTES: usize = 96;
@@ -191,9 +193,16 @@ const CredentialSlot = struct {
     credential: CredentialRecord = zeroCredential(),
 };
 
+const CredentialArena = indexed_arena.IndexedArena(
+    CredentialSlot,
+    MAX_CREDENTIALS,
+    CREDENTIAL_ID_INDEX_CAPACITY,
+    credentialSlotIdKey,
+);
+
 pub const Store = struct {
     next_credential_id: u64 = 1,
-    credentials: [MAX_CREDENTIALS]CredentialSlot = [_]CredentialSlot{CredentialSlot{}} ** MAX_CREDENTIALS,
+    credentials: CredentialArena = CredentialArena.init(),
 
     pub fn init() Store {
         return .{};
@@ -208,7 +217,6 @@ pub const Store = struct {
         _ = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
 
         const credential_id = self.nextReservableCredentialId() orelse return error.CredentialTableFull;
-        const slot = self.allocateCredential() orelse return error.CredentialTableFull;
         var credential = zeroCredential();
         credential.id = credential_id;
         credential.owner = request.owner;
@@ -241,9 +249,13 @@ pub const Store = struct {
             credential.credential_generation,
         );
 
-        slot.in_use = true;
+        const slot = self.credentials.reserve(credential_id) orelse return error.CredentialTableFull;
         slot.credential = credential;
         self.advanceNextCredentialIdFrom(credential_id);
+        // Credentials persist through the secret store, not the arena's dirty-id
+        // set. Clear it after each registration so ever-increasing credential ids
+        // cannot outgrow the arena's dirty-id capacity.
+        self.credentials.clearDirty();
         return &slot.credential;
     }
 
@@ -351,33 +363,22 @@ pub const Store = struct {
     }
 
     pub fn findCredential(self: *Store, credential_id: u64) ?*CredentialRecord {
-        for (&self.credentials) |*slot| {
-            if (slot.in_use and slot.credential.id == credential_id) return &slot.credential;
-        }
-        return null;
+        const slot = self.credentials.get(credential_id) orelse return null;
+        return &slot.credential;
     }
 
     pub fn findCredentialConst(self: *const Store, credential_id: u64) ?*const CredentialRecord {
-        for (&self.credentials) |*slot| {
-            if (slot.in_use and slot.credential.id == credential_id) return &slot.credential;
-        }
-        return null;
-    }
-
-    fn allocateCredential(self: *Store) ?*CredentialSlot {
-        for (&self.credentials) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
+        const slot = self.credentials.getConst(credential_id) orelse return null;
+        return &slot.credential;
     }
 
     fn nextReservableCredentialId(self: *Store) ?u64 {
-        if (self.countCredentials() >= MAX_CREDENTIALS) return null;
+        if (self.credentials.countInUse() >= MAX_CREDENTIALS) return null;
 
         var credential_id = normalizeCredentialId(self.next_credential_id);
         var attempts: usize = 0;
         while (attempts <= MAX_CREDENTIALS) : (attempts += 1) {
-            if (self.findCredential(credential_id) == null) return credential_id;
+            if (self.credentials.getConst(credential_id) == null) return credential_id;
             credential_id = nextCredentialIdAfter(credential_id);
         }
         return null;
@@ -386,15 +387,11 @@ pub const Store = struct {
     fn advanceNextCredentialIdFrom(self: *Store, credential_id: u64) void {
         self.next_credential_id = nextCredentialIdAfter(credential_id);
     }
-
-    fn countCredentials(self: *const Store) usize {
-        var count: usize = 0;
-        for (&self.credentials) |*slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
-    }
 };
+
+fn credentialSlotIdKey(slot: *const CredentialSlot) u64 {
+    return slot.credential.id;
+}
 
 fn normalizeCredentialId(credential_id: u64) u64 {
     return if (credential_id == 0) 1 else credential_id;
@@ -895,10 +892,10 @@ test "os identity credential ids wrap without zero and skip active credentials" 
 
     var full_identities = Store.init();
     var full_secrets = secure_secret_store.Store.init();
-    for (&full_identities.credentials, 0..) |*slot, index| {
+    for (0..MAX_CREDENTIALS) |index| {
+        const slot = full_identities.credentials.reserve(@intCast(index + 1)) orelse unreachable;
         slot.credential = zeroCredential();
         slot.credential.id = @intCast(index + 1);
-        slot.in_use = true;
     }
 
     const credential_next_before = full_identities.next_credential_id;
