@@ -1,4 +1,5 @@
 const std = @import("std");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const signing = @import("../core/signing.zig");
@@ -11,6 +12,7 @@ const kibibytes = units.kibibytes;
 const mebibytes = units.mebibytes;
 
 pub const MAX_RECORDS: usize = 16;
+const RECORD_ID_INDEX_CAPACITY: usize = MAX_RECORDS * 2;
 pub const MAX_TASK_ID_BYTES: usize = 48;
 
 pub const RecordState = enum(u8) {
@@ -109,12 +111,14 @@ const RecordSlot = struct {
     record: DispatchRecord = zeroRecord(),
 };
 
+const RecordArena = indexed_arena.IndexedArena(RecordSlot, MAX_RECORDS, RECORD_ID_INDEX_CAPACITY, recordSlotIdKey);
+
 pub const Controller = struct {
     policy: DispatchPolicy = .{},
     policy_directory: ?*const policy_object.Directory = null,
     policy_subjects: policy_object.SubjectSet = .{},
     next_record_id: u64 = 1,
-    records: [MAX_RECORDS]RecordSlot = [_]RecordSlot{RecordSlot{}} ** MAX_RECORDS,
+    records: RecordArena = RecordArena.init(),
 
     pub fn init() Controller {
         return .{};
@@ -214,28 +218,25 @@ pub const Controller = struct {
     }
 
     pub fn complete(self: *Controller, runtime: *task_runtime.Runtime, request: CompleteRequest) Error!bool {
-        for (&self.records) |*slot| {
-            if (!slot.in_use or slot.record.id != request.record_id) continue;
-            if (slot.record.state != .running) return false;
-            if (slot.record.task_id != request.expected_task_id or
-                slot.record.trigger != request.expected_trigger or
-                !std.mem.eql(u8, slot.record.backgroundTaskIdSlice(), request.expected_background_task_id))
-            {
-                return error.DispatchRecordBindingMismatch;
-            }
-            if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) {
-                return false;
-            }
-            slot.record.state = .completed;
-            slot.record.completed_tick = request.tick;
-            return true;
+        const slot = self.records.get(request.record_id) orelse return error.DispatchRecordNotFound;
+        if (slot.record.state != .running) return false;
+        if (slot.record.task_id != request.expected_task_id or
+            slot.record.trigger != request.expected_trigger or
+            !std.mem.eql(u8, slot.record.backgroundTaskIdSlice(), request.expected_background_task_id))
+        {
+            return error.DispatchRecordBindingMismatch;
         }
-        return error.DispatchRecordNotFound;
+        if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) {
+            return false;
+        }
+        slot.record.state = .completed;
+        slot.record.completed_tick = request.tick;
+        return true;
     }
 
     pub fn expireOverdue(self: *Controller, runtime: *task_runtime.Runtime, now_tick: u64) Error!usize {
         var expired_count: usize = 0;
-        for (&self.records) |*slot| {
+        for (&self.records.slots) |*slot| {
             if (!slot.in_use) continue;
             if (!slot.record.isOverdue(now_tick)) continue;
             if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) continue;
@@ -254,7 +255,7 @@ pub const Controller = struct {
 
     pub fn activeRecordCount(self: *const Controller) usize {
         var count: usize = 0;
-        for (self.records) |slot| {
+        for (self.records.slots) |slot| {
             if (!slot.in_use) continue;
             if (slot.record.state == .running) count += 1;
         }
@@ -263,7 +264,7 @@ pub const Controller = struct {
 
     pub fn latestRecord(self: *const Controller) ?DispatchRecord {
         var latest: ?DispatchRecord = null;
-        for (self.records) |slot| {
+        for (self.records.slots) |slot| {
             if (!slot.in_use) continue;
             if (latest == null or slot.record.id > latest.?.id) {
                 latest = slot.record;
@@ -344,20 +345,28 @@ pub const Controller = struct {
         tick: u64,
     ) Error!DispatchRecord {
         const record_id = self.nextReservableRecordId() orelse return error.DispatchTableFull;
-        const slot = self.allocateRecordSlot() orelse return error.DispatchTableFull;
         const record = try makeRecord(record_id, task_id, background_task_id, trigger, background_task, reason, tick);
+        const slot = self.reserveRecordSlot(record_id) orelse return error.DispatchTableFull;
         slot.record = record;
-        slot.in_use = true;
         self.advanceNextRecordIdFrom(record_id);
+        // Dispatch records persist nowhere, so the arena's dirty-id set is unused
+        // here. Clear it after each append so ever-increasing record ids cannot
+        // accumulate more distinct dirty keys than the arena's dirty-id capacity.
+        self.records.clearDirty();
         return slot.record;
     }
 
-    fn allocateRecordSlot(self: *Controller) ?*RecordSlot {
-        for (&self.records) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        for (&self.records) |*slot| {
-            if (slot.record.state != .running) return slot;
+    fn reserveRecordSlot(self: *Controller, record_id: u64) ?*RecordSlot {
+        if (self.records.reserve(record_id)) |slot| return slot;
+        const retired_index = self.firstRetiredSlotIndex() orelse return null;
+        if (!self.records.removeIndex(retired_index)) return null;
+        return self.records.reserve(record_id);
+    }
+
+    fn firstRetiredSlotIndex(self: *const Controller) ?usize {
+        for (&self.records.slots, 0..) |*slot, slot_index| {
+            if (!slot.in_use) continue;
+            if (slot.record.state != .running) return slot_index;
         }
         return null;
     }
@@ -368,7 +377,7 @@ pub const Controller = struct {
         var record_id = normalizeRecordId(self.next_record_id);
         var attempts: usize = 0;
         while (attempts <= MAX_RECORDS) : (attempts += 1) {
-            if (self.findActiveRecord(record_id) == null) return record_id;
+            if (self.records.getConst(record_id) == null) return record_id;
             record_id = nextRecordIdAfter(record_id);
         }
         return null;
@@ -379,23 +388,20 @@ pub const Controller = struct {
     }
 
     fn hasReusableRecordSlot(self: *const Controller) bool {
-        for (self.records) |slot| {
-            if (!slot.in_use) return true;
-        }
-        for (self.records) |slot| {
-            if (slot.record.state != .running) return true;
-        }
-        return false;
+        if (self.records.countInUse() < MAX_RECORDS) return true;
+        return self.firstRetiredSlotIndex() != null;
     }
 
     fn findActiveRecord(self: *Controller, record_id: u64) ?*DispatchRecord {
-        for (&self.records) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.record.id == record_id and slot.record.state == .running) return &slot.record;
-        }
-        return null;
+        const slot = self.records.get(record_id) orelse return null;
+        if (slot.record.state != .running) return null;
+        return &slot.record;
     }
 };
+
+fn recordSlotIdKey(slot: *const RecordSlot) u64 {
+    return slot.record.id;
+}
 
 fn normalizeRecordId(record_id: u64) u64 {
     return if (record_id == 0) 1 else record_id;
@@ -802,7 +808,7 @@ test "background dispatch rejects overlong task ids without publishing records" 
     ));
     try std.testing.expectEqual(@as(u64, 1), controller.next_record_id);
     try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
-    try std.testing.expect(!controller.records[0].in_use);
+    try std.testing.expect(!controller.records.slots[0].in_use);
 
     const missing = try controller.dispatch(&runtime, 404, empty_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 33);
     try std.testing.expectEqual(DecisionReason.task_not_found, missing.reason);
