@@ -1766,13 +1766,7 @@ pub const Ledger = struct {
             }
         }
         const index = oldest_index orelse return false;
-        const removed = self.events.removeIndex(index);
-        // The ledger persists by sequence number (see persistRange), not via the
-        // arena's dirty-id set, so that set is unused here. Clear it during eviction
-        // so a recycling ring cannot accumulate more distinct dirty keys than the
-        // arena's dirty-id capacity.
-        self.events.clearDirty();
-        return removed;
+        return self.events.removeIndex(index);
     }
 
     fn visitMatching(

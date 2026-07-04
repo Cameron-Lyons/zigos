@@ -349,10 +349,6 @@ pub const Controller = struct {
         const slot = self.reserveRecordSlot(record_id) orelse return error.DispatchTableFull;
         slot.record = record;
         self.advanceNextRecordIdFrom(record_id);
-        // Dispatch records persist nowhere, so the arena's dirty-id set is unused
-        // here. Clear it after each append so ever-increasing record ids cannot
-        // accumulate more distinct dirty keys than the arena's dirty-id capacity.
-        self.records.clearDirty();
         return slot.record;
     }
 

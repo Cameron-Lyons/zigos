@@ -614,7 +614,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const slot = self.allocateOverlaySessionSlot(session.session_id) orelse return error.OverlayTableFull;
             slot.session = session;
             slot.session.state = .established;
-            self.overlay_sessions.clearDirty();
             self.active_overlay_session_count += 1;
             session.state = .established;
             return session;
@@ -638,8 +637,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
             session.state = .closed;
             session.last_activity_tick = tick;
-            self.overlay_sessions.markDirty(session_id);
-            self.overlay_sessions.clearDirty();
             if (!self.closed_overlay_sessions.append(overlay_model.closed_session_key, slot_index)) {
                 native_util.impossibleByInvariant("closed overlay session index capacity covers overlay session slots");
             }

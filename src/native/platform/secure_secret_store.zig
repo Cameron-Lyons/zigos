@@ -140,10 +140,6 @@ pub const Store = struct {
         const slot = self.secrets.reserve(secret_id) orelse return error.SecretTableFull;
         slot.secret = secret;
         self.advanceNextSecretIdFrom(secret_id);
-        // Secrets and handles persist nowhere, so the arena dirty-id sets are
-        // unused here. Clear them after each mutation so ever-increasing ids
-        // cannot outgrow the arenas' dirty-id capacity.
-        self.secrets.clearDirty();
         return &slot.secret;
     }
 
@@ -167,7 +163,6 @@ pub const Store = struct {
         const slot = self.handles.reserve(handle_id) orelse return error.HandleTableFull;
         slot.handle = handle;
         self.advanceNextHandleIdFrom(handle_id);
-        self.handles.clearDirty();
         return handle;
     }
 

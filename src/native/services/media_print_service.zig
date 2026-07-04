@@ -135,10 +135,6 @@ pub const Service = struct {
         const slot = self.jobs.reserve(job_id) orelse return error.JobTableFull;
         slot.job = job;
         self.advanceNextJobIdFrom(job_id);
-        // Print jobs persist nowhere, so the arena's dirty-id set is unused here.
-        // Clear it after each submit so ever-increasing job ids cannot outgrow
-        // the arena's dirty-id capacity.
-        self.jobs.clearDirty();
         return &slot.job;
     }
 

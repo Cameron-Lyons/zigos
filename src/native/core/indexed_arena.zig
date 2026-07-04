@@ -172,13 +172,22 @@ pub fn MultimapIndex(
     };
 }
 
+pub const Options = struct {
+    /// Record reserved and removed keys in a drainable dirty-id set. Enable
+    /// only for arenas whose owner drains dirtyIds()/clearDirty() on a bounded
+    /// cadence (the storage commit path): the set holds at most one entry per
+    /// slot, so an undrained arena panics once more distinct keys have churned
+    /// through it than it has slots.
+    track_dirty: bool = false,
+};
+
 pub fn IndexedArena(
     comptime Slot: type,
     comptime capacity: usize,
     comptime index_capacity: usize,
     comptime keyOf: anytype,
 ) type {
-    return IndexedArenaWithKey(u64, Slot, capacity, index_capacity, keyOf);
+    return IndexedArenaWithKeyOptions(u64, Slot, capacity, index_capacity, keyOf, .{});
 }
 
 pub fn IndexedArenaWithKey(
@@ -188,8 +197,30 @@ pub fn IndexedArenaWithKey(
     comptime index_capacity: usize,
     comptime keyOf: anytype,
 ) type {
+    return IndexedArenaWithKeyOptions(Key, Slot, capacity, index_capacity, keyOf, .{});
+}
+
+pub fn DirtyTrackedIndexedArenaWithKey(
+    comptime Key: type,
+    comptime Slot: type,
+    comptime capacity: usize,
+    comptime index_capacity: usize,
+    comptime keyOf: anytype,
+) type {
+    return IndexedArenaWithKeyOptions(Key, Slot, capacity, index_capacity, keyOf, .{ .track_dirty = true });
+}
+
+pub fn IndexedArenaWithKeyOptions(
+    comptime Key: type,
+    comptime Slot: type,
+    comptime capacity: usize,
+    comptime index_capacity: usize,
+    comptime keyOf: anytype,
+    comptime options: Options,
+) type {
     if (capacity == 0) @compileError("indexed arena requires at least one slot");
     if (index_capacity < capacity) @compileError("indexed arena primary index capacity must cover slots");
+    const dirty_capacity = if (options.track_dirty) capacity else 0;
 
     return struct {
         const Self = @This();
@@ -202,7 +233,7 @@ pub fn IndexedArenaWithKey(
         next_unclaimed_index: usize = 0,
         used_count: usize = 0,
         dirty_count: usize = 0,
-        dirty_ids: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
+        dirty_ids: [dirty_capacity]Key = [_]Key{ids.zero(Key)} ** dirty_capacity,
 
         pub fn init() Self {
             return .{};
@@ -249,7 +280,7 @@ pub fn IndexedArenaWithKey(
             self.slot_keys[slot_index] = key;
             self.primary_index.insert(raw_key, slot_index);
             self.used_count += 1;
-            self.markDirty(key);
+            self.noteDirty(key);
         }
 
         pub fn availableIndexExcluding(
@@ -302,7 +333,7 @@ pub fn IndexedArenaWithKey(
             const raw_key = ids.raw(key);
             if (raw_key != 0) {
                 self.primary_index.remove(raw_key);
-                self.markDirty(key);
+                self.noteDirty(key);
             }
             slot.* = Slot{};
             self.slot_keys[slot_index] = ids.zero(Key);
@@ -421,23 +452,31 @@ pub fn IndexedArenaWithKey(
         }
 
         pub fn markDirty(self: *Self, key: Key) void {
+            if (!options.track_dirty) @compileError("this arena does not track dirty ids; instantiate it with DirtyTrackedIndexedArenaWithKey");
             const raw_key = ids.raw(key);
             if (raw_key == 0) return;
             for (self.dirty_ids[0..self.dirty_count]) |existing| {
                 if (ids.raw(existing) == raw_key) return;
             }
-            if (self.dirty_count >= capacity) native_util.impossibleByInvariant("indexed arena dirty id capacity covers slot capacity");
+            if (self.dirty_count >= dirty_capacity) native_util.impossibleByInvariant("indexed arena dirty id capacity covers slot capacity");
             self.dirty_ids[self.dirty_count] = key;
             self.dirty_count += 1;
         }
 
         pub fn dirtyIds(self: *const Self) []const Key {
+            if (!options.track_dirty) @compileError("this arena does not track dirty ids; instantiate it with DirtyTrackedIndexedArenaWithKey");
             return self.dirty_ids[0..self.dirty_count];
         }
 
         pub fn clearDirty(self: *Self) void {
+            if (!options.track_dirty) @compileError("this arena does not track dirty ids; instantiate it with DirtyTrackedIndexedArenaWithKey");
             @memset(self.dirty_ids[0..], ids.zero(Key));
             self.dirty_count = 0;
+        }
+
+        fn noteDirty(self: *Self, key: Key) void {
+            if (comptime !options.track_dirty) return;
+            self.markDirty(key);
         }
 
         fn findIndex(self: *const Self, key: Key) ?usize {
@@ -606,8 +645,6 @@ pub fn PagedIndexedArenaWithKey(
         free_head: ?usize = null,
         next_unclaimed_index: usize = 0,
         used_count: usize = 0,
-        dirty_count: usize = 0,
-        dirty_ids: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
 
         pub fn init() Self {
             return .{};
@@ -620,13 +657,11 @@ pub fn PagedIndexedArenaWithKey(
                 self.slot_keys[slot_index] = ids.zero(Key);
                 self.slot_generations[slot_index] = 0;
                 self.free_next[slot_index] = null;
-                self.dirty_ids[slot_index] = ids.zero(Key);
             }
             self.primary_index.reset();
             self.free_head = null;
             self.next_unclaimed_index = 0;
             self.used_count = 0;
-            self.dirty_count = 0;
         }
 
         pub fn reserve(self: *Self, key: Key) ?*Slot {
@@ -715,7 +750,6 @@ pub fn PagedIndexedArenaWithKey(
             const raw_key = ids.raw(key);
             if (raw_key != 0) {
                 self.primary_index.remove(raw_key);
-                self.markDirty(key);
             }
             slot.* = Slot{};
             self.slot_keys[slot_index] = ids.zero(Key);
@@ -760,26 +794,6 @@ pub fn PagedIndexedArenaWithKey(
             return self.used_count;
         }
 
-        pub fn markDirty(self: *Self, key: Key) void {
-            const raw_key = ids.raw(key);
-            if (raw_key == 0) return;
-            for (self.dirty_ids[0..self.dirty_count]) |existing| {
-                if (ids.raw(existing) == raw_key) return;
-            }
-            if (self.dirty_count >= capacity) native_util.impossibleByInvariant("paged indexed arena dirty id capacity covers slot capacity");
-            self.dirty_ids[self.dirty_count] = key;
-            self.dirty_count += 1;
-        }
-
-        pub fn dirtyIds(self: *const Self) []const Key {
-            return self.dirty_ids[0..self.dirty_count];
-        }
-
-        pub fn clearDirty(self: *Self) void {
-            @memset(self.dirty_ids[0..], ids.zero(Key));
-            self.dirty_count = 0;
-        }
-
         fn reserveIndexInternal(self: *Self, key: Key, requested_slot_index: ?usize) ?usize {
             const raw_key = ids.raw(key);
             if (raw_key == 0) return null;
@@ -798,7 +812,6 @@ pub fn PagedIndexedArenaWithKey(
             self.slot_keys[slot_index] = key;
             self.primary_index.insert(raw_key, slot_index);
             self.used_count += 1;
-            self.markDirty(key);
             return slot_index;
         }
 
@@ -925,7 +938,7 @@ fn testIndexExcluded(excluded_index: usize, slot_index: usize) bool {
 }
 
 test "indexed arena reserves reuses indexes and tracks dirty ids" {
-    const Arena = IndexedArena(TestSlot, 4, 8, testSlotId);
+    const Arena = DirtyTrackedIndexedArenaWithKey(u64, TestSlot, 4, 8, testSlotId);
     var arena = Arena.init();
 
     const first = arena.reserve(41).?;
@@ -958,13 +971,15 @@ test "indexed arena reuses tombstoned primary index slots" {
     const Arena = IndexedArena(TestSlot, 2, 2, testSlotId);
     var arena = Arena.init();
 
+    // Untracked arenas keep no dirty-id bookkeeping, so churning far more
+    // distinct keys through the arena than it has slots must never trip the
+    // dirty-capacity invariant.
     var id: u64 = 1;
     while (id <= 8) : (id += 1) {
         const slot = arena.reserve(id).?;
         slot.record = .{ .id = id, .owner = 7, .label = "cycle" };
         try std.testing.expectEqual(id, arena.get(id).?.record.id);
         try std.testing.expect(arena.remove(id));
-        arena.clearDirty();
     }
 
     const final_slot = arena.reserve(99).?;

@@ -644,7 +644,6 @@ pub const Controller = struct {
         self.markClaimInactive(record);
         _ = self.claim_task_index.remove(claimTaskKey(record.task_id), slot_index);
         _ = self.claims.removeIndex(slot_index);
-        self.claims.clearDirty();
         return true;
     }
 
@@ -665,7 +664,6 @@ pub const Controller = struct {
                 self.markClaimInactive(record);
                 _ = self.claim_task_index.remove(task_key, slot_index);
                 _ = self.claims.removeIndex(slot_index);
-                self.claims.clearDirty();
                 released += 1;
             }
             slot_index = next_slot_index;
@@ -697,7 +695,6 @@ pub const Controller = struct {
                 }
             }
             slot.claim = record;
-            self.claims.clearDirty();
             return slot.claim;
         }
 
@@ -708,7 +705,6 @@ pub const Controller = struct {
         }
         const slot = &self.claims.slots[slot_index];
         slot.claim = record;
-        self.claims.clearDirty();
         return slot.claim;
     }
 

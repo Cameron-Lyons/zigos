@@ -136,10 +136,6 @@ pub const Center = struct {
         const slot = self.notifications.reserve(notification_id) orelse return error.NotificationTableFull;
         slot.notification = notification;
         self.advanceNextNotificationIdFrom(notification_id);
-        // Notifications persist nowhere, so the arena's dirty-id set is unused
-        // here. Clear it after each post so ever-increasing notification ids
-        // cannot outgrow the arena's dirty-id capacity.
-        self.notifications.clearDirty();
         return &slot.notification;
     }
 

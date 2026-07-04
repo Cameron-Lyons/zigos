@@ -252,10 +252,6 @@ pub const Store = struct {
         const slot = self.credentials.reserve(credential_id) orelse return error.CredentialTableFull;
         slot.credential = credential;
         self.advanceNextCredentialIdFrom(credential_id);
-        // Credentials persist through the secret store, not the arena's dirty-id
-        // set. Clear it after each registration so ever-increasing credential ids
-        // cannot outgrow the arena's dirty-id capacity.
-        self.credentials.clearDirty();
         return &slot.credential;
     }
 
