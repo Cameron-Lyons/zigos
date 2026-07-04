@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const storage_driver_protocol = @import("../drivers/storage_driver_protocol.zig");
 
@@ -221,6 +222,7 @@ const ControllerSlot = struct {
     };
 
     in_use: bool = false,
+    published: bool = false,
     device_id: u64 = 0,
     grant: storage_driver_protocol.AtaBrokerGrant = .{
         .base_port = 0,
@@ -241,6 +243,7 @@ const ControllerSlot = struct {
 
 const DmaProgramSlot = struct {
     in_use: bool = false,
+    program_id: u64 = 0,
     device_id: u64 = 0,
     dma_domain_id: u64 = 0,
     mode: DmaIsolationMode = .programmed_io_only,
@@ -253,43 +256,274 @@ const DmaProgramSlot = struct {
     fault_count: u32 = 0,
 };
 
-var controllers: [MAX_DEVICES]ControllerSlot = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES;
-var dma_programs: [MAX_DMA_PROGRAMS]DmaProgramSlot = [_]DmaProgramSlot{DmaProgramSlot{}} ** MAX_DMA_PROGRAMS;
+const ControllerArena = struct {
+    slots: [MAX_DEVICES]ControllerSlot = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES,
+    primary_index: indexed_arena.UniqueIndex(MAX_DEVICES * 2) = indexed_arena.UniqueIndex(MAX_DEVICES * 2).init(),
+    slot_keys: [MAX_DEVICES]u64 = [_]u64{0} ** MAX_DEVICES,
+    free_next: [MAX_DEVICES]?usize = [_]?usize{null} ** MAX_DEVICES,
+    free_head: ?usize = null,
+    next_unclaimed_index: usize = 0,
+    used_count: usize = 0,
+    unpublished_next: [MAX_DEVICES]?usize = [_]?usize{null} ** MAX_DEVICES,
+    unpublished_prev: [MAX_DEVICES]?usize = [_]?usize{null} ** MAX_DEVICES,
+    unpublished_queued: [MAX_DEVICES]bool = [_]bool{false} ** MAX_DEVICES,
+    unpublished_head: ?usize = null,
+    unpublished_tail: ?usize = null,
+    unpublished_count: usize = 0,
+
+    pub fn init() ControllerArena {
+        return .{};
+    }
+
+    pub fn reset(self: *ControllerArena) void {
+        for (&self.slots) |*slot| {
+            resetControllerSlot(slot);
+        }
+        self.primary_index.reset();
+        self.slot_keys = [_]u64{0} ** MAX_DEVICES;
+        self.free_next = [_]?usize{null} ** MAX_DEVICES;
+        self.free_head = null;
+        self.next_unclaimed_index = 0;
+        self.used_count = 0;
+        self.unpublished_next = [_]?usize{null} ** MAX_DEVICES;
+        self.unpublished_prev = [_]?usize{null} ** MAX_DEVICES;
+        self.unpublished_queued = [_]bool{false} ** MAX_DEVICES;
+        self.unpublished_head = null;
+        self.unpublished_tail = null;
+        self.unpublished_count = 0;
+    }
+
+    pub fn reserve(self: *ControllerArena, key: u64) ?*ControllerSlot {
+        const slot_index = self.reserveIndex(key) orelse return null;
+        return &self.slots[slot_index];
+    }
+
+    pub fn reserveIndex(self: *ControllerArena, key: u64) ?usize {
+        if (key == 0 or self.primary_index.lookup(key) != null) return null;
+        const slot_index = self.popFreeIndex() orelse return null;
+        self.claimSlot(key, slot_index);
+        return slot_index;
+    }
+
+    pub fn reserveAtIndex(self: *ControllerArena, key: u64, slot_index: usize) ?*ControllerSlot {
+        const reserved_index = self.reserveIndexAt(key, slot_index) orelse return null;
+        return &self.slots[reserved_index];
+    }
+
+    pub fn reserveIndexAt(self: *ControllerArena, key: u64, slot_index: usize) ?usize {
+        if (key == 0 or slot_index >= MAX_DEVICES or self.primary_index.lookup(key) != null) return null;
+        if (!self.claimFreeIndex(slot_index)) return null;
+        self.claimSlot(key, slot_index);
+        return slot_index;
+    }
+
+    pub fn slotIndexOf(self: *const ControllerArena, key: u64) ?usize {
+        if (key == 0) return null;
+        const slot_index = self.primary_index.lookup(key) orelse return null;
+        if (slot_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller arena index points outside slots");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("controller arena index points at a free slot");
+        if (self.slot_keys[slot_index] != key) native_util.impossibleByInvariant("controller arena index points at the wrong key");
+        return slot_index;
+    }
+
+    pub fn get(self: *ControllerArena, key: u64) ?*ControllerSlot {
+        const slot_index = self.slotIndexOf(key) orelse return null;
+        return &self.slots[slot_index];
+    }
+
+    pub fn removeIndex(self: *ControllerArena, slot_index: usize) bool {
+        if (slot_index >= MAX_DEVICES) return false;
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use) return false;
+        const key = self.slot_keys[slot_index];
+        if (key != 0) self.primary_index.remove(key);
+        self.detachUnpublishedIndex(slot_index);
+        resetControllerSlot(slot);
+        self.slot_keys[slot_index] = 0;
+        self.used_count -= 1;
+        self.pushFreeIndex(slot_index);
+        return true;
+    }
+
+    pub fn markUnpublished(self: *ControllerArena, slot_index: usize) void {
+        if (slot_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller unpublished slot outside table");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("controller unpublished queue points at a free slot");
+        if (slot.published) native_util.impossibleByInvariant("controller unpublished queue points at a published slot");
+        if (self.unpublished_queued[slot_index]) return;
+
+        self.unpublished_prev[slot_index] = self.unpublished_tail;
+        self.unpublished_next[slot_index] = null;
+        if (self.unpublished_tail) |tail_index| {
+            self.unpublished_next[tail_index] = slot_index;
+        } else {
+            self.unpublished_head = slot_index;
+        }
+        self.unpublished_tail = slot_index;
+        self.unpublished_queued[slot_index] = true;
+        self.unpublished_count += 1;
+    }
+
+    pub fn markPublished(self: *ControllerArena, slot_index: usize) void {
+        self.detachUnpublishedIndex(slot_index);
+    }
+
+    pub fn reclaimUnpublishedIndex(self: *ControllerArena) ?usize {
+        while (self.unpublished_head) |slot_index| {
+            self.detachUnpublishedIndex(slot_index);
+            if (slot_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller unpublished queue points outside slots");
+            const slot = &self.slots[slot_index];
+            if (slot.in_use and !slot.published) return slot_index;
+        }
+        return null;
+    }
+
+    pub fn countInUse(self: *const ControllerArena) usize {
+        return self.used_count;
+    }
+
+    pub fn unpublishedCount(self: *const ControllerArena) usize {
+        return self.unpublished_count;
+    }
+
+    fn claimSlot(self: *ControllerArena, key: u64, slot_index: usize) void {
+        resetControllerSlot(&self.slots[slot_index]);
+        self.slots[slot_index].in_use = true;
+        self.slot_keys[slot_index] = key;
+        self.primary_index.insert(key, slot_index);
+        self.used_count += 1;
+    }
+
+    fn popFreeIndex(self: *ControllerArena) ?usize {
+        if (self.free_head) |slot_index| {
+            if (slot_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller free list points outside slots");
+            self.free_head = self.free_next[slot_index];
+            self.free_next[slot_index] = null;
+            return slot_index;
+        }
+
+        if (self.next_unclaimed_index >= MAX_DEVICES) return null;
+        const slot_index = self.next_unclaimed_index;
+        self.next_unclaimed_index += 1;
+        return slot_index;
+    }
+
+    fn pushFreeIndex(self: *ControllerArena, slot_index: usize) void {
+        self.free_next[slot_index] = self.free_head;
+        self.free_head = slot_index;
+    }
+
+    fn claimFreeIndex(self: *ControllerArena, slot_index: usize) bool {
+        if (slot_index >= MAX_DEVICES or self.slots[slot_index].in_use) return false;
+        if (slot_index >= self.next_unclaimed_index) {
+            while (self.next_unclaimed_index < slot_index) : (self.next_unclaimed_index += 1) {
+                self.pushFreeIndex(self.next_unclaimed_index);
+            }
+            self.next_unclaimed_index = slot_index + 1;
+            return true;
+        }
+        return self.unlinkFreeIndex(slot_index);
+    }
+
+    fn unlinkFreeIndex(self: *ControllerArena, slot_index: usize) bool {
+        var previous: ?usize = null;
+        var current = self.free_head;
+        while (current) |current_index| {
+            if (current_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller free list points outside slots");
+            const next = self.free_next[current_index];
+            if (current_index == slot_index) {
+                if (previous) |previous_index| {
+                    self.free_next[previous_index] = next;
+                } else {
+                    self.free_head = next;
+                }
+                self.free_next[current_index] = null;
+                return true;
+            }
+            previous = current_index;
+            current = next;
+        }
+        return false;
+    }
+
+    fn detachUnpublishedIndex(self: *ControllerArena, slot_index: usize) void {
+        if (slot_index >= MAX_DEVICES or !self.unpublished_queued[slot_index]) return;
+        const previous = self.unpublished_prev[slot_index];
+        const next = self.unpublished_next[slot_index];
+        if (previous) |previous_index| {
+            self.unpublished_next[previous_index] = next;
+        } else {
+            self.unpublished_head = next;
+        }
+        if (next) |next_index| {
+            self.unpublished_prev[next_index] = previous;
+        } else {
+            self.unpublished_tail = previous;
+        }
+        self.unpublished_prev[slot_index] = null;
+        self.unpublished_next[slot_index] = null;
+        self.unpublished_queued[slot_index] = false;
+        self.unpublished_count -= 1;
+    }
+};
+const DmaProgramArena = indexed_arena.IndexedArenaWithKey(u64, DmaProgramSlot, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2, dmaProgramSlotId);
+const DmaProgramDeviceIndex = indexed_arena.MultimapIndex(MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2);
+
+pub const dma_program_indexing = .{
+    .uses_controller_arena = @hasDecl(ControllerArena, "reserveIndex"),
+    .uses_controller_free_list = @hasField(ControllerArena, "free_head"),
+    .uses_unpublished_controller_queue = @hasField(ControllerArena, "unpublished_head"),
+    .tracks_controller_used_count = @hasField(ControllerArena, "used_count"),
+    .uses_arena = @hasDecl(DmaProgramArena, "reserve"),
+    .uses_device_index = @hasDecl(DmaProgramDeviceIndex, "append"),
+};
+
+var controllers: ControllerArena = ControllerArena.init();
+var dma_programs: DmaProgramArena = DmaProgramArena.init();
+var dma_program_device_index: DmaProgramDeviceIndex = DmaProgramDeviceIndex.init();
+var next_dma_program_id: u64 = 1;
+var next_dma_program_generation: u32 = 1;
 
 pub fn reset() void {
-    controllers = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES;
-    dma_programs = [_]DmaProgramSlot{DmaProgramSlot{}} ** MAX_DMA_PROGRAMS;
+    controllers.reset();
+    dma_programs = DmaProgramArena.init();
+    dma_program_device_index = DmaProgramDeviceIndex.init();
+    next_dma_program_id = 1;
+    next_dma_program_generation = 1;
 }
 
 pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) bool {
     if (device_id == 0) return false;
-    if (findControllerSlot(device_id)) |slot| {
-        slot.in_use = true;
+    if (findControllerSlotIndex(device_id)) |slot_index| {
+        const slot = &controllers.slots[slot_index];
+        controllers.markPublished(slot_index);
+        slot.published = true;
         slot.grant = grant;
         slot.host_registers = [_]u32{0} ** slot.host_registers.len;
         finishHostTransfer(slot);
         return true;
     }
-    for (&controllers) |*slot| {
-        if (slot.in_use) continue;
-        slot.in_use = true;
-        slot.device_id = device_id;
-        slot.grant = grant;
-        slot.broker_generation = 1;
-        slot.host_registers = [_]u32{0} ** slot.host_registers.len;
-        finishHostTransfer(slot);
-        return true;
-    }
-    return false;
+    const slot = reserveControllerSlot(device_id) orelse return false;
+    slot.published = true;
+    slot.device_id = device_id;
+    slot.grant = grant;
+    slot.broker_generation = 1;
+    slot.host_registers = [_]u32{0} ** slot.host_registers.len;
+    finishHostTransfer(slot);
+    return true;
 }
 
 pub fn revokeAtaController(device_id: u64) bool {
-    const slot = findController(device_id) orelse return false;
+    const slot_index = findControllerSlotIndex(device_id) orelse return false;
+    const slot = &controllers.slots[slot_index];
+    if (!slot.published) return false;
     finishHostTransfer(slot);
-    slot.in_use = false;
+    slot.published = false;
     slot.host_registers = [_]u32{0} ** slot.host_registers.len;
     slot.broker_generation +%= 1;
     if (slot.broker_generation == 0) slot.broker_generation = 1;
+    controllers.markUnpublished(slot_index);
     invalidateDmaForDevice(device_id);
     return true;
 }
@@ -365,15 +599,16 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
 
     const iommu_program = try iommuProgramFromRequest(request);
 
-    const slot = findDmaProgramSlot(request.device_id, request.dma_domain_id) orelse firstFreeDmaProgramSlot() orelse return error.DmaTableFull;
-    const next_generation = nonZeroGeneration(slot.program_generation +% 1);
+    const slot = findDmaProgramSlot(request.device_id, request.dma_domain_id) orelse try reserveDmaProgramSlot(request.device_id);
+    const program_id = slot.program_id;
     slot.* = .{
         .in_use = true,
+        .program_id = program_id,
         .device_id = request.device_id,
         .dma_domain_id = request.dma_domain_id,
         .mode = request.mode,
         .bus_master_dma_enabled = request.bus_master_dma_enabled,
-        .program_generation = next_generation,
+        .program_generation = allocateDmaProgramGeneration(),
         .window_count = request.windows.len,
         .windows = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
         .iommu_program = iommu_program,
@@ -464,9 +699,9 @@ pub fn latestDmaFault(device_id: u64, dma_domain_id: u64) ?IommuFaultEvidence {
 }
 
 pub fn invalidateDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
-    const slot = findDmaProgramSlot(device_id, dma_domain_id) orelse return false;
-    slot.in_use = false;
-    slot.program_generation = nonZeroGeneration(slot.program_generation +% 1);
+    const slot_index = findDmaProgramSlotIndex(device_id, dma_domain_id) orelse return false;
+    removeDmaProgramSlot(slot_index);
+    _ = allocateDmaProgramGeneration();
     return true;
 }
 
@@ -523,47 +758,148 @@ pub fn writePort(device_id: u64, port: u16, width: PortWidth, value: u32) Error!
 }
 
 fn findController(device_id: u64) ?*ControllerSlot {
-    for (&controllers) |*slot| {
-        if (slot.in_use and slot.device_id == device_id) return slot;
-    }
-    return null;
+    const slot = findControllerSlot(device_id) orelse return null;
+    if (!slot.published) return null;
+    return slot;
 }
 
 fn findControllerSlot(device_id: u64) ?*ControllerSlot {
-    for (&controllers) |*slot| {
-        if (slot.device_id == device_id) return slot;
+    const slot_index = findControllerSlotIndex(device_id) orelse return null;
+    return &controllers.slots[slot_index];
+}
+
+fn findControllerSlotIndex(device_id: u64) ?usize {
+    const slot_index = controllers.slotIndexOf(controllerKey(device_id)) orelse return null;
+    const slot = &controllers.slots[slot_index];
+    if (slot.device_id != device_id) return null;
+    return slot_index;
+}
+
+fn reserveControllerSlot(device_id: u64) ?*ControllerSlot {
+    const key = controllerKey(device_id);
+    if (controllers.reserve(key)) |slot| return slot;
+
+    if (controllers.reclaimUnpublishedIndex()) |slot_index| {
+        _ = controllers.removeIndex(slot_index);
+        const reserved = controllers.reserveAtIndex(key, slot_index) orelse {
+            native_util.impossibleByInvariant("controller arena failed to reclaim unpublished slot");
+        };
+        return reserved;
     }
     return null;
+}
+
+fn controllerKey(device_id: u64) u64 {
+    return indexed_arena.nonZeroKey(device_id);
 }
 
 fn invalidateDmaForDevice(device_id: u64) void {
-    for (&dma_programs) |*slot| {
-        if (slot.in_use and slot.device_id == device_id) {
-            slot.in_use = false;
-            slot.program_generation = nonZeroGeneration(slot.program_generation +% 1);
-        }
+    const device_key = dmaProgramDeviceKey(device_id);
+    var slot_index = dma_program_device_index.head(device_key);
+    while (slot_index != indexed_arena.no_index) {
+        if (slot_index >= MAX_DMA_PROGRAMS) native_util.impossibleByInvariant("DMA program device index points outside slots");
+        const next_slot_index = dma_program_device_index.next(slot_index);
+        const slot = &dma_programs.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("DMA program device index points at a free slot");
+        if (slot.device_id != device_id) native_util.impossibleByInvariant("DMA program device index points at the wrong device");
+        removeDmaProgramSlot(slot_index);
+        slot_index = next_slot_index;
     }
+    _ = allocateDmaProgramGeneration();
 }
 
 fn findDmaProgram(device_id: u64, dma_domain_id: u64) ?*const DmaProgramSlot {
-    for (&dma_programs) |*slot| {
-        if (slot.in_use and slot.device_id == device_id and slot.dma_domain_id == dma_domain_id) return slot;
-    }
-    return null;
+    const slot_index = findDmaProgramSlotIndex(device_id, dma_domain_id) orelse return null;
+    return &dma_programs.slots[slot_index];
 }
 
 fn findDmaProgramSlot(device_id: u64, dma_domain_id: u64) ?*DmaProgramSlot {
-    for (&dma_programs) |*slot| {
-        if (slot.in_use and slot.device_id == device_id and slot.dma_domain_id == dma_domain_id) return slot;
+    const slot_index = findDmaProgramSlotIndex(device_id, dma_domain_id) orelse return null;
+    return &dma_programs.slots[slot_index];
+}
+
+fn findDmaProgramSlotIndex(device_id: u64, dma_domain_id: u64) ?usize {
+    const device_key = dmaProgramDeviceKey(device_id);
+    var slot_index = dma_program_device_index.head(device_key);
+    while (slot_index != indexed_arena.no_index) : (slot_index = dma_program_device_index.next(slot_index)) {
+        if (slot_index >= MAX_DMA_PROGRAMS) native_util.impossibleByInvariant("DMA program device index points outside slots");
+        const slot = &dma_programs.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("DMA program device index points at a free slot");
+        if (slot.device_id != device_id) native_util.impossibleByInvariant("DMA program device index points at the wrong device");
+        if (slot.dma_domain_id == dma_domain_id) return slot_index;
     }
     return null;
 }
 
-fn firstFreeDmaProgramSlot() ?*DmaProgramSlot {
-    for (&dma_programs) |*slot| {
-        if (!slot.in_use) return slot;
+fn reserveDmaProgramSlot(device_id: u64) Error!*DmaProgramSlot {
+    const program_id = allocateDmaProgramId();
+    const slot_index = dma_programs.reserveIndex(program_id) orelse return error.DmaTableFull;
+    if (!dma_program_device_index.append(dmaProgramDeviceKey(device_id), slot_index)) {
+        _ = dma_programs.removeIndex(slot_index);
+        dma_programs.clearDirty();
+        return error.DmaTableFull;
     }
-    return null;
+    const slot = &dma_programs.slots[slot_index];
+    slot.program_id = program_id;
+    dma_programs.clearDirty();
+    return slot;
+}
+
+fn removeDmaProgramSlot(slot_index: usize) void {
+    if (slot_index >= MAX_DMA_PROGRAMS) native_util.impossibleByInvariant("DMA program slot index outside table");
+    const slot = &dma_programs.slots[slot_index];
+    if (!slot.in_use) native_util.impossibleByInvariant("removing free DMA program slot");
+    _ = dma_program_device_index.remove(dmaProgramDeviceKey(slot.device_id), slot_index);
+    _ = dma_programs.removeIndex(slot_index);
+    dma_programs.clearDirty();
+}
+
+fn allocateDmaProgramId() u64 {
+    const program_id = next_dma_program_id;
+    next_dma_program_id +%= 1;
+    if (next_dma_program_id == 0) next_dma_program_id = 1;
+    return program_id;
+}
+
+fn allocateDmaProgramGeneration() u32 {
+    const generation = next_dma_program_generation;
+    next_dma_program_generation +%= 1;
+    if (next_dma_program_generation == 0) next_dma_program_generation = 1;
+    return generation;
+}
+
+fn resetControllerSlot(slot: *ControllerSlot) void {
+    slot.in_use = false;
+    slot.published = false;
+    slot.device_id = 0;
+    slot.grant = .{
+        .base_port = 0,
+        .ctrl_port = 0,
+        .is_master = false,
+        .irq_line = 0,
+        .sector_count = 0,
+    };
+    @memset(slot.host_registers[0..], 0);
+    @memset(slot.host_storage[0..], 0);
+    slot.transfer_kind = .none;
+    slot.transfer_lba = 0;
+    slot.transfer_sector_count = 0;
+    slot.transfer_byte_offset = 0;
+    slot.broker_generation = 1;
+    @memset(slot.host_write_staging[0..], 0);
+}
+
+fn controllerSlotId(slot: *const ControllerSlot) u64 {
+    if (slot.device_id == 0) return 0;
+    return controllerKey(slot.device_id);
+}
+
+fn dmaProgramSlotId(slot: *const DmaProgramSlot) u64 {
+    return slot.program_id;
+}
+
+fn dmaProgramDeviceKey(device_id: u64) u64 {
+    return device_id;
 }
 
 fn statusFromProgram(program: *const DmaProgramSlot) DmaIsolationStatus {
@@ -673,10 +1009,6 @@ fn aligned(address: u64, alignment: u64) bool {
 
 fn alignDown(address: u64, alignment: u64) u64 {
     return address - (address % alignment);
-}
-
-fn nonZeroGeneration(generation: u32) u32 {
-    return if (generation == 0) 1 else generation;
 }
 
 fn registerIndex(slot: *const ControllerSlot, port: u16) Error!usize {
@@ -955,6 +1287,41 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
     try std.testing.expectEqual(@as(u32, 1), (try dmaIsolationStatus(0x1F001, 0xD170)).fault_count);
 }
 
+test "device broker indexes DMA programs by device and reuses invalidated capacity with new generations" {
+    reset();
+
+    try std.testing.expect(publishAtaController(0x1F003, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = test_ata_sector_count,
+    }));
+
+    var first_generation: u32 = 0;
+    var reclaimed_domain: u64 = 0;
+    var domain_index: usize = 0;
+    while (domain_index < MAX_DMA_PROGRAMS) : (domain_index += 1) {
+        const domain_id = 0xD200 + @as(u64, @intCast(domain_index));
+        const status = try programBrokeredDmaIsolation(0x1F003, domain_id);
+        try std.testing.expectEqual(domain_id, status.dma_domain_id);
+        try std.testing.expect(status.hardware_iommu_programmed);
+        if (domain_index == 0) {
+            first_generation = status.program_generation;
+            reclaimed_domain = domain_id;
+        }
+    }
+
+    try std.testing.expectError(error.DmaTableFull, programBrokeredDmaIsolation(0x1F003, 0xD2FF));
+    try std.testing.expect(invalidateDmaIsolation(0x1F003, reclaimed_domain));
+    try std.testing.expectError(error.DmaDomainNotProgrammed, dmaIsolationStatus(0x1F003, reclaimed_domain));
+
+    const reprogrammed = try programBrokeredDmaIsolation(0x1F003, reclaimed_domain);
+    try std.testing.expect(reprogrammed.program_generation != first_generation);
+    try std.testing.expectEqual(reclaimed_domain, reprogrammed.dma_domain_id);
+    try std.testing.expectError(error.DmaTableFull, programBrokeredDmaIsolation(0x1F003, 0xD300));
+}
+
 test "device broker records AMD-Vi programming evidence and confines bus-master DMA" {
     reset();
 
@@ -1065,4 +1432,93 @@ test "device hotplug revokes stale ports and DMA programs" {
     const replugged = try programBrokeredDmaIsolation(0x1F001, status.dma_domain_id);
     try std.testing.expect(replugged.program_generation != buffer.program_generation);
     try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
+}
+
+test "controller arena uses free list and unpublished queue" {
+    reset();
+
+    const first_index = controllers.reserveIndex(0x100).?;
+    const reserved_target_index = MAX_DEVICES - 1;
+    const reserved_index = controllers.reserveIndexAt(0x200, reserved_target_index).?;
+    try std.testing.expectEqual(@as(usize, 0), first_index);
+    try std.testing.expectEqual(reserved_target_index, reserved_index);
+    try std.testing.expectEqual(@as(usize, 2), controllers.countInUse());
+
+    try std.testing.expect(controllers.removeIndex(first_index));
+    try std.testing.expectEqual(@as(usize, 1), controllers.countInUse());
+    const reused_index = controllers.reserveIndex(0x300).?;
+    try std.testing.expectEqual(first_index, reused_index);
+
+    controllers.markUnpublished(reused_index);
+    try std.testing.expectEqual(@as(usize, 1), controllers.unpublishedCount());
+    controllers.markPublished(reused_index);
+    try std.testing.expectEqual(@as(usize, 0), controllers.unpublishedCount());
+
+    controllers.markUnpublished(reused_index);
+    try std.testing.expectEqual(reused_index, controllers.reclaimUnpublishedIndex().?);
+    try std.testing.expectEqual(@as(usize, 0), controllers.unpublishedCount());
+    try std.testing.expect(controllers.removeIndex(reused_index));
+    try std.testing.expectEqual(reused_index, controllers.reserveIndexAt(0x400, reused_index).?);
+}
+
+test "device broker indexes controller slots across full table and inactive remap" {
+    reset();
+
+    var index: usize = 0;
+    while (index < MAX_DEVICES) : (index += 1) {
+        const device_id = 0x2F000 + @as(u64, @intCast(index));
+        try std.testing.expect(publishAtaController(device_id, .{
+            .base_port = 0x1F0 + @as(u16, @intCast(index * 0x10)),
+            .ctrl_port = 0x3F6 + @as(u16, @intCast(index * 0x10)),
+            .is_master = index % 2 == 0,
+            .irq_line = @intCast(14 + index),
+            .sector_count = test_ata_sector_count,
+        }));
+        try std.testing.expectEqual(index + 1, controllers.countInUse());
+
+        const descriptor = try describe(device_id);
+        try std.testing.expectEqual(device_id, descriptor.device_id);
+        try std.testing.expectEqual(@as(u8, @intCast(14 + index)), descriptor.irq_line);
+    }
+    try std.testing.expectEqual(@as(usize, MAX_DEVICES), controllers.countInUse());
+
+    try std.testing.expect(!publishAtaController(0x2FFFF, .{
+        .base_port = 0x2F0,
+        .ctrl_port = 0x3E6,
+        .is_master = true,
+        .irq_line = 11,
+        .sector_count = test_ata_sector_count,
+    }));
+
+    const revoked_device_id = 0x2F001;
+    const revoked_generation = brokerGeneration(revoked_device_id).?;
+    try std.testing.expect(revokeAtaController(revoked_device_id));
+    try std.testing.expectEqual(@as(?u32, null), brokerGeneration(revoked_device_id));
+    try std.testing.expectEqual(@as(usize, MAX_DEVICES), controllers.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), controllers.unpublishedCount());
+
+    const replacement_device_id = 0x2FF10;
+    try std.testing.expect(publishAtaController(replacement_device_id, .{
+        .base_port = 0x300,
+        .ctrl_port = 0x306,
+        .is_master = false,
+        .irq_line = 10,
+        .sector_count = test_ata_sector_count,
+    }));
+    try std.testing.expectError(error.DeviceNotFound, describe(revoked_device_id));
+    try std.testing.expectEqual(@as(u8, 10), (try describe(replacement_device_id)).irq_line);
+    try std.testing.expectEqual(@as(usize, MAX_DEVICES), controllers.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), controllers.unpublishedCount());
+
+    try std.testing.expect(revokeAtaController(replacement_device_id));
+    try std.testing.expectEqual(@as(usize, 1), controllers.unpublishedCount());
+    try std.testing.expect(publishAtaController(replacement_device_id, .{
+        .base_port = 0x300,
+        .ctrl_port = 0x306,
+        .is_master = false,
+        .irq_line = 10,
+        .sector_count = test_ata_sector_count,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), controllers.unpublishedCount());
+    try std.testing.expect(brokerGeneration(replacement_device_id).? != revoked_generation);
 }

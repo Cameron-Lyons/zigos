@@ -567,7 +567,7 @@ fn buildDeltaLog(
     }
 
     for (workspaces.dirtySnapshotIds()) |snapshot_id| {
-        const snapshot_record = findSnapshotConst(workspaces, snapshot_id) orelse continue;
+        const snapshot_record = workspaces.findSnapshotConst(snapshot_id) orelse continue;
         if (snapshot_record.id.raw() <= root.last_snapshot_id) continue;
         try appendSnapshotRecord(&writer, snapshot_record.*);
     }
@@ -951,13 +951,6 @@ fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload:
     workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
     workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
     if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
-}
-
-fn findSnapshotConst(workspaces: *const workspace.Directory, snapshot_id: ids.SnapshotId) ?*const workspace.SnapshotRecord {
-    for (&workspaces.snapshots.slots) |*slot| {
-        if (slot.in_use and slot.snapshot.id.eql(snapshot_id)) return &slot.snapshot;
-    }
-    return null;
 }
 
 fn serializeState(store: *const object_store.Store, workspaces: *const workspace.Directory, buffer: []u8) Error!usize {
