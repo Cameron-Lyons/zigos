@@ -152,6 +152,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         holder_index: HolderIndex = HolderIndex.init(),
         target_index: TargetIndex = TargetIndex.init(),
         target_generations: TargetGenerationArena = TargetGenerationArena.init(),
+        active_capability_count: usize = 0,
 
         pub fn init() Self {
             return Self{};
@@ -332,7 +333,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             var capability_id = normalizeCapabilityId(self.next_capability_id);
             var attempts: usize = 0;
             while (attempts <= self.slots.slots.len) : (attempts += 1) {
-                if (self.findConstSlot(capability_id) == null) return capability_id;
+                if (self.slots.primary_index.lookup(capability_id) == null) return capability_id;
                 capability_id = nextCapabilityIdAfter(capability_id);
             }
             return null;
@@ -343,11 +344,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn activeCapabilityCount(self: *const Self) usize {
-            var count: usize = 0;
-            for (self.slots.slots) |slot| {
-                if (slot.in_use) count += 1;
-            }
-            return count;
+            return self.active_capability_count;
         }
 
         fn insert(self: *Self, capability: Capability, target_generation_index: u8) Error!Capability {
@@ -356,6 +353,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             self.slots.slots[slot_index].target_generation_index = target_generation_index;
             self.indexSlot(slot_index);
             self.slots.clearDirty();
+            self.active_capability_count += 1;
             return capability;
         }
 
@@ -449,6 +447,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 self.slots.slots[reserved_slot_index].target_generation_index = reservation.target_generation_indexes[index];
                 self.indexSlot(reserved_slot_index);
                 self.slots.clearDirty();
+                self.active_capability_count += 1;
                 self.advanceNextCapabilityIdFrom(capability_id);
                 output[index] = granted_capability;
             }
@@ -553,8 +552,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             const removed = self.slots.slots[slot_index].capability;
             self.unlinkHolder(slot_index, holderKey(removed.holder));
             self.unlinkTarget(slot_index, targetKey(removed.target));
-            _ = self.slots.removeIndex(slot_index);
-            self.slots.clearDirty();
+            if (self.slots.removeIndex(slot_index)) {
+                self.active_capability_count -= 1;
+                self.slots.clearDirty();
+            }
         }
 
         fn indexSlot(self: *Self, slot_index: usize) void {
