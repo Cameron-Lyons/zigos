@@ -56,12 +56,14 @@ const ActivationSlot = struct {
 
 const ActivationArena = indexed_arena.IndexedArena(ActivationSlot, MAX_ACTIVATIONS, SERVICE_INDEX_CAPACITY, activationSlotKey);
 const ActivationClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
+const ActivationServiceIndex = indexed_arena.MultimapIndex(MAX_ACTIVATIONS, MAX_ACTIVATIONS, SERVICE_INDEX_CAPACITY);
 
 pub const Runtime = struct {
     kernel_port: ?*component_port.KernelPort = null,
     next_activation_generation: u32 = 1,
     arena: ActivationArena = ActivationArena.init(),
     class_index: ActivationClassIndex = ActivationClassIndex.init(),
+    service_index: ActivationServiceIndex = ActivationServiceIndex.init(),
 
     pub fn init() Runtime {
         return .{};
@@ -175,8 +177,12 @@ pub const Runtime = struct {
 
     pub fn deactivate(self: *Runtime, service_id: u64) bool {
         var deactivated_any = false;
-        for (&self.arena.slots) |*slot| {
-            if (!slot.in_use or slot.activation.service_id != service_id) continue;
+        var slot_index = self.service_index.head(serviceKey(service_id));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.service_index.next(slot_index)) {
+            if (slot_index >= MAX_ACTIVATIONS) native_util.impossibleByInvariant("activation service index points outside slots");
+            const slot = &self.arena.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("activation service index points at a free slot");
+            if (slot.activation.service_id != service_id) native_util.impossibleByInvariant("activation service index points at the wrong service");
             if (!self.deactivateSlot(slot)) return false;
             deactivated_any = true;
         }
@@ -215,6 +221,10 @@ pub const Runtime = struct {
         const slot_index = self.arena.reserveIndex(activationKeyFor(activation.service_id, activation.device_class)) orelse return error.ActivationTableFull;
         const slot = &self.arena.slots[slot_index];
         slot.activation = activation;
+        if (!self.service_index.append(serviceKey(activation.service_id), slot_index)) {
+            _ = self.arena.removeIndex(slot_index);
+            return error.ActivationTableFull;
+        }
         self.class_index.insert(deviceClassKey(activation.device_class), slot_index);
         return slot.activation;
     }
@@ -235,6 +245,10 @@ fn activationSlotKey(slot: *const ActivationSlot) u64 {
 
 fn activationKeyFor(service_id: u64, device_class: driver_service.DeviceClass) u64 {
     return service_id *% 16 + deviceClassKey(device_class);
+}
+
+fn serviceKey(service_id: u64) u64 {
+    return indexed_arena.nonZeroKey(service_id);
 }
 
 fn recordPublishedActivation(record: *ActivationRecord, mode: ActivationMode, publication: anytype) Error!void {
@@ -600,6 +614,7 @@ test "runtime deactivates only the requested driver class for shared services" {
     const input_activation = try runtime.activateAt(&input_driver, 11);
     try std.testing.expectEqual(ActivationMode.published_data_plane, graphics_activation.mode);
     try std.testing.expectEqual(ActivationMode.published_data_plane, input_activation.mode);
+    try std.testing.expectEqual(@as(usize, 2), runtime.service_index.count(serviceKey(service_id)));
     try std.testing.expectEqual(service_id, bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
     try std.testing.expectEqual(service_id, bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
 
@@ -609,4 +624,12 @@ test "runtime deactivates only the requested driver class for shared services" {
     try std.testing.expectEqual(ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
     try std.testing.expectEqual(ActivationMode.published_data_plane, runtime.findByClass(.input_device).?.mode);
     try std.testing.expect(runtime.findByClass(.input_device).?.exclusive_claim);
+    try std.testing.expectEqual(@as(usize, 2), runtime.service_index.count(serviceKey(service_id)));
+
+    try std.testing.expect(!runtime.deactivate(0xFFFF));
+    try std.testing.expect(runtime.deactivate(service_id));
+    try std.testing.expectEqual(@as(u64, 0), bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
+    try std.testing.expectEqual(@as(u64, 0), bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
+    try std.testing.expectEqual(ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
+    try std.testing.expectEqual(ActivationMode.control_only, runtime.findByClass(.input_device).?.mode);
 }

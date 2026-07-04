@@ -37,8 +37,8 @@
     "customer_verifiable_required": true,
     "static_dsse_signatures_local_preview_only": true,
     "dsse_signature_output_base64_required": true,
-    "release_verifier_metadata_schema": "zigos.release-verifier-metadata.v1",
-    "attestation_verifier_metadata_schema": "zigos.attestation-verifier-metadata.v1",
+    "release_verifier_metadata_schema": "zigos.release-verifier-metadata",
+    "attestation_verifier_metadata_schema": "zigos.attestation-verifier-metadata",
     "verifier_metadata_digest_required": true,
     "post_quantum_policy": {
       "mode": "shadow",
