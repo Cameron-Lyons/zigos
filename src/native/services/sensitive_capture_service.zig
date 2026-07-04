@@ -2,6 +2,7 @@ const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
+const native_util = @import("../core/util.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 
@@ -41,6 +42,8 @@ pub const CaptureKind = enum(u8) {
         };
     }
 };
+
+const CAPTURE_KIND_COUNT: usize = @typeInfo(CaptureKind).@"enum".fields.len;
 
 pub const StartRequest = struct {
     subject: principal.PrincipalId,
@@ -109,10 +112,17 @@ fn slotSessionKey(slot: *const Slot) u64 {
 }
 
 const SessionArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_SESSIONS, MAX_SESSIONS * 2, slotSessionKey);
+const ActiveSessionIndex = indexed_arena.MultimapIndex(MAX_SESSIONS, 1, 2);
+const ActiveKindIndex = indexed_arena.MultimapIndex(MAX_SESSIONS, CAPTURE_KIND_COUNT, MAX_SESSIONS * 2);
+const ACTIVE_SESSION_KEY: u64 = 1;
 
 pub const Service = struct {
     next_session_id: u64 = 1,
     slots: SessionArena = SessionArena.init(),
+    active_session_count: usize = 0,
+    privacy_indicator_counts: [CAPTURE_KIND_COUNT]usize = [_]usize{0} ** CAPTURE_KIND_COUNT,
+    active_session_index: ActiveSessionIndex = ActiveSessionIndex.init(),
+    active_kind_index: ActiveKindIndex = ActiveKindIndex.init(),
 
     pub fn init() Service {
         return .{};
@@ -156,7 +166,12 @@ pub const Service = struct {
         }
 
         const session_id = self.next_session_id;
-        const session = Session{
+        const slot_index = self.slots.reserveIndex(session_id) orelse {
+            try recordStart(ledger, request, 0, false);
+            return error.CaptureTableFull;
+        };
+        const slot = &self.slots.slots[slot_index];
+        slot.session = .{
             .id = session_id,
             .subject = request.subject,
             .task_id = request.task_id,
@@ -171,15 +186,9 @@ pub const Service = struct {
             .active = true,
             .sensitivity = request.sensitivity,
         };
-
-        const slot = self.slots.reserve(session_id) orelse {
-            try recordStart(ledger, request, 0, false);
-            return error.CaptureTableFull;
-        };
-        errdefer _ = self.slots.remove(session_id);
-        try recordStart(ledger, request, session_id, true);
-        slot.session = session;
+        self.accountActiveSession(slot_index, &slot.session);
         self.advanceNextSessionId();
+        try recordStart(ledger, request, slot.session.id, true);
         return &slot.session;
     }
 
@@ -205,7 +214,7 @@ pub const Service = struct {
             return error.CaptureSessionRevoked;
         }
         if (request.now_ticks >= session.expires_at_ticks) {
-            session.active = false;
+            self.deactivateSession(request.session_id, session, false);
             try recordSampleFromSession(ledger, request, session, false, request.detail);
             return error.CaptureSessionExpired;
         }
@@ -236,8 +245,7 @@ pub const Service = struct {
             try recordStopFromSession(ledger, request, session, false, "capture stop denied: binding mismatch");
             return error.CaptureSessionBindingMismatch;
         }
-        session.active = false;
-        session.revoked = true;
+        self.deactivateSession(request.session_id, session, true);
         try recordStopFromSession(ledger, request, session, true, request.detail);
         return session;
     }
@@ -253,41 +261,89 @@ pub const Service = struct {
     }
 
     pub fn activeSessionCount(self: *const Service) usize {
-        var count: usize = 0;
-        for (&self.slots.slots) |*slot| {
-            if (slot.in_use and slot.session.active and !slot.session.revoked) count += 1;
-        }
-        return count;
+        return self.active_session_count;
     }
 
     pub fn activeSessionCountAt(self: *const Service, now_ticks: u64) usize {
+        if (self.active_session_count == 0) return 0;
         var count: usize = 0;
-        for (&self.slots.slots) |*slot| {
-            if (slot.in_use and sessionLiveAt(&slot.session, now_ticks)) count += 1;
+        var slot_index = self.active_session_index.head(ACTIVE_SESSION_KEY);
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.active_session_index.next(slot_index)) {
+            const slot = self.activeSessionSlotAt(slot_index);
+            if (sessionLiveAt(&slot.session, now_ticks)) count += 1;
         }
         return count;
     }
 
     pub fn privacyIndicatorActive(self: *const Service, kind: CaptureKind) bool {
-        for (&self.slots.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.session.active and !slot.session.revoked and slot.session.kind == kind and slot.session.indicator_visible) {
+        return self.privacy_indicator_counts[captureKindIndex(kind)] != 0;
+    }
+
+    pub fn privacyIndicatorActiveAt(self: *const Service, kind: CaptureKind, now_ticks: u64) bool {
+        if (!self.privacyIndicatorActive(kind)) return false;
+        var slot_index = self.active_kind_index.head(captureKindKey(kind));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.active_kind_index.next(slot_index)) {
+            const slot = self.activeSessionSlotAt(slot_index);
+            if (sessionLiveAt(&slot.session, now_ticks) and slot.session.indicator_visible) {
                 return true;
             }
         }
         return false;
     }
 
-    pub fn privacyIndicatorActiveAt(self: *const Service, kind: CaptureKind, now_ticks: u64) bool {
-        for (&self.slots.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (sessionLiveAt(&slot.session, now_ticks) and slot.session.kind == kind and slot.session.indicator_visible) {
-                return true;
+    fn accountActiveSession(self: *Service, slot_index: usize, session: *const Session) void {
+        if (!session.active or session.revoked) return;
+        if (!self.active_session_index.append(ACTIVE_SESSION_KEY, slot_index)) {
+            native_util.impossibleByInvariant("sensitive capture active-session index covers session slots");
+        }
+        if (!self.active_kind_index.append(captureKindKey(session.kind), slot_index)) {
+            native_util.impossibleByInvariant("sensitive capture active-kind index covers session slots");
+        }
+        self.active_session_count += 1;
+        if (session.indicator_visible) {
+            self.privacy_indicator_counts[captureKindIndex(session.kind)] += 1;
+        }
+    }
+
+    fn deactivateSession(self: *Service, session_id: u64, session: *Session, revoked: bool) void {
+        if (session.active and !session.revoked) {
+            const slot_index = self.slots.slotIndexOf(session_id) orelse {
+                native_util.impossibleByInvariant("sensitive capture active session has an arena slot");
+            };
+            if (!self.active_session_index.remove(ACTIVE_SESSION_KEY, slot_index)) {
+                native_util.impossibleByInvariant("sensitive capture active-session index missing live session");
+            }
+            if (!self.active_kind_index.remove(captureKindKey(session.kind), slot_index)) {
+                native_util.impossibleByInvariant("sensitive capture active-kind index missing live session");
+            }
+            if (self.active_session_count == 0) native_util.impossibleByInvariant("sensitive capture active count underflow");
+            self.active_session_count -= 1;
+            if (session.indicator_visible) {
+                const kind_index = captureKindIndex(session.kind);
+                if (self.privacy_indicator_counts[kind_index] == 0) native_util.impossibleByInvariant("sensitive capture privacy indicator count underflow");
+                self.privacy_indicator_counts[kind_index] -= 1;
             }
         }
-        return false;
+        session.active = false;
+        if (revoked) session.revoked = true;
+    }
+
+    fn activeSessionSlotAt(self: *const Service, slot_index: usize) *const Slot {
+        if (slot_index >= MAX_SESSIONS) native_util.impossibleByInvariant("sensitive capture active index points outside slots");
+        const slot = &self.slots.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("sensitive capture active index points at free slot");
+        if (!slot.session.active or slot.session.revoked) native_util.impossibleByInvariant("sensitive capture active index points at inactive slot");
+        return slot;
     }
 };
+
+fn captureKindIndex(kind: CaptureKind) usize {
+    return @intFromEnum(kind);
+}
+
+fn captureKindKey(kind: CaptureKind) u64 {
+    return @as(u64, @intFromEnum(kind)) + 1;
+}
 
 fn sessionLiveAt(session: *const Session, now_ticks: u64) bool {
     return session.active and !session.revoked and now_ticks < session.expires_at_ticks;
@@ -500,6 +556,8 @@ test "sensitive capture broker requires foreground visible leased sessions and r
         .detail = "private camera frame allowed",
     }, &ledger);
     try std.testing.expectEqual(@as(usize, 1), service.activeSessionCount());
+    try std.testing.expectEqual(@as(usize, 1), service.active_session_index.count(ACTIVE_SESSION_KEY));
+    try std.testing.expectEqual(@as(usize, 1), service.active_kind_index.count(captureKindKey(.camera)));
     try std.testing.expect(service.privacyIndicatorActive(.camera));
     try std.testing.expectEqual(@as(usize, 1), service.activeSessionCountAt(44));
     try std.testing.expectEqual(@as(usize, 0), service.activeSessionCountAt(45));
@@ -563,13 +621,77 @@ test "sensitive capture broker requires foreground visible leased sessions and r
         .detail = "private camera frame stopped",
     }, &ledger);
     try std.testing.expectEqual(@as(usize, 0), service.activeSessionCount());
+    try std.testing.expectEqual(@as(usize, 0), service.active_session_index.count(ACTIVE_SESSION_KEY));
+    try std.testing.expectEqual(@as(usize, 0), service.active_kind_index.count(captureKindKey(.camera)));
+    try std.testing.expect(!service.privacyIndicatorActive(.camera));
+
+    const first_mic = try service.start(&policies, subjects, .{
+        .subject = app,
+        .task_id = 43,
+        .device_id = 9,
+        .kind = .microphone,
+        .foreground_session_id = 6,
+        .expires_at_ticks = 30,
+        .now_ticks = 16,
+        .sample_budget = 1,
+        .indicator_visible = true,
+        .detail = "private microphone sample allowed",
+    }, &ledger);
+    const second_mic = try service.start(&policies, subjects, .{
+        .subject = app,
+        .task_id = 44,
+        .device_id = 10,
+        .kind = .microphone,
+        .foreground_session_id = 7,
+        .expires_at_ticks = 30,
+        .now_ticks = 17,
+        .sample_budget = 1,
+        .indicator_visible = true,
+        .detail = "private microphone sample allowed",
+    }, &ledger);
+    try std.testing.expectEqual(@as(usize, 2), service.activeSessionCount());
+    try std.testing.expectEqual(@as(usize, 2), service.active_session_index.count(ACTIVE_SESSION_KEY));
+    try std.testing.expectEqual(@as(usize, 2), service.active_kind_index.count(captureKindKey(.microphone)));
+    try std.testing.expectEqual(@as(usize, 2), service.privacy_indicator_counts[captureKindIndex(.microphone)]);
+    try std.testing.expect(service.privacyIndicatorActive(.microphone));
+    _ = try service.stop(.{
+        .subject = app,
+        .task_id = 43,
+        .session_id = first_mic.id,
+        .expected_device_id = 9,
+        .expected_foreground_session_id = 6,
+        .expected_kind = .microphone,
+        .now_ticks = 18,
+        .detail = "private microphone first stopped",
+    }, &ledger);
+    try std.testing.expectEqual(@as(usize, 1), service.activeSessionCount());
+    try std.testing.expectEqual(@as(usize, 1), service.active_session_index.count(ACTIVE_SESSION_KEY));
+    try std.testing.expectEqual(@as(usize, 1), service.active_kind_index.count(captureKindKey(.microphone)));
+    try std.testing.expectEqual(@as(usize, 1), service.privacy_indicator_counts[captureKindIndex(.microphone)]);
+    try std.testing.expect(service.privacyIndicatorActive(.microphone));
+    try std.testing.expectError(error.CaptureSessionExpired, service.sample(.{
+        .subject = app,
+        .task_id = 44,
+        .session_id = second_mic.id,
+        .expected_device_id = 10,
+        .expected_foreground_session_id = 7,
+        .expected_kind = .microphone,
+        .now_ticks = 30,
+        .bytes = 2048,
+        .detail = "private microphone expired",
+    }, &ledger));
+    try std.testing.expectEqual(@as(usize, 0), service.activeSessionCount());
+    try std.testing.expectEqual(@as(usize, 0), service.active_session_index.count(ACTIVE_SESSION_KEY));
+    try std.testing.expectEqual(@as(usize, 0), service.active_kind_index.count(captureKindKey(.microphone)));
+    try std.testing.expectEqual(@as(usize, 0), service.privacy_indicator_counts[captureKindIndex(.microphone)]);
+    try std.testing.expect(!service.privacyIndicatorActive(.microphone));
 
     const summary = ledger.userVisibleDiagnosticSummary();
     try std.testing.expect(summary.sensitive_capture_events >= 9);
     try std.testing.expect(summary.sensitive_capture_denials >= 5);
     try std.testing.expect(summary.protected_details_redacted >= summary.sensitive_capture_events);
 
-    var export_buffer: [2048]u8 = undefined;
+    var export_buffer: [4096]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "private camera frame") == null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=sensitive_capture") != null);
