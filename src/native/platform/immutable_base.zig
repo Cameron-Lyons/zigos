@@ -318,7 +318,7 @@ pub const Manager = struct {
 
     fn encode(self: *const Manager, buffer: []u8) Error![]const u8 {
         var writer = BinaryWriter{ .buffer = buffer };
-        try writer.writeBytes("zigos.immutable-base.state.v2");
+        try writer.writeBytes("zigos.immutable-base.state");
         try writer.writeByte(self.active_slot);
         try writer.writeByte(self.last_good_slot);
         try writer.writeByte(self.pending_slot);
@@ -344,8 +344,8 @@ pub const Manager = struct {
         self.slots = [_]SystemImage{zeroImage()} ** MAX_SYSTEM_IMAGES;
 
         var reader = BinaryReader{ .buffer = payload };
-        const domain = try reader.readSlice("zigos.immutable-base.state.v2".len);
-        if (!std.mem.eql(u8, domain, "zigos.immutable-base.state.v2")) return error.CorruptState;
+        const domain = try reader.readSlice("zigos.immutable-base.state".len);
+        if (!std.mem.eql(u8, domain, "zigos.immutable-base.state")) return error.CorruptState;
         self.active_slot = try readSlot(&reader);
         self.last_good_slot = try readSlot(&reader);
         self.pending_slot = try readSlot(&reader);
