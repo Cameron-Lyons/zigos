@@ -1,9 +1,11 @@
 const std = @import("std");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const copyText = native_util.copyText;
 
 pub const MAX_NOTIFICATIONS: usize = 32;
+const NOTIFICATION_ID_INDEX_CAPACITY: usize = MAX_NOTIFICATIONS * 2;
 pub const MAX_DETAIL_BYTES: usize = 96;
 
 pub const Reason = enum(u8) {
@@ -103,9 +105,16 @@ const NotificationSlot = struct {
     notification: Notification = zeroNotification(),
 };
 
+const NotificationArena = indexed_arena.IndexedArena(
+    NotificationSlot,
+    MAX_NOTIFICATIONS,
+    NOTIFICATION_ID_INDEX_CAPACITY,
+    notificationSlotIdKey,
+);
+
 pub const Center = struct {
     next_notification_id: u64 = 1,
-    notifications: [MAX_NOTIFICATIONS]NotificationSlot = [_]NotificationSlot{NotificationSlot{}} ** MAX_NOTIFICATIONS,
+    notifications: NotificationArena = NotificationArena.init(),
 
     pub fn init() Center {
         return .{};
@@ -113,7 +122,6 @@ pub const Center = struct {
 
     pub fn post(self: *Center, request: PostRequest) Error!*Notification {
         const notification_id = self.nextReservableNotificationId() orelse return error.NotificationTableFull;
-        const slot = self.firstFreeNotificationSlot() orelse return error.NotificationTableFull;
         var notification = zeroNotification();
         notification.id = notification_id;
         notification.reason = request.reason;
@@ -125,9 +133,13 @@ pub const Center = struct {
         notification.detail_len = copyText(&notification.detail, request.detail);
 
         self.applySuppressionPolicy(request);
+        const slot = self.notifications.reserve(notification_id) orelse return error.NotificationTableFull;
         slot.notification = notification;
-        slot.in_use = true;
         self.advanceNextNotificationIdFrom(notification_id);
+        // Notifications persist nowhere, so the arena's dirty-id set is unused
+        // here. Clear it after each post so ever-increasing notification ids
+        // cannot outgrow the arena's dirty-id capacity.
+        self.notifications.clearDirty();
         return &slot.notification;
     }
 
@@ -182,7 +194,7 @@ pub const Center = struct {
 
     pub fn suppressBySourceReason(self: *Center, source: principal.PrincipalId, reason: Reason) usize {
         var count: usize = 0;
-        for (&self.notifications) |*slot| {
+        for (&self.notifications.slots) |*slot| {
             if (!slot.in_use) continue;
             if (!slot.notification.source.eql(source) or slot.notification.reason != reason) continue;
             if (!slot.notification.suppressed) {
@@ -194,11 +206,8 @@ pub const Center = struct {
     }
 
     pub fn find(self: *Center, notification_id: u64) ?*Notification {
-        for (&self.notifications) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.notification.id == notification_id) return &slot.notification;
-        }
-        return null;
+        const slot = self.notifications.get(notification_id) orelse return null;
+        return &slot.notification;
     }
 
     pub fn dismiss(self: *Center, notification_id: u64) Error!*Notification {
@@ -217,7 +226,7 @@ pub const Center = struct {
 
     fn activeAttentionCounts(self: *const Center, now_ticks: u64) AttentionCounts {
         var counts = AttentionCounts{};
-        for (self.notifications) |slot| {
+        for (self.notifications.slots) |slot| {
             if (!slot.in_use) continue;
             if (!slot.notification.isActive(now_ticks)) continue;
             counts.active_visible += 1;
@@ -227,30 +236,23 @@ pub const Center = struct {
     }
 
     pub fn latestVisible(self: *const Center, now_ticks: u64) ?Notification {
-        var index = self.notifications.len;
+        var index = self.notifications.slots.len;
         while (index > 0) {
             index -= 1;
-            const slot = self.notifications[index];
+            const slot = self.notifications.slots[index];
             if (!slot.in_use) continue;
             if (slot.notification.isActive(now_ticks)) return slot.notification;
         }
         return null;
     }
 
-    fn firstFreeNotificationSlot(self: *Center) ?*NotificationSlot {
-        for (&self.notifications) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
-    }
-
     fn nextReservableNotificationId(self: *Center) ?u64 {
-        if (self.countNotifications() >= MAX_NOTIFICATIONS) return null;
+        if (self.notifications.countInUse() >= MAX_NOTIFICATIONS) return null;
 
         var notification_id = normalizeNotificationId(self.next_notification_id);
         var attempts: usize = 0;
         while (attempts <= MAX_NOTIFICATIONS) : (attempts += 1) {
-            if (self.find(notification_id) == null) return notification_id;
+            if (self.notifications.getConst(notification_id) == null) return notification_id;
             notification_id = nextNotificationIdAfter(notification_id);
         }
         return null;
@@ -260,14 +262,6 @@ pub const Center = struct {
         self.next_notification_id = nextNotificationIdAfter(notification_id);
     }
 
-    fn countNotifications(self: *const Center) usize {
-        var count: usize = 0;
-        for (self.notifications) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
-    }
-
     fn applySuppressionPolicy(self: *Center, request: PostRequest) void {
         switch (request.suppression_policy) {
             .allow_repeat => {},
@@ -275,7 +269,7 @@ pub const Center = struct {
                 _ = self.suppressBySourceReason(request.source, request.reason);
             },
             .replace_same_source_reason_task => {
-                for (&self.notifications) |*slot| {
+                for (&self.notifications.slots) |*slot| {
                     if (!slot.in_use) continue;
                     if (!slot.notification.source.eql(request.source)) continue;
                     if (slot.notification.reason != request.reason) continue;
@@ -286,6 +280,10 @@ pub const Center = struct {
         }
     }
 };
+
+fn notificationSlotIdKey(slot: *const NotificationSlot) u64 {
+    return slot.notification.id;
+}
 
 fn normalizeNotificationId(notification_id: u64) u64 {
     return if (notification_id == 0) 1 else notification_id;
@@ -409,8 +407,8 @@ test "notification center applies structured suppression policies before posting
     });
 
     try std.testing.expectEqual(@as(usize, 3), center.activeCount(1));
-    try std.testing.expect(center.notifications[0].notification.suppressed);
-    try std.testing.expect(center.notifications[2].notification.suppressed);
+    try std.testing.expect(center.notifications.slots[0].notification.suppressed);
+    try std.testing.expect(center.notifications.slots[2].notification.suppressed);
     try std.testing.expectEqualStrings("other task survives", center.latestVisible(1).?.detailSlice());
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason, replacement.suppression_policy);
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason_task, task_replacement.suppression_policy);

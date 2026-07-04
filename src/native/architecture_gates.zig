@@ -38,6 +38,7 @@ const network_policy = @import("sync/network_policy.zig");
 const policy_object = @import("policy/policy_object.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
+const notification_center = @import("services/notification_center.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
@@ -134,6 +135,9 @@ pub const indexed_hot_path_tables = .{
     },
     .background_dispatch = .{
         .uses_record_arena = @hasDecl(@FieldType(background_dispatch.Controller, "records"), "reserve"),
+    },
+    .notification_center = .{
+        .uses_notification_arena = @hasDecl(@FieldType(notification_center.Center, "notifications"), "reserve"),
     },
     .event_ledger = .{
         .uses_event_arena = @hasField(event_ledger.Ledger, "events"),
