@@ -1,11 +1,13 @@
 const std = @import("std");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const notification_center = @import("notification_center.zig");
 const principal = @import("../core/principal.zig");
 const units = @import("../core/units.zig");
 
 pub const MAX_JOBS: usize = 16;
+const JOB_ID_INDEX_CAPACITY: usize = MAX_JOBS * 2;
 pub const MAX_LABEL_BYTES: usize = 64;
 
 pub const JobKind = enum(u8) {
@@ -75,9 +77,11 @@ const JobSlot = struct {
     job: JobRecord = zeroJob(),
 };
 
+const JobArena = indexed_arena.IndexedArena(JobSlot, MAX_JOBS, JOB_ID_INDEX_CAPACITY, jobSlotIdKey);
+
 pub const Service = struct {
     next_job_id: u64 = 1,
-    jobs: [MAX_JOBS]JobSlot = [_]JobSlot{JobSlot{}} ** MAX_JOBS,
+    jobs: JobArena = JobArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -94,7 +98,6 @@ pub const Service = struct {
         if (request.kind == .print_document and !request.local_only) return error.PrinterRequiresLocalOnly;
 
         const job_id = self.nextReservableJobId() orelse return error.JobTableFull;
-        const slot = self.firstFreeJobSlot() orelse return error.JobTableFull;
         var job = zeroJob();
         job.id = job_id;
         job.kind = request.kind;
@@ -129,9 +132,13 @@ pub const Service = struct {
             job.notification_id = notice.id;
         }
 
-        slot.in_use = true;
+        const slot = self.jobs.reserve(job_id) orelse return error.JobTableFull;
         slot.job = job;
         self.advanceNextJobIdFrom(job_id);
+        // Print jobs persist nowhere, so the arena's dirty-id set is unused here.
+        // Clear it after each submit so ever-increasing job ids cannot outgrow
+        // the arena's dirty-id capacity.
+        self.jobs.clearDirty();
         return &slot.job;
     }
 
@@ -175,26 +182,17 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, job_id: u64) ?*JobRecord {
-        for (&self.jobs) |*slot| {
-            if (slot.in_use and slot.job.id == job_id) return &slot.job;
-        }
-        return null;
-    }
-
-    fn firstFreeJobSlot(self: *Service) ?*JobSlot {
-        for (&self.jobs) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
+        const slot = self.jobs.get(job_id) orelse return null;
+        return &slot.job;
     }
 
     fn nextReservableJobId(self: *Service) ?u64 {
-        if (self.countJobs() >= MAX_JOBS) return null;
+        if (self.jobs.countInUse() >= MAX_JOBS) return null;
 
         var job_id = normalizeJobId(self.next_job_id);
         var attempts: usize = 0;
         while (attempts <= MAX_JOBS) : (attempts += 1) {
-            if (self.find(job_id) == null) return job_id;
+            if (self.jobs.getConst(job_id) == null) return job_id;
             job_id = nextJobIdAfter(job_id);
         }
         return null;
@@ -203,15 +201,11 @@ pub const Service = struct {
     fn advanceNextJobIdFrom(self: *Service, job_id: u64) void {
         self.next_job_id = nextJobIdAfter(job_id);
     }
-
-    fn countJobs(self: *const Service) usize {
-        var count: usize = 0;
-        for (self.jobs) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
-    }
 };
+
+fn jobSlotIdKey(slot: *const JobSlot) u64 {
+    return slot.job.id;
+}
 
 fn normalizeJobId(job_id: u64) u64 {
     return if (job_id == 0) 1 else job_id;

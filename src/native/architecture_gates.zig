@@ -40,6 +40,7 @@ const userspace_loader = @import("task/userspace_loader.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
 const notification_center = @import("services/notification_center.zig");
 const os_identity = @import("platform/os_identity.zig");
+const media_print_service = @import("services/media_print_service.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
@@ -142,6 +143,9 @@ pub const indexed_hot_path_tables = .{
     },
     .os_identity = .{
         .uses_credential_arena = @hasDecl(@FieldType(os_identity.Store, "credentials"), "reserve"),
+    },
+    .media_print_service = .{
+        .uses_job_arena = @hasDecl(@FieldType(media_print_service.Service, "jobs"), "reserve"),
     },
     .event_ledger = .{
         .uses_event_arena = @hasField(event_ledger.Ledger, "events"),
