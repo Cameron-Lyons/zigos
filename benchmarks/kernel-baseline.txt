@@ -2,7 +2,7 @@ capability.derive.workspace_object 250000.00 70
 capability.mint_reuse_free_slot 3389951.11 170
 capability.target_generation_lookup 2042390.63 550
 permission.review.render_grants 203732.95 50
-network_policy.authorize_connection 5713.21 40
+network_policy.authorize_connection 5713.21 70
 background_dispatch.allowed_sync 498996.62 40
 task_runtime.checkpoint.write_restore 5821289.98 50
 accelerator_scheduler.claim_release 191647.73 215
@@ -19,4 +19,4 @@ denial_explanation.render_policy_hint 15283.87 60
 sync_service.overlay_session_flow 53125.25 70
 recovery_environment.reinstall_restore_repair 2250000000.00 100
 update_health.validate_pending_activation 2317858270.00 100
-driver_recovery.restart_driver 515293.59 95
+driver_recovery.restart_driver 515293.59 120
