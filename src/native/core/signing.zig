@@ -264,7 +264,7 @@ pub const ReleaseVerifierMetadata = struct {
 
     pub fn digest(self: ReleaseVerifierMetadata) crypto_hash.Digest {
         var hasher = crypto_hash.init();
-        crypto_hash.updateBytes(&hasher, "schema", "zigos.release-verifier-metadata.v1");
+        crypto_hash.updateBytes(&hasher, "schema", "zigos.release-verifier-metadata");
         crypto_hash.updateBytes(&hasher, "provider-name", self.provider_name);
         crypto_hash.updateBytes(&hasher, "key-id", self.key_id);
         crypto_hash.updateBytes(&hasher, "label", self.label);

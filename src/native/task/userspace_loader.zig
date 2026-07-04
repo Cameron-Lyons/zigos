@@ -215,6 +215,7 @@ pub const Catalog = struct {
     }
 
     pub fn findById(self: *Catalog, image_id: u64) ?*const ImageRecord {
+        if (image_id == 0) return null;
         const slot = self.images.getConst(image_id) orelse return null;
         return &slot.image;
     }
@@ -269,9 +270,8 @@ pub const Catalog = struct {
             return existing;
         }
 
-        const image_id = self.nextReservableImageId() orelse return error.ImageTableFull;
         const embedded_info = embedded orelse return error.EmbeddedArtifactRequired;
-
+        const image_id = self.nextReservableImageId() orelse return error.ImageTableFull;
         var image = zeroImage();
         const executable_image = embedded_info.executable_image;
         image.id = image_id;
@@ -296,10 +296,11 @@ pub const Catalog = struct {
         image.label_len = copyTextExact(image.label[0..], request.initial_component.label) catch return error.InitialComponentLabelTooLong;
         image.entry_len = copyTextExact(image.entry[0..], request.initial_component.entry) catch return error.InitialComponentEntryTooLong;
 
-        const slot_index = self.images.reserveIndex(image_id) orelse return error.ImageTableFull;
+        const slot_index = self.images.reserveIndex(image.id) orelse return error.ImageTableFull;
         const slot = &self.images.slots[slot_index];
         slot.image = image;
         self.bundle_index.insert(bundleIndexKey(slot.image.bundleIdSlice()), slot_index);
+        self.images.clearDirty();
         self.advanceNextImageIdFrom(image_id);
         return &slot.image;
     }

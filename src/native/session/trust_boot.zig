@@ -26,7 +26,7 @@ const userspace_loader = @import("../task/userspace_loader.zig");
 const volume_backend = @import("../storage/volume/backend.zig");
 
 const build_bootloader_source_label = "src/boot/boot64.S";
-const build_bootloader_measurement_label = "multiboot-v1:zigos_native";
+const build_bootloader_measurement_label = "multiboot:zigos_native";
 const BASE_SELECTOR_LINE_BUFFER_BYTES: usize = 128;
 const BASE_IMAGE_DIGEST_OFFSET: usize = 0;
 const POLICY_DIGEST_OFFSET: usize = crypto_hash.digest_bytes;
@@ -573,7 +573,7 @@ pub const TrustBoot = struct {
         hashCapability(&hasher, "session-capability", &graph.state.session_capability);
         hashCapability(&hasher, "policy-capability", &graph.state.policy_capability);
 
-        for (self.capability_table.slots) |slot| {
+        for (self.capability_table.slots.slots) |slot| {
             if (!slot.in_use) continue;
             hashCapability(&hasher, "capability", &slot.capability);
         }
@@ -799,7 +799,7 @@ fn emulatorProvidedBootloaderSourceDigest() crypto_hash.Digest {
 fn emulatorProvidedBootloaderMeasurementDigest() crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "measurement-source", "host-emulator-bootloader-measurement");
-    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot-v1");
+    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot");
     crypto_hash.updateBytes(&hasher, "entry", "src/boot/boot64.S");
     return crypto_hash.finalize(&hasher);
 }
@@ -963,12 +963,16 @@ fn rejectDirectArtifactTamper(
         measured_boot.production_artifact_manifest_signer,
     )) |_| {
         return false;
-    } else |err| switch (err) {
-        error.ManifestMismatch => {
-            common.printBootMarker(marker);
-            return true;
-        },
-        else => return false,
+    } else |err| {
+        switch (err) {
+            error.ManifestMismatch,
+            error.UntrustedArtifactManifest,
+            error.UntrustedRootProvenance,
+            => {},
+            else => return false,
+        }
+        common.printBootMarker(marker);
+        return true;
     }
 }
 

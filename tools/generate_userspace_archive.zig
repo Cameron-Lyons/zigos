@@ -426,13 +426,13 @@ fn writeProductionArtifactManifest(
 }
 
 fn bootloaderMeasurementLabel(boot_profile: []const u8) []const u8 {
-    if (std.mem.eql(u8, boot_profile, "benchmark")) return "multiboot-v1:benchmark";
-    return "multiboot-v1:zigos_native";
+    if (std.mem.eql(u8, boot_profile, "benchmark")) return "multiboot:benchmark";
+    return "multiboot:zigos_native";
 }
 
 fn bootloaderMeasurementDigest(boot_profile: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot-v1");
+    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot");
     crypto_hash.updateBytes(&hasher, "boot-profile", boot_profile);
     crypto_hash.updateBytes(&hasher, "entry-assembly", "src/boot/boot64.S");
     return crypto_hash.finalize(&hasher);

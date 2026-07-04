@@ -9,7 +9,6 @@ const secure_secret_store = @import("secure_secret_store.zig");
 const signing = @import("../core/signing.zig");
 
 pub const MAX_CREDENTIALS: usize = 16;
-const CREDENTIAL_ID_INDEX_CAPACITY: usize = MAX_CREDENTIALS * 2;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_RP_ID_BYTES: usize = 64;
 pub const MAX_ORIGIN_BYTES: usize = 96;
@@ -193,12 +192,11 @@ const CredentialSlot = struct {
     credential: CredentialRecord = zeroCredential(),
 };
 
-const CredentialArena = indexed_arena.IndexedArena(
-    CredentialSlot,
-    MAX_CREDENTIALS,
-    CREDENTIAL_ID_INDEX_CAPACITY,
-    credentialSlotIdKey,
-);
+fn credentialSlotId(slot: *const CredentialSlot) u64 {
+    return slot.credential.id;
+}
+
+const CredentialArena = indexed_arena.IndexedArenaWithKey(u64, CredentialSlot, MAX_CREDENTIALS, MAX_CREDENTIALS * 2, credentialSlotId);
 
 pub const Store = struct {
     next_credential_id: u64 = 1,
@@ -215,17 +213,23 @@ pub const Store = struct {
         request: RegisterCredentialRequest,
     ) Error!*CredentialRecord {
         _ = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
+        if (request.relying_party_id.len > MAX_RP_ID_BYTES) return error.RelyingPartyTooLong;
+        if (request.label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
+        const credential_public_key = signing.publicKey(request.credential_identity) catch return error.InvalidCredentialSignature;
 
         const credential_id = self.nextReservableCredentialId() orelse return error.CredentialTableFull;
+        const slot_index = self.credentials.reserveIndex(credential_id) orelse return error.CredentialTableFull;
+        errdefer _ = self.credentials.removeIndex(slot_index);
+
         var credential = zeroCredential();
         credential.id = credential_id;
         credential.owner = request.owner;
         credential.primary_device = request.device;
         credential.scope = request.scope;
         credential.synced_to_device_graph = request.scope == .synced;
-        credential.relying_party_id_len = native_util.copyTextExact(&credential.relying_party_id, request.relying_party_id) catch return error.RelyingPartyTooLong;
-        credential.label_len = native_util.copyTextExact(&credential.label, request.label) catch return error.LabelTooLong;
-        credential.credential_public_key = signing.publicKey(request.credential_identity) catch return error.InvalidCredentialSignature;
+        credential.relying_party_id_len = native_util.copyTextExact(&credential.relying_party_id, request.relying_party_id) catch unreachable;
+        credential.label_len = native_util.copyTextExact(&credential.label, request.label) catch unreachable;
+        credential.credential_public_key = credential_public_key;
         credential.created_at_ticks = request.tick;
 
         const secret = try secrets.importSecret(
@@ -249,13 +253,10 @@ pub const Store = struct {
             credential.credential_generation,
         );
 
-        const slot = self.credentials.reserve(credential_id) orelse return error.CredentialTableFull;
+        const slot = &self.credentials.slots[slot_index];
         slot.credential = credential;
-        self.advanceNextCredentialIdFrom(credential_id);
-        // Credentials persist through the secret store, not the arena's dirty-id
-        // set. Clear it after each registration so ever-increasing credential ids
-        // cannot outgrow the arena's dirty-id capacity.
         self.credentials.clearDirty();
+        self.advanceNextCredentialIdFrom(credential_id);
         return &slot.credential;
     }
 
@@ -290,6 +291,7 @@ pub const Store = struct {
 
         credential.assertion_count += 1;
         credential.last_asserted_at_ticks = request.tick;
+        self.credentials.markDirty(credential.id);
 
         var assertion = Assertion{
             .credential_id = credential.id,
@@ -330,6 +332,7 @@ pub const Store = struct {
         if (!std.mem.eql(u8, credential.relyingPartySlice(), request.relying_party_id)) return error.PhishingOriginRejected;
         try verifyRecoveryThreshold(graph, credential, request);
 
+        const credential_public_key = signing.publicKey(request.replacement_credential_identity) catch return error.InvalidCredentialSignature;
         const secret = try secrets.importSecret(
             credential.owner,
             credential.labelSlice(),
@@ -340,7 +343,7 @@ pub const Store = struct {
         credential.primary_device = request.recovery_device;
         credential.secret_id = secret.id;
         credential.sealed_secret_digest = secret.sealed_digest;
-        credential.credential_public_key = signing.publicKey(request.replacement_credential_identity) catch return error.InvalidCredentialSignature;
+        credential.credential_public_key = credential_public_key;
         credential.credential_generation += 1;
         credential.recovered_at_ticks = request.tick;
         credential.credential_digest = credentialDigest(
@@ -352,6 +355,7 @@ pub const Store = struct {
             &credential.sealed_secret_digest,
             credential.credential_generation,
         );
+        self.credentials.markDirty(credential.id);
         return credential;
     }
 
@@ -360,6 +364,7 @@ pub const Store = struct {
         try requireActiveCredential(credential);
         credential.status = .revoked;
         credential.revoked_at_ticks = tick;
+        self.credentials.markDirty(credential.id);
     }
 
     pub fn findCredential(self: *Store, credential_id: u64) ?*CredentialRecord {
@@ -373,12 +378,12 @@ pub const Store = struct {
     }
 
     fn nextReservableCredentialId(self: *Store) ?u64 {
-        if (self.credentials.countInUse() >= MAX_CREDENTIALS) return null;
+        if (self.countCredentials() >= MAX_CREDENTIALS) return null;
 
         var credential_id = normalizeCredentialId(self.next_credential_id);
         var attempts: usize = 0;
         while (attempts <= MAX_CREDENTIALS) : (attempts += 1) {
-            if (self.credentials.getConst(credential_id) == null) return credential_id;
+            if (self.findCredential(credential_id) == null) return credential_id;
             credential_id = nextCredentialIdAfter(credential_id);
         }
         return null;
@@ -387,11 +392,11 @@ pub const Store = struct {
     fn advanceNextCredentialIdFrom(self: *Store, credential_id: u64) void {
         self.next_credential_id = nextCredentialIdAfter(credential_id);
     }
-};
 
-fn credentialSlotIdKey(slot: *const CredentialSlot) u64 {
-    return slot.credential.id;
-}
+    fn countCredentials(self: *const Store) usize {
+        return self.credentials.countInUse();
+    }
+};
 
 fn normalizeCredentialId(credential_id: u64) u64 {
     return if (credential_id == 0) 1 else credential_id;
@@ -893,10 +898,13 @@ test "os identity credential ids wrap without zero and skip active credentials" 
     var full_identities = Store.init();
     var full_secrets = secure_secret_store.Store.init();
     for (0..MAX_CREDENTIALS) |index| {
-        const slot = full_identities.credentials.reserve(@intCast(index + 1)) orelse unreachable;
+        const credential_id: u64 = @intCast(index + 1);
+        const slot_index = full_identities.credentials.reserveIndex(credential_id) orelse unreachable;
+        const slot = &full_identities.credentials.slots[slot_index];
         slot.credential = zeroCredential();
-        slot.credential.id = @intCast(index + 1);
+        slot.credential.id = credential_id;
     }
+    full_identities.credentials.clearDirty();
 
     const credential_next_before = full_identities.next_credential_id;
     const secret_next_before = full_secrets.next_secret_id;
@@ -1026,6 +1034,59 @@ test "os identity recovers synced credentials through trusted device graph" {
         .replacement_credential_identity = replacement_credential_identity,
         .tick = 10,
     }));
+}
+
+test "os identity indexes credentials and rejects full tables before secret import" {
+    var graph = device_graph.Graph.init();
+    var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(testHardwareProvider());
+    var identities = Store.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 851 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 861 };
+    const user_identity = signing.SignerIdentity{
+        .label = "full-user",
+        .seed = signing.seedFromByte(0xD1),
+    };
+    const laptop_identity = signing.SignerIdentity{
+        .label = "full-laptop",
+        .seed = signing.seedFromByte(0xD2),
+    };
+
+    _ = try graph.ensureUserRoot(user, "owner", user_identity);
+    _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
+
+    var index: usize = 0;
+    while (index < MAX_CREDENTIALS) : (index += 1) {
+        const credential_identity = signing.SignerIdentity{
+            .label = "full-passkey",
+            .seed = signing.seedFromByte(@intCast(0x10 + index)),
+        };
+        const credential = try identities.registerCredential(&graph, &secrets, .{
+            .owner = user,
+            .device = laptop,
+            .relying_party_id = "full.example",
+            .label = "full-passkey",
+            .scope = .synced,
+            .credential_identity = credential_identity,
+            .tick = 20 + @as(u64, @intCast(index)),
+        });
+        try std.testing.expectEqual(credential.id, identities.findCredentialConst(credential.id).?.id);
+    }
+
+    try std.testing.expectEqual(@as(usize, MAX_CREDENTIALS), identities.credentials.countInUse());
+    try std.testing.expectError(error.CredentialTableFull, identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "full.example",
+        .label = "overflow-passkey",
+        .scope = .synced,
+        .credential_identity = .{
+            .label = "overflow-passkey",
+            .seed = signing.seedFromByte(0xE1),
+        },
+        .tick = 99,
+    }));
+    try std.testing.expectEqual(@as(usize, MAX_CREDENTIALS), identities.credentials.countInUse());
 }
 
 test "os identity requires fresh local unlock and primary device for device-bound credentials" {
