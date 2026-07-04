@@ -152,6 +152,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         next_target_generation_index: usize = 0,
         free_slot_head: ?usize = null,
         free_target_generation_head: ?usize = null,
+        active_capability_count: usize = 0,
 
         pub fn init() Self {
             return Self{};
@@ -332,7 +333,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             var capability_id = normalizeCapabilityId(self.next_capability_id);
             var attempts: usize = 0;
             while (attempts <= self.slots.len) : (attempts += 1) {
-                if (self.findConstSlot(capability_id) == null) return capability_id;
+                // Probe the raw id index: a miss is the expected outcome here,
+                // so findSlotIndex's debug miss-audit (a full slot scan) would
+                // turn every reservation into an O(slots) walk in debug builds.
+                if (indexLookup(TABLE_INDEX_CAPACITY, &self.capability_index_slots, capability_id) == null) return capability_id;
                 capability_id = nextCapabilityIdAfter(capability_id);
             }
             return null;
@@ -343,11 +347,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn activeCapabilityCount(self: *const Self) usize {
-            var count: usize = 0;
-            for (self.slots) |slot| {
-                if (slot.in_use) count += 1;
-            }
-            return count;
+            return self.active_capability_count;
         }
 
         fn insert(self: *Self, capability: Capability, target_generation_index: u8) Error!Capability {
@@ -358,6 +358,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .target_generation_index = target_generation_index,
             };
             self.indexSlot(slot_index);
+            self.active_capability_count += 1;
             return capability;
         }
 
@@ -456,6 +457,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                     .target_generation_index = reservation.target_generation_indexes[index],
                 };
                 self.indexSlot(slot_index);
+                self.active_capability_count += 1;
                 self.advanceNextCapabilityIdFrom(capability_id);
                 output[index] = granted_capability;
             }
@@ -587,6 +589,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .next_free_index = self.free_slot_head,
             };
             self.free_slot_head = slot_index;
+            self.active_capability_count -= 1;
         }
 
         fn popFreeSlot(self: *Self) ?usize {
