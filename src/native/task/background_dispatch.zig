@@ -12,7 +12,6 @@ const kibibytes = units.kibibytes;
 const mebibytes = units.mebibytes;
 
 pub const MAX_RECORDS: usize = 16;
-const RECORD_ID_INDEX_CAPACITY: usize = MAX_RECORDS * 2;
 pub const MAX_TASK_ID_BYTES: usize = 48;
 
 pub const RecordState = enum(u8) {
@@ -111,14 +110,26 @@ const RecordSlot = struct {
     record: DispatchRecord = zeroRecord(),
 };
 
-const RecordArena = indexed_arena.IndexedArena(RecordSlot, MAX_RECORDS, RECORD_ID_INDEX_CAPACITY, recordSlotIdKey);
+fn recordSlotId(slot: *const RecordSlot) u64 {
+    return slot.record.id;
+}
+
+const RecordArena = indexed_arena.IndexedArenaWithKey(u64, RecordSlot, MAX_RECORDS, MAX_RECORDS * 2, recordSlotId);
+const ActiveRecordIndex = indexed_arena.MultimapIndex(MAX_RECORDS, 1, 2);
+const ReusableRecordIndex = indexed_arena.MultimapIndex(MAX_RECORDS, 1, 2);
+const ACTIVE_RECORD_KEY: u64 = 1;
+const REUSABLE_RECORD_KEY: u64 = 2;
 
 pub const Controller = struct {
     policy: DispatchPolicy = .{},
     policy_directory: ?*const policy_object.Directory = null,
     policy_subjects: policy_object.SubjectSet = .{},
     next_record_id: u64 = 1,
+    active_count: usize = 0,
+    latest_record_id: u64 = 0,
     records: RecordArena = RecordArena.init(),
+    active_record_index: ActiveRecordIndex = ActiveRecordIndex.init(),
+    reusable_record_index: ReusableRecordIndex = ReusableRecordIndex.init(),
 
     pub fn init() Controller {
         return .{};
@@ -218,7 +229,8 @@ pub const Controller = struct {
     }
 
     pub fn complete(self: *Controller, runtime: *task_runtime.Runtime, request: CompleteRequest) Error!bool {
-        const slot = self.records.get(request.record_id) orelse return error.DispatchRecordNotFound;
+        const slot_index = self.findRecordSlotIndex(request.record_id) orelse return error.DispatchRecordNotFound;
+        const slot = &self.records.slots[slot_index];
         if (slot.record.state != .running) return false;
         if (slot.record.task_id != request.expected_task_id or
             slot.record.trigger != request.expected_trigger or
@@ -229,48 +241,60 @@ pub const Controller = struct {
         if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) {
             return false;
         }
+        self.deactivateRunningRecord(slot_index, slot);
         slot.record.state = .completed;
         slot.record.completed_tick = request.tick;
+        self.indexReusableRecord(slot_index, slot);
+        self.records.markDirty(slot.record.id);
         return true;
     }
 
     pub fn expireOverdue(self: *Controller, runtime: *task_runtime.Runtime, now_tick: u64) Error!usize {
         var expired_count: usize = 0;
-        for (&self.records.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (!slot.record.isOverdue(now_tick)) continue;
-            if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) continue;
+        var slot_index = self.active_record_index.head(ACTIVE_RECORD_KEY);
+        while (slot_index != indexed_arena.no_index) {
+            const next_slot_index = self.active_record_index.next(slot_index);
+            const slot = self.activeRecordSlotAt(slot_index);
+            if (!slot.record.isOverdue(now_tick)) {
+                slot_index = next_slot_index;
+                continue;
+            }
+            if (!try runtime.releaseBackgroundWork(slot.record.task_id, slot.record.budget)) {
+                slot_index = next_slot_index;
+                continue;
+            }
+            self.deactivateRunningRecord(slot_index, slot);
             slot.record.state = .expired;
             slot.record.reason = .expired;
             slot.record.completed_tick = now_tick;
+            self.indexReusableRecord(slot_index, slot);
+            self.records.markDirty(slot.record.id);
             expired_count += 1;
             try runtime.audit(slot.record.task_id, .{
                 .kind = .background_expired,
                 .detail = @intFromEnum(slot.record.trigger),
                 .tick = now_tick,
             });
+            slot_index = next_slot_index;
         }
         return expired_count;
     }
 
     pub fn activeRecordCount(self: *const Controller) usize {
-        var count: usize = 0;
-        for (self.records.slots) |slot| {
-            if (!slot.in_use) continue;
-            if (slot.record.state == .running) count += 1;
-        }
-        return count;
+        return self.active_count;
     }
 
     pub fn latestRecord(self: *const Controller) ?DispatchRecord {
-        var latest: ?DispatchRecord = null;
-        for (self.records.slots) |slot| {
-            if (!slot.in_use) continue;
-            if (latest == null or slot.record.id > latest.?.id) {
-                latest = slot.record;
-            }
-        }
-        return latest;
+        if (self.latest_record_id == 0) return null;
+        const slot = self.records.getConst(self.latest_record_id) orelse {
+            native_util.impossibleByInvariant("background dispatch latest record id points at a live record");
+        };
+        return slot.record;
+    }
+
+    pub fn findRecord(self: *Controller, record_id: u64) ?*DispatchRecord {
+        const slot = self.findRecordSlot(record_id) orelse return null;
+        return &slot.record;
     }
 
     fn recordDecision(
@@ -346,29 +370,100 @@ pub const Controller = struct {
     ) Error!DispatchRecord {
         const record_id = self.nextReservableRecordId() orelse return error.DispatchTableFull;
         const record = try makeRecord(record_id, task_id, background_task_id, trigger, background_task, reason, tick);
-        const slot = self.reserveRecordSlot(record_id) orelse return error.DispatchTableFull;
+        const slot_index = self.reserveRecordSlot(record_id) orelse return error.DispatchTableFull;
+        const slot = &self.records.slots[slot_index];
         slot.record = record;
-        self.advanceNextRecordIdFrom(record_id);
-        // Dispatch records persist nowhere, so the arena's dirty-id set is unused
-        // here. Clear it after each append so ever-increasing record ids cannot
-        // accumulate more distinct dirty keys than the arena's dirty-id capacity.
+        if (slot.record.state == .running) {
+            self.activateRecord(slot_index, slot);
+        } else {
+            self.indexReusableRecord(slot_index, slot);
+        }
+        self.latest_record_id = record_id;
         self.records.clearDirty();
+        self.advanceNextRecordIdFrom(record_id);
         return slot.record;
     }
 
-    fn reserveRecordSlot(self: *Controller, record_id: u64) ?*RecordSlot {
-        if (self.records.reserve(record_id)) |slot| return slot;
-        const retired_index = self.firstRetiredSlotIndex() orelse return null;
-        if (!self.records.removeIndex(retired_index)) return null;
-        return self.records.reserve(record_id);
+    fn findRecordSlot(self: *Controller, record_id: u64) ?*RecordSlot {
+        return self.records.get(record_id);
     }
 
-    fn firstRetiredSlotIndex(self: *const Controller) ?usize {
-        for (&self.records.slots, 0..) |*slot, slot_index| {
-            if (!slot.in_use) continue;
-            if (slot.record.state != .running) return slot_index;
+    fn findRecordSlotIndex(self: *const Controller, record_id: u64) ?usize {
+        const slot_index = self.records.slotIndexOf(record_id) orelse return null;
+        if (slot_index >= MAX_RECORDS) native_util.impossibleByInvariant("background dispatch record index points outside slots");
+        const slot = &self.records.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("background dispatch record index points at free slot");
+        if (slot.record.id != record_id) native_util.impossibleByInvariant("background dispatch record index points at wrong record");
+        return slot_index;
+    }
+
+    fn reserveRecordSlot(self: *Controller, record_id: u64) ?usize {
+        if (self.records.reserveIndex(record_id)) |slot_index| return slot_index;
+        const slot_index = self.reusableRecordSlotIndex() orelse return null;
+        self.unindexReusableRecord(slot_index, &self.records.slots[slot_index]);
+        _ = self.records.removeIndex(slot_index);
+        return self.records.reserveIndexAt(record_id, slot_index);
+    }
+
+    fn reusableRecordSlotIndex(self: *const Controller) ?usize {
+        const slot_index = self.reusable_record_index.head(REUSABLE_RECORD_KEY);
+        if (slot_index == indexed_arena.no_index) return null;
+        if (slot_index >= MAX_RECORDS) native_util.impossibleByInvariant("background dispatch reusable-record index points outside slots");
+        const slot = &self.records.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("background dispatch reusable-record index points at free slot");
+        if (slot.record.state == .running) native_util.impossibleByInvariant("background dispatch reusable-record index points at running record");
+        return slot_index;
+    }
+
+    fn activateRecord(self: *Controller, slot_index: usize, slot: *const RecordSlot) void {
+        if (!slot.in_use or slot.record.state != .running) {
+            native_util.impossibleByInvariant("background dispatch only indexes running records as active");
         }
-        return null;
+        if (!self.active_record_index.append(ACTIVE_RECORD_KEY, slot_index)) {
+            native_util.impossibleByInvariant("background dispatch active-record index covers record slots");
+        }
+        self.active_count += 1;
+    }
+
+    fn deactivateRunningRecord(self: *Controller, slot_index: usize, slot: *const RecordSlot) void {
+        if (!slot.in_use or slot.record.state != .running) {
+            native_util.impossibleByInvariant("background dispatch active-record index points at running records");
+        }
+        if (!self.active_record_index.remove(ACTIVE_RECORD_KEY, slot_index)) {
+            native_util.impossibleByInvariant("background dispatch active-record index missing running record");
+        }
+        self.decrementActiveRecordCount();
+    }
+
+    fn indexReusableRecord(self: *Controller, slot_index: usize, slot: *const RecordSlot) void {
+        if (!slot.in_use or slot.record.state == .running) {
+            native_util.impossibleByInvariant("background dispatch only indexes inactive records as reusable");
+        }
+        if (!self.reusable_record_index.append(REUSABLE_RECORD_KEY, slot_index)) {
+            native_util.impossibleByInvariant("background dispatch reusable-record index covers record slots");
+        }
+    }
+
+    fn unindexReusableRecord(self: *Controller, slot_index: usize, slot: *const RecordSlot) void {
+        if (!slot.in_use or slot.record.state == .running) {
+            native_util.impossibleByInvariant("background dispatch reusable-record index points at inactive records");
+        }
+        if (!self.reusable_record_index.remove(REUSABLE_RECORD_KEY, slot_index)) {
+            native_util.impossibleByInvariant("background dispatch reusable-record index missing inactive record");
+        }
+    }
+
+    fn activeRecordSlotAt(self: *Controller, slot_index: usize) *RecordSlot {
+        if (slot_index >= MAX_RECORDS) native_util.impossibleByInvariant("background dispatch active-record index points outside slots");
+        const slot = &self.records.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("background dispatch active-record index points at free slot");
+        if (slot.record.state != .running) native_util.impossibleByInvariant("background dispatch active-record index points at inactive record");
+        return slot;
+    }
+
+    fn decrementActiveRecordCount(self: *Controller) void {
+        if (self.active_count == 0) native_util.impossibleByInvariant("background dispatch active record count underflow");
+        self.active_count -= 1;
     }
 
     fn nextReservableRecordId(self: *Controller) ?u64 {
@@ -377,7 +472,7 @@ pub const Controller = struct {
         var record_id = normalizeRecordId(self.next_record_id);
         var attempts: usize = 0;
         while (attempts <= MAX_RECORDS) : (attempts += 1) {
-            if (self.records.getConst(record_id) == null) return record_id;
+            if (self.findActiveRecord(record_id) == null) return record_id;
             record_id = nextRecordIdAfter(record_id);
         }
         return null;
@@ -388,8 +483,7 @@ pub const Controller = struct {
     }
 
     fn hasReusableRecordSlot(self: *const Controller) bool {
-        if (self.records.countInUse() < MAX_RECORDS) return true;
-        return self.firstRetiredSlotIndex() != null;
+        return self.records.countInUse() < MAX_RECORDS or self.reusableRecordSlotIndex() != null;
     }
 
     fn findActiveRecord(self: *Controller, record_id: u64) ?*DispatchRecord {
@@ -398,10 +492,6 @@ pub const Controller = struct {
         return &slot.record;
     }
 };
-
-fn recordSlotIdKey(slot: *const RecordSlot) u64 {
-    return slot.record.id;
-}
 
 fn normalizeRecordId(record_id: u64) u64 {
     return if (record_id == 0) 1 else record_id;
@@ -640,10 +730,12 @@ test "background dispatch throttles delayed work and denies abusive budgets" {
 
     try std.testing.expect(first.allowed);
     try std.testing.expect(second.allowed);
+    try std.testing.expectEqual(@as(usize, 2), controller.active_record_index.count(ACTIVE_RECORD_KEY));
     try std.testing.expect(third.delayed);
     try std.testing.expectEqual(DecisionReason.throttled, third.reason);
     try std.testing.expect(!heavy.allowed);
     try std.testing.expectEqual(DecisionReason.budget_exceeded, heavy.reason);
+    try std.testing.expectEqual(@as(usize, 2), controller.reusable_record_index.count(REUSABLE_RECORD_KEY));
     try std.testing.expectError(error.DispatchRecordBindingMismatch, controller.complete(&runtime, .{
         .record_id = first.record_id.?,
         .expected_task_id = task.id + 1,
@@ -660,6 +752,7 @@ test "background dispatch throttles delayed work and denies abusive budgets" {
     });
     const denied = try controller.dispatch(&runtime, no_background_task.id, safe_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 24);
     try std.testing.expectEqual(DecisionReason.background_not_allowed, denied.reason);
+    try std.testing.expectEqual(@as(usize, 3), controller.reusable_record_index.count(REUSABLE_RECORD_KEY));
 }
 
 test "background dispatch denies remote work for local-only tasks and user-visible work without a surface" {
@@ -808,7 +901,7 @@ test "background dispatch rejects overlong task ids without publishing records" 
     ));
     try std.testing.expectEqual(@as(u64, 1), controller.next_record_id);
     try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
-    try std.testing.expect(!controller.records.slots[0].in_use);
+    try std.testing.expectEqual(@as(usize, 0), controller.records.countInUse());
 
     const missing = try controller.dispatch(&runtime, 404, empty_bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 33);
     try std.testing.expectEqual(DecisionReason.task_not_found, missing.reason);
@@ -832,6 +925,8 @@ test "background dispatch reuses completed and denied record slots" {
     while (iteration < MAX_RECORDS + 4) : (iteration += 1) {
         const decision = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 40 + iteration);
         try std.testing.expect(decision.allowed);
+        try std.testing.expectEqual(@as(usize, 1), controller.active_record_index.count(ACTIVE_RECORD_KEY));
+        try std.testing.expectEqual(@min(iteration, MAX_RECORDS - 1), controller.reusable_record_index.count(REUSABLE_RECORD_KEY));
         try std.testing.expect(try controller.complete(&runtime, .{
             .record_id = decision.record_id.?,
             .expected_task_id = task.id,
@@ -839,7 +934,12 @@ test "background dispatch reuses completed and denied record slots" {
             .expected_trigger = .sync_completion,
             .tick = 50 + iteration,
         }));
+        try std.testing.expectEqual(@as(usize, 0), controller.active_record_index.count(ACTIVE_RECORD_KEY));
+        try std.testing.expectEqual(@min(iteration + 1, MAX_RECORDS), controller.reusable_record_index.count(REUSABLE_RECORD_KEY));
+        try std.testing.expectEqual(RecordState.completed, controller.findRecord(decision.record_id.?).?.state);
+        try std.testing.expectEqual(decision.record_id.?, controller.latestRecord().?.id);
     }
+    try std.testing.expectEqual(@as(usize, MAX_RECORDS), controller.records.countInUse());
     try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
     try std.testing.expectEqual(task.budget.cpu_time_ticks, task.background_cpu_consumed_ticks);
 }
@@ -919,12 +1019,18 @@ test "background dispatch expires overdue work and releases reservations" {
     try std.testing.expect(decision.allowed);
     try std.testing.expectEqual(@as(u16, 1), task.background_active_count);
     try std.testing.expectEqual(TEST_SYNC_BACKGROUND_MEMORY_BYTES, task.background_reserved_memory_bytes);
+    try std.testing.expectEqual(@as(usize, 1), controller.active_record_index.count(ACTIVE_RECORD_KEY));
+    try std.testing.expectEqual(@as(usize, 0), controller.reusable_record_index.count(REUSABLE_RECORD_KEY));
+    try std.testing.expectEqual(decision.record_id.?, controller.latest_record_id);
 
     try std.testing.expectEqual(@as(usize, 0), try controller.expireOverdue(&runtime, 129));
     try std.testing.expectEqual(@as(u16, 1), task.background_active_count);
+    try std.testing.expectEqual(@as(usize, 1), controller.active_record_index.count(ACTIVE_RECORD_KEY));
 
     try std.testing.expectEqual(@as(usize, 1), try controller.expireOverdue(&runtime, 130));
     try std.testing.expectEqual(@as(usize, 0), controller.activeRecordCount());
+    try std.testing.expectEqual(@as(usize, 0), controller.active_record_index.count(ACTIVE_RECORD_KEY));
+    try std.testing.expectEqual(@as(usize, 1), controller.reusable_record_index.count(REUSABLE_RECORD_KEY));
     try std.testing.expectEqual(@as(u16, 0), task.background_active_count);
     try std.testing.expectEqual(@as(usize, 0), task.background_reserved_memory_bytes);
     try std.testing.expectEqual(task_runtime.AuditEventKind.background_expired, task.latestAuditEvent().?.kind);
