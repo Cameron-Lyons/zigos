@@ -299,7 +299,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             self.discard(capability_id);
             const target_generation = self.targetGenerationAtMut(target_generation_index);
             target_generation.generation += 1;
-            self.target_generations.markDirty(targetKey(target_generation.target));
         }
 
         pub fn query(self: *const Self, capability_id: u64) ?Capability {
@@ -352,7 +351,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             self.slots.slots[slot_index].capability = capability;
             self.slots.slots[slot_index].target_generation_index = target_generation_index;
             self.indexSlot(slot_index);
-            self.slots.clearDirty();
             self.active_capability_count += 1;
             return capability;
         }
@@ -376,7 +374,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             const index = self.target_generations.reserveIndex(targetKey(target)) orelse return error.TargetTableFull;
             self.target_generations.slots[index].target = target;
             self.target_generations.slots[index].generation = 1;
-            self.target_generations.clearDirty();
             return @intCast(index);
         }
 
@@ -420,7 +417,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 };
                 self.target_generations.slots[reserved_index].target = target;
                 self.target_generations.slots[reserved_index].generation = 1;
-                self.target_generations.clearDirty();
             }
 
             for (plan.slice(), 0..) |entry, index| {
@@ -446,7 +442,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 self.slots.slots[reserved_slot_index].capability = granted_capability;
                 self.slots.slots[reserved_slot_index].target_generation_index = reservation.target_generation_indexes[index];
                 self.indexSlot(reserved_slot_index);
-                self.slots.clearDirty();
                 self.active_capability_count += 1;
                 self.advanceNextCapabilityIdFrom(capability_id);
                 output[index] = granted_capability;
@@ -554,7 +549,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             self.unlinkTarget(slot_index, targetKey(removed.target));
             if (self.slots.removeIndex(slot_index)) {
                 self.active_capability_count -= 1;
-                self.slots.clearDirty();
             }
         }
 

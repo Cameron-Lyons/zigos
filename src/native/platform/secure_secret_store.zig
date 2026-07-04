@@ -138,7 +138,6 @@ pub const Store = struct {
         const slot_index = self.secrets.reserveIndex(secret_id) orelse return error.SecretTableFull;
         const slot = &self.secrets.slots[slot_index];
         slot.secret = secret;
-        self.secrets.clearDirty();
         self.advanceNextSecretIdFrom(secret_id);
         return &slot.secret;
     }
@@ -163,7 +162,6 @@ pub const Store = struct {
         const slot_index = self.handles.reserveIndex(handle_id) orelse return error.HandleTableFull;
         const slot = &self.handles.slots[slot_index];
         slot.handle = handle;
-        self.handles.clearDirty();
         self.advanceNextHandleIdFrom(handle_id);
         return handle;
     }

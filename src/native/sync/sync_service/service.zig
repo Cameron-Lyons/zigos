@@ -611,7 +611,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const slot = self.allocateOverlaySessionSlot(session.session_id) orelse return error.OverlayTableFull;
             slot.session = session;
             slot.session.state = .established;
-            self.overlay_sessions.clearDirty();
             self.active_overlay_session_count += 1;
             session.state = .established;
             return session;
@@ -635,8 +634,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
             session.state = .closed;
             session.last_activity_tick = tick;
-            self.overlay_sessions.markDirty(session_id);
-            self.overlay_sessions.clearDirty();
             if (!self.closed_overlay_sessions.append(overlay_model.closed_session_key, slot_index)) {
                 native_util.impossibleByInvariant("closed overlay session index capacity covers overlay session slots");
             }
@@ -1751,7 +1748,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 const slot_index = (start_index + offset) % MAX_TRANSPORT_FRAMES;
                 if (arena.slots[slot_index].in_use) continue;
                 const reserved_index = arena.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), slot_index) orelse continue;
-                arena.clearDirty();
                 cursor.* = (reserved_index + 1) % MAX_TRANSPORT_FRAMES;
                 return reserved_index;
             }
@@ -1786,9 +1782,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.unindexInboundTransportTargetSlot(index);
             _ = frames.removeIndex(index);
             self.decrementTransportFrameSlotCount(.inbound);
-            frames.clearDirty();
             const slot_index = frames.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), index) orelse return null;
-            frames.clearDirty();
             self.transportFrameSlotCursorPtr(.inbound).* = (slot_index + 1) % MAX_TRANSPORT_FRAMES;
             return slot_index;
         }

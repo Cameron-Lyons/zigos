@@ -463,14 +463,12 @@ pub const Runtime = struct {
                     native_util.impossibleByInvariant("removed address-space slot is immediately reusable");
                 };
                 self.address_spaces.slots[new_slot_index].address_space = address_space;
-                self.address_spaces.clearDirty();
                 return true;
             }
         }
 
         const slot = self.address_spaces.reserve(address_space.id) orelse return false;
         slot.address_space = address_space;
-        self.address_spaces.clearDirty();
         return true;
     }
 
@@ -1039,7 +1037,6 @@ test "task runtime host ids do not advance when address space installation fails
         slot.address_space = model.zeroAddressSpace();
         slot.address_space.id = address_space_id;
     }
-    runtime.address_spaces.clearDirty();
     runtime.rebuildIndexes();
 
     runtime.next_process_id = 80;
@@ -1097,7 +1094,6 @@ test "task runtime component ids do not advance when host allocation fails" {
         slot.address_space = model.zeroAddressSpace();
         slot.address_space.id = address_space_id;
     }
-    runtime.address_spaces.clearDirty();
     runtime.rebuildIndexes();
 
     runtime.next_component_id = 90;

@@ -300,7 +300,6 @@ pub const Catalog = struct {
         const slot = &self.images.slots[slot_index];
         slot.image = image;
         self.bundle_index.insert(bundleIndexKey(slot.image.bundleIdSlice()), slot_index);
-        self.images.clearDirty();
         self.advanceNextImageIdFrom(image_id);
         return &slot.image;
     }

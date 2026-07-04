@@ -164,7 +164,6 @@ pub const Keyring = struct {
             if (!slot.record.principal_id.eql(principal_id)) continue;
             slot.record.revoked = true;
             slot.record.revocation_generation +|= 1;
-            self.slots.markDirty(principalKeySlotKey(slot));
             found = true;
         }
         if (!found) return error.PrincipalKeyNotFound;
@@ -242,7 +241,6 @@ pub const Keyring = struct {
             if (!self.appendPublisherSlot(slot_index, &slot.record)) {
                 native_util.impossibleByInvariant("principal key publisher index covers key slots");
             }
-            self.slots.markDirty(record_key);
             return &slot.record;
         }
 

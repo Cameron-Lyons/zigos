@@ -245,7 +245,6 @@ pub const Controller = struct {
         slot.record.state = .completed;
         slot.record.completed_tick = request.tick;
         self.indexReusableRecord(slot_index, slot);
-        self.records.markDirty(slot.record.id);
         return true;
     }
 
@@ -268,7 +267,6 @@ pub const Controller = struct {
             slot.record.reason = .expired;
             slot.record.completed_tick = now_tick;
             self.indexReusableRecord(slot_index, slot);
-            self.records.markDirty(slot.record.id);
             expired_count += 1;
             try runtime.audit(slot.record.task_id, .{
                 .kind = .background_expired,
@@ -379,7 +377,6 @@ pub const Controller = struct {
             self.indexReusableRecord(slot_index, slot);
         }
         self.latest_record_id = record_id;
-        self.records.clearDirty();
         self.advanceNextRecordIdFrom(record_id);
         return slot.record;
     }

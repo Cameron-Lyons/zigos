@@ -156,7 +156,6 @@ pub const Service = struct {
         const slot = &self.slots.slots[slot_index];
         slot.delegation = delegation;
         self.accountActiveDelegation(slot_index, &slot.delegation);
-        self.slots.clearDirty();
         self.advanceNextDelegationIdFrom(delegation_id);
         return &slot.delegation;
     }

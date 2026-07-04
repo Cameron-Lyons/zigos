@@ -121,7 +121,6 @@ pub const Service = struct {
         }
         const slot = &self.documents.slots[slot_index];
         slot.record = record;
-        self.documents.clearDirty();
         self.bumpGeneration();
     }
 

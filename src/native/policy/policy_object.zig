@@ -226,7 +226,6 @@ pub const Directory = struct {
         if (slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
         if (slot.policy.revoked) return error.PolicyAlreadyRevoked;
         slot.policy.revoked = true;
-        self.policies.markDirty(policy_id);
     }
 
     pub fn revokePoliciesForScope(self: *Directory, scope: Scope, subject_id: u64) usize {
@@ -239,7 +238,6 @@ pub const Directory = struct {
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.revoked) continue;
             slot.policy.revoked = true;
-            self.policies.markDirty(slot.policy.id);
             revoked_count += 1;
         }
         return revoked_count;

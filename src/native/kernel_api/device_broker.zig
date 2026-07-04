@@ -836,12 +836,10 @@ fn reserveDmaProgramSlot(device_id: u64) Error!*DmaProgramSlot {
     const slot_index = dma_programs.reserveIndex(program_id) orelse return error.DmaTableFull;
     if (!dma_program_device_index.append(dmaProgramDeviceKey(device_id), slot_index)) {
         _ = dma_programs.removeIndex(slot_index);
-        dma_programs.clearDirty();
         return error.DmaTableFull;
     }
     const slot = &dma_programs.slots[slot_index];
     slot.program_id = program_id;
-    dma_programs.clearDirty();
     return slot;
 }
 
@@ -851,7 +849,6 @@ fn removeDmaProgramSlot(slot_index: usize) void {
     if (!slot.in_use) native_util.impossibleByInvariant("removing free DMA program slot");
     _ = dma_program_device_index.remove(dmaProgramDeviceKey(slot.device_id), slot_index);
     _ = dma_programs.removeIndex(slot_index);
-    dma_programs.clearDirty();
 }
 
 fn allocateDmaProgramId() u64 {

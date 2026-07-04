@@ -143,7 +143,6 @@ pub const Service = struct {
             native_util.impossibleByInvariant("prechecked print job slot reservation must succeed");
         const slot = &self.jobs.slots[slot_index];
         slot.job = job;
-        self.jobs.clearDirty();
         self.advanceNextJobIdFrom(job_id);
         return &slot.job;
     }

@@ -507,9 +507,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         const STORE_CHUNK_INDEX_CAPACITY = config.chunk_index_capacity;
         const STORE_BLOB_PAGE_COUNT = config.max_blobs / BLOB_PAGE_SIZE;
         const STORE_CHUNK_PAGE_COUNT = config.max_chunks / CHUNK_PAGE_SIZE;
-        const ObjectArena = indexed_arena.IndexedArenaWithKey(ids.ObjectId, ObjectSlot, MAX_STORE_OBJECTS, STORE_OBJECT_INDEX_CAPACITY, objectSlotId);
+        const ObjectArena = indexed_arena.DirtyTrackedIndexedArenaWithKey(ids.ObjectId, ObjectSlot, MAX_STORE_OBJECTS, STORE_OBJECT_INDEX_CAPACITY, objectSlotId);
         const ObjectTypeIndex = ObjectTypeIndexWith(MAX_STORE_OBJECTS);
-        const VersionArena = indexed_arena.IndexedArenaWithKey(ids.VersionId, VersionSlot, MAX_STORE_VERSIONS, STORE_VERSION_INDEX_CAPACITY, versionSlotId);
+        const VersionArena = indexed_arena.DirtyTrackedIndexedArenaWithKey(ids.VersionId, VersionSlot, MAX_STORE_VERSIONS, STORE_VERSION_INDEX_CAPACITY, versionSlotId);
         const BlobArena = indexed_arena.PagedIndexedArena(BlobSlot, BLOB_PAGE_SIZE, STORE_BLOB_PAGE_COUNT, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId);
         const ChunkArena = indexed_arena.PagedIndexedArena(ChunkSlot, CHUNK_PAGE_SIZE, STORE_CHUNK_PAGE_COUNT, STORE_CHUNK_INDEX_CAPACITY, chunkSlotIndexId);
 

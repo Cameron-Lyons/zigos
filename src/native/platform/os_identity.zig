@@ -255,7 +255,6 @@ pub const Store = struct {
 
         const slot = &self.credentials.slots[slot_index];
         slot.credential = credential;
-        self.credentials.clearDirty();
         self.advanceNextCredentialIdFrom(credential_id);
         return &slot.credential;
     }
@@ -291,8 +290,6 @@ pub const Store = struct {
 
         credential.assertion_count += 1;
         credential.last_asserted_at_ticks = request.tick;
-        self.credentials.markDirty(credential.id);
-
         var assertion = Assertion{
             .credential_id = credential.id,
             .owner = credential.owner,
@@ -355,7 +352,6 @@ pub const Store = struct {
             &credential.sealed_secret_digest,
             credential.credential_generation,
         );
-        self.credentials.markDirty(credential.id);
         return credential;
     }
 
@@ -364,7 +360,6 @@ pub const Store = struct {
         try requireActiveCredential(credential);
         credential.status = .revoked;
         credential.revoked_at_ticks = tick;
-        self.credentials.markDirty(credential.id);
     }
 
     pub fn findCredential(self: *Store, credential_id: u64) ?*CredentialRecord {
@@ -904,8 +899,6 @@ test "os identity credential ids wrap without zero and skip active credentials" 
         slot.credential = zeroCredential();
         slot.credential.id = credential_id;
     }
-    full_identities.credentials.clearDirty();
-
     const credential_next_before = full_identities.next_credential_id;
     const secret_next_before = full_secrets.next_secret_id;
     try std.testing.expectError(error.CredentialTableFull, full_identities.registerCredential(&graph, &full_secrets, .{

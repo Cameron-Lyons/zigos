@@ -157,7 +157,6 @@ pub const Center = struct {
             native_util.impossibleByInvariant("notification source/reason index covers notification slots");
         }
         self.accountPostedAttention(slot_index, &slot.notification);
-        self.notifications.clearDirty();
         self.advanceNextNotificationIdFrom(notification_id);
         return &slot.notification;
     }
@@ -220,7 +219,6 @@ pub const Center = struct {
             if (!slot.notification.suppressed) {
                 self.unaccountSuppressedAttention(slot_index, &slot.notification);
                 slot.notification.suppressed = true;
-                self.notifications.markDirty(slot.notification.id);
                 count += 1;
             }
         }
@@ -238,7 +236,6 @@ pub const Center = struct {
             const slot_index = self.notifications.slotIndexOf(notification_id).?;
             self.unaccountSuppressedAttention(slot_index, notification);
             notification.suppressed = true;
-            self.notifications.markDirty(notification.id);
         }
         return notification;
     }
@@ -311,7 +308,6 @@ pub const Center = struct {
                     if (!slot.notification.suppressed) {
                         self.unaccountSuppressedAttention(slot_index, &slot.notification);
                         slot.notification.suppressed = true;
-                        self.notifications.markDirty(slot.notification.id);
                     }
                 }
             },
