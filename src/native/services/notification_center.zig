@@ -133,7 +133,7 @@ pub const Center = struct {
         notification.detail_len = copyText(&notification.detail, request.detail);
 
         self.applySuppressionPolicy(request);
-        const slot = self.notifications.reserve(notification_id) orelse return error.NotificationTableFull;
+        const slot = self.reserveNotificationSlot(notification_id) orelse return error.NotificationTableFull;
         slot.notification = notification;
         self.advanceNextNotificationIdFrom(notification_id);
         return &slot.notification;
@@ -242,8 +242,23 @@ pub const Center = struct {
         return null;
     }
 
+    fn reserveNotificationSlot(self: *Center, notification_id: u64) ?*NotificationSlot {
+        if (self.notifications.reserve(notification_id)) |slot| return slot;
+        const retired_index = self.firstSuppressedSlotIndex() orelse return null;
+        if (!self.notifications.removeIndex(retired_index)) return null;
+        return self.notifications.reserve(notification_id);
+    }
+
+    fn firstSuppressedSlotIndex(self: *const Center) ?usize {
+        for (&self.notifications.slots, 0..) |*slot, slot_index| {
+            if (!slot.in_use) continue;
+            if (slot.notification.suppressed) return slot_index;
+        }
+        return null;
+    }
+
     fn nextReservableNotificationId(self: *Center) ?u64 {
-        if (self.notifications.countInUse() >= MAX_NOTIFICATIONS) return null;
+        if (!self.hasReusableNotificationSlot()) return null;
 
         var notification_id = normalizeNotificationId(self.next_notification_id);
         var attempts: usize = 0;
@@ -252,6 +267,11 @@ pub const Center = struct {
             notification_id = nextNotificationIdAfter(notification_id);
         }
         return null;
+    }
+
+    fn hasReusableNotificationSlot(self: *const Center) bool {
+        if (self.notifications.countInUse() < MAX_NOTIFICATIONS) return true;
+        return self.firstSuppressedSlotIndex() != null;
     }
 
     fn advanceNextNotificationIdFrom(self: *Center, notification_id: u64) void {
@@ -468,6 +488,40 @@ test "notification center ids wrap without zero and full posts do not suppress" 
     }));
     try std.testing.expectEqual(next_before_full, full_center.next_notification_id);
     try std.testing.expectEqual(MAX_NOTIFICATIONS, full_center.activeCount(1));
+}
+
+test "notification center reclaims suppressed slots when the table is full" {
+    var center = Center.init();
+    const source = principal.PrincipalId{ .kind = .service, .serial = 11 };
+
+    for (0..MAX_NOTIFICATIONS) |index| {
+        _ = try center.post(.{
+            .source = source,
+            .reason = .policy_notice,
+            .urgency = .normal,
+            .task_id = @intCast(index + 1),
+            .detail = "table filler",
+        });
+    }
+    const dismissed = try center.dismiss(3);
+    try std.testing.expect(dismissed.suppressed);
+
+    const replacement = try center.post(.{
+        .source = source,
+        .reason = .sync_conflict,
+        .urgency = .high,
+        .detail = "reclaimed slot notification",
+    });
+    try std.testing.expectEqual(MAX_NOTIFICATIONS, center.activeCount(1));
+    try std.testing.expect(center.find(3) == null);
+    try std.testing.expectEqualStrings("reclaimed slot notification", replacement.detailSlice());
+
+    try std.testing.expectError(error.NotificationTableFull, center.post(.{
+        .source = source,
+        .reason = .policy_notice,
+        .urgency = .normal,
+        .detail = "no capacity left",
+    }));
 }
 
 test "notification center enforces quiet mode and interruption budgets" {
