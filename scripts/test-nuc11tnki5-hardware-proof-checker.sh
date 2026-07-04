@@ -49,8 +49,18 @@ write_manifest() {
   local dir="$1"
   local repo_commit
   local repo_change_id
-  repo_commit="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"')"
-  repo_change_id="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'change_id ++ "\n"')"
+  if command -v jj >/dev/null 2>&1 &&
+    repo_commit="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"' 2>/dev/null)" &&
+    repo_change_id="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'change_id ++ "\n"' 2>/dev/null)" &&
+    [ -n "$repo_commit" ] &&
+    [ -n "$repo_change_id" ]; then
+    :
+  else
+    repo_commit="1111111111111111111111111111111111111111"
+    repo_change_id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  fi
+  export ZIGOS_EXPECTED_REPO_COMMIT="$repo_commit"
+  export ZIGOS_EXPECTED_REPO_CHANGE_ID="$repo_change_id"
   cat > "$dir/proof-manifest.txt" <<EOF
 target_id=intel-nuc11tnki5
 board_sku=NUC11TNKi5

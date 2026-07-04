@@ -1,4 +1,3 @@
-const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
@@ -88,28 +87,11 @@ pub const RuntimeContext = struct {
     }
 
     pub fn countTasksInState(self: *const RuntimeContext, state: task_runtime.TaskState) usize {
-        var count: usize = 0;
-        var slot_index: usize = 0;
-        while (slot_index < self.runtime.taskSlotCapacity()) : (slot_index += 1) {
-            const slot = self.runtime.taskSlotAtConst(slot_index);
-            if (slot.in_use and slot.task.state == state) count += 1;
-        }
-        return count;
+        return self.runtime.countTasksInState(state);
     }
 
     pub fn findTask(self: *RuntimeContext, label: []const u8) ?*task_runtime.TaskRecord {
-        var best: ?*task_runtime.TaskRecord = null;
-        var slot_index: usize = 0;
-        while (slot_index < self.runtime.taskSlotCapacity()) : (slot_index += 1) {
-            const slot = self.runtime.taskSlotAt(slot_index);
-            if (!slot.in_use or slot.task.execution_component_count == 0) continue;
-            if (std.mem.eql(u8, slot.task.executionComponents()[0].labelSlice(), label)) {
-                if (best == null or preferTaskLookupMatch(&slot.task, best.?)) {
-                    best = &slot.task;
-                }
-            }
-        }
-        return best;
+        return self.runtime.findByInitialComponentLabel(label);
     }
 
     pub fn executeUserspaceProbe(self: *RuntimeContext, task_id: u64) void {
@@ -120,13 +102,6 @@ pub const RuntimeContext = struct {
         return self.userspace_scheduler.runNext(now_ticks);
     }
 };
-
-fn preferTaskLookupMatch(candidate: *const task_runtime.TaskRecord, current: *const task_runtime.TaskRecord) bool {
-    if (candidate.state == .active and current.state != .active) return true;
-    if (candidate.state != .active and current.state == .active) return false;
-    if (candidate.process_generation != current.process_generation) return candidate.process_generation > current.process_generation;
-    return candidate.id > current.id;
-}
 
 pub const RecoveryContext = struct {
     review_compositor_session: compositor_session.Session = compositor_session.Session.init(),
