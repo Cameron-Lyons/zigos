@@ -52,8 +52,6 @@ pub const Error = model.Error;
 pub const Snapshot = model.Snapshot;
 pub const syntheticUserspaceImage = model.syntheticUserspaceImage;
 
-const INDEX_CAPACITY = model.INDEX_CAPACITY;
-const IdIndexSlot = model.IdIndexSlot;
 const TaskArena = model.TaskArena;
 pub const TaskHandle = model.TaskHandle;
 const TaskOwnerIndex = model.TaskOwnerIndex;
@@ -63,16 +61,11 @@ const AddressSpaceSlot = model.AddressSpaceSlot;
 const allocateHost = model.allocateHost;
 const reassignHost = model.reassignHost;
 const saturatingSub = model.saturatingSub;
-const emptyIndexTable = model.emptyIndexTable;
 const zeroTaskCold = model.zeroTaskCold;
 const resetTaskCold = model.resetTaskCold;
 const copyTaskColdForTask = model.copyTaskColdForTask;
 const copyTaskColdStates = model.copyTaskColdStates;
 const bindTaskColdStates = model.bindTaskColdStates;
-const copySlots = model.copySlots;
-const indexLookup = model.indexLookup;
-const indexInsert = model.indexInsert;
-const indexRemove = model.indexRemove;
 const taskCold = model.taskCold;
 const taskColdConst = model.taskColdConst;
 const taskCapabilityIndex = model.taskCapabilityIndex;
@@ -83,22 +76,30 @@ const validateUserspaceImage = model.validateUserspaceImage;
 const TEST_TASK_MEMORY_BYTES: usize = units.kibibytes(4);
 const TEST_MINIMAL_MEMORY_BYTES: usize = 256;
 const TEST_MINIMAL_SHARED_MEMORY_BYTES: usize = 512;
+const TASK_STATE_COUNT: usize = @typeInfo(TaskState).@"enum".fields.len;
+const TASK_LABEL_INDEX_CAPACITY: usize = MAX_TASKS * 2;
+const TaskInitialComponentLabelIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_LABEL_INDEX_CAPACITY);
 const findAddressSpaceSlot = model.findAddressSpaceSlot;
 const defaultInitialComponent = model.defaultInitialComponent;
 const makeLaunchProvenance = model.makeLaunchProvenance;
 const zeroExecutionComponent = model.zeroExecutionComponent;
 
 pub const Runtime = struct {
+    pub const AddressSpaceSlotType = AddressSpaceSlot;
+    pub const AddressSpaceRecordType = AddressSpaceRecord;
+    pub const AddressSpaceRegionType = AddressSpaceRegionRecord;
+
     next_task_id: u64 = 1,
     next_process_id: u64 = 1,
     next_address_space_id: u64 = 1,
     next_namespace_id: u64 = 1,
     next_component_id: u64 = 1,
-    address_space_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(INDEX_CAPACITY),
     tasks: TaskArena = TaskArena.init(),
     task_owner_index: TaskOwnerIndex = TaskOwnerIndex.init(),
+    task_initial_component_label_index: TaskInitialComponentLabelIndex = TaskInitialComponentLabelIndex.init(),
+    task_state_counts: [TASK_STATE_COUNT]usize = [_]usize{0} ** TASK_STATE_COUNT,
     task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
-    address_spaces: [MAX_TASKS]AddressSpaceSlot = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
+    address_spaces: model.AddressSpaceArena = model.AddressSpaceArena.init(),
 
     pub fn init() Runtime {
         return Runtime{};
@@ -114,15 +115,14 @@ pub const Runtime = struct {
         self.next_address_space_id = 1;
         self.next_namespace_id = 1;
         self.next_component_id = 1;
-        self.address_space_index_slots = emptyIndexTable(INDEX_CAPACITY);
         self.tasks.reset();
         self.task_owner_index.reset();
+        self.task_initial_component_label_index.reset();
+        self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
         for (&self.task_cold) |*cold| {
             cold.* = zeroTaskCold();
         }
-        for (&self.address_spaces) |*slot| {
-            slot.* = AddressSpaceSlot{};
-        }
+        self.address_spaces.reset();
     }
 
     pub fn writeSnapshot(self: *const Runtime, out: *Snapshot) void {
@@ -144,7 +144,7 @@ pub const Runtime = struct {
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
 
         out.address_space_count = 0;
-        for (self.address_spaces) |slot| {
+        for (self.address_spaces.slots) |slot| {
             if (!slot.in_use) continue;
             out.address_spaces[out.address_space_count] = slot;
             out.address_space_count += 1;
@@ -171,7 +171,11 @@ pub const Runtime = struct {
 
         var address_space_index: usize = 0;
         while (address_space_index < state.address_space_count) : (address_space_index += 1) {
-            self.address_spaces[address_space_index] = state.address_spaces[address_space_index];
+            const address_space_id = state.address_spaces[address_space_index].address_space.id;
+            const slot_index = self.address_spaces.reserveIndexAt(address_space_id, address_space_index) orelse {
+                native_util.impossibleByInvariant("address-space snapshot count is bounded by address-space arena capacity");
+            };
+            self.address_spaces.slots[slot_index] = state.address_spaces[address_space_index];
         }
         self.rebuildIndexes();
         self.debugAssertIndexIntegrity();
@@ -183,18 +187,19 @@ pub const Runtime = struct {
         self.next_address_space_id = 1;
         self.next_namespace_id = 1;
         self.next_component_id = 1;
-        self.address_space_index_slots = emptyIndexTable(INDEX_CAPACITY);
         self.tasks.reset();
         self.task_owner_index.reset();
-        for (&self.address_spaces) |*slot| {
-            slot.* = AddressSpaceSlot{};
-        }
+        self.task_initial_component_label_index.reset();
+        self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
+        self.address_spaces.reset();
     }
 
     pub fn rebuildIndexes(self: *Runtime) void {
         self.tasks.rebuildPrimaryIndex();
         self.task_owner_index.reset();
-        self.address_space_index_slots = emptyIndexTable(INDEX_CAPACITY);
+        self.task_initial_component_label_index.reset();
+        self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
+        self.address_spaces.rebuildPrimaryIndex();
 
         var slot_index: usize = 0;
         while (slot_index < MAX_TASKS) : (slot_index += 1) {
@@ -204,12 +209,11 @@ pub const Runtime = struct {
             if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
                 native_util.impossibleByInvariant("task owner index capacity covers task slots");
             }
+            self.task_state_counts[taskStateIndex(slot.task.state)] += 1;
+            if (!self.appendInitialComponentLabelIndex(slot_index, &slot.task)) {
+                native_util.impossibleByInvariant("task label index capacity covers task slots");
+            }
             rebuildCapabilityIndex(&slot.task);
-        }
-
-        for (self.address_spaces, 0..) |slot, address_space_slot_index| {
-            if (!slot.in_use) continue;
-            indexInsert(INDEX_CAPACITY, &self.address_space_index_slots, slot.address_space.id, address_space_slot_index);
         }
     }
 
@@ -280,6 +284,10 @@ pub const Runtime = struct {
         if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
             native_util.impossibleByInvariant("task owner index capacity covers task slots");
         }
+        if (!self.appendInitialComponentLabelIndex(slot_index, &slot.task)) {
+            native_util.impossibleByInvariant("task label index capacity covers task slots");
+        }
+        self.task_state_counts[taskStateIndex(slot.task.state)] += 1;
         self.advanceNextComponentIdFrom(initial_component.id);
         self.advanceNextTaskIdFrom(task_id);
         return &slot.task;
@@ -298,6 +306,10 @@ pub const Runtime = struct {
 
     pub fn taskCount(self: *const Runtime) usize {
         return self.tasks.countInUse();
+    }
+
+    pub fn countTasksInState(self: *const Runtime, state: TaskState) usize {
+        return self.task_state_counts[taskStateIndex(state)];
     }
 
     pub fn taskSlotAt(self: *Runtime, slot_index: usize) *TaskSlot {
@@ -332,6 +344,23 @@ pub const Runtime = struct {
         return null;
     }
 
+    pub fn findByInitialComponentLabel(self: *Runtime, label: []const u8) ?*TaskRecord {
+        var best: ?*TaskRecord = null;
+        var slot_index = self.task_initial_component_label_index.head(taskInitialComponentLabelKey(label));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.task_initial_component_label_index.next(slot_index)) {
+            if (slot_index >= MAX_TASKS) native_util.impossibleByInvariant("task label index points outside task slots");
+            const slot = self.tasks.slotAt(slot_index);
+            if (!slot.in_use) native_util.impossibleByInvariant("task label index points at a free slot");
+            if (slot.task.execution_component_count == 0) native_util.impossibleByInvariant("task label index points at a task without an initial component");
+            if (!std.mem.eql(u8, slot.task.executionComponents()[0].labelSlice(), label)) continue;
+            if (best == null or preferTaskLookupMatch(&slot.task, best.?)) {
+                best = &slot.task;
+            }
+        }
+        if (best == null) self.debugAssertInitialComponentLabelIndexMissAbsent(label);
+        return best;
+    }
+
     pub fn findAddressSpace(self: *Runtime, address_space_id: u64) ?*AddressSpaceRecord {
         const slot = findAddressSpaceSlot(self, address_space_id) orelse return null;
         return &slot.address_space;
@@ -351,27 +380,17 @@ pub const Runtime = struct {
     }
 
     pub fn indexedAddressSpaceSlot(self: *Runtime, address_space_id: u64) ?*AddressSpaceSlot {
-        const slot_index = indexLookup(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id) orelse {
+        return self.address_spaces.get(address_space_id) orelse {
             self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
             return null;
         };
-        if (slot_index >= self.address_spaces.len) native_util.impossibleByInvariant("address space index points outside slots");
-        const slot = &self.address_spaces[slot_index];
-        if (!slot.in_use) native_util.impossibleByInvariant("address space index points at a free slot");
-        if (slot.address_space.id != address_space_id) native_util.impossibleByInvariant("address space index points at the wrong slot");
-        return slot;
     }
 
     fn indexedAddressSpaceSlotConst(self: *const Runtime, address_space_id: u64) ?*const AddressSpaceSlot {
-        const slot_index = indexLookup(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id) orelse {
+        return self.address_spaces.getConst(address_space_id) orelse {
             self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
             return null;
         };
-        if (slot_index >= self.address_spaces.len) native_util.impossibleByInvariant("address space index points outside slots");
-        const slot = &self.address_spaces[slot_index];
-        if (!slot.in_use) native_util.impossibleByInvariant("address space index points at a free slot");
-        if (slot.address_space.id != address_space_id) native_util.impossibleByInvariant("address space index points at the wrong slot");
-        return slot;
     }
 
     fn indexedTaskSlot(self: *Runtime, task_id: u64) ?*TaskSlot {
@@ -436,12 +455,26 @@ pub const Runtime = struct {
         return false;
     }
 
-    pub fn noteAddressSpaceInstalled(self: *Runtime, address_space_id: u64, slot_index: usize) void {
-        indexInsert(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id, slot_index);
+    pub fn installAddressSpaceRecord(self: *Runtime, replace_address_space_id: ?u64, address_space: AddressSpaceRecord) bool {
+        if (replace_address_space_id) |old_id| {
+            if (self.address_spaces.slotIndexOf(old_id)) |old_slot_index| {
+                _ = self.address_spaces.removeIndex(old_slot_index);
+                const new_slot_index = self.address_spaces.reserveIndexAt(address_space.id, old_slot_index) orelse {
+                    native_util.impossibleByInvariant("removed address-space slot is immediately reusable");
+                };
+                self.address_spaces.slots[new_slot_index].address_space = address_space;
+                return true;
+            }
+        }
+
+        const slot = self.address_spaces.reserve(address_space.id) orelse return false;
+        slot.address_space = address_space;
+        return true;
     }
 
-    pub fn removeAddressSpaceIndex(self: *Runtime, address_space_id: u64) void {
-        indexRemove(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id);
+    pub fn addressSpaceRegionCapacity(self: *const Runtime) usize {
+        _ = self;
+        return MAX_EXECUTABLE_SEGMENTS + 1;
     }
 
     fn debugAssertIndexIntegrity(self: *const Runtime) void {
@@ -452,6 +485,18 @@ pub const Runtime = struct {
             if (!slot.in_use) continue;
             _ = self.indexedTaskSlotConst(slot.task.id) orelse
                 native_util.impossibleByInvariant("task index missing a live task");
+            if (slot.task.execution_component_count != 0) {
+                const key = taskInitialComponentLabelKey(slot.task.executionComponents()[0].labelSlice());
+                var found = false;
+                var label_slot_index = self.task_initial_component_label_index.head(key);
+                while (label_slot_index != indexed_arena.no_index) : (label_slot_index = self.task_initial_component_label_index.next(label_slot_index)) {
+                    if (label_slot_index == slot_index) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) native_util.impossibleByInvariant("task label index missing a live task");
+            }
             var capability_index: usize = 0;
             while (capability_index < slot.task.capability_count) : (capability_index += 1) {
                 const capability_id = slot.task.capabilityIds()[capability_index];
@@ -460,10 +505,22 @@ pub const Runtime = struct {
                 }
             }
         }
-        for (self.address_spaces) |slot| {
+        for (self.address_spaces.slots) |slot| {
             if (!slot.in_use) continue;
             _ = self.indexedAddressSpaceSlotConst(slot.address_space.id) orelse
                 native_util.impossibleByInvariant("address space index missing a live address space");
+        }
+    }
+
+    fn debugAssertInitialComponentLabelIndexMissAbsent(self: *Runtime, label: []const u8) void {
+        if (!debugIndexChecksEnabled()) return;
+        var slot_index: usize = 0;
+        while (slot_index < MAX_TASKS) : (slot_index += 1) {
+            const slot = self.tasks.slotAt(slot_index);
+            if (!slot.in_use or slot.task.execution_component_count == 0) continue;
+            if (std.mem.eql(u8, slot.task.executionComponents()[0].labelSlice(), label)) {
+                native_util.impossibleByInvariant("task label index missed a live task");
+            }
         }
     }
 
@@ -491,7 +548,7 @@ pub const Runtime = struct {
 
     fn debugAssertAddressSpaceIndexMissAbsent(self: *const Runtime, address_space_id: u64) void {
         if (!debugIndexChecksEnabled()) return;
-        for (self.address_spaces) |slot| {
+        for (self.address_spaces.slots) |slot| {
             if (slot.in_use and slot.address_space.id == address_space_id) {
                 native_util.impossibleByInvariant("address space index missed a live address space");
             }
@@ -703,10 +760,12 @@ pub const Runtime = struct {
     }
 
     pub fn terminateTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
-        const task = self.find(task_id) orelse return error.TaskNotFound;
+        const slot_index = self.tasks.slotIndexOf(task_id) orelse return error.TaskNotFound;
+        const task = &self.tasks.slotAt(slot_index).task;
         if (task.state == .terminated) return false;
 
-        task.state = .terminated;
+        self.removeInitialComponentLabelIndex(slot_index, task);
+        self.setTaskState(task, .terminated);
         resetTaskCold(taskCold(task));
         task.execution_component_count = 0;
         task.capability_count = 0;
@@ -721,7 +780,7 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.TaskNotFound;
         if (task.state != .active) return false;
 
-        task.state = .suspended;
+        self.setTaskState(task, .suspended);
         try self.audit(task_id, .{
             .kind = .suspended,
             .tick = tick,
@@ -733,12 +792,41 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.TaskNotFound;
         if (task.state != .suspended) return false;
 
-        task.state = .active;
+        self.setTaskState(task, .active);
         try self.audit(task_id, .{
             .kind = .resumed,
             .tick = tick,
         });
         return true;
+    }
+
+    fn setTaskState(self: *Runtime, task: *TaskRecord, state: TaskState) void {
+        if (task.state == state) return;
+        const old_index = taskStateIndex(task.state);
+        if (self.task_state_counts[old_index] == 0) {
+            native_util.impossibleByInvariant("task state count missing live task state");
+        }
+        self.task_state_counts[old_index] -= 1;
+        task.state = state;
+        self.task_state_counts[taskStateIndex(state)] += 1;
+    }
+
+    fn appendInitialComponentLabelIndex(self: *Runtime, slot_index: usize, task: *const TaskRecord) bool {
+        if (task.execution_component_count == 0) return true;
+        return self.task_initial_component_label_index.append(
+            taskInitialComponentLabelKey(task.executionComponents()[0].labelSlice()),
+            slot_index,
+        );
+    }
+
+    fn removeInitialComponentLabelIndex(self: *Runtime, slot_index: usize, task: *const TaskRecord) void {
+        if (task.execution_component_count == 0) return;
+        if (!self.task_initial_component_label_index.remove(
+            taskInitialComponentLabelKey(task.executionComponents()[0].labelSlice()),
+            slot_index,
+        )) {
+            native_util.impossibleByInvariant("task label index missing task being terminated");
+        }
     }
 };
 
@@ -766,6 +854,21 @@ fn nextComponentIdAfter(component_id: u64) u64 {
 
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
+}
+
+fn taskStateIndex(state: TaskState) usize {
+    return @intFromEnum(state);
+}
+
+fn taskInitialComponentLabelKey(label: []const u8) u64 {
+    return indexed_arena.nonZeroKey(native_util.fnv1a64(label));
+}
+
+fn preferTaskLookupMatch(candidate: *const TaskRecord, current: *const TaskRecord) bool {
+    if (candidate.state == .active and current.state != .active) return true;
+    if (candidate.state != .active and current.state == .active) return false;
+    if (candidate.process_generation != current.process_generation) return candidate.process_generation > current.process_generation;
+    return candidate.id > current.id;
 }
 
 fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
@@ -927,10 +1030,12 @@ test "task runtime host ids wrap without zero and skip active hosts" {
 
 test "task runtime host ids do not advance when address space installation fails" {
     var runtime = Runtime.init();
-    for (&runtime.address_spaces, 0..) |*slot, index| {
-        slot.in_use = true;
+    for (0..runtime.address_spaces.slots.len) |index| {
+        const address_space_id: u64 = @intCast(index + 1_000);
+        const slot_index = runtime.address_spaces.reserveIndex(address_space_id) orelse unreachable;
+        const slot = &runtime.address_spaces.slots[slot_index];
         slot.address_space = model.zeroAddressSpace();
-        slot.address_space.id = @intCast(index + 1_000);
+        slot.address_space.id = address_space_id;
     }
     runtime.rebuildIndexes();
 
@@ -982,10 +1087,12 @@ test "task runtime component ids wrap without zero and skip active components" {
 
 test "task runtime component ids do not advance when host allocation fails" {
     var runtime = Runtime.init();
-    for (&runtime.address_spaces, 0..) |*slot, index| {
-        slot.in_use = true;
+    for (0..runtime.address_spaces.slots.len) |index| {
+        const address_space_id: u64 = @intCast(index + 2_000);
+        const slot_index = runtime.address_spaces.reserveIndex(address_space_id) orelse unreachable;
+        const slot = &runtime.address_spaces.slots[slot_index];
         slot.address_space = model.zeroAddressSpace();
-        slot.address_space.id = @intCast(index + 2_000);
+        slot.address_space.id = address_space_id;
     }
     runtime.rebuildIndexes();
 
@@ -1291,6 +1398,7 @@ test "tasks are isolated in separate process address space and namespace hosts a
 
     const original_process_id = service_task.process_id;
     const original_address_space_id = service_task.address_space_id;
+    const original_address_space_count = runtime.address_spaces.countInUse();
     try std.testing.expect(runtime.processSeparated(service_task.id, app_task.id));
     try std.testing.expectEqual(ProcessClass.service_sandbox, service_task.process_class);
     try std.testing.expectEqual(ProcessClass.app_sandbox, app_task.process_class);
@@ -1298,6 +1406,9 @@ test "tasks are isolated in separate process address space and namespace hosts a
     try std.testing.expect(try runtime.rehostTask(service_task.id, 55));
     try std.testing.expect(service_task.process_id != original_process_id);
     try std.testing.expect(service_task.address_space_id != original_address_space_id);
+    try std.testing.expect(runtime.address_spaces.get(original_address_space_id) == null);
+    try std.testing.expect(runtime.address_spaces.get(service_task.address_space_id) != null);
+    try std.testing.expectEqual(original_address_space_count, runtime.address_spaces.countInUse());
     try std.testing.expectEqual(@as(u32, 2), service_task.process_generation);
     try std.testing.expectEqual(AuditEventKind.service_restarted, service_task.latestAuditEvent().?.kind);
 }
@@ -1359,4 +1470,114 @@ test "terminating a task clears its capabilities and marks the state" {
     try std.testing.expectEqual(@as(usize, 0), task.execution_component_count);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
     try std.testing.expectEqual(AuditEventKind.terminated, task.latestAuditEvent().?.kind);
+}
+
+test "task state counts track lifecycle transitions and snapshot restore" {
+    var runtime = Runtime.init();
+    const first = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 9 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(1),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+        },
+    });
+    const first_task_id = first.id;
+    const second = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 10 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(1),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+        },
+    });
+    const second_task_id = second.id;
+
+    try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.staged));
+    try std.testing.expectEqual(@as(usize, 2), runtime.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.suspended));
+    try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.terminated));
+
+    try std.testing.expect(try runtime.suspendTask(first_task_id, 11));
+    try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.suspended));
+
+    try std.testing.expect(try runtime.resumeTask(first_task_id, 12));
+    try std.testing.expectEqual(@as(usize, 2), runtime.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.suspended));
+
+    try std.testing.expect(try runtime.terminateTask(second_task_id, 13));
+    try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.terminated));
+
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    var restored = Runtime.init();
+    restored.restoreFromSnapshot(&snapshot);
+
+    try std.testing.expectEqual(@as(usize, 1), restored.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 1), restored.countTasksInState(.terminated));
+
+    restored.reset();
+    try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.terminated));
+}
+
+test "initial component label lookup is indexed across lifecycle and restore" {
+    var runtime = Runtime.init();
+    const first = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 11 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(1),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+        },
+        .initial_component = .{
+            .label = "indexed-service",
+            .entry = "zigos.indexed.first",
+        },
+    });
+    const first_task_id = first.id;
+    const second = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 12 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(1),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+        },
+        .initial_component = .{
+            .label = "indexed-service",
+            .entry = "zigos.indexed.second",
+        },
+    });
+    const second_task_id = second.id;
+
+    try std.testing.expectEqual(second_task_id, runtime.findByInitialComponentLabel("indexed-service").?.id);
+    try std.testing.expect(runtime.findByInitialComponentLabel("missing-service") == null);
+
+    try std.testing.expect(try runtime.suspendTask(second_task_id, 21));
+    try std.testing.expectEqual(first_task_id, runtime.findByInitialComponentLabel("indexed-service").?.id);
+
+    try std.testing.expect(try runtime.resumeTask(second_task_id, 22));
+    try std.testing.expectEqual(second_task_id, runtime.findByInitialComponentLabel("indexed-service").?.id);
+
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    var restored = Runtime.init();
+    restored.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(second_task_id, restored.findByInitialComponentLabel("indexed-service").?.id);
+
+    try std.testing.expect(try restored.terminateTask(second_task_id, 23));
+    try std.testing.expectEqual(first_task_id, restored.findByInitialComponentLabel("indexed-service").?.id);
+
+    try std.testing.expect(try restored.terminateTask(first_task_id, 24));
+    try std.testing.expect(restored.findByInitialComponentLabel("indexed-service") == null);
 }

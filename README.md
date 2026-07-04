@@ -83,7 +83,7 @@ network, USB, GPU/display, media/print, input, and compositor-facing device
 policy live as restartable userspace driver/service claims behind IOMMU DMA
 domains, brokered DMA buffers, explicit capabilities, endpoints, shared memory
 objects, device broker calls, component ports, and operation descriptors rather
-than a POSIX syscall table or legacy kernel-driver surface.
+than a POSIX syscall table or monolithic kernel-driver surface.
 
 The native layer is organized around services. Session bootstrap constructs the
 service graph, binds bootstrap capabilities, starts supervised userspace
@@ -148,7 +148,7 @@ observable boot markers.
 
 Use the pinned toolchain and repo entrypoints:
 
-- Zig `0.16.0` exactly
+- Zig (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
 - OVMF or edk2-ovmf firmware for `uefi-qemu-test`
@@ -164,10 +164,9 @@ For ISO and full disk-image workflows, install the tools verified by
 - `mtools`
 - `dosfstools`
 
-The repo includes `.tool-versions` and `mise.toml` pins. `build.zig` rejects any
-Zig version other than `0.16.0`. Run Zig through `./scripts/zig.sh` so the repo
-can resolve `ZIG_BIN`, the active Zig, `mise`, or local fallback binaries in the
-right order.
+`build.zig` and `./scripts/zig.sh` reject any Zig version other than the repo
+pin. Run Zig through `./scripts/zig.sh` so the repo can resolve `ZIG_BIN`, the
+active Zig, `mise`, or local fallback binaries in the right order.
 
 ## Setup
 
@@ -236,8 +235,8 @@ scripts/prepare-nuc11tnki5-hardware-proof.sh --build
 ```
 
 After the NUC run fills `build/hardware-proofs/nuc11tnki5/serial.log`,
-`proof-manifest.txt`, firmware settings, and power-cycle notes, validate it
-with:
+`proof-manifest.txt`, `firmware-settings.txt`, `power-cycle-notes.txt`, and
+`attestation-lifecycle.txt`, validate it with:
 
 ```bash
 scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5
@@ -270,7 +269,7 @@ be signed per DSSE payload through
 `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a hardware-backed TPM, secure enclave,
 HSM, or KMS key and verified with `zig-out/bin/zigos-verify-release
 build/release-security .` before distribution.
-The release keyring also carries the 2026 PQC transition policy: FIPS 203
+The release keyring also carries the PQC transition policy: FIPS 203
 ML-KEM is reserved for key establishment, FIPS 204 ML-DSA is the production
 signature path once a validated provider is linked, and FIPS 205 SLH-DSA is the
 hash-based diversity path for long-lived or recovery roots. `ZIGOS_RELEASE_PQC_MODE`
@@ -288,10 +287,11 @@ serial markers live in
 `spec/hardware/nuc11tnki5-required-markers.txt`, and captured logs can be
 checked with `scripts/check-nuc11tnki5-hardware-proof.sh`. A complete proof is
 a directory described by `spec/hardware/nuc11tnki5-proof-bundle.md`, with
-`serial.log`, `firmware-settings.txt`, `power-cycle-notes.txt`, and
+`proof-manifest.txt`, `serial.log`, `firmware-settings.txt`,
+`power-cycle-notes.txt`, `attestation-lifecycle.txt`, and
 `artifact-digests.sha256`. The checker rejects emulator-sourced logs and
-requires the real-hardware metadata markers, the current repo commit,
-`repo_dirty_files=0`, and the target cycle counters. The
+requires the real-hardware metadata markers, the current Jujutsu change ID and
+commit, `repo_dirty_files=0`, and the target cycle counters. The
 UEFI preflight entrypoint is `./scripts/zig.sh build uefi-qemu-test`; set
 `OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not installed in a
 standard path.
