@@ -41,6 +41,7 @@ const background_dispatch = @import("task/background_dispatch.zig");
 const notification_center = @import("services/notification_center.zig");
 const os_identity = @import("platform/os_identity.zig");
 const media_print_service = @import("services/media_print_service.zig");
+const secure_secret_store = @import("platform/secure_secret_store.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
@@ -146,6 +147,10 @@ pub const indexed_hot_path_tables = .{
     },
     .media_print_service = .{
         .uses_job_arena = @hasDecl(@FieldType(media_print_service.Service, "jobs"), "reserve"),
+    },
+    .secure_secret_store = .{
+        .uses_secret_arena = @hasDecl(@FieldType(secure_secret_store.Store, "secrets"), "reserve"),
+        .uses_handle_arena = @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "reserve"),
     },
     .event_ledger = .{
         .uses_event_arena = @hasField(event_ledger.Ledger, "events"),
