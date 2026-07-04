@@ -7351,7 +7351,7 @@ fn personalContextCatalogBindingCheck() bool {
         std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.personal.context");
 }
 
-test "2026 OS contract keeps sixteen modernization features satisfied" {
+test "OS contract keeps sixteen modernization features satisfied" {
     const checklist = currentRepositoryContract();
     try std.testing.expectEqual(@as(usize, 16), feature_count);
     try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
@@ -7360,7 +7360,7 @@ test "2026 OS contract keeps sixteen modernization features satisfied" {
     try std.testing.expect(checklist.satisfied(.typed_ai_inference_service));
 }
 
-test "2026 OS contract keeps thirty four additional modernization passes satisfied" {
+test "OS contract keeps thirty four additional modernization passes satisfied" {
     const checklist = currentRepositoryExtraContract();
     try std.testing.expectEqual(@as(usize, 34), extra_feature_count);
     try std.testing.expectEqual(extra_feature_count, checklist.satisfiedCount());
@@ -7372,7 +7372,7 @@ test "2026 OS contract keeps thirty four additional modernization passes satisfi
     try std.testing.expect(checklist.satisfied(.process_continuous_observability_scope));
 }
 
-test "2026 OS contract keeps thirty two third-loop lifecycle passes satisfied" {
+test "OS contract keeps thirty two third-loop lifecycle passes satisfied" {
     const checklist = currentRepositoryThirdContract();
     try std.testing.expectEqual(@as(usize, 32), third_feature_count);
     try std.testing.expectEqual(third_feature_count, checklist.satisfiedCount());
@@ -7382,7 +7382,7 @@ test "2026 OS contract keeps thirty two third-loop lifecycle passes satisfied" {
     try std.testing.expect(checklist.satisfied(.permission_use_policy_request));
 }
 
-test "2026 OS contract keeps twenty fourth-loop data-rights passes satisfied" {
+test "OS contract keeps twenty fourth-loop data-rights passes satisfied" {
     const checklist = currentRepositoryFourthContract();
     try std.testing.expectEqual(@as(usize, 20), fourth_feature_count);
     try std.testing.expectEqual(fourth_feature_count, checklist.satisfiedCount());
@@ -7392,7 +7392,7 @@ test "2026 OS contract keeps twenty fourth-loop data-rights passes satisfied" {
     try std.testing.expect(checklist.satisfied(.data_deletion_receipt_summary));
 }
 
-test "2026 OS contract keeps twenty fifth-loop AI model provenance passes satisfied" {
+test "OS contract keeps twenty fifth-loop AI model provenance passes satisfied" {
     const checklist = currentRepositoryFifthContract();
     try std.testing.expectEqual(@as(usize, 20), fifth_feature_count);
     try std.testing.expectEqual(fifth_feature_count, checklist.satisfiedCount());
@@ -7402,7 +7402,7 @@ test "2026 OS contract keeps twenty fifth-loop AI model provenance passes satisf
     try std.testing.expect(checklist.satisfied(.ai_model_rejection_summary));
 }
 
-test "2026 OS contract keeps twenty sixth-loop trusted session passes satisfied" {
+test "OS contract keeps twenty sixth-loop trusted session passes satisfied" {
     const checklist = currentRepositorySixthContract();
     try std.testing.expectEqual(@as(usize, 20), sixth_feature_count);
     try std.testing.expectEqual(sixth_feature_count, checklist.satisfiedCount());
@@ -7412,7 +7412,7 @@ test "2026 OS contract keeps twenty sixth-loop trusted session passes satisfied"
     try std.testing.expect(checklist.satisfied(.identity_session_redaction));
 }
 
-test "2026 OS contract keeps twenty one seventh-loop supply chain passes satisfied" {
+test "OS contract keeps twenty one seventh-loop supply chain passes satisfied" {
     const checklist = currentRepositorySeventhContract();
     try std.testing.expectEqual(@as(usize, 21), seventh_feature_count);
     try std.testing.expectEqual(seventh_feature_count, checklist.satisfiedCount());
@@ -7423,7 +7423,7 @@ test "2026 OS contract keeps twenty one seventh-loop supply chain passes satisfi
     try std.testing.expect(checklist.satisfied(.package_active_revision_mutation_gate));
 }
 
-test "2026 OS contract keeps twenty eighth-loop agent delegation passes satisfied" {
+test "OS contract keeps twenty eighth-loop agent delegation passes satisfied" {
     const checklist = currentRepositoryEighthContract();
     try std.testing.expectEqual(@as(usize, 20), eighth_feature_count);
     try std.testing.expectEqual(eighth_feature_count, checklist.satisfiedCount());
@@ -7433,7 +7433,7 @@ test "2026 OS contract keeps twenty eighth-loop agent delegation passes satisfie
     try std.testing.expect(checklist.satisfied(.agent_delegation_diagnostics));
 }
 
-test "2026 OS contract keeps sixteen ninth-loop attention sovereignty passes satisfied" {
+test "OS contract keeps sixteen ninth-loop attention sovereignty passes satisfied" {
     const checklist = currentRepositoryNinthContract();
     try std.testing.expectEqual(@as(usize, 16), ninth_feature_count);
     try std.testing.expectEqual(ninth_feature_count, checklist.satisfiedCount());
@@ -7443,7 +7443,7 @@ test "2026 OS contract keeps sixteen ninth-loop attention sovereignty passes sat
     try std.testing.expect(checklist.satisfied(.policy_digest_covers_attention));
 }
 
-test "2026 OS contract keeps twenty tenth-loop accessibility profile passes satisfied" {
+test "OS contract keeps twenty tenth-loop accessibility profile passes satisfied" {
     const checklist = currentRepositoryTenthContract();
     try std.testing.expectEqual(@as(usize, 20), tenth_feature_count);
     try std.testing.expectEqual(tenth_feature_count, checklist.satisfiedCount());
@@ -7453,7 +7453,7 @@ test "2026 OS contract keeps twenty tenth-loop accessibility profile passes sati
     try std.testing.expect(checklist.satisfied(.accessibility_redaction));
 }
 
-test "2026 OS contract keeps twenty five eleventh-loop agent session passes satisfied" {
+test "OS contract keeps twenty five eleventh-loop agent session passes satisfied" {
     const checklist = currentRepositoryEleventhContract();
     try std.testing.expectEqual(@as(usize, 25), eleventh_feature_count);
     try std.testing.expectEqual(eleventh_feature_count, checklist.satisfiedCount());
@@ -7467,7 +7467,7 @@ test "2026 OS contract keeps twenty five eleventh-loop agent session passes sati
     try std.testing.expect(checklist.satisfied(.agent_session_redaction));
 }
 
-test "2026 OS contract keeps twenty two twelfth-loop background activity passes satisfied" {
+test "OS contract keeps twenty two twelfth-loop background activity passes satisfied" {
     const checklist = currentRepositoryTwelfthContract();
     try std.testing.expectEqual(@as(usize, 22), twelfth_feature_count);
     try std.testing.expectEqual(twelfth_feature_count, checklist.satisfiedCount());
@@ -7481,7 +7481,7 @@ test "2026 OS contract keeps twenty two twelfth-loop background activity passes 
     try std.testing.expect(checklist.satisfied(.background_activity_redaction));
 }
 
-test "2026 OS contract keeps sixteen thirteenth-loop secure pasteboard passes satisfied" {
+test "OS contract keeps sixteen thirteenth-loop secure pasteboard passes satisfied" {
     const checklist = currentRepositoryThirteenthContract();
     try std.testing.expectEqual(@as(usize, 16), thirteenth_feature_count);
     try std.testing.expectEqual(thirteenth_feature_count, checklist.satisfiedCount());
@@ -7495,7 +7495,7 @@ test "2026 OS contract keeps sixteen thirteenth-loop secure pasteboard passes sa
     try std.testing.expect(checklist.satisfied(.pasteboard_boot_image_registry));
 }
 
-test "2026 OS contract keeps twenty six fourteenth-loop object resilience passes satisfied" {
+test "OS contract keeps twenty six fourteenth-loop object resilience passes satisfied" {
     const checklist = currentRepositoryFourteenthContract();
     try std.testing.expectEqual(@as(usize, 26), fourteenth_feature_count);
     try std.testing.expectEqual(fourteenth_feature_count, checklist.satisfiedCount());
@@ -7511,7 +7511,7 @@ test "2026 OS contract keeps twenty six fourteenth-loop object resilience passes
     try std.testing.expect(checklist.satisfied(.object_resilience_boot_image_registry));
 }
 
-test "2026 OS contract keeps twenty six fifteenth-loop semantic memory passes satisfied" {
+test "OS contract keeps twenty six fifteenth-loop semantic memory passes satisfied" {
     const checklist = currentRepositoryFifteenthContract();
     try std.testing.expectEqual(@as(usize, 26), fifteenth_feature_count);
     try std.testing.expectEqual(fifteenth_feature_count, checklist.satisfiedCount());
@@ -7527,7 +7527,7 @@ test "2026 OS contract keeps twenty six fifteenth-loop semantic memory passes sa
     try std.testing.expect(checklist.satisfied(.semantic_memory_redaction));
 }
 
-test "2026 OS contract keeps twenty two sixteenth-loop passwordless identity passes satisfied" {
+test "OS contract keeps twenty two sixteenth-loop passwordless identity passes satisfied" {
     const checklist = currentRepositorySixteenthContract();
     try std.testing.expectEqual(@as(usize, 22), sixteenth_feature_count);
     try std.testing.expectEqual(sixteenth_feature_count, checklist.satisfiedCount());
@@ -7540,7 +7540,7 @@ test "2026 OS contract keeps twenty two sixteenth-loop passwordless identity pas
     try std.testing.expect(checklist.satisfied(.credential_redaction));
 }
 
-test "2026 OS contract keeps twenty three seventeenth-loop private sync passes satisfied" {
+test "OS contract keeps twenty three seventeenth-loop private sync passes satisfied" {
     const checklist = currentRepositorySeventeenthContract();
     try std.testing.expectEqual(@as(usize, 23), seventeenth_feature_count);
     try std.testing.expectEqual(seventeenth_feature_count, checklist.satisfiedCount());
@@ -7553,7 +7553,7 @@ test "2026 OS contract keeps twenty three seventeenth-loop private sync passes s
     try std.testing.expect(checklist.satisfied(.sync_boot_image_registry));
 }
 
-test "2026 OS contract keeps twenty two eighteenth-loop sensitive capture passes satisfied" {
+test "OS contract keeps twenty two eighteenth-loop sensitive capture passes satisfied" {
     const checklist = currentRepositoryEighteenthContract();
     try std.testing.expectEqual(@as(usize, 22), eighteenth_feature_count);
     try std.testing.expect(checklist.satisfied(.sensitive_capture_service_model));
@@ -7582,7 +7582,7 @@ test "2026 OS contract keeps twenty two eighteenth-loop sensitive capture passes
     try std.testing.expect(checklist.complete());
 }
 
-test "2026 OS contract keeps twenty five nineteenth-loop secret vault passes satisfied" {
+test "OS contract keeps twenty five nineteenth-loop secret vault passes satisfied" {
     const checklist = currentRepositoryNineteenthContract();
     try std.testing.expectEqual(@as(usize, 25), nineteenth_feature_count);
     try std.testing.expect(checklist.satisfied(.secret_vault_service_model));
@@ -7614,7 +7614,7 @@ test "2026 OS contract keeps twenty five nineteenth-loop secret vault passes sat
     try std.testing.expect(checklist.complete());
 }
 
-test "2026 OS contract keeps twenty one twentieth-loop attention broker passes satisfied" {
+test "OS contract keeps twenty one twentieth-loop attention broker passes satisfied" {
     const checklist = currentRepositoryTwentiethContract();
     try std.testing.expectEqual(@as(usize, 21), twentieth_feature_count);
     try std.testing.expect(checklist.satisfied(.attention_broker_service_model));
@@ -7642,7 +7642,7 @@ test "2026 OS contract keeps twenty one twentieth-loop attention broker passes s
     try std.testing.expect(checklist.complete());
 }
 
-test "2026 OS contract keeps nineteen twenty-first-loop task lifecycle passes satisfied" {
+test "OS contract keeps nineteen twenty-first-loop task lifecycle passes satisfied" {
     const checklist = currentRepositoryTwentyFirstContract();
     try std.testing.expectEqual(@as(usize, 19), twenty_first_feature_count);
     try std.testing.expect(checklist.satisfied(.task_lifecycle_service_model));
@@ -7668,7 +7668,7 @@ test "2026 OS contract keeps nineteen twenty-first-loop task lifecycle passes sa
     try std.testing.expect(checklist.complete());
 }
 
-test "2026 OS contract keeps eighteen twenty-second-loop package offboarding passes satisfied" {
+test "OS contract keeps eighteen twenty-second-loop package offboarding passes satisfied" {
     const checklist = currentRepositoryTwentySecondContract();
     try std.testing.expectEqual(@as(usize, 18), twenty_second_feature_count);
     try std.testing.expect(checklist.satisfied(.package_offboarding_service_model));
@@ -7693,7 +7693,7 @@ test "2026 OS contract keeps eighteen twenty-second-loop package offboarding pas
     try std.testing.expect(checklist.complete());
 }
 
-test "2026 OS contract keeps sixteen twenty-third-loop resource governance passes satisfied" {
+test "OS contract keeps sixteen twenty-third-loop resource governance passes satisfied" {
     const checklist = currentRepositoryTwentyThirdContract();
     try std.testing.expectEqual(@as(usize, 16), twenty_third_feature_count);
     try std.testing.expect(checklist.satisfied(.scheduler_resource_governance_model));
@@ -7716,7 +7716,7 @@ test "2026 OS contract keeps sixteen twenty-third-loop resource governance passe
     try std.testing.expect(checklist.complete());
 }
 
-test "2026 OS contract keeps twenty twenty-fourth-loop network session passes satisfied" {
+test "OS contract keeps twenty twenty-fourth-loop network session passes satisfied" {
     const checklist = currentRepositoryTwentyFourthContract();
     try std.testing.expectEqual(@as(usize, 20), twenty_fourth_feature_count);
     try std.testing.expect(checklist.satisfied(.network_session_service_model));
@@ -7743,7 +7743,7 @@ test "2026 OS contract keeps twenty twenty-fourth-loop network session passes sa
     try std.testing.expect(checklist.complete());
 }
 
-test "2026 OS contract keeps thirty nine twenty-fifth-loop personal context passes satisfied" {
+test "OS contract keeps thirty nine twenty-fifth-loop personal context passes satisfied" {
     const checklist = currentRepositoryTwentyFifthContract();
     try std.testing.expectEqual(@as(usize, 39), twenty_fifth_feature_count);
     try std.testing.expect(checklist.satisfied(.personal_context_service_model));
@@ -7789,7 +7789,7 @@ test "2026 OS contract keeps thirty nine twenty-fifth-loop personal context pass
     try std.testing.expect(checklist.complete());
 }
 
-test "2026 OS contract proves AI policy and diagnostics stay private by default" {
+test "OS contract proves AI policy and diagnostics stay private by default" {
     var policies = policy_object.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "os-contract-policy",

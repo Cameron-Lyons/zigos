@@ -294,7 +294,6 @@ pub const Signature = struct {
         if (self.value_len < ED25519_SIGNATURE_BYTES) return self.value[0..0];
         return self.value[0..ED25519_SIGNATURE_BYTES];
     }
-
 };
 
 pub const SignatureLayout = struct {

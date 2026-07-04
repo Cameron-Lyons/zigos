@@ -1,8 +1,10 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("device_graph.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
+const native_util = @import("../core/util.zig");
 const network_policy = @import("network_policy.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -316,19 +318,110 @@ pub const OverlaySlot = struct {
     overlay: OverlayRecord = zeroOverlay(),
 };
 
+const WORKSPACE_POLICY_ARENA_INDEX_CAPACITY = MAX_WORKSPACE_POLICIES * 2;
+const REPLICA_ARENA_INDEX_CAPACITY = MAX_REPLICA_ENTRIES * 2;
+const CONFLICT_ARENA_INDEX_CAPACITY = MAX_CONFLICTS * 2;
+const DATABASE_CONTRACT_ARENA_INDEX_CAPACITY = MAX_DATABASE_CONTRACTS * 2;
+const OVERLAY_ARENA_INDEX_CAPACITY = MAX_OVERLAYS * 2;
+const TRANSPORT_FRAME_ARENA_INDEX_CAPACITY = MAX_TRANSPORT_FRAMES * 2;
+
+pub fn workspacePolicyArenaKey(workspace_id: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5354_4154_4557_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+pub fn overlayArenaKey(workspace_id: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5354_4154_454F_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+pub fn replicaArenaKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(device_id.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_id.serial);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, path_hash);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+pub fn conflictArenaKey(workspace_id: u64, device_id: principal.PrincipalId, path: []const u8) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xCF11_C700_5041_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(device_id.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_id.serial);
+    hash = appendHashBytes(hash, path);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+pub fn databaseContractArenaKey(contract_id: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xDBCA_0001_4944_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, contract_id);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+pub fn transportFrameArenaKey(frame_id: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5452_414E_4652_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, frame_id);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+fn appendHashBytes(hash: u64, bytes: []const u8) u64 {
+    var next = native_util.fnv1a64AppendU64LittleEndian(hash, bytes.len);
+    for (bytes) |byte| next = native_util.fnv1a64AppendByte(next, byte);
+    return next;
+}
+
+fn workspacePolicySlotKey(slot: *const WorkspacePolicySlot) u64 {
+    return workspacePolicyArenaKey(slot.policy.workspace_id);
+}
+
+fn replicaSlotKey(slot: *const ReplicaSlot) u64 {
+    return replicaArenaKey(slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash());
+}
+
+fn conflictSlotKey(slot: *const ConflictSlot) u64 {
+    return conflictArenaKey(slot.conflict.workspace_id, slot.conflict.device_id, slot.conflict.pathSlice());
+}
+
+fn databaseContractSlotKey(slot: *const DatabaseContractSlot) u64 {
+    return databaseContractArenaKey(slot.contract.id);
+}
+
+fn transportFrameSlotKey(slot: *const DurableTransportFrameSlot) u64 {
+    return transportFrameArenaKey(slot.frame.id);
+}
+
+fn overlaySlotKey(slot: *const OverlaySlot) u64 {
+    return overlayArenaKey(slot.overlay.workspace_id);
+}
+
+pub const WorkspacePolicyArena = indexed_arena.IndexedArenaWithKey(u64, WorkspacePolicySlot, MAX_WORKSPACE_POLICIES, WORKSPACE_POLICY_ARENA_INDEX_CAPACITY, workspacePolicySlotKey);
+pub const ReplicaArena = indexed_arena.IndexedArenaWithKey(u64, ReplicaSlot, MAX_REPLICA_ENTRIES, REPLICA_ARENA_INDEX_CAPACITY, replicaSlotKey);
+pub const ConflictArena = indexed_arena.IndexedArenaWithKey(u64, ConflictSlot, MAX_CONFLICTS, CONFLICT_ARENA_INDEX_CAPACITY, conflictSlotKey);
+pub const DatabaseContractArena = indexed_arena.IndexedArenaWithKey(u64, DatabaseContractSlot, MAX_DATABASE_CONTRACTS, DATABASE_CONTRACT_ARENA_INDEX_CAPACITY, databaseContractSlotKey);
+pub const OverlayArena = indexed_arena.IndexedArenaWithKey(u64, OverlaySlot, MAX_OVERLAYS, OVERLAY_ARENA_INDEX_CAPACITY, overlaySlotKey);
+pub const TransportFrameArena = indexed_arena.IndexedArenaWithKey(u64, DurableTransportFrameSlot, MAX_TRANSPORT_FRAMES, TRANSPORT_FRAME_ARENA_INDEX_CAPACITY, transportFrameSlotKey);
+
 pub const PersistentState = struct {
     next_overlay_id: u64 = 1,
     next_contract_id: u64 = 1,
     graph: device_graph.Graph = device_graph.Graph.init(),
     network_policies: network_policy.Directory = network_policy.Directory.init(),
-    workspace_policies: [MAX_WORKSPACE_POLICIES]WorkspacePolicySlot = [_]WorkspacePolicySlot{WorkspacePolicySlot{}} ** MAX_WORKSPACE_POLICIES,
-    replica_entries: [MAX_REPLICA_ENTRIES]ReplicaSlot = [_]ReplicaSlot{ReplicaSlot{}} ** MAX_REPLICA_ENTRIES,
-    conflicts: [MAX_CONFLICTS]ConflictSlot = [_]ConflictSlot{ConflictSlot{}} ** MAX_CONFLICTS,
-    database_contracts: [MAX_DATABASE_CONTRACTS]DatabaseContractSlot = [_]DatabaseContractSlot{DatabaseContractSlot{}} ** MAX_DATABASE_CONTRACTS,
-    overlays: [MAX_OVERLAYS]OverlaySlot = [_]OverlaySlot{OverlaySlot{}} ** MAX_OVERLAYS,
+    workspace_policies: WorkspacePolicyArena = WorkspacePolicyArena.init(),
+    replica_entries: ReplicaArena = ReplicaArena.init(),
+    conflicts: ConflictArena = ConflictArena.init(),
+    database_contracts: DatabaseContractArena = DatabaseContractArena.init(),
+    overlays: OverlayArena = OverlayArena.init(),
     next_transport_frame_id: u64 = 1,
-    outbound_transport_frames: [MAX_TRANSPORT_FRAMES]DurableTransportFrameSlot = [_]DurableTransportFrameSlot{DurableTransportFrameSlot{}} ** MAX_TRANSPORT_FRAMES,
-    inbound_transport_frames: [MAX_TRANSPORT_FRAMES]DurableTransportFrameSlot = [_]DurableTransportFrameSlot{DurableTransportFrameSlot{}} ** MAX_TRANSPORT_FRAMES,
+    outbound_transport_frames: TransportFrameArena = TransportFrameArena.init(),
+    inbound_transport_frames: TransportFrameArena = TransportFrameArena.init(),
 
     pub fn reset(self: *PersistentState) void {
         self.next_overlay_id = 1;
@@ -336,27 +429,13 @@ pub const PersistentState = struct {
         self.next_transport_frame_id = 1;
         self.graph.reset();
         self.network_policies.reset();
-        for (&self.workspace_policies) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.replica_entries) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.conflicts) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.database_contracts) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.overlays) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.outbound_transport_frames) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.inbound_transport_frames) |*slot| {
-            slot.* = .{};
-        }
+        self.workspace_policies.reset();
+        self.replica_entries.reset();
+        self.conflicts.reset();
+        self.database_contracts.reset();
+        self.overlays.reset();
+        self.outbound_transport_frames.reset();
+        self.inbound_transport_frames.reset();
     }
 };
 
@@ -389,7 +468,7 @@ pub const ResidentState = struct {
 
     pub fn userRootCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.graph.user_roots) |slot| {
+        for (self.persisted_state.graph.user_roots.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -397,7 +476,7 @@ pub const ResidentState = struct {
 
     pub fn deviceCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.graph.devices) |slot| {
+        for (self.persisted_state.graph.devices.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -413,7 +492,7 @@ pub const ResidentState = struct {
 
     pub fn workspacePolicyCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.workspace_policies) |slot| {
+        for (self.persisted_state.workspace_policies.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -421,7 +500,7 @@ pub const ResidentState = struct {
 
     pub fn replicaCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.replica_entries) |slot| {
+        for (self.persisted_state.replica_entries.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -429,7 +508,7 @@ pub const ResidentState = struct {
 
     pub fn conflictCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.conflicts) |slot| {
+        for (self.persisted_state.conflicts.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -437,7 +516,7 @@ pub const ResidentState = struct {
 
     pub fn databaseContractCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.database_contracts) |slot| {
+        for (self.persisted_state.database_contracts.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -445,7 +524,7 @@ pub const ResidentState = struct {
 
     pub fn overlayCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.overlays) |slot| {
+        for (self.persisted_state.overlays.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -453,7 +532,7 @@ pub const ResidentState = struct {
 
     pub fn outboundTransportFrameCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.outbound_transport_frames) |slot| {
+        for (self.persisted_state.outbound_transport_frames.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
@@ -461,7 +540,7 @@ pub const ResidentState = struct {
 
     pub fn inboundTransportFrameCount(self: *const ResidentState) usize {
         var count: usize = 0;
-        for (self.persisted_state.inbound_transport_frames) |slot| {
+        for (self.persisted_state.inbound_transport_frames.slots) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;

@@ -549,7 +549,7 @@ fn launchProvenance(
 }
 
 pub fn activeRevisionDigest(bundle: *const InstalledBundle) Digest {
-    return installedBundleRevisionDigest(bundle, "zigos.package.active-revision.v1");
+    return installedBundleRevisionDigest(bundle, "zigos.package.active-revision");
 }
 
 pub fn rollbackRequestForActive(bundle: *const InstalledBundle) RollbackRequest {
@@ -567,7 +567,7 @@ pub fn removeRequestForActive(bundle: *const InstalledBundle) RemoveRequest {
 }
 
 pub fn offboardRemovedBundleDigest(bundle: *const InstalledBundle) Digest {
-    return installedBundleRevisionDigest(bundle, "zigos.package.offboard.removed-bundle.v2");
+    return installedBundleRevisionDigest(bundle, "zigos.package.offboard.removed-bundle");
 }
 
 fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const u8) Digest {
@@ -721,15 +721,7 @@ fn publisherKeyWasRevoked(
     publisher: []const u8,
     signature: manifest.Signature,
 ) bool {
-    if (!signature.isComplete()) return false;
-    for (&trust_store.slots) |*slot| {
-        if (!slot.in_use or !slot.record.revoked) continue;
-        if (slot.record.publisher_len == 0) continue;
-        if (!std.mem.eql(u8, slot.record.publisherSlice(), publisher)) continue;
-        if (!std.mem.eql(u8, slot.record.public_key[0..], signature.publicKeySlice())) continue;
-        return true;
-    }
-    return false;
+    return trust_store.revokedPublisherSignature(publisher, signature);
 }
 
 fn bundleKey(bundle_id: []const u8) u64 {
