@@ -262,7 +262,7 @@ pub const AttestationVerifierMetadata = struct {
 
     pub fn digest(self: AttestationVerifierMetadata) crypto_hash.Digest {
         var hasher = crypto_hash.init();
-        crypto_hash.updateBytes(&hasher, "schema", "zigos.attestation-verifier-metadata.v1");
+        crypto_hash.updateBytes(&hasher, "schema", "zigos.attestation-verifier-metadata");
         crypto_hash.updateBytes(&hasher, "provider-name", self.provider_name);
         crypto_hash.updateBytes(&hasher, "key-id", self.key_id);
         crypto_hash.updateBytes(&hasher, "label", self.label);

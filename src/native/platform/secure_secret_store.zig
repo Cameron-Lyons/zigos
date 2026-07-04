@@ -6,8 +6,6 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_SECRETS: usize = 16;
 pub const MAX_HANDLES: usize = 32;
-const SECRET_ID_INDEX_CAPACITY: usize = MAX_SECRETS * 2;
-const HANDLE_ID_INDEX_CAPACITY: usize = MAX_HANDLES * 2;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_VALUE_BYTES: usize = 96;
 
@@ -83,8 +81,8 @@ const HandleSlot = struct {
     },
 };
 
-const SecretArena = indexed_arena.IndexedArena(SecretSlot, MAX_SECRETS, SECRET_ID_INDEX_CAPACITY, secretSlotIdKey);
-const HandleArena = indexed_arena.IndexedArena(HandleSlot, MAX_HANDLES, HANDLE_ID_INDEX_CAPACITY, handleSlotIdKey);
+const SecretArena = indexed_arena.IndexedArenaWithKey(u64, SecretSlot, MAX_SECRETS, MAX_SECRETS * 2, secretSlotId);
+const HandleArena = indexed_arena.IndexedArenaWithKey(u64, HandleSlot, MAX_HANDLES, MAX_HANDLES * 2, secretHandleSlotId);
 
 pub const Store = struct {
     next_secret_id: u64 = 1,
@@ -137,7 +135,8 @@ pub const Store = struct {
             secret.value_len = native_util.copyTextExact(&secret.value, raw) catch unreachable;
         }
 
-        const slot = self.secrets.reserve(secret_id) orelse return error.SecretTableFull;
+        const slot_index = self.secrets.reserveIndex(secret_id) orelse return error.SecretTableFull;
+        const slot = &self.secrets.slots[slot_index];
         slot.secret = secret;
         self.advanceNextSecretIdFrom(secret_id);
         return &slot.secret;
@@ -160,7 +159,8 @@ pub const Store = struct {
             .hardware_backed = secret.hardware_backed,
             .export_allowed = allow_raw_export and secret.exportable,
         };
-        const slot = self.handles.reserve(handle_id) orelse return error.HandleTableFull;
+        const slot_index = self.handles.reserveIndex(handle_id) orelse return error.HandleTableFull;
+        const slot = &self.handles.slots[slot_index];
         slot.handle = handle;
         self.advanceNextHandleIdFrom(handle_id);
         return handle;
@@ -189,7 +189,7 @@ pub const Store = struct {
         var secret_id = normalizeSecretStoreId(self.next_secret_id);
         var attempts: usize = 0;
         while (attempts <= MAX_SECRETS) : (attempts += 1) {
-            if (self.secrets.getConst(secret_id) == null) return secret_id;
+            if (self.describeSecret(secret_id) == null) return secret_id;
             secret_id = nextSecretStoreIdAfter(secret_id);
         }
         return null;
@@ -201,7 +201,7 @@ pub const Store = struct {
         var handle_id = normalizeSecretStoreId(self.next_handle_id);
         var attempts: usize = 0;
         while (attempts <= MAX_HANDLES) : (attempts += 1) {
-            if (self.handles.getConst(handle_id) == null) return handle_id;
+            if (self.describeHandle(handle_id) == null) return handle_id;
             handle_id = nextSecretStoreIdAfter(handle_id);
         }
         return null;
@@ -226,11 +226,11 @@ pub const Store = struct {
     }
 };
 
-fn secretSlotIdKey(slot: *const SecretSlot) u64 {
+fn secretSlotId(slot: *const SecretSlot) u64 {
     return slot.secret.id;
 }
 
-fn handleSlotIdKey(slot: *const HandleSlot) u64 {
+fn secretHandleSlotId(slot: *const HandleSlot) u64 {
     return slot.handle.id;
 }
 
@@ -391,11 +391,10 @@ test "secure secret store stages records and wraps ids without publishing zero" 
     try std.testing.expect(store.describeHandle(0) == null);
 
     var full_secrets = Store.init();
+    var label_buffer: [MAX_LABEL_BYTES]u8 = undefined;
     for (0..MAX_SECRETS) |index| {
-        const slot = full_secrets.secrets.reserve(@intCast(index + 10)) orelse unreachable;
-        slot.secret = zeroSecret();
-        slot.secret.id = @intCast(index + 10);
-        slot.secret.owner = owner;
+        const label = try std.fmt.bufPrint(&label_buffer, "full-secret-{d}", .{index});
+        _ = try full_secrets.importSecret(owner, label, "private full secret", false, true);
     }
     const secret_next_before = full_secrets.next_secret_id;
     try std.testing.expectError(error.SecretTableFull, full_secrets.importSecret(
@@ -411,18 +410,44 @@ test "secure secret store stages records and wraps ids without publishing zero" 
     var full_handles = Store.init();
     const full_handle_secret = try full_handles.importSecret(owner, "full-handle", "private full handle", false, true);
     for (0..MAX_HANDLES) |index| {
-        const slot = full_handles.handles.reserve(@intCast(index + 10)) orelse unreachable;
-        slot.handle = .{
-            .id = @intCast(index + 10),
-            .secret_id = full_handle_secret.id,
-            .holder = holder,
-            .task_id = @intCast(100 + index),
-            .hardware_backed = false,
-            .export_allowed = true,
-        };
+        _ = try full_handles.lendHandle(full_handle_secret.id, holder, @intCast(100 + index), true);
     }
     const handle_next_before = full_handles.next_handle_id;
     try std.testing.expectError(error.HandleTableFull, full_handles.lendHandle(full_handle_secret.id, holder, 94, true));
     try std.testing.expectEqual(handle_next_before, full_handles.next_handle_id);
     try std.testing.expect(full_handles.describeHandle(handle_next_before) == null);
+}
+
+test "secure secret store indexes secrets and handles through full tables" {
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 4 };
+    const holder = principal.PrincipalId{ .kind = .app, .serial = 46 };
+
+    var first_secret_id: u64 = 0;
+    var last_secret_id: u64 = 0;
+    var index: usize = 0;
+    while (index < MAX_SECRETS) : (index += 1) {
+        const secret = try store.importSecret(owner, "indexed-secret", "portable material", false, true);
+        if (index == 0) first_secret_id = secret.id;
+        last_secret_id = secret.id;
+    }
+    try std.testing.expect(store.describeSecret(first_secret_id) != null);
+    try std.testing.expect(store.describeSecret(last_secret_id) != null);
+    try std.testing.expectError(error.SecretTableFull, store.importSecret(owner, "overflow-secret", "portable material", false, true));
+
+    var first_handle_id: u64 = 0;
+    var last_handle_id: u64 = 0;
+    index = 0;
+    while (index < MAX_HANDLES) : (index += 1) {
+        const handle = try store.lendHandle(first_secret_id, holder, 200 + @as(u64, @intCast(index)), true);
+        if (index == 0) first_handle_id = handle.id;
+        last_handle_id = handle.id;
+    }
+    try std.testing.expect(store.describeHandle(first_handle_id) != null);
+    try std.testing.expect(store.describeHandle(last_handle_id) != null);
+    try std.testing.expectEqualStrings("portable material", try store.exportRaw(last_handle_id, .{
+        .holder = holder,
+        .task_id = 200 + @as(u64, @intCast(MAX_HANDLES - 1)),
+    }));
+    try std.testing.expectError(error.HandleTableFull, store.lendHandle(first_secret_id, holder, 999, true));
 }

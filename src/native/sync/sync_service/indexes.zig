@@ -5,70 +5,25 @@ const native_util = @import("../../core/util.zig");
 const principal = @import("../../core/principal.zig");
 const state_support = @import("../sync_state_support.zig");
 const contracts = @import("contracts.zig");
-const workspace = @import("../../storage/workspace.zig");
 
 pub const replica_index_capacity: usize = state_support.MAX_REPLICA_ENTRIES * 2;
-pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
-pub const replica_scope_index_capacity: usize = state_support.MAX_REPLICA_ENTRIES * 2;
-pub const ReplicaScopeIndex = indexed_arena.MultimapIndex(
-    state_support.MAX_REPLICA_ENTRIES,
-    state_support.MAX_REPLICA_ENTRIES,
-    replica_scope_index_capacity,
-);
 pub const workspace_policy_index_capacity: usize = state_support.MAX_WORKSPACE_POLICIES * 2;
-pub const WorkspacePolicyIndex = indexed_arena.UniqueIndex(workspace_policy_index_capacity);
 pub const overlay_index_capacity: usize = state_support.MAX_OVERLAYS * 2;
-pub const OverlayIndex = indexed_arena.UniqueIndex(overlay_index_capacity);
 pub const database_contract_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
-pub const DatabaseContractIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
-pub const database_contract_equivalent_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
-pub const DatabaseContractEquivalentIndex = indexed_arena.UniqueIndex(database_contract_equivalent_index_capacity);
-pub const database_contract_bundle_index_capacity: usize = state_support.MAX_DATABASE_CONTRACTS * 2;
-pub const DatabaseContractBundleIndex = indexed_arena.MultimapIndex(
-    state_support.MAX_DATABASE_CONTRACTS,
-    state_support.MAX_DATABASE_CONTRACTS,
-    database_contract_bundle_index_capacity,
-);
 pub const conflict_index_capacity: usize = state_support.MAX_CONFLICTS * 2;
-pub const ConflictIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
-pub const conflict_object_index_capacity: usize = state_support.MAX_CONFLICTS * 2;
-pub const ConflictObjectIndex = indexed_arena.UniqueIndex(conflict_object_index_capacity);
-pub const conflict_scope_index_capacity: usize = state_support.MAX_CONFLICTS * 2;
-pub const ConflictScopeIndex = indexed_arena.MultimapIndex(
-    state_support.MAX_CONFLICTS,
-    state_support.MAX_CONFLICTS,
-    conflict_scope_index_capacity,
-);
-pub const inbound_transport_duplicate_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
-pub const InboundTransportDuplicateIndex = indexed_arena.UniqueIndex(inbound_transport_duplicate_index_capacity);
-pub const inbound_transport_high_water_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
-pub const InboundTransportHighWaterIndex = indexed_arena.UniqueIndex(inbound_transport_high_water_index_capacity);
-pub const inbound_transport_target_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
-pub const InboundTransportTargetIndex = indexed_arena.MultimapIndex(
-    state_support.MAX_TRANSPORT_FRAMES,
-    state_support.MAX_TRANSPORT_FRAMES,
-    inbound_transport_target_index_capacity,
-);
-pub const outbound_transport_frame_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
-pub const OutboundTransportFrameIndex = indexed_arena.UniqueIndex(outbound_transport_frame_index_capacity);
-pub const outbound_transport_target_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
-pub const OutboundTransportTargetIndex = indexed_arena.MultimapIndex(
-    state_support.MAX_TRANSPORT_FRAMES,
-    state_support.MAX_TRANSPORT_FRAMES,
-    outbound_transport_target_index_capacity,
-);
-pub const outbound_transport_path_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
-pub const OutboundTransportPathIndex = indexed_arena.MultimapIndex(
-    state_support.MAX_TRANSPORT_FRAMES,
-    state_support.MAX_TRANSPORT_FRAMES,
-    outbound_transport_path_index_capacity,
-);
-pub const inbound_transport_path_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
-pub const InboundTransportPathIndex = indexed_arena.MultimapIndex(
-    state_support.MAX_TRANSPORT_FRAMES,
-    state_support.MAX_TRANSPORT_FRAMES,
-    inbound_transport_path_index_capacity,
-);
+pub const transport_frame_index_capacity: usize = state_support.MAX_TRANSPORT_FRAMES * 2;
+pub const WorkspacePolicyIndex = indexed_arena.UniqueIndex(workspace_policy_index_capacity);
+pub const OverlayIndex = indexed_arena.UniqueIndex(overlay_index_capacity);
+pub const DatabaseContractIdIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
+pub const DatabaseContractBundleIndex = indexed_arena.MultimapIndex(state_support.MAX_DATABASE_CONTRACTS, state_support.MAX_DATABASE_CONTRACTS, database_contract_index_capacity);
+pub const DatabaseContractEquivalentIndex = indexed_arena.UniqueIndex(database_contract_index_capacity);
+pub const ConflictPathIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
+pub const ConflictObjectIndex = indexed_arena.UniqueIndex(conflict_index_capacity);
+pub const ConflictScopeIndex = indexed_arena.MultimapIndex(state_support.MAX_CONFLICTS, state_support.MAX_CONFLICTS, conflict_index_capacity);
+pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
+pub const ReplicaScopeIndex = CompactMultimapIndex(state_support.MAX_REPLICA_ENTRIES, state_support.MAX_REPLICA_ENTRIES);
+pub const TransportFramePathIndex = CompactMultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES);
+pub const TransportFrameTargetIndex = CompactMultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -90,41 +45,8 @@ pub const ReplicaScopeLookup = struct {
     device_id: principal.PrincipalId,
 };
 
-pub const ConflictLookup = struct {
-    workspace_id: u64,
-    device_id: principal.PrincipalId,
-    path: []const u8,
-    path_hash: u64,
-};
-
-pub const ConflictObjectLookup = struct {
-    workspace_id: u64,
-    device_id: principal.PrincipalId,
-    object_id: u64,
-};
-
-pub const ConflictScopeLookup = struct {
-    workspace_id: u64,
-    device_id: principal.PrincipalId,
-};
-
-pub const InboundTransportDuplicateLookup = struct {
-    workspace_id: u64,
-    source_device: principal.PrincipalId,
-    target_device: principal.PrincipalId,
-    source_frame_id: u64,
-};
-
-pub const InboundTransportScopeLookup = struct {
-    workspace_id: u64,
-    source_device: principal.PrincipalId,
-    target_device: principal.PrincipalId,
-};
-
-const ReplicaIndexKey = struct {
-    workspace_id: u64 = 0,
-    device_id: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
-    path_hash: u64 = 0,
+pub const DatabaseContractLookup = struct {
+    id: u64,
 };
 
 pub const DatabaseContractEquivalentLookup = struct {
@@ -154,35 +76,8 @@ pub fn replicaScopeSlotMatches(context: ReplicaScopeLookup, slot: *const state_s
         slot.entry.device_id.eql(context.device_id);
 }
 
-pub fn conflictSlotMatches(context: ConflictLookup, slot: *const state_support.ConflictSlot) bool {
-    return slot.conflict.workspace_id == context.workspace_id and
-        slot.conflict.device_id.eql(context.device_id) and
-        conflictPathHash(&slot.conflict) == context.path_hash and
-        std.mem.eql(u8, slot.conflict.pathSlice(), context.path);
-}
-
-pub fn conflictObjectSlotMatches(context: ConflictObjectLookup, slot: *const state_support.ConflictSlot) bool {
-    return slot.conflict.workspace_id == context.workspace_id and
-        slot.conflict.device_id.eql(context.device_id) and
-        slot.conflict.object_id == context.object_id;
-}
-
-pub fn conflictScopeSlotMatches(context: ConflictScopeLookup, slot: *const state_support.ConflictSlot) bool {
-    return slot.conflict.workspace_id == context.workspace_id and
-        slot.conflict.device_id.eql(context.device_id);
-}
-
-pub fn inboundTransportDuplicateSlotMatches(context: InboundTransportDuplicateLookup, slot: *const state_support.DurableTransportFrameSlot) bool {
-    return slot.frame.workspace_id == context.workspace_id and
-        slot.frame.source_frame_id == context.source_frame_id and
-        slot.frame.source_device.eql(context.source_device) and
-        slot.frame.target_device.eql(context.target_device);
-}
-
-pub fn inboundTransportScopeSlotMatches(context: InboundTransportScopeLookup, slot: *const state_support.DurableTransportFrameSlot) bool {
-    return slot.frame.workspace_id == context.workspace_id and
-        slot.frame.source_device.eql(context.source_device) and
-        slot.frame.target_device.eql(context.target_device);
+pub fn databaseContractSlotMatches(context: DatabaseContractLookup, slot: *const state_support.DatabaseContractSlot) bool {
+    return slot.contract.id == context.id;
 }
 
 pub fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalentLookup, slot: *const state_support.DatabaseContractSlot) bool {
@@ -192,188 +87,233 @@ pub fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalent
         contracts.signatureEql(slot.contract.signature, context.signature);
 }
 
-fn replicaIndexKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) ReplicaIndexKey {
-    return .{
-        .workspace_id = workspace_id,
-        .device_id = device_id,
-        .path_hash = path_hash,
-    };
-}
-
 pub fn replicaIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
-    return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, path_hash)));
+    return state_support.replicaArenaKey(workspace_id, device_id, path_hash);
 }
 
-pub fn replicaScopeIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId) u64 {
+pub fn replicaScopeLookupKey(workspace_id: u64, device_id: principal.PrincipalId) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5250_4C43_5343_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(device_id.kind));
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_id.serial);
+    hash = appendPrincipal(hash, device_id);
     return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn conflictIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
-    return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, path_hash)));
-}
-
-pub fn conflictObjectIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, object_id: u64) u64 {
-    return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, object_id)));
-}
-
-pub fn conflictScopeIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId) u64 {
+pub fn workspacePolicyLookupKey(workspace_id: u64) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xA11C_4F4B_5350_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(device_id.kind));
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_id.serial);
     return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn inboundTransportDuplicateIndexLookupKey(
-    workspace_id: u64,
-    source_device: principal.PrincipalId,
-    target_device: principal.PrincipalId,
-    source_frame_id: u64,
-) u64 {
-    var hash = inboundTransportScopeHash(workspace_id, source_device, target_device);
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, source_frame_id);
+pub fn overlayLookupKey(workspace_id: u64) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xA11C_4F4B_4F56_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
     return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn inboundTransportHighWaterIndexLookupKey(
-    workspace_id: u64,
-    source_device: principal.PrincipalId,
-    target_device: principal.PrincipalId,
-) u64 {
-    return indexed_arena.nonZeroKey(inboundTransportScopeHash(workspace_id, source_device, target_device));
+pub fn databaseContractIdLookupKey(contract_id: u64) u64 {
+    return state_support.databaseContractArenaKey(contract_id);
 }
 
-pub fn outboundTransportFrameIndexLookupKey(frame_id: u64) u64 {
-    return indexed_arena.nonZeroKey(frame_id);
-}
-
-pub fn outboundTransportTargetIndexLookupKey(workspace_id: u64, target_device: principal.PrincipalId) u64 {
+pub fn databaseContractBundleLookupKey(workspace_id: u64, bundle_id: []const u8) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xDBCA_0001_4255_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(target_device.kind));
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, target_device.serial);
+    hash = appendHashBytes(hash, bundle_id);
     return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn outboundTransportPathIndexLookupKey(workspace_id: u64, target_device: principal.PrincipalId, path: []const u8) u64 {
-    const target_key = outboundTransportTargetIndexLookupKey(workspace_id, target_device);
-    return indexed_arena.nonZeroKey(native_util.fnv1a64WithSeed(target_key, path));
-}
-
-pub fn inboundTransportPathIndexLookupKey(workspace_id: u64, target_device: principal.PrincipalId, path: []const u8) u64 {
-    return outboundTransportPathIndexLookupKey(workspace_id, target_device, path);
-}
-
-pub fn inboundTransportTargetIndexLookupKey(workspace_id: u64, target_device: principal.PrincipalId) u64 {
-    return outboundTransportTargetIndexLookupKey(workspace_id, target_device);
-}
-
-fn inboundTransportScopeHash(
-    workspace_id: u64,
-    source_device: principal.PrincipalId,
-    target_device: principal.PrincipalId,
-) u64 {
-    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(source_device.kind));
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, source_device.serial);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(target_device.kind));
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, target_device.serial);
-    return hash;
-}
-
-pub fn workspacePolicyIndexLookupKey(workspace_id: u64) u64 {
-    return workspaceScopedIndexKey(workspace_id);
-}
-
-pub fn overlayIndexLookupKey(workspace_id: u64) u64 {
-    return workspaceScopedIndexKey(workspace_id);
-}
-
-pub fn databaseContractIndexLookupKey(contract_id: u64) u64 {
-    return indexed_arena.nonZeroKey(contract_id);
-}
-
-pub fn databaseContractEquivalentIndexLookupKey(
+pub fn databaseContractEquivalentLookupKey(
     workspace_id: u64,
     bundle_id: []const u8,
     label: []const u8,
     signature: manifest.Signature,
 ) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xDBCA_0001_4551_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = appendBytesWithLength(hash, bundle_id);
-    hash = appendBytesWithLength(hash, label);
-    hash = appendBytesWithLength(hash, signature.format);
-    hash = appendBytesWithLength(hash, signature.signer);
-    hash = appendBytesWithLength(hash, signature.publicKeySlice());
-    hash = appendBytesWithLength(hash, signature.valueSlice());
+    hash = appendHashBytes(hash, bundle_id);
+    hash = appendHashBytes(hash, label);
+    hash = appendSignature(hash, signature);
     return indexed_arena.nonZeroKey(hash);
 }
 
-pub fn databaseContractBundleIndexLookupKey(workspace_id: u64, bundle_id: []const u8) u64 {
+pub fn conflictPathLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path: []const u8) u64 {
+    return state_support.conflictArenaKey(workspace_id, device_id, path);
+}
+
+pub fn conflictObjectLookupKey(workspace_id: u64, device_id: principal.PrincipalId, object_id: u64) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xCF11_C700_4F42_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = appendBytesWithLength(hash, bundle_id);
+    hash = appendPrincipal(hash, device_id);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, object_id);
     return indexed_arena.nonZeroKey(hash);
 }
 
-fn replicaIndexHash(key: ReplicaIndexKey) u64 {
+pub fn conflictScopeLookupKey(workspace_id: u64, device_id: principal.PrincipalId) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(key.device_id.kind));
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.device_id.serial);
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.path_hash);
-    return hash;
-}
-
-fn workspaceScopedIndexKey(workspace_id: u64) u64 {
-    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xCF11_C700_5343_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, device_id);
     return indexed_arena.nonZeroKey(hash);
 }
 
-fn appendBytesWithLength(hash: u64, bytes: []const u8) u64 {
-    const with_len = native_util.fnv1a64AppendU64LittleEndian(hash, @intCast(bytes.len));
-    return native_util.fnv1a64WithSeed(with_len, bytes);
+pub fn transportFramePathLookupKey(workspace_id: u64, target_device: principal.PrincipalId, path: []const u8) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5452_4652_5041_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, target_device);
+    hash = appendHashBytes(hash, path);
+    return indexed_arena.nonZeroKey(hash);
 }
 
-fn conflictPathHash(conflict: *const state_support.ConflictRecord) u64 {
-    return workspace.pathHash(conflict.pathSlice());
+pub fn transportFrameTargetLookupKey(workspace_id: u64, target_device: principal.PrincipalId) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5452_4652_5447_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, target_device);
+    return indexed_arena.nonZeroKey(hash);
 }
 
-test "sync service lookup indexes use nonzero workspace keys" {
-    try std.testing.expect(workspacePolicyIndexLookupKey(0) != 0);
-    try std.testing.expect(overlayIndexLookupKey(42) != 0);
-    try std.testing.expectEqual(workspacePolicyIndexLookupKey(42), overlayIndexLookupKey(42));
-    try std.testing.expect(replicaScopeIndexLookupKey(7, .{ .kind = .device, .serial = 2 }) != 0);
-    try std.testing.expect(conflictIndexLookupKey(7, .{ .kind = .device, .serial = 2 }, 99) != 0);
-    try std.testing.expect(conflictObjectIndexLookupKey(7, .{ .kind = .device, .serial = 2 }, 99) != 0);
-    try std.testing.expect(conflictScopeIndexLookupKey(7, .{ .kind = .device, .serial = 2 }) != 0);
-    try std.testing.expect(inboundTransportDuplicateIndexLookupKey(
-        7,
-        .{ .kind = .device, .serial = 2 },
-        .{ .kind = .device, .serial = 3 },
-        99,
-    ) != 0);
-    try std.testing.expect(inboundTransportHighWaterIndexLookupKey(
-        7,
-        .{ .kind = .device, .serial = 2 },
-        .{ .kind = .device, .serial = 3 },
-    ) != 0);
-    try std.testing.expect(inboundTransportTargetIndexLookupKey(7, .{ .kind = .device, .serial = 3 }) != 0);
-    try std.testing.expect(outboundTransportFrameIndexLookupKey(0) != 0);
-    try std.testing.expect(outboundTransportTargetIndexLookupKey(7, .{ .kind = .device, .serial = 3 }) != 0);
-    try std.testing.expect(outboundTransportPathIndexLookupKey(7, .{ .kind = .device, .serial = 3 }, "notes/today.md") != 0);
-    try std.testing.expect(inboundTransportPathIndexLookupKey(7, .{ .kind = .device, .serial = 3 }, "notes/today.md") != 0);
-    try std.testing.expect(databaseContractIndexLookupKey(0) != 0);
-    const signature = manifest.Signature{ .signer = "test-signer" };
-    try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != 0);
-    try std.testing.expect(databaseContractEquivalentIndexLookupKey(7, "app.notes", "main", signature) != databaseContractEquivalentIndexLookupKey(7, "app.notes", "other", signature));
-    try std.testing.expect(databaseContractBundleIndexLookupKey(7, "app.notes") != 0);
-    try std.testing.expect(databaseContractBundleIndexLookupKey(7, "app.notes") != databaseContractBundleIndexLookupKey(8, "app.notes"));
+fn appendSignature(hash: u64, signature: manifest.Signature) u64 {
+    var next = appendHashBytes(hash, signature.format);
+    next = appendHashBytes(next, signature.signer);
+    next = appendHashBytes(next, signature.publicKeySlice());
+    next = appendHashBytes(next, signature.valueSlice());
+    return next;
+}
+
+fn appendHashBytes(hash: u64, bytes: []const u8) u64 {
+    var next = native_util.fnv1a64AppendU64LittleEndian(hash, bytes.len);
+    for (bytes) |byte| next = native_util.fnv1a64AppendByte(next, byte);
+    return next;
+}
+
+fn appendPrincipal(hash: u64, value: principal.PrincipalId) u64 {
+    var next = native_util.fnv1a64AppendByte(hash, @intFromEnum(value.kind));
+    next = native_util.fnv1a64AppendU64LittleEndian(next, value.serial);
+    return next;
+}
+
+fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity: usize) type {
+    if (link_capacity == 0) @compileError("compact multimap index requires at least one linked slot");
+    if (bucket_capacity == 0) @compileError("compact multimap index requires at least one bucket");
+    if (link_capacity >= std.math.maxInt(u8)) @compileError("compact multimap index stores links as u8");
+
+    return struct {
+        const Self = @This();
+        const empty_link = std.math.maxInt(u8);
+
+        const Bucket = struct {
+            key: u64 = 0,
+            head: u8 = empty_link,
+            tail: u8 = empty_link,
+            count: u8 = 0,
+        };
+
+        buckets: [bucket_capacity]Bucket = [_]Bucket{Bucket{}} ** bucket_capacity,
+        next_by_slot: [link_capacity]u8 = [_]u8{empty_link} ** link_capacity,
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn reset(self: *Self) void {
+            self.* = Self.init();
+        }
+
+        pub fn count(self: *const Self, key: u64) usize {
+            const entry = self.bucketConst(key) orelse return 0;
+            return entry.count;
+        }
+
+        pub fn head(self: *const Self, key: u64) usize {
+            const entry = self.bucketConst(key) orelse return indexed_arena.no_index;
+            return decode(entry.head);
+        }
+
+        pub fn next(self: *const Self, slot_index: usize) usize {
+            if (slot_index >= link_capacity) return indexed_arena.no_index;
+            return decode(self.next_by_slot[slot_index]);
+        }
+
+        pub fn append(self: *Self, key: u64, slot_index: usize) bool {
+            if (key == 0 or slot_index >= link_capacity) return false;
+            const entry = self.findOrCreateBucket(key) orelse return false;
+            const encoded = encode(slot_index);
+            self.next_by_slot[slot_index] = empty_link;
+            if (entry.tail == empty_link) {
+                entry.head = encoded;
+            } else {
+                self.next_by_slot[decode(entry.tail)] = encoded;
+            }
+            entry.tail = encoded;
+            entry.count += 1;
+            return true;
+        }
+
+        pub fn remove(self: *Self, key: u64, slot_index: usize) bool {
+            if (key == 0 or slot_index >= link_capacity) return false;
+            const entry = self.bucket(key) orelse return false;
+            const encoded = encode(slot_index);
+            var previous: u8 = empty_link;
+            var current = entry.head;
+            while (current != empty_link) : (current = self.next_by_slot[decode(current)]) {
+                if (current == encoded) {
+                    const next_link = self.next_by_slot[decode(current)];
+                    if (previous == empty_link) {
+                        entry.head = next_link;
+                    } else {
+                        self.next_by_slot[decode(previous)] = next_link;
+                    }
+                    if (entry.tail == current) entry.tail = previous;
+                    self.next_by_slot[decode(current)] = empty_link;
+                    entry.count -= 1;
+                    if (entry.count == 0) entry.* = .{};
+                    return true;
+                }
+                previous = current;
+            }
+            return false;
+        }
+
+        fn bucket(self: *Self, key: u64) ?*Bucket {
+            const index = self.bucketIndex(key) orelse return null;
+            return &self.buckets[index];
+        }
+
+        fn bucketConst(self: *const Self, key: u64) ?*const Bucket {
+            const index = self.bucketIndex(key) orelse return null;
+            return &self.buckets[index];
+        }
+
+        fn bucketIndex(self: *const Self, key: u64) ?usize {
+            if (key == 0) return null;
+            for (self.buckets, 0..) |bucket_slot, bucket_index| {
+                if (bucket_slot.key == key) return bucket_index;
+            }
+            return null;
+        }
+
+        fn findOrCreateBucket(self: *Self, key: u64) ?*Bucket {
+            if (self.bucket(key)) |slot| return slot;
+            for (&self.buckets) |*slot| {
+                if (slot.key != 0) continue;
+                slot.* = .{ .key = key };
+                return slot;
+            }
+            return null;
+        }
+
+        fn encode(slot_index: usize) u8 {
+            return @intCast(slot_index);
+        }
+
+        fn decode(link: u8) usize {
+            return if (link == empty_link) indexed_arena.no_index else @as(usize, link);
+        }
+    };
 }

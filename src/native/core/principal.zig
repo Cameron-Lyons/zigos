@@ -1,6 +1,8 @@
 const std = @import("std");
 const hash_seeds = @import("hash_seeds.zig");
+const indexed_arena = @import("indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
+const native_util = @import("util.zig");
 const signing = @import("signing.zig");
 
 pub const MAX_PRINCIPAL_KEYS = 32;
@@ -79,6 +81,26 @@ const PrincipalKeySlot = struct {
     record: PrincipalKeyRecord = undefined,
 };
 
+fn principalIndexKey(principal_id: PrincipalId) u64 {
+    const bytes = principal_id.keyBytes();
+    return indexed_arena.nonZeroKey(native_util.fnv1a64(&bytes));
+}
+
+fn principalPublicKeyIndexKey(principal_id: PrincipalId, public_key: signing.PublicKey) u64 {
+    const principal_bytes = principal_id.keyBytes();
+    var hash = native_util.fnv1a64(&principal_bytes);
+    hash = native_util.fnv1a64WithSeed(hash, public_key[0..]);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+fn principalKeySlotKey(slot: *const PrincipalKeySlot) u64 {
+    return principalPublicKeyIndexKey(slot.record.principal_id, slot.record.public_key);
+}
+
+fn publisherIndexKey(publisher: []const u8) u64 {
+    return indexed_arena.nonZeroKey(native_util.fnv1a64(publisher));
+}
+
 pub const KeyringError = error{
     KeyringFull,
     PublisherTooLong,
@@ -86,8 +108,15 @@ pub const KeyringError = error{
     PrincipalKeyNotFound,
 };
 
+const PRINCIPAL_KEY_INDEX_CAPACITY = MAX_PRINCIPAL_KEYS * 2;
+const PrincipalKeyArena = indexed_arena.IndexedArenaWithKey(u64, PrincipalKeySlot, MAX_PRINCIPAL_KEYS, PRINCIPAL_KEY_INDEX_CAPACITY, principalKeySlotKey);
+const PrincipalKeyPrincipalIndex = indexed_arena.MultimapIndex(MAX_PRINCIPAL_KEYS, MAX_PRINCIPAL_KEYS, PRINCIPAL_KEY_INDEX_CAPACITY);
+const PrincipalKeyPublisherIndex = indexed_arena.MultimapIndex(MAX_PRINCIPAL_KEYS, MAX_PRINCIPAL_KEYS, PRINCIPAL_KEY_INDEX_CAPACITY);
+
 pub const Keyring = struct {
-    slots: [MAX_PRINCIPAL_KEYS]PrincipalKeySlot = [_]PrincipalKeySlot{.{}} ** MAX_PRINCIPAL_KEYS,
+    slots: PrincipalKeyArena = PrincipalKeyArena.init(),
+    principal_index: PrincipalKeyPrincipalIndex = PrincipalKeyPrincipalIndex.init(),
+    publisher_index: PrincipalKeyPublisherIndex = PrincipalKeyPublisherIndex.init(),
 
     pub fn init() Keyring {
         return .{};
@@ -127,8 +156,12 @@ pub const Keyring = struct {
 
     pub fn revokePrincipal(self: *Keyring, principal_id: PrincipalId) KeyringError!void {
         var found = false;
-        for (&self.slots) |*slot| {
-            if (!slot.in_use or !slot.record.principal_id.eql(principal_id)) continue;
+        var slot_index = self.principal_index.head(principalIndexKey(principal_id));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.principal_index.next(slot_index)) {
+            if (slot_index >= self.slots.slots.len) native_util.impossibleByInvariant("principal key principal index points outside key slots");
+            const slot = &self.slots.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("principal key principal index points at a free key slot");
+            if (!slot.record.principal_id.eql(principal_id)) continue;
             slot.record.revoked = true;
             slot.record.revocation_generation +|= 1;
             found = true;
@@ -137,9 +170,12 @@ pub const Keyring = struct {
     }
 
     pub fn isPolicyAuthorityRoot(self: *const Keyring, principal_id: PrincipalId) bool {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and
-                slot.record.policy_authority_root and
+        var slot_index = self.principal_index.head(principalIndexKey(principal_id));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.principal_index.next(slot_index)) {
+            if (slot_index >= self.slots.slots.len) native_util.impossibleByInvariant("principal key principal index points outside key slots");
+            const slot = &self.slots.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("principal key principal index points at a free key slot");
+            if (slot.record.policy_authority_root and
                 !slot.record.revoked and
                 slot.record.principal_id.eql(principal_id))
             {
@@ -154,48 +190,84 @@ pub const Keyring = struct {
         principal_id: PrincipalId,
         public_key: signing.PublicKey,
     ) bool {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and
-                slot.record.policy_authority_root and
-                !slot.record.revoked and
-                slot.record.principal_id.eql(principal_id) and
-                std.mem.eql(u8, slot.record.public_key[0..], public_key[0..]))
-            {
-                return true;
-            }
-        }
-        return false;
+        const slot = self.slots.getConst(principalPublicKeyIndexKey(principal_id, public_key)) orelse return false;
+        return slot.record.policy_authority_root and
+            !slot.record.revoked and
+            slot.record.principal_id.eql(principal_id) and
+            std.mem.eql(u8, slot.record.public_key[0..], public_key[0..]);
     }
 
     pub fn trustedPublisherSignature(self: *const Keyring, publisher: []const u8, signature: manifest.Signature) bool {
         if (!signature.isComplete()) return false;
-        for (&self.slots) |*slot| {
-            if (!slot.in_use or slot.record.revoked) continue;
+        return self.publisherSignatureMatches(publisher, signature.ed25519PublicKeySlice(), false);
+    }
+
+    pub fn revokedPublisherSignature(self: *const Keyring, publisher: []const u8, signature: manifest.Signature) bool {
+        if (!signature.isComplete()) return false;
+        return self.publisherSignatureMatches(publisher, signature.publicKeySlice(), true);
+    }
+
+    fn publisherSignatureMatches(
+        self: *const Keyring,
+        publisher: []const u8,
+        public_key: []const u8,
+        revoked: bool,
+    ) bool {
+        var slot_index = self.publisher_index.head(publisherIndexKey(publisher));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.publisher_index.next(slot_index)) {
+            if (slot_index >= self.slots.slots.len) native_util.impossibleByInvariant("principal key publisher index points outside key slots");
+            const slot = &self.slots.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("principal key publisher index points at a free key slot");
+            if (slot.record.revoked != revoked) continue;
             if (slot.record.publisher_len == 0) continue;
             if (!std.mem.eql(u8, slot.record.publisherSlice(), publisher)) continue;
-            if (!std.mem.eql(u8, slot.record.public_key[0..], signature.ed25519PublicKeySlice())) continue;
+            if (!std.mem.eql(u8, slot.record.public_key[0..], public_key)) continue;
             return true;
         }
         return false;
     }
 
     fn put(self: *Keyring, record: PrincipalKeyRecord) KeyringError!*PrincipalKeyRecord {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and
-                slot.record.principal_id.eql(record.principal_id) and
-                std.mem.eql(u8, slot.record.public_key[0..], record.public_key[0..]))
+        const record_key = principalPublicKeyIndexKey(record.principal_id, record.public_key);
+        if (self.slots.slotIndexOf(record_key)) |slot_index| {
+            const slot = &self.slots.slots[slot_index];
+            if (!slot.record.principal_id.eql(record.principal_id) or
+                !std.mem.eql(u8, slot.record.public_key[0..], record.public_key[0..]))
             {
-                slot.record = record;
-                return &slot.record;
+                native_util.impossibleByInvariant("principal key primary index points at the wrong key");
             }
-        }
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
+            self.removePublisherSlot(slot_index, &slot.record);
             slot.record = record;
+            if (!self.appendPublisherSlot(slot_index, &slot.record)) {
+                native_util.impossibleByInvariant("principal key publisher index covers key slots");
+            }
             return &slot.record;
         }
-        return error.KeyringFull;
+
+        const slot_index = self.slots.reserveIndex(record_key) orelse return error.KeyringFull;
+        const slot = &self.slots.slots[slot_index];
+        slot.record = record;
+
+        if (!self.principal_index.append(principalIndexKey(record.principal_id), slot_index)) {
+            _ = self.slots.removeIndex(slot_index);
+            native_util.impossibleByInvariant("principal key principal index covers key slots");
+        }
+        if (!self.appendPublisherSlot(slot_index, &slot.record)) {
+            _ = self.principal_index.remove(principalIndexKey(record.principal_id), slot_index);
+            _ = self.slots.removeIndex(slot_index);
+            native_util.impossibleByInvariant("principal key publisher index covers key slots");
+        }
+        return &slot.record;
+    }
+
+    fn appendPublisherSlot(self: *Keyring, slot_index: usize, record: *const PrincipalKeyRecord) bool {
+        if (record.publisher_len == 0) return true;
+        return self.publisher_index.append(publisherIndexKey(record.publisherSlice()), slot_index);
+    }
+
+    fn removePublisherSlot(self: *Keyring, slot_index: usize, record: *const PrincipalKeyRecord) void {
+        if (record.publisher_len == 0) return;
+        _ = self.publisher_index.remove(publisherIndexKey(record.publisherSlice()), slot_index);
     }
 };
 
@@ -244,4 +316,32 @@ test "principal keyring binds publishers to trusted keys and supports revocation
 
     try keyring.revokePrincipal(publisher);
     try std.testing.expect(!keyring.trustedPublisherSignature("Example Software", signature));
+}
+
+test "principal keyring updates publisher indexes when bindings are replaced" {
+    var keyring = Keyring.init();
+    const root = PrincipalId{ .kind = .policy_authority, .serial = 1 };
+    const publisher = PrincipalId{ .kind = .app, .serial = 7 };
+    const publisher_key = signing.publicKeyFromByte(0xD4);
+
+    _ = try keyring.bindPublisher(publisher, root, "Old Publisher", publisher_key);
+
+    var signature = manifest.Signature{
+        .signer = "Old Publisher",
+        .public_key_len = 32,
+        .value_len = 64,
+    };
+    @memcpy(signature.public_key[0..publisher_key.len], publisher_key[0..]);
+    @memset(signature.value[0..manifest.ED25519_SIGNATURE_BYTES], 0xE5);
+    try std.testing.expect(keyring.trustedPublisherSignature("Old Publisher", signature));
+
+    _ = try keyring.bindPublisher(publisher, root, "New Publisher", publisher_key);
+    try std.testing.expectEqual(@as(usize, 1), keyring.slots.countInUse());
+    try std.testing.expect(!keyring.trustedPublisherSignature("Old Publisher", signature));
+
+    signature.signer = "New Publisher";
+    try std.testing.expect(keyring.trustedPublisherSignature("New Publisher", signature));
+
+    try keyring.revokePrincipal(publisher);
+    try std.testing.expect(!keyring.trustedPublisherSignature("New Publisher", signature));
 }

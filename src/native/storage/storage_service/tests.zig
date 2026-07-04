@@ -709,11 +709,17 @@ test "storage service retains authoritative object and workspace state across re
 
     var restarted = Service.initWithStore(700, 18, owner, &checkpoint_store);
     const resolved = try restarted.resolve(notes.id, "documents/notes.md");
+    const resolved_by_object = try restarted.findEntryForObject(notes.id, object.object_id);
     const entries = try restarted.entries(notes.id);
     const grant = restarted.findShareGrant(notes.id, .{ .kind = .app, .serial = 70 }).?;
+    const restarted_notes = restarted.findWorkspaceRecordConst(notes.id).?;
+    const grant_key = workspace.shareGrantPrincipalKey(.{ .kind = .app, .serial = 70 });
     try std.testing.expectEqual(object.object_id, resolved.object_id);
     try std.testing.expectEqual(object.version_id, resolved.version_id);
+    try std.testing.expectEqualStrings("documents/notes.md", resolved_by_object.pathSlice());
+    try std.testing.expectEqual(object.version_id, resolved_by_object.version_id);
     try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqual(@as(usize, 1), restarted_notes.share_table.share_grant_principal_index.count(grant_key));
     try std.testing.expectEqual(@as(?*object_store.Store, &checkpoint_store.store), restarted.store);
     try std.testing.expectEqual(@as(?*workspace.Directory, &checkpoint_store.workspaces), restarted.workspaces);
     try std.testing.expectEqual(workspace.ShareNetworkScope.trusted_overlay, grant.network_scope);
@@ -1039,7 +1045,10 @@ test "workspace mutation-log compaction is skipped while a live snapshot needs o
     const owner = principal.PrincipalId{ .kind = .service, .serial = 9_920 };
     const signer = signing.SignerIdentity{ .label = "snap-signer", .seed = signing.seedFromByte(0xE2) };
     var service = Service.initWithStore(9_921, 9_922, owner, &checkpoint_store);
+    try std.testing.expect(!service.hasAnyWorkspaceRecords());
+    try std.testing.expect(!service.hasAnySnapshots());
     const ws = try service.createWorkspace(.{ .owner = owner, .label = "snap-guard" });
+    try std.testing.expect(service.hasAnyWorkspaceRecords());
     const keep_path = "documents/keep.md";
     const churn_path = "documents/churn.md";
 
@@ -1054,6 +1063,8 @@ test "workspace mutation-log compaction is skipped while a live snapshot needs o
     try service.stagePut(ws.id, keep_path, keep_version.object_id, keep_version.version_id, .document);
     _ = try service.commit(ws.id, 1);
     const snap = try service.snapshot(ws.id, "snap-1", signer);
+    try std.testing.expect(service.hasAnySnapshots());
+    try std.testing.expectEqual(@as(u32, 1), service.findWorkspaceRecordConst(ws.id).?.oldestSnapshotGeneration().?);
 
     const churn_version = try service.putVersion(.{
         .preferred_object_id = object_store.ids.object(9_931),
