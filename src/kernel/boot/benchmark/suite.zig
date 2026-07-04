@@ -231,6 +231,7 @@ const quality_gates = benchmark_cases.qualityGateCases(.{
     .scheduler_fairness_ratio_percent = qualitySchedulerFairnessRatioPercent,
     .starvation_resistance_after_pressure = qualityStarvationResistanceAfterPressure,
     .lower_class_service_debt_batch_tie_dispatch = qualityLowerClassServiceDebtBatchTieDispatch,
+    .accelerator_claim_deadline_priority = qualityAcceleratorClaimDeadlinePriority,
     .brokered_accelerator_queue_completion_release = qualityBrokeredAcceleratorQueueCompletionRelease,
     .background_throttling_delayed_dispatches = qualityBackgroundThrottlingDelayedDispatches,
     .latency_under_load_max_wait_ticks = qualityLatencyUnderLoadMaxWaitTicks,
@@ -1744,6 +1745,71 @@ fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
         batch_stats.dispatch_count == 1 and
         batch_stats.missed_deadline_count == 0 and
         batch_stats.last_dispatch_engine == .npu);
+}
+
+fn qualityAcceleratorClaimDeadlinePriority() u64 {
+    var executor = userspace_executor.Executor{};
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    configureLoadTelemetry(&scheduler, 7_008, 708, 1, .{
+        .total_cpu_budget_ticks = 200_000,
+        .memory_capacity_bytes = mebibytes(8),
+        .gpu_driver_online = true,
+    });
+
+    const batch = createLoadTask(
+        &runtime,
+        781,
+        .batch_compute,
+        "quality-claim-batch",
+        "app.quality.claim-batch",
+        load_dispatch_cpu_tick_cost * 2,
+        kibibytes(64),
+        null,
+    );
+    const foreground = createLoadTask(
+        &runtime,
+        782,
+        .foreground_interactive,
+        "quality-claim-foreground",
+        "app.quality.claim-foreground",
+        load_dispatch_cpu_tick_cost * 2,
+        kibibytes(64),
+        5,
+    );
+    if (!scheduler.registerTask(batch.id)) return 0;
+    if (!scheduler.registerTask(foreground.id)) return 0;
+    if (!scheduler.parkTaskUntilEvent(batch.id)) return 0;
+    if (!scheduler.parkTaskUntilEvent(foreground.id)) return 0;
+
+    const batch_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = batch.id,
+        .engine = .gpu,
+        .resource_class = .batch_compute,
+        .requested_at_tick = 1,
+        .deadline_tick = 200,
+        .shared_memory_bytes = kibibytes(64),
+    }) orelse return 0;
+    const foreground_claim = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = foreground.id,
+        .engine = .gpu,
+        .resource_class = .foreground_interactive,
+        .requested_at_tick = 2,
+        .deadline_tick = 20,
+        .shared_memory_bytes = kibibytes(64),
+    }) orelse return 0;
+
+    const granted = scheduler.grantNextAcceleratorClaim(.gpu, 20) orelse return 0;
+    const batch_stats = scheduler.taskDispatchStats(batch.id) orelse return 0;
+    const foreground_stats = scheduler.taskDispatchStats(foreground.id) orelse return 0;
+    return @intFromBool(batch_claim != foreground_claim and
+        granted.id == foreground_claim and
+        scheduler.acceleratorClaimQueueDepth(.gpu) == 1 and
+        !batch_stats.queued_ready and
+        foreground_stats.queued_ready);
 }
 
 fn qualityBrokeredAcceleratorQueueCompletionRelease() u64 {
