@@ -270,11 +270,11 @@ fn validatePostQuantumPolicy(keyring: std.json.Value) !PostQuantumPolicy {
     if (!containsAsciiIgnoreCase(try stringField(policy, "backup_signature_algorithm"), "slh-dsa")) {
         return error.PqcPolicyMissingSlhDsaPath;
     }
-    const hybrid_transition = try stringField(policy, "hybrid_transition");
-    if (!containsAsciiIgnoreCase(hybrid_transition, "ed25519+ml-dsa65") or
-        !containsAsciiIgnoreCase(hybrid_transition, "preview"))
+    const classical_baseline = try stringField(policy, "classical_baseline");
+    if (!containsAsciiIgnoreCase(classical_baseline, "ed25519") or
+        !containsAsciiIgnoreCase(classical_baseline, "validated"))
     {
-        return error.PqcPolicyMissingHybridPreviewBoundary;
+        return error.PqcPolicyMissingClassicalBaselineBoundary;
     }
 
     const standards = try arrayField(policy, "standards");
@@ -1392,7 +1392,7 @@ fn writeValidFixture(
     const verifier_metadata_digest = try hexAlloc(allocator, &verifier_digest);
     const keyring_json = try std.fmt.allocPrint(
         allocator,
-        "{{\"schema_version\":1,\"public_release_allowed\":true,\"required_provider_boundary\":\"cloud KMS release signing provider\",\"post_quantum_policy\":{{\"mode\":\"{s}\",\"fips_validated_required\":true,\"fips_140_validation_required\":true,\"production_signature_algorithm\":\"ml-dsa-65\",\"key_establishment_algorithm\":\"ml-kem-768\",\"backup_signature_algorithm\":\"slh-dsa-sha2-128s\",\"hybrid_transition\":\"ed25519 remains required; ed25519+ml-dsa65 is preview-only and never satisfies production FIPS 204 ML-DSA\",\"standards\":[{{\"fips\":\"FIPS 203\",\"algorithm\":\"ML-KEM\",\"scope\":\"key establishment\"}},{{\"fips\":\"FIPS 204\",\"algorithm\":\"ML-DSA\",\"scope\":\"digital signatures\"}},{{\"fips\":\"FIPS 205\",\"algorithm\":\"SLH-DSA\",\"scope\":\"hash-based signature fallback\"}}],\"rollout\":[\"shadow verifier measurement\",\"canary dual-signature release\",\"required public-release ML-DSA verification\"]}},\"keys\":[{{\"key_id\":\"fixture-key\",\"label\":\"{s}\",\"status\":\"active\",\"algorithm\":\"ed25519\",\"custody\":\"cloud_kms\",\"hardware_backed\":true,\"generation\":7,\"not_before\":\"2026-01-01\",\"not_after\":\"2027-01-01\",\"provider_name\":\"{s}\",\"provider_boundary\":\"cloud_kms\",\"rotation_supported\":true,\"revocation_supported\":true,\"customer_verifiable\":true,\"verifier_protocol\":\"dsse_in_toto_slsa\",\"public_key_encoding\":\"hex-ed25519-raw\",\"public_key\":\"{s}\",\"verifier_metadata_schema\":\"zigos.release-verifier-metadata\",\"verifier_metadata_digest\":\"{s}\"}}]}}\n",
+        "{{\"schema_version\":1,\"public_release_allowed\":true,\"required_provider_boundary\":\"cloud KMS release signing provider\",\"post_quantum_policy\":{{\"mode\":\"{s}\",\"fips_validated_required\":true,\"fips_140_validation_required\":true,\"production_signature_algorithm\":\"ml-dsa-65\",\"key_establishment_algorithm\":\"ml-kem-768\",\"backup_signature_algorithm\":\"slh-dsa-sha2-128s\",\"classical_baseline\":\"ed25519 remains the classical DSSE baseline until releases carry a signature from a separately validated FIPS 204 ML-DSA provider\",\"standards\":[{{\"fips\":\"FIPS 203\",\"algorithm\":\"ML-KEM\",\"scope\":\"key establishment\"}},{{\"fips\":\"FIPS 204\",\"algorithm\":\"ML-DSA\",\"scope\":\"digital signatures\"}},{{\"fips\":\"FIPS 205\",\"algorithm\":\"SLH-DSA\",\"scope\":\"hash-based signature fallback\"}}],\"rollout\":[\"shadow verifier measurement\",\"canary dual-signature release\",\"required public-release ML-DSA verification\"]}},\"keys\":[{{\"key_id\":\"fixture-key\",\"label\":\"{s}\",\"status\":\"active\",\"algorithm\":\"ed25519\",\"custody\":\"cloud_kms\",\"hardware_backed\":true,\"generation\":7,\"not_before\":\"2026-01-01\",\"not_after\":\"2027-01-01\",\"provider_name\":\"{s}\",\"provider_boundary\":\"cloud_kms\",\"rotation_supported\":true,\"revocation_supported\":true,\"customer_verifiable\":true,\"verifier_protocol\":\"dsse_in_toto_slsa\",\"public_key_encoding\":\"hex-ed25519-raw\",\"public_key\":\"{s}\",\"verifier_metadata_schema\":\"zigos.release-verifier-metadata\",\"verifier_metadata_digest\":\"{s}\"}}]}}\n",
         .{ pqc_mode, key_label, provider_name, public_key_hex, verifier_metadata_digest },
     );
     try dir.writeFile(std.testing.io, .{ .sub_path = "release-keyring.json", .data = keyring_json });

@@ -556,12 +556,6 @@ fn validateReleaseArtifacts(
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "customer_verifiable_required");
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "static_dsse_signatures_local_preview_only");
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "dsse_signature_output_base64_required");
-    const hybrid_status = try common.expectStringField(allocator, errors, release_signing, "release signing", "hybrid_ml_dsa_status") orelse "";
-    if (std.mem.indexOf(u8, hybrid_status, "preview") == null or
-        std.mem.indexOf(u8, hybrid_status, "not a production FIPS 204") == null)
-    {
-        try common.addError(errors, allocator, "release signing hybrid_ml_dsa_status must state that the hybrid ML-DSA path is preview-only and not production FIPS 204", .{});
-    }
     const post_quantum_policy = try common.expectObjectField(allocator, errors, release_signing, "release signing", "post_quantum_policy") orelse return;
     try validatePostQuantumReleasePolicy(allocator, errors, post_quantum_policy);
     const verifier_protocols = try common.collectStringArray(
@@ -804,36 +798,6 @@ fn validateReleaseKeyringRoot(
     if (!has_ml_dsa65) {
         try common.addError(errors, allocator, "release keyring production_pqc_profiles must include ml-dsa-65", .{});
     }
-
-    const preview_profiles_value = common.field(root, "preview_profiles") orelse {
-        try common.addError(errors, allocator, "release keyring must include preview_profiles", .{});
-        return;
-    };
-    const preview_profiles = switch (preview_profiles_value) {
-        .array => |array| array.items,
-        else => {
-            try common.addError(errors, allocator, "release keyring preview_profiles must be an array", .{});
-            return;
-        },
-    };
-    var has_hybrid_preview = false;
-    for (preview_profiles, 0..) |profile, index| {
-        if (profile != .object) {
-            try common.addError(errors, allocator, "release keyring preview_profiles entry {d} must be an object", .{index});
-            continue;
-        }
-        const name = try common.expectStringField(allocator, errors, profile, "release keyring preview_profile", "profile") orelse "";
-        if (!std.mem.eql(u8, name, "ed25519+ml-dsa65")) continue;
-        has_hybrid_preview = true;
-        try expectFalseBoolField(allocator, errors, profile, "release keyring preview_profile ed25519+ml-dsa65", "release_allowed");
-        const fips_204_status = try common.expectStringField(allocator, errors, profile, "release keyring preview_profile ed25519+ml-dsa65", "fips_204_status") orelse "";
-        if (!common.containsAsciiIgnoreCase(fips_204_status, "not a production")) {
-            try common.addError(errors, allocator, "release keyring preview profile must reject ed25519+ml-dsa65 as production FIPS 204", .{});
-        }
-    }
-    if (!has_hybrid_preview) {
-        try common.addError(errors, allocator, "release keyring preview_profiles must include ed25519+ml-dsa65", .{});
-    }
 }
 
 fn validateConfiguredReleaseKey(
@@ -894,7 +858,7 @@ const release_keyring_fixture =
     \\    "production_signature_algorithm": "ml-dsa-65",
     \\    "key_establishment_algorithm": "ml-kem-768",
     \\    "backup_signature_algorithm": "slh-dsa-sha2-128s",
-    \\    "hybrid_transition": "Ed25519 remains required; ed25519+ml-dsa65 is preview-only and never satisfies production FIPS 204 ML-DSA",
+    \\    "classical_baseline": "Ed25519 remains the classical DSSE baseline until releases carry a signature from a separately validated FIPS 204 ML-DSA provider",
     \\    "standards": [
     \\      { "fips": "FIPS 203", "algorithm": "ML-KEM", "scope": "key establishment" },
     \\      { "fips": "FIPS 204", "algorithm": "ML-DSA", "scope": "digital signatures" },
@@ -934,14 +898,6 @@ const release_keyring_fixture =
     \\      "fips_standard": "FIPS 204",
     \\      "fips_validation_required": true,
     \\      "fips_140_validated_module_required": true
-    \\    }
-    \\  ],
-    \\  "preview_profiles": [
-    \\    {
-    \\      "profile": "ed25519+ml-dsa65",
-    \\      "status": "preview-only",
-    \\      "release_allowed": false,
-    \\      "fips_204_status": "not a production FIPS 204 ML-DSA implementation"
     \\    }
     \\  ]
     \\}
@@ -1361,12 +1317,12 @@ fn validatePostQuantumReleasePolicy(
     if (!common.containsAsciiIgnoreCase(backup_signature, "slh-dsa")) {
         try common.addError(errors, allocator, "release signing post_quantum_policy backup_signature_algorithm must name SLH-DSA", .{});
     }
-    const hybrid_transition = try common.expectStringField(allocator, errors, policy, "release signing post_quantum_policy", "hybrid_transition") orelse "";
-    if (!common.containsAsciiIgnoreCase(hybrid_transition, "ed25519+ml-dsa65") or
-        !common.containsAsciiIgnoreCase(hybrid_transition, "preview") or
-        !common.containsAsciiIgnoreCase(hybrid_transition, "FIPS 204"))
+    const classical_baseline = try common.expectStringField(allocator, errors, policy, "release signing post_quantum_policy", "classical_baseline") orelse "";
+    if (!common.containsAsciiIgnoreCase(classical_baseline, "ed25519") or
+        !common.containsAsciiIgnoreCase(classical_baseline, "validated") or
+        !common.containsAsciiIgnoreCase(classical_baseline, "FIPS 204"))
     {
-        try common.addError(errors, allocator, "release signing post_quantum_policy hybrid_transition must keep ed25519+ml-dsa65 preview-only and separate from production FIPS 204 ML-DSA", .{});
+        try common.addError(errors, allocator, "release signing post_quantum_policy classical_baseline must keep ed25519 as the classical baseline and require a validated FIPS 204 ML-DSA provider for production", .{});
     }
 
     const standards_value = common.field(policy, "standards") orelse {

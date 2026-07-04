@@ -78,11 +78,12 @@ The following are release blockers:
 - Customer verification bundle missing artifact digests, SPDX SBOM, DSSE
   in-toto/SLSA provenance, release keyring, revoked key list, or reproducible
   build evidence.
-- Treating the `ed25519+ml-dsa65` hybrid preview profile as a production
-  FIPS 204 ML-DSA implementation.
+- Treating any locally computed commitment as a production FIPS 204 ML-DSA
+  implementation; production PQC signatures must come from a separately
+  validated ML-DSA provider.
 - Public release keyring missing post-quantum policy for FIPS 203 ML-KEM,
   FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements,
-  hybrid transition, measured rollout, or fail-closed verifier behavior for
-  required ML-DSA signatures.
+  the classical Ed25519 baseline, measured rollout, or fail-closed verifier
+  behavior for required ML-DSA signatures.
 - Any crash dump or diagnostic export path that includes secrets, capability
   tokens, private content, or raw memory by default.
