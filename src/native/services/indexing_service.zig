@@ -6,7 +6,7 @@ const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
-const copyText = native_util.copyText;
+const copyTextExact = native_util.copyTextExact;
 
 pub const MAX_DOCUMENTS: usize = 32;
 pub const MAX_RESULTS: usize = 8;
@@ -32,8 +32,10 @@ pub const SearchResult = struct {
 };
 
 pub const Error = error{
+    BodyTooLong,
     DocumentTableFull,
     PolicyDenied,
+    TitleTooLong,
 };
 
 pub const DocumentRecord = struct {
@@ -104,11 +106,9 @@ pub const Service = struct {
         body: []const u8,
         sensitivity: manifest.DataSensitivity,
     ) Error!void {
+        const record = try makeDocument(workspace_id, object_id, version_id, title, body, sensitivity);
         if (self.findSlot(workspace_id, object_id)) |slot| {
-            slot.record.version_id = version_id;
-            slot.record.title_len = copyText(&slot.record.title, title);
-            slot.record.body_len = copyText(&slot.record.body, body);
-            slot.record.sensitivity = sensitivity;
+            slot.record = record;
             self.bumpGeneration();
             return;
         }
@@ -120,12 +120,7 @@ pub const Service = struct {
             return error.DocumentTableFull;
         }
         const slot = &self.documents.slots[slot_index];
-        slot.record.workspace_id = workspace_id;
-        slot.record.object_id = object_id;
-        slot.record.version_id = version_id;
-        slot.record.title_len = copyText(&slot.record.title, title);
-        slot.record.body_len = copyText(&slot.record.body, body);
-        slot.record.sensitivity = sensitivity;
+        slot.record = record;
         self.bumpGeneration();
     }
 
@@ -326,6 +321,24 @@ fn maxSensitivity(left: manifest.DataSensitivity, right: manifest.DataSensitivit
     return if (@intFromEnum(right) > @intFromEnum(left)) right else left;
 }
 
+fn makeDocument(
+    workspace_id: u64,
+    object_id: u64,
+    version_id: u64,
+    title: []const u8,
+    body: []const u8,
+    sensitivity: manifest.DataSensitivity,
+) Error!DocumentRecord {
+    var record = zeroDocument();
+    record.workspace_id = workspace_id;
+    record.object_id = object_id;
+    record.version_id = version_id;
+    record.title_len = copyTextExact(&record.title, title) catch return error.TitleTooLong;
+    record.body_len = copyTextExact(&record.body, body) catch return error.BodyTooLong;
+    record.sensitivity = sensitivity;
+    return record;
+}
+
 fn countOccurrencesFold(haystack: []const u8, needle: []const u8) usize {
     if (needle.len == 0 or haystack.len < needle.len) return 0;
 
@@ -400,6 +413,26 @@ test "indexing service remains permission aware and updates ranked results" {
     try std.testing.expectEqual(@as(u64, 101), updated[0].object_id);
     try std.testing.expectEqual(@as(u64, 2), updated[0].version_id);
     try std.testing.expectEqual(service.generation, updated[0].index_generation);
+}
+
+test "indexing service rejects overlong document text without partial updates" {
+    var service = Service.init();
+    const oversized_title = [_]u8{'t'} ** (MAX_TITLE_BYTES + 1);
+    const oversized_body = [_]u8{'b'} ** (MAX_BODY_BYTES + 1);
+
+    try std.testing.expectError(error.TitleTooLong, service.upsert(1, 100, 1, oversized_title[0..], "body"));
+    try std.testing.expectEqual(@as(usize, 0), service.documents.countInUse());
+    try std.testing.expectEqual(@as(u64, 1), service.generation);
+
+    try service.upsert(1, 100, 1, "Original", "body");
+    try std.testing.expectEqual(@as(u64, 2), service.generation);
+
+    try std.testing.expectError(error.BodyTooLong, service.upsert(1, 100, 2, "Updated", oversized_body[0..]));
+    const slot = service.findSlot(1, 100).?;
+    try std.testing.expectEqual(@as(u64, 1), slot.record.version_id);
+    try std.testing.expectEqualStrings("Original", slot.record.titleSlice());
+    try std.testing.expectEqualStrings("body", slot.record.bodySlice());
+    try std.testing.expectEqual(@as(u64, 2), service.generation);
 }
 
 test "indexing service keeps highest ranked results after buffer fills" {

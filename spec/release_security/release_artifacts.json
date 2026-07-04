@@ -40,7 +40,6 @@
     "release_verifier_metadata_schema": "zigos.release-verifier-metadata",
     "attestation_verifier_metadata_schema": "zigos.attestation-verifier-metadata",
     "verifier_metadata_digest_required": true,
-    "hybrid_ml_dsa_status": "ed25519+ml-dsa65 is preview-only envelope plumbing and is not a production FIPS 204 ML-DSA implementation",
     "post_quantum_policy": {
       "mode": "shadow",
       "fips_validated_required": true,
@@ -48,7 +47,7 @@
       "production_signature_algorithm": "ml-dsa-65",
       "key_establishment_algorithm": "ml-kem-768",
       "backup_signature_algorithm": "slh-dsa-sha2-128s",
-      "hybrid_transition": "Ed25519 remains the classical DSSE baseline during migration; ed25519+ml-dsa65 stays preview-only and never satisfies production FIPS 204 ML-DSA; public required mode needs a separately verified ML-DSA signature from a validated provider.",
+      "classical_baseline": "Ed25519 remains the classical DSSE baseline during migration; public required mode needs a separately verified FIPS 204 ML-DSA signature from a validated provider.",
       "standards": [
         {
           "fips": "FIPS 203",
@@ -75,7 +74,7 @@
     "verifier_protocols": [
       "verify artifact-digests.sha256 against downloaded artifacts",
       "verify DSSE signatures over application/vnd.in-toto+json payloads before parsing provenance",
-      "verify release-keyring.json post_quantum_policy covers FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements, hybrid transition, and measured rollout",
+      "verify release-keyring.json post_quantum_policy covers FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements, the classical Ed25519 baseline, and measured rollout",
       "verify SLSA provenance predicate type, exactly one subject per DSSE envelope, and subject digests",
       "verify zigos-verify-release fails closed unless signed SLSA buildDefinition.buildType is https://github.com/Cameron-Lyons/zigos/release-security-gate, runDetails.builder.id is zigos-local-release-security-gate, externalParameters record sourceControl=jj, Jujutsu changeId, commit id, repository, and Zig version, and runDetails.metadata records a zero dirtyWorkspaceFileCount",
       "verify release-keyring.json key ids, custody, generation, and not-before/not-after bounds against signed SLSA runDetails.metadata.startedOn",

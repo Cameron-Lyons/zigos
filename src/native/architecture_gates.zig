@@ -283,17 +283,20 @@ pub const indexed_hot_path_tables = .{
         .indexes_workspace_policies = @hasField(sync_service.Service, "workspace_policy_index"),
         .indexes_overlays = @hasField(sync_service.Service, "overlay_index"),
         .indexes_replica_scopes = @hasField(sync_service.Service, "replica_scope_index"),
-        .indexes_database_contracts = @hasField(sync_service.Service, "database_contract_index"),
+        .indexes_database_contracts = @hasField(sync_service.Service, "database_contract_id_index"),
         .indexes_database_contract_equivalence = @hasField(sync_service.Service, "database_contract_equivalent_index"),
         .indexes_database_contract_bundles = @hasField(sync_service.Service, "database_contract_bundle_index"),
-        .indexes_conflicts = @hasField(sync_service.Service, "conflict_index"),
+        .indexes_conflicts = @hasField(sync_service.Service, "conflict_path_index"),
         .indexes_conflict_objects = @hasField(sync_service.Service, "conflict_object_index"),
         .indexes_conflict_scopes = @hasField(sync_service.Service, "conflict_scope_index"),
-        .indexes_inbound_transport_duplicates = @hasField(sync_service.Service, "inbound_transport_duplicate_index"),
+        .indexes_inbound_transport_duplicates = @hasField(sync_service.Service, "inbound_transport_target_index") and
+            @hasField(sync_service.Service, "inbound_transport_path_index") and
+            @hasDecl(@FieldType(sync_state_support.PersistentState, "inbound_transport_frames"), "reserveIndex"),
         .indexes_inbound_transport_targets = @hasField(sync_service.Service, "inbound_transport_target_index"),
-        .indexes_inbound_transport_high_water = @hasField(sync_service.Service, "inbound_transport_high_water_index"),
+        .indexes_inbound_transport_high_water = @hasField(sync_service.Service, "inbound_transport_frame_count") and
+            @hasField(sync_service.Service, "inbound_transport_target_index"),
         .indexes_inbound_transport_paths = @hasField(sync_service.Service, "inbound_transport_path_index"),
-        .indexes_outbound_transport_frames = @hasField(sync_service.Service, "outbound_transport_frame_index"),
+        .indexes_outbound_transport_frames = @hasDecl(@FieldType(sync_state_support.PersistentState, "outbound_transport_frames"), "reserveIndex"),
         .indexes_outbound_transport_targets = @hasField(sync_service.Service, "outbound_transport_target_index"),
         .indexes_outbound_transport_paths = @hasField(sync_service.Service, "outbound_transport_path_index"),
         .tracks_transport_frame_counts = @hasField(sync_service.Service, "outbound_transport_frame_count") and

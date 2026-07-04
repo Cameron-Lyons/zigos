@@ -217,7 +217,7 @@ pub const Store = struct {
         if (request.label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
         const credential_public_key = signing.publicKey(request.credential_identity) catch return error.InvalidCredentialSignature;
 
-        const credential_id = self.next_credential_id;
+        const credential_id = self.nextReservableCredentialId() orelse return error.CredentialTableFull;
         const slot_index = self.credentials.reserveIndex(credential_id) orelse return error.CredentialTableFull;
         errdefer _ = self.credentials.removeIndex(slot_index);
 
@@ -255,8 +255,7 @@ pub const Store = struct {
 
         const slot = &self.credentials.slots[slot_index];
         slot.credential = credential;
-        self.next_credential_id += 1;
-        self.credentials.clearDirty();
+        self.advanceNextCredentialIdFrom(credential_id);
         return &slot.credential;
     }
 
@@ -291,8 +290,6 @@ pub const Store = struct {
 
         credential.assertion_count += 1;
         credential.last_asserted_at_ticks = request.tick;
-        self.credentials.markDirty(credential.id);
-
         var assertion = Assertion{
             .credential_id = credential.id,
             .owner = credential.owner,
@@ -355,7 +352,6 @@ pub const Store = struct {
             &credential.sealed_secret_digest,
             credential.credential_generation,
         );
-        self.credentials.markDirty(credential.id);
         return credential;
     }
 
@@ -364,7 +360,6 @@ pub const Store = struct {
         try requireActiveCredential(credential);
         credential.status = .revoked;
         credential.revoked_at_ticks = tick;
-        self.credentials.markDirty(credential.id);
     }
 
     pub fn findCredential(self: *Store, credential_id: u64) ?*CredentialRecord {
@@ -376,7 +371,36 @@ pub const Store = struct {
         const slot = self.credentials.getConst(credential_id) orelse return null;
         return &slot.credential;
     }
+
+    fn nextReservableCredentialId(self: *Store) ?u64 {
+        if (self.countCredentials() >= MAX_CREDENTIALS) return null;
+
+        var credential_id = normalizeCredentialId(self.next_credential_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_CREDENTIALS) : (attempts += 1) {
+            if (self.findCredential(credential_id) == null) return credential_id;
+            credential_id = nextCredentialIdAfter(credential_id);
+        }
+        return null;
+    }
+
+    fn advanceNextCredentialIdFrom(self: *Store, credential_id: u64) void {
+        self.next_credential_id = nextCredentialIdAfter(credential_id);
+    }
+
+    fn countCredentials(self: *const Store) usize {
+        return self.credentials.countInUse();
+    }
 };
+
+fn normalizeCredentialId(credential_id: u64) u64 {
+    return if (credential_id == 0) 1 else credential_id;
+}
+
+fn nextCredentialIdAfter(credential_id: u64) u64 {
+    const next = credential_id +% 1;
+    return normalizeCredentialId(next);
+}
 
 pub fn createLocalUnlockProof(
     owner: principal.PrincipalId,
@@ -739,6 +763,155 @@ test "os identity creates passkey credentials and rejects phishing origins" {
         .credential_identity = credential_identity,
         .tick = 5,
     }));
+}
+
+test "os identity registration rejects overlong text without consuming credential ids" {
+    var graph = device_graph.Graph.init();
+    var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(testHardwareProvider());
+    var identities = Store.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 751 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 761 };
+    const user_identity = signing.SignerIdentity{
+        .label = "oversized-user",
+        .seed = signing.seedFromByte(0xD1),
+    };
+    const laptop_identity = signing.SignerIdentity{
+        .label = "oversized-laptop",
+        .seed = signing.seedFromByte(0xD2),
+    };
+    const credential_identity = signing.SignerIdentity{
+        .label = "oversized-passkey",
+        .seed = signing.seedFromByte(0xD3),
+    };
+    const oversized_relying_party = [_]u8{'r'} ** (MAX_RP_ID_BYTES + 1);
+    const oversized_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
+
+    _ = try graph.ensureUserRoot(user, "owner", user_identity);
+    _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
+
+    try std.testing.expectError(error.RelyingPartyTooLong, identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = oversized_relying_party[0..],
+        .label = "accounts-passkey",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 2,
+    }));
+    try std.testing.expectError(error.LabelTooLong, identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "accounts.example",
+        .label = oversized_label[0..],
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 3,
+    }));
+    try std.testing.expectEqual(@as(u64, 1), identities.next_credential_id);
+    try std.testing.expect(identities.findCredential(1) == null);
+    try std.testing.expectEqual(@as(u64, 1), secrets.next_secret_id);
+
+    const credential = try identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "accounts.example",
+        .label = "accounts-passkey",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 4,
+    });
+    try std.testing.expectEqual(@as(u64, 1), credential.id);
+    try std.testing.expectEqual(@as(u64, 2), identities.next_credential_id);
+    try std.testing.expectEqual(@as(u64, 2), secrets.next_secret_id);
+}
+
+test "os identity credential ids wrap without zero and skip active credentials" {
+    var graph = device_graph.Graph.init();
+    var secrets = secure_secret_store.Store.init();
+    secrets.attachHardwareProvider(testHardwareProvider());
+    var identities = Store.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 771 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 781 };
+    const user_identity = signing.SignerIdentity{
+        .label = "wrap-user",
+        .seed = signing.seedFromByte(0xE1),
+    };
+    const laptop_identity = signing.SignerIdentity{
+        .label = "wrap-laptop",
+        .seed = signing.seedFromByte(0xE2),
+    };
+    const credential_identity = signing.SignerIdentity{
+        .label = "wrap-passkey",
+        .seed = signing.seedFromByte(0xE3),
+    };
+
+    _ = try graph.ensureUserRoot(user, "owner", user_identity);
+    _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
+
+    identities.next_credential_id = std.math.maxInt(u64);
+    const max_credential = try identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "wrap.example",
+        .label = "wrap-passkey-max",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 2,
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), max_credential.id);
+    try std.testing.expectEqual(@as(u64, 1), identities.next_credential_id);
+    try std.testing.expect(identities.findCredential(0) == null);
+
+    const wrapped_credential = try identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "wrap.example",
+        .label = "wrap-passkey-one",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 3,
+    });
+    try std.testing.expectEqual(@as(u64, 1), wrapped_credential.id);
+    try std.testing.expectEqual(@as(u64, 2), identities.next_credential_id);
+    try std.testing.expect(identities.findCredential(0) == null);
+
+    identities.next_credential_id = 1;
+    const skipped_credential = try identities.registerCredential(&graph, &secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "wrap.example",
+        .label = "wrap-passkey-two",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 4,
+    });
+    try std.testing.expectEqual(@as(u64, 2), skipped_credential.id);
+    try std.testing.expectEqual(@as(u64, 3), identities.next_credential_id);
+    try std.testing.expect(identities.findCredential(0) == null);
+
+    var full_identities = Store.init();
+    var full_secrets = secure_secret_store.Store.init();
+    for (0..MAX_CREDENTIALS) |index| {
+        const credential_id: u64 = @intCast(index + 1);
+        const slot_index = full_identities.credentials.reserveIndex(credential_id) orelse unreachable;
+        const slot = &full_identities.credentials.slots[slot_index];
+        slot.credential = zeroCredential();
+        slot.credential.id = credential_id;
+    }
+    const credential_next_before = full_identities.next_credential_id;
+    const secret_next_before = full_secrets.next_secret_id;
+    try std.testing.expectError(error.CredentialTableFull, full_identities.registerCredential(&graph, &full_secrets, .{
+        .owner = user,
+        .device = laptop,
+        .relying_party_id = "wrap.example",
+        .label = "wrap-passkey-full",
+        .scope = .synced,
+        .credential_identity = credential_identity,
+        .tick = 5,
+    }));
+    try std.testing.expectEqual(credential_next_before, full_identities.next_credential_id);
+    try std.testing.expectEqual(secret_next_before, full_secrets.next_secret_id);
 }
 
 test "os identity recovers synced credentials through trusted device graph" {

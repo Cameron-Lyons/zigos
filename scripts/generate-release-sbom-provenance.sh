@@ -307,7 +307,7 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
     "production_signature_algorithm": "ml-dsa-65",
     "key_establishment_algorithm": "ml-kem-768",
     "backup_signature_algorithm": "slh-dsa-sha2-128s",
-    "hybrid_transition": "Ed25519 remains the classical DSSE baseline during migration; ed25519+ml-dsa65 stays preview-only and never satisfies production FIPS 204 ML-DSA; required mode needs a separately verified ML-DSA signature from a validated provider.",
+    "classical_baseline": "Ed25519 remains the classical DSSE baseline during migration; required mode needs a separately verified FIPS 204 ML-DSA signature from a validated provider.",
     "standards": [
       {
         "fips": "FIPS 203",
@@ -368,14 +368,6 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
       "signature_encoding": "base64-ml-dsa-65-raw",
       "verifier_status": "zigos-verify-release fails closed until a validated ML-DSA provider is linked"
     }
-  ],
-  "preview_profiles": [
-    {
-      "profile": "ed25519+ml-dsa65",
-      "status": "preview-only",
-      "release_allowed": false,
-      "fips_204_status": "not a production FIPS 204 ML-DSA implementation"
-    }
   ]
 }
 EOF
@@ -410,7 +402,7 @@ cat > "$OUTPUT_PATH/customer-verification-policy.json" <<EOF
     "Compare each downloaded artifact SHA-256 digest with artifact-digests.sha256.",
     "Verify every DSSE signature in provenance.dsse.intoto.jsonl against release-keyring.json before parsing payloads; signatures cover the DSSE v1 pre-authentication encoding.",
     "Recompute each active release key verifier metadata digest from provider name, key id, label, generation, custody, provider boundary, public key, lifecycle controls, verifier protocol, and FIPS posture before trusting the key.",
-    "Verify release-keyring.json post_quantum_policy covers FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements, hybrid transition, and measured rollout.",
+    "Verify release-keyring.json post_quantum_policy covers FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements, the classical Ed25519 baseline, and measured rollout.",
     "Reject signatures from key ids or generations listed in revoked-release-keys.json.",
     "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1, exactly one subject per signed DSSE envelope, and subject digests matching artifact-digests.sha256.",
     "Require zigos-verify-release to fail closed unless each signed SLSA statement records buildDefinition.buildType=https://github.com/Cameron-Lyons/zigos/release-security-gate, runDetails.builder.id=zigos-local-release-security-gate, sourceControl=jj, the Jujutsu changeId, the commit id, repository, and Zig version used to generate the release, and runDetails.metadata records dirtyWorkspaceFileCount=0.",
@@ -418,8 +410,7 @@ cat > "$OUTPUT_PATH/customer-verification-policy.json" <<EOF
     "Compare artifact-measurements.json size and digest measurements against downloaded artifacts, requiring exact one-entry-per-artifact coverage without duplicates.",
     "Compare reproducible-build.json and reproducible-artifact-digests.sha256 against the complete release digest manifest, including fail-closed repo_vcs=jj, repository, Jujutsu change ID, commit id, Zig version, dirty_workspace_file_count=0 evidence, and equality with the signed SLSA source identity.",
     "Run zig-out/bin/zigos-verify-release build/release-security . before trusting a downloaded release.",
-    "Reject required ML-DSA rollout unless zigos-verify-release verifies a production ML-DSA signature from a validated provider.",
-    "Reject ed25519+ml-dsa65 as a production FIPS 204 signal; it is preview-only until replaced by a validated ML-DSA provider."
+    "Reject required ML-DSA rollout unless zigos-verify-release verifies a production ML-DSA signature from a validated provider."
   ]
 }
 EOF

@@ -248,7 +248,6 @@ pub const TransportFrameRequest = struct {
 
 pub const DurableTransportFrameSlot = struct {
     in_use: bool = false,
-    acked: bool = false,
     duplicate_count: u16 = 0,
     frame: TransportFrame = .{},
 };

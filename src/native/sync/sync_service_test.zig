@@ -1736,7 +1736,7 @@ test "sync service covers device graph policy replication semantics and restart 
         const path = entry.pathSlice();
         try std.testing.expect(!std.mem.eql(u8, path, "state/index"));
         try std.testing.expect(!std.mem.startsWith(u8, path, "state/chunks/"));
-        if (std.mem.startsWith(u8, path, "state/")) sync_record_count += 1;
+        if (std.mem.startsWith(u8, path, "state/v6/")) sync_record_count += 1;
     }
     try std.testing.expect(sync_record_count >= 10);
 

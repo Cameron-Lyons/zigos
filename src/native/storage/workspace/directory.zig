@@ -424,8 +424,8 @@ fn shareGrantProbeIndex(key: u64) usize {
     return @intCast((key *% 0x9E37_79B9_7F4A_7C15) % SHARE_GRANT_INDEX_CAPACITY);
 }
 
-const WorkspaceArena = indexed_arena.IndexedArenaWithKey(ids.WorkspaceId, WorkspaceSlot, MAX_WORKSPACES, WORKSPACE_INDEX_CAPACITY, workspaceSlotId);
-const SnapshotArena = indexed_arena.IndexedArenaWithKey(ids.SnapshotId, SnapshotSlot, MAX_SNAPSHOTS, SNAPSHOT_INDEX_CAPACITY, snapshotSlotId);
+const WorkspaceArena = indexed_arena.DirtyTrackedIndexedArenaWithKey(ids.WorkspaceId, WorkspaceSlot, MAX_WORKSPACES, WORKSPACE_INDEX_CAPACITY, workspaceSlotId);
+const SnapshotArena = indexed_arena.DirtyTrackedIndexedArenaWithKey(ids.SnapshotId, SnapshotSlot, MAX_SNAPSHOTS, SNAPSHOT_INDEX_CAPACITY, snapshotSlotId);
 const WorkspaceOwnerLabelIndex = indexed_arena.UniqueIndex(WORKSPACE_INDEX_CAPACITY);
 const WorkspaceLabelIndex = indexed_arena.MultimapIndex(MAX_WORKSPACES, MAX_WORKSPACES, WORKSPACE_INDEX_CAPACITY);
 const SnapshotLabelIndex = indexed_arena.UniqueIndex(SNAPSHOT_INDEX_CAPACITY);

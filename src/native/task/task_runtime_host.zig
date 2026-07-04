@@ -94,14 +94,14 @@ pub fn zeroAddressSpace(AddressSpaceType: type, RegionType: type, comptime regio
 
 pub fn findAddressSpaceSlot(runtime: anytype, address_space_id: u64) ?*AddressSpaceSlotType(@TypeOf(runtime)) {
     const RuntimeType = runtimeType(@TypeOf(runtime));
-    if (@hasDecl(RuntimeType, "indexedAddressSpaceSlot")) {
+    if (comptime @hasDecl(RuntimeType, "indexedAddressSpaceSlot")) {
         return runtime.indexedAddressSpaceSlot(address_space_id);
+    } else {
+        for (&runtime.address_spaces) |*slot| {
+            if (slot.in_use and slot.address_space.id == address_space_id) return slot;
+        }
+        return null;
     }
-
-    for (&runtime.address_spaces) |*slot| {
-        if (slot.in_use and slot.address_space.id == address_space_id) return slot;
-    }
-    return null;
 }
 
 pub fn installAddressSpace(
@@ -111,29 +111,29 @@ pub fn installAddressSpace(
     address_space: anytype,
 ) ErrorSet!void {
     const RuntimeType = runtimeType(@TypeOf(runtime));
-    if (@hasDecl(RuntimeType, "installAddressSpaceRecord")) {
+    if (comptime @hasDecl(RuntimeType, "installAddressSpaceRecord")) {
         if (runtime.installAddressSpaceRecord(replace_address_space_id, address_space)) return;
         return error.AddressSpaceTableFull;
-    }
+    } else {
+        if (replace_address_space_id) |old_id| {
+            if (findAddressSpaceSlot(runtime, old_id)) |slot| {
+                slot.in_use = true;
+                slot.address_space = address_space;
+                noteAddressSpaceIndexRemoved(runtime, old_id);
+                noteAddressSpaceIndexInstalled(runtime, address_space.id, slotIndexFor(runtime, slot));
+                return;
+            }
+        }
 
-    if (replace_address_space_id) |old_id| {
-        if (findAddressSpaceSlot(runtime, old_id)) |slot| {
+        for (&runtime.address_spaces, 0..) |*slot, slot_index| {
+            if (slot.in_use) continue;
             slot.in_use = true;
             slot.address_space = address_space;
-            noteAddressSpaceIndexRemoved(runtime, old_id);
-            noteAddressSpaceIndexInstalled(runtime, address_space.id, slotIndexFor(runtime, slot));
+            noteAddressSpaceIndexInstalled(runtime, address_space.id, slot_index);
             return;
         }
+        return error.AddressSpaceTableFull;
     }
-
-    for (&runtime.address_spaces, 0..) |*slot, slot_index| {
-        if (slot.in_use) continue;
-        slot.in_use = true;
-        slot.address_space = address_space;
-        noteAddressSpaceIndexInstalled(runtime, address_space.id, slot_index);
-        return;
-    }
-    return error.AddressSpaceTableFull;
 }
 
 fn noteAddressSpaceIndexInstalled(runtime: anytype, address_space_id: u64, slot_index: usize) void {
@@ -165,12 +165,9 @@ fn assignHost(
     userspace_image: anytype,
     replace_address_space_id: ?u64,
 ) ErrorSet!HostAssignment(ProcessClassType, NamespaceClassType) {
-    const process_id = runtime.next_process_id;
-    runtime.next_process_id += 1;
-    const address_space_id = runtime.next_address_space_id;
-    runtime.next_address_space_id += 1;
-    const namespace_id = runtime.next_namespace_id;
-    runtime.next_namespace_id += 1;
+    const process_id = nextReservableProcessId(runtime) orelse return error.AddressSpaceTableFull;
+    const address_space_id = nextReservableAddressSpaceId(runtime) orelse return error.AddressSpaceTableFull;
+    const namespace_id = nextReservableNamespaceId(runtime) orelse return error.AddressSpaceTableFull;
 
     const AddressSpaceType = AddressSpaceRecordType(@TypeOf(runtime));
     const RegionType = AddressSpaceRegionType(@TypeOf(runtime));
@@ -189,6 +186,9 @@ fn assignHost(
             userspace_image,
         ),
     );
+    runtime.next_process_id = nextHostIdAfter(process_id);
+    runtime.next_address_space_id = nextHostIdAfter(address_space_id);
+    runtime.next_namespace_id = nextHostIdAfter(namespace_id);
 
     return .{
         .process_id = process_id,
@@ -205,6 +205,76 @@ fn assignHost(
             .service_component => NamespaceClassType.service_private,
         },
     };
+}
+
+fn nextReservableProcessId(runtime: anytype) ?u64 {
+    var process_id = normalizeHostId(runtime.next_process_id);
+    var attempts: usize = 0;
+    while (attempts <= taskSlotCapacity(runtime)) : (attempts += 1) {
+        if (!processIdInUse(runtime, process_id)) return process_id;
+        process_id = nextHostIdAfter(process_id);
+    }
+    return null;
+}
+
+fn nextReservableAddressSpaceId(runtime: anytype) ?u64 {
+    var address_space_id = normalizeHostId(runtime.next_address_space_id);
+    var attempts: usize = 0;
+    while (attempts <= addressSpaceSlotCapacity(runtime)) : (attempts += 1) {
+        if (findAddressSpaceSlot(runtime, address_space_id) == null) return address_space_id;
+        address_space_id = nextHostIdAfter(address_space_id);
+    }
+    return null;
+}
+
+fn nextReservableNamespaceId(runtime: anytype) ?u64 {
+    var namespace_id = normalizeHostId(runtime.next_namespace_id);
+    var attempts: usize = 0;
+    while (attempts <= taskSlotCapacity(runtime)) : (attempts += 1) {
+        if (!namespaceIdInUse(runtime, namespace_id)) return namespace_id;
+        namespace_id = nextHostIdAfter(namespace_id);
+    }
+    return null;
+}
+
+fn processIdInUse(runtime: anytype, process_id: u64) bool {
+    var slot_index: usize = 0;
+    while (slot_index < taskSlotCapacity(runtime)) : (slot_index += 1) {
+        const slot = runtime.taskSlotAtConst(slot_index);
+        if (slot.in_use and slot.task.process_id == process_id) return true;
+    }
+    return false;
+}
+
+fn namespaceIdInUse(runtime: anytype, namespace_id: u64) bool {
+    var slot_index: usize = 0;
+    while (slot_index < taskSlotCapacity(runtime)) : (slot_index += 1) {
+        const slot = runtime.taskSlotAtConst(slot_index);
+        if (slot.in_use and slot.task.namespace_id == namespace_id) return true;
+    }
+    return false;
+}
+
+fn taskSlotCapacity(runtime: anytype) usize {
+    return runtime.taskSlotCapacity();
+}
+
+fn addressSpaceSlotCapacity(runtime: anytype) usize {
+    const AddressSpacesType = @TypeOf(runtime.address_spaces);
+    if (comptime @hasField(AddressSpacesType, "slots")) {
+        return runtime.address_spaces.slots.len;
+    } else {
+        return runtime.address_spaces.len;
+    }
+}
+
+fn normalizeHostId(id: u64) u64 {
+    return if (id == 0) 1 else id;
+}
+
+fn nextHostIdAfter(id: u64) u64 {
+    const next = id +% 1;
+    return normalizeHostId(next);
 }
 
 fn makeAddressSpace(

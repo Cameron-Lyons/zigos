@@ -385,7 +385,6 @@ pub const Graph = struct {
         }
         record.key_rotation_generation = next_generation;
         record.last_rotated_at_ticks = tick;
-        self.devices.markDirty(graphPrincipalKey(device_principal));
         return record;
     }
 
@@ -417,7 +416,6 @@ pub const Graph = struct {
         record.revoked_at_ticks = tick;
         if (self.trusted_device_count == 0) native_util.impossibleByInvariant("trusted device count covers trusted records");
         self.trusted_device_count -= 1;
-        self.devices.markDirty(graphPrincipalKey(device_principal));
     }
 
     pub fn findUserRoot(self: *Graph, user_principal: principal.PrincipalId) ?*UserRootRecord {

@@ -29,7 +29,7 @@ else
     };
 
 pub const MAX_DEVICES: usize = 4;
-pub const MAX_DMA_WINDOWS: usize = 4;
+pub const MAX_DMA_WINDOWS: usize = 8;
 pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
 const ata_io_register_count = 8;
 const ata_control_register_index = ata_io_register_count;
@@ -564,10 +564,34 @@ pub fn programBrokeredDmaIsolation(device_id: u64, dma_domain_id: u64) Error!Dma
     });
 }
 
+// Program a window-confined bus-master DMA program for a real storage data
+// plane (the NVMe engine): the device may master the bus, but only into the
+// declared queue/bounce frames. Unconfined bus mastering stays rejected by
+// programDmaIsolation, so the only real DMA engine is now inside broker
+// mediation instead of bypassing it.
+pub fn programBusMasterStorageDmaIsolation(
+    device_id: u64,
+    dma_domain_id: u64,
+    windows: []const DmaWindow,
+) Error!DmaIsolationStatus {
+    return programDmaIsolation(.{
+        .device_id = device_id,
+        .dma_domain_id = dma_domain_id,
+        .mode = .brokered_dma_buffers,
+        .bus_master_dma_enabled = true,
+        .windows = windows,
+    });
+}
+
 pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus {
     _ = findController(request.device_id) orelse return error.DeviceNotFound;
     if (request.dma_domain_id == 0) return error.InvalidDmaDomain;
-    if (request.bus_master_dma_enabled) return error.UnsupportedBusMasterDma;
+    // Bus-master DMA is permitted only when confined: brokered-buffer mode with
+    // declared windows and a full IOMMU program (both enforced below). An
+    // unconfined bus-master request (programmed-IO mode) is still rejected.
+    if (request.bus_master_dma_enabled and request.mode != .brokered_dma_buffers) {
+        return error.UnsupportedBusMasterDma;
+    }
     if (request.windows.len == 0 or request.windows.len > MAX_DMA_WINDOWS) return error.InvalidDmaWindow;
     for (request.windows) |window| {
         if (!validDmaWindow(window)) return error.InvalidDmaWindow;
@@ -812,12 +836,10 @@ fn reserveDmaProgramSlot(device_id: u64) Error!*DmaProgramSlot {
     const slot_index = dma_programs.reserveIndex(program_id) orelse return error.DmaTableFull;
     if (!dma_program_device_index.append(dmaProgramDeviceKey(device_id), slot_index)) {
         _ = dma_programs.removeIndex(slot_index);
-        dma_programs.clearDirty();
         return error.DmaTableFull;
     }
     const slot = &dma_programs.slots[slot_index];
     slot.program_id = program_id;
-    dma_programs.clearDirty();
     return slot;
 }
 
@@ -827,7 +849,6 @@ fn removeDmaProgramSlot(slot_index: usize) void {
     if (!slot.in_use) native_util.impossibleByInvariant("removing free DMA program slot");
     _ = dma_program_device_index.remove(dmaProgramDeviceKey(slot.device_id), slot_index);
     _ = dma_programs.removeIndex(slot_index);
-    dma_programs.clearDirty();
 }
 
 fn allocateDmaProgramId() u64 {
@@ -1298,7 +1319,7 @@ test "device broker indexes DMA programs by device and reuses invalidated capaci
     try std.testing.expectError(error.DmaTableFull, programBrokeredDmaIsolation(0x1F003, 0xD300));
 }
 
-test "device broker records AMD-Vi programming evidence and rejects bus-master DMA" {
+test "device broker records AMD-Vi programming evidence and confines bus-master DMA" {
     reset();
 
     try std.testing.expect(publishAtaController(0x1F002, .{
@@ -1309,14 +1330,48 @@ test "device broker records AMD-Vi programming evidence and rejects bus-master D
         .sector_count = test_ata_sector_count,
     }));
     const window = defaultBrokeredDmaWindow(0x1F002);
+
+    // Unconfined bus mastering (programmed-IO mode) stays rejected.
     try std.testing.expectError(error.UnsupportedBusMasterDma, programDmaIsolation(.{
         .device_id = 0x1F002,
         .dma_domain_id = 0xA11D,
-        .mode = .brokered_dma_buffers,
+        .mode = .programmed_io_only,
         .bus_master_dma_enabled = true,
         .iommu_engine = .amd_vi,
         .windows = &.{window},
     }));
+
+    // Window-confined bus mastering is accepted and carries IOMMU evidence,
+    // and accesses outside the declared windows still fault.
+    const queue_window = DmaWindow{
+        .base = 0x0080_0000,
+        .length = iommu_page_size,
+        .readable_by_device = true,
+        .writable_by_device = false,
+    };
+    const bus_master_status = try programBusMasterStorageDmaIsolation(
+        0x1F002,
+        0xA11D,
+        &.{ window, queue_window },
+    );
+    try std.testing.expect(bus_master_status.bus_master_dma_enabled);
+    try std.testing.expect(bus_master_status.hardware_iommu_programmed);
+    try std.testing.expectEqual(@as(usize, 2), bus_master_status.window_count);
+    try std.testing.expectError(error.DmaWindowDenied, validateDmaAccess(
+        0x1F002,
+        0xA11D,
+        queue_window.base,
+        test_dma_buffer_bytes,
+        .device_write,
+    ));
+    try std.testing.expectError(error.DmaWindowDenied, validateDmaAccess(
+        0x1F002,
+        0xA11D,
+        queue_window.base + queue_window.length,
+        test_dma_buffer_bytes,
+        .device_read,
+    ));
+    try validateDmaAccess(0x1F002, 0xA11D, queue_window.base, test_dma_buffer_bytes, .device_read);
 
     const status = try programDmaIsolation(.{
         .device_id = 0x1F002,

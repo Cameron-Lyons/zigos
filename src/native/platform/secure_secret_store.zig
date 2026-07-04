@@ -109,32 +109,36 @@ pub const Store = struct {
     ) Error!*SecretRecord {
         if (raw.len > MAX_VALUE_BYTES) return error.SecretTooLarge;
         if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
+        const secret_id = self.nextReservableSecretId() orelse return error.SecretTableFull;
         const hardware_sealed_digest = if (hardware_backed)
             self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable
         else
             crypto_hash.zero_digest;
-        const secret_id = self.next_secret_id;
-        const slot = self.secrets.reserve(secret_id) orelse return error.SecretTableFull;
-        slot.secret = zeroSecret();
-        slot.secret.id = secret_id;
-        slot.secret.owner = owner;
-        slot.secret.hardware_backed = hardware_backed;
-        slot.secret.exportable = exportable;
-        slot.secret.resident_material = true;
-        slot.secret.label_len = native_util.copyTextExact(&slot.secret.label, label) catch unreachable;
+
+        var secret = zeroSecret();
+        secret.id = secret_id;
+        secret.owner = owner;
+        secret.hardware_backed = hardware_backed;
+        secret.exportable = exportable;
+        secret.resident_material = true;
+        secret.label_len = native_util.copyTextExact(&secret.label, label) catch return error.LabelTooLong;
         if (hardware_backed) {
-            slot.secret.hardware_provider_used = true;
-            slot.secret.sealed_digest_present = true;
-            slot.secret.sealed_digest = hardware_sealed_digest;
+            secret.hardware_provider_used = true;
+            secret.sealed_digest_present = true;
+            secret.sealed_digest = hardware_sealed_digest;
         }
         if (hardware_backed and !exportable) {
-            slot.secret.resident_material = false;
-            slot.secret.value_len = 0;
-            @memset(&slot.secret.value, 0);
+            secret.resident_material = false;
+            secret.value_len = 0;
+            @memset(&secret.value, 0);
         } else {
-            slot.secret.value_len = native_util.copyTextExact(&slot.secret.value, raw) catch unreachable;
+            secret.value_len = native_util.copyTextExact(&secret.value, raw) catch unreachable;
         }
-        self.next_secret_id += 1;
+
+        const slot_index = self.secrets.reserveIndex(secret_id) orelse return error.SecretTableFull;
+        const slot = &self.secrets.slots[slot_index];
+        slot.secret = secret;
+        self.advanceNextSecretIdFrom(secret_id);
         return &slot.secret;
     }
 
@@ -146,9 +150,8 @@ pub const Store = struct {
         allow_raw_export: bool,
     ) Error!SecretHandle {
         const secret = self.findSecret(secret_id) orelse return error.SecretNotFound;
-        const handle_id = self.next_handle_id;
-        const slot = self.handles.reserve(handle_id) orelse return error.HandleTableFull;
-        slot.handle = .{
+        const handle_id = self.nextReservableHandleId() orelse return error.HandleTableFull;
+        const handle = SecretHandle{
             .id = handle_id,
             .secret_id = secret_id,
             .holder = holder,
@@ -156,8 +159,11 @@ pub const Store = struct {
             .hardware_backed = secret.hardware_backed,
             .export_allowed = allow_raw_export and secret.exportable,
         };
-        self.next_handle_id += 1;
-        return slot.handle;
+        const slot_index = self.handles.reserveIndex(handle_id) orelse return error.HandleTableFull;
+        const slot = &self.handles.slots[slot_index];
+        slot.handle = handle;
+        self.advanceNextHandleIdFrom(handle_id);
+        return handle;
     }
 
     pub fn describeHandle(self: *const Store, handle_id: u64) ?SecretHandle {
@@ -175,6 +181,38 @@ pub const Store = struct {
         if (!handle.export_allowed) return error.RawExportDenied;
         const secret = self.findSecretConst(handle.secret_id) orelse return error.SecretNotFound;
         return secret.value[0..secret.value_len];
+    }
+
+    fn nextReservableSecretId(self: *const Store) ?u64 {
+        if (self.secrets.countInUse() >= MAX_SECRETS) return null;
+
+        var secret_id = normalizeSecretStoreId(self.next_secret_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_SECRETS) : (attempts += 1) {
+            if (self.describeSecret(secret_id) == null) return secret_id;
+            secret_id = nextSecretStoreIdAfter(secret_id);
+        }
+        return null;
+    }
+
+    fn nextReservableHandleId(self: *const Store) ?u64 {
+        if (self.handles.countInUse() >= MAX_HANDLES) return null;
+
+        var handle_id = normalizeSecretStoreId(self.next_handle_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_HANDLES) : (attempts += 1) {
+            if (self.describeHandle(handle_id) == null) return handle_id;
+            handle_id = nextSecretStoreIdAfter(handle_id);
+        }
+        return null;
+    }
+
+    fn advanceNextSecretIdFrom(self: *Store, secret_id: u64) void {
+        self.next_secret_id = nextSecretStoreIdAfter(secret_id);
+    }
+
+    fn advanceNextHandleIdFrom(self: *Store, handle_id: u64) void {
+        self.next_handle_id = nextSecretStoreIdAfter(handle_id);
     }
 
     fn findSecret(self: *Store, secret_id: u64) ?*SecretRecord {
@@ -211,6 +249,15 @@ fn zeroSecret() SecretRecord {
         .value_len = 0,
         .value = [_]u8{0} ** MAX_VALUE_BYTES,
     };
+}
+
+fn normalizeSecretStoreId(id: u64) u64 {
+    return if (id == 0) 1 else id;
+}
+
+fn nextSecretStoreIdAfter(id: u64) u64 {
+    const next = id +% 1;
+    return normalizeSecretStoreId(next);
 }
 
 fn defaultSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
@@ -302,6 +349,73 @@ test "secure secret store reports missing handles and oversized secrets" {
         .holder = holder,
         .task_id = 1,
     }));
+}
+
+test "secure secret store stages records and wraps ids without publishing zero" {
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 4 };
+    const holder = principal.PrincipalId{ .kind = .app, .serial = 46 };
+
+    store.next_secret_id = std.math.maxInt(u64);
+    const max_secret = try store.importSecret(owner, "max-secret", "private max secret", false, true);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_secret.id);
+    try std.testing.expectEqual(@as(u64, 1), store.next_secret_id);
+    try std.testing.expect(store.describeSecret(0) == null);
+
+    const wrapped_secret = try store.importSecret(owner, "wrapped-secret", "private wrapped secret", false, true);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_secret.id);
+    try std.testing.expectEqual(@as(u64, 2), store.next_secret_id);
+    try std.testing.expect(store.describeSecret(0) == null);
+
+    store.next_secret_id = 1;
+    const skipped_secret = try store.importSecret(owner, "skipped-secret", "private skipped secret", false, true);
+    try std.testing.expectEqual(@as(u64, 2), skipped_secret.id);
+    try std.testing.expectEqual(@as(u64, 3), store.next_secret_id);
+    try std.testing.expect(store.describeSecret(0) == null);
+
+    store.next_handle_id = std.math.maxInt(u64);
+    const max_handle = try store.lendHandle(max_secret.id, holder, 92, true);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_handle.id);
+    try std.testing.expectEqual(@as(u64, 1), store.next_handle_id);
+    try std.testing.expect(store.describeHandle(0) == null);
+
+    const wrapped_handle = try store.lendHandle(wrapped_secret.id, holder, 93, true);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_handle.id);
+    try std.testing.expectEqual(@as(u64, 2), store.next_handle_id);
+    try std.testing.expect(store.describeHandle(0) == null);
+
+    store.next_handle_id = 1;
+    const skipped_handle = try store.lendHandle(skipped_secret.id, holder, 94, true);
+    try std.testing.expectEqual(@as(u64, 2), skipped_handle.id);
+    try std.testing.expectEqual(@as(u64, 3), store.next_handle_id);
+    try std.testing.expect(store.describeHandle(0) == null);
+
+    var full_secrets = Store.init();
+    var label_buffer: [MAX_LABEL_BYTES]u8 = undefined;
+    for (0..MAX_SECRETS) |index| {
+        const label = try std.fmt.bufPrint(&label_buffer, "full-secret-{d}", .{index});
+        _ = try full_secrets.importSecret(owner, label, "private full secret", false, true);
+    }
+    const secret_next_before = full_secrets.next_secret_id;
+    try std.testing.expectError(error.SecretTableFull, full_secrets.importSecret(
+        owner,
+        "full-secret",
+        "private full secret",
+        true,
+        false,
+    ));
+    try std.testing.expectEqual(secret_next_before, full_secrets.next_secret_id);
+    try std.testing.expect(full_secrets.describeSecret(secret_next_before) == null);
+
+    var full_handles = Store.init();
+    const full_handle_secret = try full_handles.importSecret(owner, "full-handle", "private full handle", false, true);
+    for (0..MAX_HANDLES) |index| {
+        _ = try full_handles.lendHandle(full_handle_secret.id, holder, @intCast(100 + index), true);
+    }
+    const handle_next_before = full_handles.next_handle_id;
+    try std.testing.expectError(error.HandleTableFull, full_handles.lendHandle(full_handle_secret.id, holder, 94, true));
+    try std.testing.expectEqual(handle_next_before, full_handles.next_handle_id);
+    try std.testing.expect(full_handles.describeHandle(handle_next_before) == null);
 }
 
 test "secure secret store indexes secrets and handles through full tables" {

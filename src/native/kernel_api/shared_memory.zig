@@ -361,7 +361,7 @@ pub const Table = struct {
     ) Error!Object {
         if (size_bytes == 0) return error.SizeZero;
 
-        const object_id = self.allocateObjectId();
+        const object_id = self.nextReservableObjectId() orelse return error.TableFull;
         const page_count = pageCount(size_bytes);
         const page_base = try self.mmu.allocatePhysicalFrames(page_count);
         const slot_index = self.arena.reserveIndex(object_id) orelse return error.TableFull;
@@ -385,6 +385,7 @@ pub const Table = struct {
             .mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT,
             .mapping_count = 0,
         };
+        self.advanceNextObjectIdFrom(object_id);
         return slot.object;
     }
 
@@ -650,9 +651,21 @@ pub const Table = struct {
         return self.object_task_mapping_index.contains(objectTaskMappingKey(object_id, task_id));
     }
 
-    fn allocateObjectId(self: *Table) ids.SharedMemoryId {
-        defer self.next_object_id += 1;
-        return ids.sharedMemory(self.next_object_id);
+    fn nextReservableObjectId(self: *const Table) ?ids.SharedMemoryId {
+        if (self.arena.countInUse() >= MAX_SHARED_MEMORY_OBJECTS) return null;
+
+        var object_id = normalizeObjectId(self.next_object_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_SHARED_MEMORY_OBJECTS) : (attempts += 1) {
+            const candidate = ids.sharedMemory(object_id);
+            if (self.findConst(candidate) == null) return candidate;
+            object_id = nextObjectIdAfter(object_id);
+        }
+        return null;
+    }
+
+    fn advanceNextObjectIdFrom(self: *Table, object_id: ids.SharedMemoryId) void {
+        self.next_object_id = nextObjectIdAfter(object_id.raw());
     }
 
     fn find(self: *Table, object_id: ids.SharedMemoryId) ?*Object {
@@ -668,6 +681,15 @@ pub const Table = struct {
 
 fn objectSlotId(slot: *const ObjectSlot) ids.SharedMemoryId {
     return slot.object.id;
+}
+
+fn normalizeObjectId(object_id: u64) u64 {
+    return if (object_id == 0) 1 else object_id;
+}
+
+fn nextObjectIdAfter(object_id: u64) u64 {
+    const next = object_id +% 1;
+    return normalizeObjectId(next);
 }
 
 fn mmuMappingKey(object_id: ids.SharedMemoryId, kind: MmuMappingKind, domain_id: u64) u64 {
@@ -909,6 +931,44 @@ test "shared memory objects map unmap and revoke across tasks" {
     try std.testing.expectEqual(@as(u16, 1), descriptor.flags);
     try std.testing.expectError(error.Revoked, table.taskMappingDescriptor(object.id, ids.task(7)));
     try std.testing.expectError(error.Revoked, table.map(object.id, ids.task(9)));
+}
+
+test "shared memory object ids wrap without zero and skip active objects" {
+    var table = Table.init();
+
+    table.next_object_id = std.math.maxInt(u64);
+    const max_object = try table.create(ids.task(7), PAGE_SIZE);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_object.id.raw());
+    try std.testing.expectEqual(@as(u64, 1), table.next_object_id);
+    try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(ids.SharedMemoryId.zero));
+
+    const wrapped_object = try table.create(ids.task(8), PAGE_SIZE);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_object.id.raw());
+    try std.testing.expectEqual(@as(u64, 2), table.next_object_id);
+    try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(ids.SharedMemoryId.zero));
+
+    table.next_object_id = 1;
+    const skipped_object = try table.create(ids.task(9), PAGE_SIZE);
+    try std.testing.expectEqual(@as(u64, 2), skipped_object.id.raw());
+    try std.testing.expectEqual(@as(u64, 3), table.next_object_id);
+    try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(ids.SharedMemoryId.zero));
+}
+
+test "shared memory object ids do not advance when creation fails" {
+    var table = Table.init();
+
+    table.next_object_id = 77;
+    try std.testing.expectError(error.SizeZero, table.create(ids.task(7), 0));
+    try std.testing.expectEqual(@as(u64, 77), table.next_object_id);
+
+    for (0..MAX_SHARED_MEMORY_OBJECTS) |index| {
+        _ = try table.create(ids.task(@intCast(index + 100)), PAGE_SIZE);
+    }
+
+    const next_before_full = table.next_object_id;
+    try std.testing.expectError(error.TableFull, table.create(ids.task(1_000), PAGE_SIZE));
+    try std.testing.expectEqual(next_before_full, table.next_object_id);
+    try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(ids.sharedMemory(next_before_full)));
 }
 
 test "shared memory objects label accelerator access and explicit zero-copy attachments" {

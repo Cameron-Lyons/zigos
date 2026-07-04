@@ -271,10 +271,10 @@ pub const Catalog = struct {
         }
 
         const embedded_info = embedded orelse return error.EmbeddedArtifactRequired;
-
+        const image_id = self.nextReservableImageId() orelse return error.ImageTableFull;
         var image = zeroImage();
         const executable_image = embedded_info.executable_image;
-        image.id = self.next_image_id;
+        image.id = image_id;
         image.component_class = request.component_class;
         image.component_abi_version = componentAbiVersion(request.initial_component.substrate);
         image.bundle_signed = request.bundle.signature.isPresent();
@@ -300,11 +300,35 @@ pub const Catalog = struct {
         const slot = &self.images.slots[slot_index];
         slot.image = image;
         self.bundle_index.insert(bundleIndexKey(slot.image.bundleIdSlice()), slot_index);
-        self.images.clearDirty();
-        self.next_image_id += 1;
+        self.advanceNextImageIdFrom(image_id);
         return &slot.image;
     }
+
+    fn nextReservableImageId(self: *Catalog) ?u64 {
+        if (self.imageCount() >= MAX_IMAGES) return null;
+
+        var image_id = normalizeImageId(self.next_image_id);
+        var attempts: usize = 0;
+        while (attempts <= MAX_IMAGES) : (attempts += 1) {
+            if (self.findById(image_id) == null) return image_id;
+            image_id = nextImageIdAfter(image_id);
+        }
+        return null;
+    }
+
+    fn advanceNextImageIdFrom(self: *Catalog, image_id: u64) void {
+        self.next_image_id = nextImageIdAfter(image_id);
+    }
 };
+
+fn normalizeImageId(image_id: u64) u64 {
+    return if (image_id == 0) 1 else image_id;
+}
+
+fn nextImageIdAfter(image_id: u64) u64 {
+    const next = image_id +% 1;
+    return normalizeImageId(next);
+}
 
 fn bundleIndexKey(bundle_id: []const u8) u64 {
     const hash = native_util.fnv1a64(bundle_id);
@@ -566,6 +590,33 @@ pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments
     return bytes;
 }
 
+const test_main_components = [_]manifest.ExecutionComponentDecl{
+    .{ .id = "main", .entry = "app.main" },
+};
+
+const test_main_interfaces = [_]manifest.InterfaceDecl{
+    .{ .name = "zigos.workspace.document" },
+    .{ .name = "zigos.object.workspace" },
+};
+
+const test_main_assets = [_]manifest.AssetDecl{
+    .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+};
+
+fn signedTestBundle(bundle_id: []const u8, display_name: []const u8) !manifest.BundleManifest {
+    var bundle = manifest.BundleManifest{
+        .bundle_id = bundle_id,
+        .display_name = display_name,
+        .publisher = "zigos.dev",
+        .provided_interfaces = test_main_interfaces[0..1],
+        .consumed_interfaces = test_main_interfaces[1..2],
+        .components = &test_main_components,
+        .assets = &test_main_assets,
+    };
+    bundle.signature = try userspace_manifest_signing.signBundle(bundle);
+    return bundle;
+}
+
 test "userspace image launch records bundle provenance and isolated process state" {
     var catalog = Catalog.init();
     const interfaces = [_]manifest.InterfaceDecl{
@@ -760,6 +811,81 @@ test "catalog stores embedded elf metadata for registered userspace artifacts" {
     try std.testing.expectEqual(@as(usize, 1), image.executable_image.segment_count);
     try std.testing.expectEqual(@as(u32, 0xA10F), image.role_tag);
     try std.testing.expectEqual(@as(u32, 15), image.heartbeat_increment);
+}
+
+test "catalog image ids wrap without zero and skip active images" {
+    var catalog = Catalog.init();
+    const bytes = makeSyntheticElf32ForTest(0x402000, 2, 1);
+
+    catalog.next_image_id = std.math.maxInt(u64);
+    const max_image = try catalog.registerEmbeddedArtifact(.{
+        .bundle = try signedTestBundle("app.image-wrap-max", "Image Wrap Max"),
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "main",
+            .entry = "app.main",
+        },
+        .elf_bytes = &bytes,
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), max_image.id);
+    try std.testing.expectEqual(@as(u64, 1), catalog.next_image_id);
+    try std.testing.expect(catalog.findById(0) == null);
+
+    const wrapped_image = try catalog.registerEmbeddedArtifact(.{
+        .bundle = try signedTestBundle("app.image-wrap-one", "Image Wrap One"),
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "main",
+            .entry = "app.main",
+        },
+        .elf_bytes = &bytes,
+    });
+    try std.testing.expectEqual(@as(u64, 1), wrapped_image.id);
+    try std.testing.expectEqual(@as(u64, 2), catalog.next_image_id);
+    try std.testing.expect(catalog.findById(0) == null);
+
+    catalog.next_image_id = 1;
+    const skipped_image = try catalog.registerEmbeddedArtifact(.{
+        .bundle = try signedTestBundle("app.image-wrap-two", "Image Wrap Two"),
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "main",
+            .entry = "app.main",
+        },
+        .elf_bytes = &bytes,
+    });
+    try std.testing.expectEqual(@as(u64, 2), skipped_image.id);
+    try std.testing.expectEqual(@as(u64, 3), catalog.next_image_id);
+    try std.testing.expect(catalog.findById(0) == null);
+
+    var full_catalog = Catalog.init();
+    var bundle_id_buffer: [MAX_BUNDLE_ID_BYTES]u8 = undefined;
+    var display_name_buffer: [MAX_DISPLAY_NAME_BYTES]u8 = undefined;
+    for (0..MAX_IMAGES) |index| {
+        const bundle_id = try std.fmt.bufPrint(&bundle_id_buffer, "app.full-image-{d}", .{index});
+        const display_name = try std.fmt.bufPrint(&display_name_buffer, "Full Image {d}", .{index});
+        _ = try full_catalog.registerEmbeddedArtifact(.{
+            .bundle = try signedTestBundle(bundle_id, display_name),
+            .component_class = .app_component,
+            .initial_component = .{
+                .label = "main",
+                .entry = "app.main",
+            },
+            .elf_bytes = &bytes,
+        });
+    }
+    const next_before_full = full_catalog.next_image_id;
+    try std.testing.expectError(error.ImageTableFull, full_catalog.registerEmbeddedArtifact(.{
+        .bundle = try signedTestBundle("app.full-image-rejected", "Full Image Rejected"),
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "main",
+            .entry = "app.main",
+        },
+        .elf_bytes = &bytes,
+    }));
+    try std.testing.expectEqual(next_before_full, full_catalog.next_image_id);
+    try std.testing.expectEqual(MAX_IMAGES, full_catalog.imageCount());
 }
 
 test "catalog rejects generated artifact metadata that no longer matches embedded elf bytes" {

@@ -165,13 +165,14 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const slot_index = self.slots.reserveIndex(self.next_session_id) orelse {
+        const session_id = self.next_session_id;
+        const slot_index = self.slots.reserveIndex(session_id) orelse {
             try recordStart(ledger, request, 0, false);
             return error.CaptureTableFull;
         };
         const slot = &self.slots.slots[slot_index];
         slot.session = .{
-            .id = self.next_session_id,
+            .id = session_id,
             .subject = request.subject,
             .task_id = request.task_id,
             .device_id = request.device_id,
@@ -186,7 +187,7 @@ pub const Service = struct {
             .sensitivity = request.sensitivity,
         };
         self.accountActiveSession(slot_index, &slot.session);
-        self.next_session_id += 1;
+        self.advanceNextSessionId();
         try recordStart(ledger, request, slot.session.id, true);
         return &slot.session;
     }
@@ -252,6 +253,11 @@ pub const Service = struct {
     pub fn find(self: *Service, session_id: u64) ?*Session {
         const slot = self.slots.get(session_id) orelse return null;
         return &slot.session;
+    }
+
+    fn advanceNextSessionId(self: *Service) void {
+        self.next_session_id +%= 1;
+        if (self.next_session_id == 0) self.next_session_id = 1;
     }
 
     pub fn activeSessionCount(self: *const Service) usize {
@@ -689,4 +695,61 @@ test "sensitive capture broker requires foreground visible leased sessions and r
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "private camera frame") == null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=sensitive_capture") != null);
+}
+
+test "sensitive capture session ids wrap without publishing id zero" {
+    const signing = @import("../core/signing.zig");
+
+    var policies = policy_object.Directory.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 993 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 994 };
+    const signer = signing.SignerIdentity{ .label = "capture-wrap-policy", .seed = signing.seedFromByte(0xca) };
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = user.serial,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .label = "capture wrap policy",
+        .camera_allowed = true,
+        .require_capture_indicator = true,
+        .require_sensitive_capture_foreground = true,
+        .allow_background_capture = false,
+        .max_sensitive_capture_lease_ticks = 50,
+        .max_sensitive_capture_samples = 1,
+    }, signer);
+
+    const subjects = policy_object.SubjectSet{ .user_id = user.serial };
+    var service = Service.init();
+    service.next_session_id = std.math.maxInt(u64);
+
+    const first = try service.start(&policies, subjects, .{
+        .subject = app,
+        .task_id = 43,
+        .device_id = 7,
+        .kind = .camera,
+        .foreground_session_id = 5,
+        .expires_at_ticks = 45,
+        .now_ticks = 11,
+        .sample_budget = 1,
+        .indicator_visible = true,
+        .detail = "private camera frame allowed",
+    }, null);
+    try std.testing.expectEqual(std.math.maxInt(u64), first.id);
+    try std.testing.expectEqual(@as(u64, 1), service.next_session_id);
+    try std.testing.expect(service.find(0) == null);
+
+    const second = try service.start(&policies, subjects, .{
+        .subject = app,
+        .task_id = 44,
+        .device_id = 8,
+        .kind = .camera,
+        .foreground_session_id = 6,
+        .expires_at_ticks = 45,
+        .now_ticks = 12,
+        .sample_budget = 1,
+        .indicator_visible = true,
+        .detail = "private camera frame allowed",
+    }, null);
+    try std.testing.expectEqual(@as(u64, 1), second.id);
+    try std.testing.expectEqual(@as(u64, 2), service.next_session_id);
+    try std.testing.expectEqual(@as(usize, 2), service.activeSessionCount());
 }

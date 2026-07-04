@@ -125,7 +125,6 @@ pub const Relay = struct {
         const plaintext = try decryptPacket(session, slot.packet, plaintext_out);
         _ = self.session_index.remove(key, slot_index);
         _ = self.packets.removeIndex(slot_index);
-        self.packets.clearDirty();
         self.delivered_packets += 1;
         return plaintext;
     }
