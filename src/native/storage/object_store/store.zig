@@ -625,8 +625,11 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             }
 
             const version_id = self.nextVersionId();
-            const blob_address = computeBlobAddress(request.payload);
-            const blob_slot_index = try self.putBlob(blob_address, request.payload);
+            var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
+            const chunk_count = try buildChunkRefs(request.payload, &chunk_refs);
+            const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
+            const blob_address = blobManifestAddressFromMerkleRoot(request.payload.len, chunk_count, merkle_root);
+            const blob_slot_index = try self.putBlobPrepared(blob_address, merkle_root, request.payload, &chunk_refs, chunk_count);
             const parents = versionParents(previous_version_id);
             const parent_count = parentCount(parents);
             const version_address = computeVersionAddress(parents[0..@as(usize, @intCast(parent_count))], request.metadata, blob_address);
@@ -803,7 +806,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             while (try cursor.next()) |payload_chunk| {
                 const next_offset = payload_chunk.offset + payload_chunk.bytes.len;
                 if (next_offset > version_record.payload_len or next_offset > out.len) return error.CorruptBlob;
-                copyBytes(out[payload_chunk.offset..next_offset], payload_chunk.bytes);
+                @memcpy(out[payload_chunk.offset..next_offset], payload_chunk.bytes);
                 summary.bytes_transferred = next_offset;
                 summary.chunks_transferred += 1;
             }
@@ -971,8 +974,8 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.version.parent_count = request.parent_count;
             slot.version.parent_version_ids = request.parent_version_ids;
             slot.version.object_type = request.object_type;
-            copyBytes(slot.version.blob_address[0..], request.blob_address[0..]);
-            copyBytes(slot.version.version_address[0..], request.version_address[0..]);
+            slot.version.blob_address = request.blob_address;
+            slot.version.version_address = request.version_address;
             writeMetadata(&slot.version.metadata, request.metadata);
             slot.version.payload_len = request.payload_len;
             slot.version.blob_slot_index = request.blob_slot_index;
@@ -1013,10 +1016,29 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn putBlob(self: *Self, address: BlobAddress, payload: []const u8) Error!usize {
             if (payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
-            if (!std.mem.eql(u8, &computeBlobAddress(payload), &address)) return error.CorruptBlob;
-
             var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
-            const chunk_count = try self.putPayloadChunks(payload, &chunk_refs);
+            const chunk_count = try buildChunkRefs(payload, &chunk_refs);
+            const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
+            const computed_address = blobManifestAddressFromMerkleRoot(payload.len, chunk_count, merkle_root);
+            if (!std.mem.eql(u8, &computed_address, &address)) return error.CorruptBlob;
+            return self.putBlobPrepared(address, merkle_root, payload, &chunk_refs, chunk_count);
+        }
+
+        /// `chunk_refs` addresses must already be derived from `payload` and
+        /// `address`/`merkle_root` from those refs; callers own that proof.
+        fn putBlobPrepared(
+            self: *Self,
+            address: BlobAddress,
+            merkle_root: BlobAddress,
+            payload: []const u8,
+            chunk_refs: *[MAX_BLOB_CHUNKS]ChunkRef,
+            chunk_count: usize,
+        ) Error!usize {
+            for (chunk_refs[0..chunk_count], 0..) |*chunk_ref, chunk_index| {
+                const start = chunk_index * MAX_CHUNK_BYTES;
+                const end = @min(start + MAX_CHUNK_BYTES, payload.len);
+                chunk_ref.slot_index = try self.putChunkPrepared(chunk_ref.address, payload[start..end]);
+            }
 
             if (self.blobSlotIndex(address)) |slot_index| {
                 const slot = self.blobSlotAt(slot_index);
@@ -1028,39 +1050,24 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot_index = self.blobs.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
             const slot = self.blobSlotAt(slot_index);
             slot.blob.address = address;
-            slot.blob.merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
+            slot.blob.merkle_root = merkle_root;
             slot.blob.payload_len = payload.len;
             slot.blob.chunk_count = @intCast(chunk_count);
-            slot.blob.chunks = chunk_refs;
+            slot.blob.chunks = chunk_refs.*;
             slot.blob.ref_count = 1;
             slot.blob.manifest_verified = false;
             self.recordBlobPayloadBytes(payload.len);
             return slot_index;
         }
 
-        fn putPayloadChunks(self: *Self, payload: []const u8, out: *[MAX_BLOB_CHUNKS]ChunkRef) Error!usize {
-            const chunk_count = chunkCountForLen(payload.len);
-            if (chunk_count > MAX_BLOB_CHUNKS) return error.PayloadTooLarge;
-
-            var chunk_index: usize = 0;
-            while (chunk_index < chunk_count) : (chunk_index += 1) {
-                const start = chunk_index * MAX_CHUNK_BYTES;
-                const end = @min(start + MAX_CHUNK_BYTES, payload.len);
-                const payload_chunk = payload[start..end];
-                const chunk_address = computeChunkAddress(payload_chunk);
-                const slot_index = try self.putChunk(chunk_address, payload_chunk);
-                out[chunk_index] = .{
-                    .address = chunk_address,
-                    .payload_len = @intCast(payload_chunk.len),
-                    .slot_index = slot_index,
-                };
-            }
-            return chunk_count;
-        }
-
         pub fn putChunk(self: *Self, address: ChunkAddress, payload: []const u8) Error!usize {
             if (payload.len > MAX_CHUNK_BYTES) return error.PayloadTooLarge;
             if (!std.mem.eql(u8, &computeChunkAddress(payload), &address)) return error.CorruptBlob;
+            return self.putChunkPrepared(address, payload);
+        }
+
+        /// `address` must already be `computeChunkAddress(payload)`; callers own that proof.
+        fn putChunkPrepared(self: *Self, address: ChunkAddress, payload: []const u8) Error!usize {
             if (self.chunkSlotIndex(address)) |slot_index| {
                 const slot = self.chunkSlotAt(slot_index);
                 if (slot.chunk.payload_len != payload.len or !std.mem.eql(u8, slot.chunk.chunkSlice(), payload)) return error.CorruptBlob;
@@ -1071,8 +1078,8 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot = self.chunkSlotAt(slot_index);
             slot.chunk.address = address;
             slot.chunk.payload_len = @intCast(payload.len);
-            @memset(slot.chunk.payload[0..], 0);
-            copyBytes(slot.chunk.payload[0..payload.len], payload);
+            @memcpy(slot.chunk.payload[0..payload.len], payload);
+            @memset(slot.chunk.payload[payload.len..], 0);
             return slot_index;
         }
 
@@ -1143,14 +1150,6 @@ pub fn signMetadata(
     return metadata;
 }
 
-fn copyBytes(dest: []u8, src: []const u8) void {
-    var index: usize = 0;
-    const len = @min(dest.len, src.len);
-    while (index < len) : (index += 1) {
-        dest[index] = src[index];
-    }
-}
-
 fn queryResultFor(object_record: *const ObjectRecord, latest: *const VersionRecord) ObjectQueryResult {
     var result = ObjectQueryResult{
         .object_id = object_record.id,
@@ -1211,12 +1210,12 @@ fn writeMetadata(dest: *SignedMetadata, src: *const SignedMetadata) void {
     dest.signature.signer = src.signature.signer;
     dest.signature.public_key_len = src.signature.public_key_len;
     dest.signature.value_len = src.signature.value_len;
-    copyBytes(dest.signature.public_key[0..], src.signature.public_key[0..]);
-    copyBytes(dest.signature.value[0..], src.signature.value[0..]);
+    dest.signature.public_key = src.signature.public_key;
+    dest.signature.value = src.signature.value;
     dest.label_len = src.label_len;
-    copyBytes(dest.label[0..], src.label[0..]);
+    dest.label = src.label;
     dest.content_type_len = src.content_type_len;
-    copyBytes(dest.content_type[0..], src.content_type[0..]);
+    dest.content_type = src.content_type;
     dest.created_at_ticks = src.created_at_ticks;
 }
 
@@ -1243,10 +1242,13 @@ pub fn computeChunkAddress(payload: []const u8) ChunkAddress {
 }
 
 pub fn computeBlobManifestAddress(payload_len: usize, chunk_refs: []const ChunkRef) BlobAddress {
-    const merkle_root = computeBlobMerkleRoot(chunk_refs);
+    return blobManifestAddressFromMerkleRoot(payload_len, chunk_refs.len, computeBlobMerkleRoot(chunk_refs));
+}
+
+fn blobManifestAddressFromMerkleRoot(payload_len: usize, chunk_count: usize, merkle_root: BlobAddress) BlobAddress {
     var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "payload-len", payload_len);
-    crypto_hash.updateInt(&hasher, "chunk-count", chunk_refs.len);
+    crypto_hash.updateInt(&hasher, "chunk-count", chunk_count);
     crypto_hash.updateBytes(&hasher, "chunk-merkle-root", &merkle_root);
     return crypto_hash.finalize(&hasher);
 }
