@@ -170,7 +170,7 @@ fn detectDrive(device: *ATADevice) void {
         return;
     }
 
-    while ((x86.inb(device.base_port + ATA_REG_STATUS) & ATA_SR_BSY) != 0) {}
+    if (!waitNotBusy(device)) return;
 
     if (x86.inb(device.base_port + ATA_REG_LBA1) != 0 or
         x86.inb(device.base_port + ATA_REG_LBA2) != 0)
@@ -178,7 +178,10 @@ fn detectDrive(device: *ATADevice) void {
         return;
     }
 
+    var drq_polls: u32 = WAIT_NOT_BUSY_POLLS;
     while (true) {
+        if (drq_polls == 0) return;
+        drq_polls -= 1;
         const stat = x86.inb(device.base_port + ATA_REG_STATUS);
         if ((stat & ATA_SR_ERR) != 0) {
             return;
