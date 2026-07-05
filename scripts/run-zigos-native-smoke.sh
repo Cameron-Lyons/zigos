@@ -13,7 +13,11 @@ KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
 MODE="${4:-full}"
-ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-180}"
+# Per-boot cap on waiting for the validation marker. The harness stops QEMU as
+# soon as the marker appears, so this only bounds the failure path; keep it
+# generous enough that a slow shared runner does not fail an otherwise healthy
+# boot.
+ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-420}"
 NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
 
 last_marker_for_group() {
