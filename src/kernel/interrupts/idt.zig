@@ -60,6 +60,20 @@ pub fn setGate(n: u8, handler: *const fn () callconv(.c) void, selector: u16, ty
     };
 }
 
+const TASK_GATE_PRESENT_32: u8 = 0x85;
+
+/// Route a vector through a hardware task switch. The offset fields are
+/// ignored for task gates; the target context comes from the TSS the
+/// selector names.
+pub fn setTaskGate(n: u8, tss_selector: u16) void {
+    idt[n] = IdtEntry{
+        .offset_low = 0,
+        .selector = tss_selector,
+        .type_attr = TASK_GATE_PRESENT_32,
+        .offset_high = 0,
+    };
+}
+
 pub var interrupt_handlers: [IDT_ENTRIES]?*const fn (*InterruptRegisters) callconv(.c) void = [_]?*const fn (*InterruptRegisters) callconv(.c) void{null} ** IDT_ENTRIES;
 
 pub fn register_interrupt_handler(n: u8, handler: *const fn (*InterruptRegisters) callconv(.c) void) void {

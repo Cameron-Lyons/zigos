@@ -397,6 +397,9 @@ pub fn init() void {
 
     enable_paging(@intFromPtr(&kernel_page_directory));
     unmapBootStackGuardPage();
+    // The double-fault task switch loads CR3 from its TSS; point it at the
+    // kernel page directory now that paging is live.
+    @import("../interrupts/gdt.zig").refreshDoubleFaultCr3();
     vga.print("Paging enabled!\n");
     vga.print("Total frames: ");
     numfmt.printDec(total_frames);

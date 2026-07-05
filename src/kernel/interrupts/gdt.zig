@@ -47,6 +47,7 @@ pub const KERNEL_DATA_SEG = 0x10;
 pub const USER_CODE_SEG = 0x18;
 pub const USER_DATA_SEG = 0x20;
 pub const TSS_SEG = 0x28;
+pub const DOUBLE_FAULT_TSS_SEG = 0x30;
 
 const NULL_DESCRIPTOR_INDEX = 0;
 const KERNEL_CODE_DESCRIPTOR_INDEX = 1;
@@ -54,6 +55,7 @@ const KERNEL_DATA_DESCRIPTOR_INDEX = 2;
 const USER_CODE_DESCRIPTOR_INDEX = 3;
 const USER_DATA_DESCRIPTOR_INDEX = 4;
 const TSS_DESCRIPTOR_INDEX = 5;
+const DOUBLE_FAULT_TSS_DESCRIPTOR_INDEX = 6;
 const FLAT_SEGMENT_LIMIT: u32 = 0xFFFFF;
 const FIELD_U16_MASK: u32 = 0xFFFF;
 const FIELD_U8_MASK: u32 = 0xFF;
@@ -73,12 +75,21 @@ const ACCESSED = 0x01;
 const GRANULARITY = 0x80;
 const SIZE_32 = 0x40;
 
+const DOUBLE_FAULT_STACK_BYTES: usize = 16 * 1024;
+const EFLAGS_RESERVED_BIT: u32 = 0x2;
+
 // SAFETY: fully initialized in init() via setGdtEntry calls
-var gdt: [6]GdtEntry align(8) = undefined;
+var gdt: [7]GdtEntry align(8) = undefined;
 // SAFETY: fully initialized in init() before gdt_flush
 var gdt_ptr: GdtPtr = undefined;
 // SAFETY: fully initialized in init() before tss_flush
 var tss: Tss align(8) = undefined;
+// SAFETY: fully initialized by configureDoubleFaultTask before the task gate
+// for vector 8 is installed
+var double_fault_tss: Tss align(8) = undefined;
+// A stack overflow leaves ESP pointing at unmapped memory, so the double
+// fault handler needs its own known-good stack to run on.
+var double_fault_stack: [DOUBLE_FAULT_STACK_BYTES]u8 align(16) = [_]u8{0} ** DOUBLE_FAULT_STACK_BYTES;
 
 extern fn gdt_flush(gdt_ptr: *const GdtPtr) void;
 extern fn tss_flush() void;
@@ -138,4 +149,52 @@ fn writeTss(num: usize, ss0: u16, esp0: u32) void {
 
 pub fn setKernelStack(stack: u32) void {
     tss.esp0 = stack;
+}
+
+/// Install the task used by the vector-8 task gate. A double fault usually
+/// means the current stack is unusable (e.g. an overflow into the guard
+/// page), so the CPU switches to this fully specified context instead of
+/// trying to push a frame on the broken stack.
+pub fn configureDoubleFaultTask(handler_address: u32) void {
+    setGdtEntry(
+        DOUBLE_FAULT_TSS_DESCRIPTOR_INDEX,
+        @intFromPtr(&double_fault_tss),
+        @sizeOf(Tss) - 1,
+        PRESENT | EXECUTABLE | ACCESSED,
+        0,
+    );
+
+    @memset(@as([*]u8, @ptrCast(&double_fault_tss))[0..@sizeOf(Tss)], 0);
+    double_fault_tss.eip = handler_address;
+    double_fault_tss.esp = @intFromPtr(&double_fault_stack) + double_fault_stack.len;
+    double_fault_tss.ebp = double_fault_tss.esp;
+    // Interrupts stay disabled in the handler; only the reserved bit is set.
+    double_fault_tss.eflags = EFLAGS_RESERVED_BIT;
+    double_fault_tss.cs = KERNEL_CODE_SEG;
+    double_fault_tss.ss = KERNEL_DATA_SEG;
+    double_fault_tss.ds = KERNEL_DATA_SEG;
+    double_fault_tss.es = KERNEL_DATA_SEG;
+    double_fault_tss.fs = KERNEL_DATA_SEG;
+    double_fault_tss.gs = KERNEL_DATA_SEG;
+    refreshDoubleFaultCr3();
+}
+
+/// The task switch loads CR3 from the target TSS, so this must be re-run
+/// after paging comes up (and any later page-directory change).
+pub fn refreshDoubleFaultCr3() void {
+    double_fault_tss.cr3 = asm volatile ("mov %%cr3, %[out]"
+        : [out] "=r" (-> u32),
+    );
+}
+
+pub const InterruptedContext = struct {
+    eip: u32,
+    esp: u32,
+    ebp: u32,
+};
+
+/// The interrupted context: a task-gate switch saves the outgoing dynamic
+/// state (EIP, ESP, general registers) into the previously active TSS.
+pub fn interruptedContext() InterruptedContext {
+    return .{ .eip = tss.eip, .esp = tss.esp, .ebp = tss.ebp };
 }
