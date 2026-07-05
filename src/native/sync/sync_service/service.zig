@@ -703,8 +703,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var contract = zeroDatabaseContract();
             contract.id = self.stateConst().next_contract_id;
             contract.workspace_id = workspace_id;
-            contract.bundle_id_len = native_util.copyTextExact(&contract.bundle_id, bundle_id) catch unreachable;
-            contract.label_len = native_util.copyTextExact(&contract.label, label) catch unreachable;
+            contract.bundle_id_len = native_util.copyTextExact(&contract.bundle_id, bundle_id) catch return error.BundleIdTooLong;
+            contract.label_len = native_util.copyTextExact(&contract.label, label) catch return error.LabelTooLong;
             contract.signature = signature;
 
             const slot_index = self.allocateDatabaseContractIndex(contract.id) orelse return error.DatabaseContractTableFull;
@@ -1230,7 +1230,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             conflict.workspace_id = workspace_id;
             conflict.device_id = device_id;
             conflict.object_id = object_id;
-            conflict.path_len = native_util.copyTextExact(&conflict.path, path) catch unreachable;
+            conflict.path_len = native_util.copyTextExact(&conflict.path, path) catch return error.PathTooLong;
             conflict.local_version_id = local_version_id;
             conflict.remote_version_id = remote_version_id;
             conflict.semantic = semantic;

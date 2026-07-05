@@ -74,6 +74,7 @@ pub const Error = task_runtime.Error || manifest.ValidationError || compositor_d
     ReviewCommandTooLong,
     ReviewComplete,
     ReviewIncomplete,
+    ReviewRenderTooLarge,
     ReviewTickRequired,
     ReviewWindowMissing,
 };
@@ -359,7 +360,7 @@ pub const RenderedReviewSurface = struct {
             self.decisions[0..self.decision_count],
         );
         var review_buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
-        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &self.bundle) catch unreachable;
+        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &self.bundle) catch return error.ReviewRenderTooLarge;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
 
@@ -560,7 +561,7 @@ pub const Service = struct {
             self.presentReviewRequest(review_window_id, bundle, request);
             const session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
             var prompt_buffer: [REVIEW_PROMPT_BUFFER_BYTES]u8 = undefined;
-            const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, &bundle, index) catch unreachable;
+            const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, &bundle, index) catch return error.ReviewRenderTooLarge;
             console.print(prompt);
             console.print("    command: allow [local] [lease=<ticks>] | deny (revokable later)\n");
 
@@ -582,7 +583,7 @@ pub const Service = struct {
 
         const reviewed_session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
         var review_buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
-        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &bundle) catch unreachable;
+        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &bundle) catch return error.ReviewRenderTooLarge;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
 

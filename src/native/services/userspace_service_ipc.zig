@@ -125,6 +125,7 @@ fn runStartupProtocol(
         const received_request = try syscallEndpointRecv(port, task_id, service_endpoint.capability_id, now_ticks);
         if (received_request.present == 0) return error.ProtocolMismatch;
         const request_len: usize = @intCast(received_request.message.payload_len);
+        if (request_len > received_request.payload.len) return error.ProtocolMismatch;
         const decoded_request = try service_protocol.decodeRequest(received_request.payload[0..request_len]);
         if (!service_protocol.requestMatchesOperation(decoded_request, kind, operation, index)) {
             return error.ProtocolMismatch;
@@ -138,6 +139,7 @@ fn runStartupProtocol(
         const received_response = try syscallEndpointRecv(port, task_id, peer_endpoint.capability_id, now_ticks);
         if (received_response.present == 0) return error.ProtocolMismatch;
         const response_len: usize = @intCast(received_response.message.payload_len);
+        if (response_len > received_response.payload.len) return error.ProtocolMismatch;
         const decoded_response = try service_protocol.decodeResponse(received_response.payload[0..response_len]);
         if (!service_protocol.requestMatchesOperation(decoded_response, kind, operation, index)) {
             return error.ProtocolMismatch;
