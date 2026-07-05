@@ -418,7 +418,7 @@ pub const Supervisor = struct {
     }
 
     fn isolationDomainInUse(self: *const Supervisor, isolation_domain_id: u64) bool {
-        for (self.service_arena.slots) |slot| {
+        for (&self.service_arena.slots) |*slot| {
             if (slot.in_use and slot.service.isolation_domain_id == isolation_domain_id) return true;
         }
         return false;
