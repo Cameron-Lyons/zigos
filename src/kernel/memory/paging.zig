@@ -1,16 +1,6 @@
 const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
-const swap = @import("swap.zig");
-const panic_utils = @import("../utils/panic.zig");
 const numfmt = @import("../utils/numfmt.zig");
-
-fn isSwapped(vaddr: u32) bool {
-    return swap.isSwapped(vaddr);
-}
-
-fn swapIn(vaddr: u32) !void {
-    return swap.swapIn(vaddr);
-}
 
 const PAGE_SIZE = 4096;
 const PAGE_SHIFT = 12;
@@ -166,15 +156,7 @@ fn alloc_frame() u32 {
     }
     defer @atomicStore(bool, &frame_lock, false, .seq_cst);
 
-    const frame_addr = find_free_frame() orelse blk: {
-        if (swap.tryFreeFrame()) {
-            break :blk find_free_frame() orelse {
-                vga.print("Out of memory!\n");
-                while (true) {
-                    asm volatile ("hlt");
-                }
-            };
-        }
+    const frame_addr = find_free_frame() orelse {
         vga.print("Out of memory!\n");
         while (true) {
             asm volatile ("hlt");
@@ -193,14 +175,7 @@ pub fn alloc_frames(count: u32) ?u32 {
     }
     defer @atomicStore(bool, &frame_lock, false, .seq_cst);
 
-    var start_addr = find_contiguous_frames(count);
-    if (start_addr == null) {
-        var freed: u32 = 0;
-        while (freed < count) : (freed += 1) {
-            if (!swap.tryFreeFrame()) break;
-        }
-        start_addr = find_contiguous_frames(count);
-    }
+    const start_addr = find_contiguous_frames(count);
     if (start_addr) |addr| {
         var i: u32 = 0;
         while (i < count) : (i += 1) {
@@ -450,16 +425,6 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
     const instruction_fetch = (regs.err_code & 0x10) != 0;
 
     if (present) {
-        if (isSwapped(faulting_address)) {
-            swapIn(faulting_address) catch |err| {
-                vga.print("\n=== PAGE FAULT SWAP-IN FAILED ===\n");
-                vga.print("Reason: ");
-                vga.print(@errorName(err));
-                vga.print("\n");
-                panic_utils.panic("Cannot recover swapped page at 0x{x}", .{faulting_address});
-            };
-            return;
-        }
         if (handle_demand_paging(faulting_address, write, user)) {
             return;
         }
@@ -504,11 +469,9 @@ fn print_hex_console(value: u32, console: anytype) void {
     }
 }
 
-pub const KERNEL_HEAP_START: u32 = 0x10000000;
-const HEAP_START: u32 = KERNEL_HEAP_START;
+const HEAP_START: u32 = 0x10000000;
 const HEAP_INITIAL_SIZE: u32 = 1024 * 1024;
-pub const KERNEL_HEAP_MAX_SIZE: u32 = 16 * 1024 * 1024;
-const HEAP_MAX_SIZE: u32 = KERNEL_HEAP_MAX_SIZE;
+const HEAP_MAX_SIZE: u32 = 16 * 1024 * 1024;
 const HEAP_HEADER_MAGIC: u31 = 0x1234567;
 const HEAP_BLOCK_ALIGNMENT: u32 = 8;
 const HEAP_MIN_SPLIT_PAYLOAD: u32 = 16;

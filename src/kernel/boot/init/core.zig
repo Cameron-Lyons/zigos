@@ -1,7 +1,6 @@
 const console = @import("../../utils/console.zig");
 const isr = @import("../../interrupts/isr.zig");
 const paging = @import("../../memory/paging.zig");
-const swap = @import("../../memory/swap.zig");
 const memory = @import("../../memory/memory.zig");
 
 pub fn init() void {
@@ -21,9 +20,6 @@ pub fn init() void {
 
     console.print("Initializing paging...\n");
     paging.init();
-
-    console.print("Initializing swap...\n");
-    swap.init();
 
     console.print("Enabling kernel memory protection...\n");
     const protection = @import("../../memory/protection.zig");
