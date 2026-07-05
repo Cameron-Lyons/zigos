@@ -118,27 +118,34 @@ fn addHostToolRun(
     return run;
 }
 
-fn addReleaseSecurityGateRun(
+fn releaseSecurityGateModule(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Run {
+) *std.Build.Module {
     const check_common_module = b.createModule(.{
         .root_source_file = b.path("tools/check_common.zig"),
     });
     const wire = native_modules.addWireModules(b);
 
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/check_release_security_gate.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    module.addImport("check_common", check_common_module);
+    module.addImport("binary_cursor", wire.binary_cursor);
+    module.addImport("userspace_wire", wire.userspace_wire);
+    return module;
+}
+
+fn addReleaseSecurityGateRun(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Run {
     const tool = b.addExecutable(.{
         .name = "check-release-security-gate",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/check_release_security_gate.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
+        .root_module = releaseSecurityGateModule(b, optimize),
     });
-    tool.root_module.addImport("check_common", check_common_module);
-    tool.root_module.addImport("binary_cursor", wire.binary_cursor);
-    tool.root_module.addImport("userspace_wire", wire.userspace_wire);
-
     const run = b.addRunArtifact(tool);
     run.setCwd(b.path("."));
     return run;
@@ -148,23 +155,10 @@ fn addReleaseSecurityGateTestRun(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Step.Run {
-    const check_common_module = b.createModule(.{
-        .root_source_file = b.path("tools/check_common.zig"),
-    });
-    const wire = native_modules.addWireModules(b);
-
     const tests = b.addTest(.{
         .name = "check-release-security-gate-tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/check_release_security_gate.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
+        .root_module = releaseSecurityGateModule(b, optimize),
     });
-    tests.root_module.addImport("check_common", check_common_module);
-    tests.root_module.addImport("binary_cursor", wire.binary_cursor);
-    tests.root_module.addImport("userspace_wire", wire.userspace_wire);
-
     const run = b.addRunArtifact(tests);
     run.setCwd(b.path("."));
     return run;
