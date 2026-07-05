@@ -25,14 +25,7 @@ pub fn Id(comptime display_name: []const u8) type {
             return self.value == other.value;
         }
 
-        pub fn format(
-            self: Self,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
+        pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
             try writer.print("{s}({d})", .{ display_name, self.value });
         }
 

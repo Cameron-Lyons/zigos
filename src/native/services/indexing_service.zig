@@ -277,6 +277,9 @@ fn worstResultIndex(results: []const SearchResult) usize {
 }
 
 fn scoreDocument(record: *const DocumentRecord, needle: []const u8, generation: u64) ?SearchResult {
+    // Hit counts are bounded by the stored text sizes, so the score always
+    // fits the u16 result fields; keep that proof next to the arithmetic.
+    comptime std.debug.assert(MAX_TITLE_BYTES * 4 + MAX_BODY_BYTES <= std.math.maxInt(u16));
     const title_hits = countOccurrencesFold(record.titleSlice(), needle);
     const body_hits = countOccurrencesFold(record.bodySlice(), needle);
     const score = title_hits * 4 + body_hits;
@@ -288,8 +291,8 @@ fn scoreDocument(record: *const DocumentRecord, needle: []const u8, generation: 
         .version_id = record.version_id,
         .index_generation = generation,
         .score = @intCast(score),
-        .title_hits = @intCast(@min(title_hits, std.math.maxInt(u16))),
-        .body_hits = @intCast(@min(body_hits, std.math.maxInt(u16))),
+        .title_hits = @intCast(title_hits),
+        .body_hits = @intCast(body_hits),
         .sensitivity = record.sensitivity,
         .title_fingerprint = hashTitle(record.titleSlice()),
         .title_len = record.title_len,
