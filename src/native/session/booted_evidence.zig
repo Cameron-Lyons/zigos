@@ -348,19 +348,43 @@ fn runNotesDailyDriverJourney(
     };
     for (controls, 0..) |control, index| {
         const tick = 230 + @as(u64, @intCast(index));
-        if (journey.dispatch(.{ .control = control, .tick = tick }).status != .ok) {
-            printJourneyControlRejected(control);
+        const response = journey.dispatch(.{ .control = control, .tick = tick });
+        if (response.status != .ok) {
+            printJourneyControlRejected(control, response);
             return false;
         }
     }
 
     const snapshot = journey.markerSnapshot();
-    if (!snapshot.complete()) return false;
+    if (!snapshot.complete()) {
+        common.printBootMarker("ZIGOS:NOTES_DAILY:MARKERS_INCOMPLETE");
+        return false;
+    }
     emitNotesDailyDriverMarkers(snapshot);
     return true;
 }
 
-fn printJourneyControlRejected(control: production_journey.ProductionJourneyControl) void {
+fn printJourneyControlRejected(
+    control: production_journey.ProductionJourneyControl,
+    response: production_journey.ProductionJourneyResponse,
+) void {
+    printJourneyControlRejectedMarker(control);
+    // The rejection markers alone cost a debugging session on CI-only
+    // failures; name the status and concrete error so a boot log is enough.
+    // SAFETY: filled by the subsequent std.fmt.bufPrint call
+    var detail_buffer: [96]u8 = undefined;
+    const detail = std.fmt.bufPrint(
+        &detail_buffer,
+        "ZIGOS:NOTES_DAILY:REJECT_DETAIL status={s} error={s}",
+        .{
+            @tagName(response.status),
+            if (response.failure) |err| @errorName(err) else "none",
+        },
+    ) catch return;
+    common.printBootMarker(detail);
+}
+
+fn printJourneyControlRejectedMarker(control: production_journey.ProductionJourneyControl) void {
     common.printBootMarker(switch (control) {
         .apply_policy => "ZIGOS:NOTES_DAILY:APPLY_POLICY:REJECTED",
         .trust_device => "ZIGOS:NOTES_DAILY:TRUST_DEVICE:REJECTED",
