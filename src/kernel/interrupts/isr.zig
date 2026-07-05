@@ -8,6 +8,7 @@ const GateHandler = *const fn () callconv(.c) void;
 const IDT_INTERRUPT_GATE: u8 = 0x8E;
 const IDT_USER_DPL: u8 = 0x60;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
+const DOUBLE_FAULT_VECTOR: u8 = 8;
 const PAGE_FAULT_VECTOR: u32 = 14;
 const IRQ_BASE_VECTOR: u8 = 32;
 const IRQ_SLAVE_BASE_VECTOR: u32 = 40;
@@ -245,6 +246,12 @@ pub fn init() void {
         setKernelGate(@as(u8, @intCast(vector)), stub);
     }
 
+    // A double fault after a stack overflow cannot push an exception frame on
+    // the broken stack; without a task gate it silently escalates to a triple
+    // fault and the machine resets with no output at all.
+    gdt.configureDoubleFaultTask(@intFromPtr(&doubleFaultTask));
+    idt.setTaskGate(DOUBLE_FAULT_VECTOR, gdt.DOUBLE_FAULT_TSS_SEG);
+
     remapPIC();
 
     for (irq_stubs, 0..) |stub, irq| {
@@ -255,6 +262,18 @@ pub fn init() void {
     setUserGate(NATIVE_SYSCALL_VECTOR, &isr129);
 
     idt.init();
+}
+
+fn doubleFaultTask() callconv(.c) noreturn {
+    // The hardware task switch sets CR0.TS; clear it so the panic path may
+    // use SSE without raising a device-not-available fault mid-report.
+    asm volatile ("clts");
+    const context = gdt.interruptedContext();
+    const panic_utils = @import("../utils/panic.zig");
+    panic_utils.panic(
+        "DOUBLE FAULT: eip=0x{x:0>8} esp=0x{x:0>8} ebp=0x{x:0>8} (likely kernel stack overflow)",
+        .{ context.eip, context.esp, context.ebp },
+    );
 }
 
 fn setKernelGate(vector: u8, handler: GateHandler) void {
