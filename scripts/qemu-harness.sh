@@ -16,6 +16,13 @@ qemu_harness_default_memory() {
   printf '%s\n' "${QEMU_MEMORY:-256M}"
 }
 
+qemu_harness_cpu_model() {
+  # 'max' exposes every TCG-supported feature (SMEP, SMAP, UMIP, ...) so the
+  # kernel's dynamic CPU hardening actually engages under emulation; the
+  # default qemu64 model advertises none of them.
+  printf '%s\n' "${QEMU_CPU_MODEL:-max}"
+}
+
 qemu_harness_profile_memory() {
   printf '%s\n' "${QEMU_PROFILE_MEMORY:-${QEMU_MEMORY:-128M}}"
 }
@@ -87,6 +94,7 @@ qemu_harness_build_kernel_command() {
   QEMU_HARNESS_COMMAND=(
     "$(qemu_harness_binary)"
     -kernel "$kernel_path"
+    -cpu "$(qemu_harness_cpu_model)"
     -m "$memory_size"
     -display none
     -serial "$serial_target"
@@ -189,6 +197,7 @@ qemu_harness_build_uefi_cdrom_command() {
   QEMU_HARNESS_COMMAND=(
     "$(qemu_harness_binary)"
     -machine q35
+    -cpu "$(qemu_harness_cpu_model)"
     -m "$memory_size"
     -display none
     -serial "$serial_target"

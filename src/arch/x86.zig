@@ -65,25 +65,39 @@ pub inline fn rdtsc() u64 {
     return (@as(u64, high) << 32) | low;
 }
 
+pub const CR0_EM: u32 = 1 << 2;
+pub const CR0_MP: u32 = 1 << 1;
+
+pub const CR4_OSFXSR: u32 = 1 << 9;
+pub const CR4_OSXMMEXCPT: u32 = 1 << 10;
+pub const CR4_UMIP: u32 = 1 << 11;
+pub const CR4_SMEP: u32 = 1 << 20;
+
+pub inline fn readCr4() u32 {
+    return asm volatile ("mov %%cr4, %[value]"
+        : [value] "=r" (-> u32),
+    );
+}
+
+pub inline fn writeCr4(value: u32) void {
+    asm volatile ("mov %[value], %%cr4"
+        :
+        : [value] "r" (value),
+    );
+}
+
 pub fn enableSse() void {
     var cr0: u32 = asm volatile ("mov %%cr0, %[value]"
         : [value] "=r" (-> u32),
     );
-    cr0 &= ~@as(u32, 1 << 2);
-    cr0 |= @as(u32, 1 << 1);
+    cr0 &= ~CR0_EM;
+    cr0 |= CR0_MP;
     asm volatile ("mov %[value], %%cr0"
         :
         : [value] "r" (cr0),
     );
 
-    var cr4: u32 = asm volatile ("mov %%cr4, %[value]"
-        : [value] "=r" (-> u32),
-    );
-    cr4 |= @as(u32, 1 << 9) | @as(u32, 1 << 10);
-    asm volatile ("mov %[value], %%cr4"
-        :
-        : [value] "r" (cr4),
-    );
+    writeCr4(readCr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
 
     asm volatile ("fninit");
 }

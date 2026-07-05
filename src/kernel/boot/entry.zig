@@ -1,4 +1,5 @@
 const x86 = @import("../../arch/x86.zig");
+const cpu_features = @import("../../arch/cpu_features.zig");
 const vga = @import("../drivers/vga.zig");
 const console = @import("../utils/console.zig");
 const config = @import("../config.zig");
@@ -16,6 +17,10 @@ pub fn kernelMain() void {
     console.init();
     common.printBootMarker(boot_markers.boot_start);
     common.printBootProfile();
+    const hardening = cpu_features.detect();
+    cpu_features.enable(hardening);
+    common.printBootMarker(if (hardening.smep) boot_markers.cpu_smep_enabled else boot_markers.cpu_smep_absent);
+    common.printBootMarker(if (hardening.umip) boot_markers.cpu_umip_enabled else boot_markers.cpu_umip_absent);
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();
