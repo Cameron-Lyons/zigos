@@ -266,7 +266,7 @@ pub fn enableWriteProtect() void {
         ::: .{ .eax = true });
 }
 
-pub fn unmap_page(virt_addr: u32) void {
+fn unmap_page(virt_addr: u32) void {
     const page_dir_index = pageDirectoryIndex(virt_addr);
     const page_table_index = pageTableIndex(virt_addr);
 
@@ -285,44 +285,6 @@ pub fn unmap_page(virt_addr: u32) void {
 
         invalidate_page(virt_addr);
     }
-}
-
-pub fn remap_page(virt_addr: u32, new_phys_addr: u32, flags: u32) void {
-    unmap_page(virt_addr);
-    mapPage(virt_addr, new_phys_addr, flags);
-}
-
-pub fn get_physical_address(virt_addr: u32) ?u32 {
-    const page_dir_index = pageDirectoryIndex(virt_addr);
-    const page_table_index = pageTableIndex(virt_addr);
-    const offset = pageOffset(virt_addr);
-
-    const page_dir_entry = getCurrentPageDirectory()[page_dir_index];
-    if (!page_dir_entry.present) {
-        return null;
-    }
-
-    const table_addr = @as(usize, page_dir_entry.address) << PAGE_SHIFT;
-    const table: *const PageTable = @ptrFromInt(table_addr);
-
-    const page_entry = table[page_table_index];
-    if (!page_entry.present) {
-        return null;
-    }
-
-    return (@as(u32, page_entry.address) << PAGE_SHIFT) | offset;
-}
-
-pub const MemoryStats = struct {
-    total_frames: u32,
-    used_frames: u32,
-};
-
-pub fn getMemoryStats() MemoryStats {
-    return MemoryStats{
-        .total_frames = total_frames,
-        .used_frames = used_frames,
-    };
 }
 
 pub fn createUserPageDirectory() !*PageDirectory {
@@ -480,10 +442,6 @@ pub fn getCurrentPageDirectory() *PageDirectory {
     return current_page_directory;
 }
 
-pub fn getKernelPageDirectory() *PageDirectory {
-    return &kernel_page_directory;
-}
-
 pub fn switchPageDirectory(pd: *PageDirectory) void {
     current_page_directory = pd;
     // Loading CR3 flushes the non-global TLB entries; no separate flush is
@@ -495,7 +453,7 @@ pub fn switchPageDirectory(pd: *PageDirectory) void {
     );
 }
 
-pub fn invalidate_page(virt_addr: u32) void {
+fn invalidate_page(virt_addr: u32) void {
     asm volatile ("invlpg (%[addr])"
         :
         : [addr] "r" (virt_addr),
@@ -528,17 +486,6 @@ pub fn map_range(virt_start: u32, phys_start: u32, size: u32, flags: u32) void {
     }
 }
 
-pub fn unmap_range(virt_start: u32, size: u32) void {
-    var offset: u32 = 0;
-    while (offset < size) : (offset += PAGE_SIZE) {
-        unmap_page(virt_start + offset);
-    }
-}
-
-pub fn is_page_present(virt_addr: u32) bool {
-    return getPageEntry(&kernel_page_directory, virt_addr) != null;
-}
-
 fn getPageEntry(page_directory: *PageDirectory, virt_addr: u32) ?*PageTableEntry {
     const page_dir_index = pageDirectoryIndex(virt_addr);
     const page_table_index = pageTableIndex(virt_addr);
@@ -566,29 +513,9 @@ fn updatePageEntryFlags(entry: *PageTableEntry, flags: u32) void {
     entry.global = (flags & PAGE_GLOBAL) != 0;
 }
 
-pub fn set_page_flags(virt_addr: u32, flags: u32) void {
-    if (getPageEntry(&kernel_page_directory, virt_addr)) |entry| {
-        updatePageEntryFlags(entry, flags);
-        invalidate_page(virt_addr);
-    }
-}
-
 pub fn set_current_page_flags(virt_addr: u32, flags: u32) void {
     if (getPageEntry(getCurrentPageDirectory(), virt_addr)) |entry| {
         updatePageEntryFlags(entry, flags);
         invalidate_page(virt_addr);
     }
-}
-
-pub fn get_page_flags(virt_addr: u32) ?u32 {
-    const entry = getPageEntry(getCurrentPageDirectory(), virt_addr) orelse return null;
-
-    var flags: u32 = 0;
-    if (entry.present) flags |= PAGE_PRESENT;
-    if (entry.writable) flags |= PAGE_WRITABLE;
-    if (entry.user) flags |= PAGE_USER;
-    if (entry.write_through) flags |= PAGE_WRITE_THROUGH;
-    if (entry.cache_disabled) flags |= PAGE_CACHE_DISABLE;
-    if (entry.global) flags |= PAGE_GLOBAL;
-    return flags;
 }
