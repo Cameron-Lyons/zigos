@@ -12,12 +12,17 @@ multiboot_header:
     .long 32
 
 .section .bss
-.align 16
-.equ BOOT_STACK_SIZE, 1048576
+.align 4096
+.equ BOOT_STACK_SIZE, 4194304
+.global stack_bottom
 stack_bottom:
-    /* The native session bootstrap now carries substantial typed runtime and
-       crypto state before the scheduler hands off to later tasks. Keep the
-       BSP boot stack comfortably above the compiled session_manager frame. */
+    /* The native session bootstrap carries substantial typed runtime and
+       crypto state before the scheduler hands off to later tasks, and Debug
+       builds need several times the ReleaseFast frame depth. Keep the BSP
+       boot stack comfortably above the deepest compiled frame chain. The
+       page at stack_bottom is kept page-aligned so paging.init can unmap it
+       as a guard page: an overflow then faults immediately instead of
+       silently corrupting the globals below the stack. */
     .skip BOOT_STACK_SIZE
 stack_top:
 

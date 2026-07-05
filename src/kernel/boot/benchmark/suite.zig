@@ -417,6 +417,12 @@ var recovery_context = RecoveryContext{};
 var update_health_context = UpdateHealthContext{};
 var benchmark_image_context = BenchmarkImageContext{};
 
+// task_runtime.Runtime is >2 MiB, and a Runtime local (plus the temporary a
+// Debug build materializes for its initializer) put multi-megabyte frames on
+// the boot stack — deep enough to reach the guard page below it. Gates and
+// probes run one at a time, so they share this fixture and reset it on entry.
+var quality_gate_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
+
 pub fn run() noreturn {
     console.print("Running native spec-aligned benchmarks...\n");
     console.print(boot_markers.bench_start);
@@ -540,7 +546,7 @@ fn preparePermissionReviewFixture() void {
 }
 
 fn prepareBackgroundFixture() void {
-    background_context.runtime = task_runtime.Runtime.init();
+    background_context.runtime.reset();
     background_context.dispatcher = background_dispatch.Controller.init();
 
     const task = background_context.runtime.createTask(.{
@@ -615,9 +621,12 @@ fn prepareStorageVolumeFixture() void {
 }
 
 fn prepareTaskCheckpointFixture() void {
-    task_checkpoint_context.source_runtime = task_runtime.Runtime.init();
-    task_checkpoint_context.restored_runtime = task_runtime.Runtime.init();
-    task_checkpoint_context.snapshot = task_runtime.Runtime.initSnapshot();
+    task_checkpoint_context.source_runtime.reset();
+    task_checkpoint_context.restored_runtime.reset();
+    // The snapshot needs no reset: writeSnapshot fully rewrites the header
+    // and the dense task records that restoreFromSnapshot reads back, and
+    // re-initializing the >2 MiB Snapshot here would put its Debug-mode
+    // temporary on the boot stack.
 
     const sync_image = benchmarkAppImage();
     const primary = task_checkpoint_context.source_runtime.createTask(.{
@@ -1511,9 +1520,10 @@ fn qualityBatterySaverBatchDelay() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.bind(&catalog, runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_001, 701, 1, .{
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = mebibytes(8),
@@ -1523,7 +1533,7 @@ fn qualityBatterySaverBatchDelay() u64 {
     });
 
     const batch = createLoadTask(
-        &runtime,
+        runtime,
         701,
         .batch_compute,
         "quality-battery-batch",
@@ -1545,9 +1555,10 @@ fn qualityThermalCriticalBackgroundDelay() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.bind(&catalog, runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_002, 702, 1, .{
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = mebibytes(8),
@@ -1555,7 +1566,7 @@ fn qualityThermalCriticalBackgroundDelay() u64 {
     });
 
     const background = createLoadTask(
-        &runtime,
+        runtime,
         702,
         .background_light,
         "quality-thermal-background",
@@ -1577,9 +1588,10 @@ fn qualityMemoryPressureBatchDelay() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.bind(&catalog, runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_003, 703, 1, .{
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = kibibytes(32),
@@ -1587,7 +1599,7 @@ fn qualityMemoryPressureBatchDelay() u64 {
     });
 
     const batch = createLoadTask(
-        &runtime,
+        runtime,
         703,
         .batch_compute,
         "quality-memory-batch",
@@ -1615,9 +1627,10 @@ fn qualitySchedulerFairnessRatioPercent() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.bind(&catalog, runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_004, 704, 1, .{
         .total_cpu_budget_ticks = 1_000_000,
         .memory_capacity_bytes = mebibytes(16),
@@ -1626,7 +1639,7 @@ fn qualitySchedulerFairnessRatioPercent() u64 {
     var task_ids: [FAIRNESS_BACKGROUND_TASKS]u64 = [_]u64{0} ** FAIRNESS_BACKGROUND_TASKS;
     for (&task_ids, 0..) |*task_id, index| {
         const task = createLoadTask(
-            &runtime,
+            runtime,
             710 + @as(u64, @intCast(index)),
             .background_light,
             "quality-fair-background",
@@ -1659,12 +1672,13 @@ fn qualityStarvationResistanceAfterPressure() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.bind(&catalog, runtime, &capabilities);
 
     const background = createLoadTask(
-        &runtime,
+        runtime,
         730,
         .background_light,
         "quality-starve-background",
@@ -1674,7 +1688,7 @@ fn qualityStarvationResistanceAfterPressure() u64 {
         null,
     );
     const batch = createLoadTask(
-        &runtime,
+        runtime,
         731,
         .batch_compute,
         "quality-starve-batch",
@@ -1710,9 +1724,10 @@ fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.bind(&catalog, runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_007, 707, 1, .{
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = mebibytes(8),
@@ -1720,7 +1735,7 @@ fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
     });
 
     const background = createLoadTask(
-        &runtime,
+        runtime,
         770,
         .background_light,
         "quality-debt-background",
@@ -1730,7 +1745,7 @@ fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
         null,
     );
     const batch = createLoadTask(
-        &runtime,
+        runtime,
         771,
         .batch_compute,
         "quality-debt-batch",
@@ -1765,9 +1780,10 @@ fn qualityAcceleratorClaimDeadlinePriority() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.bind(&catalog, runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_008, 708, 1, .{
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = mebibytes(8),
@@ -1775,7 +1791,7 @@ fn qualityAcceleratorClaimDeadlinePriority() u64 {
     });
 
     const batch = createLoadTask(
-        &runtime,
+        runtime,
         781,
         .batch_compute,
         "quality-claim-batch",
@@ -1785,7 +1801,7 @@ fn qualityAcceleratorClaimDeadlinePriority() u64 {
         null,
     );
     const foreground = createLoadTask(
-        &runtime,
+        runtime,
         782,
         .foreground_interactive,
         "quality-claim-foreground",
@@ -1889,7 +1905,8 @@ fn qualityBrokeredAcceleratorQueueCompletionRelease() u64 {
 }
 
 fn qualityBackgroundThrottlingDelayedDispatches() u64 {
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     const task = runtime.createTask(.{
         .owner = app(740),
         .component_class = .app_component,
@@ -1915,9 +1932,9 @@ fn qualityBackgroundThrottlingDelayedDispatches() u64 {
         .max_shared_memory_bytes = kibibytes(64),
     });
 
-    const first = dispatcher.dispatch(&runtime, task.id, background_bundle, "sync", .sync_completion, 10) catch unreachable;
-    const second = dispatcher.dispatch(&runtime, task.id, background_bundle, "sync", .sync_completion, 11) catch unreachable;
-    const third = dispatcher.dispatch(&runtime, task.id, background_bundle, "sync", .sync_completion, 12) catch unreachable;
+    const first = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 10) catch unreachable;
+    const second = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 11) catch unreachable;
+    const third = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 12) catch unreachable;
     return @intFromBool(first.allowed and
         second.allowed and
         third.delayed and
@@ -1929,9 +1946,10 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.bind(&catalog, runtime, &capabilities);
     configureLoadTelemetry(&scheduler, 7_006, 706, 1, .{
         .total_cpu_budget_ticks = 1_000_000,
         .memory_capacity_bytes = mebibytes(16),
@@ -1940,7 +1958,7 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
     var background_ids: [LATENCY_BACKGROUND_TASKS]u64 = [_]u64{0} ** LATENCY_BACKGROUND_TASKS;
     for (&background_ids, 0..) |*task_id, index| {
         const task = createLoadTask(
-            &runtime,
+            runtime,
             750 + @as(u64, @intCast(index)),
             .background_light,
             "quality-latency-background",
@@ -1954,7 +1972,7 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
     }
 
     const foreground = createLoadTask(
-        &runtime,
+        runtime,
         760,
         .foreground_interactive,
         "quality-latency-foreground",
@@ -2377,7 +2395,8 @@ fn seedUpdateHealthNetworkProbe(
 }
 
 fn seedUpdateHealthUiProbe(session: *compositor_session.Session) update_health.UiProbe {
-    var runtime = task_runtime.Runtime.init();
+    quality_gate_runtime.reset();
+    const runtime = &quality_gate_runtime;
     const task = runtime.createTask(.{
         .owner = service(89),
         .component_class = .service_component,

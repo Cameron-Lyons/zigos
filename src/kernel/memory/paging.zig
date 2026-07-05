@@ -53,6 +53,10 @@ pub const PageDirectory = [TABLES_PER_DIRECTORY]PageTableEntry;
 const MEMORY_SIZE = 128 * 1024 * 1024;
 const IDENTITY_MAPPED_TABLES = MEMORY_SIZE / (PAGE_SIZE * PAGES_PER_TABLE);
 
+// Lowest address of the BSP boot stack, page-aligned in boot64.S. The stack
+// grows down toward the kernel globals placed just below it in .bss.
+extern var stack_bottom: u8;
+
 // SAFETY: fully initialized in init() which identity-maps the first 128MB
 var kernel_page_directory: PageDirectory align(PAGE_SIZE) = undefined;
 // SAFETY: fully initialized in init() which identity-maps the first 128MB
@@ -362,6 +366,7 @@ pub fn init() void {
     frame_search_word_hint = (kernel_end / PAGE_SIZE) / FRAME_BITMAP_WORD_BITS;
 
     enable_paging(@intFromPtr(&kernel_page_directory));
+    unmapBootStackGuardPage();
     vga.print("Paging enabled!\n");
     vga.print("Total frames: ");
     numfmt.printDec(total_frames);
@@ -370,6 +375,21 @@ pub fn init() void {
     vga.print("\n");
 
     init_heap();
+}
+
+// A boot-stack overflow used to run straight into the device-broker globals
+// below stack_bottom and corrupt them silently; Debug builds hit this with
+// their larger frames while ReleaseFast masked it. Sacrifice the lowest stack
+// page as an unmapped guard so an overflow page-faults at the boundary
+// instead. Demand paging only maps heap addresses, so the guard stays
+// unmapped for the kernel's lifetime.
+fn unmapBootStackGuardPage() void {
+    const guard_address: u32 = @intFromPtr(&stack_bottom);
+    if (guard_address % PAGE_SIZE != 0) {
+        vga.print("Boot stack guard skipped: stack_bottom is not page-aligned\n");
+        return;
+    }
+    unmap_page(guard_address);
 }
 
 fn enable_paging(page_dir_addr: u32) void {
