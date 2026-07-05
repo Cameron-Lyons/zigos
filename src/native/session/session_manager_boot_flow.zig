@@ -32,6 +32,7 @@ const background_dispatch = @import("../task/background_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
 const trust_boot = @import("trust_boot.zig");
+const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
@@ -223,6 +224,7 @@ pub const SessionManager = struct {
             return;
         }
         stack_watermark.reportPeak();
+        userspace_executor.reportTrapStackPeak();
         common.printBootMarker(boot_markers.task_session_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
