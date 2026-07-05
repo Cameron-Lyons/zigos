@@ -43,6 +43,7 @@ const PathSet = struct {
     paths: [workspace.MAX_WORKSPACE_ENTRIES][workspace.MAX_ENTRY_PATH_BYTES]u8 =
         [_][workspace.MAX_ENTRY_PATH_BYTES]u8{[_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES} ** workspace.MAX_WORKSPACE_ENTRIES,
     lens: [workspace.MAX_WORKSPACE_ENTRIES]usize = [_]usize{0} ** workspace.MAX_WORKSPACE_ENTRIES,
+    hashes: [workspace.MAX_WORKSPACE_ENTRIES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACE_ENTRIES,
     count: usize = 0,
 
     fn add(self: *PathSet, path: []const u8) Error!void {
@@ -52,12 +53,15 @@ const PathSet = struct {
         @memset(self.paths[self.count][0..], 0);
         @memcpy(self.paths[self.count][0..path.len], path);
         self.lens[self.count] = path.len;
+        self.hashes[self.count] = workspace.pathHash(path);
         self.count += 1;
     }
 
     fn contains(self: *const PathSet, path: []const u8) bool {
+        const hash = workspace.pathHash(path);
         var index: usize = 0;
         while (index < self.count) : (index += 1) {
+            if (self.hashes[index] != hash or self.lens[index] != path.len) continue;
             if (std.mem.eql(u8, self.paths[index][0..self.lens[index]], path)) return true;
         }
         return false;

@@ -284,7 +284,6 @@ pub const WorkspaceStagingState = struct {
     transaction_open: bool = false,
     staged_entry_count: usize = 0,
     staged_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
-    staged_entry_index_slots: [ENTRY_INDEX_CAPACITY]EntryIndexSlot = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY),
     staged_effective_entry_count: usize = 0,
 };
 
@@ -559,7 +558,6 @@ pub const Directory = struct {
         workspace.staging.transaction_open = true;
         workspace.staging.staged_entry_count = 0;
         workspace.staging.staged_effective_entry_count = workspace.path_index.entry_count;
-        workspace.staging.staged_entry_index_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
         clearEntries(&workspace.staging.staged_entries);
     }
 
@@ -589,7 +587,6 @@ pub const Directory = struct {
         if (workspace.staging.staged_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
 
         try insertSortedEntry(&workspace.staging.staged_entries, &workspace.staging.staged_entry_count, try Entry.init(path, object_id, version_id, object_type));
-        rebuildStagedEntryIndex(workspace);
     }
 
     pub fn stageDelete(self: *Directory, workspace_id: ids.WorkspaceId, path: []const u8) Error!void {
@@ -606,7 +603,6 @@ pub const Directory = struct {
                 workspace.staging.staged_entries[index] = try deleteTombstone(path);
             } else {
                 removeEntry(&workspace.staging.staged_entries, &workspace.staging.staged_entry_count, index);
-                rebuildStagedEntryIndex(workspace);
             }
             return;
         }
@@ -615,7 +611,6 @@ pub const Directory = struct {
         if (workspace.staging.staged_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
 
         try insertSortedEntry(&workspace.staging.staged_entries, &workspace.staging.staged_entry_count, try deleteTombstone(path));
-        rebuildStagedEntryIndex(workspace);
         workspace.staging.staged_effective_entry_count -= 1;
     }
 
@@ -1212,7 +1207,6 @@ fn writeLengthPrefixed(writer: *BinaryWriter, bytes: []const u8) error{NoSpaceLe
 
 fn rebuildWorkspaceIndexes(workspace: *WorkspaceRecord) void {
     rebuildWorkspaceEntryIndex(workspace);
-    rebuildStagedEntryIndex(workspace);
     rebuildShareGrantIndex(workspace);
     workspace.oldest_snapshot_generation = NO_SNAPSHOT_GENERATION;
 }
@@ -1277,15 +1271,6 @@ fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
     workspace_merkle.rebuildPathMerkle(&workspace.path_index, MAX_WORKSPACE_ENTRIES);
 }
 
-fn rebuildStagedEntryIndex(workspace: *WorkspaceRecord) void {
-    sortEntries(workspace.staging.staged_entries[0..workspace.staging.staged_entry_count]);
-    workspace_index.rebuildPathSlots(
-        ENTRY_INDEX_CAPACITY,
-        &workspace.staging.staged_entry_index_slots,
-        workspace.staging.staged_entries[0..workspace.staging.staged_entry_count],
-    );
-}
-
 fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
     const entries = workspace.path_index.entries[0..workspace.path_index.entry_count];
     if (workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, path)) |index| return index;
@@ -1299,10 +1284,10 @@ fn findWorkspaceEntryObjectIndex(workspace: *const WorkspaceRecord, object_id: i
     return null;
 }
 
+// Staged entries stay path-sorted via insertSortedEntry/removeEntry, so a
+// binary search is enough; staging keeps no hash index.
 fn findStagedEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
-    const entries = workspace.staging.staged_entries[0..workspace.staging.staged_entry_count];
-    if (workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.staging.staged_entry_index_slots, entries, path)) |index| return index;
-    return findEntryIndex(entries, path);
+    return findEntryIndex(workspace.staging.staged_entries[0..workspace.staging.staged_entry_count], path);
 }
 
 fn deleteTombstone(path: []const u8) Error!Entry {
@@ -1578,7 +1563,6 @@ fn clearTransactionState(workspace: *WorkspaceRecord) void {
     workspace.staging.transaction_open = false;
     workspace.staging.staged_entry_count = 0;
     workspace.staging.staged_effective_entry_count = 0;
-    workspace.staging.staged_entry_index_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
     clearEntries(&workspace.staging.staged_entries);
 }
 
