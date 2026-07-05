@@ -62,19 +62,6 @@ var used_frames: u32 = 0;
 var frame_lock: bool = false;
 var frame_search_word_hint: u32 = 0;
 
-const PageCache = struct {
-    virtual_addr: u32,
-    physical_addr: u32,
-    flags: u32,
-    lru_counter: u32,
-};
-
-const TLB_CACHE_SIZE = 64;
-// SAFETY: entries written before being read; tlb_cache_count tracks valid entries
-var tlb_cache: [TLB_CACHE_SIZE]PageCache = undefined;
-var tlb_cache_count: u32 = 0;
-var lru_counter: u32 = 0;
-
 fn set_frame(frame_addr: u32) void {
     const frame = frame_addr / PAGE_SIZE;
     const idx = frame / FRAME_BITMAP_WORD_BITS;
@@ -222,8 +209,6 @@ pub fn mapPage(virt_addr: u32, phys_addr: u32, flags: u32) void {
         .global = (flags & PAGE_GLOBAL) != 0,
         .address = @truncate(phys_addr >> PAGE_SHIFT),
     };
-
-    update_tlb_cache(virt_addr, phys_addr, flags);
 }
 
 /// Clear the writable bit on an existing mapping. Only binding for
@@ -243,7 +228,6 @@ pub fn setPageReadOnly(virt_addr: u32) void {
     if (!page_entry.present) return;
     page_entry.writable = false;
     invalidate_page(virt_addr);
-    remove_from_tlb_cache(virt_addr);
 }
 
 /// Set CR0.WP so read-only pages bind CPL0 writes as well; without it the
@@ -274,7 +258,6 @@ pub fn unmap_page(virt_addr: u32) void {
         page_entry.* = PageTableEntry{};
 
         invalidate_page(virt_addr);
-        remove_from_tlb_cache(virt_addr);
     }
 }
 
@@ -637,7 +620,8 @@ pub fn getKernelPageDirectory() *PageDirectory {
 
 pub fn switchPageDirectory(pd: *PageDirectory) void {
     current_page_directory = pd;
-    flush_tlb();
+    // Loading CR3 flushes the non-global TLB entries; no separate flush is
+    // needed.
     asm volatile (
         \\mov %[addr], %%cr3
         :
@@ -645,70 +629,11 @@ pub fn switchPageDirectory(pd: *PageDirectory) void {
     );
 }
 
-fn update_tlb_cache(virt_addr: u32, phys_addr: u32, flags: u32) void {
-    lru_counter += 1;
-
-    if (tlb_cache_count < TLB_CACHE_SIZE) {
-        tlb_cache[tlb_cache_count] = PageCache{
-            .virtual_addr = pageAlignedAddress(virt_addr),
-            .physical_addr = pageAlignedAddress(phys_addr),
-            .flags = flags,
-            .lru_counter = lru_counter,
-        };
-        tlb_cache_count += 1;
-    } else {
-        var oldest_idx: u32 = 0;
-        var oldest_counter: u32 = tlb_cache[0].lru_counter;
-
-        var i: u32 = 1;
-        while (i < TLB_CACHE_SIZE) : (i += 1) {
-            if (tlb_cache[i].lru_counter < oldest_counter) {
-                oldest_counter = tlb_cache[i].lru_counter;
-                oldest_idx = i;
-            }
-        }
-
-        tlb_cache[oldest_idx] = PageCache{
-            .virtual_addr = pageAlignedAddress(virt_addr),
-            .physical_addr = pageAlignedAddress(phys_addr),
-            .flags = flags,
-            .lru_counter = lru_counter,
-        };
-    }
-}
-
-fn remove_from_tlb_cache(virt_addr: u32) void {
-    const aligned_addr = pageAlignedAddress(virt_addr);
-
-    var i: u32 = 0;
-    while (i < tlb_cache_count) : (i += 1) {
-        if (tlb_cache[i].virtual_addr == aligned_addr) {
-            if (i < tlb_cache_count - 1) {
-                tlb_cache[i] = tlb_cache[tlb_cache_count - 1];
-            }
-            tlb_cache_count -= 1;
-            break;
-        }
-    }
-}
-
 pub fn invalidate_page(virt_addr: u32) void {
     asm volatile ("invlpg (%[addr])"
         :
         : [addr] "r" (virt_addr),
     );
-}
-
-fn flush_tlb() void {
-    // SAFETY: populated by the subsequent inline assembly reading CR3
-    var cr3: u32 = undefined;
-    asm volatile (
-        \\mov %%cr3, %[cr3]
-        \\mov %[cr3], %%cr3
-        : [cr3] "=r" (cr3),
-    );
-
-    tlb_cache_count = 0;
 }
 
 fn handle_demand_paging(addr: u32, _: bool, user: bool) bool {
