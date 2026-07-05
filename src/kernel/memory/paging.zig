@@ -446,8 +446,11 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
     if (reserved) console.print("  - Reserved bit violation\n");
     if (instruction_fetch) console.print("  - Instruction fetch\n");
 
-    console.print("System halted.\n");
-    asm volatile ("hlt");
+    // Returning would iret back to the faulting instruction and refault
+    // forever; panic instead so the backtrace identifies the culprit and the
+    // machine halts for good.
+    const panic_utils = @import("../utils/panic.zig");
+    panic_utils.panic("unrecoverable page fault at 0x{x:0>8} (eip=0x{x:0>8})", .{ faulting_address, regs.eip });
 }
 
 fn print_hex_console(value: u32, console: anytype) void {
