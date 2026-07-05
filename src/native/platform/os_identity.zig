@@ -227,8 +227,8 @@ pub const Store = struct {
         credential.primary_device = request.device;
         credential.scope = request.scope;
         credential.synced_to_device_graph = request.scope == .synced;
-        credential.relying_party_id_len = native_util.copyTextExact(&credential.relying_party_id, request.relying_party_id) catch unreachable;
-        credential.label_len = native_util.copyTextExact(&credential.label, request.label) catch unreachable;
+        credential.relying_party_id_len = native_util.copyTextExact(&credential.relying_party_id, request.relying_party_id) catch return error.RelyingPartyTooLong;
+        credential.label_len = native_util.copyTextExact(&credential.label, request.label) catch return error.LabelTooLong;
         credential.credential_public_key = credential_public_key;
         credential.created_at_ticks = request.tick;
 
@@ -311,7 +311,7 @@ pub const Store = struct {
             .device_trust_generation = device_record.trust_generation,
             .unlock_age_ticks = request.tick - unlock.issued_at_ticks,
         };
-        assertion.relying_party_id_len = native_util.copyTextExact(&assertion.relying_party_id, credential.relyingPartySlice()) catch unreachable;
+        assertion.relying_party_id_len = native_util.copyTextExact(&assertion.relying_party_id, credential.relyingPartySlice()) catch return error.RelyingPartyTooLong;
         assertion.origin_len = native_util.copyTextExact(&assertion.origin, request.origin) catch return error.OriginTooLong;
         assertion.challenge_len = native_util.copyTextExact(&assertion.challenge, request.challenge) catch return error.ChallengeTooLong;
         return assertion;

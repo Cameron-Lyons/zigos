@@ -132,7 +132,7 @@ pub const Store = struct {
             secret.value_len = 0;
             @memset(&secret.value, 0);
         } else {
-            secret.value_len = native_util.copyTextExact(&secret.value, raw) catch unreachable;
+            secret.value_len = native_util.copyTextExact(&secret.value, raw) catch return error.SecretTooLarge;
         }
 
         const slot_index = self.secrets.reserveIndex(secret_id) orelse return error.SecretTableFull;
