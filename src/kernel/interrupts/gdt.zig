@@ -137,6 +137,12 @@ fn writeTss(num: usize, ss0: u16, esp0: u32) void {
 
     @memset(@as([*]u8, @ptrCast(&tss))[0..@sizeOf(Tss)], 0);
 
+    // Placing the bitmap base at the segment limit means there is no I/O
+    // permission bitmap at all, so every IN/OUT from ring 3 raises #GP. The
+    // zeroed default (0) would overlay the bitmap on the TSS fields above,
+    // granting ring 3 access to every port that lines up with a 0 byte.
+    tss.iomap_base = @sizeOf(Tss);
+
     tss.ss0 = ss0;
     tss.esp0 = esp0;
 
@@ -165,6 +171,7 @@ pub fn configureDoubleFaultTask(handler_address: u32) void {
     );
 
     @memset(@as([*]u8, @ptrCast(&double_fault_tss))[0..@sizeOf(Tss)], 0);
+    double_fault_tss.iomap_base = @sizeOf(Tss);
     double_fault_tss.eip = handler_address;
     double_fault_tss.esp = @intFromPtr(&double_fault_stack) + double_fault_stack.len;
     double_fault_tss.ebp = double_fault_tss.esp;
