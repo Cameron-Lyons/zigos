@@ -121,20 +121,16 @@ pub fn requireProductionDriverDeviceId(device_class: driver_service.DeviceClass)
     return record.device_id;
 }
 
+/// Inventory admission is the production-binding policy plus exactly one
+/// bootstrap concession: the early ATA storage path may enter the inventory
+/// before a production driver can bind it.
 pub fn sourceCanEnterInventory(
     device_class: driver_service.DeviceClass,
     source: DetectionSource,
     device_id: u64,
 ) bool {
-    if (source == .absent or source == .synthetic or device_id == 0) return false;
-    return switch (device_class) {
-        .network_adapter => source == .intel_i225_lm_inventory and isStablePciVendorDevice(device_id, PCI_VENDOR_INTEL, PCI_DEVICE_INTEL_I225_LM),
-        .storage_controller => (source == .nvme_pci_inventory and isStablePciId(device_id)) or source == .ata_bootstrap,
-        .usb_controller => source == .xhci_inventory and isStablePciVendor(device_id, PCI_VENDOR_INTEL),
-        .graphics_adapter, .audio_print_io => source == .pci_inventory and isStablePciVendor(device_id, PCI_VENDOR_INTEL),
-        .input_device => source == .xhci_inventory and isStablePciVendor(device_id, PCI_VENDOR_INTEL),
-        .compositor_policy => source == .platform_policy,
-    };
+    if (device_class == .storage_controller and source == .ata_bootstrap and device_id != 0) return true;
+    return sourceCanBindProductionDriver(device_class, source, device_id);
 }
 
 pub fn sourceCanBindProductionDriver(
@@ -196,15 +192,12 @@ fn isStablePciVendorDevice(device_id: u64, vendor_id: u16, pci_device_id: u16) b
 const device_class_count = std.meta.fields(driver_service.DeviceClass).len;
 
 fn defaultRecords() [device_class_count]DeviceRecord {
-    return .{
-        defaultRecord(.network_adapter),
-        defaultRecord(.storage_controller),
-        defaultRecord(.usb_controller),
-        defaultRecord(.graphics_adapter),
-        defaultRecord(.audio_print_io),
-        defaultRecord(.input_device),
-        defaultRecord(.compositor_policy),
-    };
+    // SAFETY: every slot is written by the inline for below.
+    var result: [device_class_count]DeviceRecord = undefined;
+    inline for (std.meta.fields(driver_service.DeviceClass)) |field| {
+        result[field.value] = defaultRecord(@enumFromInt(field.value));
+    }
+    return result;
 }
 
 fn defaultRecord(device_class: driver_service.DeviceClass) DeviceRecord {
@@ -219,15 +212,7 @@ fn defaultRecord(device_class: driver_service.DeviceClass) DeviceRecord {
 }
 
 fn recordForClassMut(device_class: driver_service.DeviceClass) *DeviceRecord {
-    return switch (device_class) {
-        .network_adapter => &records[0],
-        .storage_controller => &records[1],
-        .usb_controller => &records[2],
-        .graphics_adapter => &records[3],
-        .audio_print_io => &records[4],
-        .input_device => &records[5],
-        .compositor_policy => &records[6],
-    };
+    return &records[@intFromEnum(device_class)];
 }
 
 test "device inventory starts absent until hardware is discovered" {
