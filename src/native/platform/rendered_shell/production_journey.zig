@@ -93,6 +93,9 @@ pub const ProductionJourneyRequest = struct {
 pub const ProductionJourneyResponse = struct {
     control: ProductionJourneyControl,
     status: ProductionJourneyStatus = .ok,
+    // The error behind a non-ok status; statuses group many causes and boot
+    // logs need the precise one to diagnose a rejected journey step.
+    failure: ?anyerror = null,
     task_id: u64 = 0,
     active_window_id: u64 = 0,
     visible_window_count: u16 = 0,
@@ -203,6 +206,7 @@ pub const ProductionJourneyService = struct {
         var response = ProductionJourneyResponse{ .control = request.control };
         self.click(request.control, request.tick) catch |err| {
             response.status = statusForProductionJourneyError(err);
+            response.failure = err;
         };
         if (response.status == .ok and request.control != .recover_system) {
             self.runtime_service.checkpoint(request.tick);
