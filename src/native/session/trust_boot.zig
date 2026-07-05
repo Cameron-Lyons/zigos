@@ -530,7 +530,7 @@ pub const TrustBoot = struct {
         crypto_hash.updateInt(&hasher, "session-task-id", graph.state.session_task.id);
         crypto_hash.updateInt(&hasher, "review-service-task-id", graph.state.review_service_task.id);
 
-        for (self.supervisor.service_arena.slots) |slot| {
+        for (&self.supervisor.service_arena.slots) |*slot| {
             if (!slot.in_use) continue;
             hashServiceRecord(&hasher, &slot.service);
         }
@@ -538,7 +538,7 @@ pub const TrustBoot = struct {
             crypto_hash.updateInt(&hasher, "binding-task-id", binding.task_id);
             crypto_hash.updateInt(&hasher, "binding-endpoint-id", binding.endpoint_id);
         }
-        for (self.userspace_catalog.images.slots) |slot| {
+        for (&self.userspace_catalog.images.slots) |*slot| {
             if (!slot.in_use) continue;
             const image = &slot.image;
             crypto_hash.updateBytes(&hasher, "image-bundle", image.bundleIdSlice());
@@ -573,11 +573,11 @@ pub const TrustBoot = struct {
         hashCapability(&hasher, "session-capability", &graph.state.session_capability);
         hashCapability(&hasher, "policy-capability", &graph.state.policy_capability);
 
-        for (self.capability_table.slots.slots) |slot| {
+        for (&self.capability_table.slots.slots) |*slot| {
             if (!slot.in_use) continue;
             hashCapability(&hasher, "capability", &slot.capability);
         }
-        for (self.service_directory.registry.bindings.slots) |slot| {
+        for (&self.service_directory.registry.bindings.slots) |*slot| {
             if (!slot.in_use) continue;
             const binding = &slot.binding;
             crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);

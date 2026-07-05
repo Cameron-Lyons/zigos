@@ -144,9 +144,9 @@ pub const Runtime = struct {
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
 
         out.address_space_count = 0;
-        for (self.address_spaces.slots) |slot| {
+        for (&self.address_spaces.slots) |*slot| {
             if (!slot.in_use) continue;
-            out.address_spaces[out.address_space_count] = slot;
+            out.address_spaces[out.address_space_count] = slot.*;
             out.address_space_count += 1;
         }
     }
@@ -505,7 +505,7 @@ pub const Runtime = struct {
                 }
             }
         }
-        for (self.address_spaces.slots) |slot| {
+        for (&self.address_spaces.slots) |*slot| {
             if (!slot.in_use) continue;
             _ = self.indexedAddressSpaceSlotConst(slot.address_space.id) orelse
                 native_util.impossibleByInvariant("address space index missing a live address space");
@@ -548,7 +548,7 @@ pub const Runtime = struct {
 
     fn debugAssertAddressSpaceIndexMissAbsent(self: *const Runtime, address_space_id: u64) void {
         if (!debugIndexChecksEnabled()) return;
-        for (self.address_spaces.slots) |slot| {
+        for (&self.address_spaces.slots) |*slot| {
             if (slot.in_use and slot.address_space.id == address_space_id) {
                 native_util.impossibleByInvariant("address space index missed a live address space");
             }
