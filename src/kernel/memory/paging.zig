@@ -266,7 +266,7 @@ pub fn enableWriteProtect() void {
         ::: .{ .eax = true });
 }
 
-fn unmap_page(virt_addr: u32) void {
+pub fn unmap_page(virt_addr: u32) void {
     const page_dir_index = pageDirectoryIndex(virt_addr);
     const page_table_index = pageTableIndex(virt_addr);
 
