@@ -24,6 +24,7 @@ stack_bottom:
        as a guard page: an overflow then faults immediately instead of
        silently corrupting the globals below the stack. */
     .skip BOOT_STACK_SIZE
+.global stack_top
 stack_top:
 
 .section .text

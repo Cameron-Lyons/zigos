@@ -57,6 +57,12 @@ else
         pub fn print(_: []const u8) void {}
         pub fn printChar(_: u8) void {}
     };
+const stack_watermark = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/utils/stack_watermark.zig")
+else
+    struct {
+        pub fn reportPeak() void {}
+    };
 
 pub const SessionManager = struct {
     initialized: bool = false,
@@ -216,6 +222,7 @@ pub const SessionManager = struct {
             self.failBoot();
             return;
         }
+        stack_watermark.reportPeak();
         common.printBootMarker(boot_markers.task_session_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
