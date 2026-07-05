@@ -215,6 +215,12 @@ pub fn mapPage(virt_addr: u32, phys_addr: u32, flags: u32) void {
         for (table) |*entry| {
             entry.* = PageTableEntry{};
         }
+    } else if ((flags & PAGE_USER) != 0 and !page_dir_entry.user) {
+        // A directory entry must be at least as permissive as any mapping
+        // beneath it: a user PTE under a supervisor-only PDE is unreachable
+        // from ring 3. Widening the PDE is safe because the PTE bits still
+        // gate access per page.
+        page_dir_entry.user = true;
     }
 
     const table_addr = @as(usize, page_dir_entry.address) << PAGE_SHIFT;
