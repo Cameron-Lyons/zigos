@@ -20,8 +20,12 @@ fn heapStartAddress() usize {
 const BlockHeader = struct {
     size: usize,
     is_free: bool,
+    // Address-ordered neighbours, for splitting and coalescing.
     next: ?*BlockHeader,
     prev: ?*BlockHeader,
+    // Free-list links; only meaningful while is_free.
+    next_free: ?*BlockHeader,
+    prev_free: ?*BlockHeader,
 };
 
 // SAFETY: assigned in init() before any heap operations
@@ -54,6 +58,8 @@ pub fn init() void {
     initial_block.is_free = true;
     initial_block.next = null;
     initial_block.prev = null;
+    initial_block.next_free = null;
+    initial_block.prev_free = null;
 
     free_list = initial_block;
     is_initialized = true;
@@ -68,6 +74,28 @@ pub fn init() void {
 
 pub fn getReservedMemoryEnd() usize {
     return heapStartAddress() + HEAP_SIZE;
+}
+
+fn freeListPush(block: *BlockHeader) void {
+    block.prev_free = null;
+    block.next_free = free_list;
+    if (free_list) |head| {
+        head.prev_free = block;
+    }
+    free_list = block;
+}
+
+fn freeListRemove(block: *BlockHeader) void {
+    if (block.prev_free) |prev| {
+        prev.next_free = block.next_free;
+    } else {
+        free_list = block.next_free;
+    }
+    if (block.next_free) |next| {
+        next.prev_free = block.prev_free;
+    }
+    block.next_free = null;
+    block.prev_free = null;
 }
 
 fn splitBlock(block: *BlockHeader, size: usize) void {
@@ -89,29 +117,25 @@ fn splitBlock(block: *BlockHeader, size: usize) void {
 
         block.size = size;
         block.next = new_block;
+        freeListPush(new_block);
     }
 }
 
-fn coalesceBlocks(block: *BlockHeader) void {
-    if (block.next) |next| {
-        if (next.is_free) {
-            block.size += @sizeOf(BlockHeader) + next.size;
-            block.next = next.next;
-            if (next.next) |next_next| {
-                next_next.prev = block;
-            }
-        }
-    }
+fn takeFreeBlock(aligned_size: usize) ?*anyopaque {
+    var current = free_list;
+    while (current) |block| {
+        const next_free = block.next_free;
+        if (block.size >= aligned_size) {
+            splitBlock(block, aligned_size);
+            freeListRemove(block);
+            block.is_free = false;
 
-    if (block.prev) |prev| {
-        if (prev.is_free) {
-            prev.size += @sizeOf(BlockHeader) + block.size;
-            prev.next = block.next;
-            if (block.next) |next| {
-                next.prev = prev;
-            }
+            const data_ptr: [*]u8 = @ptrCast(block);
+            return @ptrCast(data_ptr + @sizeOf(BlockHeader));
         }
+        current = next_free;
     }
+    return null;
 }
 
 pub fn kmalloc(size: usize) ?*anyopaque {
@@ -121,19 +145,7 @@ pub fn kmalloc(size: usize) ?*anyopaque {
 
     const aligned_size = alignUp(size, BLOCK_ALIGNMENT);
 
-    var current = free_list;
-    while (current) |block| {
-        if (block.is_free and block.size >= aligned_size) {
-            splitBlock(block, aligned_size);
-            block.is_free = false;
-
-            const data_ptr: [*]u8 = @ptrCast(block);
-            return @ptrCast(data_ptr + @sizeOf(BlockHeader));
-        }
-        current = block.next;
-    }
-
-    return null;
+    return takeFreeBlock(aligned_size);
 }
 
 pub fn kfree(ptr: ?*anyopaque) void {
@@ -155,7 +167,33 @@ pub fn kfree(ptr: ?*anyopaque) void {
     }
 
     block.is_free = true;
-    coalesceBlocks(block);
+
+    // Absorb a free successor, then fold into a free predecessor; the
+    // neighbour being absorbed leaves the free list, and the surviving
+    // block enters it exactly once.
+    if (block.next) |next| {
+        if (next.is_free) {
+            freeListRemove(next);
+            block.size += @sizeOf(BlockHeader) + next.size;
+            block.next = next.next;
+            if (next.next) |next_next| {
+                next_next.prev = block;
+            }
+        }
+    }
+
+    if (block.prev) |prev| {
+        if (prev.is_free) {
+            prev.size += @sizeOf(BlockHeader) + block.size;
+            prev.next = block.next;
+            if (block.next) |next| {
+                next.prev = prev;
+            }
+            return;
+        }
+    }
+
+    freeListPush(block);
 }
 
 fn blockWithinHeap(block: *const BlockHeader) bool {

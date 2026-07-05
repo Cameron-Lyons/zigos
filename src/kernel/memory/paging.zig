@@ -101,21 +101,41 @@ fn find_free_frame() ?u32 {
 }
 
 fn find_contiguous_frames(count: u32) ?u32 {
+    if (count == 0) return null;
+
     var contiguous: u32 = 0;
     var start_frame: u32 = 0;
 
-    var i: u32 = 0;
-    while (i < FRAME_COUNT) : (i += 1) {
-        if (!test_frame(i * PAGE_SIZE)) {
+    var word_index: u32 = 0;
+    while (word_index < BITMAP_SIZE) : (word_index += 1) {
+        const word = frame_bitmap[word_index];
+        if (word == 0) {
             if (contiguous == 0) {
-                start_frame = i;
+                start_frame = word_index * FRAME_BITMAP_WORD_BITS;
             }
-            contiguous += 1;
-            if (contiguous == count) {
+            contiguous += FRAME_BITMAP_WORD_BITS;
+            if (contiguous >= count) {
                 return start_frame * PAGE_SIZE;
             }
-        } else {
+            continue;
+        }
+        if (word == ~@as(u32, 0)) {
             contiguous = 0;
+            continue;
+        }
+        var bit: u32 = 0;
+        while (bit < FRAME_BITMAP_WORD_BITS) : (bit += 1) {
+            if ((word >> @truncate(bit)) & 1 == 0) {
+                if (contiguous == 0) {
+                    start_frame = word_index * FRAME_BITMAP_WORD_BITS + bit;
+                }
+                contiguous += 1;
+                if (contiguous == count) {
+                    return start_frame * PAGE_SIZE;
+                }
+            } else {
+                contiguous = 0;
+            }
         }
     }
     return null;
