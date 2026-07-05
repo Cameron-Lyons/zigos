@@ -364,8 +364,6 @@ pub fn init() void {
     vga.print(" Used frames: ");
     numfmt.printDec(used_frames);
     vga.print("\n");
-
-    init_heap();
 }
 
 // A boot-stack overflow used to run straight into the device-broker globals
@@ -432,16 +430,6 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
     asm volatile ("hlt");
 }
 
-fn print_hex(value: u32) void {
-    const hex_chars = "0123456789ABCDEF";
-    var i: u32 = HEX_HIGH_NIBBLE_SHIFT;
-    while (i >= 0) : (i -= HEX_NIBBLE_BITS) {
-        const nibble = (value >> @truncate(i)) & HEX_NIBBLE_MASK;
-        vga.put_char(hex_chars[nibble]);
-        if (i == 0) break;
-    }
-}
-
 fn print_hex_console(value: u32, console: anytype) void {
     const hex_chars = "0123456789ABCDEF";
     var i: u32 = HEX_HIGH_NIBBLE_SHIFT;
@@ -452,161 +440,10 @@ fn print_hex_console(value: u32, console: anytype) void {
     }
 }
 
+// Demand-paged kernel heap range served by handle_demand_paging; the heap
+// allocator itself lives in memory.zig.
 const HEAP_START: u32 = 0x10000000;
-const HEAP_INITIAL_SIZE: u32 = 1024 * 1024;
 const HEAP_MAX_SIZE: u32 = 16 * 1024 * 1024;
-const HEAP_HEADER_MAGIC: u31 = 0x1234567;
-const HEAP_BLOCK_ALIGNMENT: u32 = 8;
-const HEAP_MIN_SPLIT_PAYLOAD: u32 = 16;
-const MAX_U32: u32 = ~@as(u32, 0);
-
-const BlockHeader = packed struct {
-    size: u32,
-    is_free: bool,
-    magic: u31 = HEAP_HEADER_MAGIC,
-};
-
-var heap_start: u32 = HEAP_START;
-var heap_end: u32 = HEAP_START;
-var heap_max: u32 = HEAP_START + HEAP_MAX_SIZE;
-
-pub fn init_heap() void {
-    heap_end = heap_start + HEAP_INITIAL_SIZE;
-
-    var current_addr = heap_start;
-    while (current_addr < heap_end) : (current_addr += PAGE_SIZE) {
-        const frame = alloc_frame();
-        mapPage(current_addr, frame, PAGE_PRESENT | PAGE_WRITABLE);
-    }
-
-    const initial_block: *BlockHeader = @ptrFromInt(heap_start);
-    initial_block.* = BlockHeader{
-        .size = HEAP_INITIAL_SIZE - @sizeOf(BlockHeader),
-        .is_free = true,
-    };
-
-    vga.print("Heap initialized at 0x");
-    print_hex(heap_start);
-    vga.print(" size: ");
-    numfmt.printDec(HEAP_INITIAL_SIZE);
-    vga.print("\n");
-}
-
-fn find_best_fit(size: u32) ?*BlockHeader {
-    var current: *BlockHeader = @ptrFromInt(heap_start);
-    var best_fit: ?*BlockHeader = null;
-    var best_size: u32 = MAX_U32;
-
-    while (@intFromPtr(current) < heap_end) {
-        if (current.is_free and current.size >= size and current.size < best_size) {
-            best_fit = current;
-            best_size = current.size;
-        }
-
-        const next_addr = @intFromPtr(current) + @sizeOf(BlockHeader) + current.size;
-        if (next_addr >= heap_end) break;
-        current = @as(*BlockHeader, @ptrFromInt(next_addr));
-    }
-
-    return best_fit;
-}
-
-fn expand_heap(size: u32) bool {
-    const header_size: u32 = @sizeOf(BlockHeader);
-    if (size > MAX_U32 - header_size) return false;
-    const required_size = size + header_size;
-    const new_pages = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    const new_size = new_pages * PAGE_SIZE;
-
-    if (heap_end + new_size > heap_max) {
-        return false;
-    }
-
-    var current_addr = heap_end;
-    const new_end = heap_end + new_size;
-    while (current_addr < new_end) : (current_addr += PAGE_SIZE) {
-        const frame = alloc_frame();
-        mapPage(current_addr, frame, PAGE_PRESENT | PAGE_WRITABLE);
-    }
-
-    const new_block: *BlockHeader = @ptrFromInt(heap_end);
-    new_block.* = BlockHeader{
-        .size = new_size - @sizeOf(BlockHeader),
-        .is_free = true,
-    };
-
-    heap_end = new_end;
-    return true;
-}
-
-pub fn kmalloc(size: u32) ?*anyopaque {
-    const aligned_size = alignHeapAllocation(size);
-
-    var block = find_best_fit(aligned_size);
-    if (block == null) {
-        if (!expand_heap(aligned_size)) {
-            vga.print("kmalloc: out of memory!\n");
-            return null;
-        }
-        block = find_best_fit(aligned_size);
-    }
-
-    const header = block.?;
-
-    const header_size: u32 = @sizeOf(BlockHeader);
-    if (header.size > aligned_size + header_size + HEAP_MIN_SPLIT_PAYLOAD) {
-        const remaining_size = header.size - aligned_size - header_size;
-        const new_block_addr = @intFromPtr(header) + @as(usize, header_size) + @as(usize, aligned_size);
-        const new_block: *BlockHeader = @ptrFromInt(new_block_addr);
-        new_block.* = BlockHeader{
-            .size = remaining_size,
-            .is_free = true,
-        };
-        header.size = aligned_size;
-    }
-
-    header.is_free = false;
-    return @as(*anyopaque, @ptrFromInt(@intFromPtr(header) + @sizeOf(BlockHeader)));
-}
-
-fn alignHeapAllocation(size: u32) u32 {
-    return (size + HEAP_BLOCK_ALIGNMENT - 1) & ~(HEAP_BLOCK_ALIGNMENT - 1);
-}
-
-pub fn kfree(ptr: *anyopaque) void {
-    const header_addr = @intFromPtr(ptr) - @sizeOf(BlockHeader);
-    const header: *BlockHeader = @ptrFromInt(header_addr);
-
-    if (header.magic != HEAP_HEADER_MAGIC) {
-        vga.print("kfree: invalid magic number!\n");
-        return;
-    }
-
-    header.is_free = true;
-
-    coalesce_free_blocks();
-}
-
-fn coalesce_free_blocks() void {
-    var current: *BlockHeader = @ptrFromInt(heap_start);
-
-    while (@intFromPtr(current) < heap_end) {
-        if (current.is_free) {
-            const next_addr = @intFromPtr(current) + @sizeOf(BlockHeader) + current.size;
-            if (next_addr < heap_end) {
-                const next: *BlockHeader = @ptrFromInt(next_addr);
-                if (next.is_free) {
-                    current.size += @sizeOf(BlockHeader) + next.size;
-                    continue;
-                }
-            }
-        }
-
-        const next_addr = @intFromPtr(current) + @sizeOf(BlockHeader) + current.size;
-        if (next_addr >= heap_end) break;
-        current = @as(*BlockHeader, @ptrFromInt(next_addr));
-    }
-}
 
 var current_page_directory: *PageDirectory = &kernel_page_directory;
 
@@ -639,7 +476,7 @@ pub fn invalidate_page(virt_addr: u32) void {
 fn handle_demand_paging(addr: u32, _: bool, user: bool) bool {
     const aligned_addr = pageAlignedAddress(addr);
 
-    if (aligned_addr >= HEAP_START and aligned_addr < heap_max) {
+    if (aligned_addr >= HEAP_START and aligned_addr < HEAP_START + HEAP_MAX_SIZE) {
         const phys = alloc_frame();
         var flags: u32 = PAGE_PRESENT | PAGE_WRITABLE;
         if (user) flags |= PAGE_USER;

@@ -7,7 +7,6 @@ const MIN_BLOCK_SIZE: usize = 16;
 const BLOCK_ALIGNMENT: usize = 16;
 
 const PAGE_SIZE: usize = 4096;
-const MAX_PHYSICAL_MEMORY: usize = 128 * BYTES_PER_MIB;
 extern var __kernel_end: u8;
 
 fn alignUp(addr: usize, alignment: usize) usize {
@@ -17,8 +16,6 @@ fn alignUp(addr: usize, alignment: usize) usize {
 fn heapStartAddress() usize {
     return alignUp(@intFromPtr(&__kernel_end), PAGE_SIZE);
 }
-
-var next_physical_page: usize = 0;
 
 const BlockHeader = struct {
     size: usize,
@@ -51,7 +48,6 @@ pub fn init() void {
     const heap_start_addr = heapStartAddress();
     heap_start = @ptrFromInt(heap_start_addr);
     heap_end = heap_start + HEAP_SIZE;
-    next_physical_page = @intFromPtr(heap_end);
 
     const initial_block: *BlockHeader = @ptrCast(@alignCast(heap_start));
     initial_block.size = HEAP_SIZE - @sizeOf(BlockHeader);
@@ -165,121 +161,4 @@ pub fn kfree(ptr: ?*anyopaque) void {
 fn blockWithinHeap(block: *const BlockHeader) bool {
     const addr = @intFromPtr(block);
     return addr >= @intFromPtr(heap_start) and addr + @sizeOf(BlockHeader) <= @intFromPtr(heap_end);
-}
-
-pub fn krealloc(ptr: ?*anyopaque, new_size: usize) ?*anyopaque {
-    if (ptr == null) return kmalloc(new_size);
-    if (new_size == 0) {
-        kfree(ptr);
-        return null;
-    }
-
-    const raw_ptr: [*]u8 = @ptrCast(ptr.?);
-    const block: *BlockHeader = @ptrCast(@alignCast(raw_ptr - @sizeOf(BlockHeader)));
-
-    // Reject pointers that do not refer to a live heap block before dereferencing
-    // the header (kfree applies the same range check; krealloc previously did not).
-    if (!blockWithinHeap(block) or block.is_free) {
-        return null;
-    }
-
-    if (block.size >= new_size) {
-        return ptr;
-    }
-
-    const new_ptr = kmalloc(new_size);
-    if (new_ptr) |new| {
-        const copy_size = @min(block.size, new_size);
-        @memcpy(@as([*]u8, @ptrCast(new))[0..copy_size], @as([*]u8, @ptrCast(ptr.?))[0..copy_size]);
-        kfree(ptr);
-    }
-
-    return new_ptr;
-}
-
-pub fn getMemoryStats() struct { total: usize, used: usize, free: usize } {
-    lockAllocator();
-    defer unlockAllocator();
-
-    var total: usize = 0;
-    var free: usize = 0;
-
-    var current = free_list;
-    while (current) |block| {
-        total += block.size + @sizeOf(BlockHeader);
-        if (block.is_free) {
-            free += block.size;
-        }
-        current = block.next;
-    }
-
-    return .{
-        .total = total,
-        .used = total - free,
-        .free = free,
-    };
-}
-
-pub fn allocPages(num_pages: usize) ?[*]u8 {
-    const size = num_pages * PAGE_SIZE;
-
-    const ptr = kmalloc(size);
-    if (ptr) |p| {
-        return @as([*]u8, @ptrCast(p));
-    }
-    return null;
-}
-
-pub fn freePages(ptr: [*]u8, num_pages: usize) void {
-    _ = num_pages;
-    kfree(@as(*anyopaque, @ptrCast(ptr)));
-}
-
-pub fn allocatePhysicalPage() ?u32 {
-    lockAllocator();
-    defer unlockAllocator();
-
-    const page = next_physical_page;
-    next_physical_page += PAGE_SIZE;
-
-    if (next_physical_page > MAX_PHYSICAL_MEMORY) {
-        return null;
-    }
-
-    return @as(u32, @intCast(page));
-}
-
-pub fn alloc(comptime T: type) ?*T {
-    const size = @sizeOf(T);
-
-    if (kmalloc(size)) |ptr| {
-        const typed_ptr: *T = @ptrCast(@alignCast(ptr));
-        // SAFETY: Immediately overwritten by caller
-        typed_ptr.* = undefined;
-        return typed_ptr;
-    }
-
-    return null;
-}
-
-pub const Allocator = struct {
-    pub fn alloc(self: *Allocator, comptime T: type, n: usize) ![]T {
-        _ = self;
-        const size = @sizeOf(T) * n;
-        const ptr = kmalloc(size) orelse return error.OutOfMemory;
-        const slice = @as([*]T, @ptrCast(@alignCast(ptr)))[0..n];
-        @memset(@as([*]u8, @ptrCast(slice.ptr))[0..size], 0);
-        return slice;
-    }
-
-    pub fn free(self: *Allocator, memory: []u8) void {
-        _ = self;
-        kfree(@as(*anyopaque, @ptrCast(memory.ptr)));
-    }
-};
-
-var default_allocator = Allocator{};
-
-pub fn getDefaultAllocator() *Allocator {
-    return &default_allocator;
 }
