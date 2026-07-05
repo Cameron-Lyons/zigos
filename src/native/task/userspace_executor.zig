@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
@@ -61,9 +62,64 @@ else
 const PAGE_SIZE: usize = 4096;
 const USERSPACE_TRAP_VECTOR: u8 = 129;
 const PAGE_FAULT_VECTOR: u8 = 14;
-const USERSPACE_KERNEL_STACK_BYTES: usize = units.kibibytes(16);
+const TRAP_STACK_BYTES: usize = units.kibibytes(64);
+const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
+// Same word the boot-stack watermark uses; unlikely as live stack data.
+const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
 const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
+
+// The ring-0 stack every userspace trap and syscall dispatch runs on. It used
+// to be a 16 KiB field inside Executor, where an overflow ran silently into
+// the executor's own mapping tables - the failure mode the boot stack had
+// before it grew a guard page. Page-aligned so the lowest page can be
+// unmapped as a guard (an overflow then double-faults with diagnostics), and
+// painted so boot logs report the high-water mark.
+var trap_stack: [TRAP_STACK_BYTES]u8 align(PAGE_SIZE) = [_]u8{0} ** TRAP_STACK_BYTES;
+var trap_stack_guard_armed: bool = false;
+
+fn trapStackPaintableBase() usize {
+    return @intFromPtr(&trap_stack) + TRAP_STACK_GUARD_BYTES;
+}
+
+fn armTrapStackGuard() void {
+    if (builtin.target.os.tag != .freestanding) return;
+    if (trap_stack_guard_armed) return;
+    freestanding.paging.unmap_page(@intFromPtr(&trap_stack));
+    const base = trapStackPaintableBase();
+    const words: [*]u32 = @ptrFromInt(base);
+    const count = (TRAP_STACK_BYTES - TRAP_STACK_GUARD_BYTES) / @sizeOf(u32);
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        words[index] = TRAP_STACK_PAINT_PATTERN;
+    }
+    trap_stack_guard_armed = true;
+}
+
+/// Emit the trap-stack high-water mark; creep toward capacity shows up in
+/// QEMU logs long before the guard page would trip mid-syscall.
+pub fn reportTrapStackPeak() void {
+    if (builtin.target.os.tag != .freestanding) return;
+    if (!trap_stack_guard_armed) return;
+    const base = trapStackPaintableBase();
+    const top = @intFromPtr(&trap_stack) + trap_stack.len;
+    var addr = base;
+    var untouched: usize = 0;
+    while (addr < top) : (addr += @sizeOf(u32)) {
+        const word: *const u32 = @ptrFromInt(addr);
+        if (word.* != TRAP_STACK_PAINT_PATTERN) break;
+        untouched += @sizeOf(u32);
+    }
+    const used = (top - base) - untouched;
+    // SAFETY: filled by the subsequent std.fmt.bufPrint call
+    var line_buffer: [96]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &line_buffer,
+        "ZIGOS:PLATFORM:TRAP_STACK:PEAK used_bytes={d} capacity_bytes={d}",
+        .{ used, top - base },
+    ) catch return;
+    common.printBootMarker(line);
+}
 
 pub export var zigos_userspace_resume_requested: u32 = 0;
 pub export var zigos_userspace_resume_esp: u32 = 0;
@@ -116,7 +172,6 @@ pub const Executor = struct {
     user_page_fault_count: u64 = 0,
     mappings: [task_runtime.MAX_TASKS]MappingEntry = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS,
     mapping_index: MappingIndex = MappingIndex.init(),
-    userspace_kernel_stack: [USERSPACE_KERNEL_STACK_BYTES]u8 align(16) = [_]u8{0} ** USERSPACE_KERNEL_STACK_BYTES,
 
     pub fn init(self: *Executor) void {
         if (builtin.target.os.tag != .freestanding) return;
@@ -126,6 +181,7 @@ pub const Executor = struct {
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
             trap_handler_registered = true;
         }
+        armTrapStackGuard();
         self.initialized = true;
     }
 
@@ -364,8 +420,8 @@ pub const Executor = struct {
         }
     }
 
-    fn trapStackTop(self: *Executor) usize {
-        return @intFromPtr(&self.userspace_kernel_stack) + self.userspace_kernel_stack.len;
+    fn trapStackTop(_: *Executor) usize {
+        return @intFromPtr(&trap_stack) + trap_stack.len;
     }
 };
 
