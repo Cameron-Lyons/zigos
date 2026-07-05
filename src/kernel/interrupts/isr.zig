@@ -29,7 +29,14 @@ const PIC_MASTER_OFFSET: u8 = 0x20;
 const PIC_SLAVE_OFFSET: u8 = 0x28;
 const PIC_MASTER_HAS_SLAVE_ON_IRQ2: u8 = 0x04;
 const PIC_SLAVE_CASCADE_ID: u8 = 0x02;
-const PIC_MASK_NONE: u8 = 0x00;
+const PIC_TIMER_IRQ_BIT: u8 = 1 << 0;
+const PIC_KEYBOARD_IRQ_BIT: u8 = 1 << 1;
+// Only the PIT and the PS/2 keyboard have handlers; every other line stays
+// masked (including the slave cascade - no slave device is serviced) so an
+// unowned device cannot inject interrupts the dispatch table would drop on
+// the floor after a blind EOI.
+const PIC_MASTER_MASK: u8 = ~(PIC_TIMER_IRQ_BIT | PIC_KEYBOARD_IRQ_BIT);
+const PIC_SLAVE_MASK_ALL: u8 = 0xFF;
 
 extern fn isr0() void;
 extern fn isr1() void;
@@ -293,6 +300,6 @@ fn remapPIC() void {
     io.outb(PIC_SLAVE_DATA_PORT, PIC_SLAVE_CASCADE_ID);
     io.outb(PIC_MASTER_DATA_PORT, PIC_ICW4_8086);
     io.outb(PIC_SLAVE_DATA_PORT, PIC_ICW4_8086);
-    io.outb(PIC_MASTER_DATA_PORT, PIC_MASK_NONE);
-    io.outb(PIC_SLAVE_DATA_PORT, PIC_MASK_NONE);
+    io.outb(PIC_MASTER_DATA_PORT, PIC_MASTER_MASK);
+    io.outb(PIC_SLAVE_DATA_PORT, PIC_SLAVE_MASK_ALL);
 }
