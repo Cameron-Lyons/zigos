@@ -298,9 +298,7 @@ pub const NativeNetworkStack = struct {
             .attestation_verifier_metadata_digest_bound = connection.attestation_verifier_metadata_digest_bound,
             .attestation_verifier_metadata_digest = connection.attestation_verifier_metadata_digest,
         };
-        for (payload, 0..) |byte, index| {
-            frame.ciphertext[index] = byte ^ connection.key[index % connection.key.len];
-        }
+        applyModeledKeystream(&frame.ciphertext, payload, &connection.key);
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeNativeFrame(wire_frame[0..], connection, &frame);
@@ -361,9 +359,7 @@ pub const NativeNetworkStack = struct {
             .scoped_discovery = true,
         };
         frame.discovery_class_len = native_util.copyTextExact(&frame.discovery_class, connection.discoveryClassSlice()) catch return error.DiscoveryClassTooLong;
-        for (payload, 0..) |byte, index| {
-            frame.ciphertext[index] = byte ^ connection.key[index % connection.key.len];
-        }
+        applyModeledKeystream(&frame.ciphertext, payload, &connection.key);
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeDiscoveryFrame(wire_frame[0..], connection, &frame);
@@ -552,23 +548,17 @@ fn encodeNativeFrame(
     connection: *const NativeServiceIdentityConnection,
     frame: *const NativeServiceIdentityFrame,
 ) Error![]const u8 {
-    const identity = connection.serviceIdentitySlice();
-    if (identity.len > std.math.maxInt(u8) or frame.payload_len > std.math.maxInt(u8)) return error.PayloadTooLarge;
-    const required_len = 4 + (3 * @sizeOf(u64)) + connection.source_mac.len + 1 + identity.len + 1 + frame.payload_len + frame.payload_digest.len;
-    if (buffer.len < required_len) return error.PayloadTooLarge;
-
-    var writer = NativeFrameWriter{ .buffer = buffer };
-    try writer.writeBytes(SERVICE_IDENTITY_FRAME_MAGIC);
-    try writer.writeU64(frame.connection_id);
-    try writer.writeU64(frame.policy_id);
-    try writer.writeU64(frame.capability_id);
-    try writer.writeBytes(&connection.source_mac);
-    try writer.writeByte(@intCast(identity.len));
-    try writer.writeBytes(identity);
-    try writer.writeByte(@intCast(frame.payload_len));
-    try writer.writeBytes(frame.ciphertextSlice());
-    try writer.writeBytes(&frame.payload_digest);
-    return buffer[0..writer.offset];
+    return encodeWireFrame(
+        buffer,
+        SERVICE_IDENTITY_FRAME_MAGIC,
+        frame.connection_id,
+        frame.policy_id,
+        frame.capability_id,
+        &connection.source_mac,
+        connection.serviceIdentitySlice(),
+        frame.ciphertextSlice(),
+        &frame.payload_digest,
+    );
 }
 
 fn encodeDiscoveryFrame(
@@ -576,23 +566,62 @@ fn encodeDiscoveryFrame(
     connection: *const NativeLocalDiscoveryConnection,
     frame: *const NativeLocalDiscoveryFrame,
 ) Error![]const u8 {
-    const discovery_class = connection.discoveryClassSlice();
-    if (discovery_class.len > std.math.maxInt(u8) or frame.probe_len > std.math.maxInt(u8)) return error.PayloadTooLarge;
-    const required_len = 4 + (3 * @sizeOf(u64)) + connection.source_mac.len + 1 + discovery_class.len + 1 + frame.probe_len + frame.probe_digest.len;
+    return encodeWireFrame(
+        buffer,
+        DISCOVERY_FRAME_MAGIC,
+        frame.connection_id,
+        frame.policy_id,
+        frame.capability_id,
+        &connection.source_mac,
+        connection.discoveryClassSlice(),
+        frame.ciphertextSlice(),
+        &frame.probe_digest,
+    );
+}
+
+/// Both native wire frames share one layout: magic, three u64 ids, source
+/// MAC, length-prefixed class/identity, length-prefixed ciphertext, digest.
+fn encodeWireFrame(
+    buffer: []u8,
+    magic: []const u8,
+    connection_id: u64,
+    policy_id: u64,
+    capability_id: u64,
+    source_mac: []const u8,
+    label: []const u8,
+    ciphertext: []const u8,
+    digest: []const u8,
+) Error![]const u8 {
+    if (label.len > std.math.maxInt(u8) or ciphertext.len > std.math.maxInt(u8)) return error.PayloadTooLarge;
+    const required_len = magic.len + (3 * @sizeOf(u64)) + source_mac.len + 1 + label.len + 1 + ciphertext.len + digest.len;
     if (buffer.len < required_len) return error.PayloadTooLarge;
 
     var writer = NativeFrameWriter{ .buffer = buffer };
-    try writer.writeBytes(DISCOVERY_FRAME_MAGIC);
-    try writer.writeU64(frame.connection_id);
-    try writer.writeU64(frame.policy_id);
-    try writer.writeU64(frame.capability_id);
-    try writer.writeBytes(&connection.source_mac);
-    try writer.writeByte(@intCast(discovery_class.len));
-    try writer.writeBytes(discovery_class);
-    try writer.writeByte(@intCast(frame.probe_len));
-    try writer.writeBytes(frame.ciphertextSlice());
-    try writer.writeBytes(&frame.probe_digest);
+    try writer.writeBytes(magic);
+    try writer.writeU64(connection_id);
+    try writer.writeU64(policy_id);
+    try writer.writeU64(capability_id);
+    try writer.writeBytes(source_mac);
+    try writer.writeByte(@intCast(label.len));
+    try writer.writeBytes(label);
+    try writer.writeByte(@intCast(ciphertext.len));
+    try writer.writeBytes(ciphertext);
+    try writer.writeBytes(digest);
     return buffer[0..writer.offset];
+}
+
+/// Modeled confidentiality only: a repeating-key XOR keystream stands in for
+/// a real AEAD in the proof environment. It provides no secrecy against a
+/// known-plaintext observer and must be replaced before any real network
+/// payload depends on the frame's `encrypted` flag.
+fn applyModeledKeystream(
+    ciphertext: *[MAX_NATIVE_PAYLOAD_BYTES]u8,
+    payload: []const u8,
+    key: *const crypto_hash.Digest,
+) void {
+    for (payload, 0..) |byte, index| {
+        ciphertext[index] = byte ^ key[index % key.len];
+    }
 }
 
 fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principal.PrincipalId) void {
