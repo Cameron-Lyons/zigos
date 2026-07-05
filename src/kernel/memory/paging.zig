@@ -251,6 +251,36 @@ pub fn mapPage(virt_addr: u32, phys_addr: u32, flags: u32) void {
     update_tlb_cache(virt_addr, phys_addr, flags);
 }
 
+/// Clear the writable bit on an existing mapping. Only binding for
+/// supervisor-mode writes once CR0.WP is set (see enableWriteProtect).
+pub fn setPageReadOnly(virt_addr: u32) void {
+    const page_dir_index = pageDirectoryIndex(virt_addr);
+    const page_table_index = pageTableIndex(virt_addr);
+
+    const page_directory = getCurrentPageDirectory();
+    const page_dir_entry = &page_directory[page_dir_index];
+    if (!page_dir_entry.present) return;
+
+    const table_addr = @as(usize, page_dir_entry.address) << PAGE_SHIFT;
+    const table: *PageTable = @ptrFromInt(table_addr);
+
+    const page_entry = &table[page_table_index];
+    if (!page_entry.present) return;
+    page_entry.writable = false;
+    invalidate_page(virt_addr);
+    remove_from_tlb_cache(virt_addr);
+}
+
+/// Set CR0.WP so read-only pages bind CPL0 writes as well; without it the
+/// writable bit only constrains user mode and kernel W^X is theater.
+pub fn enableWriteProtect() void {
+    asm volatile (
+        \\mov %%cr0, %%eax
+        \\or $0x10000, %%eax
+        \\mov %%eax, %%cr0
+        ::: .{ .eax = true });
+}
+
 pub fn unmap_page(virt_addr: u32) void {
     const page_dir_index = pageDirectoryIndex(virt_addr);
     const page_table_index = pageTableIndex(virt_addr);
