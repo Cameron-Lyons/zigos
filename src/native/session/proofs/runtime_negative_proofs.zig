@@ -30,6 +30,22 @@ var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
 var reboot_proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
 var reboot_proof_restarted_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
 
+// task_runtime.Runtime alone is >2 MiB, so a proof that carried these
+// fixtures in its stack frame overflowed the boot stack and silently
+// corrupted the globals below it. Keep them here and reset on entry; the
+// proofs run one at a time.
+var proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
+var proof_capabilities: capability.CapabilityTable = capability.CapabilityTable.init();
+var proof_endpoints: endpoint.Table = endpoint.Table.init();
+var proof_shared: shared_memory.Table = shared_memory.Table.init();
+
+fn resetProofFixtures() void {
+    proof_runtime.reset();
+    proof_capabilities = capability.CapabilityTable.init();
+    proof_endpoints = endpoint.Table.init();
+    proof_shared = shared_memory.Table.init();
+}
+
 pub fn runAndPrint() bool {
     if (!processIsolationBlocksForeignSharedMemory()) return false;
     common.printBootMarker(boot_markers.runtime_proof_process_isolation);
@@ -90,11 +106,10 @@ pub fn runFreestandingAndPrint(
 }
 
 pub fn processIsolationBlocksForeignSharedMemory() bool {
-    var runtime = task_runtime.Runtime.init();
-    var capabilities = capability.CapabilityTable.init();
-    var endpoints = endpoint.Table.init();
-    var shared = shared_memory.Table.init();
-    var kernel = native_kernel.Kernel.init(policyAuthority(1), &runtime, &capabilities, &endpoints, &shared);
+    resetProofFixtures();
+    const runtime = &proof_runtime;
+    const capabilities = &proof_capabilities;
+    var kernel = native_kernel.Kernel.init(policyAuthority(1), runtime, capabilities, &proof_endpoints, &proof_shared);
     var port = component_port.KernelPort.init(&kernel);
 
     const owner = runtime.createTask(.{
@@ -135,11 +150,10 @@ pub fn processIsolationBlocksForeignSharedMemory() bool {
 }
 
 pub fn syscallSubjectSpoofingIsRejected() bool {
-    var runtime = task_runtime.Runtime.init();
-    var capabilities = capability.CapabilityTable.init();
-    var endpoints = endpoint.Table.init();
-    var shared = shared_memory.Table.init();
-    var kernel = native_kernel.Kernel.init(policyAuthority(1), &runtime, &capabilities, &endpoints, &shared);
+    resetProofFixtures();
+    const runtime = &proof_runtime;
+    const capabilities = &proof_capabilities;
+    var kernel = native_kernel.Kernel.init(policyAuthority(1), runtime, capabilities, &proof_endpoints, &proof_shared);
     var port = component_port.KernelPort.init(&kernel);
 
     const receiver = runtime.createTask(.{
