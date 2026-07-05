@@ -308,8 +308,9 @@ fn saveIncremental(
 ) Error!PersistResult {
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     const current_generation = if (current) |loaded| loaded.root.generation else 0;
+    var state_hashes = WorkspaceStateHashCache{};
     const delta = if (current) |loaded|
-        try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces)
+        try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces, &state_hashes)
     else
         BuiltLog{};
 
@@ -323,7 +324,7 @@ fn saveIncremental(
         const next_generation = current_generation + 1;
         const data_offset = current.?.root.data_offset;
         const next_log_bytes = current.?.root.log_bytes + @as(u32, @intCast(delta.bytes_len));
-        var next_root = try buildRootState(next_generation, next_log_bytes, store, workspaces);
+        var next_root = try buildRootState(next_generation, next_log_bytes, store, workspaces, &state_hashes);
         next_root.data_offset = data_offset;
         next_root.log_record_count = current.?.root.log_record_count + delta.record_count;
         next_root.log_segment_count = current.?.root.log_segment_count + delta.segment_count;
@@ -353,7 +354,7 @@ fn saveIncremental(
         (if (loaded.root.data_offset == 0) alternate_data_region_offset else 0)
     else
         0;
-    var next_root = try buildRootState(next_generation, @intCast(log_writer.offset), store, workspaces);
+    var next_root = try buildRootState(next_generation, @intCast(log_writer.offset), store, workspaces, &state_hashes);
     next_root.data_offset = next_data_offset;
     next_root.log_record_count = 1;
     next_root.log_segment_count = 0;
@@ -532,11 +533,35 @@ fn writeRoot(writer: anytype, sector_index: u32, root: RootState) Error!void {
     }
 }
 
+/// Per-save memo for workspace state hashes: buildDeltaLog and buildRootState
+/// both need the hash of a dirty workspace, and hashing walks the full
+/// mutation log, share table, and recoverable-delete list.
+const WorkspaceStateHashCache = struct {
+    ids: [workspace.MAX_WORKSPACES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACES,
+    hashes: [workspace.MAX_WORKSPACES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACES,
+    count: usize = 0,
+
+    fn getOrCompute(self: *WorkspaceStateHashCache, record: *const workspace.WorkspaceRecord) Error!u64 {
+        const id = record.id.raw();
+        for (self.ids[0..self.count], 0..) |cached_id, index| {
+            if (cached_id == id) return self.hashes[index];
+        }
+        const hash = try volume_hashing.workspaceStateHash(record);
+        if (self.count < self.ids.len) {
+            self.ids[self.count] = id;
+            self.hashes[self.count] = hash;
+            self.count += 1;
+        }
+        return hash;
+    }
+};
+
 fn buildDeltaLog(
     buffer: []u8,
     root: RootState,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
+    state_hashes: *WorkspaceStateHashCache,
 ) Error!BuiltLog {
     var writer = CursorWriter{ .buffer = buffer };
     try volume_log.appendRecordPayload(&writer, .segment_boundary, &.{});
@@ -544,7 +569,7 @@ fn buildDeltaLog(
     for (store.dirtyObjectIds()) |object_id| {
         const object_record = store.object(object_id) orelse continue;
         if (object_record.latest_version_id.raw() <= root.last_version_id) continue;
-        try appendObjectRecord(&writer, object_record.*);
+        try appendObjectRecord(&writer, object_record);
     }
 
     for (store.dirtyVersionIds()) |version_id| {
@@ -552,24 +577,24 @@ fn buildDeltaLog(
         if (version_record.id.raw() <= root.last_version_id) continue;
         try appendVersionPayloadChunks(&writer, store, version_record);
         const blob = store.blob(version_record.blob_address) orelse return error.CorruptImage;
-        try appendBlobRecord(&writer, blob.*);
-        try appendVersionRecord(&writer, version_record.*);
+        try appendBlobRecord(&writer, blob);
+        try appendVersionRecord(&writer, version_record);
     }
 
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         const workspace_record = workspaces.findConst(workspace_id) orelse continue;
         const summary = findWorkspaceSummary(root, workspace_record.id.raw());
-        const state_hash = try volume_hashing.workspaceStateHash(workspace_record);
+        const state_hash = try state_hashes.getOrCompute(workspace_record);
         if (summary) |persisted| {
             if (persisted.generation == workspace_record.generation and persisted.state_hash == state_hash) continue;
         }
-        try appendWorkspaceRecord(&writer, workspace_record.*);
+        try appendWorkspaceRecord(&writer, workspace_record);
     }
 
     for (workspaces.dirtySnapshotIds()) |snapshot_id| {
         const snapshot_record = workspaces.findSnapshotConst(snapshot_id) orelse continue;
         if (snapshot_record.id.raw() <= root.last_snapshot_id) continue;
-        try appendSnapshotRecord(&writer, snapshot_record.*);
+        try appendSnapshotRecord(&writer, snapshot_record);
     }
 
     if (writer.offset == volume_log.recordHeaderLen()) return .{};
@@ -585,6 +610,7 @@ fn buildRootState(
     log_bytes: u32,
     store: *const object_store.Store,
     workspaces: *const workspace.Directory,
+    state_hashes: *WorkspaceStateHashCache,
 ) Error!RootState {
     var root = RootState{
         .generation = generation,
@@ -601,7 +627,7 @@ fn buildRootState(
         root.workspace_summaries[root.workspace_summary_count] = .{
             .id = slot.workspace.id.raw(),
             .generation = slot.workspace.generation,
-            .state_hash = try volume_hashing.workspaceStateHash(&slot.workspace),
+            .state_hash = try state_hashes.getOrCompute(&slot.workspace),
         };
         root.workspace_summary_count += 1;
     }
@@ -675,13 +701,13 @@ fn countLogRecords(log: []const u8) Error!u16 {
     return count;
 }
 
-fn appendObjectRecord(writer: *CursorWriter, record: object_store.ObjectRecord) Error!void {
+fn appendObjectRecord(writer: *CursorWriter, record: *const object_store.ObjectRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .object_state);
     try encodeObjectBody(writer, record);
     try volume_log.finishRecord(writer, header_offset);
 }
 
-fn appendVersionRecord(writer: *CursorWriter, record: object_store.VersionRecord) Error!void {
+fn appendVersionRecord(writer: *CursorWriter, record: *const object_store.VersionRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .version_state);
     try encodeVersionBody(writer, record);
     try volume_log.finishRecord(writer, header_offset);
@@ -698,19 +724,19 @@ fn appendVersionPayloadChunks(
     }
 }
 
-fn appendWorkspaceRecord(writer: *CursorWriter, record: workspace.WorkspaceRecord) Error!void {
+fn appendWorkspaceRecord(writer: *CursorWriter, record: *const workspace.WorkspaceRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .workspace_state);
     try encodeWorkspaceBody(writer, record);
     try volume_log.finishRecord(writer, header_offset);
 }
 
-fn appendSnapshotRecord(writer: *CursorWriter, record: workspace.SnapshotRecord) Error!void {
+fn appendSnapshotRecord(writer: *CursorWriter, record: *const workspace.SnapshotRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .snapshot_state);
     try encodeSnapshotBody(writer, record);
     try volume_log.finishRecord(writer, header_offset);
 }
 
-fn encodeObjectBody(writer: *CursorWriter, record: object_store.ObjectRecord) Error!void {
+fn encodeObjectBody(writer: *CursorWriter, record: *const object_store.ObjectRecord) Error!void {
     try writer.writeU64(record.id.raw());
     try writer.writeByte(@intFromEnum(record.object_type));
     try writer.writeU64(record.latest_version_id.raw());
@@ -732,7 +758,7 @@ fn encodeObjectBody(writer: *CursorWriter, record: object_store.ObjectRecord) Er
     try writer.writeU64(record.recovery_history.latest_recoverable_version_id.raw());
 }
 
-fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) Error!void {
+fn encodeVersionBody(writer: *CursorWriter, record: *const object_store.VersionRecord) Error!void {
     try writer.writeU64(record.id.raw());
     try writer.writeU64(record.object_id.raw());
     try writer.writeU64(record.previous_version_id.raw());
@@ -749,7 +775,7 @@ fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) 
     try writer.writeU16(record.chunk_count);
 }
 
-fn appendBlobRecord(writer: *CursorWriter, record: object_store.BlobRecord) Error!void {
+fn appendBlobRecord(writer: *CursorWriter, record: *const object_store.BlobRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .blob_state);
     try encodeBlobBody(writer, record);
     try volume_log.finishRecord(writer, header_offset);
@@ -763,7 +789,7 @@ fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadCh
     try volume_log.finishRecord(writer, header_offset);
 }
 
-fn encodeBlobBody(writer: *CursorWriter, record: object_store.BlobRecord) Error!void {
+fn encodeBlobBody(writer: *CursorWriter, record: *const object_store.BlobRecord) Error!void {
     try writer.writeBytes(&record.address);
     try writer.writeBytes(&record.merkle_root);
     try writer.writeU32(@intCast(record.payload_len));
@@ -776,13 +802,13 @@ fn encodeBlobBody(writer: *CursorWriter, record: object_store.BlobRecord) Error!
     }
 }
 
-fn encodeChunkBody(writer: *CursorWriter, record: object_store.ChunkRecord) Error!void {
+fn encodeChunkBody(writer: *CursorWriter, record: *const object_store.ChunkRecord) Error!void {
     try writer.writeBytes(&record.address);
     try writer.writeU16(record.payload_len);
     try writer.writeBytes(record.chunkSlice());
 }
 
-fn encodeWorkspaceBody(writer: *CursorWriter, record: workspace.WorkspaceRecord) Error!void {
+fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.WorkspaceRecord) Error!void {
     try writer.writeU64(record.id.raw());
     try writePrincipal(writer, record.owner);
     try writeText(writer, record.labelSlice());
@@ -806,7 +832,7 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: workspace.WorkspaceRecord)
     }
 }
 
-fn encodeSnapshotBody(writer: *CursorWriter, record: workspace.SnapshotRecord) Error!void {
+fn encodeSnapshotBody(writer: *CursorWriter, record: *const workspace.SnapshotRecord) Error!void {
     try writer.writeU64(record.id.raw());
     try writer.writeU64(record.workspace_id.raw());
     try writer.writeU32(record.generation);
@@ -970,75 +996,36 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
 
     for (&store.objects.slots) |*slot| {
         if (!slot.in_use) continue;
-        try encodeObjectBody(&writer, slot.object);
+        try encodeObjectBody(&writer, &slot.object);
     }
 
     var chunk_slot_index: usize = 0;
     while (chunk_slot_index < store.chunkSlotCapacity()) : (chunk_slot_index += 1) {
         const slot = store.chunkSlotAtConst(chunk_slot_index);
         if (!slot.in_use) continue;
-        try encodeChunkBody(&writer, slot.chunk);
+        try encodeChunkBody(&writer, &slot.chunk);
     }
 
     var blob_slot_index: usize = 0;
     while (blob_slot_index < store.blobSlotCapacity()) : (blob_slot_index += 1) {
         const slot = store.blobSlotAtConst(blob_slot_index);
         if (!slot.in_use) continue;
-        try encodeBlobBody(&writer, slot.blob);
+        try encodeBlobBody(&writer, &slot.blob);
     }
 
     for (&store.versions.slots) |*slot| {
         if (!slot.in_use) continue;
-        try writer.writeU64(slot.version.id.raw());
-        try writer.writeU64(slot.version.object_id.raw());
-        try writer.writeU64(slot.version.previous_version_id.raw());
-        try writer.writeByte(slot.version.parent_count);
-        var parent_index: usize = 0;
-        while (parent_index < object_store.MAX_VERSION_PARENTS) : (parent_index += 1) {
-            try writer.writeU64(slot.version.parent_version_ids[parent_index].raw());
-        }
-        try writer.writeByte(@intFromEnum(slot.version.object_type));
-        try writer.writeBytes(&slot.version.blob_address);
-        try writer.writeBytes(&slot.version.version_address);
-        try writeMetadata(&writer, slot.version.metadata);
-        try writer.writeU32(@intCast(slot.version.payload_len));
-        try writer.writeU16(slot.version.chunk_count);
+        try encodeVersionBody(&writer, &slot.version);
     }
 
     for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
-        try writer.writeU64(slot.workspace.id.raw());
-        try writePrincipal(&writer, slot.workspace.owner);
-        try writeText(&writer, slot.workspace.labelSlice());
-        try writer.writeU32(slot.workspace.generation);
-        try writer.writeU16(@intCast(slot.workspace.path_index.entry_count));
-        for (slot.workspace.path_index.entries[0..slot.workspace.path_index.entry_count]) |entry| {
-            try writeEntry(&writer, entry);
-        }
-        try writer.writeU16(@intCast(slot.workspace.mutation_log.entry_mutation_count));
-        for (slot.workspace.mutation_log.entry_mutations[0..slot.workspace.mutation_log.entry_mutation_count]) |mutation| {
-            try writer.writeU32(mutation.generation);
-            try writeEntry(&writer, mutation.entry);
-        }
-        try writer.writeU16(@intCast(slot.workspace.share_table.share_grant_count));
-        for (slot.workspace.share_table.share_grants[0..slot.workspace.share_table.share_grant_count]) |grant| {
-            try writeShareGrant(&writer, grant);
-        }
-        try writer.writeU16(@intCast(slot.workspace.recoverable_deletes.deleted_count));
-        for (slot.workspace.recoverable_deletes.deleted_entries[0..slot.workspace.recoverable_deletes.deleted_count]) |entry| {
-            try writeEntry(&writer, entry);
-        }
+        try encodeWorkspaceBody(&writer, &slot.workspace);
     }
 
     for (&workspaces.snapshots.slots) |*slot| {
         if (!persistableSnapshotSlot(slot)) continue;
-        try writer.writeU64(slot.snapshot.id.raw());
-        try writer.writeU64(slot.snapshot.workspace_id.raw());
-        try writer.writeU32(slot.snapshot.generation);
-        try writeText(&writer, slot.snapshot.labelSlice());
-        try writer.writeBytes(&slot.snapshot.root_address);
-        try writeSignature(&writer, slot.snapshot.signature);
-        try writer.writeU16(@intCast(slot.snapshot.entry_count));
+        try encodeSnapshotBody(&writer, &slot.snapshot);
     }
 
     return writer.offset;
