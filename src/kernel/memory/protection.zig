@@ -11,15 +11,19 @@ const vga = @import("../drivers/vga.zig");
 
 const PAGE_SIZE_U32: u32 = 0x1000;
 
-// Linker-script symbols bounding the measured region: .multiboot, .text and
-// .rodata. The section that follows (.zigos_userspace_archive) is 4 KiB
-// aligned, so rounding the end up covers only linker padding.
+// Linker-script symbols bounding the region to write-protect: .multiboot,
+// .text and .rodata (the measured region), then the embedded userspace ELF
+// archive. The archive bytes are only ever read - the loader digests and
+// copies them into freshly mapped frames - and keeping them immutable closes
+// the window between digest verification and copy. The section that follows
+// (.data) is 4 KiB aligned, so rounding the end up covers only linker
+// padding.
 extern const __kernel_measure_start: u8;
-extern const __kernel_measure_end: u8;
+extern const __kernel_archive_end: u8;
 
 pub fn protectKernelMemory() void {
     const image_start: u32 = @intFromPtr(&__kernel_measure_start);
-    const image_end: u32 = @intFromPtr(&__kernel_measure_end);
+    const image_end: u32 = @intFromPtr(&__kernel_archive_end);
 
     var addr = image_start & ~(PAGE_SIZE_U32 - 1);
     const end = (image_end + PAGE_SIZE_U32 - 1) & ~(PAGE_SIZE_U32 - 1);
@@ -30,5 +34,5 @@ pub fn protectKernelMemory() void {
     // and the pass above would be decorative.
     paging.enableWriteProtect();
 
-    vga.print("Kernel text and rodata write-protected\n");
+    vga.print("Kernel text, rodata, and userspace archive write-protected\n");
 }

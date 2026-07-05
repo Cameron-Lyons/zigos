@@ -26,6 +26,7 @@ SECTIONS
         *(.zigos_userspace_archive)
         *(.zigos_userspace_archive.*)
     }
+    __kernel_archive_end = .;
 
     .data : ALIGN(4K)
     {
