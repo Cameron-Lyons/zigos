@@ -1788,14 +1788,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn inboundFrameOutsideReplayWindow(self: *const Self, frame: *const state_support.TransportFrame) bool {
-            var high_water: u64 = 0;
-            for (self.stateConst().inbound_transport_frames.slots) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.frame.workspace_id != frame.workspace_id) continue;
-                if (!slot.frame.source_device.eql(frame.source_device)) continue;
-                if (!slot.frame.target_device.eql(frame.target_device)) continue;
-                high_water = @max(high_water, slot.frame.source_frame_id);
-            }
+            const high_water = self.latestInboundSourceFrameId(frame.workspace_id, frame.source_device, frame.target_device);
             return frame.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= high_water;
         }
 
@@ -1952,13 +1945,12 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn findDuplicateInboundFrame(self: *Self, request: TransportFrameRequest) ?*DurableTransportFrameSlot {
             if (request.source_frame_id == 0) return null;
-            for (&self.state().inbound_transport_frames.slots) |*slot| {
-                if (!slot.in_use) continue;
+            var slot_index = self.inbound_transport_target_index.head(sync_indexes.transportFrameTargetLookupKey(request.workspace_id, request.target_device));
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.inbound_transport_target_index.next(slot_index)) {
+                const slot = self.inboundTransportTargetIndexSlot(slot_index, request.workspace_id, request.target_device);
                 if (slot.frame.source_frame_id != request.source_frame_id) continue;
-                if (slot.frame.workspace_id != request.workspace_id) continue;
                 if (!slot.frame.source_device.eql(request.source_device)) continue;
-                if (!slot.frame.target_device.eql(request.target_device)) continue;
-                return slot;
+                return &self.state().inbound_transport_frames.slots[slot_index];
             }
             return null;
         }
@@ -1973,16 +1965,28 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn replayWindowRejects(self: *const Self, request: TransportFrameRequest) bool {
             if (request.source_frame_id == 0) return false;
-            var latest_source_frame_id: u64 = 0;
-            for (self.stateConst().inbound_transport_frames.slots) |slot| {
-                if (!slot.in_use) continue;
-                if (slot.frame.workspace_id != request.workspace_id) continue;
-                if (!slot.frame.source_device.eql(request.source_device)) continue;
-                if (!slot.frame.target_device.eql(request.target_device)) continue;
-                latest_source_frame_id = @max(latest_source_frame_id, slot.frame.source_frame_id);
-            }
+            const latest_source_frame_id = self.latestInboundSourceFrameId(request.workspace_id, request.source_device, request.target_device);
             if (latest_source_frame_id < state_support.TRANSPORT_REPLAY_WINDOW) return false;
             return request.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= latest_source_frame_id;
+        }
+
+        // Highest source_frame_id resident for one (workspace, source, target)
+        // replay scope, found through the inbound target index rather than a
+        // full-table scan.
+        fn latestInboundSourceFrameId(
+            self: *const Self,
+            workspace_id: u64,
+            source_device: principal.PrincipalId,
+            target_device: principal.PrincipalId,
+        ) u64 {
+            var latest: u64 = 0;
+            var slot_index = self.inbound_transport_target_index.head(sync_indexes.transportFrameTargetLookupKey(workspace_id, target_device));
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.inbound_transport_target_index.next(slot_index)) {
+                const slot = self.inboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
+                if (!slot.frame.source_device.eql(source_device)) continue;
+                latest = @max(latest, slot.frame.source_frame_id);
+            }
+            return latest;
         }
 
         fn transportFrameSlots(self: *Self, queue_kind: TransportQueueKind) []DurableTransportFrameSlot {
