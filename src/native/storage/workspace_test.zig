@@ -395,3 +395,38 @@ test "workspace restore rejects tampered signed snapshots" {
     snapshot.generation += 1;
     try std.testing.expectError(error.InvalidSignature, directory.restore(notes.id, snapshot.id, 12));
 }
+
+test "aborting a transaction discards staged entries and reopens the workspace" {
+    var store = object_store.Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = signing.seedFromByte(0x66),
+    };
+    const object = try store.putVersion(.{
+        .preferred_object_id = ids.object(902),
+        .object_type = .document,
+        .payload = "hello",
+        .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "hello", 10),
+    });
+
+    var directory = Directory.init();
+    const notes = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 1 },
+        .label = "notes",
+    });
+
+    try std.testing.expectError(error.NoActiveTransaction, directory.abortTransaction(notes.id));
+
+    try directory.beginTransaction(notes.id);
+    try directory.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
+    try directory.abortTransaction(notes.id);
+
+    // The staged put must not survive the abort, and the workspace must be
+    // open for the next transaction rather than wedged with
+    // TransactionAlreadyOpen.
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(notes.id, "documents/notes.md"));
+    try directory.beginTransaction(notes.id);
+    try directory.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
+    _ = try directory.commit(notes.id, 11);
+    _ = try directory.resolve(notes.id, "documents/notes.md");
+}

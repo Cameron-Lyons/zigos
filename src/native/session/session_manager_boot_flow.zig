@@ -225,9 +225,35 @@ pub const SessionManager = struct {
         }
         stack_watermark.reportPeak();
         userspace_executor.reportTrapStackPeak();
+        self.reportFinalCheckpointState();
         common.printBootMarker(boot_markers.task_session_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
+    }
+
+    // Report-only: the storage crash-restart proof deliberately disables
+    // checkpointing partway through boot, so dirty=true here is the designed
+    // end state, not a fault. Forcing a flush instead persists post-proof
+    // runtime state that was never meant to round-trip and changes what the
+    // next cold boot reloads. The line exists so a boot log records which
+    // generation the disk was left at and whether any flush error was
+    // swallowed on the way.
+    fn reportFinalCheckpointState(self: *SessionManager) void {
+        const storage = self.storageServicePtr();
+        const checkpoint_error: []const u8 = if (storage.checkpoint_store.last_checkpoint_error) |err| @errorName(err) else "none";
+        // SAFETY: filled by the subsequent std.fmt.bufPrint call
+        var line_buffer: [128]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &line_buffer,
+            "ZIGOS:STORAGE:CHECKPOINT:FINAL enabled={} dirty={} generation={d} error={s}",
+            .{
+                storage.checkpoint_enabled,
+                storage.pendingCheckpointMutations(),
+                storage.checkpoint_store.last_checkpoint_generation,
+                checkpoint_error,
+            },
+        ) catch return;
+        common.printBootMarker(line);
     }
 
     fn bootStorageDurabilityProof(self: *SessionManager) void {
