@@ -42,7 +42,14 @@ const ATA_LBA28_HEAD_MASK: u64 = 0x0F;
 // so a transfer reaching past this would silently wrap to the wrong sector.
 const ATA_LBA28_SECTOR_LIMIT: u64 = 0x1000_0000;
 const ATA_ALT_STATUS_SETTLE_READS: usize = 4;
-const ATA_POLL_LIMIT: u32 = 100_000;
+// Status polls, not time: the wall-clock budget this buys depends on how fast
+// the host services port reads. writeSectors issues CACHE FLUSH after every
+// chunk, and under QEMU cache=writethrough that command holds BSY until the
+// host fsync completes - tens to hundreds of milliseconds on a loaded shared
+// CI runner. 100k polls (~100ms) lost that race and turned healthy-but-slow
+// disks into error.Timeout; 1M keeps roughly a second of headroom while a
+// drive reporting ERR/DF still fails immediately.
+const ATA_POLL_LIMIT: u32 = 1_000_000;
 
 pub const AtaDriverError = error{
     Timeout,
