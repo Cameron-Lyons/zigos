@@ -188,6 +188,28 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     return true;
 }
 
+// The bool-returning evidence flows fail the boot gracefully through
+// failBoot, but a bare `return false` leaves the smoke log with nothing but
+// a missing ready marker and thirty candidate exits. These helpers keep the
+// bool contract and name the step (plus the error, when there is one) so
+// one boot log identifies the exit taken.
+fn evidenceCheckFailed(comptime step: []const u8) bool {
+    common.printBootMarker("ZIGOS:BOOTED_EVIDENCE:CHECK_FAILED step=" ++ step);
+    return false;
+}
+
+fn evidenceStepFailed(comptime step: []const u8, err: anyerror) bool {
+    // SAFETY: filled by the subsequent std.fmt.bufPrint call
+    var line_buffer: [128]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &line_buffer,
+        "ZIGOS:BOOTED_EVIDENCE:STEP_FAILED step={s} error={s}",
+        .{ step, @errorName(err) },
+    ) catch return false;
+    common.printBootMarker(line);
+    return false;
+}
+
 fn bootedFramebufferContains(compositor: *const compositor_session.Session, expected_text: []const u8) bool {
     if (compositor.visibleWindowCount() == 0 or compositor.active_window_id == 0) return false;
 
@@ -260,30 +282,30 @@ fn runNotesDailyDriverJourney(
     storage_state: scenario_support.StorageScenarioState,
 ) bool {
     var package_port = package_service.PackagePort.init(manager.packageServicePtr(), context.capability_table);
-    const package_authority = mintNotesDailyPackageAuthority(context, graph.state.session_task.id, 220) catch return false;
+    const package_authority = mintNotesDailyPackageAuthority(context, graph.state.session_task.id, 220) catch |err| return evidenceStepFailed("daily.mint_package_authority", err);
     _ = package_port.trustPolicyAuthorityRoot(
         package_authority,
         .{ .kind = .policy_authority, .serial = 1 },
         signing.publicKeyFromByte(0x5A),
-    ) catch return false;
+    ) catch |err| return evidenceStepFailed("daily.trust_policy_authority_root", err);
     _ = package_port.trustPublisher(
         package_authority,
         .{ .kind = .app, .serial = 26_026 },
         .{ .kind = .policy_authority, .serial = 1 },
         "zigos.dev",
-        signing.publicKey(notes_daily_bundle_signer) catch return false,
-    ) catch return false;
+        signing.publicKey(notes_daily_bundle_signer) catch |err| return evidenceStepFailed("daily.bundle_signer_public_key", err),
+    ) catch |err| return evidenceStepFailed("daily.trust_publisher", err);
 
     var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
     const sync_authority = scenario_support.mintSyncAuthority(context, 221);
     var policies = policy_object.Directory.init();
     var journey_ux = native_ux.Controller.init();
-    const install_bundle = signedNotesDailyBundle(0) catch return false;
-    const update_bundle = signedNotesDailyBundle(1) catch return false;
+    const install_bundle = signedNotesDailyBundle(0) catch |err| return evidenceStepFailed("daily.sign_install_bundle", err);
+    const update_bundle = signedNotesDailyBundle(1) catch |err| return evidenceStepFailed("daily.sign_update_bundle", err);
     var store_channel = public_store.Channel.init(notes_daily_public_store_source, .beta);
-    store_channel.trustPublisher("zigos.dev", signing.publicKey(notes_daily_bundle_signer) catch return false) catch return false;
-    store_channel.publish(store_channel.prepareRelease(install_bundle, &notes_daily_v1_store_assets, 1)) catch return false;
-    store_channel.publish(store_channel.prepareRelease(update_bundle, &notes_daily_v2_store_assets, 1)) catch return false;
+    store_channel.trustPublisher("zigos.dev", signing.publicKey(notes_daily_bundle_signer) catch |err| return evidenceStepFailed("daily.store_signer_public_key", err)) catch |err| return evidenceStepFailed("daily.store_trust_publisher", err);
+    store_channel.publish(store_channel.prepareRelease(install_bundle, &notes_daily_v1_store_assets, 1)) catch |err| return evidenceStepFailed("daily.publish_install_release", err);
+    store_channel.publish(store_channel.prepareRelease(update_bundle, &notes_daily_v2_store_assets, 1)) catch |err| return evidenceStepFailed("daily.publish_update_release", err);
     var journey = production_journey.ProductionJourneyService.init(
         context.runtime_service,
         &journey_ux,
@@ -445,7 +467,7 @@ fn runBootedNotesTypedInputLoop(
     var typed_sync_service = sync_service_mod.Service.init(context.sync_service_id, context.sync_task_id, context.sync_service_principal);
     var sync_port = sync_service_mod.SyncPort.init(&typed_sync_service, context.capability_table);
     const sync_authority = scenario_support.mintSyncAuthority(context, 260);
-    _ = sync_port.ensureUserRoot(sync_authority, context.session_user, "notes-typed", notes_daily_user_signer) catch return false;
+    _ = sync_port.ensureUserRoot(sync_authority, context.session_user, "notes-typed", notes_daily_user_signer) catch |err| return evidenceStepFailed("typed.ensure_user_root", err);
     _ = sync_port.enrollTrustedDevice(
         sync_authority,
         context.session_user,
@@ -454,7 +476,7 @@ fn runBootedNotesTypedInputLoop(
         notes_daily_user_signer,
         notes_daily_primary_device_signer,
         260,
-    ) catch return false;
+    ) catch |err| return evidenceStepFailed("typed.enroll_local_device", err);
     _ = sync_port.enrollTrustedDevice(
         sync_authority,
         context.session_user,
@@ -463,13 +485,13 @@ fn runBootedNotesTypedInputLoop(
         notes_daily_user_signer,
         notes_daily_paired_device_signer,
         261,
-    ) catch return false;
+    ) catch |err| return evidenceStepFailed("typed.enroll_tablet_device", err);
     const local_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = context.sync_service_principal,
         .workspace_id = storage_state.notes_workspace_id,
         .label = "notes-typed-local",
         .mode = .local_network,
-    }) catch return false;
+    }) catch |err| return evidenceStepFailed("typed.create_network_policy", err);
     _ = sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = storage_state.notes_workspace_id,
         .owner = context.session_user,
@@ -477,7 +499,7 @@ fn runBootedNotesTypedInputLoop(
         .personal_e2ee = true,
         .selective_prefixes = &.{"documents/"},
         .device_to_device_policy_id = local_policy.id,
-    }) catch return false;
+    }) catch |err| return evidenceStepFailed("typed.configure_workspace_policy", err);
 
     var notifications = notification_center.Center.init();
     var shell_checkpoint_store = humane_shell.HumaneShellCheckpointStore{};
@@ -521,37 +543,37 @@ fn runBootedNotesTypedInputLoop(
     );
     var system = booted_system.BootedSystem.init(&shell);
 
-    if (!system.dispatchInput(.{ .kind = .boot, .tick = 260 }).accepted) return false;
-    if (!system.dispatchInput(.{ .kind = .start_task, .tick = 261 }).accepted) return false;
-    if (!system.dispatchInput(.{ .kind = .open_workspace, .tick = 262 }).accepted) return false;
-    if (!system.dispatchInput(.{ .kind = .open_document, .tick = 263 }).accepted) return false;
+    if (!system.dispatchInput(.{ .kind = .boot, .tick = 260 }).accepted) return evidenceCheckFailed("typed.input_boot");
+    if (!system.dispatchInput(.{ .kind = .start_task, .tick = 261 }).accepted) return evidenceCheckFailed("typed.input_start_task");
+    if (!system.dispatchInput(.{ .kind = .open_workspace, .tick = 262 }).accepted) return evidenceCheckFailed("typed.input_open_workspace");
+    if (!system.dispatchInput(.{ .kind = .open_document, .tick = 263 }).accepted) return evidenceCheckFailed("typed.input_open_document");
     const previous_version_id = shell.state.document_version_id;
     if (!system.dispatchInput(.{
         .kind = .text_input,
         .tick = 264,
         .text = booted_notes_typed_text,
-    }).accepted) return false;
-    if (!shell.state.document_edited or shell.state.document_version_id == previous_version_id) return false;
-    if (!std.mem.eql(u8, shell.documentTextSlice(), booted_notes_typed_text)) return false;
-    const typed_version = context.storage_service_instance.version(shell.state.document_version_id) orelse return false;
-    const typed_payload = context.storage_service_instance.versionPayload(typed_version) catch return false;
-    if (!std.mem.eql(u8, typed_payload, booted_notes_typed_text)) return false;
+    }).accepted) return evidenceCheckFailed("typed.input_text");
+    if (!shell.state.document_edited or shell.state.document_version_id == previous_version_id) return evidenceCheckFailed("typed.document_edit_state");
+    if (!std.mem.eql(u8, shell.documentTextSlice(), booted_notes_typed_text)) return evidenceCheckFailed("typed.document_text_matches");
+    const typed_version = context.storage_service_instance.version(shell.state.document_version_id) orelse return evidenceCheckFailed("typed.stored_version_present");
+    const typed_payload = context.storage_service_instance.versionPayload(typed_version) catch |err| return evidenceStepFailed("typed.stored_version_payload", err);
+    if (!std.mem.eql(u8, typed_payload, booted_notes_typed_text)) return evidenceCheckFailed("typed.stored_payload_matches");
     common.printBootMarker(boot_markers.notes_daily_driver_typed_edit_ok);
 
-    if (!system.dispatchInput(.{ .kind = .sync_document, .tick = 265 }).accepted) return false;
-    if (!shell.state.document_synced or shell.state.sync_selected_entries == 0 or shell.state.sync_transport_frames == 0) return false;
+    if (!system.dispatchInput(.{ .kind = .sync_document, .tick = 265 }).accepted) return evidenceCheckFailed("typed.input_sync_document");
+    if (!shell.state.document_synced or shell.state.sync_selected_entries == 0 or shell.state.sync_transport_frames == 0) return evidenceCheckFailed("typed.sync_state");
     const synced_replica_version = typed_sync_service.replicaVersion(
         storage_state.notes_workspace_id,
         tablet_device,
         "documents/notes.md",
-    ) orelse return false;
-    if (synced_replica_version != shell.state.document_version_id) return false;
+    ) orelse return evidenceCheckFailed("typed.replica_version_present");
+    if (synced_replica_version != shell.state.document_version_id) return evidenceCheckFailed("typed.replica_version_matches");
     common.printBootMarker(boot_markers.notes_daily_driver_typed_sync_ok);
 
     const previous_restart_generation = context.runtime_service.restart_generation;
-    if (!system.dispatchInput(.{ .kind = .recover_state, .tick = 266 }).accepted) return false;
-    if (!shell.state.recovered or context.runtime_service.restart_generation <= previous_restart_generation) return false;
-    if (!std.mem.eql(u8, shell.documentTextSlice(), booted_notes_typed_text)) return false;
+    if (!system.dispatchInput(.{ .kind = .recover_state, .tick = 266 }).accepted) return evidenceCheckFailed("typed.input_recover_state");
+    if (!shell.state.recovered or context.runtime_service.restart_generation <= previous_restart_generation) return evidenceCheckFailed("typed.recovery_state");
+    if (!std.mem.eql(u8, shell.documentTextSlice(), booted_notes_typed_text)) return evidenceCheckFailed("typed.recovered_text_matches");
     common.printBootMarker(boot_markers.notes_daily_driver_typed_recovery_ok);
     common.printBootMarker(boot_markers.notes_daily_driver_typed_loop_complete);
     return true;
