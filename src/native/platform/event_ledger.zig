@@ -1906,6 +1906,10 @@ pub const Ledger = struct {
         };
 
         try storage.beginTransaction(self.workspace_id);
+        // A failed append must not leave the ledger workspace's transaction
+        // open: every later append would then die with TransactionAlreadyOpen,
+        // turning one transient storage error into a permanently wedged ledger.
+        errdefer storage.abortTransaction(self.workspace_id) catch {};
         var expired_sequence = first_sequence;
         while (expired_sequence <= latest_sequence) : (expired_sequence += 1) {
             if (expired_sequence <= MAX_PERSISTED_EVENTS) continue;

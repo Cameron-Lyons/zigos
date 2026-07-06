@@ -2,6 +2,8 @@ const std = @import("std");
 const event_ledger = @import("event_ledger.zig");
 const native_ux = @import("native_ux.zig");
 const notification_center = @import("../services/notification_center.zig");
+const object_store_mod = @import("../storage/object_store.zig");
+const object_store_ids = object_store_mod.ids;
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
@@ -740,6 +742,54 @@ test "event ledger persistence retains full in-memory history and detail payload
     try std.testing.expect(std.mem.indexOf(u8, exported, "#1 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "#8 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "abcdefghijklmnopqrstuvwxyz-0123456789") != null);
+
+    storage_checkpoint_store.resetPersistent();
+}
+
+test "event ledger persist failure aborts its transaction instead of wedging the workspace" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
+    const signer = signing.SignerIdentity{
+        .label = "diagnostic-ledger",
+        .seed = signing.seedFromByte(0xA8),
+    };
+
+    var storage = storage_service.Service.initWithStore(902, 302, owner, &storage_checkpoint_store);
+    var ledger = try Ledger.initPersistent(&storage, owner, signer);
+
+    const filler = try storage.putVersion(.{
+        .preferred_object_id = object_store_ids.object(950),
+        .object_type = .document,
+        .payload = "filler",
+        .metadata = try object_store_mod.signMetadata(signer, "filler", "text/markdown", .document, "filler", 5),
+    });
+    try storage.beginTransaction(ledger.workspace_id);
+    var filler_index: usize = 0;
+    while (true) : (filler_index += 1) {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "filler/{d}", .{filler_index});
+        storage.stagePut(ledger.workspace_id, path, filler.object_id, filler.version_id, .document) catch |err| {
+            try std.testing.expectEqual(error.EntryTableFull, err);
+            break;
+        };
+    }
+    _ = try storage.commit(ledger.workspace_id, 6);
+
+    // Persisting a new event needs a fresh entry in the full workspace, so
+    // the append fails partway through its transaction. It must fail with
+    // the underlying storage error on every attempt; before the abort-on-
+    // error fix the first failure left the transaction open and every later
+    // append died with TransactionAlreadyOpen instead.
+    try std.testing.expectError(
+        error.EntryTableFull,
+        ledger.recordUpdateTransition(owner, 1, .none, false, 10, "stable-b activated"),
+    );
+    try std.testing.expectError(
+        error.EntryTableFull,
+        ledger.recordUpdateTransition(owner, 1, .none, false, 11, "stable-b activated"),
+    );
 
     storage_checkpoint_store.resetPersistent();
 }

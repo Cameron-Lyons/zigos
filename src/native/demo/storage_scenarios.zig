@@ -274,8 +274,22 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     context.storage_service_instance.bindCapabilityTable(context.capability_table);
     context.storage_service_instance.checkpoint_enabled = false;
     _ = context.supervisor.completeRestart(context.storage_service_id, 96);
+    // In ReleaseFast a `catch unreachable` here is undefined behavior, so a
+    // reload that came back empty (stale or unreadable volume after a real
+    // device fault) used to sail on silently and surface tens of proofs
+    // later as an inexplicable WorkspaceNotFound. Panic with the reason at
+    // the point of detection instead: the QEMU harness greps for panics and
+    // attributes the boot failure to this proof.
+    if (storage_volume_mod.hasAttachedDevice() and !context.storage_service_instance.loaded_from_volume) {
+        support.common.printBootMarker("ZIGOS:STORAGE:STORAGE_SERVICE:RELOAD_FAILED");
+        std.debug.panic("storage restart proof: attached volume did not reload", .{});
+    }
+    const recovered_entry = context.storage_service_instance.resolve(notes_workspace_id, "documents/notes.md") catch |err| {
+        support.common.printBootMarker("ZIGOS:STORAGE:STORAGE_SERVICE:RECOVERY_RESOLVE_FAILED");
+        std.debug.panic("storage restart proof: reloaded volume lost documents/notes.md: {s}", .{@errorName(err)});
+    };
     if (context.supervisor.hasDiagnostic(context.storage_service_id, .restart_completed) and
-        (context.storage_service_instance.resolve(notes_workspace_id, "documents/notes.md") catch |err| native_util.bootProofFailure("storage scenarios", err)).version_id.eql(notes_entry.version_id))
+        recovered_entry.version_id.eql(notes_entry.version_id))
     {
         support.common.printBootMarker(boot_markers.storage_service_recovered);
     }

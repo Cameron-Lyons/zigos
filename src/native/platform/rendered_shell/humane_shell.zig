@@ -644,6 +644,7 @@ pub const HumaneShell = struct {
             .parent_version_id = latest.id,
         });
         try self.storage.beginTransaction(ids.workspace(self.config.workspace_id));
+        errdefer self.storage.abortTransaction(ids.workspace(self.config.workspace_id)) catch {};
         try self.storage.stagePut(ids.workspace(self.config.workspace_id), self.config.document_path, edited.object_id, edited.version_id, .document);
         _ = try self.storage.commit(ids.workspace(self.config.workspace_id), tick);
 

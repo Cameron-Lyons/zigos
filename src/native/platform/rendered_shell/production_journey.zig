@@ -488,6 +488,7 @@ pub const ProductionJourneyService = struct {
             .parent_version_id = latest.id,
         });
         try self.storage.beginTransaction(workspace_id);
+        errdefer self.storage.abortTransaction(workspace_id) catch {};
         try self.storage.stagePut(workspace_id, self.config.document_path, edited.object_id, edited.version_id, .document);
         _ = try self.storage.commit(workspace_id, tick);
 
