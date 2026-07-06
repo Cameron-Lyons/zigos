@@ -1,4 +1,5 @@
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const native_util = @import("../core/util.zig");
 const network_driver_task = @import("../drivers/network_driver_task.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -62,7 +63,7 @@ pub fn run(
     var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
     const sync_authority = support.mintSyncAuthority(context, 100);
 
-    const sync_root = sync_port.ensureUserRoot(sync_authority, context.session_user, "cameron", user_root_signer) catch unreachable;
+    const sync_root = sync_port.ensureUserRoot(sync_authority, context.session_user, "cameron", user_root_signer) catch |err| native_util.bootProofFailure("sync scenarios", err);
     if (sync_root.root_signature.isComplete()) {
         support.common.printBootMarker(boot_markers.sync_device_graph_rooted);
     }
@@ -75,7 +76,7 @@ pub fn run(
         user_root_signer,
         local_device_signer,
         100,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("sync scenarios", err);
     if (sync_service.findDeviceRecord(tablet_device_principal) == null) {
         _ = sync_port.enrollTrustedDevice(
             sync_authority,
@@ -85,7 +86,7 @@ pub fn run(
             user_root_signer,
             tablet_device_signer,
             101,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("sync scenarios", err);
     }
     if (sync_service.findDeviceRecord(phone_device_principal) == null) {
         _ = sync_port.enrollTrustedDevice(
@@ -96,7 +97,7 @@ pub fn run(
             user_root_signer,
             phone_device_signer,
             102,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("sync scenarios", err);
     }
     if (local_device_record.overlay_id != 0 and
         sync_service.findDeviceRecord(tablet_device_principal) != null and
@@ -115,7 +116,7 @@ pub fn run(
             user_root_signer,
             tablet_rotated_signer,
             103,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("sync scenarios", err);
     }
     const rotated_tablet = sync_service.findDeviceRecord(tablet_device_principal).?;
     if (rotated_tablet.key_rotation_generation >= 2 and rotated_tablet.rotation_signature.isComplete()) {
@@ -129,14 +130,14 @@ pub fn run(
             phone_device_principal,
             user_root_signer,
             104,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("sync scenarios", err);
         context.update_ledger.recordDeviceTrustChange(
             context.session_user,
             phone_device_principal,
             false,
             104,
             "device revoked",
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("sync scenarios", err);
     }
     if (!sync_service.isTrustedDevice(phone_device_principal) and sync_service.trustedDeviceCount() >= 2) {
         support.common.printBootMarker("ZIGOS:SYNC:DEVICE_REVOKE:OK");
@@ -147,74 +148,74 @@ pub fn run(
         .workspace_id = storage_state.notes_workspace_id,
         .label = "none",
         .mode = .none,
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("sync scenarios", err);
     const local_network_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = context.sync_service_principal,
         .workspace_id = storage_state.notes_workspace_id,
         .label = "local-net",
         .mode = .local_network,
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("sync scenarios", err);
     const printer_discovery_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = context.sync_service_principal,
         .workspace_id = storage_state.notes_workspace_id,
         .label = "printer-discovery",
         .mode = .local_subnet_discovery,
         .target = "printer",
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("sync scenarios", err);
     const overlay_network_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = context.sync_service_principal,
         .workspace_id = storage_state.notes_workspace_id,
         .label = "overlay",
         .mode = .named_service_identity,
         .target = "overlay.notes.sync",
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("sync scenarios", err);
     const relay_network_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = context.sync_service_principal,
         .workspace_id = storage_state.notes_workspace_id,
         .label = "relay",
         .mode = .named_domain,
         .target = "relay.zigos.dev",
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("sync scenarios", err);
     const inbound_collab_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = context.sync_service_principal,
         .workspace_id = storage_state.notes_workspace_id,
         .label = "collab-review",
         .mode = .inbound_collaborative_session,
         .target = "document-review/v1",
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("sync scenarios", err);
     const internet_network_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = context.sync_service_principal,
         .workspace_id = storage_state.notes_workspace_id,
         .label = "internet",
         .mode = .unrestricted_internet,
         .explicit_internet_grant = true,
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("sync scenarios", err);
 
-    if (!(sync_port.evaluateNetworkPolicy(sync_authority, none_network_policy.id, .public_internet) catch unreachable).allowed) {
+    if (!(sync_port.evaluateNetworkPolicy(sync_authority, none_network_policy.id, .public_internet) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed) {
         support.common.printBootMarker("ZIGOS:SYNC:NETWORK_POLICY:NONE");
     }
-    if ((sync_port.evaluateNetworkPolicy(sync_authority, local_network_policy.id, .local_network) catch unreachable).allowed and
-        !(sync_port.evaluateNetworkPolicy(sync_authority, local_network_policy.id, .{ .domain = "relay.zigos.dev" }) catch unreachable).allowed)
+    if ((sync_port.evaluateNetworkPolicy(sync_authority, local_network_policy.id, .local_network) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed and
+        !(sync_port.evaluateNetworkPolicy(sync_authority, local_network_policy.id, .{ .domain = "relay.zigos.dev" }) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed)
     {
         support.common.printBootMarker("ZIGOS:SYNC:NETWORK_POLICY:LOCAL");
     }
-    if ((sync_port.evaluateNetworkPolicy(sync_authority, printer_discovery_policy.id, .{ .discovery_class = "printer" }) catch unreachable).allowed and
-        !(sync_port.evaluateNetworkPolicy(sync_authority, printer_discovery_policy.id, .{ .discovery_class = "camera" }) catch unreachable).allowed)
+    if ((sync_port.evaluateNetworkPolicy(sync_authority, printer_discovery_policy.id, .{ .discovery_class = "printer" }) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed and
+        !(sync_port.evaluateNetworkPolicy(sync_authority, printer_discovery_policy.id, .{ .discovery_class = "camera" }) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed)
     {
         support.common.printBootMarker("ZIGOS:SYNC:NETWORK_POLICY:DISCOVERY");
     }
-    if ((sync_port.evaluateNetworkPolicy(sync_authority, overlay_network_policy.id, .{ .service_identity = "overlay.notes.sync" }) catch unreachable).allowed) {
+    if ((sync_port.evaluateNetworkPolicy(sync_authority, overlay_network_policy.id, .{ .service_identity = "overlay.notes.sync" }) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed) {
         support.common.printBootMarker("ZIGOS:SYNC:NETWORK_POLICY:SERVICE");
     }
-    if ((sync_port.evaluateNetworkPolicy(sync_authority, relay_network_policy.id, .{ .domain = "relay.zigos.dev" }) catch unreachable).allowed) {
+    if ((sync_port.evaluateNetworkPolicy(sync_authority, relay_network_policy.id, .{ .domain = "relay.zigos.dev" }) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed) {
         support.common.printBootMarker("ZIGOS:SYNC:NETWORK_POLICY:DOMAIN");
     }
-    if ((sync_port.evaluateNetworkPolicy(sync_authority, inbound_collab_policy.id, .{ .inbound_session_type = "document-review/v1" }) catch unreachable).allowed and
-        !(sync_port.evaluateNetworkPolicy(sync_authority, inbound_collab_policy.id, .{ .inbound_session_type = "pair-screen/v1" }) catch unreachable).allowed)
+    if ((sync_port.evaluateNetworkPolicy(sync_authority, inbound_collab_policy.id, .{ .inbound_session_type = "document-review/v1" }) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed and
+        !(sync_port.evaluateNetworkPolicy(sync_authority, inbound_collab_policy.id, .{ .inbound_session_type = "pair-screen/v1" }) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed)
     {
         support.common.printBootMarker("ZIGOS:SYNC:NETWORK_POLICY:INBOUND");
     }
-    if ((sync_port.evaluateNetworkPolicy(sync_authority, internet_network_policy.id, .public_internet) catch unreachable).allowed) {
+    if ((sync_port.evaluateNetworkPolicy(sync_authority, internet_network_policy.id, .public_internet) catch |err| native_util.bootProofFailure("sync scenarios", err)).allowed) {
         support.common.printBootMarker("ZIGOS:SYNC:NETWORK_POLICY:INTERNET");
     }
 
@@ -228,9 +229,9 @@ pub fn run(
         .relay_policy_id = relay_network_policy.id,
         .overlay_policy_id = overlay_network_policy.id,
         .relay_domain = "relay.zigos.dev",
-    }) catch unreachable;
-    _ = sync_port.configureOverlay(sync_authority, storage_state.notes_workspace_id, local_device_principal, "overlay.notes.sync", true) catch unreachable;
-    _ = sync_port.publishPrivateService(sync_authority, storage_state.notes_workspace_id, "notes.remote") catch unreachable;
+    }) catch |err| native_util.bootProofFailure("sync scenarios", err);
+    _ = sync_port.configureOverlay(sync_authority, storage_state.notes_workspace_id, local_device_principal, "overlay.notes.sync", true) catch |err| native_util.bootProofFailure("sync scenarios", err);
+    _ = sync_port.publishPrivateService(sync_authority, storage_state.notes_workspace_id, "notes.remote") catch |err| native_util.bootProofFailure("sync scenarios", err);
     if (workspace_policy.offline_first) {
         support.common.printBootMarker("ZIGOS:SYNC:SYNC_POLICY:OFFLINE_FIRST");
     }
@@ -245,7 +246,7 @@ pub fn run(
         "documents/notes.md",
         storage_state.notes_object_id,
         storage_state.latest_notes_version_id,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("sync scenarios", err);
     const device_sync_summary = sync_port.replicateWorkspace(
         sync_authority,
         context.storage_service_instance,
@@ -253,7 +254,7 @@ pub fn run(
         local_device_principal,
         tablet_device_principal,
         .device_to_device,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("sync scenarios", err);
     if (device_sync_summary.selected_entry_count == 2 and device_sync_summary.skipped_entry_count == 1) {
         support.common.printBootMarker("ZIGOS:SYNC:SYNC_POLICY:SELECTIVE");
     }
@@ -275,7 +276,7 @@ pub fn run(
             109,
             "documents/notes.md conflict",
             true,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("sync scenarios", err);
         support.common.printBootMarker("ZIGOS:SYNC:SYNC:CONFLICT_REPORT");
     }
     if (device_sync_summary.overlay_ready and
@@ -293,7 +294,7 @@ pub fn run(
         local_device_principal,
         tablet_device_principal,
         .device_to_device,
-    ) catch unreachable) {
+    ) catch |err| native_util.bootProofFailure("sync scenarios", err)) {
         support.common.printBootMarker("ZIGOS:SYNC:SEMANTICS:SECRET_TRANSFER");
     }
 
@@ -303,7 +304,7 @@ pub fn run(
         "app.db.notes",
         "notes-db",
         database_contract_signer,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("sync scenarios", err);
     if (sync_port.replicateDatabaseContract(
         sync_authority,
         database_contract.id,
@@ -311,7 +312,7 @@ pub fn run(
         local_device_principal,
         tablet_device_principal,
         .relay_assisted,
-    ) catch unreachable) {
+    ) catch |err| native_util.bootProofFailure("sync scenarios", err)) {
         support.common.printBootMarker("ZIGOS:SYNC:SYNC:RELAY");
         support.common.printBootMarker("ZIGOS:SYNC:SEMANTICS:TRANSACTIONAL");
     }
@@ -346,7 +347,7 @@ pub fn run(
 
     if (context.supervisor.recordCrash(context.sync_service_id, 105, 0x59)) {
         _ = context.supervisor.requestRestart(context.sync_service_id, 106);
-        _ = context.runtime.rehostTask(context.sync_task_id, 106) catch unreachable;
+        _ = context.runtime.rehostTask(context.sync_task_id, 106) catch |err| native_util.bootProofFailure("sync scenarios", err);
         var restarted_sync_resident = sync_service_mod.ResidentState{};
         var restarted_sync_service = sync_service_mod.Service.initWithStorage(
             context.sync_service_id,
@@ -354,7 +355,7 @@ pub fn run(
             context.sync_service_principal,
             context.storage_service_instance,
             &restarted_sync_resident,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("sync scenarios", err);
         _ = context.supervisor.completeRestart(context.sync_service_id, 107);
         if (restarted_sync_service.loaded_existing_state and
             restarted_sync_service.findWorkspacePolicy(storage_state.notes_workspace_id) != null and

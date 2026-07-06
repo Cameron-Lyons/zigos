@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const native_util = @import("../core/util.zig");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const booted_system = @import("../platform/rendered_shell/booted_system.zig");
@@ -70,14 +71,14 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         "allow local lease=25",
         "allow local lease=15",
     };
-    var physical_review_input = permission_review_service.PhysicalInputSource.initDefault() catch unreachable;
+    var physical_review_input = permission_review_service.PhysicalInputSource.initDefault() catch |err| native_util.bootProofFailure("booted evidence", err);
     var expected_physical_review_reports: usize = 0;
     for (physical_review_commands) |command| {
         physical_review_input.enqueueTextCommand(
             xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
             xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
             command,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("booted evidence", err);
         expected_physical_review_reports += command.len + 1;
     }
 
@@ -168,15 +169,15 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         lifecycle_context.storage_service_instance,
         lifecycle_context.package_service_principal,
         scenario_support.diagnostic_ledger_signer,
-    ) catch unreachable;
-    lifecycle_context.update_ledger.absorb(&early_boot_ledger) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("booted evidence", err);
+    lifecycle_context.update_ledger.absorb(&early_boot_ledger) catch |err| native_util.bootProofFailure("booted evidence", err);
     var sync_service = sync_service_mod.Service.initWithStorage(
         lifecycle_context.sync_service_id,
         lifecycle_context.sync_task_id,
         lifecycle_context.sync_service_principal,
         lifecycle_context.storage_service_instance,
         lifecycle_context.sync_resident_state,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("booted evidence", err);
     _ = sync_scenarios.run(&lifecycle_context, &sync_service, storage_state);
     if (!runNotesDailyDriverJourney(manager, graph, &lifecycle_context, &sync_service, &compositor_service, storage_state)) {
         return false;

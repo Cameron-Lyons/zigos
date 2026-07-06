@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const native_util = @import("../core/util.zig");
 const capability = @import("../kernel_api/capability.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const object_store_mod = @import("../storage/object_store.zig");
@@ -102,7 +103,7 @@ pub fn mintSyncAuthority(context: *Context, now_ticks: u64) sync_service_mod.Aut
             .expires_at_ticks = 1_000,
         },
         .audit = .{},
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("scenario support", err);
     return .{
         .task_id = context.sync_task_id,
         .principal = context.sync_service_principal,

@@ -56,7 +56,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
             .document,
             "# Notes\n- bootstrap slice\n",
             80,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("storage scenarios", err);
         support.common.printBootMarker("ZIGOS:STORAGE:SEED:PUT_V1_METADATA_OK");
         const notes_v1_request = object_store_mod.PutRequest{
             .preferred_object_id = notes_object_id,
@@ -64,7 +64,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
             .payload = "# Notes\n- bootstrap slice\n",
             .metadata = notes_v1_metadata,
         };
-        _ = context.storage_service_instance.putVersionRef(&notes_v1_request) catch unreachable;
+        _ = context.storage_service_instance.putVersionRef(&notes_v1_request) catch |err| native_util.bootProofFailure("storage scenarios", err);
         support.common.printBootMarker("ZIGOS:STORAGE:SEED:PUT_V1_STORE_DONE");
         if (context.storage_service_instance.hasAnySnapshots()) {
             support.common.printBootMarker("ZIGOS:STORAGE:SEED:SNAPSHOT_DIRTY_BEFORE_CHECKPOINT");
@@ -89,61 +89,61 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
                 .document,
                 "# Notes\n- restored through workspace snapshot\n",
                 81,
-            ) catch unreachable,
+            ) catch |err| native_util.bootProofFailure("storage scenarios", err),
             .preferred_object_id = null,
             .parent_version_id = notes_v1_version_id,
         };
-        _ = context.storage_service_instance.putVersionRef(&notes_v2_request) catch unreachable;
+        _ = context.storage_service_instance.putVersionRef(&notes_v2_request) catch |err| native_util.bootProofFailure("storage scenarios", err);
         const notes_v2_version_id = support.latestInsertedVersion(context.storage_service_instance).?.id;
         const blob_request = object_store_mod.PutRequest{
             .preferred_object_id = object_store_mod.ids.object(920),
             .object_type = .blob,
             .payload = "blob-bytes",
-            .metadata = object_store_mod.signMetadata(support.storage_signer, "blob", "application/octet-stream", .blob, "blob-bytes", 82) catch unreachable,
+            .metadata = object_store_mod.signMetadata(support.storage_signer, "blob", "application/octet-stream", .blob, "blob-bytes", 82) catch |err| native_util.bootProofFailure("storage scenarios", err),
         };
-        _ = context.storage_service_instance.putVersionRef(&blob_request) catch unreachable;
+        _ = context.storage_service_instance.putVersionRef(&blob_request) catch |err| native_util.bootProofFailure("storage scenarios", err);
         const inbox_collection_request = object_store_mod.PutRequest{
             .preferred_object_id = object_store_mod.ids.object(921),
             .object_type = .collection,
             .payload = "notes,archive",
-            .metadata = object_store_mod.signMetadata(support.storage_signer, "inbox", "application/zigos-collection", .collection, "notes,archive", 83) catch unreachable,
+            .metadata = object_store_mod.signMetadata(support.storage_signer, "inbox", "application/zigos-collection", .collection, "notes,archive", 83) catch |err| native_util.bootProofFailure("storage scenarios", err),
         };
-        _ = context.storage_service_instance.putVersionRef(&inbox_collection_request) catch unreachable;
+        _ = context.storage_service_instance.putVersionRef(&inbox_collection_request) catch |err| native_util.bootProofFailure("storage scenarios", err);
         const inbox_collection = support.latestInsertedVersion(context.storage_service_instance).?;
         const secret_request = object_store_mod.PutRequest{
             .preferred_object_id = object_store_mod.ids.object(922),
             .object_type = .secret,
             .payload = "enc:workspace-secret",
-            .metadata = object_store_mod.signMetadata(support.storage_signer, "secret", "application/zigos-secret", .secret, "enc:workspace-secret", 84) catch unreachable,
+            .metadata = object_store_mod.signMetadata(support.storage_signer, "secret", "application/zigos-secret", .secret, "enc:workspace-secret", 84) catch |err| native_util.bootProofFailure("storage scenarios", err),
         };
-        _ = context.storage_service_instance.putVersionRef(&secret_request) catch unreachable;
+        _ = context.storage_service_instance.putVersionRef(&secret_request) catch |err| native_util.bootProofFailure("storage scenarios", err);
         const cover_media_request = object_store_mod.PutRequest{
             .preferred_object_id = object_store_mod.ids.object(923),
             .object_type = .media_asset,
             .payload = "jpeg:cover",
-            .metadata = object_store_mod.signMetadata(support.storage_signer, "cover", "image/jpeg", .media_asset, "jpeg:cover", 85) catch unreachable,
+            .metadata = object_store_mod.signMetadata(support.storage_signer, "cover", "image/jpeg", .media_asset, "jpeg:cover", 85) catch |err| native_util.bootProofFailure("storage scenarios", err),
         };
-        _ = context.storage_service_instance.putVersionRef(&cover_media_request) catch unreachable;
+        _ = context.storage_service_instance.putVersionRef(&cover_media_request) catch |err| native_util.bootProofFailure("storage scenarios", err);
         const cover_media = support.latestInsertedVersion(context.storage_service_instance).?;
         const model_request = object_store_mod.PutRequest{
             .preferred_object_id = object_store_mod.ids.object(924),
             .object_type = .model_artifact,
             .payload = "tiny-embed-v1",
-            .metadata = object_store_mod.signMetadata(support.storage_signer, "embed", "application/zigos-model", .model_artifact, "tiny-embed-v1", 86) catch unreachable,
+            .metadata = object_store_mod.signMetadata(support.storage_signer, "embed", "application/zigos-model", .model_artifact, "tiny-embed-v1", 86) catch |err| native_util.bootProofFailure("storage scenarios", err),
         };
-        _ = context.storage_service_instance.putVersionRef(&model_request) catch unreachable;
+        _ = context.storage_service_instance.putVersionRef(&model_request) catch |err| native_util.bootProofFailure("storage scenarios", err);
         const event_request = object_store_mod.PutRequest{
             .preferred_object_id = object_store_mod.ids.object(925),
             .object_type = .event_stream,
             .payload = "append:event-1",
-            .metadata = object_store_mod.signMetadata(support.storage_signer, "events", "application/zigos-event-stream", .event_stream, "append:event-1", 87) catch unreachable,
+            .metadata = object_store_mod.signMetadata(support.storage_signer, "events", "application/zigos-event-stream", .event_stream, "append:event-1", 87) catch |err| native_util.bootProofFailure("storage scenarios", err),
         };
-        _ = context.storage_service_instance.putVersionRef(&event_request) catch unreachable;
+        _ = context.storage_service_instance.putVersionRef(&event_request) catch |err| native_util.bootProofFailure("storage scenarios", err);
 
         const seeded_workspace = context.storage_service_instance.createWorkspace(.{
             .owner = context.session_user,
             .label = "notes-workspace",
-        }) catch unreachable;
+        }) catch |err| native_util.bootProofFailure("storage scenarios", err);
         context.storage_service_instance.shareWorkspace(seeded_workspace.id, .{
             .principal_id = context.sync_service_principal,
             .can_read = true,
@@ -152,28 +152,28 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
             .network_scope = .relay_assisted,
             .reshare_policy = .owner_only,
             .audit_visibility = .shared_participants,
-        }) catch unreachable;
+        }) catch |err| native_util.bootProofFailure("storage scenarios", err);
 
-        context.storage_service_instance.beginTransaction(seeded_workspace.id) catch unreachable;
-        context.storage_service_instance.stagePut(seeded_workspace.id, "documents/notes.md", notes_object_id, notes_v1_version_id, .document) catch unreachable;
-        context.storage_service_instance.stagePut(seeded_workspace.id, "collections/inbox", inbox_collection.object_id, inbox_collection.id, .collection) catch unreachable;
-        context.storage_service_instance.stagePut(seeded_workspace.id, "assets/cover.jpg", cover_media.object_id, cover_media.id, .media_asset) catch unreachable;
-        _ = context.storage_service_instance.commit(seeded_workspace.id, 88) catch unreachable;
+        context.storage_service_instance.beginTransaction(seeded_workspace.id) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        context.storage_service_instance.stagePut(seeded_workspace.id, "documents/notes.md", notes_object_id, notes_v1_version_id, .document) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        context.storage_service_instance.stagePut(seeded_workspace.id, "collections/inbox", inbox_collection.object_id, inbox_collection.id, .collection) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        context.storage_service_instance.stagePut(seeded_workspace.id, "assets/cover.jpg", cover_media.object_id, cover_media.id, .media_asset) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        _ = context.storage_service_instance.commit(seeded_workspace.id, 88) catch |err| native_util.bootProofFailure("storage scenarios", err);
 
-        const baseline_snapshot = context.storage_service_instance.snapshot(seeded_workspace.id, "baseline", support.workspace_signer) catch unreachable;
+        const baseline_snapshot = context.storage_service_instance.snapshot(seeded_workspace.id, "baseline", support.workspace_signer) catch |err| native_util.bootProofFailure("storage scenarios", err);
 
-        context.storage_service_instance.beginTransaction(seeded_workspace.id) catch unreachable;
-        context.storage_service_instance.stagePut(seeded_workspace.id, "documents/notes.md", notes_object_id, notes_v2_version_id, .document) catch unreachable;
-        _ = context.storage_service_instance.commit(seeded_workspace.id, 89) catch unreachable;
-        _ = context.storage_service_instance.restore(seeded_workspace.id, baseline_snapshot.id, 90) catch unreachable;
+        context.storage_service_instance.beginTransaction(seeded_workspace.id) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        context.storage_service_instance.stagePut(seeded_workspace.id, "documents/notes.md", notes_object_id, notes_v2_version_id, .document) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        _ = context.storage_service_instance.commit(seeded_workspace.id, 89) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        _ = context.storage_service_instance.restore(seeded_workspace.id, baseline_snapshot.id, 90) catch |err| native_util.bootProofFailure("storage scenarios", err);
 
-        context.storage_service_instance.beginTransaction(seeded_workspace.id) catch unreachable;
-        context.storage_service_instance.stageDelete(seeded_workspace.id, "documents/notes.md") catch unreachable;
-        _ = context.storage_service_instance.commit(seeded_workspace.id, 91) catch unreachable;
-        _ = context.storage_service_instance.recoverDeleted(seeded_workspace.id, "documents/notes.md", 92) catch unreachable;
+        context.storage_service_instance.beginTransaction(seeded_workspace.id) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        context.storage_service_instance.stageDelete(seeded_workspace.id, "documents/notes.md") catch |err| native_util.bootProofFailure("storage scenarios", err);
+        _ = context.storage_service_instance.commit(seeded_workspace.id, 91) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        _ = context.storage_service_instance.recoverDeleted(seeded_workspace.id, "documents/notes.md", 92) catch |err| native_util.bootProofFailure("storage scenarios", err);
 
-        context.storage_service_instance.exportSnapshotInto(seeded_workspace.id, baseline_snapshot.id, support.export_signer, context.export_package) catch unreachable;
-        _ = context.storage_service_instance.importWorkspaceFromPackage(context.storage_service_principal, "imported-notes", context.export_package, 93) catch unreachable;
+        context.storage_service_instance.exportSnapshotInto(seeded_workspace.id, baseline_snapshot.id, support.export_signer, context.export_package) catch |err| native_util.bootProofFailure("storage scenarios", err);
+        _ = context.storage_service_instance.importWorkspaceFromPackage(context.storage_service_principal, "imported-notes", context.export_package, 93) catch |err| native_util.bootProofFailure("storage scenarios", err);
     }
 
     if (storage_reloaded) {
@@ -188,7 +188,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     support.common.printBootMarker("ZIGOS:STORAGE:RELOAD:BASELINE:START");
     const baseline_snapshot = context.storage_service_instance.findSnapshot(notes_workspace_id, "baseline") orelse blk: {
         support.common.printBootMarker("ZIGOS:STORAGE:RELOAD:BASELINE:MISS");
-        break :blk context.storage_service_instance.snapshot(notes_workspace_id, "baseline", support.workspace_signer) catch unreachable;
+        break :blk context.storage_service_instance.snapshot(notes_workspace_id, "baseline", support.workspace_signer) catch |err| native_util.bootProofFailure("storage scenarios", err);
     };
     support.common.printBootMarker("ZIGOS:STORAGE:RELOAD:BASELINE:DONE");
     const baseline_snapshot_id = baseline_snapshot.id.raw();
@@ -198,7 +198,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         baseline_snapshot_id,
         support.export_signer,
         context.export_package,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("storage scenarios", err);
     support.common.printBootMarker("ZIGOS:STORAGE:RELOAD:EXPORT_REFRESH:DONE");
     support.common.printBootMarker("ZIGOS:STORAGE:RELOAD:IMPORTED_WORKSPACE:START");
     const imported_workspace = context.storage_service_instance.findWorkspace(context.storage_service_principal, "imported-notes") orelse
@@ -209,11 +209,11 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
             "imported-notes",
             context.export_package,
             93,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("storage scenarios", err);
     };
     support.common.printBootMarker(boot_markers.storage_reload_imported_workspace_done);
     const imported_workspace_id = imported_workspace.id.raw();
-    const notes_entry = context.storage_service_instance.resolve(notes_workspace_id, "documents/notes.md") catch unreachable;
+    const notes_entry = context.storage_service_instance.resolve(notes_workspace_id, "documents/notes.md") catch |err| native_util.bootProofFailure("storage scenarios", err);
     support.common.printBootMarker("ZIGOS:STORAGE:RELOAD:NOTES_ENTRY:DONE");
     const latest_notes_version_id = context.storage_service_instance.latestVersion(notes_object_id).?.id.raw();
     support.common.printBootMarker(boot_markers.storage_reload_latest_version_done);
@@ -247,7 +247,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     if (notes_workspace.deletedCount() != 0 and !notes_entry.version_id.isZero()) {
         support.common.printBootMarker("ZIGOS:STORAGE:DELETE_RECOVERY:OK");
     }
-    if ((context.storage_service_instance.resolve(imported_workspace_id, "documents/notes.md") catch unreachable).version_id.eql(notes_entry.version_id)) {
+    if ((context.storage_service_instance.resolve(imported_workspace_id, "documents/notes.md") catch |err| native_util.bootProofFailure("storage scenarios", err)).version_id.eql(notes_entry.version_id)) {
         support.common.printBootMarker("ZIGOS:STORAGE:EXPORT_IMPORT:OK");
     }
 
@@ -255,7 +255,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     context.storage_service_instance.checkpoint();
     _ = context.supervisor.recordCrash(context.storage_service_id, 94, 0x53);
     _ = context.supervisor.requestRestart(context.storage_service_id, 95);
-    _ = context.runtime.rehostTask(context.storage_task_id, 95) catch unreachable;
+    _ = context.runtime.rehostTask(context.storage_task_id, 95) catch |err| native_util.bootProofFailure("storage scenarios", err);
     _ = bootstrap_driver_port.refreshActiveStorageAttachment(context.storage_service_id);
     context.storage_service_instance.* = if (storage_volume_mod.hasAttachedDevice())
         storage_service_mod.Service.reloadFromAttachedVolume(
@@ -275,7 +275,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     context.storage_service_instance.checkpoint_enabled = false;
     _ = context.supervisor.completeRestart(context.storage_service_id, 96);
     if (context.supervisor.hasDiagnostic(context.storage_service_id, .restart_completed) and
-        (context.storage_service_instance.resolve(notes_workspace_id, "documents/notes.md") catch unreachable).version_id.eql(notes_entry.version_id))
+        (context.storage_service_instance.resolve(notes_workspace_id, "documents/notes.md") catch |err| native_util.bootProofFailure("storage scenarios", err)).version_id.eql(notes_entry.version_id))
     {
         support.common.printBootMarker(boot_markers.storage_service_recovered);
     }
@@ -289,7 +289,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         .principal = context.notes_object_capability.holder,
         .capability_id = context.notes_object_capability.id,
         .now_ticks = 94,
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("storage scenarios", err);
     if (!bridge_view.authoritative and bridge_view.object_id == notes_object_id.raw() and
         bridge_view.version_id == notes_entry.version_id.raw())
     {
