@@ -351,6 +351,7 @@ fn runNotesDailyDriverJourney(
         const response = journey.dispatch(.{ .control = control, .tick = tick });
         if (response.status != .ok) {
             printJourneyControlRejected(control, response);
+            printJourneyStorageDiagnostics(context.storage_service_instance, storage_state.notes_workspace_id);
             return false;
         }
     }
@@ -382,6 +383,33 @@ fn printJourneyControlRejected(
         },
     ) catch return;
     common.printBootMarker(detail);
+}
+
+// Distinguishes the three ways a workspace lookup dies: record gone from
+// the arena (id and label both miss), primary-index corruption (id misses
+// while the label index still resolves), or a stale captured id (label
+// resolves to a different id). One CI boot log is then enough to tell them
+// apart instead of reproducing a timing-dependent failure.
+fn printJourneyStorageDiagnostics(storage: anytype, workspace_id: u64) void {
+    const by_id: []const u8 = if (storage.findWorkspaceRecordConst(workspace_id) != null) "hit" else "miss";
+    const label_id: u64 = if (storage.findWorkspaceByLabel("notes-workspace")) |record| record.id.raw() else 0;
+    const checkpoint_error: []const u8 = if (storage.checkpoint_store.last_checkpoint_error) |err| @errorName(err) else "none";
+    // SAFETY: filled by the subsequent std.fmt.bufPrint call
+    var line_buffer: [160]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &line_buffer,
+        "ZIGOS:NOTES_DAILY:REJECT_STORAGE probe_id={d} by_id={s} label_id={d} workspaces={d} objects={d} versions={d} checkpoint={s}",
+        .{
+            workspace_id,
+            by_id,
+            label_id,
+            storage.workspaces.workspaceCount(),
+            storage.objectCount(),
+            storage.versionCount(),
+            checkpoint_error,
+        },
+    ) catch return;
+    common.printBootMarker(line);
 }
 
 fn printJourneyControlRejectedMarker(control: production_journey.ProductionJourneyControl) void {

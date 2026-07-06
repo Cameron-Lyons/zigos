@@ -561,6 +561,15 @@ pub const Directory = struct {
         clearEntries(&workspace.staging.staged_entries);
     }
 
+    pub fn abortTransaction(self: *Directory, workspace_id: ids.WorkspaceId) Error!void {
+        const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
+        if (!workspace.staging.transaction_open) return error.NoActiveTransaction;
+        workspace.staging.transaction_open = false;
+        workspace.staging.staged_entry_count = 0;
+        workspace.staging.staged_effective_entry_count = workspace.path_index.entry_count;
+        clearEntries(&workspace.staging.staged_entries);
+    }
+
     pub fn stagePut(
         self: *Directory,
         workspace_id: ids.WorkspaceId,

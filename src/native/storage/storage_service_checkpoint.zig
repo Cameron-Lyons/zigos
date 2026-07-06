@@ -1,6 +1,13 @@
 const builtin = @import("builtin");
+const std = @import("std");
 const object_store = @import("object_store.zig");
 const root = @import("root");
+const common = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/boot/common.zig")
+else
+    struct {
+        pub fn printBootMarker(_: []const u8) void {}
+    };
 const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
     root.storage_volume
 else
@@ -100,9 +107,24 @@ pub fn flushCheckpoint(service: anytype) void {
     if (!service.checkpoint_store.volume.hasAttachedDevice()) return;
     const result = service.checkpoint_store.volume.saveToVolume(service.store, service.workspaces) catch |err| {
         service.checkpoint_store.last_checkpoint_error = err;
+        reportFlushError(err);
         return;
     };
     service.checkpoint_store.last_checkpoint_generation = result.generation;
     service.checkpoint_store.last_checkpoint_error = null;
     service.checkpoint_store.dirty = false;
+}
+
+// A swallowed flush error leaves the on-disk store one generation behind
+// whatever the boot log claims was committed; without a marker the next
+// cold boot debugs as an unrelated reload failure.
+fn reportFlushError(err: storage_volume.Error) void {
+    // SAFETY: filled by the subsequent std.fmt.bufPrint call
+    var line_buffer: [96]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &line_buffer,
+        "ZIGOS:STORAGE:CHECKPOINT:FLUSH_ERROR error={s}",
+        .{@errorName(err)},
+    ) catch return;
+    common.printBootMarker(line);
 }

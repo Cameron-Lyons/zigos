@@ -164,6 +164,11 @@ pub const StorageCore = struct {
         self.noteMutation(false);
     }
 
+    pub fn abortTransaction(self: *Service, workspace_id: anytype) workspace.Error!void {
+        try self.workspaces.abortTransaction(workspaceId(workspace_id));
+        if (self.deferred_checkpoint_count != 0) self.deferred_checkpoint_count -= 1;
+    }
+
     pub fn stagePut(
         self: *Service,
         workspace_id: anytype,
