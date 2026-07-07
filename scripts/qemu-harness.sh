@@ -168,11 +168,8 @@ qemu_harness_find_ovmf_vars() {
     /usr/share/edk2/ovmf/OVMF_VARS_4M.fd \
     /usr/share/edk2/x64/OVMF_VARS.fd \
     /usr/share/qemu/edk2-x86_64-vars.fd \
-    /usr/share/qemu/edk2-i386-vars.fd \
     /opt/homebrew/share/qemu/edk2-x86_64-vars.fd \
-    /opt/homebrew/share/qemu/edk2-i386-vars.fd \
-    /usr/local/share/qemu/edk2-x86_64-vars.fd \
-    /usr/local/share/qemu/edk2-i386-vars.fd; do
+    /usr/local/share/qemu/edk2-x86_64-vars.fd; do
     if [ -f "$path" ]; then
       printf '%s\n' "$path"
       return 0
