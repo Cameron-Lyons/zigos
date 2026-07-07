@@ -63,7 +63,7 @@ pub fn clearWithColor(new_color: u8) void {
     color = new_color;
 }
 
-pub fn put_char(c: u8) void {
+pub fn putChar(c: u8) void {
     if (c == '\n') {
         column = 0;
         row += 1;
@@ -98,23 +98,9 @@ pub fn put_char(c: u8) void {
     }
 }
 
-pub fn printChar(c: u8) void {
-    put_char(c);
-}
-
-pub fn putCharAt(x: u8, y: u8, c: u8, entry_color: u8) void {
-    const index = @as(usize, y) * VGA_WIDTH + x;
-    buffer[index] = vga_entry(c, entry_color);
-}
-
-pub fn setCursor(x: u8, y: u8) void {
-    column = @min(@as(usize, x), VGA_WIDTH - 1);
-    row = @min(@as(usize, y), VGA_HEIGHT - 1);
-}
-
 pub fn print(str: []const u8) void {
     for (str) |c| {
-        put_char(c);
+        putChar(c);
     }
 }
 
@@ -122,7 +108,7 @@ pub fn printWithColor(str: []const u8, new_color: u8) void {
     const old_color = color;
     color = new_color;
     for (str) |c| {
-        put_char(c);
+        putChar(c);
     }
     color = old_color;
 }

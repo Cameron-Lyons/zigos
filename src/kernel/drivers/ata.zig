@@ -13,7 +13,7 @@ else
             return 0;
         }
     };
-const vga = @import("vga.zig");
+const console = @import("../utils/console.zig");
 
 pub const kernel_boundary_role = "bootstrap_storage_inventory_shim";
 pub const publishes_full_storage_service = false;
@@ -108,7 +108,7 @@ var secondary_master: ATADevice = undefined;
 var secondary_slave: ATADevice = undefined;
 
 pub fn init() void {
-    vga.print("  - Detecting ATA drives...\n");
+    console.print("  - Detecting ATA drives...\n");
 
     primary_master = emptyDevice(ATA_PRIMARY_BASE, ATA_PRIMARY_CTRL, true);
     detectDrive(&primary_master);
@@ -123,19 +123,19 @@ pub fn init() void {
     detectDrive(&secondary_slave);
 
     if (primary_master.present) {
-        vga.print("    Primary Master: ");
+        console.print("    Primary Master: ");
         printDriveInfo(&primary_master);
     }
     if (primary_slave.present) {
-        vga.print("    Primary Slave: ");
+        console.print("    Primary Slave: ");
         printDriveInfo(&primary_slave);
     }
     if (secondary_master.present) {
-        vga.print("    Secondary Master: ");
+        console.print("    Secondary Master: ");
         printDriveInfo(&secondary_master);
     }
     if (secondary_slave.present) {
-        vga.print("    Secondary Slave: ");
+        console.print("    Secondary Slave: ");
         printDriveInfo(&secondary_slave);
     }
 }
@@ -319,33 +319,33 @@ test "kernel ATA shim rejects direct data-plane transfer attempts" {
 fn printDriveInfo(device: *const ATADevice) void {
     var i: usize = 0;
     while (i < ATA_MODEL_BYTES and device.model[i] != 0) : (i += 1) {
-        vga.put_char(device.model[i]);
+        console.putChar(device.model[i]);
     }
 
-    vga.print(" (");
+    console.print(" (");
     printSize(device.sectors * @as(u64, ATA_SECTOR_SIZE));
-    vga.print(")\n");
+    console.print(")\n");
 }
 
 fn printSize(bytes: u64) void {
     if (bytes >= BYTES_PER_GIB) {
         printNumber(bytes / BYTES_PER_GIB);
-        vga.print(" GB");
+        console.print(" GB");
     } else if (bytes >= BYTES_PER_MIB) {
         printNumber(bytes / BYTES_PER_MIB);
-        vga.print(" MB");
+        console.print(" MB");
     } else if (bytes >= BYTES_PER_KIB) {
         printNumber(bytes / BYTES_PER_KIB);
-        vga.print(" KB");
+        console.print(" KB");
     } else {
         printNumber(bytes);
-        vga.print(" B");
+        console.print(" B");
     }
 }
 
 fn printNumber(num: u64) void {
     if (num == 0) {
-        vga.put_char('0');
+        console.putChar('0');
         return;
     }
 
@@ -362,6 +362,6 @@ fn printNumber(num: u64) void {
 
     while (i > 0) {
         i -= 1;
-        vga.put_char(buffer[i]);
+        console.putChar(buffer[i]);
     }
 }

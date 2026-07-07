@@ -1,5 +1,5 @@
 const paging = @import("paging.zig");
-const vga = @import("../drivers/vga.zig");
+const console = @import("../utils/console.zig");
 
 // User-memory validation and user/kernel copies are owned by the native syscall
 // surface (native/kernel_api/syscall_dispatch.validateUserRange), which checks
@@ -34,5 +34,5 @@ pub fn protectKernelMemory() void {
     // and the pass above would be decorative.
     paging.enableWriteProtect();
 
-    vga.print("Kernel text, rodata, and userspace archive write-protected\n");
+    console.print("Kernel text, rodata, and userspace archive write-protected\n");
 }

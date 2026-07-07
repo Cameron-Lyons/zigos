@@ -1,4 +1,4 @@
-const vga = @import("../drivers/vga.zig");
+const console = @import("../utils/console.zig");
 const memory = @import("memory.zig");
 const numfmt = @import("../utils/numfmt.zig");
 
@@ -164,7 +164,7 @@ fn alloc_frame() u32 {
     defer @atomicStore(bool, &frame_lock, false, .seq_cst);
 
     const frame_addr = find_free_frame() orelse {
-        vga.print("Out of memory!\n");
+        console.print("Out of memory!\n");
         while (true) {
             asm volatile ("hlt");
         }
@@ -305,7 +305,7 @@ pub fn createUserPageDirectory() !*PageDirectory {
 }
 
 pub fn init() void {
-    vga.print("Initializing paging...\n");
+    console.print("Initializing paging...\n");
 
     for (&frame_bitmap) |*word| {
         word.* = 0;
@@ -346,12 +346,12 @@ pub fn init() void {
     // The double-fault task switch loads CR3 from its TSS; point it at the
     // kernel page directory now that paging is live.
     @import("../interrupts/gdt.zig").refreshDoubleFaultCr3();
-    vga.print("Paging enabled!\n");
-    vga.print("Total frames: ");
+    console.print("Paging enabled!\n");
+    console.print("Total frames: ");
     numfmt.printDec(total_frames);
-    vga.print(" Used frames: ");
+    console.print(" Used frames: ");
     numfmt.printDec(used_frames);
-    vga.print("\n");
+    console.print("\n");
 }
 
 // A boot-stack overflow used to run straight into the device-broker globals
@@ -363,7 +363,7 @@ pub fn init() void {
 fn unmapBootStackGuardPage() void {
     const guard_address: u32 = @intFromPtr(&stack_bottom);
     if (guard_address % PAGE_SIZE != 0) {
-        vga.print("Boot stack guard skipped: stack_bottom is not page-aligned\n");
+        console.print("Boot stack guard skipped: stack_bottom is not page-aligned\n");
         return;
     }
     unmap_page(guard_address);
@@ -399,7 +399,6 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
         }
     }
 
-    const console = @import("../utils/console.zig");
     console.print("\n=== PAGE FAULT ===\n");
     console.print("Address: 0x");
     print_hex_console(faulting_address, console);
@@ -421,12 +420,12 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
     panic_utils.panic("unrecoverable page fault at 0x{x:0>8} (eip=0x{x:0>8})", .{ faulting_address, regs.eip });
 }
 
-fn print_hex_console(value: u32, console: anytype) void {
+fn print_hex_console(value: u32, output: anytype) void {
     const hex_chars = "0123456789ABCDEF";
     var i: u32 = HEX_HIGH_NIBBLE_SHIFT;
     while (i >= 0) : (i -= HEX_NIBBLE_BITS) {
         const nibble = (value >> @truncate(i)) & HEX_NIBBLE_MASK;
-        console.printChar(hex_chars[nibble]);
+        output.printChar(hex_chars[nibble]);
         if (i == 0) break;
     }
 }
