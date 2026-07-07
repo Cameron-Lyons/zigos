@@ -24,7 +24,6 @@ const sync_service = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const update_health = @import("../platform/update_health.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
-const volume_backend = @import("../storage/volume/backend.zig");
 
 const build_bootloader_source_label = "src/boot/boot64.S";
 const build_bootloader_measurement_label = "multiboot:zigos_native";
@@ -1061,9 +1060,6 @@ fn readDirectMeasuredBootSector(storage_service_id: u64, buffer: *[direct_measur
     if (!@hasDecl(root, "storage_volume")) return false;
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
-    if (root_volume.attached_ata_device) |device| {
-        return volume_backend.readAtaBootstrap(device, direct_measured_boot_lba, buffer[0..]);
-    }
     return root_volume.attached_backend_read(direct_measured_boot_lba, buffer.ptr, buffer.len);
 }
 
@@ -1074,8 +1070,5 @@ fn writeDirectMeasuredBootSector(storage_service_id: u64, buffer: *const [direct
     if (!@hasDecl(root, "storage_volume")) return false;
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
-    if (root_volume.attached_ata_device) |device| {
-        return volume_backend.writeAtaBootstrap(device, direct_measured_boot_lba, buffer[0..]);
-    }
     return root_volume.attached_backend_write(direct_measured_boot_lba, buffer.ptr, buffer.len);
 }

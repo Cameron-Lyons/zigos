@@ -81,7 +81,7 @@ test "storage quota policy rejects writes above the first supported envelope" {
     try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
 }
 
-test "storage volume separates generic, target nvme, and brokered ata attachments" {
+test "storage volume separates generic, target nvme, and brokered bootstrap attachments" {
     const BackendFns = struct {
         fn read(_: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
             @memset(buffer_ptr[0..buffer_len], 0);
