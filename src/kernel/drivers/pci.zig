@@ -1,5 +1,5 @@
 const io = @import("../utils/io.zig");
-const vga = @import("vga.zig");
+const console = @import("../utils/console.zig");
 
 const CONFIG_ADDRESS = 0xCF8;
 const CONFIG_DATA = 0xCFC;
@@ -240,7 +240,7 @@ pub fn findDeviceByStableId(target_device_id: u64) ?PCIDevice {
 }
 
 pub fn scanBus() void {
-    vga.print("Scanning PCI bus...\n");
+    console.print("Scanning PCI bus...\n");
 
     var bus: u16 = 0;
     while (bus < PCI_MAX_BUS_COUNT) : (bus += 1) {
@@ -249,21 +249,21 @@ pub fn scanBus() void {
             var func: u8 = 0;
             while (func < PCI_MAX_FUNCTION_COUNT) : (func += 1) {
                 if (checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    vga.print("PCI ");
+                    console.print("PCI ");
                     printHex8(@intCast(bus));
-                    vga.print(":");
+                    console.print(":");
                     printHex8(device);
-                    vga.print(".");
+                    console.print(".");
                     printHex8(func);
-                    vga.print(" - Vendor: ");
+                    console.print(" - Vendor: ");
                     printHex16(pci_device.vendor_id);
-                    vga.print(" Device: ");
+                    console.print(" Device: ");
                     printHex16(pci_device.device_id);
-                    vga.print(" Class: ");
+                    console.print(" Class: ");
                     printHex8(pci_device.class_code);
-                    vga.print(":");
+                    console.print(":");
                     printHex8(pci_device.subclass);
-                    vga.print("\n");
+                    console.print("\n");
 
                     if (func == 0 and !deviceHasMultipleFunctions(@intCast(bus), device)) break;
                 }
@@ -275,8 +275,8 @@ pub fn scanBus() void {
 fn printHex8(value: u8) void {
     const high = value >> 4;
     const low = value & 0x0F;
-    vga.printChar(if (high < 10) '0' + high else 'A' + high - 10);
-    vga.printChar(if (low < 10) '0' + low else 'A' + low - 10);
+    console.printChar(if (high < 10) '0' + high else 'A' + high - 10);
+    console.printChar(if (low < 10) '0' + low else 'A' + low - 10);
 }
 
 fn printHex16(value: u16) void {

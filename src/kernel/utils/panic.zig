@@ -1,5 +1,4 @@
 const std = @import("std");
-const vga = @import("../drivers/vga.zig");
 const config = @import("../config.zig");
 const console = @import("console.zig");
 const qemu_exit = @import("qemu_exit.zig");
@@ -60,7 +59,7 @@ pub fn panic(comptime format: []const u8, args: anytype) noreturn {
     }
     panic_occurred = true;
 
-    vga.clearWithColor(panic_color);
+    console.clearWithColor(panic_color);
 
     printPanic("\n");
     printPanic("============================ KERNEL PANIC ============================\n");

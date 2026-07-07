@@ -2,6 +2,8 @@ const vga = @import("../drivers/vga.zig");
 const serial = @import("../drivers/serial.zig");
 
 pub fn init() void {
+    vga.init();
+    vga.clear();
     serial.init();
 }
 
@@ -11,12 +13,11 @@ pub fn print(str: []const u8) void {
 }
 
 pub fn printChar(c: u8) void {
-    vga.printChar(c);
-    serial.putChar(c);
+    putChar(c);
 }
 
 pub fn putChar(c: u8) void {
-    vga.put_char(c);
+    vga.putChar(c);
     serial.putChar(c);
 }
 

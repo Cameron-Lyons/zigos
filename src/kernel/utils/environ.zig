@@ -1,4 +1,4 @@
-const vga = @import("../drivers/vga.zig");
+const console = @import("console.zig");
 const panic_utils = @import("panic.zig");
 
 const MAX_ENV_VARS = 64;
@@ -37,7 +37,7 @@ pub fn init() void {
     setDefaultVar("HOME", "/home/user");
     setDefaultVar("SHELL", "/bin/sh");
     setDefaultVar("USER", "root");
-    setDefaultVar("TERM", "vga");
+    setDefaultVar("TERM", "zigos-console");
 }
 
 fn setDefaultVar(comptime name: []const u8, comptime value: []const u8) void {
@@ -149,14 +149,14 @@ pub fn printAll() void {
     while (i < env_count) : (i += 1) {
         var j: usize = 0;
         while (j < env_vars[i].name_len) : (j += 1) {
-            vga.put_char(env_vars[i].name[j]);
+            console.putChar(env_vars[i].name[j]);
         }
-        vga.put_char('=');
+        console.putChar('=');
         j = 0;
         while (j < env_vars[i].value_len) : (j += 1) {
-            vga.put_char(env_vars[i].value[j]);
+            console.putChar(env_vars[i].value[j]);
         }
-        vga.put_char('\n');
+        console.putChar('\n');
     }
 }
 

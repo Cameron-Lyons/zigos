@@ -1,6 +1,5 @@
 const x86 = @import("../../arch/x86.zig");
 const cpu_features = @import("../../arch/cpu_features.zig");
-const vga = @import("../drivers/vga.zig");
 const console = @import("../utils/console.zig");
 const config = @import("../config.zig");
 const common = @import("common.zig");
@@ -12,8 +11,6 @@ const hardware_proof = @import("../platform/hardware_proof.zig");
 
 pub fn kernelMain() void {
     x86.enableSse();
-    vga.init();
-    vga.clear();
     console.init();
     common.printBootMarker(boot_markers.boot_start);
     common.printBootProfile();

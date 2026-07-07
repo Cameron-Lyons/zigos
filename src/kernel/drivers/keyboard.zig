@@ -1,5 +1,5 @@
 const std = @import("std");
-const vga = @import("vga.zig");
+const console = @import("../utils/console.zig");
 const io = @import("../utils/io.zig");
 
 pub const ArrowKey = enum(u8) {
@@ -196,17 +196,17 @@ pub fn handleInterrupt() void {
                         const base_ch = scancode_to_ascii[scancode];
                         switch (base_ch) {
                             'c' => {
-                                vga.print("^C\n");
+                                console.print("^C\n");
                                 if (keyboard_line_discipline) |line| line.abort_line(line.context);
                                 return;
                             },
                             'z' => {
-                                vga.print("^Z\n");
+                                console.print("^Z\n");
                                 if (keyboard_line_discipline) |line| line.resume_prompt(line.context);
                                 return;
                             },
                             'l' => {
-                                vga.clear();
+                                console.clear();
                                 if (keyboard_line_discipline) |line| line.refresh_line(line.context);
                                 return;
                             },
@@ -234,12 +234,12 @@ pub fn handleInterrupt() void {
                         } else {
                             if (input_echo_enabled) {
                                 if (ch == '\n') {
-                                    vga.print("\n");
+                                    console.print("\n");
                                 } else if (ch == '\x08') {
-                                    vga.print("\x08 \x08");
+                                    console.print("\x08 \x08");
                                 } else {
                                     var buf: [2]u8 = .{ ch, 0 };
-                                    vga.print(&buf);
+                                    console.print(&buf);
                                 }
                             }
                         }
