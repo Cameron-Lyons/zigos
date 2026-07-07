@@ -1,4 +1,5 @@
 const capability = @import("../kernel_api/capability.zig");
+const native_util = @import("../core/util.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const contract = @import("contract.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
@@ -57,11 +58,13 @@ pub const ServiceBindings = struct {
 };
 
 pub fn serviceOwner(state: *const BootstrapState, class: contract.ServiceClass) principal.PrincipalId {
-    return session_bootstrap.ownerForServiceClass(state.ids, class) orelse unreachable;
+    return session_bootstrap.ownerForServiceClass(state.ids, class) orelse
+        native_util.impossibleByInvariant("every service class has a bootstrap owner");
 }
 
 pub fn serviceRecord(state: *const BootstrapState, class: contract.ServiceClass) *supervisor_mod.ServiceRecord {
-    return session_bootstrap.serviceRecordForClass(state.services, class) orelse unreachable;
+    return session_bootstrap.serviceRecordForClass(state.services, class) orelse
+        native_util.impossibleByInvariant("every service class has a bootstrap service record");
 }
 
 pub fn serviceId(state: *const BootstrapState, class: contract.ServiceClass) u64 {

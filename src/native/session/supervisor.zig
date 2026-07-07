@@ -480,7 +480,8 @@ pub const Supervisor = struct {
     }
 
     fn nextDiagnosticSequence(self: *Supervisor) u64 {
-        const sequence = self.nextReservableDiagnosticSequence() orelse unreachable;
+        const sequence = self.nextReservableDiagnosticSequence() orelse
+            native_util.impossibleByInvariant("scanning one more candidate than the diagnostic table holds always finds a free sequence");
         self.next_diagnostic_sequence = nextDiagnosticSequenceAfter(sequence);
         return sequence;
     }
