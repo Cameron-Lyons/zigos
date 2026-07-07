@@ -135,10 +135,6 @@ pub const Volume = struct {
         self.attachBackendFnsWithKind(sector_count, read, write, .nvme_pci);
     }
 
-    pub fn attachAtaBootstrapBrokerBackend(self: *Volume, backend: Backend) void {
-        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, .ata_bootstrap_broker);
-    }
-
     fn attachBackendFnsWithKind(
         self: *Volume,
         sector_count: u64,
@@ -238,10 +234,6 @@ pub fn attachNvmePciBackendFns(
     write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
 ) void {
     default_volume.attachNvmePciBackendFns(sector_count, read, write);
-}
-
-pub fn attachAtaBootstrapBrokerBackend(backend: Backend) void {
-    default_volume.attachAtaBootstrapBrokerBackend(backend);
 }
 
 pub fn clearAttachedBackend() void {
