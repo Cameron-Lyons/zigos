@@ -49,35 +49,13 @@ qemu_harness_load_extra_args() {
   fi
 }
 
-qemu_harness_drive_arg() {
-  local image_path="${1:?drive image path required}"
-  printf 'file=%s,if=ide,format=raw,index=0,id=disk0,cache=writethrough\n' "$image_path"
-}
-
 qemu_harness_append_native_store_drive() {
   local image_path="${1:?drive image path required}"
-  local default_bus="${2:-ide}"
-  local native_store_bus="${ZIGOS_NATIVE_STORE_BUS:-$default_bus}"
 
   QEMU_HARNESS_COMMAND+=(
     -drive "file=$image_path,if=none,format=raw,id=disk0,cache=writethrough"
+    -device "nvme,drive=disk0,serial=zigosnvme0"
   )
-  case "$native_store_bus" in
-    nvme)
-      QEMU_HARNESS_COMMAND+=(
-        -device "nvme,drive=disk0,serial=zigosnvme0"
-      )
-      ;;
-    ide)
-      QEMU_HARNESS_COMMAND+=(
-        -device "ide-hd,drive=disk0,bus=ide.0,unit=0"
-      )
-      ;;
-    *)
-      echo "Unsupported ZIGOS_NATIVE_STORE_BUS '$native_store_bus'; expected 'nvme' or 'ide'." >&2
-      return 2
-      ;;
-  esac
 }
 
 qemu_harness_build_kernel_command() {

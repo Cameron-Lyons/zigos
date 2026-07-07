@@ -68,6 +68,7 @@ pub const DriverRecoveryReport = struct {
     runtime_activation_generation: u32 = 0,
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
+    published_data_plane: bool = false,
     userspace_brokered_data_plane: bool = false,
 };
 
@@ -82,6 +83,7 @@ pub const DriverHotSwapReport = struct {
     runtime_activation_generation: u32 = 0,
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
+    published_data_plane: bool = false,
     userspace_brokered_data_plane: bool = false,
 };
 
@@ -90,6 +92,7 @@ const DriverActivationObservation = struct {
     activation_generation: u32 = 0,
     dma_domain_id: u64 = 0,
     exclusive_claim: bool = false,
+    published_data_plane: bool = false,
     userspace_brokered_data_plane: bool = false,
 };
 
@@ -294,6 +297,7 @@ pub const Supervisor = struct {
             .runtime_activation_generation = activation.activation_generation,
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
+            .published_data_plane = activation.published_data_plane,
             .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
@@ -365,6 +369,7 @@ pub const Supervisor = struct {
             .runtime_activation_generation = activation.activation_generation,
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
+            .published_data_plane = activation.published_data_plane,
             .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
@@ -679,9 +684,30 @@ fn observeDriverActivation(result: anytype) DriverActivationObservation {
         observation.exclusive_claim = result.exclusive_claim;
     }
     if (@hasField(T, "mode")) {
+        observation.published_data_plane = std.mem.eql(u8, @tagName(result.mode), "published_data_plane");
         observation.userspace_brokered_data_plane = std.mem.eql(u8, @tagName(result.mode), "userspace_brokered_data_plane");
     }
     return observation;
+}
+
+test "driver activation observation records published data-plane mode" {
+    const ActivationMode = enum {
+        published_data_plane,
+        userspace_brokered_data_plane,
+    };
+    const activation = .{
+        .activation_generation = @as(u32, 7),
+        .dma_domain_id = @as(u64, 0xDADA),
+        .exclusive_claim = true,
+        .mode = ActivationMode.published_data_plane,
+    };
+    const observation = observeDriverActivation(activation);
+    try std.testing.expect(observation.observed);
+    try std.testing.expect(observation.published_data_plane);
+    try std.testing.expect(!observation.userspace_brokered_data_plane);
+    try std.testing.expectEqual(@as(u32, 7), observation.activation_generation);
+    try std.testing.expectEqual(@as(u64, 0xDADA), observation.dma_domain_id);
+    try std.testing.expect(observation.exclusive_claim);
 }
 
 test "supervisor registers services using the contract boundary map" {

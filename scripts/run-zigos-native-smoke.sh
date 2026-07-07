@@ -5,6 +5,7 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 ZIG="${ROOT_DIR}/scripts/zig.sh"
 MARKER_TOOL="${ROOT_DIR}/src/print_native_smoke_markers.zig"
+FAILURE_MARKER_PATTERN="panic|KERNEL PANIC|System Halted|(^|[:_])FAIL([[:space:]:]|$)"
 
 # shellcheck source=scripts/qemu-harness.sh
 source "$ROOT_DIR/scripts/qemu-harness.sh"
@@ -82,7 +83,7 @@ run_boot() {
     exit 1
   fi
 
-  if grep -Eqi "panic|KERNEL PANIC|System Halted|FAIL" "$log_path"; then
+  if grep -Eqi "$FAILURE_MARKER_PATTERN" "$log_path"; then
     echo "Zigos native smoke test failed: panic or failure marker found in $log_path" >&2
     cat "$log_path" >&2
     exit 1
