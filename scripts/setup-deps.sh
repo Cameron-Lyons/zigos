@@ -67,7 +67,7 @@ install_apt() {
 
   log "Installing dependencies with apt..."
   ${s} apt-get update
-  ${s} apt-get install -y nasm qemu-system-x86 qemu-system-i386 ovmf grub-common grub-pc-bin dosfstools xorriso mtools
+  ${s} apt-get install -y nasm qemu-system-x86 ovmf grub-common grub-pc-bin dosfstools xorriso mtools
 
   if ! have_cmd zig; then
     if ! ${s} apt-get install -y zig; then
