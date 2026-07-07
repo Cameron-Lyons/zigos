@@ -115,6 +115,12 @@ const WorkspaceCommitContext = struct {
 const StorageVolumeContext = struct {
     volume: storage_volume.Volume = storage_volume.Volume.init(),
     seed_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
+    // Byte-for-byte copy of seed_image as the one-time fixture build left it.
+    // The compact-checkpoint case saves into seed_image, so without a restore
+    // between measurement passes each pass starts from the previous pass's
+    // mutated image and the reported best-pass checksum becomes timing-
+    // dependent (whether a pass crosses the compaction threshold varies).
+    pristine_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
     store: object_store.Store = object_store.Store.init(),
     workspaces: workspace.Directory = workspace.Directory.init(),
     prepared: bool = false,
@@ -453,6 +459,17 @@ fn prepareFixtures() void {
     prepareWorkspaceCommitFixture();
     prepareTaskCheckpointFixture();
     preparePackageFixture();
+    restoreStorageVolumeSeedImage();
+}
+
+// The storage volume fixture is built lazily inside the case bodies so its
+// 25-save construction is paid once (and discarded with the slowest pass)
+// rather than measured on every pass. Restoring the image bytes here keeps
+// each pass starting from identical on-image state without moving the
+// construction cost into the timed window.
+fn restoreStorageVolumeSeedImage() void {
+    if (!storage_volume_context.prepared) return;
+    @memcpy(storage_volume_context.seed_image[0..], storage_volume_context.pristine_image[0..]);
 }
 
 fn prepareBenchmarkUserspaceImages() void {
@@ -617,6 +634,7 @@ fn prepareStorageVolumeFixture() void {
         ) catch unreachable;
     }
 
+    @memcpy(storage_volume_context.pristine_image[0..], storage_volume_context.seed_image[0..]);
     storage_volume_context.prepared = true;
 }
 
