@@ -1506,7 +1506,8 @@ fn validateStorageModernOnlyTrack(
         "attachPublishedStorageBackend(publication, publication.backend.?)",
         "storagePublicationMatchesTargetNvme",
         "storage_volume.attachNvmePciBackend(backend)",
-        "storage_volume.attachBackend(.{",
+        "pub fn activeStorageRead(service_id: u64, start_lba: u64, buffer: []u8) bool",
+        "pub fn activeStorageWrite(service_id: u64, start_lba: u64, buffer: []const u8) bool",
     };
     for (driver_port_snippets) |snippet| {
         if (std.mem.indexOf(u8, driver_port_source, snippet) == null) {
@@ -1516,6 +1517,12 @@ fn validateStorageModernOnlyTrack(
     const retired_driver_port_snippets = [_][]const u8{
         "claimStorageAtaBootstrapInventory",
         "ataBootstrapBridgeGrant",
+        "publishStorageAtaBootstrap",
+        "ata_bootstrap_bridge",
+        "activeBrokeredStorage",
+        "activeStorageAtaSession",
+        "StoragePublicationKind",
+        "programStorageDmaIsolation",
     };
     for (retired_driver_port_snippets) |snippet| {
         if (std.mem.indexOf(u8, driver_port_source, snippet) != null) {
@@ -1854,14 +1861,20 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
 
-    const storage_dma_wiring_snippets = [_][]const u8{
-        "fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool",
-        "device_broker.programBusMasterStorageDmaIsolation(device_id, dma_domain_id, windows[0..count])",
-        "windows[0] = device_broker.defaultBrokeredDmaWindow(device_id)",
+    const retired_storage_publication_bridge_snippets = [_][]const u8{
+        "publishStorageAtaBootstrap",
+        "ata_bootstrap_bridge",
+        "activeBrokeredStorage",
+        "activeStorageAtaSession",
+        "programStorageDmaIsolation",
+        "userspace_brokered_data_plane",
     };
-    for (storage_dma_wiring_snippets) |snippet| {
-        if (std.mem.indexOf(u8, bootstrap_driver_port_source, snippet) == null) {
-            try common.addError(errors, allocator, "Userspace driver data path must confine the real storage DMA engine through the broker: {s}", .{snippet});
+    for (retired_storage_publication_bridge_snippets) |snippet| {
+        if (std.mem.indexOf(u8, bootstrap_driver_port_source, snippet) != null or
+            std.mem.indexOf(u8, driver_runtime_source, snippet) != null or
+            std.mem.indexOf(u8, session_bootstrap_source, snippet) != null)
+        {
+            try common.addError(errors, allocator, "Userspace driver data path must not revive the ATA storage publication bridge: {s}", .{snippet});
         }
     }
     const published_nvme_restart_snippets = [_][]const u8{
@@ -1917,16 +1930,6 @@ fn validateUserspaceDriverDataPathTrack(
         source: []const u8,
         snippets: []const []const u8,
     }{
-        .{
-            .path = bootstrap_driver_port_path,
-            .source = bootstrap_driver_port_source,
-            .snippets = &.{"try generated_image_fixtures.storageDriverImage()"},
-        },
-        .{
-            .path = driver_runtime_path,
-            .source = driver_runtime_source,
-            .snippets = &.{"try generated_image_fixtures.storageDriverImage()"},
-        },
         .{
             .path = storage_driver_path,
             .source = storage_driver_source,

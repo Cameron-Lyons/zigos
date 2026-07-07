@@ -12,7 +12,6 @@ const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(r
 else
     @import("../storage/storage_volume.zig");
 const native_util = @import("../core/util.zig");
-const units = @import("../core/units.zig");
 
 pub const MAX_ACTIVATIONS: usize = 8;
 pub const MAX_ACTIVATION_PUBLISHER_BYTES: usize = bootstrap_driver_port.MAX_PUBLISHER_BYTES;
@@ -21,7 +20,6 @@ const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
 pub const ActivationMode = enum(u8) {
     control_only,
     published_data_plane,
-    userspace_brokered_data_plane,
 };
 
 pub const ActivationRecord = struct {
@@ -138,11 +136,7 @@ pub const Runtime = struct {
                             now_ticks,
                             self.kernel_port,
                         )) {
-                            record.mode = if (publication.kind == .ata_bootstrap_bridge)
-                                .userspace_brokered_data_plane
-                            else
-                                .published_data_plane;
-                            try recordPublishedActivation(&record, record.mode, publication);
+                            try recordPublishedActivation(&record, .published_data_plane, publication);
                         }
                     }
                 }
@@ -340,108 +334,6 @@ test "kernel bootstrap cannot publish network data-plane transports" {
     const activation = try runtime.activateAt(driver, 1);
     try std.testing.expectEqual(ActivationMode.control_only, activation.mode);
     try std.testing.expect(!activation.exclusive_claim);
-}
-
-test "runtime uses the activation tick when activating ATA bootstrap authority" {
-    const capability = @import("../kernel_api/capability.zig");
-    const device_broker = @import("../kernel_api/device_broker.zig");
-    const endpoint = @import("../kernel_api/endpoint.zig");
-    const native_kernel = @import("../kernel_api/native_kernel.zig");
-    const principal = @import("../core/principal.zig");
-    const shared_memory = @import("../kernel_api/shared_memory.zig");
-    const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
-    const task_runtime = @import("../task/task_runtime.zig");
-    const device_id: u64 = 0x0000_1F00_0001;
-
-    bootstrap_driver_port.reset();
-    defer bootstrap_driver_port.reset();
-    device_broker.reset();
-    defer device_broker.reset();
-    device_inventory.reset();
-    defer device_inventory.reset();
-    storage_volume.clearAttachedBackend();
-    defer storage_volume.clearAttachedBackend();
-
-    var runtime = task_runtime.Runtime.init();
-    var capabilities = capability.CapabilityTable.init();
-    var endpoints = endpoint.Table.init();
-    var shared = shared_memory.Table.init();
-    var kernel = native_kernel.Kernel.init(
-        .{ .kind = .policy_authority, .serial = 1 },
-        &runtime,
-        &capabilities,
-        &endpoints,
-        &shared,
-    );
-    var kernel_port = component_port.KernelPort.init(&kernel);
-
-    try std.testing.expect(device_broker.publishAtaController(device_id, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = storage_volume.required_device_sectors,
-    }));
-
-    const storage_driver_lease_image = try generated_image_fixtures.storageDriverImage();
-    const driver_task = try runtime.createTask(.{
-        .owner = principal.PrincipalId{ .kind = .service, .serial = 30 },
-        .component_class = .service_component,
-        .budget = .{
-            .cpu_time_ticks = 1_000,
-            .memory_bytes = units.kibibytes(1),
-            .endpoint_slots = 4,
-            .shared_memory_bytes = units.kibibytes(1),
-        },
-        .local_only = true,
-        .launch = .{
-            .boundary = .userspace_process,
-            .image_id = 30,
-            .component_abi_version = 1,
-            .signed = true,
-            .bundle_id = "zigos.system.storage-driver",
-        },
-        .userspace_image = &storage_driver_lease_image,
-    });
-    const device_capability = try driver_service.mintDriverAuthority(&capabilities, .{
-        .holder = driver_task.owner,
-        .task_id = driver_task.id,
-        .device_id = device_id,
-        .device_class = .storage_controller,
-        .issued_at_ticks = 1,
-        .expires_at_ticks = 5,
-        .renewable = false,
-    });
-    try runtime.grantCapability(driver_task.id, device_capability.id);
-
-    var directory = driver_service.Directory.init();
-    const driver = try directory.register(.{
-        .service_id = 30,
-        .owner_task_id = driver_task.id,
-        .device_id = device_id,
-        .device_class = .storage_controller,
-        .authority_capability_id = device_capability.id,
-        .capability_table = &capabilities,
-        .requester = driver_task.owner,
-        .now_ticks = 2,
-        .bundle = .{
-            .bundle_id = "svc.driver.storage-runtime",
-            .display_name = "Storage Driver Runtime",
-            .publisher = "zigos.spec",
-            .signature = .{
-                .format = manifest.SIGNATURE_FORMAT_ED25519,
-                .signer = "zigos-spec-driver",
-            },
-        },
-        .bootstrap_transport = .kernel_bootstrap_broker,
-    });
-    try std.testing.expect(try bootstrap_driver_port.publishStorageAtaBootstrap(device_id, "zigos.system.storage-driver", false));
-
-    var driver_runtime = Runtime.init();
-    driver_runtime.bindKernelPort(&kernel_port);
-    const activation = try driver_runtime.activateAt(driver, 10);
-    try std.testing.expectEqual(ActivationMode.control_only, activation.mode);
-    try std.testing.expect(!storage_volume.hasAttachedDevice());
 }
 
 test "runtime treats driver restart after active storage I/O as a normal invariant" {

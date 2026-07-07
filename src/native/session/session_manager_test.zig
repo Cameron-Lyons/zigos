@@ -59,7 +59,7 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expect(runtime_service.has_checkpoint);
     try std.testing.expectEqual(@as(u32, 0), runtime_service.restart_generation);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
-    try std.testing.expect(storage_activation.mode == .published_data_plane or storage_activation.mode == .userspace_brokered_data_plane);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, storage_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, usb_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, graphics_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);
@@ -167,7 +167,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expect(runtime_service.has_checkpoint);
     try std.testing.expectEqual(@as(u32, 0), runtime_service.restart_generation);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
-    try std.testing.expect(storage_activation.mode == .published_data_plane or storage_activation.mode == .userspace_brokered_data_plane);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, storage_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, usb_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, graphics_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);

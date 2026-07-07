@@ -69,7 +69,6 @@ pub const DriverRecoveryReport = struct {
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
     published_data_plane: bool = false,
-    userspace_brokered_data_plane: bool = false,
 };
 
 pub const DriverHotSwapReport = struct {
@@ -84,7 +83,6 @@ pub const DriverHotSwapReport = struct {
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
     published_data_plane: bool = false,
-    userspace_brokered_data_plane: bool = false,
 };
 
 const DriverActivationObservation = struct {
@@ -93,7 +91,6 @@ const DriverActivationObservation = struct {
     dma_domain_id: u64 = 0,
     exclusive_claim: bool = false,
     published_data_plane: bool = false,
-    userspace_brokered_data_plane: bool = false,
 };
 
 const ServiceSlot = struct {
@@ -298,7 +295,6 @@ pub const Supervisor = struct {
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
             .published_data_plane = activation.published_data_plane,
-            .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
 
@@ -370,7 +366,6 @@ pub const Supervisor = struct {
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
             .published_data_plane = activation.published_data_plane,
-            .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
 
@@ -685,7 +680,6 @@ fn observeDriverActivation(result: anytype) DriverActivationObservation {
     }
     if (@hasField(T, "mode")) {
         observation.published_data_plane = std.mem.eql(u8, @tagName(result.mode), "published_data_plane");
-        observation.userspace_brokered_data_plane = std.mem.eql(u8, @tagName(result.mode), "userspace_brokered_data_plane");
     }
     return observation;
 }
@@ -693,7 +687,6 @@ fn observeDriverActivation(result: anytype) DriverActivationObservation {
 test "driver activation observation records published data-plane mode" {
     const ActivationMode = enum {
         published_data_plane,
-        userspace_brokered_data_plane,
     };
     const activation = .{
         .activation_generation = @as(u32, 7),
@@ -704,7 +697,6 @@ test "driver activation observation records published data-plane mode" {
     const observation = observeDriverActivation(activation);
     try std.testing.expect(observation.observed);
     try std.testing.expect(observation.published_data_plane);
-    try std.testing.expect(!observation.userspace_brokered_data_plane);
     try std.testing.expectEqual(@as(u32, 7), observation.activation_generation);
     try std.testing.expectEqual(@as(u64, 0xDADA), observation.dma_domain_id);
     try std.testing.expect(observation.exclusive_claim);
@@ -948,7 +940,7 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     const FakeRuntime = struct {
         const ActivationMode = enum(u8) {
             control_only,
-            userspace_brokered_data_plane,
+            published_data_plane,
         };
         const ActivationRecord = struct {
             activation_generation: u32,
@@ -977,7 +969,7 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
                 .activation_generation = @intCast(self.activation_count),
                 .dma_domain_id = driver.dma_domain_id,
                 .exclusive_claim = true,
-                .mode = .userspace_brokered_data_plane,
+                .mode = .published_data_plane,
             };
         }
     };
@@ -1045,7 +1037,7 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     try std.testing.expectEqual(@as(u32, 1), report.runtime_activation_generation);
     try std.testing.expectEqual(swapped.dma_domain_id, report.runtime_dma_domain_id);
     try std.testing.expect(report.runtime_exclusive_claim);
-    try std.testing.expect(report.userspace_brokered_data_plane);
+    try std.testing.expect(report.published_data_plane);
     try std.testing.expectEqual(second_authority.id, swapped.authority_capability_id);
     try std.testing.expectEqualStrings("graphics-v2", swapped.signerSlice());
     try std.testing.expectEqual(@as(usize, 1), runtime.deactivation_count);

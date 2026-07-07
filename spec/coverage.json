@@ -1879,10 +1879,6 @@
           "name": "runtime deactivates only the requested driver class for shared services"
         },
         {
-          "file": "src/native/drivers/driver_runtime.zig",
-          "name": "runtime uses the activation tick when activating ATA bootstrap authority"
-        },
-        {
           "file": "src/native/drivers/storage_driver_task.zig",
           "name": "storage driver task attaches only through the kernel device broker"
         }

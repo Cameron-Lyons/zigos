@@ -97,10 +97,7 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         try std.testing.expect(!activation.kernel_bootstrap);
         try std.testing.expect(activation.exclusive_claim);
         switch (expectation.device_class) {
-            .storage_controller => try std.testing.expect(
-                activation.mode == .published_data_plane or
-                    activation.mode == .userspace_brokered_data_plane,
-            ),
+            .storage_controller => try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, activation.mode),
             .network_adapter,
             .usb_controller,
             .graphics_adapter,

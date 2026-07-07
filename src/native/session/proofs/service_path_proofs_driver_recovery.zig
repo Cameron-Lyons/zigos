@@ -1,23 +1,57 @@
 const std = @import("std");
 const bootstrap_driver_port = @import("../../drivers/bootstrap_driver_port.zig");
 const capability = @import("../../kernel_api/capability.zig");
-const component_port = @import("../../kernel_api/component_port.zig");
-const device_broker = @import("../../kernel_api/device_broker.zig");
-const device_broker_client = @import("../../kernel_api/device_broker_client.zig");
 const driver_runtime_mod = @import("../../drivers/driver_runtime.zig");
 const driver_service = @import("../../drivers/driver_service.zig");
-const storage_driver_task_mod = @import("../../drivers/storage_driver_task.zig");
 const notification_center = @import("../../services/notification_center.zig");
 const session_manager = @import("../session_manager.zig");
 const service_catalog = @import("../service_catalog.zig");
 const storage_volume = @import("../../storage/storage_volume.zig");
 const supervisor_mod = @import("../supervisor.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
-const common = @import("service_path_proofs_common.zig");
 
-const expectDeviceDescribe = common.expectDeviceDescribe;
-const storageGrant = common.storageGrant;
 const storage_restart_probe_lba: u64 = storage_volume.required_device_sectors + 32;
+const storage_restart_probe_sectors: u64 = 4;
+const storage_restart_probe_image_bytes: usize = @as(usize, @intCast(storage_restart_probe_lba + storage_restart_probe_sectors)) * storage_volume.sector_size;
+
+const PublishedStorageBackend = struct {
+    var target_device_id: u64 = 0;
+    var image: []u8 = &.{};
+
+    fn reset(image_buffer: []u8, device_id: u64) void {
+        @memset(image_buffer, 0);
+        image = image_buffer;
+        target_device_id = device_id;
+    }
+
+    fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+        const buffer = buffer_ptr[0..buffer_len];
+        const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+        const end = start + buffer.len;
+        if (end > image.len) return false;
+        @memcpy(buffer, image[start..end]);
+        return true;
+    }
+
+    fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+        if (buffer_len % storage_volume.sector_size != 0) return false;
+        const buffer = buffer_ptr[0..buffer_len];
+        const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+        const end = start + buffer.len;
+        if (end > image.len) return false;
+        @memcpy(image[start..end], buffer);
+        return true;
+    }
+
+    fn activate(device_id: u64) ?storage_volume.Backend {
+        if (device_id != target_device_id) return null;
+        return .{
+            .sector_count = storage_restart_probe_lba + storage_restart_probe_sectors,
+            .read = read,
+            .write = write,
+        };
+    }
+};
 
 pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !void {
     const BootedDriverRuntime = struct {
@@ -75,7 +109,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     const supervisor = session_manager.testing.supervisorPtr();
     const driver_directory = session_manager.testing.driverDirectoryPtr();
     const driver_runtime = session_manager.testing.driverRuntimePtr();
-    const kernel_port = session_manager.kernelPort() orelse return error.KernelPortUnavailable;
     const ledger = session_manager.testing.updateLedgerPtr();
 
     const storage_service_record = supervisor.findByClass(.storage_object).?;
@@ -97,28 +130,22 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     const storage_address_space_before = storage_driver_task.address_space_id;
 
     bootstrap_driver_port.reset();
-    try std.testing.expect(device_broker.publishAtaController(storage_driver.device_id, storageGrant()));
-    try std.testing.expect(try bootstrap_driver_port.publishStorageAtaBootstrap(
+    var storage_image = [_]u8{0} ** storage_restart_probe_image_bytes;
+    PublishedStorageBackend.reset(storage_image[0..], storage_driver.device_id);
+    try std.testing.expect(try bootstrap_driver_port.publishStorageActivator(
         storage_driver.device_id,
         "zigos.system.storage-driver",
+        PublishedStorageBackend.activate,
         false,
     ));
 
     const initial_activation = try driver_runtime.activateAt(storage_driver, 780);
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.userspace_brokered_data_plane, initial_activation.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, initial_activation.mode);
     try std.testing.expect(initial_activation.exclusive_claim);
     try std.testing.expect(initial_activation.iommu_enforced);
 
     runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
-    const descriptor_before = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 781);
-    try std.testing.expectEqual(storage_driver.device_id, descriptor_before.device_id);
-    try std.testing.expectEqual(@as(u16, 0x1F0), descriptor_before.base_port);
-
-    try proveBrokeredStorageWriteRead(storage_service_record.id, storage_restart_probe_lba, "driver-restart-before", 0x31);
-    const stale_crash_session = bootstrap_driver_port.activeStorageAtaSession(storage_service_record.id) orelse return error.MissingBootedDriverBinding;
-    try std.testing.expectEqual(storage_driver.authority_capability_id, stale_crash_session.client.authority_capability_id);
-    try std.testing.expectEqual(storage_driver.owner_task_id, stale_crash_session.client.task_id);
-    try std.testing.expectEqual(storage_driver.dma_domain_id, stale_crash_session.dma_domain_id);
+    try provePublishedStorageWriteRead(storage_service_record.id, storage_restart_probe_lba, "driver-restart-before", 0x31);
 
     var booted_runtime = BootedDriverRuntime{
         .tasks = runtime,
@@ -144,7 +171,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expect(recovery.runtime_activation_generation > initial_activation.activation_generation);
     try std.testing.expectEqual(recovered_driver.dma_domain_id, recovery.runtime_dma_domain_id);
     try std.testing.expect(recovery.runtime_exclusive_claim);
-    try std.testing.expect(recovery.userspace_brokered_data_plane);
+    try std.testing.expect(recovery.published_data_plane);
     try std.testing.expectEqual(@as(usize, 1), booted_runtime.deactivation_count);
     try std.testing.expectEqual(@as(usize, 1), booted_runtime.activation_count);
     try std.testing.expectEqual(@as(usize, 1), booted_runtime.rehost_count);
@@ -168,31 +195,12 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(task_count_before, session_manager.testing.countTasks());
     try std.testing.expectEqual(session_process_generation_before, session_task.process_generation);
 
-    try std.testing.expect(storage_driver_task_mod.staleAuthorityRejectedAfterGenerationChange(&stale_crash_session));
-    try std.testing.expect(storage_driver_task_mod.staleDmaPortAccessRejectedAfterGenerationChange(&stale_crash_session));
-    try std.testing.expect(storage_driver_task_mod.staleBrokeredDmaBufferRejectedAfterGenerationChange(&stale_crash_session));
-    var stale_crash_session_copy = stale_crash_session;
-    var stale_crash_read: [storage_volume.sector_size]u8 = undefined;
-    try std.testing.expect(!storage_driver_task_mod.readAtaBootstrapSession(
-        &stale_crash_session_copy,
-        storage_restart_probe_lba,
-        stale_crash_read[0..],
-    ));
-
     runtime.allowHostPointerSyscallsForTask(recovered_driver.owner_task_id);
-    const recovered_descriptor = try expectDeviceDescribe(kernel_port, recovered_driver.owner_task_id, recovered_driver.authority_capability_id, 792);
-    try std.testing.expectEqual(recovered_driver.device_id, recovered_descriptor.device_id);
-    try proveBrokeredStorageReadback(storage_service_record.id, storage_restart_probe_lba, "driver-restart-before", 0x31);
-    try proveReboundStorageSession(
-        storage_service_record.id,
-        recovered_driver,
-        stale_crash_session.process_generation,
-        stale_crash_session.dma_domain_id,
-    );
-    try proveBrokeredStorageWriteRead(storage_service_record.id, storage_restart_probe_lba + 1, "driver-restart-after-crash", 0x52);
+    try provePublishedStorageReadback(storage_service_record.id, storage_restart_probe_lba, "driver-restart-before", 0x31);
+    try provePublishedStorageRebound(storage_service_record.id, recovered_driver);
+    try provePublishedStorageWriteRead(storage_service_record.id, storage_restart_probe_lba + 1, "driver-restart-after-crash", 0x52);
 
     const recovered_authority_id = recovered_driver.authority_capability_id;
-    const stale_hot_swap_session = bootstrap_driver_port.activeStorageAtaSession(storage_service_record.id) orelse return error.MissingBootedDriverBinding;
     const hot_swap_process_generation_before = recovered_task.process_generation;
     const hot_swap_address_space_before = recovered_task.address_space_id;
     const hot_swap_restart_generation_before = recovered_driver.restart_generation;
@@ -238,7 +246,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expect(hot_swap.runtime_activation_generation > recovery.runtime_activation_generation);
     try std.testing.expectEqual(swapped_driver.dma_domain_id, hot_swap.runtime_dma_domain_id);
     try std.testing.expect(hot_swap.runtime_exclusive_claim);
-    try std.testing.expect(hot_swap.userspace_brokered_data_plane);
+    try std.testing.expect(hot_swap.published_data_plane);
     try std.testing.expectEqual(next_authority.id, swapped_driver.authority_capability_id);
     try std.testing.expect(swapped_driver.authority_capability_id != recovered_authority_id);
     try std.testing.expectEqualStrings("zigos-storage-driver-v2", swapped_driver.signerSlice());
@@ -262,25 +270,11 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(task_count_before, session_manager.testing.countTasks());
     try std.testing.expectEqual(session_process_generation_before, session_task.process_generation);
     try std.testing.expect(!runtime.hasCapability(swapped_driver.owner_task_id, recovered_authority_id));
-    var stale_authority_client = device_broker_client.Client.init(kernel_port, recovered_authority_id, swapped_driver.owner_task_id, 803);
-    try std.testing.expectError(error.CapabilityNotFound, stale_authority_client.describe());
-    try std.testing.expect(storage_driver_task_mod.staleAuthorityRejectedAfterGenerationChange(&stale_hot_swap_session));
-    try std.testing.expect(storage_driver_task_mod.staleDmaPortAccessRejectedAfterGenerationChange(&stale_hot_swap_session));
-    try std.testing.expect(storage_driver_task_mod.staleBrokeredDmaBufferRejectedAfterGenerationChange(&stale_hot_swap_session));
 
     runtime.allowHostPointerSyscallsForTask(swapped_driver.owner_task_id);
-    const swapped_descriptor = try expectDeviceDescribe(kernel_port, swapped_driver.owner_task_id, next_authority.id, 802);
-    try std.testing.expectEqual(swapped_driver.device_id, swapped_descriptor.device_id);
-    try std.testing.expectEqual(@as(u16, 0x1F0), swapped_descriptor.base_port);
-    try std.testing.expectEqual(@as(u8, 14), swapped_descriptor.irq_line);
-    try proveReboundStorageSession(
-        storage_service_record.id,
-        swapped_driver,
-        stale_hot_swap_session.process_generation,
-        stale_hot_swap_session.dma_domain_id,
-    );
-    try proveBrokeredStorageReadback(storage_service_record.id, storage_restart_probe_lba + 1, "driver-restart-after-crash", 0x52);
-    try proveBrokeredStorageWriteRead(storage_service_record.id, storage_restart_probe_lba + 2, "driver-restart-after-swap", 0x73);
+    try provePublishedStorageRebound(storage_service_record.id, swapped_driver);
+    try provePublishedStorageReadback(storage_service_record.id, storage_restart_probe_lba + 1, "driver-restart-after-crash", 0x52);
+    try provePublishedStorageWriteRead(storage_service_record.id, storage_restart_probe_lba + 2, "driver-restart-after-swap", 0x73);
 
     const compositor_service_record = supervisor.findByClass(.compositor_ui_session).?;
     const graphics_driver = driver_directory.findByClass(.graphics_adapter).?;
@@ -350,7 +344,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expect(graphics_hot_swap.runtime_activation_observed);
     try std.testing.expectEqual(swapped_graphics.dma_domain_id, graphics_hot_swap.runtime_dma_domain_id);
     try std.testing.expect(graphics_hot_swap.runtime_exclusive_claim);
-    try std.testing.expect(!graphics_hot_swap.userspace_brokered_data_plane);
+    try std.testing.expect(graphics_hot_swap.published_data_plane);
     try std.testing.expectEqual(graphics_authority.id, swapped_graphics.authority_capability_id);
     try std.testing.expectEqualStrings("zigos-graphics-driver-v2", swapped_graphics.signerSlice());
     try std.testing.expect(runtime.hasCapability(swapped_graphics.owner_task_id, graphics_authority.id));
@@ -380,37 +374,28 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(session_process_generation_before, session_task.process_generation);
 }
 
-fn proveBrokeredStorageWriteRead(service_id: u64, lba: u64, label: []const u8, salt: u8) !void {
+fn provePublishedStorageWriteRead(service_id: u64, lba: u64, label: []const u8, salt: u8) !void {
     var expected: [storage_volume.sector_size]u8 = undefined;
     fillStoragePattern(expected[0..], label, salt);
-    try std.testing.expect(bootstrap_driver_port.activeBrokeredStorageWrite(service_id, lba, expected[0..]));
-    try proveBrokeredStorageReadback(service_id, lba, label, salt);
+    try std.testing.expect(bootstrap_driver_port.activeStorageWrite(service_id, lba, expected[0..]));
+    try provePublishedStorageReadback(service_id, lba, label, salt);
 }
 
-fn proveBrokeredStorageReadback(service_id: u64, lba: u64, label: []const u8, salt: u8) !void {
+fn provePublishedStorageReadback(service_id: u64, lba: u64, label: []const u8, salt: u8) !void {
     var expected: [storage_volume.sector_size]u8 = undefined;
     var readback: [storage_volume.sector_size]u8 = undefined;
     fillStoragePattern(expected[0..], label, salt);
     @memset(readback[0..], 0);
-    try std.testing.expect(bootstrap_driver_port.activeBrokeredStorageRead(service_id, lba, readback[0..]));
+    try std.testing.expect(bootstrap_driver_port.activeStorageRead(service_id, lba, readback[0..]));
     try std.testing.expect(std.mem.eql(u8, expected[0..], readback[0..]));
 }
 
-fn proveReboundStorageSession(
-    service_id: u64,
-    driver: *const driver_service.DriverRecord,
-    old_process_generation: u32,
-    old_dma_domain_id: u64,
-) !void {
-    const session = bootstrap_driver_port.activeStorageAtaSession(service_id) orelse return error.MissingBootedDriverBinding;
-    try std.testing.expectEqual(driver.authority_capability_id, session.client.authority_capability_id);
-    try std.testing.expectEqual(driver.owner_task_id, session.client.task_id);
-    try std.testing.expectEqual(session.process_generation, session.client.process_generation);
-    try std.testing.expect(session.process_generation > old_process_generation);
-    try std.testing.expectEqual(driver.dma_domain_id, session.dma_domain_id);
-    try std.testing.expect(session.dma_domain_id != old_dma_domain_id);
-    try std.testing.expect(storage_driver_task_mod.constrainedProgrammedIoFirstTarget(&session));
-    try std.testing.expect(storage_driver_task_mod.brokeredDmaBufferReady(&session));
+fn provePublishedStorageRebound(service_id: u64, driver: *const driver_service.DriverRecord) !void {
+    try std.testing.expect(driver.dma_domain_id != 0);
+    try std.testing.expect(storage_volume.hasProductionStorageBackend());
+    var readback: [storage_volume.sector_size]u8 = undefined;
+    @memset(readback[0..], 0);
+    try std.testing.expect(bootstrap_driver_port.activeStorageRead(service_id, storage_restart_probe_lba, readback[0..]));
 }
 
 fn fillStoragePattern(buffer: []u8, label: []const u8, salt: u8) void {
