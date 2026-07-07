@@ -740,6 +740,18 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "NUC11TNKi5 boot device inventory source must capture target-specific PCI snippet: {s}", .{snippet});
         }
     }
+    const retired_boot_storage_seed_snippets = [_][]const u8{
+        "ata.init()",
+        "captureAtaBootstrapInventory",
+        "recordAtaBootstrapGrant",
+        "ataBrokerGrant",
+        ".ata_bootstrap",
+    };
+    for (retired_boot_storage_seed_snippets) |snippet| {
+        if (std.mem.indexOf(u8, devices_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 boot device inventory source must not seed ATA bootstrap storage before NVMe inventory: {s}", .{snippet});
+        }
+    }
     const required_service_bootstrap_snippets = [_][]const u8{
         "device_inventory.requireProductionDriverDeviceId(device_class)",
         "const device_id = try",
