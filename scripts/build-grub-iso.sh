@@ -7,7 +7,7 @@ STAGING_DIR="${3:?staging directory required}"
 GRUB_MKRESCUE="${GRUB_MKRESCUE:-}"
 
 if [ -z "$GRUB_MKRESCUE" ]; then
-  for cmd in grub-mkrescue i686-elf-grub-mkrescue x86_64-elf-grub-mkrescue; do
+  for cmd in x86_64-elf-grub-mkrescue grub-mkrescue; do
     if command -v "$cmd" >/dev/null 2>&1; then
       GRUB_MKRESCUE="$cmd"
       break
