@@ -250,10 +250,10 @@ pub const Environment = struct {
         device: principal.PrincipalId,
         signer: signing.SignerIdentity,
         tick: u64,
-    ) (OperationError || sync_service.AuthorityError || sync_service.Error)!bool {
+    ) (OperationError || sync_service.AuthorityError || sync_service.Error || capability.Error)!bool {
         try self.requireRecoverySession(session, .revoke_device_trust);
         var capability_table = capability.CapabilityTable.init();
-        const authority_capability = sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, @max(tick, 1_000)) catch unreachable;
+        const authority_capability = try sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, @max(tick, 1_000));
         var port = sync_service.SyncPort.init(sync, &capability_table);
         const authority = sync_service.authorityContext(sync, authority_capability, tick);
         port.revokeTrustedDevice(authority, user, device, signer, tick) catch |err| switch (err) {
@@ -299,10 +299,10 @@ pub const Environment = struct {
         storage: *const storage_service.Service,
         workspace_id: anytype,
         device_id: principal.PrincipalId,
-    ) (OperationError || sync_service.AuthorityError || sync_service.Error)!bool {
+    ) (OperationError || sync_service.AuthorityError || sync_service.Error || capability.Error)!bool {
         try self.requireRecoverySession(session, .repair_sync_metadata);
         var capability_table = capability.CapabilityTable.init();
-        const authority_capability = sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, 1_000) catch unreachable;
+        const authority_capability = try sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, 1_000);
         var port = sync_service.SyncPort.init(sync, &capability_table);
         const authority = sync_service.authorityContext(sync, authority_capability, 0);
         self.report.sync_metadata_repaired = try port.repairWorkspaceMetadata(authority, storage, object_store.ids.raw(workspace_id), device_id);
@@ -318,10 +318,10 @@ pub const Environment = struct {
         signer: signing.SignerIdentity,
         next_signer: signing.SignerIdentity,
         tick: u64,
-    ) (OperationError || sync_service.AuthorityError || sync_service.Error)!u32 {
+    ) (OperationError || sync_service.AuthorityError || sync_service.Error || capability.Error)!u32 {
         try self.requireRecoverySession(session, .rotate_device_keys);
         var capability_table = capability.CapabilityTable.init();
-        const authority_capability = sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, @max(tick, 1_000)) catch unreachable;
+        const authority_capability = try sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, @max(tick, 1_000));
         var port = sync_service.SyncPort.init(sync, &capability_table);
         const authority = sync_service.authorityContext(sync, authority_capability, tick);
         const record = try port.rotateDeviceKey(authority, user, device, signer, next_signer, tick);
