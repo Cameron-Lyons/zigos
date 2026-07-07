@@ -149,6 +149,7 @@ observable boot markers.
 Use the pinned toolchain and repo entrypoints:
 
 - Zig (pinned in `.tool-versions` and `mise.toml`)
+- Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
 - OVMF or edk2-ovmf firmware for `uefi-qemu-test`

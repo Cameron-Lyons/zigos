@@ -1120,7 +1120,7 @@ fn collectUnsafeSourcePaths(
     io: std.Io,
 ) !std.StringHashMap(void) {
     const result = try std.process.run(gpa, io, .{
-        .argv = &.{ "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "src", "tools", "build_support" },
+        .argv = &.{ "jj", "file", "list", "-T", "path ++ \"\\0\"", "src", "tools", "build_support" },
         .stdout_limit = .limited(common.child_stdout_max_bytes),
         .stderr_limit = .limited(common.child_stderr_max_bytes),
     });
@@ -1130,9 +1130,9 @@ fn collectUnsafeSourcePaths(
     switch (result.term) {
         .exited => |code| if (code != 0) {
             std.debug.print("{s}", .{result.stderr});
-            return error.GitLsFilesFailed;
+            return error.JjFileListFailed;
         },
-        else => return error.GitLsFilesFailed,
+        else => return error.JjFileListFailed,
     }
 
     var unsafe_paths = std.StringHashMap(void).init(allocator);

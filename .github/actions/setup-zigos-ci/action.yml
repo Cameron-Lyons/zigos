@@ -32,6 +32,12 @@ runs:
         version: ${{ steps.resolve-zig-version.outputs.version }}
         cache-key: zigos-ci-${{ steps.resolve-zig-version.outputs.version }}
 
+    - name: Install Jujutsu
+      uses: jdx/mise-action@v4
+      with:
+        install_args: jujutsu@0.43.0
+        cache: true
+
     - name: Verify Zig version
       shell: bash
       run: |
@@ -42,6 +48,19 @@ runs:
           exit 1
         fi
         echo "Using Zig ${actual}"
+
+    - name: Verify Jujutsu version
+      shell: bash
+      run: |
+        actual="$(jj --version)"
+        case "${actual}" in
+          "jj 0.43.0"|"jj 0.43.0-"*) ;;
+          *)
+            echo "Installed Jujutsu version mismatch: expected jj 0.43.0, got ${actual}" >&2
+            exit 1
+            ;;
+        esac
+        echo "Using ${actual}"
 
     - name: Install build dependencies
       if: inputs.install-build-dependencies == 'true'
