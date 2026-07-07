@@ -1,5 +1,6 @@
 const std = @import("std");
 const object_store = @import("object_store.zig");
+const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_volume = @import("storage_volume.zig");
 const workspace = @import("workspace.zig");
@@ -648,4 +649,69 @@ test "storage volume gates long-running replay by compacting before record and s
     _ = try loadFromImage(image, &loaded_store, &loaded_workspaces);
     try std.testing.expectEqual(previous_version_id, loaded_store.latestVersion(908).?.id);
     try std.testing.expectEqual(@as(usize, iterations), loaded_store.versionCount());
+}
+
+test "storage volume persists a mutated workspace alongside an untouched one across saves" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    const allocator = std.testing.allocator;
+    const volume = try allocator.create(storage_volume.Volume);
+    defer allocator.destroy(volume);
+    volume.reset();
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = signing.seedFromByte(0x72),
+    };
+    const first = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(901),
+        .object_type = .document,
+        .payload = "alpha",
+        .metadata = try object_store.signMetadata(signer, "alpha", "text/markdown", .document, "alpha", 20),
+    });
+    const notes = try workspaces.create(.{
+        .owner = .{ .kind = .user, .serial = 1 },
+        .label = "notes",
+    });
+    const journal = try workspaces.create(.{
+        .owner = .{ .kind = .user, .serial = 1 },
+        .label = "journal",
+    });
+    try workspaces.beginTransaction(notes.id);
+    try workspaces.stagePut(notes.id, "documents/notes.md", first.object_id, first.version_id, .document);
+    _ = try workspaces.commit(notes.id, 21);
+    try workspaces.beginTransaction(journal.id);
+    try workspaces.stagePut(journal.id, "documents/journal.md", first.object_id, first.version_id, .document);
+    _ = try workspaces.commit(journal.id, 22);
+    _ = try volume.saveToImage(image, &store, &workspaces);
+
+    // Share the journal workspace only. share() marks the workspace dirty
+    // but does not bump its generation, so the delta builder's skip check
+    // falls through to the state hash alone: if the volume's cross-save
+    // cache served a stale hash here, the grant would match the persisted
+    // summary and be silently dropped from the delta. The untouched notes
+    // workspace exercises the cache-hit path in the same save.
+    const shared_principal = principal.PrincipalId{ .kind = .user, .serial = 2 };
+    try workspaces.share(journal.id, .{
+        .principal_id = shared_principal,
+        .can_read = true,
+        .can_write = true,
+    });
+    _ = try volume.saveToImage(image, &store, &workspaces);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    const loaded_volume = try allocator.create(storage_volume.Volume);
+    defer allocator.destroy(loaded_volume);
+    loaded_volume.reset();
+    _ = try loaded_volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
+    const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "notes").?;
+    const loaded_journal = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "journal").?;
+    try std.testing.expectEqual(first.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
+    try std.testing.expectEqual(first.version_id, (try loaded_workspaces.resolve(loaded_journal.id, "documents/journal.md")).version_id);
+    const loaded_grant = loaded_workspaces.findShareGrant(loaded_journal.id, shared_principal) orelse return error.ShareGrantNotPersisted;
+    try std.testing.expect(loaded_grant.can_write);
 }

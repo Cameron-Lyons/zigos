@@ -98,6 +98,7 @@ pub const Volume = struct {
         [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_OBJECTS,
     snapshot_signers: [workspace.MAX_SNAPSHOTS][max_signer_bytes]u8 =
         [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** workspace.MAX_SNAPSHOTS,
+    workspace_state_hashes: WorkspaceStateHashCache = .{},
 
     pub fn init() Volume {
         var volume: Volume = undefined;
@@ -116,6 +117,7 @@ pub const Volume = struct {
         @memset(std.mem.sliceAsBytes(self.version_signers[0..]), 0);
         @memset(std.mem.sliceAsBytes(self.object_signers[0..]), 0);
         @memset(std.mem.sliceAsBytes(self.snapshot_signers[0..]), 0);
+        self.workspace_state_hashes = .{};
     }
 
     pub fn attachBackend(self: *Volume, backend: Backend) void {
@@ -308,9 +310,12 @@ fn saveIncremental(
 ) Error!PersistResult {
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     const current_generation = if (current) |loaded| loaded.root.generation else 0;
-    var state_hashes = WorkspaceStateHashCache{};
+    const state_hashes = &self.workspace_state_hashes;
+    for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
+        state_hashes.invalidate(workspace_id.raw());
+    }
     const delta = if (current) |loaded|
-        try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces, &state_hashes)
+        try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
     else
         BuiltLog{};
 
@@ -324,7 +329,7 @@ fn saveIncremental(
         const next_generation = current_generation + 1;
         const data_offset = current.?.root.data_offset;
         const next_log_bytes = current.?.root.log_bytes + @as(u32, @intCast(delta.bytes_len));
-        var next_root = try buildRootState(next_generation, next_log_bytes, store, workspaces, &state_hashes);
+        var next_root = try buildRootState(next_generation, next_log_bytes, store, workspaces, state_hashes);
         next_root.data_offset = data_offset;
         next_root.log_record_count = current.?.root.log_record_count + delta.record_count;
         next_root.log_segment_count = current.?.root.log_segment_count + delta.segment_count;
@@ -354,7 +359,7 @@ fn saveIncremental(
         (if (loaded.root.data_offset == 0) alternate_data_region_offset else 0)
     else
         0;
-    var next_root = try buildRootState(next_generation, @intCast(log_writer.offset), store, workspaces, &state_hashes);
+    var next_root = try buildRootState(next_generation, @intCast(log_writer.offset), store, workspaces, state_hashes);
     next_root.data_offset = next_data_offset;
     next_root.log_record_count = 1;
     next_root.log_segment_count = 0;
@@ -536,6 +541,14 @@ fn writeRoot(writer: anytype, sector_index: u32, root: RootState) Error!void {
 /// Per-save memo for workspace state hashes: buildDeltaLog and buildRootState
 /// both need the hash of a dirty workspace, and hashing walks the full
 /// mutation log, share table, and recoverable-delete list.
+// Lives on the Volume and survives across saves: the full workspace state
+// hash walks every entry, mutation, share grant, and recoverable delete, and
+// buildRootState needs a hash for EVERY workspace on EVERY flush - which
+// noteMutation triggers on each durable boundary. Entries are invalidated
+// from the directory's dirty-id set at the top of each save, so the cache
+// leans on exactly the completeness contract the delta builder already
+// requires: a workspace absent from the dirty set has not changed since the
+// last clearDirty.
 const WorkspaceStateHashCache = struct {
     ids: [workspace.MAX_WORKSPACES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACES,
     hashes: [workspace.MAX_WORKSPACES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACES,
@@ -553,6 +566,22 @@ const WorkspaceStateHashCache = struct {
             self.count += 1;
         }
         return hash;
+    }
+
+    fn invalidate(self: *WorkspaceStateHashCache, id: u64) void {
+        for (self.ids[0..self.count], 0..) |cached_id, index| {
+            if (cached_id != id) continue;
+            self.count -= 1;
+            self.ids[index] = self.ids[self.count];
+            self.hashes[index] = self.hashes[self.count];
+            self.ids[self.count] = 0;
+            self.hashes[self.count] = 0;
+            return;
+        }
+    }
+
+    fn reset(self: *WorkspaceStateHashCache) void {
+        self.* = .{};
     }
 };
 
@@ -646,6 +675,9 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
     store.reset();
     workspaces.reset();
+    // The directory contents are replaced wholesale below and replay clears
+    // dirty tracking, so cached hashes keyed to the old contents must go.
+    self.workspace_state_hashes.reset();
     if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
     if (root.log_segment_count > max_log_segments) return error.CorruptImage;
 
