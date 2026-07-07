@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const native_util = @import("../core/util.zig");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const bootstrap_capabilities = @import("../session/bootstrap_capabilities.zig");
@@ -47,7 +48,7 @@ pub fn run(
             .local_only = true,
         },
         env.userspace_scheduler,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("transport checks", err);
     const storage_authority_capability_id = bootstrap_capabilities.deriveTaskCapability(
         kernel_port,
         state.session_task.id,
@@ -56,7 +57,7 @@ pub fn run(
         bootstrap_capabilities.serviceBootstrapRights(),
         3,
         3,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("transport checks", err);
     executeUserspaceProbe(env, storage_task_desc.task_id);
     const transport_probe_task = userspace_launch.launchRegisteredKernel(
         env.userspace_catalog,
@@ -80,7 +81,7 @@ pub fn run(
             .local_only = true,
         },
         env.userspace_scheduler,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("transport checks", err);
     const transport_probe_authority_id = bootstrap_capabilities.deriveTaskCapability(
         kernel_port,
         state.session_task.id,
@@ -89,7 +90,7 @@ pub fn run(
         bootstrap_capabilities.transportBootstrapRights(),
         4,
         4,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker(boot_markers.transport_task_create_ok);
 
     const storage_endpoint = kernel_port.endpointCreate(.{
@@ -101,7 +102,7 @@ pub fn run(
             .local_only = true,
             .service_port = true,
         },
-    }, 3) catch unreachable;
+    }, 3) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:ENDPOINT_CREATE:OK");
     const storage_record = env.runtime.find(storage_task_desc.task_id) orelse unreachable;
     env.service_directory.register(
@@ -111,7 +112,7 @@ pub fn run(
         storage_endpoint.capability_id,
         support.bootstrap_storage_interface,
         kernel_descriptors.serviceBindingFlags(storage_record),
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:SERVICE_REGISTER:OK");
 
     const transport_probe_endpoint = kernel_port.endpointCreate(.{
@@ -120,19 +121,19 @@ pub fn run(
         .owner_task_id = transport_probe_task.task_id,
         .label = "transport.probe",
         .flags = .{ .local_only = true },
-    }, 4) catch unreachable;
-    const storage_connection = env.service_directory.connect(support.bootstrap_storage_interface) catch unreachable;
+    }, 4) catch |err| native_util.bootProofFailure("transport checks", err);
+    const storage_connection = env.service_directory.connect(support.bootstrap_storage_interface) catch |err| native_util.bootProofFailure("transport checks", err);
     _ = kernel_port.endpointConnect(.{
         .header = component_port.makeHeader(.endpoint_connect, 6, transport_probe_task.task_id),
         .endpoint_capability_id = transport_probe_endpoint.capability_id,
         .peer_endpoint_capability_id = storage_connection.endpoint_capability_id,
         .peer_endpoint_id = storage_connection.endpoint_id,
-    }, 4) catch unreachable;
+    }, 4) catch |err| native_util.bootProofFailure("transport checks", err);
     env.runtime.audit(transport_probe_task.task_id, .{
         .kind = .service_connected,
         .detail = @truncate(storage_connection.service_id),
         .tick = 4,
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker(boot_markers.transport_service_connect_ok);
 
     const transport_probe_shm = kernel_port.sharedMemoryCreate(.{
@@ -140,12 +141,12 @@ pub fn run(
         .authority_capability_id = transport_probe_authority_id,
         .owner_task_id = transport_probe_task.task_id,
         .size_bytes = shared_memory.PAGE_SIZE,
-    }, 5) catch unreachable;
+    }, 5) catch |err| native_util.bootProofFailure("transport checks", err);
     _ = kernel_port.sharedMemoryMap(.{
         .header = component_port.makeHeader(.shared_memory_map, 8, transport_probe_task.task_id),
         .shared_memory_capability_id = transport_probe_shm.capability_id,
         .task_id = transport_probe_task.task_id,
-    }, 5) catch unreachable;
+    }, 5) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:SHM:MAP_OK");
 
     kernel_port.endpointSend(.{
@@ -154,12 +155,12 @@ pub fn run(
         .payload = "workspace-open",
         .attached_capability_id = transport_probe_shm.capability_id,
         .move_attached_capability = false,
-    }, 6) catch unreachable;
+    }, 6) catch |err| native_util.bootProofFailure("transport checks", err);
     const transport_probe_received = kernel_port.endpointRecv(.{
         .header = component_port.makeHeader(.endpoint_recv, 9, storage_task_desc.task_id),
         .endpoint_capability_id = storage_endpoint.capability_id,
         .receiver_task_id = storage_task_desc.task_id,
-    }, 7) catch unreachable orelse unreachable;
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err) orelse unreachable;
     if (std.mem.eql(u8, transport_probe_received.payload[0..transport_probe_received.payload_len], "workspace-open") and
         transport_probe_received.attached_capability != null)
     {
@@ -170,7 +171,7 @@ pub fn run(
         .header = component_port.makeHeader(.resource_query, 10, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
         .task_id = transport_probe_task.task_id,
-    }, 7) catch unreachable;
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
     if (transport_probe_resources.endpoint_count == 1) {
         common.printBootMarker("ZIGOS:TRANSPORT:RESOURCE_QUERY:OK");
     }
@@ -178,14 +179,14 @@ pub fn run(
         .header = component_port.makeHeader(.accounting_query, 11, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
         .task_id = transport_probe_task.task_id,
-    }, 7) catch unreachable;
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
     if (transport_probe_accounting.audit_event_count != 0) {
         common.printBootMarker("ZIGOS:TRANSPORT:ACCOUNTING_QUERY:OK");
     }
     if ((kernel_port.timeQuery(.{
         .header = component_port.makeHeader(.time_query, 12, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
-    }, 7) catch unreachable) == 7) {
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err)) == 7) {
         common.printBootMarker("ZIGOS:TRANSPORT:TIME_QUERY:OK");
     }
 
@@ -220,13 +221,13 @@ pub fn run(
                 .broker_service_id = state.services.policy_service.id,
             },
         },
-    }, 7) catch unreachable;
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_MINT:OK");
     _ = kernel_port.capabilityQuery(.{
         .header = component_port.makeHeader(.capability_query, 14, transport_probe_task.task_id),
         .authority_capability_id = derivable_capability.capability_id,
         .capability_id = derivable_capability.capability_id,
-    }, 7) catch unreachable;
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_QUERY:OK");
 
     _ = kernel_port.capabilityDerive(.{
@@ -251,13 +252,13 @@ pub fn run(
                 .broker_service_id = state.services.policy_service.id,
             },
         },
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_DERIVE:OK");
     kernel_port.capabilityRevoke(.{
         .header = component_port.makeHeader(.capability_revoke, 16, transport_probe_task.task_id),
         .authority_capability_id = derivable_capability.capability_id,
         .capability_id = derivable_capability.capability_id,
-    }, 7) catch unreachable;
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_REVOKE:OK");
 
     const termination_probe_task = userspace_launch.launchRegisteredKernel(
@@ -282,7 +283,7 @@ pub fn run(
             .local_only = true,
         },
         env.userspace_scheduler,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("transport checks", err);
     const termination_probe_capability_id = bootstrap_capabilities.mintTaskCapability(
         kernel_port,
         state.session_task.id,
@@ -293,10 +294,10 @@ pub fn run(
         state.ids.policy_authority,
         18,
         8,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("transport checks", err);
     _ = kernel_port.taskTerminate(.{
         .header = component_port.makeHeader(.task_terminate, 19, termination_probe_task.task_id),
         .task_capability_id = termination_probe_capability_id,
-    }, 9) catch unreachable;
+    }, 9) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:TASK_TERMINATE:OK");
 }

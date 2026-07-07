@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_util = @import("../core/util.zig");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
 const contract = @import("../session/contract.zig");
@@ -70,7 +71,7 @@ pub fn run(
         context.package_service_principal,
         platform_state_signer,
         immutable_base_workspace_state.workspace.id,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     const core_health_service_ids = [_]u64{
         context.policy_service_id,
         context.package_service_id,
@@ -95,7 +96,7 @@ pub fn run(
             "kernel=v1;base=stable-a;mode=ro",
             platform_image_signer,
             108,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("platform scenarios", err);
         support.common.printBootMarker("ZIGOS:PLATFORM:SEED_SLOT0");
         _ = beginSuccessfulActivation(
             &activation_probe,
@@ -114,7 +115,7 @@ pub fn run(
             "kernel=v2;base=stable-b;mode=ro",
             platform_image_signer,
             112,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("platform scenarios", err);
         support.common.printBootMarker("ZIGOS:PLATFORM:SEED_SLOT1");
 
         const boot_failure = beginValidatedActivation(
@@ -235,8 +236,8 @@ pub fn run(
 
     var measured = measured_boot.Recorder.init();
     measured.begin(immutable_base_manager.activation_generation);
-    measured.add(.kernel, "kernel-zigos-native", "platform-native-kernel") catch unreachable;
-    measured.add(.base_image, active_base_image.labelSlice(), &active_base_image.measurement) catch unreachable;
+    measured.add(.kernel, "kernel-zigos-native", "platform-native-kernel") catch |err| native_util.bootProofFailure("platform scenarios", err);
+    measured.add(.base_image, active_base_image.labelSlice(), &active_base_image.measurement) catch |err| native_util.bootProofFailure("platform scenarios", err);
     var policy_measure: [MEASUREMENT_TEXT_BUFFER_BYTES]u8 = undefined;
     const policy_measure_text = std.fmt.bufPrint(
         &policy_measure,
@@ -246,8 +247,8 @@ pub fn run(
             @intFromBool(sync_state.workspace_policy.personal_e2ee),
             sync_state.workspace_policy.overlay_policy_id orelse 0,
         },
-    ) catch unreachable;
-    measured.add(.policy, "workspace-policy", policy_measure_text) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
+    measured.add(.policy, "workspace-policy", policy_measure_text) catch |err| native_util.bootProofFailure("platform scenarios", err);
     const critical_services = [_]*supervisor_mod.ServiceRecord{
         context.supervisor.find(context.policy_service_id).?,
         context.supervisor.find(context.storage_service_id).?,
@@ -256,7 +257,7 @@ pub fn run(
     };
     for (critical_services) |service_record| {
         if (criticalServiceImage(context, service_record)) |image| {
-            measured.addCriticalServiceImage(service_record, image) catch unreachable;
+            measured.addCriticalServiceImage(service_record, image) catch |err| native_util.bootProofFailure("platform scenarios", err);
         } else {
             var service_measure: [MEASUREMENT_TEXT_BUFFER_BYTES]u8 = undefined;
             const service_measure_text = std.fmt.bufPrint(
@@ -267,11 +268,11 @@ pub fn run(
                     @intFromEnum(service_record.state),
                     service_record.restart_count,
                 },
-            ) catch unreachable;
-            measured.add(.critical_service, contract.serviceName(service_record.class), service_measure_text) catch unreachable;
+            ) catch |err| native_util.bootProofFailure("platform scenarios", err);
+            measured.add(.critical_service, contract.serviceName(service_record.class), service_measure_text) catch |err| native_util.bootProofFailure("platform scenarios", err);
         }
     }
-    measured.addDriverSet("core-driver-set", context.driver_directory) catch unreachable;
+    measured.addDriverSet("core-driver-set", context.driver_directory) catch |err| native_util.bootProofFailure("platform scenarios", err);
     const measured_boot_record = measured.finalize();
     measured_boot_console.printMeasurementSummary(&measured_boot_record);
     if (measured_boot_record.countKind(.kernel) == 1 and
@@ -294,7 +295,7 @@ pub fn run(
             sync_state.user_root_signer,
             recovery_device_signer,
             117,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     }
 
     var recovery = recovery_environment.Environment.init(context.session_service);
@@ -308,14 +309,14 @@ pub fn run(
             .rotate_device_keys,
             .revoke_device_trust,
         },
-    }, 118) catch unreachable;
+    }, 118) catch |err| native_util.bootProofFailure("platform scenarios", err);
     if (recovery.verifyAndReinstallImage(
         recovery_boot.session(),
         &immutable_base_manager,
         "kernel=v2;base=reinstalled;mode=ro",
         platform_image_signer,
         118,
-    ) catch unreachable) {
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err)) {
         support.common.printBootMarker(boot_markers.platform_recovery_verify_reinstall);
     }
 
@@ -329,7 +330,7 @@ pub fn run(
                 storage_state.notes_workspace_id,
                 "platform-recovery",
                 support.workspace_signer,
-            ) catch unreachable;
+            ) catch |err| native_util.bootProofFailure("platform scenarios", err);
             break :created snapshot.id;
         };
         context.storage_service_instance.exportSnapshotInto(
@@ -337,7 +338,7 @@ pub fn run(
             recovery_snapshot_id,
             support.export_signer,
             context.export_package,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     }
 
     support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_START");
@@ -351,25 +352,25 @@ pub fn run(
             .document,
             "# Notes\n- platform recovery drift\n",
             136,
-        ) catch unreachable,
+        ) catch |err| native_util.bootProofFailure("platform scenarios", err),
         .preferred_object_id = null,
         .parent_version_id = object_store_mod.ids.version(storage_state.latest_notes_version_id),
     };
-    _ = context.storage_service_instance.putVersionRef(&notes_v3_request) catch unreachable;
+    _ = context.storage_service_instance.putVersionRef(&notes_v3_request) catch |err| native_util.bootProofFailure("platform scenarios", err);
     support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_PUT");
     const notes_v3 = support.latestInsertedVersion(context.storage_service_instance).?;
     const notes_object_id = notes_v3.object_id;
     const notes_v3_version_id = notes_v3.id;
     support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_LATEST");
-    context.storage_service_instance.beginTransaction(storage_state.notes_workspace_id) catch unreachable;
+    context.storage_service_instance.beginTransaction(storage_state.notes_workspace_id) catch |err| native_util.bootProofFailure("platform scenarios", err);
     context.storage_service_instance.stagePut(
         storage_state.notes_workspace_id,
         "documents/notes.md",
         notes_object_id,
         notes_v3_version_id,
         .document,
-    ) catch unreachable;
-    _ = context.storage_service_instance.commit(storage_state.notes_workspace_id, 137) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
+    _ = context.storage_service_instance.commit(storage_state.notes_workspace_id, 137) catch |err| native_util.bootProofFailure("platform scenarios", err);
     support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_COMMIT");
     _ = recovery.restoreWorkspaceExport(
         recovery_boot.session(),
@@ -377,9 +378,9 @@ pub fn run(
         storage_state.notes_workspace_id,
         context.export_package,
         138,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:RESTORE_APPLIED");
-    const restored_notes = context.storage_service_instance.resolve(storage_state.notes_workspace_id, "documents/notes.md") catch unreachable;
+    const restored_notes = context.storage_service_instance.resolve(storage_state.notes_workspace_id, "documents/notes.md") catch |err| native_util.bootProofFailure("platform scenarios", err);
     _ = restored_notes;
 
     if (sync_service.findWorkspacePolicy(storage_state.notes_workspace_id) == null) {
@@ -393,7 +394,7 @@ pub fn run(
             .relay_policy_id = sync_state.relay_policy_id,
             .overlay_policy_id = sync_state.overlay_policy_id,
             .relay_domain = "relay.zigos.dev",
-        }) catch unreachable;
+        }) catch |err| native_util.bootProofFailure("platform scenarios", err);
     }
     if (recovery.repairSyncMetadata(
         recovery_boot.session(),
@@ -401,7 +402,7 @@ pub fn run(
         context.storage_service_instance,
         storage_state.notes_workspace_id,
         sync_state.tablet_device_principal,
-    ) catch unreachable and sync_service.findConflict(storage_state.notes_workspace_id, sync_state.tablet_device_principal, "documents/notes.md") == null) {
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err) and sync_service.findConflict(storage_state.notes_workspace_id, sync_state.tablet_device_principal, "documents/notes.md") == null) {
         support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:REPAIR_SYNC");
     }
 
@@ -415,7 +416,7 @@ pub fn run(
             sync_state.user_root_signer,
             recovery_rotated_signer,
             139,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     }
     if (sync_service.findDeviceRecord(recovery_device_principal).?.key_rotation_generation >= 2) {
         support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:ROTATE_KEYS");
@@ -428,7 +429,7 @@ pub fn run(
             recovery_device_principal,
             sync_state.user_root_signer,
             140,
-        ) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     }
     if (!sync_service.isTrustedDevice(recovery_device_principal)) {
         support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:REVOKE_TRUST");
@@ -451,11 +452,11 @@ pub fn run(
             .label = "notes-task",
             .entry = "app.notes",
         },
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("platform scenarios", err);
     if (notes_task.component_class == .app_component) {
         support.common.printBootMarker("ZIGOS:PLATFORM:UX:START_TASK");
     }
-    const task_view = context.compositor.openTaskView(notes_task, "Edit Notes") catch unreachable;
+    const task_view = context.compositor.openTaskView(notes_task, "Edit Notes") catch |err| native_util.bootProofFailure("platform scenarios", err);
     if (task_view.id != 0) {
         support.common.printBootMarker("ZIGOS:PLATFORM:UX:TASK_VIEW");
     }
@@ -465,18 +466,18 @@ pub fn run(
         storage_state.notes_workspace_id,
         "documents/notes.md",
         context.session_user,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     const workspace_record = context.storage_service_instance.findWorkspaceRecord(storage_state.notes_workspace_id).?;
     const workspace_view = context.compositor.openWorkspaceView(
         notes_task,
         storage_state.notes_workspace_id,
         workspace_record.labelSlice(),
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     const document_view = context.compositor.openDocumentView(
         notes_task,
         storage_state.notes_workspace_id,
         "documents/notes.md",
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     if (!opened_workspace.version_id.isZero()) {
         support.common.printBootMarker("ZIGOS:PLATFORM:UX:OPEN_WORKSPACE");
     }
@@ -493,14 +494,14 @@ pub fn run(
         sync_state.user_root_signer,
         paired_device_signer,
         paired_device_tick,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     context.update_ledger.recordDeviceTrustChange(
         context.session_user,
         paired_device_principal,
         true,
         paired_device_tick,
         "device paired",
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
     if (sync_service.isTrustedDevice(paired_device_principal)) {
         support.common.printBootMarker("ZIGOS:PLATFORM:UX:PAIR_DEVICE");
     }
@@ -510,10 +511,10 @@ pub fn run(
         context.session_user,
         .object_access,
         true,
-    ) catch unreachable) {
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err)) {
         support.common.printBootMarker("ZIGOS:PLATFORM:UX:REVIEW_PERMISSION");
     }
-    ux.recoverSystem(notes_task.id, context.session_user, "recovery-environment") catch unreachable;
+    ux.recoverSystem(notes_task.id, context.session_user, "recovery-environment") catch |err| native_util.bootProofFailure("platform scenarios", err);
     recordUxFlows(context, &ux, ux_flow_ledger_start_tick);
     if (ux.flow_count == 5) {
         support.common.printBootMarker(boot_markers.platform_ux_recover_system);
@@ -528,7 +529,7 @@ fn recordUxFlows(context: *support.Context, ux: *const native_ux.Controller, fir
     var index: usize = 0;
     while (index < ux.flow_count) : (index += 1) {
         const flow = ux.flowAtOrder(index) orelse continue;
-        context.update_ledger.recordTaskFlow(flow.*, first_tick + @as(u64, @intCast(index))) catch unreachable;
+        context.update_ledger.recordTaskFlow(flow.*, first_tick + @as(u64, @intCast(index))) catch |err| native_util.bootProofFailure("platform scenarios", err);
     }
 }
 
@@ -567,7 +568,7 @@ fn ensureImmutableBaseWorkspace(context: *support.Context) ImmutableBaseWorkspac
     };
     support.common.printBootMarker("ZIGOS:PLATFORM:IMMUTABLE_BASE:CREATE_START");
     return .{
-        .workspace = context.storage_service_instance.createWorkspaceRef(&request) catch unreachable,
+        .workspace = context.storage_service_instance.createWorkspaceRef(&request) catch |err| native_util.bootProofFailure("platform scenarios", err),
         .found_existing = false,
     };
 }
@@ -598,7 +599,7 @@ fn beginValidatedActivation(
     probe_tick: u64,
     validation_tick: u64,
 ) update_health.ActivationCheckResult {
-    manager.beginActivation(slot_index, activation_tick) catch unreachable;
+    manager.beginActivation(slot_index, activation_tick) catch |err| native_util.bootProofFailure("platform scenarios", err);
     return validateActivation(probe, manager, storage_probe_path, probe_tick, validation_tick);
 }
 
@@ -612,8 +613,8 @@ fn beginSuccessfulActivation(
     probe_tick: u64,
     validation_tick: u64,
 ) update_health.ActivationCheckResult {
-    manager.beginActivation(slot_index, activation_tick) catch unreachable;
-    update_health.recordBootSuccess(manager, boot_success_tick) catch unreachable;
+    manager.beginActivation(slot_index, activation_tick) catch |err| native_util.bootProofFailure("platform scenarios", err);
+    update_health.recordBootSuccess(manager, boot_success_tick) catch |err| native_util.bootProofFailure("platform scenarios", err);
     return validateActivation(probe, manager, storage_probe_path, probe_tick, validation_tick);
 }
 
@@ -647,7 +648,7 @@ fn validateActivation(
         },
         probe.context.update_ledger,
         validation_tick,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
 }
 
 fn emitRollbackMarker(
@@ -673,8 +674,8 @@ fn recordMeasuredBootComparison(
         context.storage_service_instance,
         measurement_owner,
         measurement_signer,
-    ) catch unreachable;
-    const comparison = journal.record(boot.*, 130) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("platform scenarios", err);
+    const comparison = journal.record(boot.*, 130) catch |err| native_util.bootProofFailure("platform scenarios", err);
     if (comparison.previous == null) {
         support.common.printBootMarker(boot_markers.platform_measured_boot_first);
         return;

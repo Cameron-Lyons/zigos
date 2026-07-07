@@ -1,4 +1,5 @@
 const manifest = @import("../policy/manifest.zig");
+const native_util = @import("../core/util.zig");
 const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
 const capability = @import("../kernel_api/capability.zig");
 const package_service = @import("../services/package_service.zig");
@@ -29,7 +30,7 @@ fn signDemoReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.Bund
         .ed25519,
         identity,
         &package_service.digestBundle(bundle),
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 pub fn seed(
@@ -61,7 +62,7 @@ pub fn seed(
             .expires_at_ticks = 1_000,
         },
         .audit = .{},
-    }) catch unreachable;
+    }) catch |err| native_util.bootProofFailure("bootstrap packages", err);
     var port = package_service.PackagePort.init(packages, capability_table);
     const authority = package_service.AuthorityContext{
         .task_id = task_id,
@@ -74,16 +75,16 @@ pub fn seed(
     installNotes(&port, authority, packages);
     installSync(&port, authority, packages);
     installCapture(&port, authority, packages);
-    capability_table.revokeGrant(package_authority.id) catch unreachable;
+    capability_table.revokeGrant(package_authority.id) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 fn trustDemoPublishers(port: *package_service.PackagePort, authority: package_service.AuthorityContext) void {
     const issuer = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
-    _ = port.trustPolicyAuthorityRoot(authority, issuer, signing.publicKeyFromByte(0x5A)) catch unreachable;
-    _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 41 }, issuer, "zigos.dev", signing.publicKey(viewer_signer) catch unreachable) catch unreachable;
-    _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 42 }, issuer, "zigos.dev", signing.publicKey(notes_signer) catch unreachable) catch unreachable;
-    _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 43 }, issuer, "zigos.dev", signing.publicKey(sync_signer) catch unreachable) catch unreachable;
-    _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 44 }, issuer, "zigos.dev", signing.publicKey(capture_signer) catch unreachable) catch unreachable;
+    _ = port.trustPolicyAuthorityRoot(authority, issuer, signing.publicKeyFromByte(0x5A)) catch |err| native_util.bootProofFailure("bootstrap packages", err);
+    _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 41 }, issuer, "zigos.dev", signing.publicKey(viewer_signer) catch |err| native_util.bootProofFailure("bootstrap packages", err)) catch |err| native_util.bootProofFailure("bootstrap packages", err);
+    _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 42 }, issuer, "zigos.dev", signing.publicKey(notes_signer) catch |err| native_util.bootProofFailure("bootstrap packages", err)) catch |err| native_util.bootProofFailure("bootstrap packages", err);
+    _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 43 }, issuer, "zigos.dev", signing.publicKey(sync_signer) catch |err| native_util.bootProofFailure("bootstrap packages", err)) catch |err| native_util.bootProofFailure("bootstrap packages", err);
+    _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 44 }, issuer, "zigos.dev", signing.publicKey(capture_signer) catch |err| native_util.bootProofFailure("bootstrap packages", err)) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 fn installViewer(port: *package_service.PackagePort, authority: package_service.AuthorityContext, packages: *package_service.Service) void {
@@ -138,7 +139,7 @@ fn installViewer(port: *package_service.PackagePort, authority: package_service.
         .bundle = bundle,
         .source_identity = store_source,
         .data_schema_version = 1,
-    }, null) catch unreachable;
+    }, null) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 fn installNotes(port: *package_service.PackagePort, authority: package_service.AuthorityContext, packages: *package_service.Service) void {
@@ -150,7 +151,7 @@ fn installNotes(port: *package_service.PackagePort, authority: package_service.A
         .bundle = bundle,
         .source_identity = store_source,
         .data_schema_version = 1,
-    }, null) catch unreachable;
+    }, null) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 fn installSync(port: *package_service.PackagePort, authority: package_service.AuthorityContext, packages: *package_service.Service) void {
@@ -162,7 +163,7 @@ fn installSync(port: *package_service.PackagePort, authority: package_service.Au
         .bundle = bundle,
         .source_identity = store_source,
         .data_schema_version = 1,
-    }, null) catch unreachable;
+    }, null) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 fn installCapture(port: *package_service.PackagePort, authority: package_service.AuthorityContext, packages: *package_service.Service) void {
@@ -174,5 +175,5 @@ fn installCapture(port: *package_service.PackagePort, authority: package_service
         .bundle = bundle,
         .source_identity = store_source,
         .data_schema_version = 1,
-    }, null) catch unreachable;
+    }, null) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }

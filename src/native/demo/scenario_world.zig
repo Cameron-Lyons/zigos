@@ -1,4 +1,5 @@
 const event_ledger = @import("../platform/event_ledger.zig");
+const native_util = @import("../core/util.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const support = @import("scenario_support.zig");
 const storage_scenarios = @import("storage_scenarios.zig");
@@ -14,15 +15,15 @@ pub fn run(context: *Context) void {
         context.storage_service_instance,
         context.package_service_principal,
         support.diagnostic_ledger_signer,
-    ) catch unreachable;
-    context.update_ledger.absorb(&early_boot_ledger) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("scenario world", err);
+    context.update_ledger.absorb(&early_boot_ledger) catch |err| native_util.bootProofFailure("scenario world", err);
     var sync_service = sync_service_mod.Service.initWithStorage(
         context.sync_service_id,
         context.sync_task_id,
         context.sync_service_principal,
         context.storage_service_instance,
         context.sync_resident_state,
-    ) catch unreachable;
+    ) catch |err| native_util.bootProofFailure("scenario world", err);
     const sync_state = sync_scenarios.run(context, &sync_service, storage_state);
     platform_scenarios.run(context, &sync_service, storage_state, sync_state);
 }

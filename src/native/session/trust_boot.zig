@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const native_util = @import("../core/util.zig");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
@@ -612,8 +613,8 @@ pub const TrustBoot = struct {
             &self.native_store.storage_service_instance,
             session_bootstrap.principals().package_service,
             measurement_signer,
-        ) catch unreachable;
-        var comparison = journal.record(boot.*, 130) catch unreachable;
+        ) catch |err| native_util.bootProofFailure("trust boot", err);
+        var comparison = journal.record(boot.*, 130) catch |err| native_util.bootProofFailure("trust boot", err);
         const current_summary = measured_boot.BootSummary.fromRecord(boot);
         if (comparison.previous == null) {
             if (direct_previous) |previous| {
