@@ -24,11 +24,7 @@ pub fn addCheckSteps(
     host_tests_step.dependOn(&test_artifacts.run_userspace_runtime_tests.step);
 
     const fmt_check_script =
-        \\if command -v jj >/dev/null 2>&1 && jj root >/dev/null 2>&1; then
-        \\  jj file list -T 'path ++ "\0"' '*.zig'
-        \\else
-        \\  git ls-files -z '*.zig'
-        \\fi | while IFS= read -r -d '' file; do [ -e "$file" ] && printf '%s\0' "$file"; done | xargs -0 ./scripts/zig.sh fmt --check
+        \\jj file list -T 'path ++ "\0"' '*.zig' | while IFS= read -r -d '' file; do [ -e "$file" ] && printf '%s\0' "$file"; done | xargs -0 ./scripts/zig.sh fmt --check
     ;
     const fmt_check_cmd = b.addSystemCommand(&.{
         "bash",

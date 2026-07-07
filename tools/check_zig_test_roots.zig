@@ -99,7 +99,7 @@ fn loadTrackedZigFiles(
     io: std.Io,
 ) !TrackedFiles {
     const result = try std.process.run(gpa, io, .{
-        .argv = &.{ "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "src" },
+        .argv = &.{ "jj", "file", "list", "-T", "path ++ \"\\0\"", "src" },
         .stdout_limit = .limited(common.child_stdout_max_bytes),
         .stderr_limit = .limited(common.child_stderr_max_bytes),
     });
@@ -109,9 +109,9 @@ fn loadTrackedZigFiles(
     switch (result.term) {
         .exited => |code| if (code != 0) {
             std.debug.print("{s}", .{result.stderr});
-            return error.GitLsFilesFailed;
+            return error.JjFileListFailed;
         },
-        else => return error.GitLsFilesFailed,
+        else => return error.JjFileListFailed,
     }
 
     var paths = std.StringHashMap(void).init(allocator);
