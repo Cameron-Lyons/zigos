@@ -808,13 +808,13 @@ fn verifiedDeviceGraphBoot(generation: u64, provenance: measured_boot.RootProven
 fn unverifiedDeviceGraphBoot(generation: u64) measured_boot.BootRecord {
     var recorder = measured_boot.Recorder.init();
     recorder.begin(generation);
-    recorder.add(.kernel, "kernel-zigos", "kernel=device-graph") catch unreachable;
-    recorder.add(.base_image, "stable-device-graph", "image=device-graph") catch unreachable;
-    recorder.add(.critical_service, "policy", "healthy") catch unreachable;
-    recorder.add(.critical_service, "storage", "healthy") catch unreachable;
-    recorder.add(.critical_service, "sync", "healthy") catch unreachable;
-    recorder.add(.critical_service, "network", "healthy") catch unreachable;
-    recorder.add(.policy, "device-graph-policy", "strict") catch unreachable;
-    recorder.add(.driver_set, "device-graph-drivers", "drivers") catch unreachable;
+    recorder.add(.kernel, "kernel-zigos", "kernel=device-graph") catch |err| native_util.impossibleByInvariantError("fresh recorder holds the fixed device-graph artifact set", err);
+    recorder.add(.base_image, "stable-device-graph", "image=device-graph") catch |err| native_util.impossibleByInvariantError("fresh recorder holds the fixed device-graph artifact set", err);
+    recorder.add(.critical_service, "policy", "healthy") catch |err| native_util.impossibleByInvariantError("fresh recorder holds the fixed device-graph artifact set", err);
+    recorder.add(.critical_service, "storage", "healthy") catch |err| native_util.impossibleByInvariantError("fresh recorder holds the fixed device-graph artifact set", err);
+    recorder.add(.critical_service, "sync", "healthy") catch |err| native_util.impossibleByInvariantError("fresh recorder holds the fixed device-graph artifact set", err);
+    recorder.add(.critical_service, "network", "healthy") catch |err| native_util.impossibleByInvariantError("fresh recorder holds the fixed device-graph artifact set", err);
+    recorder.add(.policy, "device-graph-policy", "strict") catch |err| native_util.impossibleByInvariantError("fresh recorder holds the fixed device-graph artifact set", err);
+    recorder.add(.driver_set, "device-graph-drivers", "drivers") catch |err| native_util.impossibleByInvariantError("fresh recorder holds the fixed device-graph artifact set", err);
     return recorder.finalize();
 }
