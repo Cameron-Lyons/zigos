@@ -29,8 +29,8 @@ const PIC_MASTER_HAS_SLAVE_ON_IRQ2: u8 = 0x04;
 const PIC_SLAVE_CASCADE_ID: u8 = 0x02;
 const PIC_TIMER_IRQ_BIT: u8 = 1 << 0;
 // Only the bootstrap PIT has a live PIC line. Every other line stays masked
-// (including PS/2 keyboard and the slave cascade) so unowned devices cannot
-// inject interrupts the dispatch table would drop after a blind EOI.
+// so unowned legacy IRQ sources cannot inject interrupts the dispatch table
+// would drop after a blind EOI.
 const PIC_MASTER_MASK: u8 = ~PIC_TIMER_IRQ_BIT;
 const PIC_SLAVE_MASK_ALL: u8 = 0xFF;
 

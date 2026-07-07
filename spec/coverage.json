@@ -1807,7 +1807,6 @@
         "src/native/drivers/bootstrap_driver_port.zig",
         "src/native/drivers/network_driver_task.zig",
         "src/native/drivers/storage_driver_task.zig",
-        "src/kernel/drivers/keyboard.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
         "src/kernel/drivers/nvme.zig",
