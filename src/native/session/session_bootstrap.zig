@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const native_util = @import("../core/util.zig");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const common = if (builtin.target.os.tag == .freestanding)
@@ -135,7 +136,8 @@ pub fn registerCoreServices(
     runtime_service.bind(services.runtime_service_record.id, ids.task_runtime_service);
 
     for (service_catalog.catalog) |entry| {
-        const service = serviceRecordForClass(services, entry.class) orelse unreachable;
+        const service = serviceRecordForClass(services, entry.class) orelse
+            native_util.impossibleByInvariant("the service catalog registers a record for every class");
         _ = supervisor.markHealthy(service.id, boot_health_tick);
     }
 

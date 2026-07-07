@@ -104,7 +104,8 @@ pub fn run(
         },
     }, 3) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:ENDPOINT_CREATE:OK");
-    const storage_record = env.runtime.find(storage_task_desc.task_id) orelse unreachable;
+    const storage_record = env.runtime.find(storage_task_desc.task_id) orelse
+        native_util.impossibleByInvariant("storage task registered earlier in this bootstrap remains findable");
     env.service_directory.register(
         state.services.storage_service.id,
         storage_task_desc.task_id,
@@ -160,7 +161,8 @@ pub fn run(
         .header = component_port.makeHeader(.endpoint_recv, 9, storage_task_desc.task_id),
         .endpoint_capability_id = storage_endpoint.capability_id,
         .receiver_task_id = storage_task_desc.task_id,
-    }, 7) catch |err| native_util.bootProofFailure("transport checks", err) orelse unreachable;
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err) orelse
+        native_util.impossibleByInvariant("endpointRecv returns the frame sent one step earlier");
     if (std.mem.eql(u8, transport_probe_received.payload[0..transport_probe_received.payload_len], "workspace-open") and
         transport_probe_received.attached_capability != null)
     {
