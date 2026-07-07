@@ -4,7 +4,6 @@ const driver_service = @import("driver_service.zig");
 pub const DetectionSource = enum(u8) {
     absent,
     synthetic,
-    ata_bootstrap,
     pci_inventory,
     nvme_pci_inventory,
     intel_i225_lm_inventory,
@@ -89,15 +88,13 @@ pub fn requireProductionDriverDeviceId(device_class: driver_service.DeviceClass)
     return record.device_id;
 }
 
-/// Inventory admission is the production-binding policy plus exactly one
-/// bootstrap concession: the early ATA storage path may enter the inventory
-/// before a production driver can bind it.
+/// Inventory admission follows production-binding policy; modeled test boots
+/// seed target-grade records instead of carrying non-production storage sources.
 pub fn sourceCanEnterInventory(
     device_class: driver_service.DeviceClass,
     source: DetectionSource,
     device_id: u64,
 ) bool {
-    if (device_class == .storage_controller and source == .ata_bootstrap and device_id != 0) return true;
     return sourceCanBindProductionDriver(device_class, source, device_id);
 }
 
@@ -121,7 +118,6 @@ pub fn sourceName(source: DetectionSource) []const u8 {
     return switch (source) {
         .absent => "absent",
         .synthetic => "synthetic",
-        .ata_bootstrap => "ata_bootstrap",
         .pci_inventory => "pci_inventory",
         .nvme_pci_inventory => "nvme_pci_inventory",
         .intel_i225_lm_inventory => "intel_i225_lm_inventory",
@@ -226,22 +222,12 @@ test "device inventory refuses synthetic records for production driver binding" 
     try std.testing.expect(sourceCanBindProductionDriver(.network_adapter, network.source, network.device_id));
 }
 
-test "device inventory records ATA bootstrap but requires target-grade NVMe for production storage binding" {
+test "device inventory admits only target-grade NVMe for production storage binding" {
     reset();
 
     registerDetected(.storage_controller, 0x1F001, .nvme_pci_inventory, false);
     try std.testing.expect(!recordForClass(.storage_controller).detected);
     try std.testing.expectError(error.DeviceNotDetected, requireProductionDriverDeviceId(.storage_controller));
-
-    registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
-    const ata_storage = recordForClass(.storage_controller);
-    try std.testing.expect(ata_storage.detected);
-    try std.testing.expectEqual(DetectionSource.ata_bootstrap, ata_storage.source);
-    try std.testing.expect(sourceCanEnterInventory(.storage_controller, ata_storage.source, ata_storage.device_id));
-    try std.testing.expect(!sourceCanBindProductionDriver(.storage_controller, ata_storage.source, ata_storage.device_id));
-    try std.testing.expectError(error.NonProductionDeviceBinding, requireProductionDriverDeviceId(.storage_controller));
-
-    reset();
 
     registerDetected(.storage_controller, 0x8086_9A0B_0001, .pci_inventory, false);
     try std.testing.expect(!recordForClass(.storage_controller).detected);
@@ -270,13 +256,11 @@ test "device inventory only admits xHCI input for production binding" {
     try std.testing.expectEqual(@as(u64, 0x8086_A0ED_0001), try requireProductionDriverDeviceId(.input_device));
 }
 
-test "device inventory promotes observed ATA storage to target NVMe production binding" {
+test "device inventory keeps first target NVMe production binding stable" {
     reset();
 
-    registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
-    try std.testing.expectError(error.NonProductionDeviceBinding, requireProductionDriverDeviceId(.storage_controller));
-
     registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
+    registerDetected(.storage_controller, 0x8086_9A0B_0002, .nvme_pci_inventory, false);
     const storage = recordForClass(.storage_controller);
     try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), storage.device_id);
     try std.testing.expectEqual(DetectionSource.nvme_pci_inventory, storage.source);
@@ -286,7 +270,7 @@ test "device inventory promotes observed ATA storage to target NVMe production b
 test "device inventory records discovered hardware without overwriting the first handoff record" {
     reset();
 
-    registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
+    registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
     registerDetected(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory, false);
     registerDetected(.network_adapter, 0xDEAD_BEEF, .intel_i225_lm_inventory, false);
     registerDetected(.usb_controller, 0x8086_A0ED_0001, .xhci_inventory, false);
@@ -299,13 +283,13 @@ test "device inventory records discovered hardware without overwriting the first
     const input = recordForClass(.input_device);
     const compositor_policy = recordForClass(.compositor_policy);
 
-    try std.testing.expectEqual(@as(u64, 0x1F001), storage.device_id);
-    try std.testing.expectEqual(DetectionSource.ata_bootstrap, storage.source);
+    try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), storage.device_id);
+    try std.testing.expectEqual(DetectionSource.nvme_pci_inventory, storage.source);
     try std.testing.expect(storage.detected);
-    try std.testing.expect(storage.kernel_bootstrap);
+    try std.testing.expect(!storage.kernel_bootstrap);
     try std.testing.expect(sourceCanEnterInventory(.storage_controller, storage.source, storage.device_id));
-    try std.testing.expect(!sourceCanBindProductionDriver(.storage_controller, storage.source, storage.device_id));
-    try std.testing.expectError(error.NonProductionDeviceBinding, requireProductionDriverDeviceId(.storage_controller));
+    try std.testing.expect(sourceCanBindProductionDriver(.storage_controller, storage.source, storage.device_id));
+    try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), try requireProductionDriverDeviceId(.storage_controller));
 
     try std.testing.expectEqual(@as(u64, 0x8086_15F2_0001), network.device_id);
     try std.testing.expectEqual(DetectionSource.intel_i225_lm_inventory, network.source);

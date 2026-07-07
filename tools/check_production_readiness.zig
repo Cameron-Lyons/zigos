@@ -701,9 +701,9 @@ fn validateNuc11tnki5KernelProofSources(
         "if (!sourceCanEnterInventory(device_class, source, device_id)) return",
         ".platform_policy",
         "device inventory refuses synthetic records for production driver binding",
-        "device inventory records ATA bootstrap but requires target-grade NVMe for production storage binding",
+        "device inventory admits only target-grade NVMe for production storage binding",
         "device inventory only admits xHCI input for production binding",
-        "device inventory promotes observed ATA storage to target NVMe production binding",
+        "device inventory keeps first target NVMe production binding stable",
     };
     for (required_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) == null) {
@@ -718,6 +718,7 @@ fn validateNuc11tnki5KernelProofSources(
         "recordAtaBootstrapGrant",
         "ataBootstrapGrant",
         "ataBootstrapBridgeGrant",
+        "ata_bootstrap",
         "ata_bootstrap_grant",
         "captured_ata_bootstrap",
     };

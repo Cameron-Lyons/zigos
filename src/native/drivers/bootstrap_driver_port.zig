@@ -812,10 +812,10 @@ test "storage backend activation requires target nvme inventory" {
     try std.testing.expect(!storage_volume.hasAttachedDevice());
 
     reset();
-    const ata_device_id: u64 = 0x0000_1F00_0000_5203;
-    device_inventory.registerDetected(.storage_controller, ata_device_id, .ata_bootstrap, true);
-    try std.testing.expect(try publishStorageBackend(ata_device_id, "test-storage", backend, false));
-    try std.testing.expect(!activateStorageBackend(ata_device_id, 0x5204, 0, 0, 1, 0, null));
+    const wrong_source_device_id: u64 = 0x0000_8086_9A0B_5203;
+    device_inventory.registerDetected(.storage_controller, wrong_source_device_id, .pci_inventory, false);
+    try std.testing.expect(try publishStorageBackend(wrong_source_device_id, "test-storage", backend, false));
+    try std.testing.expect(!activateStorageBackend(wrong_source_device_id, 0x5204, 0, 0, 1, 0, null));
     try std.testing.expect(!storage_volume.hasAttachedDevice());
 }
 

@@ -301,7 +301,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(!compositor_policy_rights.has(.object_write));
 
     device_inventory.reset();
-    device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
+    device_inventory.registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
     device_inventory.registerDetected(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory, false);
     device_inventory.registerDetected(.usb_controller, 0x8086A0ED0001, .xhci_inventory, false);
     device_inventory.registerDetected(.input_device, 0x8086A0ED0001, .xhci_inventory, false);
@@ -310,8 +310,8 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     const usb_handoff = device_inventory.recordForClass(.usb_controller);
     const input_handoff = device_inventory.recordForClass(.input_device);
     try std.testing.expect(storage_handoff.detected);
-    try std.testing.expect(storage_handoff.kernel_bootstrap);
-    try std.testing.expectEqualStrings("ata_bootstrap", device_inventory.sourceName(storage_handoff.source));
+    try std.testing.expect(!storage_handoff.kernel_bootstrap);
+    try std.testing.expectEqualStrings("nvme_pci_inventory", device_inventory.sourceName(storage_handoff.source));
     try std.testing.expect(network_handoff.detected);
     try std.testing.expect(!network_handoff.kernel_bootstrap);
     try std.testing.expectEqualStrings("intel_i225_lm_inventory", device_inventory.sourceName(network_handoff.source));

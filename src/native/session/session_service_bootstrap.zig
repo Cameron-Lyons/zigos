@@ -1101,17 +1101,16 @@ fn proveAcceleratorDriverQueueEvents(
     return true;
 }
 
-test "hosted model inventory promotes ATA bootstrap storage only for modeled boots" {
+test "hosted model inventory seeds target NVMe storage directly" {
     device_inventory.reset();
     device_inventory.setModelDeviceInventory(false);
-    device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
     seedHostedModelDeviceInventory();
-    try std.testing.expectEqual(device_inventory.DetectionSource.ata_bootstrap, device_inventory.recordForClass(.storage_controller).source);
-    try std.testing.expectError(error.NonProductionDeviceBinding, device_inventory.requireProductionDriverDeviceId(.storage_controller));
+    const hosted_storage = device_inventory.recordForClass(.storage_controller);
+    try std.testing.expectEqual(device_inventory.DetectionSource.nvme_pci_inventory, hosted_storage.source);
+    try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), try device_inventory.requireProductionDriverDeviceId(.storage_controller));
 
     device_inventory.reset();
     device_inventory.setModelDeviceInventory(true);
-    device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
     seedHostedModelDeviceInventory();
     const modeled_storage = device_inventory.recordForClass(.storage_controller);
     try std.testing.expectEqual(device_inventory.DetectionSource.nvme_pci_inventory, modeled_storage.source);
