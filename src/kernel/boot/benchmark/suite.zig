@@ -475,8 +475,8 @@ fn restoreStorageVolumeSeedImage() void {
 fn prepareBenchmarkUserspaceImages() void {
     if (benchmark_image_context.prepared) return;
 
-    benchmark_image_context.app_image = generated_image_fixtures.appImage() catch unreachable;
-    benchmark_image_context.service_image = generated_image_fixtures.serviceImage() catch unreachable;
+    benchmark_image_context.app_image = generated_image_fixtures.appImage() catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    benchmark_image_context.service_image = generated_image_fixtures.serviceImage() catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     benchmark_image_context.prepared = true;
 }
 
@@ -500,7 +500,7 @@ fn prepareFileBridgeFixture() void {
         ids.object(900),
         ids.version(file_bridge_context.expected_version_id),
         .document,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     file_bridge_context.version_present = true;
     const authority = file_bridge_context.capability_table.mintBootRoot(.{
         .holder = app(1),
@@ -518,7 +518,7 @@ fn prepareFileBridgeFixture() void {
             .expires_at_ticks = std.math.maxInt(u64),
         },
         .audit = .{},
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     file_bridge_context.bridge = file_bridge.Bridge.init(
         &file_bridge_context,
         &file_bridge_context.capability_table,
@@ -539,7 +539,7 @@ fn prepareNetworkPolicyFixture() void {
         .target = "relay.zigos.dev",
         .require_remote_attestation = true,
         .pinned_root_digest = digest,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     network_policy_context.policy_id = policy.id;
     network_policy_context.evidence = .{
         .destination = .{ .domain = "relay.zigos.dev" },
@@ -553,11 +553,11 @@ fn preparePermissionReviewFixture() void {
     permission_review_context.decisions = .{
         permission_review.decisionFromCommand(
             permission_review_requests[0],
-            permission_review.parseCommand("allow local lease=200") catch unreachable,
+            permission_review.parseCommand("allow local lease=200") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
         ),
         permission_review.decisionFromCommand(
             permission_review_requests[1],
-            permission_review.parseCommand("allow lease=30") catch unreachable,
+            permission_review.parseCommand("allow lease=30") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
         ),
     };
 }
@@ -581,15 +581,15 @@ fn prepareBackgroundFixture() void {
         .launch = .{
             .bundle_id = background_bundle.bundle_id,
         },
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     background_context.task_id = task.id;
 }
 
 fn prepareIndexingFixture() void {
     indexing_context.service = indexing_service.Service.init();
-    indexing_context.service.upsert(1, 100, 1, "Alpha Notes", "alpha alpha roadmap") catch unreachable;
-    indexing_context.service.upsert(1, 101, 2, "Quarterly Report", "finance alpha summary") catch unreachable;
-    indexing_context.service.upsert(2, 200, 1, "Private Contract", "alpha restricted") catch unreachable;
+    indexing_context.service.upsert(1, 100, 1, "Alpha Notes", "alpha alpha roadmap") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    indexing_context.service.upsert(1, 101, 2, "Quarterly Report", "finance alpha summary") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    indexing_context.service.upsert(2, 200, 1, "Private Contract", "alpha restricted") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn prepareWorkspaceCommitFixture() void {
@@ -597,14 +597,14 @@ fn prepareWorkspaceCommitFixture() void {
     const notes = workspace_commit_context.baseline.create(.{
         .owner = app(41),
         .label = "benchmark-notes",
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     workspace_commit_context.workspace_id = notes.id;
 
-    workspace_commit_context.baseline.beginTransaction(notes.id) catch unreachable;
-    workspace_commit_context.baseline.stagePut(notes.id, "documents/plan.md", ids.object(900), ids.version(901), .document) catch unreachable;
-    workspace_commit_context.baseline.stagePut(notes.id, "assets/cover.jpg", ids.object(902), ids.version(903), .media_asset) catch unreachable;
-    workspace_commit_context.baseline.stagePut(notes.id, "collections/inbox", ids.object(904), ids.version(905), .collection) catch unreachable;
-    _ = workspace_commit_context.baseline.commit(notes.id, 10) catch unreachable;
+    workspace_commit_context.baseline.beginTransaction(notes.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    workspace_commit_context.baseline.stagePut(notes.id, "documents/plan.md", ids.object(900), ids.version(901), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    workspace_commit_context.baseline.stagePut(notes.id, "assets/cover.jpg", ids.object(902), ids.version(903), .media_asset) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    workspace_commit_context.baseline.stagePut(notes.id, "collections/inbox", ids.object(904), ids.version(905), .collection) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = workspace_commit_context.baseline.commit(notes.id, 10) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn prepareStorageVolumeFixture() void {
@@ -614,24 +614,24 @@ fn prepareStorageVolumeFixture() void {
     const record = storage_volume_context.workspaces.create(.{
         .owner = owner,
         .label = "volume-bench",
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const workspace_id = record.id;
     const save_count = @as(usize, storage_volume.replay_gate_segments) + 1;
     for (0..save_count) |index| {
-        storage_volume_context.workspaces.beginTransaction(workspace_id) catch unreachable;
+        storage_volume_context.workspaces.beginTransaction(workspace_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
         storage_volume_context.workspaces.stagePut(
             workspace_id,
             "benchmarks/storage-volume.md",
             ids.object(0xBEE0),
             ids.version(900 + @as(u64, @intCast(index))),
             .document,
-        ) catch unreachable;
-        _ = storage_volume_context.workspaces.commit(workspace_id, 800 + @as(u64, @intCast(index))) catch unreachable;
+        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+        _ = storage_volume_context.workspaces.commit(workspace_id, 800 + @as(u64, @intCast(index))) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
         _ = storage_volume_context.volume.saveToImage(
             storage_volume_context.seed_image[0..],
             &storage_volume_context.store,
             &storage_volume_context.workspaces,
-        ) catch unreachable;
+        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     }
 
     @memcpy(storage_volume_context.pristine_image[0..], storage_volume_context.seed_image[0..]);
@@ -667,14 +667,14 @@ fn prepareTaskCheckpointFixture() void {
             .bundle_id = "app.sync",
         },
         .userspace_image = &sync_image,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     task_checkpoint_context.primary_task_id = primary.id;
     _ = task_checkpoint_context.source_runtime.attachComponent(primary.id, .{
         .label = "sync-worker",
         .entry = "app.sync.worker",
-    }, 60) catch unreachable;
-    task_checkpoint_context.source_runtime.grantCapability(primary.id, 301) catch unreachable;
-    task_checkpoint_context.source_runtime.grantCapability(primary.id, 302) catch unreachable;
+    }, 60) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    task_checkpoint_context.source_runtime.grantCapability(primary.id, 301) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    task_checkpoint_context.source_runtime.grantCapability(primary.id, 302) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = task_checkpoint_context.source_runtime.reserveBackgroundWork(
         primary.id,
         .{
@@ -685,12 +685,12 @@ fn prepareTaskCheckpointFixture() void {
         .local_network_only,
         .status_only,
         61,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     task_checkpoint_context.source_runtime.audit(primary.id, .{
         .kind = .service_connected,
         .detail = 7,
         .tick = 62,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     const helper = task_checkpoint_context.source_runtime.createTask(.{
         .owner = service(121),
@@ -707,14 +707,14 @@ fn prepareTaskCheckpointFixture() void {
             .label = "checkpoint-helper",
             .entry = "service.checkpoint.helper",
         },
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     task_checkpoint_context.secondary_task_id = helper.id;
-    task_checkpoint_context.source_runtime.grantCapability(helper.id, 401) catch unreachable;
+    task_checkpoint_context.source_runtime.grantCapability(helper.id, 401) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     task_checkpoint_context.source_runtime.audit(helper.id, .{
         .kind = .policy_allowed,
         .detail = 1,
         .tick = 63,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn preparePackageFixture() void {
@@ -724,7 +724,7 @@ fn preparePackageFixture() void {
     trustBenchmarkPackagePublisher(&package_context.service);
     const slot = &package_context.service.slots.slots[0];
     slot.in_use = true;
-    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
+    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     package_context.service.rebuildIndexes();
 }
 
@@ -732,13 +732,13 @@ fn trustBenchmarkPackagePublisher(service_ref: *package_service.Service) void {
     _ = service_ref.trust_store.bindPolicyAuthorityRoot(
         package_policy_authority,
         signing.publicKeyFromByte(0x51),
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = service_ref.trust_store.bindPublisher(
         package_publisher_principal,
         package_policy_authority,
         package_bundle_v1.publisher,
-        signing.publicKey(package_signer_identity) catch unreachable,
-    ) catch unreachable;
+        signing.publicKey(package_signer_identity) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn signedPackageBundle(template: manifest.BundleManifest) manifest.BundleManifest {
@@ -747,7 +747,7 @@ fn signedPackageBundle(template: manifest.BundleManifest) manifest.BundleManifes
         .ed25519,
         package_signer_identity,
         &package_service.digestBundle(bundle),
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return bundle;
 }
 
@@ -770,7 +770,7 @@ fn prepareOverlaySessionFixture() void {
     var sync_port = sync_service.SyncPort.init(&overlay_session_context.service, &overlay_session_context.capability_table);
     const authority = overlay_session_context.authority;
     const owner = user(19);
-    _ = sync_port.ensureUserRoot(authority, owner, "overlay-owner", signer("overlay-user", 0x61)) catch unreachable;
+    _ = sync_port.ensureUserRoot(authority, owner, "overlay-owner", signer("overlay-user", 0x61)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = sync_port.enrollTrustedDevice(
         authority,
         owner,
@@ -779,7 +779,7 @@ fn prepareOverlaySessionFixture() void {
         signer("overlay-user", 0x61),
         signer("overlay-laptop", 0x62),
         10,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = sync_port.enrollTrustedDevice(
         authority,
         owner,
@@ -788,28 +788,28 @@ fn prepareOverlaySessionFixture() void {
         signer("overlay-user", 0x61),
         signer("overlay-tablet", 0x63),
         11,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     const local_policy = sync_port.createNetworkPolicy(authority, .{
         .owner = overlay_session_context.service.owner,
         .workspace_id = overlay_session_context.workspace_id,
         .label = "overlay-local",
         .mode = .local_network,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const overlay_policy = sync_port.createNetworkPolicy(authority, .{
         .owner = overlay_session_context.service.owner,
         .workspace_id = overlay_session_context.workspace_id,
         .label = "overlay-service",
         .mode = .named_service_identity,
         .target = "overlay.workspace.sync",
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const relay_policy = sync_port.createNetworkPolicy(authority, .{
         .owner = overlay_session_context.service.owner,
         .workspace_id = overlay_session_context.workspace_id,
         .label = "overlay-relay",
         .mode = .named_domain,
         .target = "relay.zigos.dev",
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = sync_port.configureWorkspacePolicy(authority, .{
         .workspace_id = overlay_session_context.workspace_id,
         .owner = owner,
@@ -817,19 +817,19 @@ fn prepareOverlaySessionFixture() void {
         .relay_policy_id = relay_policy.id,
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = "relay.zigos.dev",
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = sync_port.configureOverlay(
         authority,
         overlay_session_context.workspace_id,
         overlay_session_context.source_device,
         "overlay.workspace.sync",
         true,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = sync_port.publishPrivateService(
         authority,
         overlay_session_context.workspace_id,
         "notes.remote",
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 // Host-side timing noise (TCG JIT warmup, runner preemption) only ever adds
@@ -901,7 +901,7 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
             .policy_generation = 1,
             .source_task_id = 700 + iteration,
         },
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const derived = table.derive(.{
         .parent_capability_id = parent.id,
         .holder = app(11),
@@ -919,7 +919,7 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
             .policy_generation = 1,
             .source_task_id = 700 + iteration,
         },
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return derived.id + derived.target.id + derived.scope.workspace_id.?;
 }
 
@@ -946,14 +946,14 @@ fn benchmarkCapabilityMintReuseFreeSlot(iteration: u32) u64 {
                 .issued_at_ticks = 1,
                 .expires_at_ticks = 1000,
             },
-        }) catch unreachable;
+        }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
         capability_id.* = minted.id;
         checksum +%= minted.id;
     }
 
     var index: usize = 0;
     while (index < minted_ids.len) : (index += 2) {
-        table.revokeGrant(minted_ids[index]) catch unreachable;
+        table.revokeGrant(minted_ids[index]) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     }
 
     index = 0;
@@ -974,7 +974,7 @@ fn benchmarkCapabilityMintReuseFreeSlot(iteration: u32) u64 {
                 .issued_at_ticks = 1,
                 .expires_at_ticks = 1000,
             },
-        }) catch unreachable;
+        }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
         checksum +%= minted.id + minted.holder.serial;
     }
 
@@ -1004,7 +1004,7 @@ fn benchmarkCapabilityTargetGenerationLookup(iteration: u32) u64 {
                 .issued_at_ticks = 1,
                 .expires_at_ticks = 1000,
             },
-        }) catch unreachable;
+        }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
         checksum +%= slot.id;
     }
 
@@ -1012,7 +1012,7 @@ fn benchmarkCapabilityTargetGenerationLookup(iteration: u32) u64 {
         if (table.isUsable(capability_record, 10)) checksum +%= @as(u64, @intCast(index + 1));
     }
 
-    table.revokeTargetAuthority(capabilities[capabilities.len - 1].id) catch unreachable;
+    table.revokeTargetAuthority(capabilities[capabilities.len - 1].id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     if (!table.isUsable(capabilities[capabilities.len - 1], 10)) checksum +%= capabilities[capabilities.len - 1].target.id;
     return checksum;
 }
@@ -1027,7 +1027,7 @@ fn benchmarkPermissionReviewRender(iteration: u32) u64 {
         &permission_review_buffer,
         &session,
         &permission_review_bundle,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const grants = permission_review.decisionsToGrants(
         &permission_review_bundle,
         permission_review_context.decisions[0..],
@@ -1047,7 +1047,7 @@ fn benchmarkNetworkPolicyAuthorize(iteration: u32) u64 {
     const decision = network_policy_context.directory.authorizeConnection(
         network_policy_context.policy_id,
         network_policy_context.evidence,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return @as(u64, @intFromBool(decision.allowed)) +
         @as(u64, @intFromBool(decision.attestation_required)) +
         @as(u64, @intFromBool(decision.identity_pinned)) +
@@ -1062,14 +1062,14 @@ fn benchmarkBackgroundDispatch(iteration: u32) u64 {
         "sync",
         .sync_completion,
         40 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = background_context.dispatcher.complete(&background_context.runtime, .{
         .record_id = decision.record_id.?,
         .expected_task_id = background_context.task_id,
         .expected_background_task_id = "sync",
         .expected_trigger = .sync_completion,
         .tick = 45 + iteration,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const task = background_context.runtime.find(background_context.task_id) orelse unreachable;
     return @intFromBool(decision.allowed) +
         decision.expected_duration_seconds +
@@ -1113,7 +1113,7 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
     const object = shared.createWithAccess(task_id, kibibytes(64), .{
         .cpu = true,
         .gpu = true,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const claim = controller.claimWithSharedMemory(.{
         .task_id = task_id.raw(),
         .request = .{
@@ -1122,8 +1122,8 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
             .shared_memory_bytes = object.size_bytes,
         },
         .shared_memory_object_id = object.id,
-    }, &shared) catch unreachable;
-    const released = controller.releaseClaim(claim.id, &shared) catch unreachable;
+    }, &shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const released = controller.releaseClaim(claim.id, &shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return claim.id + object.id.raw() + @intFromBool(released) + @intFromEnum(claim.engine);
 }
 
@@ -1133,7 +1133,7 @@ fn benchmarkFileBridgeResolve(iteration: u32) u64 {
         .workspace_id = file_bridge_context.expected_workspace_id,
         .path = "documents/plan.md",
         .access = .read,
-    }, file_bridge_context.requester, file_bridge_context.authority_capability_id, 30 + iteration) catch unreachable;
+    }, file_bridge_context.requester, file_bridge_context.authority_capability_id, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return view.object_id + view.version_id + view.path_len + @intFromBool(view.readable);
 }
 
@@ -1142,17 +1142,17 @@ fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
     const directory = &workspace_commit_context.baseline;
     const workspace_id = workspace_commit_context.workspace_id;
 
-    directory.beginTransaction(workspace_id) catch unreachable;
-    directory.stagePut(workspace_id, "documents/plan.md", ids.object(900), ids.version(1_100 + iteration), .document) catch unreachable;
-    directory.stageDelete(workspace_id, "assets/cover.jpg") catch unreachable;
-    directory.stagePut(workspace_id, "documents/draft.md", ids.object(1_200 + iteration), ids.version(1_300 + iteration), .document) catch unreachable;
-    directory.stagePut(workspace_id, "documents/tmp.md", ids.object(1_400 + iteration), ids.version(1_500 + iteration), .document) catch unreachable;
-    directory.stageDelete(workspace_id, "documents/tmp.md") catch unreachable;
+    directory.beginTransaction(workspace_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    directory.stagePut(workspace_id, "documents/plan.md", ids.object(900), ids.version(1_100 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    directory.stageDelete(workspace_id, "assets/cover.jpg") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    directory.stagePut(workspace_id, "documents/draft.md", ids.object(1_200 + iteration), ids.version(1_300 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    directory.stagePut(workspace_id, "documents/tmp.md", ids.object(1_400 + iteration), ids.version(1_500 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    directory.stageDelete(workspace_id, "documents/tmp.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
-    const generation = directory.commit(workspace_id, 70 + iteration) catch unreachable;
-    const entries = directory.entries(workspace_id) catch unreachable;
-    const plan = directory.resolve(workspace_id, "documents/plan.md") catch unreachable;
-    const draft = directory.resolve(workspace_id, "documents/draft.md") catch unreachable;
+    const generation = directory.commit(workspace_id, 70 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const entries = directory.entries(workspace_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const plan = directory.resolve(workspace_id, "documents/plan.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const draft = directory.resolve(workspace_id, "documents/draft.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return generation + entries.len + plan.version_id.raw() + draft.object_id.raw();
 }
 
@@ -1164,7 +1164,7 @@ fn benchmarkStorageVolumeReplaySegmentedLog(iteration: u32) u64 {
         storage_volume_context.seed_image[0..],
         &storage_volume_context.store,
         &storage_volume_context.workspaces,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const record = storage_volume_context.workspaces.findOwned(app(0xBEE0), "volume-bench") orelse unreachable;
     return generation + record.generation + record.entryCount();
 }
@@ -1175,41 +1175,41 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
         storage_volume_context.seed_image[0..],
         &storage_volume_context.store,
         &storage_volume_context.workspaces,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const record = storage_volume_context.workspaces.findOwned(app(0xBEE0), "volume-bench") orelse unreachable;
-    storage_volume_context.workspaces.beginTransaction(record.id) catch unreachable;
+    storage_volume_context.workspaces.beginTransaction(record.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     storage_volume_context.workspaces.stagePut(
         record.id,
         "benchmarks/storage-volume.md",
         ids.object(0xBEE0),
         ids.version(10_000 + @as(u64, iteration)),
         .document,
-    ) catch unreachable;
-    _ = storage_volume_context.workspaces.commit(record.id, 10_000 + @as(u64, iteration)) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = storage_volume_context.workspaces.commit(record.id, 10_000 + @as(u64, iteration)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
-    const before_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch unreachable;
+    const before_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const result = storage_volume_context.volume.saveToImage(
         storage_volume_context.seed_image[0..],
         &storage_volume_context.store,
         &storage_volume_context.workspaces,
-    ) catch unreachable;
-    const after_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const after_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return result.generation + after_compacted - before_compacted + record.generation;
 }
 
 fn benchmarkPackageRevision(iteration: u32) u64 {
     _ = iteration;
     const slot = &package_context.service.slots.slots[0];
-    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
+    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     package_service_bundle_ops.installRevision(
         &slot.bundle,
         package_context.signed_v2,
         "store:zigos",
         2,
         crypto_hash.digestFromByte(0x22),
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const active = package_service_bundle_ops.resolveActiveManifest(&slot.bundle, &package_context.resolved);
-    const launch_plan = package_context.service.buildLaunchPlan("app.notes") catch unreachable;
+    const launch_plan = package_context.service.buildLaunchPlan("app.notes") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     package_service_bundle_ops.rollback(&slot.bundle);
     return active.version_minor +
         launch_plan.component_count +
@@ -1247,7 +1247,7 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
         .source_principal = source,
         .label = "render reel",
         .visibility = .task,
-    }, &media_context.scheduler, &media_context.notifications, 20 + iteration) catch unreachable;
+    }, &media_context.scheduler, &media_context.notifications, 20 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const print_job = media_context.service.submit(.{
         .kind = .print_document,
         .task_id = 502 + iteration,
@@ -1256,10 +1256,10 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
         .label = "print itinerary",
         .printer_identity = "printer://lobby",
         .visibility = .user,
-    }, &media_context.scheduler, &media_context.notifications, 21 + iteration) catch unreachable;
+    }, &media_context.scheduler, &media_context.notifications, 21 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
-    _ = media_context.service.complete(print_job.id, &media_context.scheduler, &media_context.notifications, 30 + iteration) catch unreachable;
-    _ = media_context.service.complete(export_job.id, &media_context.scheduler, &media_context.notifications, 31 + iteration) catch unreachable;
+    _ = media_context.service.complete(print_job.id, &media_context.scheduler, &media_context.notifications, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = media_context.service.complete(export_job.id, &media_context.scheduler, &media_context.notifications, 31 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     return export_job.id +
         print_job.id +
@@ -1282,14 +1282,14 @@ fn benchmarkEventLedgerExport(iteration: u32) u64 {
         20 + iteration,
         "org policy denied capture",
         true,
-    ) catch unreachable;
-    event_ledger_context.ledger.recordProcessCrash(.network_stack, service_subject, 21 + iteration, 5001, "segfault") catch unreachable;
-    event_ledger_context.ledger.recordDriverRestart(.media_print_helpers, service_subject, 88 + iteration, 22 + iteration, "audio-print restarted") catch unreachable;
-    event_ledger_context.ledger.recordUpdateTransition(service_subject, 1, .boot, true, 23 + iteration, "rolled back to stable-a") catch unreachable;
-    event_ledger_context.ledger.recordSyncConflict(user_subject, 5, 24 + iteration, "documents/tax-return.pdf conflict", true) catch unreachable;
-    event_ledger_context.ledger.recordDeviceTrustChange(user_subject, device_subject, false, 25 + iteration, "device revoked") catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    event_ledger_context.ledger.recordProcessCrash(.network_stack, service_subject, 21 + iteration, 5001, "segfault") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    event_ledger_context.ledger.recordDriverRestart(.media_print_helpers, service_subject, 88 + iteration, 22 + iteration, "audio-print restarted") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    event_ledger_context.ledger.recordUpdateTransition(service_subject, 1, .boot, true, 23 + iteration, "rolled back to stable-a") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    event_ledger_context.ledger.recordSyncConflict(user_subject, 5, 24 + iteration, "documents/tax-return.pdf conflict", true) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    event_ledger_context.ledger.recordDeviceTrustChange(user_subject, device_subject, false, 25 + iteration, "device revoked") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
-    const exported = event_ledger_context.ledger.exportText(&event_ledger_buffer, .{}) catch unreachable;
+    const exported = event_ledger_context.ledger.exportText(&event_ledger_buffer, .{}) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return exported.len + event_ledger_context.ledger.next_sequence;
 }
 
@@ -1303,19 +1303,19 @@ fn benchmarkSecretStoreImportHandleExport(iteration: u32) u64 {
         if (exportable) "abcd-efgh" else "super-secret-token",
         !exportable,
         exportable,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const handle = secret_store_context.store.lendHandle(
         secret.id,
         secret_store_context.holder,
         700 + iteration,
         true,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const described = secret_store_context.store.describeHandle(handle.id) orelse unreachable;
     if (exportable) {
         const exported = secret_store_context.store.exportRaw(handle.id, .{
             .holder = secret_store_context.holder,
             .task_id = 700 + iteration,
-        }) catch unreachable;
+        }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
         return secret.id +
             handle.id +
             described.task_id +
@@ -1350,7 +1350,7 @@ fn benchmarkDenialExplanationRender(iteration: u32) u64 {
         else => .capability_expired,
     };
     const explanation = denial_explanation.forPermissionDecision(kind, reason);
-    const rendered = denial_explanation.renderToBuffer(&denial_explanation_buffer, explanation) catch unreachable;
+    const rendered = denial_explanation.renderToBuffer(&denial_explanation_buffer, explanation) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return rendered.len +
         explanation.policy_len +
         explanation.missing_capability_len +
@@ -1380,12 +1380,12 @@ fn benchmarkOverlaySessionFlow(iteration: u32) u64 {
         transport,
         if (usage == .private_service) "notes.remote" else null,
         40 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     authority.now_ticks = 41 + iteration;
-    _ = sync_port.probeOverlaySession(authority, session.session_id, 41 + iteration) catch unreachable;
+    _ = sync_port.probeOverlaySession(authority, session.session_id, 41 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const live = overlay_session_context.service.findOverlaySession(session.session_id) orelse unreachable;
     authority.now_ticks = 42 + iteration;
-    _ = sync_port.closeOverlaySession(authority, session.session_id, 42 + iteration) catch unreachable;
+    _ = sync_port.closeOverlaySession(authority, session.session_id, 42 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     return session.session_id +
         session.overlay_id +
@@ -1407,7 +1407,7 @@ fn benchmarkRecoveryLifecycle(iteration: u32) u64 {
             .rotate_device_keys,
             .revoke_device_trust,
         },
-    }, 16 + iteration) catch unreachable;
+    }, 16 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const payload = if ((iteration & 1) == 0) "kernel=v2" else "kernel=v3";
     const reinstalled = recovery_context.environment.verifyAndReinstallImage(
         recovery_boot.session(),
@@ -1415,21 +1415,21 @@ fn benchmarkRecoveryLifecycle(iteration: u32) u64 {
         payload,
         signer("platform-image", 0x72),
         16 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const restored = recovery_context.environment.restoreWorkspaceSnapshot(
         recovery_boot.session(),
         &recovery_context.storage,
         recovery_context.workspace_id,
         recovery_context.snapshot_id,
         17 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const repaired = recovery_context.environment.repairSyncMetadata(
         recovery_boot.session(),
         &recovery_context.sync,
         &recovery_context.storage,
         recovery_context.workspace_id,
         recovery_context.tablet,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const rotation_generation = recovery_context.environment.rotateDeviceKeys(
         recovery_boot.session(),
         &recovery_context.sync,
@@ -1438,7 +1438,7 @@ fn benchmarkRecoveryLifecycle(iteration: u32) u64 {
         signer("platform-user", 0x74),
         signer("tablet-device-v2", 0x77),
         18 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const revoked = recovery_context.environment.revokeDeviceTrust(
         recovery_boot.session(),
         &recovery_context.sync,
@@ -1446,7 +1446,7 @@ fn benchmarkRecoveryLifecycle(iteration: u32) u64 {
         recovery_context.tablet,
         signer("platform-user", 0x74),
         19 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     return @as(u64, @intFromBool(reinstalled)) +
         @as(u64, @intFromBool(restored)) +
@@ -1458,8 +1458,8 @@ fn benchmarkRecoveryLifecycle(iteration: u32) u64 {
 
 fn benchmarkUpdateHealthValidation(iteration: u32) u64 {
     prepareUpdateHealthFixture(iteration);
-    update_health_context.manager.beginActivation(0, 13 + iteration) catch unreachable;
-    update_health.recordBootSuccess(&update_health_context.manager, 14 + iteration) catch unreachable;
+    update_health_context.manager.beginActivation(0, 13 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    update_health.recordBootSuccess(&update_health_context.manager, 14 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const result = update_health.validatePendingActivation(
         &update_health_context.manager,
         &update_health_context.supervisor,
@@ -1467,7 +1467,7 @@ fn benchmarkUpdateHealthValidation(iteration: u32) u64 {
         update_health_context.request,
         &update_health_context.ledger,
         15 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const event = update_health_context.ledger.latestKindPtr(.update_transition) orelse unreachable;
     return result.evaluation.core_services_started +
         @as(u64, @intFromBool(result.evaluation.report.isHealthy())) +
@@ -1479,7 +1479,7 @@ fn benchmarkUpdateHealthValidation(iteration: u32) u64 {
 
 fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
     var supervisor = supervisor_mod.Supervisor.init();
-    const compositor = supervisor.register(.compositor_ui_session, service(50 + iteration)) catch unreachable;
+    const compositor = supervisor.register(.compositor_ui_session, service(50 + iteration)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     if (!supervisor.markHealthy(compositor.id, 1 + iteration)) unreachable;
 
     var directory = driver_service.Directory.init();
@@ -1510,7 +1510,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         .requester = authority.holder,
         .now_ticks = 1 + iteration,
         .bundle = bundle,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     var runtime = DriverRecoveryRuntime{};
     var notifications = notification_center.Center.init();
@@ -1524,7 +1524,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         10 + iteration,
         0xD1,
         "display driver restart",
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     return driver.restart_generation +
         runtime.activation_count +
@@ -1939,7 +1939,7 @@ fn qualityBackgroundThrottlingDelayedDispatches() u64 {
         .launch = .{
             .bundle_id = background_bundle.bundle_id,
         },
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     var dispatcher = background_dispatch.Controller.init();
     dispatcher.configure(.{
@@ -1950,9 +1950,9 @@ fn qualityBackgroundThrottlingDelayedDispatches() u64 {
         .max_shared_memory_bytes = kibibytes(64),
     });
 
-    const first = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 10) catch unreachable;
-    const second = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 11) catch unreachable;
-    const third = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 12) catch unreachable;
+    const first = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 10) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const second = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 11) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const third = dispatcher.dispatch(runtime, task.id, background_bundle, "sync", .sync_completion, 12) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return @intFromBool(first.allowed and
         second.allowed and
         third.delayed and
@@ -2050,7 +2050,7 @@ fn configureLoadTelemetry(
         task_id,
         observed_tick,
         telemetry_counters,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
 }
 
@@ -2091,7 +2091,7 @@ fn createLoadTask(
             .bundle_id = bundle_id,
         },
         .userspace_image = &image,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 const DriverRecoveryRuntime = struct {
@@ -2112,9 +2112,9 @@ fn prepareRecoveryFixture(iteration: u32) void {
         &recovery_context.storage,
         storage_owner,
         signer("platform-state", 0x71),
-    ) catch unreachable;
-    _ = recovery_context.manager.stageImage(0, "stable-a", "kernel=v1", signer("platform-image", 0x72), 10 + iteration) catch unreachable;
-    _ = recovery_context.manager.activate(0, .{}, 11 + iteration) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = recovery_context.manager.stageImage(0, "stable-a", "kernel=v1", signer("platform-image", 0x72), 10 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = recovery_context.manager.activate(0, .{}, 11 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     const notes_v1 = recovery_context.storage.putVersion(.{
         .preferred_object_id = ids.object(980),
@@ -2127,8 +2127,8 @@ fn prepareRecoveryFixture(iteration: u32) void {
             .document,
             "notes-v1",
             12 + iteration,
-        ) catch unreachable,
-    }) catch unreachable;
+        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const notes_v2 = recovery_context.storage.putVersion(.{
         .preferred_object_id = ids.object(980),
         .object_type = .document,
@@ -2140,38 +2140,38 @@ fn prepareRecoveryFixture(iteration: u32) void {
             .document,
             "notes-v2",
             13 + iteration,
-        ) catch unreachable,
+        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
         .parent_version_id = notes_v1.version_id,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const workspace_record = recovery_context.storage.createWorkspace(.{
         .owner = recovery_context.user,
         .label = "recovery-notes",
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     recovery_context.workspace_id = workspace_record.id.raw();
-    recovery_context.storage.beginTransaction(workspace_record.id) catch unreachable;
+    recovery_context.storage.beginTransaction(workspace_record.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     recovery_context.storage.stagePut(
         workspace_record.id,
         "documents/notes.md",
         notes_v1.object_id,
         notes_v1.version_id,
         .document,
-    ) catch unreachable;
-    _ = recovery_context.storage.commit(workspace_record.id, 14 + iteration) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = recovery_context.storage.commit(workspace_record.id, 14 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const snapshot = recovery_context.storage.snapshot(
         workspace_record.id,
         "baseline",
         signer("platform-storage", 0x73),
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     recovery_context.snapshot_id = snapshot.id.raw();
-    recovery_context.storage.beginTransaction(workspace_record.id) catch unreachable;
+    recovery_context.storage.beginTransaction(workspace_record.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     recovery_context.storage.stagePut(
         workspace_record.id,
         "documents/notes.md",
         notes_v2.object_id,
         notes_v2.version_id,
         .document,
-    ) catch unreachable;
-    _ = recovery_context.storage.commit(workspace_record.id, 15 + iteration) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = recovery_context.storage.commit(workspace_record.id, 15 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     recovery_context.sync = sync_service.Service.init(921, 52, sync_owner);
     recovery_context.sync_capabilities = capability.CapabilityTable.init();
@@ -2186,7 +2186,7 @@ fn prepareRecoveryFixture(iteration: u32) void {
     );
     var sync_port = sync_service.SyncPort.init(&recovery_context.sync, &recovery_context.sync_capabilities);
     const sync_authority = recovery_context.sync_authority;
-    _ = sync_port.ensureUserRoot(sync_authority, recovery_context.user, "cameron", signer("platform-user", 0x74)) catch unreachable;
+    _ = sync_port.ensureUserRoot(sync_authority, recovery_context.user, "cameron", signer("platform-user", 0x74)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = sync_port.enrollTrustedDevice(
         sync_authority,
         recovery_context.user,
@@ -2195,7 +2195,7 @@ fn prepareRecoveryFixture(iteration: u32) void {
         signer("platform-user", 0x74),
         signer("primary-device", 0x75),
         16 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = sync_port.enrollTrustedDevice(
         sync_authority,
         recovery_context.user,
@@ -2204,19 +2204,19 @@ fn prepareRecoveryFixture(iteration: u32) void {
         signer("platform-user", 0x74),
         signer("tablet-device", 0x76),
         17 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const local_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "local-net",
         .mode = .local_network,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_record.id.raw(),
         .owner = recovery_context.user,
         .device_to_device_policy_id = local_policy.id,
         .selective_prefixes = &.{"documents/"},
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     sync_port.setReplicaVersion(
         sync_authority,
         workspace_record.id.raw(),
@@ -2224,7 +2224,7 @@ fn prepareRecoveryFixture(iteration: u32) void {
         "documents/notes.md",
         notes_v1.object_id,
         notes_v1.version_id,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     recovery_context.environment = recovery_environment.Environment.init(storage_owner);
 }
@@ -2243,7 +2243,7 @@ fn prepareUpdateHealthFixture(iteration: u32) void {
         &update_health_context.storage,
         owner,
         signer("update-health-state", 0x31),
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     update_health_context.sync = sync_service.Service.init(1_500, 401, owner);
     update_health_context.sync_capabilities = capability.CapabilityTable.init();
     update_health_context.compositor = compositor_session.Session.init();
@@ -2263,7 +2263,7 @@ fn prepareUpdateHealthFixture(iteration: u32) void {
         "kernel=v1",
         signer("update-health-image", 0x32),
         11 + iteration,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     update_health_context.core_service_ids[0] = registerHealthyServiceForBenchmark(
         &update_health_context.supervisor,
@@ -2313,7 +2313,7 @@ fn registerHealthyServiceForBenchmark(
     owner: principal.PrincipalId,
     tick: u64,
 ) u64 {
-    const service_record = supervisor.register(class, owner) catch unreachable;
+    const service_record = supervisor.register(class, owner) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     if (!supervisor.noteContractBound(service_record.id, 100 + service_record.id, tick)) unreachable;
     if (!supervisor.markHealthy(service_record.id, tick)) unreachable;
     return service_record.id;
@@ -2336,15 +2336,15 @@ fn seedUpdateHealthStorageProbe(
             .document,
             "notes-v1",
             tick,
-        ) catch unreachable,
-    }) catch unreachable;
+        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const workspace_record = storage.createWorkspace(.{
         .owner = owner,
         .label = "update-health",
-    }) catch unreachable;
-    storage.beginTransaction(workspace_record.id) catch unreachable;
-    storage.stagePut(workspace_record.id, "documents/notes.md", record.object_id, record.version_id, .document) catch unreachable;
-    _ = storage.commit(workspace_record.id, tick + 1) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    storage.beginTransaction(workspace_record.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    storage.stagePut(workspace_record.id, "documents/notes.md", record.object_id, record.version_id, .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = storage.commit(workspace_record.id, tick + 1) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return workspace_record.id.raw();
 }
 
@@ -2360,7 +2360,7 @@ fn seedUpdateHealthNetworkProbe(
     const authority_capability = mintBenchmarkSyncAuthority(capability_table, sync);
     var port = sync_service.SyncPort.init(sync, capability_table);
     const authority = benchmarkSyncAuthority(sync, authority_capability, tick_base);
-    _ = port.ensureUserRoot(authority, owner, "update-health", signer("update-health-user", 0x51)) catch unreachable;
+    _ = port.ensureUserRoot(authority, owner, "update-health", signer("update-health-user", 0x51)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = port.enrollTrustedDevice(
         authority,
         owner,
@@ -2369,7 +2369,7 @@ fn seedUpdateHealthNetworkProbe(
         signer("update-health-user", 0x51),
         signer("update-health-source", 0x52),
         tick_base,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = port.enrollTrustedDevice(
         authority,
         owner,
@@ -2378,28 +2378,28 @@ fn seedUpdateHealthNetworkProbe(
         signer("update-health-user", 0x51),
         signer("update-health-target", 0x53),
         tick_base + 1,
-    ) catch unreachable;
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     const local_policy = port.createNetworkPolicy(authority, .{
         .owner = sync.owner,
         .workspace_id = workspace_id,
         .label = "health-local",
         .mode = .local_network,
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const overlay_policy = port.createNetworkPolicy(authority, .{
         .owner = sync.owner,
         .workspace_id = workspace_id,
         .label = "health-overlay",
         .mode = .named_service_identity,
         .target = "overlay.health.sync",
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = port.configureWorkspacePolicy(authority, .{
         .workspace_id = workspace_id,
         .owner = owner,
         .device_to_device_policy_id = local_policy.id,
         .overlay_policy_id = overlay_policy.id,
-    }) catch unreachable;
-    _ = port.configureOverlay(authority, workspace_id, source_device, "overlay.health.sync", true) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = port.configureOverlay(authority, workspace_id, source_device, "overlay.health.sync", true) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     return .{
         .sync = sync,
@@ -2429,8 +2429,8 @@ fn seedUpdateHealthUiProbe(session: *compositor_session.Session) update_health.U
             .label = "health-ui",
             .entry = "zigos.health.ui",
         },
-    }) catch unreachable;
-    _ = session.openTaskView(task, "Update Health") catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = session.openTaskView(task, "Update Health") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return .{ .session = session };
 }
 

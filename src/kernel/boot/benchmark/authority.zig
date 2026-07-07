@@ -1,4 +1,5 @@
 const std = @import("std");
+const benchmark_reporting = @import("reporting.zig");
 const identities = @import("identities.zig");
 const capability = @import("../../../native/kernel_api/capability.zig");
 const driver_service = @import("../../../native/drivers/driver_service.zig");
@@ -36,7 +37,7 @@ pub fn mintBenchmarkSyncAuthority(
             .renewable = false,
         },
         .audit = .{},
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark authority", err);
 }
 
 pub fn benchmarkSyncAuthority(
@@ -75,5 +76,5 @@ pub fn mintDriverAuthority(
             .renewable = true,
         },
         .audit = .{},
-    }) catch unreachable;
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark authority", err);
 }
