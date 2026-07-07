@@ -64,7 +64,10 @@ const WORD_BITS: u6 = 16;
 const DWORD_BITS: u6 = 32;
 const QWORD_HIGH_BITS: u6 = 48;
 const DRIVE_SELECT_SHIFT = 8;
-const WAIT_NOT_BUSY_POLLS: u32 = 100_000;
+// Status polls, not time; see ATA_POLL_LIMIT in storage_driver_task.zig for
+// why the budget must survive a loaded host's I/O latency. Absent devices
+// read status 0 and exit on the first poll, so detection stays fast.
+const WAIT_NOT_BUSY_POLLS: u32 = 1_000_000;
 const BYTES_PER_KIB: u64 = 1024;
 const BYTES_PER_MIB: u64 = BYTES_PER_KIB * 1024;
 const BYTES_PER_GIB: u64 = BYTES_PER_MIB * 1024;
