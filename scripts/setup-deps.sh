@@ -58,7 +58,7 @@ install_macos() {
   fi
 
   log "Installing dependencies with Homebrew..."
-  brew install zig nasm qemu dosfstools xorriso mtools i686-elf-grub
+  brew install zig nasm qemu dosfstools xorriso mtools x86_64-elf-grub
 }
 
 install_apt() {
@@ -115,7 +115,7 @@ verify_tools() {
   fi
 
   local grub_cmd=""
-  for cmd in grub-mkrescue i686-elf-grub-mkrescue x86_64-elf-grub-mkrescue; do
+  for cmd in x86_64-elf-grub-mkrescue grub-mkrescue; do
     if have_cmd "${cmd}"; then
       grub_cmd="${cmd}"
       break
