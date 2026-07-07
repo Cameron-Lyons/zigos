@@ -15,14 +15,3 @@ pub fn printChar(c: u8) void {
 pub fn putChar(c: u8) void {
     serial.putChar(c);
 }
-
-pub fn printWithColor(str: []const u8, color: u8) void {
-    _ = color;
-    serial.print(str);
-}
-
-pub fn clear() void {}
-
-pub fn clearWithColor(color: u8) void {
-    _ = color;
-}
