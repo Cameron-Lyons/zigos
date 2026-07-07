@@ -702,7 +702,7 @@ fn validateNuc11tnki5KernelProofSources(
         ".platform_policy",
         "device inventory refuses synthetic records for production driver binding",
         "device inventory records ATA bootstrap but requires target-grade NVMe for production storage binding",
-        "device inventory refuses PS/2 bootstrap for production input binding",
+        "device inventory only admits xHCI input for production binding",
         "device inventory promotes observed ATA storage to target NVMe production binding",
     };
     for (required_device_inventory_snippets) |snippet| {
@@ -723,10 +723,12 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const retired_device_inventory_binding_snippets = [_][]const u8{
         ".input_device => source == .ps2_bootstrap",
+        "ps2_bootstrap",
+        "0x8042_0001",
     };
     for (retired_device_inventory_binding_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 device inventory source must not bind production input through PS/2 bootstrap: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 device inventory source must not keep PS/2 bootstrap input inventory vocabulary: {s}", .{snippet});
         }
     }
     const required_boot_device_inventory_snippets = [_][]const u8{
@@ -785,6 +787,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     const retired_ps2_input_seed_snippets = [_][]const u8{
         "device_inventory.registerDetected(.input_device, 0x8042_0001, .ps2_bootstrap, false)",
+        ".ps2_bootstrap",
     };
     const ps2_seed_sources = [_]Ps2SeedSource{
         .{ .label = devices_path, .source = devices_source },
