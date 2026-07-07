@@ -1693,7 +1693,7 @@ fn validateResourceSchedulerTelemetryTrack(
 
     const benchmark_snippets = [_][]const u8{
         "const generated_image_fixtures = @import(\"../../../native/task/generated_image_fixtures.zig\")",
-        "benchmark_image_context.app_image = generated_image_fixtures.appImage() catch unreachable",
+        "benchmark_image_context.app_image = generated_image_fixtures.appImage() catch |err| benchmark_reporting.benchStepFailure(\"benchmark suite\", err)",
         "const image = if (service_task) benchmarkServiceImage() else benchmarkAppImage()",
     };
     for (benchmark_snippets) |snippet| {

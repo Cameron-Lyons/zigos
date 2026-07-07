@@ -1,7 +1,5 @@
 const console = @import("../../utils/console.zig");
 const config = @import("../../config.zig");
-const device = @import("../../devices/device.zig");
-const console_device = @import("../../devices/console_device.zig");
 const ata = @import("../../drivers/ata.zig");
 const first_target_telemetry = @import("../../drivers/first_target_telemetry.zig");
 const pci = @import("../../drivers/pci.zig");
@@ -9,7 +7,6 @@ const nvme_hw = @import("../../drivers/nvme_hw.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
 const storage_driver_protocol = @import("../../../native/drivers/storage_driver_protocol.zig");
-const panic_handler = @import("../../utils/panic.zig");
 const common = @import("../common.zig");
 const data_plane_boundary = @import("data_plane_boundary.zig");
 const hardware_proof = @import("../../platform/hardware_proof.zig");
@@ -50,10 +47,6 @@ pub fn init() void {
     // Native QEMU paths that cannot pass `-append` reliably also fall back to
     // modeled inventory only when first-target network hardware is absent.
     // Real freestanding hardware keeps strict detected-inventory binding.
-    device.init();
-    console_device.init() catch |err| {
-        panic_handler.panic("Failed to initialize console device: {}", .{err});
-    };
     ata.init();
     captureAtaBootstrapInventory();
     capturePciInventory();
