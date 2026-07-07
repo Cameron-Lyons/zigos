@@ -715,6 +715,11 @@ fn validateNuc11tnki5KernelProofSources(
         "defaultRecord(.storage_controller, 200)",
         "defaultRecord(.usb_controller, 300)",
         "defaultRecord(.input_device, 600)",
+        "recordAtaBootstrapGrant",
+        "ataBootstrapGrant",
+        "ataBootstrapBridgeGrant",
+        "ata_bootstrap_grant",
+        "captured_ata_bootstrap",
     };
     for (retired_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) != null) {
@@ -798,6 +803,16 @@ fn validateNuc11tnki5KernelProofSources(
             if (std.mem.indexOf(u8, source_check.source, snippet) != null) {
                 try common.addError(errors, allocator, "NUC11TNKi5 source {s} must not seed production input through PS/2 bootstrap: {s}", .{ source_check.label, snippet });
             }
+        }
+    }
+    const retired_boot_storage_bridge_snippets = [_][]const u8{
+        "claimStorageAtaBootstrapInventory",
+        "ataBootstrapBridgeGrant",
+        "recordAtaBootstrapGrant",
+    };
+    for (retired_boot_storage_bridge_snippets) |snippet| {
+        if (std.mem.indexOf(u8, session_service_bootstrap_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 hosted service bootstrap source must not claim storage through retired ATA inventory bridges: {s}", .{snippet});
         }
     }
     const required_apic_snippets = [_][]const u8{
@@ -1495,6 +1510,15 @@ fn validateStorageModernOnlyTrack(
     for (driver_port_snippets) |snippet| {
         if (std.mem.indexOf(u8, driver_port_source, snippet) == null) {
             try common.addError(errors, allocator, "Storage production track must gate attached storage backend activation: {s}", .{snippet});
+        }
+    }
+    const retired_driver_port_snippets = [_][]const u8{
+        "claimStorageAtaBootstrapInventory",
+        "ataBootstrapBridgeGrant",
+    };
+    for (retired_driver_port_snippets) |snippet| {
+        if (std.mem.indexOf(u8, driver_port_source, snippet) != null) {
+            try common.addError(errors, allocator, "Storage production track must not bridge ATA bootstrap through device inventory: {s}", .{snippet});
         }
     }
 

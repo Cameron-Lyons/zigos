@@ -342,7 +342,7 @@ test "kernel bootstrap cannot publish network data-plane transports" {
     try std.testing.expect(!activation.exclusive_claim);
 }
 
-test "runtime uses the activation tick when claiming storage bootstrap authority" {
+test "runtime uses the activation tick when activating ATA bootstrap authority" {
     const capability = @import("../kernel_api/capability.zig");
     const device_broker = @import("../kernel_api/device_broker.zig");
     const endpoint = @import("../kernel_api/endpoint.zig");
@@ -375,14 +375,13 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     );
     var kernel_port = component_port.KernelPort.init(&kernel);
 
-    device_inventory.registerDetected(.storage_controller, device_id, .ata_bootstrap, true);
-    device_inventory.recordAtaBootstrapGrant(device_id, .{
+    try std.testing.expect(device_broker.publishAtaController(device_id, .{
         .base_port = 0x1F0,
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
         .sector_count = storage_volume.required_device_sectors,
-    });
+    }));
 
     const storage_driver_lease_image = try generated_image_fixtures.storageDriverImage();
     const driver_task = try runtime.createTask(.{
@@ -436,7 +435,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         },
         .bootstrap_transport = .kernel_bootstrap_broker,
     });
-    try std.testing.expect(try bootstrap_driver_port.claimStorageAtaBootstrapInventory(driver, "zigos.system.storage-driver"));
+    try std.testing.expect(try bootstrap_driver_port.publishStorageAtaBootstrap(device_id, "zigos.system.storage-driver", false));
 
     var driver_runtime = Runtime.init();
     driver_runtime.bindKernelPort(&kernel_port);

@@ -358,8 +358,13 @@ const StorageRestartProbe = struct {
         if (!self.broker_revoke_rejected) return false;
         if (storage_driver_task_mod.brokeredDmaBufferReady(&session)) return false;
 
-        const grant = device_inventory.ataBootstrapBridgeGrant(session.device_id) orelse return false;
-        if (!device_broker.publishAtaController(session.device_id, grant)) return false;
+        if (!device_broker.publishAtaController(session.device_id, .{
+            .base_port = session.base_port,
+            .ctrl_port = session.ctrl_port,
+            .is_master = session.is_master,
+            .irq_line = session.irq_line,
+            .sector_count = session.sector_count,
+        })) return false;
         var stale_broker_session = session;
         storage_driver_task_mod.readAtaBootstrapSessionChecked(&stale_broker_session, storage_restart_scratch_lba, revoked_read[0..]) catch |err| {
             if (err != error.StaleBrokerSession) return false;
@@ -609,22 +614,6 @@ fn activateDrivers(
         "zigos.system.storage-driver",
         54,
     ) orelse return false;
-    const storage_inventory = device_inventory.recordForClass(.storage_controller);
-    const can_claim_storage_bootstrap = storage_inventory.detected and
-        (storage_inventory.source == .ata_bootstrap or
-            (device_inventory.modelDeviceInventoryEnabled() and
-                !nvme_bridge.attached() and
-                device_inventory.ataBootstrapBridgeGrant(storage_driver.device_id) != null));
-    if (bootstrap_driver_port.storagePublication() == null and can_claim_storage_bootstrap) {
-        const claimed_storage_bootstrap = bootstrap_driver_port.claimStorageAtaBootstrapInventory(
-            storage_driver,
-            "zigos.system.storage-driver",
-        ) catch false;
-        if (!claimed_storage_bootstrap) {
-            recordBootFailure(env, state.services.storage_service.id, 54, error.InvalidBootstrapTransport);
-            return false;
-        }
-    }
     if (bootstrap_driver_port.storagePublication() == null) {
         const published_storage = bootstrap_driver_port.publishStorageActivator(
             storage_driver.device_id,
@@ -1123,18 +1112,10 @@ test "hosted model inventory promotes ATA bootstrap storage only for modeled boo
     device_inventory.reset();
     device_inventory.setModelDeviceInventory(true);
     device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
-    device_inventory.recordAtaBootstrapGrant(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = 4096,
-    });
     seedHostedModelDeviceInventory();
     const modeled_storage = device_inventory.recordForClass(.storage_controller);
     try std.testing.expectEqual(device_inventory.DetectionSource.nvme_pci_inventory, modeled_storage.source);
     try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), try device_inventory.requireProductionDriverDeviceId(.storage_controller));
-    try std.testing.expect(device_inventory.ataBootstrapBridgeGrant(modeled_storage.device_id) != null);
 
     device_inventory.setModelDeviceInventory(false);
 }

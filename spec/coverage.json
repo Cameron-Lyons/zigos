@@ -1880,7 +1880,7 @@
         },
         {
           "file": "src/native/drivers/driver_runtime.zig",
-          "name": "runtime uses the activation tick when claiming storage bootstrap authority"
+          "name": "runtime uses the activation tick when activating ATA bootstrap authority"
         },
         {
           "file": "src/native/drivers/storage_driver_task.zig",
