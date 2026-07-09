@@ -56,9 +56,9 @@ build_node_command() {
     "file:$serial_log" \
     yes \
     no \
-    -drive "$(qemu_harness_drive_arg "$store_image")" \
     -netdev "socket,id=syncnet,$socket_mode" \
     -device "e1000,netdev=syncnet"
+  qemu_harness_append_native_store_drive "$store_image"
 }
 
 build_node_command "$NODE_A_STORE" "$NODE_A_LOG" "listen=127.0.0.1:${SYNC_TWO_NODE_PORT}"

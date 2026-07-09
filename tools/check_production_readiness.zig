@@ -1474,6 +1474,38 @@ fn validateStorageModernOnlyTrack(
         }
     }
 
+    const qemu_harness_path = "scripts/qemu-harness.sh";
+    const qemu_harness_source = try readRequiredSource(allocator, io, errors, qemu_harness_path) orelse return;
+    const native_store_qemu_snippets = [_][]const u8{
+        "-drive \"file=$image_path,if=none,format=raw,id=disk0,cache=writethrough\"",
+        "-device \"nvme,drive=disk0,serial=zigosnvme0\"",
+    };
+    for (native_store_qemu_snippets) |snippet| {
+        if (std.mem.indexOf(u8, qemu_harness_source, snippet) == null) {
+            try common.addError(errors, allocator, "Storage production track must keep NVMe-only native-store QEMU attachment: {s}", .{snippet});
+        }
+    }
+    const retired_native_store_qemu_snippets = [_][]const u8{
+        "qemu_harness_drive_arg",
+        "ZIGOS_NATIVE_STORE_BUS",
+        "if=ide",
+        "ide-hd",
+    };
+    for (retired_native_store_qemu_snippets) |snippet| {
+        if (std.mem.indexOf(u8, qemu_harness_source, snippet) != null) {
+            try common.addError(errors, allocator, "Storage production track must not reintroduce IDE native-store QEMU attachment: {s}", .{snippet});
+        }
+    }
+
+    const sync_qemu_path = "scripts/run-sync-two-node-qemu.sh";
+    const sync_qemu_source = try readRequiredSource(allocator, io, errors, sync_qemu_path) orelse return;
+    if (std.mem.indexOf(u8, sync_qemu_source, "qemu_harness_append_native_store_drive \"$store_image\"") == null) {
+        try common.addError(errors, allocator, "Storage production track must run two-node sync storage through the shared NVMe native-store attachment", .{});
+    }
+    if (std.mem.indexOf(u8, sync_qemu_source, "qemu_harness_drive_arg") != null) {
+        try common.addError(errors, allocator, "Storage production track must not run two-node sync storage through legacy IDE drive args", .{});
+    }
+
     const removed_snippets = [_][]const u8{
         "findWorkspaceSlotById",
         "findSnapshotSlotIndexById",
@@ -1715,12 +1747,14 @@ fn validateUserspaceDriverDataPathTrack(
     const bootstrap_driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
     const driver_runtime_path = "src/native/drivers/driver_runtime.zig";
     const storage_driver_path = "src/native/drivers/storage_driver_task.zig";
+    const session_bootstrap_path = "src/native/session/session_service_bootstrap.zig";
     const driver_spec_path = "src/tests/spec/drivers_storage_sync.zig";
     const backlog_gate_path = "src/tests/spec/backlog_gates.zig";
     const broker_source = try readRequiredSource(allocator, io, errors, broker_path) orelse return;
     const bootstrap_driver_port_source = try readRequiredSource(allocator, io, errors, bootstrap_driver_port_path) orelse return;
     const driver_runtime_source = try readRequiredSource(allocator, io, errors, driver_runtime_path) orelse return;
     const storage_driver_source = try readRequiredSource(allocator, io, errors, storage_driver_path) orelse return;
+    const session_bootstrap_source = try readRequiredSource(allocator, io, errors, session_bootstrap_path) orelse return;
     const driver_spec_source = try readRequiredSource(allocator, io, errors, driver_spec_path) orelse return;
     const backlog_gate_source = try readRequiredSource(allocator, io, errors, backlog_gate_path) orelse return;
 
@@ -1746,6 +1780,17 @@ fn validateUserspaceDriverDataPathTrack(
     for (storage_dma_wiring_snippets) |snippet| {
         if (std.mem.indexOf(u8, bootstrap_driver_port_source, snippet) == null) {
             try common.addError(errors, allocator, "Userspace driver data path must confine the real storage DMA engine through the broker: {s}", .{snippet});
+        }
+    }
+    const published_nvme_restart_snippets = [_][]const u8{
+        "verifyPublishedBackendFailureChecks(service_id, expected[0..])",
+        "storage_recovery.published_data_plane or",
+        "self.rebind_observed = readRestartProbeStorage(service_id, storage_restart_scratch_lba, readback[0..]) and",
+        "self.republished_session_ready = readRestartProbeStorage(service_id, storage_restart_scratch_lba, readback[0..]) and",
+    };
+    for (published_nvme_restart_snippets) |snippet| {
+        if (std.mem.indexOf(u8, session_bootstrap_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace driver data path must keep published-NVMe restart proof snippet: {s}", .{snippet});
         }
     }
 

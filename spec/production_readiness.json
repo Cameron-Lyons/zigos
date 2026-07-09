@@ -394,6 +394,9 @@
         "src/native/storage/volume/backend.zig",
         "src/native/storage/storage_volume_test.zig",
         "src/native/session/native_store_mount.zig",
+        "scripts/qemu-harness.sh",
+        "scripts/run-storage-durability-qemu.sh",
+        "scripts/run-sync-two-node-qemu.sh",
         "src/kernel/boot/benchmark/suite.zig",
         "benchmarks/kernel-thresholds.txt"
       ],
@@ -404,7 +407,7 @@
         "Workspace share grants now keep a resident principal index rebuilt with workspace state, workspace path indexes maintain object-id slots, workspace and snapshot arenas expose resident counts and indexed snapshot-id lookup, workspaces cache the oldest live snapshot generation for mutation-log compaction guards, and the object store tracks the latest inserted version id, max blob payload bytes, and object-type buckets, so object access, any-access, reshare policy checks, object-to-path share resolution, latest-version retrieval, type-scoped object queries, snapshot existence checks, dirty-snapshot persistence, compaction safety checks, and quota payload usage use keyed or cached lookups instead of scanning storage tables.",
         "The first supported storage envelope is exported from storage_volume.first_supported_capacity_envelope and checked before image or attached-volume persistence.",
         "Writes that exceed the first supported envelope have an explicit user-facing quota policy: reject without partial persistence, report storage.quota.* limit codes, surface NoSpaceLeft at the persistence gate, and reject undersized demo images instead of carrying migration paths; attached-volume production persistence and native-store root adoption require a capacity-checked NVMe PCI backend rather than generic callback, ATA bootstrap, or brokered ATA backends.",
-        "The storage durability QEMU target reuses one native store image across forced reboots, interrupted writes, and one bad root slot, while benchmark thresholds now gate segmented replay and forced checkpoint compaction."
+        "Native-store QEMU helpers attach persistence images as NVMe controllers only, including storage durability and two-node sync boots, while benchmark thresholds now gate segmented replay and forced checkpoint compaction."
       ],
       "capacity_envelope": [
         "Volume image: 786432 bytes across 1536 required device sectors, with 785408 bytes available for replay logs.",
@@ -836,6 +839,8 @@
         "src/native/drivers/accelerator_driver_task.zig",
         "src/native/drivers/network_driver_task.zig",
         "src/native/drivers/storage_driver_task.zig",
+        "src/native/session/session_service_bootstrap.zig",
+        "src/native/session/supervisor.zig",
         "src/native/kernel_api/device_broker.zig",
         "src/native/session/service_path_proofs.zig",
         "src/kernel/drivers/ata.zig",
@@ -844,13 +849,13 @@
       "current_evidence": [
         "Driver registration checks signed bundles, device-class authority, DMA range metadata, restart generations, and a constrained first target of brokered storage DMA domains: programmed-I/O ATA or window-confined NVMe bus mastering, never unconfined bus-master DMA.",
         "The device broker now indexes controller slots and programmed DMA domains by device using arena/index-backed tables; unconfined bus mastering is rejected, and bus mastering is accepted only as a brokered-buffer program whose declared windows enumerate the exact queue or bounce frames the real NVMe engine may touch.",
-        "Storage driver tasks attach through the kernel device broker and the ATA bootstrap path exports checked read/write bridges for freestanding volume access.",
+        "Storage driver tasks attach through the kernel device broker; brokered ATA and published target-NVMe backends both export checked read/write bridges for freestanding volume access.",
         "The driver boundary spec gate exercises brokered ATA read/write I/O, programs an IOMMU-style DMA domain, authorizes brokered DMA buffers, and rejects stale task authority, stale DMA buffers, stale broker sessions, expired leases, invalid ports, explicit broker revocation, and post-restart target generation mismatches.",
-        "The storage data-plane gate covers timeout propagation, active-I/O restart, and partial-transfer recovery by proving incomplete ATA writes are discarded before a restarted userspace driver reissues I/O.",
+        "The storage data-plane gate covers active-I/O restart, invalid-transfer propagation, and partial-transfer rejection across brokered ATA sessions and published NVMe backends before a restarted userspace driver reissues I/O.",
         "The native network driver path reauthorizes brokered service-identity sends through the egress broker, so revoked network-policy capabilities stop already-open userspace network paths before transmit; network activation now fails closed until the published transport device id matches detected production Intel I225-LM inventory, and the booted sync path captures an encrypted native transport ABI frame that matches the active network driver transmit.",
         "Driver broker, runtime lease, storage-driver attach, and driver-boundary spec tests now create runnable driver/control/app tasks from generated userspace image fixtures instead of synthetic executable descriptors, and the production-readiness gate rejects synthetic descriptors in those driver data-path sources.",
         "A native accelerator driver task now owns brokered GPU, NPU, and media queue sessions, requires hardware queue ownership plus completion-interrupt evidence, emits typed scheduler queue events only after rejecting CPU engines, missing brokers, missing owners, missing generations, missing interrupts, and stale completions, and the booted driver proof now emits queue-owned and completion-interrupt markers required by native smoke and the NUC11TNKi5 hardware marker contract.",
-        "QEMU driver restart proof performs broker-mediated storage reads and writes before and after restart, injects checked ATA timeout propagation, rejects partial-sector transfers before port I/O, rejects stale authority, stale DMA buffer, stale port access, explicit broker revocation, and stale broker sessions, then gates republish/rebind before post-restart I/O; the expanded marker group is now required by the real-hardware proof marker contract."
+        "QEMU driver restart proof performs storage reads and writes before and after restart, accepts published NVMe data-plane recovery as well as brokered ATA recovery, rejects invalid or partial transfers before port I/O, rejects stale access after deactivation, then gates republish/rebind before post-restart I/O; the expanded marker group is now required by the real-hardware proof marker contract."
       ],
       "production_gaps": [
         "Bootstrap storage has the deepest hardware-like data-plane proof; network now has booted encrypted frame ownership evidence and accelerator queues now have brokered driver-event evidence, but other driver classes remain inventory, policy, or publication proofs.",

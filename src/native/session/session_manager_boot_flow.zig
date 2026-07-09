@@ -305,6 +305,7 @@ pub const SessionManager = struct {
     pub fn buildProductionServiceGraph(self: *SessionManager) ?ServiceGraph {
         var graph = self.beginServiceGraph() orelse return null;
         if (!self.service_graph_builder.bootProduction(&graph)) {
+            graphBuildFailed("service_boot");
             self.failBoot();
             return null;
         }
@@ -312,14 +313,17 @@ pub const SessionManager = struct {
         self.runtime_context.runtime_service.checkpoint(60);
         var trust = self.trustBoot();
         if (!trust.proveProductionAbImageRollback(&graph)) {
+            graphBuildFailed("ab_image_rollback");
             self.failBoot();
             return null;
         }
         if (!trust.proveProductionPostActivationHealthChecks(&graph)) {
+            graphBuildFailed("post_activation_health");
             self.failBoot();
             return null;
         }
         if (!trust.verifyProductionArtifactManifest(&graph)) {
+            graphBuildFailed("artifact_manifest");
             self.failBoot();
             return null;
         }
@@ -355,6 +359,10 @@ pub const SessionManager = struct {
         );
     }
 };
+
+fn graphBuildFailed(comptime step: []const u8) void {
+    common.printBootMarker("ZIGOS:BOOT:GRAPH_BUILD:FAILED step=" ++ step);
+}
 
 fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState {
     common.printBootMarker(boot_markers.native_bootstrap);
