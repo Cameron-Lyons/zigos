@@ -91,7 +91,6 @@ pub const Volume = struct {
     attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = volume_backend.unattachedRead,
     attached_backend_write: *const fn (u64, [*]const u8, usize) callconv(.c) bool = volume_backend.unattachedWrite,
     attached_backend_kind: volume_backend.AttachedBackendKind = .none,
-    attached_ata_device: ?*const anyopaque = null,
     version_signers: [object_store.MAX_VERSIONS][max_signer_bytes]u8 =
         [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_VERSIONS,
     object_signers: [object_store.MAX_OBJECTS][max_signer_bytes]u8 =
@@ -113,7 +112,6 @@ pub const Volume = struct {
         self.attached_backend_read = volume_backend.unattachedRead;
         self.attached_backend_write = volume_backend.unattachedWrite;
         self.attached_backend_kind = .none;
-        self.attached_ata_device = null;
         @memset(std.mem.sliceAsBytes(self.version_signers[0..]), 0);
         @memset(std.mem.sliceAsBytes(self.object_signers[0..]), 0);
         @memset(std.mem.sliceAsBytes(self.snapshot_signers[0..]), 0);
@@ -153,16 +151,6 @@ pub const Volume = struct {
         self.attached_backend_read = read;
         self.attached_backend_write = write;
         self.attached_backend_kind = kind;
-        self.attached_ata_device = null;
-    }
-
-    pub fn attachAtaBootstrapDevice(self: *Volume, device: *const anyopaque, sector_count: u64) void {
-        self.attached_backend_present = true;
-        self.attached_backend_sector_count = sector_count;
-        self.attached_backend_read = volume_backend.unattachedRead;
-        self.attached_backend_write = volume_backend.unattachedWrite;
-        self.attached_backend_kind = .ata_bootstrap;
-        self.attached_ata_device = device;
     }
 
     pub fn clearAttachedBackend(self: *Volume) void {
@@ -171,7 +159,6 @@ pub const Volume = struct {
         self.attached_backend_read = volume_backend.unattachedRead;
         self.attached_backend_write = volume_backend.unattachedWrite;
         self.attached_backend_kind = .none;
-        self.attached_ata_device = null;
     }
 
     pub fn hasAttachedDevice(self: *const Volume) bool {
@@ -190,7 +177,6 @@ pub const Volume = struct {
         self.attached_backend_read = source.attached_backend_read;
         self.attached_backend_write = source.attached_backend_write;
         self.attached_backend_kind = source.attached_backend_kind;
-        self.attached_ata_device = source.attached_ata_device;
     }
 
     pub fn clearAttachedVolume(self: *Volume) void {
@@ -256,10 +242,6 @@ pub fn attachNvmePciBackendFns(
 
 pub fn attachAtaBootstrapBrokerBackend(backend: Backend) void {
     default_volume.attachAtaBootstrapBrokerBackend(backend);
-}
-
-pub fn attachAtaBootstrapDevice(device: *const anyopaque, sector_count: u64) void {
-    default_volume.attachAtaBootstrapDevice(device, sector_count);
 }
 
 pub fn clearAttachedBackend() void {

@@ -1432,6 +1432,16 @@ fn validateStorageModernOnlyTrack(
             try common.addError(errors, allocator, "Storage production track must keep target NVMe attachment snippet: {s}", .{snippet});
         }
     }
+    const retired_storage_volume_snippets = [_][]const u8{
+        "attached_ata_device",
+        "pub fn attachAtaBootstrapDevice",
+        "= .ata_bootstrap;",
+    };
+    for (retired_storage_volume_snippets) |snippet| {
+        if (std.mem.indexOf(u8, source, snippet) != null) {
+            try common.addError(errors, allocator, "Storage production track must not reintroduce direct ATA volume attachment: {s}", .{snippet});
+        }
+    }
 
     const backend_source_path = "src/native/storage/volume/backend.zig";
     const backend_source = try readRequiredSource(allocator, io, errors, backend_source_path) orelse return;
@@ -1442,6 +1452,35 @@ fn validateStorageModernOnlyTrack(
     for (backend_snippets) |snippet| {
         if (std.mem.indexOf(u8, backend_source, snippet) == null) {
             try common.addError(errors, allocator, "Storage production track must keep distinct backend kind: {s}", .{snippet});
+        }
+    }
+    const retired_backend_snippets = [_][]const u8{
+        "zigosStorageBootstrapAtaRead",
+        "zigosStorageBootstrapAtaWrite",
+        "readAtaBootstrap(",
+        "writeAtaBootstrap(",
+        "ata_bootstrap,",
+        ".ata_bootstrap =>",
+        "ataReadRange",
+        "ataWriteRange",
+    };
+    for (retired_backend_snippets) |snippet| {
+        if (std.mem.indexOf(u8, backend_source, snippet) != null) {
+            try common.addError(errors, allocator, "Storage production track must not reintroduce direct ATA backend bridges: {s}", .{snippet});
+        }
+    }
+
+    const storage_driver_task_path = "src/native/drivers/storage_driver_task.zig";
+    const storage_driver_task_source = try readRequiredSource(allocator, io, errors, storage_driver_task_path) orelse return;
+    const retired_storage_driver_task_snippets = [_][]const u8{
+        "export fn zigosStorageBootstrapAtaRead",
+        "export fn zigosStorageBootstrapAtaWrite",
+        "attachAtaBootstrapSession",
+        "storage_volume.attachAtaBootstrapDevice",
+    };
+    for (retired_storage_driver_task_snippets) |snippet| {
+        if (std.mem.indexOf(u8, storage_driver_task_source, snippet) != null) {
+            try common.addError(errors, allocator, "Storage production track must not export direct ATA volume attachment shims: {s}", .{snippet});
         }
     }
 
@@ -1461,7 +1500,7 @@ fn validateStorageModernOnlyTrack(
 
     const storage_test_path = "src/native/storage/storage_volume_test.zig";
     const storage_test_source = try readRequiredSource(allocator, io, errors, storage_test_path) orelse return;
-    if (std.mem.indexOf(u8, storage_test_source, "storage volume separates generic, target nvme, and brokered ata attachments") == null) {
+    if (std.mem.indexOf(u8, storage_test_source, "storage volume separates generic, target nvme, and brokered bootstrap attachments") == null) {
         try common.addError(errors, allocator, "Storage production track must keep regression coverage for production storage attachment kinds", .{});
     }
 
@@ -1483,6 +1522,7 @@ fn validateStorageModernOnlyTrack(
         "checkpoint_store.volume.attachBackendFns(",
         "checkpoint_store.volume.attachAtaBootstrapDevice(",
         "checkpoint_store.volume.attachAtaBootstrapBrokerBackendFns(",
+        "attachAtaBootstrapDevice(",
     };
     for (retired_native_store_mount_snippets) |snippet| {
         if (std.mem.indexOf(u8, native_store_mount_source, snippet) != null) {
