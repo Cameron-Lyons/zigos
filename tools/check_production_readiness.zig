@@ -1447,7 +1447,6 @@ fn validateStorageModernOnlyTrack(
     const backend_source = try readRequiredSource(allocator, io, errors, backend_source_path) orelse return;
     const backend_snippets = [_][]const u8{
         "nvme_pci",
-        "ata_bootstrap_broker",
     };
     for (backend_snippets) |snippet| {
         if (std.mem.indexOf(u8, backend_source, snippet) == null) {
@@ -1455,6 +1454,7 @@ fn validateStorageModernOnlyTrack(
         }
     }
     const retired_backend_snippets = [_][]const u8{
+        "ata_bootstrap_broker",
         "zigosStorageBootstrapAtaRead",
         "zigosStorageBootstrapAtaWrite",
         "readAtaBootstrap(",
@@ -1490,7 +1490,7 @@ fn validateStorageModernOnlyTrack(
         "attachPublishedStorageBackend(publication, publication.backend.?)",
         "storagePublicationMatchesTargetNvme",
         "storage_volume.attachNvmePciBackend(backend)",
-        "storage_volume.attachAtaBootstrapBrokerBackend",
+        "storage_volume.attachBackend(.{",
     };
     for (driver_port_snippets) |snippet| {
         if (std.mem.indexOf(u8, driver_port_source, snippet) == null) {
@@ -1500,7 +1500,7 @@ fn validateStorageModernOnlyTrack(
 
     const storage_test_path = "src/native/storage/storage_volume_test.zig";
     const storage_test_source = try readRequiredSource(allocator, io, errors, storage_test_path) orelse return;
-    if (std.mem.indexOf(u8, storage_test_source, "storage volume separates generic, target nvme, and brokered bootstrap attachments") == null) {
+    if (std.mem.indexOf(u8, storage_test_source, "storage volume only treats target nvme attachments as production storage") == null) {
         try common.addError(errors, allocator, "Storage production track must keep regression coverage for production storage attachment kinds", .{});
     }
 
@@ -1523,6 +1523,7 @@ fn validateStorageModernOnlyTrack(
         "checkpoint_store.volume.attachAtaBootstrapDevice(",
         "checkpoint_store.volume.attachAtaBootstrapBrokerBackendFns(",
         "attachAtaBootstrapDevice(",
+        "attachAtaBootstrapBrokerBackend(",
     };
     for (retired_native_store_mount_snippets) |snippet| {
         if (std.mem.indexOf(u8, native_store_mount_source, snippet) != null) {

@@ -564,7 +564,7 @@ fn ataPublicationSessionCurrent(session: *const storage_driver_task.AtaControlle
 
 fn attachActiveAtaPublicationBackend(service_id: u64, session: *const storage_driver_task.AtaControllerSession) void {
     active_storage_backend_service_id = service_id;
-    storage_volume.attachAtaBootstrapBrokerBackend(.{
+    storage_volume.attachBackend(.{
         .sector_count = session.sector_count,
         .read = activeAtaPublicationBackendRead,
         .write = activeAtaPublicationBackendWrite,
