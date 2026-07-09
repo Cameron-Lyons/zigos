@@ -586,6 +586,7 @@ fn validateNuc11tnki5KernelProofSources(
     const xhci_path = "src/kernel/drivers/xhci.zig";
     const nvme_path = "src/kernel/drivers/nvme.zig";
     const i225_path = "src/kernel/drivers/intel_i225.zig";
+    const retired_kernel_ata_path = "src/kernel/drivers/ata.zig";
     if (!common.pathExists(io, hardware_proof_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source is missing: {s}", .{hardware_proof_path});
         return;
@@ -649,6 +650,9 @@ fn validateNuc11tnki5KernelProofSources(
     if (!common.pathExists(io, i225_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 I225 proof source is missing: {s}", .{i225_path});
         return;
+    }
+    if (common.pathExists(io, retired_kernel_ata_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 retired ATA kernel shim must stay deleted: {s}", .{retired_kernel_ata_path});
     }
     const hardware_proof_source = try common.readFileAlloc(allocator, io, hardware_proof_path, common.source_file_max_bytes);
     const apic_source = try common.readFileAlloc(allocator, io, apic_path, common.source_file_max_bytes);
