@@ -582,11 +582,11 @@ fn validateNuc11tnki5KernelProofSources(
     const device_inventory_path = "src/native/drivers/device_inventory.zig";
     const service_bootstrap_path = "src/native/session/service_bootstrap.zig";
     const session_service_bootstrap_path = "src/native/session/session_service_bootstrap.zig";
-    const keyboard_path = "src/kernel/drivers/keyboard.zig";
     const xhci_path = "src/kernel/drivers/xhci.zig";
     const nvme_path = "src/kernel/drivers/nvme.zig";
     const i225_path = "src/kernel/drivers/intel_i225.zig";
     const retired_kernel_ata_path = "src/kernel/drivers/ata.zig";
+    const retired_keyboard_path = "src/kernel/drivers/keyboard.zig";
     if (!common.pathExists(io, hardware_proof_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source is missing: {s}", .{hardware_proof_path});
         return;
@@ -635,10 +635,6 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 session service bootstrap source is missing: {s}", .{session_service_bootstrap_path});
         return;
     }
-    if (!common.pathExists(io, keyboard_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 keyboard bootstrap source is missing: {s}", .{keyboard_path});
-        return;
-    }
     if (!common.pathExists(io, nvme_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 NVMe proof source is missing: {s}", .{nvme_path});
         return;
@@ -654,6 +650,9 @@ fn validateNuc11tnki5KernelProofSources(
     if (common.pathExists(io, retired_kernel_ata_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 retired ATA kernel shim must stay deleted: {s}", .{retired_kernel_ata_path});
     }
+    if (common.pathExists(io, retired_keyboard_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 retired PS/2 keyboard shim must stay deleted: {s}", .{retired_keyboard_path});
+    }
     const hardware_proof_source = try common.readFileAlloc(allocator, io, hardware_proof_path, common.source_file_max_bytes);
     const apic_source = try common.readFileAlloc(allocator, io, apic_path, common.source_file_max_bytes);
     const devices_source = try common.readFileAlloc(allocator, io, devices_path, common.source_file_max_bytes);
@@ -666,7 +665,6 @@ fn validateNuc11tnki5KernelProofSources(
     const device_inventory_source = try common.readFileAlloc(allocator, io, device_inventory_path, common.source_file_max_bytes);
     const service_bootstrap_source = try common.readFileAlloc(allocator, io, service_bootstrap_path, common.source_file_max_bytes);
     const session_service_bootstrap_source = try common.readFileAlloc(allocator, io, session_service_bootstrap_path, common.source_file_max_bytes);
-    const keyboard_source = try common.readFileAlloc(allocator, io, keyboard_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
@@ -791,7 +789,6 @@ fn validateNuc11tnki5KernelProofSources(
     const ps2_seed_sources = [_]Ps2SeedSource{
         .{ .label = devices_path, .source = devices_source },
         .{ .label = session_service_bootstrap_path, .source = session_service_bootstrap_source },
-        .{ .label = keyboard_path, .source = keyboard_source },
     };
     for (ps2_seed_sources) |source_check| {
         for (retired_ps2_input_seed_snippets) |snippet| {
