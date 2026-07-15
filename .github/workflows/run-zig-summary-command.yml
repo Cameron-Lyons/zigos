@@ -15,9 +15,6 @@ on:
       log-path:
         required: true
         type: string
-      summary-script:
-        required: true
-        type: string
       summary-path:
         required: true
         type: string
@@ -50,9 +47,15 @@ jobs:
       if: always()
       shell: bash
       run: |
-        mkdir -p build
-        bash ${{ inputs.summary-script }} ${{ inputs.log-path }} > ${{ inputs.summary-path }}
-        cat ${{ inputs.summary-path }} >> "$GITHUB_STEP_SUMMARY"
+        mkdir -p "$(dirname -- '${{ inputs.summary-path }}')"
+        if [ ! -s '${{ inputs.summary-path }}' ]; then
+          {
+            echo '## Command Summary'
+            echo
+            echo 'The command ended before it produced a validated summary.'
+          } > '${{ inputs.summary-path }}'
+        fi
+        cat '${{ inputs.summary-path }}' >> "$GITHUB_STEP_SUMMARY"
 
     - name: Upload summary artifact
       if: always()

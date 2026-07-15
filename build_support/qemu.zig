@@ -193,9 +193,10 @@ pub fn addBenchmarkCommand(
 ) *std.Build.Step.Run {
     const command = b.addSystemCommand(&.{
         "bash",
-        "scripts/run-kernel-benchmark.sh",
+        "scripts/capture-kernel-benchmark.sh",
         kernel.output_path,
         "build/kernel-benchmark.log",
+        "build/kernel-benchmark-summary.md",
     });
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspace_images.step);

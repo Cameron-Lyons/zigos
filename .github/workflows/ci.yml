@@ -96,7 +96,6 @@ jobs:
       job-name: Native Benchmarks
       command: ./scripts/zig.sh build -Doptimize=ReleaseFast benchmark
       log-path: build/kernel-benchmark.log
-      summary-script: scripts/render-kernel-benchmark-summary.sh
       summary-path: build/kernel-benchmark-summary.md
       artifact-name: kernel-benchmark
       timeout-minutes: 20
