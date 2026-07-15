@@ -70,6 +70,7 @@ pub fn adoptRootStorageVolume(checkpoint_store: *storage_service_mod.CheckpointS
         root_volume.attached_backend_sector_count,
         root_volume.attached_backend_read,
         root_volume.attached_backend_write,
+        root_volume.attached_backend_flush,
     );
     return true;
 }
@@ -88,11 +89,16 @@ test "native store root adoption only accepts production NVMe PCI volumes" {
         fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
             return true;
         }
+
+        fn flush() callconv(.c) bool {
+            return true;
+        }
     };
     const production_backend = storage_volume.Backend{
         .sector_count = storage_volume.required_device_sectors,
         .read = BackendFns.read,
         .write = BackendFns.write,
+        .flush = BackendFns.flush,
     };
 
     var volume = storage_volume.Volume.init();
@@ -112,6 +118,7 @@ test "native store root adoption only accepts production NVMe PCI volumes" {
         .sector_count = storage_volume.required_device_sectors - 1,
         .read = BackendFns.read,
         .write = BackendFns.write,
+        .flush = BackendFns.flush,
     };
     volume.attachNvmePciBackend(undersized_nvme_backend);
     try @import("std").testing.expect(!canAdoptProductionRootVolume(&volume));

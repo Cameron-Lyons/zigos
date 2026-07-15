@@ -43,12 +43,11 @@ const ATA_LBA28_HEAD_MASK: u64 = 0x0F;
 const ATA_LBA28_SECTOR_LIMIT: u64 = 0x1000_0000;
 const ATA_ALT_STATUS_SETTLE_READS: usize = 4;
 // Status polls, not time: the wall-clock budget this buys depends on how fast
-// the host services port reads. writeSectors issues CACHE FLUSH after every
-// chunk, and under QEMU cache=writethrough that command holds BSY until the
-// host fsync completes - tens to hundreds of milliseconds on a loaded shared
-// CI runner. 100k polls (~100ms) lost that race and turned healthy-but-slow
-// disks into error.Timeout; 1M keeps roughly a second of headroom while a
-// drive reporting ERR/DF still fails immediately.
+// the host services port reads. An explicit durability barrier may hold BSY
+// while QEMU cache=writethrough completes a host fsync - tens to hundreds of
+// milliseconds on a loaded shared CI runner. 100k polls (~100ms) lost that
+// race and turned healthy-but-slow disks into error.Timeout; 1M keeps roughly
+// a second of headroom while a drive reporting ERR/DF still fails immediately.
 const ATA_POLL_LIMIT: u32 = 1_000_000;
 
 pub const AtaDriverError = error{
@@ -140,6 +139,17 @@ pub fn writeAtaBootstrapSessionChecked(session: *AtaControllerSession, start_lba
     try transferWriteRangeChecked(session, start_lba, buffer);
 }
 
+pub fn flushAtaBootstrapSession(session: *AtaControllerSession) bool {
+    flushAtaBootstrapSessionChecked(session) catch return false;
+    return true;
+}
+
+pub fn flushAtaBootstrapSessionChecked(session: *AtaControllerSession) AtaDriverError!void {
+    try waitDriveReady(session);
+    try writePortU8(session, session.base_port + ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH);
+    try waitDriveReady(session);
+}
+
 pub fn forceNextAtaTimeout(session: *AtaControllerSession) void {
     session.fault_injection.force_next_timeout = true;
 }
@@ -206,6 +216,11 @@ export fn zigosStorageBootstrapAtaWrite(
     return writeAtaBootstrapSession(session, start_lba, buffer_ptr[0..buffer_len]);
 }
 
+export fn zigosStorageBootstrapAtaFlush(device_ptr: *const anyopaque) callconv(.c) bool {
+    const session: *AtaControllerSession = @ptrCast(@alignCast(@constCast(device_ptr)));
+    return flushAtaBootstrapSession(session);
+}
+
 fn readSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []u8) AtaDriverError!void {
     if (count == 0 or count > ATA_MAX_SECTOR_TRANSFER) return error.InvalidParameter;
     if (buffer.len < @as(usize, count) * storage_volume.sector_size) return error.InvalidParameter;
@@ -267,9 +282,6 @@ fn writeSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []c
             buffer_offset += 2;
         }
     }
-
-    try writePortU8(session, session.base_port + ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH);
-    try waitDriveReady(session);
 }
 
 fn transferWriteRangeChecked(session: *AtaControllerSession, start_lba: u64, buffer: []const u8) AtaDriverError!void {

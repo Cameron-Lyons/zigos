@@ -58,14 +58,33 @@ qemu_harness_append_native_store_drive() {
   local image_path="${1:?drive image path required}"
   local default_bus="${2:-ide}"
   local native_store_bus="${ZIGOS_NATIVE_STORE_BUS:-$default_bus}"
+  local native_store_cache="${ZIGOS_NATIVE_STORE_CACHE:-writethrough}"
+
+  case "$native_store_cache" in
+    writeback|writethrough)
+      ;;
+    *)
+      echo "Unsupported ZIGOS_NATIVE_STORE_CACHE '$native_store_cache'; expected 'writeback' or 'writethrough'." >&2
+      return 2
+      ;;
+  esac
 
   QEMU_HARNESS_COMMAND+=(
-    -drive "file=$image_path,if=none,format=raw,id=disk0,cache=writethrough"
+    -drive "file=$image_path,if=none,format=raw,id=disk0,cache=$native_store_cache"
   )
   case "$native_store_bus" in
     nvme)
+      local nvme_write_cache="${ZIGOS_NVME_WRITE_CACHE:-auto}"
+      case "$nvme_write_cache" in
+        on|off|auto)
+          ;;
+        *)
+          echo "Unsupported ZIGOS_NVME_WRITE_CACHE '$nvme_write_cache'; expected 'on', 'off', or 'auto'." >&2
+          return 2
+          ;;
+      esac
       QEMU_HARNESS_COMMAND+=(
-        -device "nvme,drive=disk0,serial=zigosnvme0"
+        -device "nvme,drive=disk0,serial=zigosnvme0,write-cache=$nvme_write_cache"
       )
       ;;
     ide)

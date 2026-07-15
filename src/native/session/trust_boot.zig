@@ -1068,14 +1068,13 @@ fn readDirectMeasuredBootSector(storage_service_id: u64, buffer: *[direct_measur
 }
 
 fn writeDirectMeasuredBootSector(storage_service_id: u64, buffer: *const [direct_measured_boot_sector_size]u8) bool {
-    if (bootstrap_driver_port.activeStorageWrite(storage_service_id, direct_measured_boot_lba, buffer[0..])) return true;
+    if (bootstrap_driver_port.activeStorageWrite(storage_service_id, direct_measured_boot_lba, buffer[0..])) {
+        return bootstrap_driver_port.activeStorageFlush(storage_service_id);
+    }
 
     const root = @import("root");
     if (!@hasDecl(root, "storage_volume")) return false;
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
-    if (root_volume.attached_ata_device) |device| {
-        return volume_backend.writeAtaBootstrap(device, direct_measured_boot_lba, buffer[0..]);
-    }
-    return root_volume.attached_backend_write(direct_measured_boot_lba, buffer.ptr, buffer.len);
+    return volume_backend.writeAttachedDurableRange(root_volume, direct_measured_boot_lba, buffer[0..]);
 }

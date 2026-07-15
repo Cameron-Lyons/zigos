@@ -62,6 +62,10 @@ pub fn publishedDriversActivateScopedTransports() !void {
             return true;
         }
 
+        fn flush() callconv(.c) bool {
+            return true;
+        }
+
         fn activate(device_id: u64) ?storage_volume.Backend {
             if (device_id != 0x0000_8086_5845_0001) return null;
             activation_count += 1;
@@ -69,6 +73,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
                 .sector_count = storage_volume.required_device_sectors,
                 .read = read,
                 .write = write,
+                .flush = flush,
             };
         }
     };

@@ -90,6 +90,7 @@ pub const Volume = struct {
     attached_backend_sector_count: u64 = 0,
     attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = volume_backend.unattachedRead,
     attached_backend_write: *const fn (u64, [*]const u8, usize) callconv(.c) bool = volume_backend.unattachedWrite,
+    attached_backend_flush: *const fn () callconv(.c) bool = volume_backend.unattachedFlush,
     attached_backend_kind: volume_backend.AttachedBackendKind = .none,
     attached_ata_device: ?*const anyopaque = null,
     version_signers: [object_store.MAX_VERSIONS][max_signer_bytes]u8 =
@@ -112,6 +113,7 @@ pub const Volume = struct {
         self.attached_backend_sector_count = 0;
         self.attached_backend_read = volume_backend.unattachedRead;
         self.attached_backend_write = volume_backend.unattachedWrite;
+        self.attached_backend_flush = volume_backend.unattachedFlush;
         self.attached_backend_kind = .none;
         self.attached_ata_device = null;
         @memset(std.mem.sliceAsBytes(self.version_signers[0..]), 0);
@@ -121,11 +123,11 @@ pub const Volume = struct {
     }
 
     pub fn attachBackend(self: *Volume, backend: Backend) void {
-        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, .generic);
+        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, backend.flush, .generic);
     }
 
     pub fn attachNvmePciBackend(self: *Volume, backend: Backend) void {
-        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, .nvme_pci);
+        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, backend.flush, .nvme_pci);
     }
 
     pub fn attachNvmePciBackendFns(
@@ -133,12 +135,13 @@ pub const Volume = struct {
         sector_count: u64,
         read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
         write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
+        flush: *const fn () callconv(.c) bool,
     ) void {
-        self.attachBackendFnsWithKind(sector_count, read, write, .nvme_pci);
+        self.attachBackendFnsWithKind(sector_count, read, write, flush, .nvme_pci);
     }
 
     pub fn attachAtaBootstrapBrokerBackend(self: *Volume, backend: Backend) void {
-        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, .ata_bootstrap_broker);
+        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, backend.flush, .ata_bootstrap_broker);
     }
 
     fn attachBackendFnsWithKind(
@@ -146,12 +149,14 @@ pub const Volume = struct {
         sector_count: u64,
         read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
         write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
+        flush: *const fn () callconv(.c) bool,
         kind: volume_backend.AttachedBackendKind,
     ) void {
         self.attached_backend_present = true;
         self.attached_backend_sector_count = sector_count;
         self.attached_backend_read = read;
         self.attached_backend_write = write;
+        self.attached_backend_flush = flush;
         self.attached_backend_kind = kind;
         self.attached_ata_device = null;
     }
@@ -161,6 +166,7 @@ pub const Volume = struct {
         self.attached_backend_sector_count = sector_count;
         self.attached_backend_read = volume_backend.unattachedRead;
         self.attached_backend_write = volume_backend.unattachedWrite;
+        self.attached_backend_flush = volume_backend.unattachedFlush;
         self.attached_backend_kind = .ata_bootstrap;
         self.attached_ata_device = device;
     }
@@ -170,6 +176,7 @@ pub const Volume = struct {
         self.attached_backend_sector_count = 0;
         self.attached_backend_read = volume_backend.unattachedRead;
         self.attached_backend_write = volume_backend.unattachedWrite;
+        self.attached_backend_flush = volume_backend.unattachedFlush;
         self.attached_backend_kind = .none;
         self.attached_ata_device = null;
     }
@@ -189,6 +196,7 @@ pub const Volume = struct {
         self.attached_backend_sector_count = source.attached_backend_sector_count;
         self.attached_backend_read = source.attached_backend_read;
         self.attached_backend_write = source.attached_backend_write;
+        self.attached_backend_flush = source.attached_backend_flush;
         self.attached_backend_kind = source.attached_backend_kind;
         self.attached_ata_device = source.attached_ata_device;
     }
@@ -250,8 +258,9 @@ pub fn attachNvmePciBackendFns(
     sector_count: u64,
     read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
     write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
+    flush: *const fn () callconv(.c) bool,
 ) void {
-    default_volume.attachNvmePciBackendFns(sector_count, read, write);
+    default_volume.attachNvmePciBackendFns(sector_count, read, write, flush);
 }
 
 pub fn attachAtaBootstrapBrokerBackend(backend: Backend) void {
@@ -309,6 +318,10 @@ fn saveIncremental(
     writer: anytype,
 ) Error!PersistResult {
     try ensureWithinProductCapacityEnvelope(store, workspaces);
+    const started_dirty = store.dirtyObjectIds().len != 0 or
+        store.dirtyVersionIds().len != 0 or
+        workspaces.dirtyWorkspaceIds().len != 0 or
+        workspaces.dirtySnapshotIds().len != 0;
     const current_generation = if (current) |loaded| loaded.root.generation else 0;
     const state_hashes = &self.workspace_state_hashes;
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
@@ -320,6 +333,10 @@ fn saveIncremental(
         BuiltLog{};
 
     if (current != null and delta.bytes_len == 0) {
+        // A failed post-root barrier can leave the new root visible through a
+        // write-back controller cache while its corresponding dirty state remains
+        // set. Retry the barrier before accepting that visible root as durable.
+        if (started_dirty) try flushWrites(writer);
         store.clearDirty();
         workspaces.clearDirty();
         return .{ .generation = current_generation };
@@ -338,7 +355,9 @@ fn saveIncremental(
         // Append-only beyond the current log within the same region: the prior
         // root's prefix is untouched, so an interrupted append falls back to it.
         try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, self.io_log_buffer[0..delta.bytes_len]);
+        try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
+        try flushWrites(writer);
         store.clearDirty();
         workspaces.clearDirty();
         return .{ .generation = next_generation };
@@ -366,7 +385,9 @@ fn saveIncremental(
     next_root.compacted_generation = next_generation;
     const next_root_sector = volume_root_slot.nextRootSector(current);
     try writeBytes(writer, data_start_byte + next_data_offset, self.io_log_buffer[0..log_writer.offset]);
+    try flushWrites(writer);
     try writeRoot(writer, next_root_sector, next_root);
+    try flushWrites(writer);
     store.clearDirty();
     workspaces.clearDirty();
     return .{ .generation = next_generation };
@@ -535,6 +556,16 @@ fn writeRoot(writer: anytype, sector_index: u32, root: RootState) Error!void {
         ImageWriteFns => try volume_root_slot.writeImageRoot(writer.image, sector_index, root),
         BackendWriteFns => try volume_root_slot.writeBackendRoot(writer.volume, sector_index, root),
         else => @compileError("unsupported root writer"),
+    }
+}
+
+fn flushWrites(writer: anytype) Error!void {
+    switch (@TypeOf(writer)) {
+        ImageWriteFns => {},
+        BackendWriteFns => {
+            if (!volume_backend.flushAttached(writer.volume)) return error.DurabilityBarrierFailed;
+        },
+        else => @compileError("unsupported durability writer"),
     }
 }
 

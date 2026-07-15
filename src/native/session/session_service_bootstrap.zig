@@ -65,6 +65,7 @@ const nvme_bridge = if (builtin.target.os.tag == .freestanding)
         extern fn zigosStorageBootstrapNvmeSectorCount() callconv(.c) u64;
         pub extern fn zigosStorageBootstrapNvmeRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool;
         pub extern fn zigosStorageBootstrapNvmeWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool;
+        pub extern fn zigosStorageBootstrapNvmeFlush() callconv(.c) bool;
         pub fn attached() bool {
             return zigosStorageBootstrapNvmeAttached();
         }
@@ -84,6 +85,9 @@ else
             return false;
         }
         pub fn zigosStorageBootstrapNvmeWrite(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+        pub fn zigosStorageBootstrapNvmeFlush() callconv(.c) bool {
             return false;
         }
     };
@@ -113,6 +117,10 @@ const BootedStorageDataPlane = struct {
         return true;
     }
 
+    fn flush() callconv(.c) bool {
+        return true;
+    }
+
     fn activate(device_id: u64) ?storage_volume_mod.Backend {
         if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
         // Prefer the real NVMe data plane when present so storage persists across
@@ -130,12 +138,14 @@ const BootedStorageDataPlane = struct {
                 .sector_count = nvme_sectors,
                 .read = nvme_bridge.zigosStorageBootstrapNvmeRead,
                 .write = nvme_bridge.zigosStorageBootstrapNvmeWrite,
+                .flush = nvme_bridge.zigosStorageBootstrapNvmeFlush,
             };
         }
         return .{
             .sector_count = booted_storage_sector_count,
             .read = read,
             .write = write,
+            .flush = flush,
         };
     }
 };

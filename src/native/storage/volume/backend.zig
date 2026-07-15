@@ -17,12 +17,18 @@ const ata_bridge = if (builtin.target.os.tag == .freestanding)
             buffer_len: usize,
         ) callconv(.c) bool;
 
+        extern fn zigosStorageBootstrapAtaFlush(device: *const anyopaque) callconv(.c) bool;
+
         pub fn read(device: *const anyopaque, start_lba: u64, buffer: []u8) bool {
             return zigosStorageBootstrapAtaRead(device, start_lba, buffer.ptr, buffer.len);
         }
 
         pub fn write(device: *const anyopaque, start_lba: u64, buffer: []const u8) bool {
             return zigosStorageBootstrapAtaWrite(device, start_lba, buffer.ptr, buffer.len);
+        }
+
+        pub fn flush(device: *const anyopaque) bool {
+            return zigosStorageBootstrapAtaFlush(device);
         }
     }
 else
@@ -34,12 +40,17 @@ else
         pub fn write(_: *const anyopaque, _: u64, _: []const u8) bool {
             return false;
         }
+
+        pub fn flush(_: *const anyopaque) bool {
+            return false;
+        }
     };
 
 pub const Backend = struct {
     sector_count: u64,
     read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
     write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
+    flush: *const fn () callconv(.c) bool,
 };
 
 pub const AttachedBackendKind = enum(u8) {
@@ -58,12 +69,20 @@ pub fn unattachedWrite(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
     return false;
 }
 
+pub fn unattachedFlush() callconv(.c) bool {
+    return false;
+}
+
 pub fn readAtaBootstrap(device: *const anyopaque, start_lba: u64, buffer: []u8) bool {
     return ata_bridge.read(device, start_lba, buffer);
 }
 
 pub fn writeAtaBootstrap(device: *const anyopaque, start_lba: u64, buffer: []const u8) bool {
     return ata_bridge.write(device, start_lba, buffer);
+}
+
+pub fn flushAtaBootstrap(device: *const anyopaque) bool {
+    return ata_bridge.flush(device);
 }
 
 pub fn clearAttachedVolume(volume: anytype) void {
@@ -74,6 +93,7 @@ pub fn clearAttachedVolume(volume: anytype) void {
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
         if (!writeAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return;
     }
+    _ = flushAttached(volume);
 }
 
 pub fn writeAttachedBytes(volume: anytype, offset: usize, bytes: []const u8) bool {
@@ -151,6 +171,19 @@ pub fn writeAttachedRange(volume: anytype, start_lba: u64, buffer: []const u8) b
     };
 }
 
+pub fn writeAttachedDurableRange(volume: anytype, start_lba: u64, buffer: []const u8) bool {
+    if (!writeAttachedRange(volume, start_lba, buffer)) return false;
+    return flushAttached(volume);
+}
+
+pub fn flushAttached(volume: anytype) bool {
+    return switch (volume.attached_backend_kind) {
+        .none => false,
+        .generic, .nvme_pci, .ata_bootstrap_broker => volume.attached_backend_flush(),
+        .ata_bootstrap => ataFlush(volume),
+    };
+}
+
 fn ataReadRange(volume: anytype, start_lba: u64, buffer: []u8) bool {
     const device = volume.attached_ata_device orelse return false;
     return readAtaBootstrap(device, start_lba, buffer);
@@ -159,4 +192,9 @@ fn ataReadRange(volume: anytype, start_lba: u64, buffer: []u8) bool {
 fn ataWriteRange(volume: anytype, start_lba: u64, buffer: []const u8) bool {
     const device = volume.attached_ata_device orelse return false;
     return writeAtaBootstrap(device, start_lba, buffer);
+}
+
+fn ataFlush(volume: anytype) bool {
+    const device = volume.attached_ata_device orelse return false;
+    return flushAtaBootstrap(device);
 }

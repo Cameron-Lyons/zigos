@@ -471,6 +471,10 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
             return true;
         }
 
+        fn flush() callconv(.c) bool {
+            return true;
+        }
+
         fn activate(device_id: u64) ?storage_volume.Backend {
             if (device_id != 0x0000_8086_5845_00A1) return null;
             activation_count += 1;
@@ -478,6 +482,7 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
                 .sector_count = storage_volume.required_device_sectors,
                 .read = read,
                 .write = write,
+                .flush = flush,
             };
         }
     };
