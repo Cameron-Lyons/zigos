@@ -77,16 +77,6 @@ pub fn makeLaunchProvenance(RecordType: type, spec: anytype) RecordType {
     return record;
 }
 
-pub fn makeExecutionComponent(RecordType: type, runtime: anytype, component: anytype) RecordType {
-    var record = zeroExecutionComponent(RecordType);
-    record.id = runtime.next_component_id;
-    runtime.next_component_id += 1;
-    record.substrate = component.substrate;
-    record.label_len = native_util.copyTextWithReserve(record.label[0..], component.label, 1);
-    record.entry_len = native_util.copyTextWithReserve(record.entry[0..], component.entry, 1);
-    return record;
-}
-
 pub fn validateUserspaceImage(
     ErrorSet: type,
     max_executable_segments: usize,
