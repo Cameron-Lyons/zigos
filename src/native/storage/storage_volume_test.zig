@@ -11,6 +11,193 @@ const saveToImage = storage_volume.saveToImage;
 const loadFromImage = storage_volume.loadFromImage;
 const DELTA_PAYLOAD_BUFFER_BYTES: usize = 32;
 
+const WriteBackBackend = struct {
+    const Event = enum(u8) {
+        data_write,
+        root_write,
+        flush,
+    };
+
+    const max_events = 32;
+
+    var visible: []u8 = &.{};
+    var durable: []u8 = &.{};
+    var events: [max_events]Event = undefined;
+    var event_count: usize = 0;
+    var flush_count: usize = 0;
+    var fail_on_flush: usize = 0;
+
+    fn attach(volume: *Volume, visible_image: []u8, durable_image: []u8) void {
+        visible = visible_image;
+        durable = durable_image;
+        @memset(visible, 0);
+        @memset(durable, 0);
+        beginAttempt(0);
+        volume.attachBackend(.{
+            .sector_count = storage_volume.required_device_sectors,
+            .read = read,
+            .write = write,
+            .flush = flush,
+        });
+    }
+
+    fn beginAttempt(failing_flush: usize) void {
+        event_count = 0;
+        flush_count = 0;
+        fail_on_flush = failing_flush;
+    }
+
+    fn powerLoss() void {
+        @memcpy(visible, durable);
+    }
+
+    fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+        const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+        const end = start + buffer_len;
+        if (end > visible.len) return false;
+        @memcpy(buffer_ptr[0..buffer_len], visible[start..end]);
+        return true;
+    }
+
+    fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+        const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+        const end = start + buffer_len;
+        if (end > visible.len) return false;
+        record(if (start_lba < storage_volume.header_sectors) .root_write else .data_write);
+        @memcpy(visible[start..end], buffer_ptr[0..buffer_len]);
+        return true;
+    }
+
+    fn flush() callconv(.c) bool {
+        record(.flush);
+        flush_count += 1;
+        if (fail_on_flush != 0 and flush_count == fail_on_flush) return false;
+        @memcpy(durable, visible);
+        return true;
+    }
+
+    fn record(event: Event) void {
+        if (event_count >= events.len) return;
+        events[event_count] = event;
+        event_count += 1;
+    }
+
+    fn firstFlushIndex() ?usize {
+        for (events[0..event_count], 0..) |event, index| {
+            if (event == .flush) return index;
+        }
+        return null;
+    }
+};
+
+fn putBarrierTestVersion(store: *object_store.Store, workspaces: *workspace.Directory, serial: u64) !void {
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-barrier",
+        .seed = signing.seedFromByte(0x6B),
+    };
+    const result = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(serial),
+        .object_type = .document,
+        .payload = "explicit durability barrier",
+        .metadata = try object_store.signMetadata(signer, "barrier", "text/plain", .document, "explicit durability barrier", 1),
+    });
+    const record = try workspaces.create(.{
+        .owner = .{ .kind = .user, .serial = serial },
+        .label = "barrier-workspace",
+    });
+    try workspaces.beginTransaction(record.id);
+    try workspaces.stagePut(record.id, "documents/barrier.md", result.object_id, result.version_id, .document);
+    _ = try workspaces.commit(record.id, 2);
+}
+
+fn expectOrderedBarrierTrace() !void {
+    const first_flush = WriteBackBackend.firstFlushIndex() orelse return error.MissingDurabilityBarrier;
+    try std.testing.expect(first_flush > 0);
+    for (WriteBackBackend.events[0..first_flush]) |event| {
+        try std.testing.expectEqual(WriteBackBackend.Event.data_write, event);
+    }
+    try std.testing.expectEqual(first_flush + 3, WriteBackBackend.event_count);
+    try std.testing.expectEqual(WriteBackBackend.Event.root_write, WriteBackBackend.events[first_flush + 1]);
+    try std.testing.expectEqual(WriteBackBackend.Event.flush, WriteBackBackend.events[first_flush + 2]);
+}
+
+fn expectBarrierFailurePreservesDirtyState(failing_flush: usize, object_serial: u64) !void {
+    const allocator = std.testing.allocator;
+    const visible = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(visible);
+    const durable = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(durable);
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.reset();
+    WriteBackBackend.attach(volume, visible, durable);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    try putBarrierTestVersion(&store, &workspaces, object_serial);
+    WriteBackBackend.beginAttempt(failing_flush);
+
+    try std.testing.expectError(error.DurabilityBarrierFailed, volume.saveToVolume(&store, &workspaces));
+    try std.testing.expectEqual(@as(usize, 1), store.dirtyObjectIds().len);
+    try std.testing.expectEqual(@as(usize, 1), store.dirtyVersionIds().len);
+    try std.testing.expectEqual(@as(usize, 1), workspaces.dirtyWorkspaceIds().len);
+    try std.testing.expectEqual(failing_flush, WriteBackBackend.flush_count);
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        durable[0 .. storage_volume.header_sectors * storage_volume.sector_size],
+        0,
+    ));
+
+    // Retry without a power cycle. In the second-barrier case, reads can see
+    // the write-back root written by the failed attempt, so the retry must flush
+    // that root before it is allowed to clear the dirty sets.
+    WriteBackBackend.beginAttempt(0);
+    const retried = try volume.saveToVolume(&store, &workspaces);
+    try std.testing.expectEqual(@as(u64, 1), retried.generation);
+    try std.testing.expectEqual(@as(usize, 0), store.dirtyObjectIds().len);
+    try std.testing.expectEqual(@as(usize, 0), store.dirtyVersionIds().len);
+    try std.testing.expectEqual(@as(usize, 0), workspaces.dirtyWorkspaceIds().len);
+
+    WriteBackBackend.powerLoss();
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    try std.testing.expect(volume.loadFromVolume(&loaded_store, &loaded_workspaces));
+    try std.testing.expect(loaded_store.latestVersion(object_serial) != null);
+}
+
+test "storage backend commits log and root through ordered durability barriers" {
+    const allocator = std.testing.allocator;
+    const visible = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(visible);
+    const durable = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(durable);
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.reset();
+    WriteBackBackend.attach(volume, visible, durable);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    try putBarrierTestVersion(&store, &workspaces, 0xB401);
+    const persisted = try volume.saveToVolume(&store, &workspaces);
+
+    try std.testing.expectEqual(@as(u64, 1), persisted.generation);
+    try std.testing.expectEqual(@as(usize, 2), WriteBackBackend.flush_count);
+    try expectOrderedBarrierTrace();
+    try std.testing.expectEqualSlices(u8, durable, visible);
+
+    WriteBackBackend.powerLoss();
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    try std.testing.expect(volume.loadFromVolume(&loaded_store, &loaded_workspaces));
+    try std.testing.expect(loaded_store.latestVersion(0xB401) != null);
+}
+
+test "storage backend barrier failures preserve dirty state and withhold the new root" {
+    try expectBarrierFailurePreservesDirtyState(1, 0xB402);
+    try expectBarrierFailurePreservesDirtyState(2, 0xB403);
+}
+
 test "storage volume exposes the first supported product capacity envelope" {
     const envelope = storage_volume.productCapacityEnvelope();
 
@@ -91,6 +278,10 @@ test "storage volume separates generic, target nvme, and brokered ata attachment
         fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
             return true;
         }
+
+        fn flush() callconv(.c) bool {
+            return true;
+        }
     };
 
     var volume = Volume.init();
@@ -98,6 +289,7 @@ test "storage volume separates generic, target nvme, and brokered ata attachment
         .sector_count = storage_volume.required_device_sectors,
         .read = BackendFns.read,
         .write = BackendFns.write,
+        .flush = BackendFns.flush,
     };
     volume.attachBackend(backend);
     try std.testing.expectEqual(storage_volume.AttachedBackendKind.generic, volume.attached_backend_kind);
@@ -115,6 +307,7 @@ test "storage volume separates generic, target nvme, and brokered ata attachment
         .sector_count = storage_volume.required_device_sectors - 1,
         .read = BackendFns.read,
         .write = BackendFns.write,
+        .flush = BackendFns.flush,
     };
     volume.attachNvmePciBackend(undersized_nvme_backend);
     try std.testing.expectEqual(storage_volume.AttachedBackendKind.nvme_pci, volume.attached_backend_kind);

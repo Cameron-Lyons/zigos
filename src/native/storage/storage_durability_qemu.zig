@@ -221,8 +221,5 @@ fn writeProofSector(buffer: *const [proof_sector_size]u8) bool {
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= proof_lba) return false;
-    if (root_volume.attached_ata_device) |device| {
-        return volume_backend.writeAtaBootstrap(device, proof_lba, buffer[0..]);
-    }
-    return root_volume.attached_backend_write(proof_lba, buffer.ptr, buffer.len);
+    return volume_backend.writeAttachedDurableRange(root_volume, proof_lba, buffer[0..]);
 }

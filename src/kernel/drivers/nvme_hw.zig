@@ -68,12 +68,10 @@ pub const Error = error{
 const ADMIN_OPC_CREATE_IO_SQ: u32 = 0x01;
 const ADMIN_OPC_CREATE_IO_CQ: u32 = 0x05;
 const ADMIN_OPC_IDENTIFY: u32 = 0x06;
-const ADMIN_OPC_SET_FEATURES: u32 = 0x09;
-// Set Features / Identify selectors.
-const FEATURE_VOLATILE_WRITE_CACHE: u32 = 0x06;
-const IDENTIFY_CNS_CONTROLLER: u32 = 0x01;
+// Identify selectors.
 const IDENTIFY_CNS_NAMESPACE: u32 = 0x00;
 // NVM I/O opcodes.
+const NVM_OPC_FLUSH: u32 = 0x00;
 const NVM_OPC_WRITE: u32 = 0x01;
 const NVM_OPC_READ: u32 = 0x02;
 
@@ -311,6 +309,14 @@ pub fn writeSectors(self: *Controller, lba: u64, buffer_phys: u32, sector_count:
     try ioCommand(self, NVM_OPC_WRITE, lba, buffer_phys, sector_count);
 }
 
+pub fn flush(self: *Controller) Error!void {
+    if (!self.io_ready) return error.NamespaceMissing;
+    var command = [_]u32{0} ** 16;
+    command[0] = NVM_OPC_FLUSH;
+    command[1] = self.nsid;
+    try submit(self, &self.io, &command);
+}
+
 fn zeroFrame(phys: u32) void {
     // Freshly allocated normal-RAM frame, not yet handed to the controller, so a
     // bulk non-volatile @memset is safe and far cheaper than a byte loop.
@@ -331,34 +337,6 @@ var bounce_phys: u32 = 0;
 
 pub fn attached() bool {
     return active_present;
-}
-
-// Durability barrier for the storage commit path: if the controller has a
-// volatile write cache, disable it (Set Features FID 0x06, WCE=0) so that a
-// completed write command means the data is on media. Combined with the
-// synchronous, polled submit() (one outstanding command per queue) this turns
-// the storage volume's program-order "write log, then write root" into a real
-// media-ordering guarantee without per-commit FLUSH plumbing. If the controller
-// reports no volatile write cache, writes are already durable on completion.
-fn disableVolatileWriteCache(self: *Controller) Error!void {
-    const buffer = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
-    zeroFrame(buffer);
-    var identify = [_]u32{0} ** 16;
-    identify[0] = ADMIN_OPC_IDENTIFY;
-    identify[6] = buffer; // PRP1
-    identify[10] = IDENTIFY_CNS_CONTROLLER;
-    try submit(self, &self.admin, &identify);
-
-    // Identify Controller byte 525 bit 0 (VWC) = volatile write cache present.
-    const words: [*]volatile u32 = @ptrFromInt(buffer);
-    const vwc_present = ((words[131] >> 8) & 0x1) != 0;
-    if (!vwc_present) return;
-
-    var set = [_]u32{0} ** 16;
-    set[0] = ADMIN_OPC_SET_FEATURES;
-    set[10] = FEATURE_VOLATILE_WRITE_CACHE; // FID
-    set[11] = 0; // WCE = 0: disable the volatile write cache
-    try submit(self, &self.admin, &set);
 }
 
 // Identify the active namespace, populating namespace_sectors (NSZE) and
@@ -399,7 +377,6 @@ fn identifyNamespace(self: *Controller) Error!void {
 pub fn attachAsBackend(dev: pci.PCIDevice) Error!void {
     var controller = try bringUp(dev);
     try createIoQueues(&controller);
-    try disableVolatileWriteCache(&controller);
     try identifyNamespace(&controller);
     const bounce = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
     active_controller = controller;
@@ -446,6 +423,12 @@ pub fn backendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) 
     return true;
 }
 
+pub fn backendFlush() callconv(.c) bool {
+    if (!active_present) return false;
+    flush(&active_controller) catch return false;
+    return true;
+}
+
 // Kernel-exported bridge so the native storage layer can use the real NVMe data
 // plane as a bootstrap backend (peer of the ATA bootstrap bridge in
 // storage_driver_task.zig). The native side declares these `extern` behind a
@@ -465,6 +448,10 @@ export fn zigosStorageBootstrapNvmeRead(start_lba: u64, buffer_ptr: [*]u8, buffe
 
 export fn zigosStorageBootstrapNvmeWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
     return backendWrite(start_lba, buffer_ptr, buffer_len);
+}
+
+export fn zigosStorageBootstrapNvmeFlush() callconv(.c) bool {
+    return backendFlush();
 }
 
 // The steady-state DMA footprint of the active controller, one page per index:

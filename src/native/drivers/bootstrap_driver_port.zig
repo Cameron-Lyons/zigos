@@ -405,6 +405,24 @@ pub fn activeStorageWrite(service_id: u64, start_lba: u64, buffer: []const u8) b
     };
 }
 
+pub fn activeStorageFlush(service_id: u64) bool {
+    const publication = publicationForActiveStorage(service_id) orelse return false;
+    return switch (publication.kind) {
+        .ata_bootstrap_bridge => blk: {
+            if (!refreshAtaPublicationSession(publication)) break :blk false;
+            if (publication.ata_session) |*session| {
+                attachActiveAtaPublicationBackend(service_id, session);
+                break :blk storage_driver_task.flushAtaBootstrapSession(session);
+            }
+            break :blk false;
+        },
+        .backend, .activator => blk: {
+            const backend = publication.backend orelse return false;
+            break :blk backend.flush();
+        },
+    };
+}
+
 pub fn activeBrokeredStorageRead(service_id: u64, start_lba: u64, buffer: []u8) bool {
     const publication = publicationForActiveStorage(service_id) orelse return false;
     if (publication.kind != .ata_bootstrap_bridge) return false;
@@ -423,6 +441,17 @@ pub fn activeBrokeredStorageWrite(service_id: u64, start_lba: u64, buffer: []con
     if (publication.ata_session) |*session| {
         attachActiveAtaPublicationBackend(service_id, session);
         return storage_driver_task.writeAtaBootstrapSession(session, start_lba, buffer);
+    }
+    return false;
+}
+
+pub fn activeBrokeredStorageFlush(service_id: u64) bool {
+    const publication = publicationForActiveStorage(service_id) orelse return false;
+    if (publication.kind != .ata_bootstrap_bridge) return false;
+    if (!refreshAtaPublicationSession(publication)) return false;
+    if (publication.ata_session) |*session| {
+        attachActiveAtaPublicationBackend(service_id, session);
+        return storage_driver_task.flushAtaBootstrapSession(session);
     }
     return false;
 }
@@ -568,6 +597,7 @@ fn attachActiveAtaPublicationBackend(service_id: u64, session: *const storage_dr
         .sector_count = session.sector_count,
         .read = activeAtaPublicationBackendRead,
         .write = activeAtaPublicationBackendWrite,
+        .flush = activeAtaPublicationBackendFlush,
     });
 }
 
@@ -592,6 +622,11 @@ fn activeAtaPublicationBackendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len
 fn activeAtaPublicationBackendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
     if (active_storage_backend_service_id == 0) return false;
     return activeBrokeredStorageWrite(active_storage_backend_service_id, start_lba, buffer_ptr[0..buffer_len]);
+}
+
+fn activeAtaPublicationBackendFlush() callconv(.c) bool {
+    if (active_storage_backend_service_id == 0) return false;
+    return activeBrokeredStorageFlush(active_storage_backend_service_id);
 }
 
 fn initPublication(comptime T: type, device_id: u64, publisher: []const u8, kernel_bootstrap: bool) Error!T {
@@ -741,6 +776,10 @@ test "kernel bootstrap cannot publish storage data-plane transports directly" {
             return false;
         }
 
+        fn flush() callconv(.c) bool {
+            return false;
+        }
+
         fn activate(_: u64) ?storage_volume.Backend {
             return null;
         }
@@ -750,6 +789,7 @@ test "kernel bootstrap cannot publish storage data-plane transports directly" {
         .sector_count = 1,
         .read = Backend.read,
         .write = Backend.write,
+        .flush = Backend.flush,
     };
 
     try std.testing.expect(!(try publishStorageBackend(0x1F001, "kernel-storage", backend, true)));
@@ -775,11 +815,16 @@ test "active storage attachment refreshes from the publication" {
         fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
             return true;
         }
+
+        fn flush() callconv(.c) bool {
+            return true;
+        }
     };
     const backend = storage_volume.Backend{
         .sector_count = storage_volume.required_device_sectors,
         .read = Backend.read,
         .write = Backend.write,
+        .flush = Backend.flush,
     };
     const device_id: u64 = 0x0000_8086_5845_5101;
     const service_id: u64 = 0x5102;
@@ -814,11 +859,16 @@ test "storage backend activation requires target nvme inventory" {
         fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
             return true;
         }
+
+        fn flush() callconv(.c) bool {
+            return true;
+        }
     };
     const backend = storage_volume.Backend{
         .sector_count = storage_volume.required_device_sectors,
         .read = Backend.read,
         .write = Backend.write,
+        .flush = Backend.flush,
     };
 
     const uninventoried_device_id: u64 = 0x0000_8086_5845_5201;

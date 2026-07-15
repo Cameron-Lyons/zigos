@@ -20,7 +20,11 @@ NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
 
 # Drive the native store as a real NVMe controller so the kernel NVMe data-plane
 # driver provides genuine persistence across the forced reboots in this proof.
+# Keep both the block backend and controller cache write-back capable so the
+# proof exercises the storage stack's explicit durability barriers.
 export ZIGOS_NATIVE_STORE_BUS=nvme
+export ZIGOS_NATIVE_STORE_CACHE=writeback
+export ZIGOS_NVME_WRITE_CACHE=on
 
 BASE_LOG_PATH="${LOG_PATH%.log}"
 BOOT1_LOG="${BASE_LOG_PATH}.boot1.log"

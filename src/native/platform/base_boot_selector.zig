@@ -435,10 +435,7 @@ fn writeRootVolumeSector(buffer: *const [sector_size]u8) bool {
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= sector_lba) return false;
-    if (root_volume.attached_ata_device) |device| {
-        return volume_backend.writeAtaBootstrap(device, sector_lba, buffer[0..]);
-    }
-    return root_volume.attached_backend_write(sector_lba, buffer.ptr, buffer.len);
+    return volume_backend.writeAttachedDurableRange(root_volume, sector_lba, buffer[0..]);
 }
 
 test "freestanding base boot selector promotes and rolls back signed artifacts across reboot" {

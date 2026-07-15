@@ -28,6 +28,7 @@ const FakeStorageVolumeBackend = struct {
             .sector_count = storage_volume.required_device_sectors,
             .read = read,
             .write = write,
+            .flush = flush,
         });
     }
 
@@ -46,6 +47,10 @@ const FakeStorageVolumeBackend = struct {
         const end = start + buffer.len;
         if (end > image.len) return false;
         @memcpy(image[start..end], buffer);
+        return true;
+    }
+
+    fn flush() callconv(.c) bool {
         return true;
     }
 };
@@ -814,6 +819,7 @@ test "storage service refreshes checkpoint backend after device republish" {
                 .sector_count = storage_volume.required_device_sectors,
                 .read = readFirst,
                 .write = writeFirst,
+                .flush = flushFirst,
             });
         }
 
@@ -824,6 +830,7 @@ test "storage service refreshes checkpoint backend after device republish" {
                 .sector_count = storage_volume.required_device_sectors,
                 .read = readSecond,
                 .write = writeSecond,
+                .flush = flushSecond,
             });
         }
 
@@ -843,6 +850,14 @@ test "storage service refreshes checkpoint backend after device republish" {
 
         fn writeSecond(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
             return writeImage(second_image, start_lba, buffer_ptr[0..buffer_len]);
+        }
+
+        fn flushFirst() callconv(.c) bool {
+            return !first_revoked;
+        }
+
+        fn flushSecond() callconv(.c) bool {
+            return true;
         }
 
         fn readImage(image: []const u8, start_lba: u64, buffer: []u8) bool {
@@ -957,6 +972,10 @@ test "storage service records checkpoint flush failures" {
         fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
             return false;
         }
+
+        fn flush() callconv(.c) bool {
+            return false;
+        }
     };
 
     var checkpoint_store = CheckpointStore{};
@@ -966,6 +985,7 @@ test "storage service records checkpoint flush failures" {
         .sector_count = storage_volume.required_device_sectors,
         .read = FailingBackend.read,
         .write = FailingBackend.write,
+        .flush = FailingBackend.flush,
     });
     defer storage_volume.clearAttachedBackend();
 
