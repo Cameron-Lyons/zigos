@@ -75,7 +75,7 @@ else
 
 const mailbox_section = if (builtin.target.ofmt == .macho) "__DATA,__zigos_boot" else mailbox.SECTION_NAME;
 
-export var zigos_userspace_bootstrap: mailbox.Mailbox align(@alignOf(mailbox.Mailbox)) linksection(mailbox_section) = .{};
+export var zigos_userspace_bootstrap: mailbox.Mailbox align(mailbox.ABI_ALIGNMENT) linksection(mailbox_section) = .{};
 
 const freestanding_trap = if (builtin.target.os.tag == .freestanding)
     struct {

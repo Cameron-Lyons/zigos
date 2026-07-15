@@ -23,6 +23,21 @@ else
     struct {
         pub fn printBootMarker(_: []const u8) void {}
     };
+const paging = if (builtin.target.os.tag == .freestanding)
+    @import("../../../kernel/memory/paging.zig")
+else
+    struct {
+        pub const FrameStats = struct {
+            total: u32 = 0,
+            reserved: u32 = 0,
+            allocated: u32 = 0,
+            free: u32 = 0,
+        };
+
+        pub fn frameStats() FrameStats {
+            return .{};
+        }
+    };
 
 const MMU_PROOF_BUNDLE_ID = "zigos.proof.mmu-isolation";
 
@@ -76,15 +91,52 @@ pub fn runFreestandingAndPrint(
         .budget = budget(),
         .local_only = true,
     }) catch return false;
+    const task_id = launched.id;
+
+    const baseline_frames = paging.frameStats().allocated;
+    const baseline_mappings = scheduler.executor.materializedCount();
+    if (!scheduler.executor.materializeTaskForProof(catalog, runtime, task_id)) return false;
+
+    const materialized_frames = paging.frameStats().allocated;
+    if (materialized_frames <= baseline_frames) return false;
+    const frame_footprint = materialized_frames - baseline_frames;
+    if (scheduler.executor.materializedCount() != baseline_mappings + 1) return false;
+
+    if (!scheduler.executor.rehostActiveTaskForProof(runtime, task_id, 1)) return false;
+    if (scheduler.executor.materializedCount() != baseline_mappings) return false;
+    if (paging.frameStats().allocated != baseline_frames) return false;
+    if (!scheduler.executor.materializeTaskForProof(catalog, runtime, task_id)) return false;
+    if (scheduler.executor.materializedCount() != baseline_mappings + 1) return false;
+    if (paging.frameStats().allocated != baseline_frames + frame_footprint) return false;
+
+    // Churn beyond the logical address-space table capacity. Each rehost must
+    // retire the old physical mapping before the replacement is materialized,
+    // proving bounded frame use instead of relying on eventual reboot cleanup.
+    var rehost_iteration: usize = 0;
+    while (rehost_iteration < task_runtime.MAX_TASKS + 1) : (rehost_iteration += 1) {
+        const before = runtime.find(task_id) orelse return false;
+        const retired_address_space_id = before.address_space_id;
+        if (!(runtime.rehostTask(task_id, rehost_iteration + 2) catch return false)) return false;
+
+        const rehosted = runtime.find(task_id) orelse return false;
+        if (rehosted.address_space_id == retired_address_space_id) return false;
+        if (scheduler.executor.materializedCount() != baseline_mappings) return false;
+        if (paging.frameStats().allocated != baseline_frames) return false;
+
+        if (!scheduler.executor.materializeTaskForProof(catalog, runtime, task_id)) return false;
+        if (scheduler.executor.materializedCount() != baseline_mappings + 1) return false;
+        if (paging.frameStats().allocated != baseline_frames + frame_footprint) return false;
+    }
 
     var saw_syscall_pointer_denial = false;
     var attempt: usize = 0;
     while (attempt < 8) : (attempt += 1) {
-        const yielded = scheduler.executeTask(launched.id, attempt);
+        const yielded = scheduler.executeTask(task_id, attempt);
+        const current = runtime.find(task_id) orelse return false;
 
         if (!saw_syscall_pointer_denial and
             scheduler.executor.observedUserCounterStagePulse(
-                launched.address_space_id,
+                current.address_space_id,
                 .syscall_ready,
                 userspace_bootstrap_mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE,
             ))
@@ -93,9 +145,17 @@ pub fn runFreestandingAndPrint(
             saw_syscall_pointer_denial = true;
         }
 
-        if (scheduler.executor.consumeUserPageFault(launched.id, userspace_bootstrap_mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR)) {
+        if (scheduler.executor.consumeUserPageFault(
+            task_id,
+            current.address_space_id,
+            userspace_bootstrap_mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR,
+        )) {
             if (!saw_syscall_pointer_denial) return false;
             common.printBootMarker(boot_markers.runtime_proof_mmu_user_fault);
+            if (!(runtime.terminateTask(task_id, task_runtime.MAX_TASKS + 10) catch return false)) return false;
+            if (scheduler.executor.materializedCount() != baseline_mappings) return false;
+            if (paging.frameStats().allocated != baseline_frames) return false;
+            common.printBootMarker(boot_markers.runtime_proof_address_space_reclamation);
             return true;
         }
 

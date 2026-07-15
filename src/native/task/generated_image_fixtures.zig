@@ -75,7 +75,8 @@ pub fn validateArtifact(artifact: anytype) Error!task_runtime.ExecutableImageSpe
 
 pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     try std.testing.expect(archive_index.artifacts.len > 0);
-    _ = try validateArtifact(archive_index.artifacts[0]);
+    const production_image = try validateArtifact(archive_index.artifacts[0]);
+    try std.testing.expect(production_image.bootstrap_mailbox_address != 0);
 
     var missing_bytes = archive_index.artifacts[0];
     missing_bytes.data = "";
@@ -115,6 +116,7 @@ fn metadataMatchesInspection(artifact: anytype, inspection: elf_image_inspector.
 fn executableImageFromArtifact(artifact: anytype) task_runtime.ExecutableImageSpec {
     var image = task_runtime.ExecutableImageSpec{
         .entry_point = artifact.entry_point,
+        .bootstrap_mailbox_address = artifact.bootstrap_mailbox_address,
         .stack_top = artifact.stack_top,
         .stack_size_bytes = artifact.stack_size_bytes,
         .file_size_bytes = artifact.file_size_bytes,
@@ -147,6 +149,7 @@ fn executableImagesEqual(
     rhs: task_runtime.ExecutableImageSpec,
 ) bool {
     if (lhs.entry_point != rhs.entry_point) return false;
+    if (lhs.bootstrap_mailbox_address != rhs.bootstrap_mailbox_address) return false;
     if (lhs.stack_top != rhs.stack_top) return false;
     if (lhs.stack_size_bytes != rhs.stack_size_bytes) return false;
     if (lhs.file_size_bytes != rhs.file_size_bytes) return false;

@@ -1,6 +1,10 @@
+const std = @import("std");
+const handoff = @import("../boot/handoff.zig");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
 const numfmt = @import("../utils/numfmt.zig");
+const frame_allocator = @import("frame_allocator.zig");
+const firmware_memory_map = @import("firmware_memory_map.zig");
 
 const PAGE_SIZE = 4096;
 const PAGE_SHIFT = 12;
@@ -9,10 +13,10 @@ const TABLES_PER_DIRECTORY = 1024;
 const PAGE_DIRECTORY_SHIFT = 22;
 const PAGE_TABLE_INDEX_MASK: u32 = PAGES_PER_TABLE - 1;
 const PAGE_OFFSET_MASK: u32 = PAGE_SIZE - 1;
-const FRAME_BITMAP_WORD_BITS = 32;
 const HEX_NIBBLE_BITS = 4;
 const HEX_HIGH_NIBBLE_SHIFT: u32 = 28;
 const HEX_NIBBLE_MASK: u32 = 0xF;
+const MAX_U32: u32 = ~@as(u32, 0);
 
 pub const PAGE_PRESENT: u32 = 0x1;
 pub const PAGE_WRITABLE: u32 = 0x2;
@@ -40,8 +44,50 @@ pub const PageTableEntry = packed struct {
 pub const PageTable = [PAGES_PER_TABLE]PageTableEntry;
 pub const PageDirectory = [TABLES_PER_DIRECTORY]PageTableEntry;
 
-const MEMORY_SIZE = 128 * 1024 * 1024;
+pub const FrameRun = frame_allocator.FrameRun;
+pub const FrameStats = frame_allocator.Stats;
+pub const FrameReleaseError = frame_allocator.Error;
+
+pub const UserAddressSpace = struct {
+    directory: *PageDirectory,
+};
+
+pub const UserPermissions = struct {
+    writable: bool,
+    write_through: bool = false,
+    cache_disabled: bool = false,
+};
+
+pub const UserMapError = error{
+    OutOfMemory,
+    InvalidRange,
+    AddressOverflow,
+    KernelMappingCollision,
+    AlreadyMapped,
+};
+
+pub const UserWriteError = error{
+    InvalidRange,
+    AddressOverflow,
+    PageNotOwned,
+};
+
+pub const UserAddressSpaceDestroyError = error{
+    AddressSpaceActive,
+};
+
+const MEMORY_SIZE: u32 = 128 * 1024 * 1024;
 const IDENTITY_MAPPED_TABLES = MEMORY_SIZE / (PAGE_SIZE * PAGES_PER_TABLE);
+
+// x86 leaves three software-defined bits in every 32-bit paging entry. PDE
+// tags describe who owns the page-table frame; PTE tags describe who owns the
+// mapped leaf frame. Zero intentionally means borrowed/inherited so the
+// statically built identity map remains non-reclaimable.
+const TABLE_OWNER_INHERITED: u3 = 0;
+const TABLE_OWNER_KERNEL_DYNAMIC: u3 = 1;
+const TABLE_OWNER_USER_PRIVATE: u3 = 2;
+const PAGE_OWNER_BORROWED: u3 = 0;
+const PAGE_OWNER_USER_PRIVATE: u3 = 1;
 
 // Lowest address of the BSP boot stack, page-aligned in boot64.S. The stack
 // grows down toward the kernel globals placed just below it in .bss.
@@ -52,94 +98,11 @@ var kernel_page_directory: PageDirectory align(PAGE_SIZE) = undefined;
 // SAFETY: fully initialized in init() which identity-maps the first 128MB
 var kernel_page_tables: [IDENTITY_MAPPED_TABLES]PageTable align(PAGE_SIZE) = undefined;
 
-const FRAME_COUNT = MEMORY_SIZE / PAGE_SIZE;
-const BITMAP_SIZE = FRAME_COUNT / FRAME_BITMAP_WORD_BITS;
+const PhysicalFrameAllocator = frame_allocator.Fixed(MEMORY_SIZE, PAGE_SIZE);
 
-// SAFETY: zeroed and populated in init() before any frame allocation
-var frame_bitmap: [BITMAP_SIZE]u32 = undefined;
-var total_frames: u32 = FRAME_COUNT;
-var used_frames: u32 = 0;
+// SAFETY: reset and populated in init() before any frame allocation.
+var physical_frames = PhysicalFrameAllocator.init();
 var frame_lock: bool = false;
-var frame_search_word_hint: u32 = 0;
-
-fn set_frame(frame_addr: u32) void {
-    const frame = frame_addr / PAGE_SIZE;
-    const idx = frame / FRAME_BITMAP_WORD_BITS;
-    const offset = frame % FRAME_BITMAP_WORD_BITS;
-    const mask = @as(u32, 1) << @truncate(offset);
-    if ((frame_bitmap[idx] & mask) == 0) {
-        frame_bitmap[idx] |= mask;
-        used_frames += 1;
-    }
-}
-
-fn test_frame(frame_addr: u32) bool {
-    const frame = frame_addr / PAGE_SIZE;
-    const idx = frame / FRAME_BITMAP_WORD_BITS;
-    const offset = frame % FRAME_BITMAP_WORD_BITS;
-    return (frame_bitmap[idx] & (@as(u32, 1) << @truncate(offset))) != 0;
-}
-
-fn find_free_frame_range(start_word: u32, end_word: u32) ?u32 {
-    var i = start_word;
-    while (i < end_word) : (i += 1) {
-        const free_mask = ~frame_bitmap[i];
-        if (free_mask != 0) {
-            const bit: u32 = @intCast(@ctz(free_mask));
-            return (i * FRAME_BITMAP_WORD_BITS + bit) * PAGE_SIZE;
-        }
-    }
-    return null;
-}
-
-fn find_free_frame() ?u32 {
-    if (frame_search_word_hint >= BITMAP_SIZE) {
-        frame_search_word_hint = 0;
-    }
-    return find_free_frame_range(frame_search_word_hint, BITMAP_SIZE) orelse
-        find_free_frame_range(0, frame_search_word_hint);
-}
-
-fn find_contiguous_frames(count: u32) ?u32 {
-    if (count == 0) return null;
-
-    var contiguous: u32 = 0;
-    var start_frame: u32 = 0;
-
-    var word_index: u32 = 0;
-    while (word_index < BITMAP_SIZE) : (word_index += 1) {
-        const word = frame_bitmap[word_index];
-        if (word == 0) {
-            if (contiguous == 0) {
-                start_frame = word_index * FRAME_BITMAP_WORD_BITS;
-            }
-            contiguous += FRAME_BITMAP_WORD_BITS;
-            if (contiguous >= count) {
-                return start_frame * PAGE_SIZE;
-            }
-            continue;
-        }
-        if (word == ~@as(u32, 0)) {
-            contiguous = 0;
-            continue;
-        }
-        var bit: u32 = 0;
-        while (bit < FRAME_BITMAP_WORD_BITS) : (bit += 1) {
-            if ((word >> @truncate(bit)) & 1 == 0) {
-                if (contiguous == 0) {
-                    start_frame = word_index * FRAME_BITMAP_WORD_BITS + bit;
-                }
-                contiguous += 1;
-                if (contiguous == count) {
-                    return start_frame * PAGE_SIZE;
-                }
-            } else {
-                contiguous = 0;
-            }
-        }
-    }
-    return null;
-}
 
 fn pageDirectoryIndex(virt_addr: u32) u32 {
     return virt_addr >> PAGE_DIRECTORY_SHIFT;
@@ -153,88 +116,145 @@ fn pageOffset(virt_addr: u32) u32 {
     return virt_addr & PAGE_OFFSET_MASK;
 }
 
-fn pageAlignedAddress(addr: u32) u32 {
-    return addr & ~PAGE_OFFSET_MASK;
-}
-
-fn alloc_frame() u32 {
+fn acquireFrameLock() void {
     while (@atomicRmw(bool, &frame_lock, .Xchg, true, .seq_cst)) {
         asm volatile ("pause");
     }
-    defer @atomicStore(bool, &frame_lock, false, .seq_cst);
+}
 
-    const frame_addr = find_free_frame() orelse {
-        vga.print("Out of memory!\n");
-        while (true) {
-            asm volatile ("hlt");
-        }
-    };
-    set_frame(frame_addr);
-    frame_search_word_hint = (frame_addr / PAGE_SIZE) / FRAME_BITMAP_WORD_BITS;
-    return frame_addr;
+fn releaseFrameLock() void {
+    @atomicStore(bool, &frame_lock, false, .seq_cst);
+}
+
+fn haltWithMessage(message: []const u8) noreturn {
+    vga.print(message);
+    while (true) {
+        asm volatile ("hlt");
+    }
+}
+
+fn tryAllocFrame() ?u32 {
+    acquireFrameLock();
+    defer releaseFrameLock();
+
+    const run = physical_frames.allocate(1) orelse return null;
+    return run.base;
 }
 
 pub fn alloc_frames(count: u32) ?u32 {
-    if (count == 0) return null;
+    acquireFrameLock();
+    defer releaseFrameLock();
 
-    while (@atomicRmw(bool, &frame_lock, .Xchg, true, .seq_cst)) {
-        asm volatile ("pause");
-    }
-    defer @atomicStore(bool, &frame_lock, false, .seq_cst);
-
-    const start_addr = find_contiguous_frames(count);
-    if (start_addr) |addr| {
-        var i: u32 = 0;
-        while (i < count) : (i += 1) {
-            set_frame(addr + i * PAGE_SIZE);
-        }
-        frame_search_word_hint = ((addr / PAGE_SIZE) + (count - 1)) / FRAME_BITMAP_WORD_BITS;
-    }
-    return start_addr;
+    const run = physical_frames.allocate(count) orelse return null;
+    return run.base;
 }
 
-pub fn mapPage(virt_addr: u32, phys_addr: u32, flags: u32) void {
+pub fn release_frames(base: u32, count: u32) FrameReleaseError!void {
+    acquireFrameLock();
+    defer releaseFrameLock();
+
+    try physical_frames.release(.{ .base = base, .count = count });
+}
+
+pub fn frameStats() FrameStats {
+    acquireFrameLock();
+    defer releaseFrameLock();
+
+    return physical_frames.stats();
+}
+
+fn pageTableFromEntry(entry: PageTableEntry) *PageTable {
+    const table_addr = @as(usize, entry.address) << PAGE_SHIFT;
+    return @ptrFromInt(table_addr);
+}
+
+fn mapBorrowedPageIn(
+    page_directory: *PageDirectory,
+    virt_addr: u32,
+    phys_addr: u32,
+    flags: u32,
+    table_owner: u3,
+) UserMapError!void {
+    if (pageOffset(virt_addr) != 0 or pageOffset(phys_addr) != 0) {
+        return error.InvalidRange;
+    }
+
     const page_dir_index = pageDirectoryIndex(virt_addr);
     const page_table_index = pageTableIndex(virt_addr);
-
-    const page_directory = getCurrentPageDirectory();
     const page_dir_entry = &page_directory[page_dir_index];
 
     if (!page_dir_entry.present) {
-        const table_phys_addr = alloc_frame();
+        const table_phys_addr = tryAllocFrame() orelse return error.OutOfMemory;
         page_dir_entry.* = PageTableEntry{
             .present = true,
             .writable = true,
             .user = (flags & PAGE_USER) != 0,
             .write_through = (flags & PAGE_WRITE_THROUGH) != 0,
             .cache_disabled = (flags & PAGE_CACHE_DISABLE) != 0,
+            .available = table_owner,
             .address = @truncate(table_phys_addr >> PAGE_SHIFT),
         };
 
-        const table: *PageTable = @ptrFromInt(table_phys_addr);
+        const table: *PageTable = pageTableFromEntry(page_dir_entry.*);
         for (table) |*entry| {
             entry.* = PageTableEntry{};
         }
-    } else if ((flags & PAGE_USER) != 0 and !page_dir_entry.user) {
-        // A directory entry must be at least as permissive as any mapping
-        // beneath it: a user PTE under a supervisor-only PDE is unreachable
-        // from ring 3. Widening the PDE is safe because the PTE bits still
-        // gate access per page.
-        page_dir_entry.user = true;
+    } else {
+        if (table_owner == TABLE_OWNER_USER_PRIVATE and page_dir_entry.available != TABLE_OWNER_USER_PRIVATE) {
+            return error.KernelMappingCollision;
+        }
+        if ((flags & PAGE_USER) != 0 and !page_dir_entry.user) {
+            if (page_dir_entry.available != TABLE_OWNER_USER_PRIVATE) {
+                return error.KernelMappingCollision;
+            }
+            // Only a private directory entry may be widened for a user PTE.
+            // Inherited kernel tables are never mutated through a user space.
+            page_dir_entry.user = true;
+        }
     }
 
-    const table_addr = @as(usize, page_dir_entry.address) << PAGE_SHIFT;
-    const table: *PageTable = @ptrFromInt(table_addr);
+    const table = pageTableFromEntry(page_dir_entry.*);
+    const page_entry = &table[page_table_index];
+    if (page_entry.present and page_entry.available == PAGE_OWNER_USER_PRIVATE) {
+        return error.AlreadyMapped;
+    }
 
-    table[page_table_index] = PageTableEntry{
+    page_entry.* = PageTableEntry{
         .present = true,
         .writable = (flags & PAGE_WRITABLE) != 0,
         .user = (flags & PAGE_USER) != 0,
         .write_through = (flags & PAGE_WRITE_THROUGH) != 0,
         .cache_disabled = (flags & PAGE_CACHE_DISABLE) != 0,
         .global = (flags & PAGE_GLOBAL) != 0,
+        .available = PAGE_OWNER_BORROWED,
         .address = @truncate(phys_addr >> PAGE_SHIFT),
     };
+
+    if (page_directory == getCurrentPageDirectory()) {
+        invalidate_page(virt_addr);
+    }
+}
+
+fn mapFailure(error_value: UserMapError) noreturn {
+    switch (error_value) {
+        error.OutOfMemory => haltWithMessage("Out of physical memory while mapping page!\n"),
+        error.InvalidRange => haltWithMessage("Attempted to map an unaligned page!\n"),
+        error.KernelMappingCollision => haltWithMessage("User mapping collided with inherited kernel memory!\n"),
+        error.AlreadyMapped => haltWithMessage("Attempted to replace an owned user page!\n"),
+        error.AddressOverflow => haltWithMessage("Page mapping address overflow!\n"),
+    }
+}
+
+/// Maps device or firmware memory into the kernel without transferring frame
+/// ownership to paging. Dynamic page-table frames remain kernel-owned.
+pub fn mapKernelBorrowedPage(virt_addr: u32, phys_addr: u32, flags: u32) void {
+    mapBorrowedPageIn(
+        &kernel_page_directory,
+        virt_addr,
+        phys_addr,
+        flags & ~PAGE_USER,
+        TABLE_OWNER_KERNEL_DYNAMIC,
+    ) catch |err| mapFailure(err);
 }
 
 /// Clear the writable bit on an existing mapping. Only binding for
@@ -266,29 +286,32 @@ pub fn enableWriteProtect() void {
         ::: .{ .eax = true });
 }
 
-pub fn unmap_page(virt_addr: u32) void {
+/// Removes a borrowed current-space PTE without releasing its physical frame.
+/// Owned user mappings must be reclaimed by destroyUserAddressSpace.
+pub fn unmapBorrowedCurrentPage(virt_addr: u32) bool {
     const page_dir_index = pageDirectoryIndex(virt_addr);
     const page_table_index = pageTableIndex(virt_addr);
 
     const page_directory = getCurrentPageDirectory();
     const page_dir_entry = &page_directory[page_dir_index];
     if (!page_dir_entry.present) {
-        return;
+        return false;
     }
 
-    const table_addr = @as(usize, page_dir_entry.address) << PAGE_SHIFT;
-    const table: *PageTable = @ptrFromInt(table_addr);
+    const table = pageTableFromEntry(page_dir_entry.*);
 
     const page_entry = &table[page_table_index];
-    if (page_entry.present) {
-        page_entry.* = PageTableEntry{};
-
-        invalidate_page(virt_addr);
+    if (!page_entry.present or page_entry.available != PAGE_OWNER_BORROWED) {
+        return false;
     }
+
+    page_entry.* = PageTableEntry{};
+    invalidate_page(virt_addr);
+    return true;
 }
 
-pub fn createUserPageDirectory() !*PageDirectory {
-    const pd_phys = alloc_frames(1) orelse return error.OutOfMemory;
+pub fn createUserAddressSpace() error{OutOfMemory}!UserAddressSpace {
+    const pd_phys = tryAllocFrame() orelse return error.OutOfMemory;
     const pd: *PageDirectory = @ptrCast(@alignCast(@as([*]u8, @ptrFromInt(pd_phys))));
 
     for (pd) |*entry| {
@@ -301,15 +324,194 @@ pub fn createUserPageDirectory() !*PageDirectory {
         }
     }
 
-    return pd;
+    return .{ .directory = pd };
+}
+
+/// Allocates zeroed backing one frame at a time and maps it only into the
+/// supplied user address space. Page-granular allocation avoids false OOM
+/// when physical memory is fragmented. On failure, the caller must destroy
+/// the address space; any pages installed before the failure remain owned by
+/// it and are reclaimed by the destructor.
+pub fn mapOwnedUserRange(
+    space: *UserAddressSpace,
+    virtual_start: u32,
+    size_bytes: u32,
+    permissions: UserPermissions,
+) UserMapError!void {
+    if (pageOffset(virtual_start) != 0 or size_bytes == 0) {
+        return error.InvalidRange;
+    }
+    if (size_bytes > MAX_U32 - (PAGE_SIZE - 1)) {
+        return error.AddressOverflow;
+    }
+
+    const mapped_size = (size_bytes + PAGE_SIZE - 1) & ~PAGE_OFFSET_MASK;
+    if (virtual_start > MAX_U32 - mapped_size) {
+        return error.AddressOverflow;
+    }
+
+    // Reject the complete range before allocating anything. In particular,
+    // user mappings may not widen or write through a copied kernel PDE.
+    var offset: u32 = 0;
+    while (offset < mapped_size) : (offset += PAGE_SIZE) {
+        const virtual_address = virtual_start + offset;
+        const page_dir_entry = space.directory[pageDirectoryIndex(virtual_address)];
+        if (!page_dir_entry.present) continue;
+        if (page_dir_entry.available != TABLE_OWNER_USER_PRIVATE) {
+            return error.KernelMappingCollision;
+        }
+
+        const table = pageTableFromEntry(page_dir_entry);
+        if (table[pageTableIndex(virtual_address)].present) {
+            return error.AlreadyMapped;
+        }
+    }
+
+    // Page tables are tagged as soon as they are installed. If this operation
+    // later runs out of frames, they remain owned by `space` and are reclaimed
+    // by its destructor (or reused by a retry).
+    offset = 0;
+    while (offset < mapped_size) : (offset += PAGE_SIZE) {
+        const virtual_address = virtual_start + offset;
+        const page_dir_entry = &space.directory[pageDirectoryIndex(virtual_address)];
+        if (!page_dir_entry.present) {
+            const table_phys = tryAllocFrame() orelse return error.OutOfMemory;
+            page_dir_entry.* = PageTableEntry{
+                .present = true,
+                .writable = true,
+                .user = true,
+                .available = TABLE_OWNER_USER_PRIVATE,
+                .address = @truncate(table_phys >> PAGE_SHIFT),
+            };
+
+            const table = pageTableFromEntry(page_dir_entry.*);
+            for (table) |*entry| {
+                entry.* = PageTableEntry{};
+            }
+        } else {
+            page_dir_entry.writable = true;
+            page_dir_entry.user = true;
+        }
+    }
+
+    offset = 0;
+    while (offset < mapped_size) : (offset += PAGE_SIZE) {
+        const virtual_address = virtual_start + offset;
+        const page_phys = tryAllocFrame() orelse return error.OutOfMemory;
+        const kernel_alias: [*]u8 = @ptrFromInt(page_phys);
+        @memset(kernel_alias[0..PAGE_SIZE], 0);
+        const page_dir_entry = space.directory[pageDirectoryIndex(virtual_address)];
+        const table = pageTableFromEntry(page_dir_entry);
+        table[pageTableIndex(virtual_address)] = PageTableEntry{
+            .present = true,
+            .writable = permissions.writable,
+            .user = true,
+            .write_through = permissions.write_through,
+            .cache_disabled = permissions.cache_disabled,
+            .available = PAGE_OWNER_USER_PRIVATE,
+            .address = @truncate(page_phys >> PAGE_SHIFT),
+        };
+    }
+}
+
+/// Copies bytes through the kernel identity alias into pages owned by the
+/// supplied user address space. This does not require activating its CR3 and
+/// therefore never opens a writable user mapping just to populate code.
+pub fn writeOwnedUserRange(
+    space: *const UserAddressSpace,
+    virtual_start: u32,
+    source: []const u8,
+) UserWriteError!void {
+    if (source.len == 0) return;
+    const byte_count = std.math.cast(u32, source.len) orelse return error.AddressOverflow;
+    if (virtual_start > MAX_U32 - byte_count) return error.AddressOverflow;
+
+    var copied: usize = 0;
+    while (copied < source.len) {
+        const virtual_address = virtual_start + @as(u32, @intCast(copied));
+        const page_dir_entry = space.directory[pageDirectoryIndex(virtual_address)];
+        if (!page_dir_entry.present or page_dir_entry.available != TABLE_OWNER_USER_PRIVATE) {
+            return error.PageNotOwned;
+        }
+        const table = pageTableFromEntry(page_dir_entry);
+        const page_entry = table[pageTableIndex(virtual_address)];
+        if (!page_entry.present or page_entry.available != PAGE_OWNER_USER_PRIVATE) {
+            return error.PageNotOwned;
+        }
+
+        const offset_in_page: usize = pageOffset(virtual_address);
+        const copy_len = @min(source.len - copied, PAGE_SIZE - offset_in_page);
+        const physical_page: usize = @as(usize, page_entry.address) << PAGE_SHIFT;
+        const destination: [*]u8 = @ptrFromInt(physical_page + offset_in_page);
+        @memcpy(destination[0..copy_len], source[copied..][0..copy_len]);
+        copied += copy_len;
+    }
+}
+
+pub fn destroyUserAddressSpace(space: *UserAddressSpace) UserAddressSpaceDestroyError!void {
+    if (space.directory == getCurrentPageDirectory()) {
+        return error.AddressSpaceActive;
+    }
+
+    // Reclaim the complete hierarchy under one allocator lock. Destruction is
+    // off-CPU by contract, and avoiding one atomic lock round-trip per user
+    // page keeps large address-space retirement bounded by bitmap work alone.
+    acquireFrameLock();
+    defer releaseFrameLock();
+
+    for (space.directory) |*page_dir_entry| {
+        if (!page_dir_entry.present or page_dir_entry.available != TABLE_OWNER_USER_PRIVATE) {
+            continue;
+        }
+
+        const table_phys: u32 = @as(u32, page_dir_entry.address) << PAGE_SHIFT;
+        const table = pageTableFromEntry(page_dir_entry.*);
+        for (table) |*page_entry| {
+            if (page_entry.present and page_entry.available == PAGE_OWNER_USER_PRIVATE) {
+                const page_phys: u32 = @as(u32, page_entry.address) << PAGE_SHIFT;
+                physical_frames.release(.{ .base = page_phys, .count = 1 }) catch
+                    haltWithMessage("Corrupt owned user-frame accounting!\n");
+            }
+            page_entry.* = PageTableEntry{};
+        }
+
+        physical_frames.release(.{ .base = table_phys, .count = 1 }) catch
+            haltWithMessage("Corrupt user page-table accounting!\n");
+        page_dir_entry.* = PageTableEntry{};
+    }
+
+    const directory_phys: u32 = @intCast(@intFromPtr(space.directory));
+    physical_frames.release(.{ .base = directory_phys, .count = 1 }) catch
+        haltWithMessage("Corrupt user page-directory accounting!\n");
+    space.* = undefined;
+}
+
+pub fn switchToUserAddressSpace(space: *const UserAddressSpace) void {
+    switchPageDirectory(space.directory);
 }
 
 pub fn init() void {
     vga.print("Initializing paging...\n");
 
-    for (&frame_bitmap) |*word| {
-        word.* = 0;
-    }
+    const boot_info = handoff.capturedInfo() orelse
+        haltWithMessage("Missing Multiboot memory-map handoff!\n");
+    const boot_info_address = handoff.capturedInfoAddress() orelse
+        haltWithMessage("Invalid Multiboot information extent!\n");
+    const memory_map_bytes = handoff.capturedMemoryMapBytes(boot_info) orelse
+        haltWithMessage("Missing Multiboot memory map!\n");
+    firmware_memory_map.initializeAllocator(
+        MEMORY_SIZE,
+        PAGE_SIZE,
+        &physical_frames,
+        memory_map_bytes,
+    ) catch haltWithMessage("Invalid Multiboot memory map!\n");
+    firmware_memory_map.reserveLiveHandoffRanges(
+        MEMORY_SIZE,
+        PAGE_SIZE,
+        &physical_frames,
+        boot_info_address,
+        boot_info,
+    ) catch haltWithMessage("Invalid live Multiboot handoff extent!\n");
 
     for (&kernel_page_directory) |*entry| {
         entry.* = PageTableEntry{};
@@ -335,11 +537,14 @@ pub fn init() void {
     }
 
     const kernel_end = memory.getReservedMemoryEnd();
-    var i: u32 = 0;
-    while (i < kernel_end) : (i += PAGE_SIZE) {
-        set_frame(i);
+    const reserved_frame_count = (kernel_end + PAGE_SIZE - 1) / PAGE_SIZE;
+    physical_frames.reserve(.{
+        .base = 0,
+        .count = reserved_frame_count,
+    }) catch haltWithMessage("Invalid physical-memory reservation!\n");
+    if (physical_frames.stats().free == 0) {
+        haltWithMessage("No usable physical frames remain after kernel reservation!\n");
     }
-    frame_search_word_hint = (kernel_end / PAGE_SIZE) / FRAME_BITMAP_WORD_BITS;
 
     enable_paging(@intFromPtr(&kernel_page_directory));
     unmapBootStackGuardPage();
@@ -347,26 +552,28 @@ pub fn init() void {
     // kernel page directory now that paging is live.
     @import("../interrupts/gdt.zig").refreshDoubleFaultCr3();
     vga.print("Paging enabled!\n");
+    const stats = frameStats();
     vga.print("Total frames: ");
-    numfmt.printDec(total_frames);
-    vga.print(" Used frames: ");
-    numfmt.printDec(used_frames);
+    numfmt.printDec(stats.total);
+    vga.print(" Reserved frames: ");
+    numfmt.printDec(stats.reserved);
+    vga.print(" Allocated frames: ");
+    numfmt.printDec(stats.allocated);
     vga.print("\n");
 }
 
 // A boot-stack overflow used to run straight into the device-broker globals
 // below stack_bottom and corrupt them silently; Debug builds hit this with
 // their larger frames while ReleaseFast masked it. Sacrifice the lowest stack
-// page as an unmapped guard so an overflow page-faults at the boundary
-// instead. Demand paging only maps heap addresses, so the guard stays
-// unmapped for the kernel's lifetime.
+// page as an unmapped guard so an overflow page-faults at the boundary. Page
+// faults fail closed, so the guard stays unmapped for the kernel's lifetime.
 fn unmapBootStackGuardPage() void {
     const guard_address: u32 = @intFromPtr(&stack_bottom);
     if (guard_address % PAGE_SIZE != 0) {
         vga.print("Boot stack guard skipped: stack_bottom is not page-aligned\n");
         return;
     }
-    unmap_page(guard_address);
+    _ = unmapBorrowedCurrentPage(guard_address);
 }
 
 fn enable_paging(page_dir_addr: u32) void {
@@ -387,17 +594,11 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
         : [addr] "=r" (faulting_address),
     );
 
-    const present = (regs.err_code & 0x1) == 0;
+    const not_present = (regs.err_code & 0x1) == 0;
     const write = (regs.err_code & 0x2) != 0;
     const user = (regs.err_code & 0x4) != 0;
     const reserved = (regs.err_code & 0x8) != 0;
     const instruction_fetch = (regs.err_code & 0x10) != 0;
-
-    if (present) {
-        if (handle_demand_paging(faulting_address, write, user)) {
-            return;
-        }
-    }
 
     const console = @import("../utils/console.zig");
     console.print("\n=== PAGE FAULT ===\n");
@@ -408,7 +609,7 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
     print_hex_console(regs.eip, console);
     console.print("\n");
 
-    if (present) console.print("  - Page not present\n");
+    if (not_present) console.print("  - Page not present\n");
     if (write) console.print("  - Write violation\n") else console.print("  - Read violation\n");
     if (user) console.print("  - User mode\n") else console.print("  - Kernel mode\n");
     if (reserved) console.print("  - Reserved bit violation\n");
@@ -430,11 +631,6 @@ fn print_hex_console(value: u32, console: anytype) void {
         if (i == 0) break;
     }
 }
-
-// Demand-paged kernel heap range served by handle_demand_paging; the heap
-// allocator itself lives in memory.zig.
-const HEAP_START: u32 = 0x10000000;
-const HEAP_MAX_SIZE: u32 = 16 * 1024 * 1024;
 
 var current_page_directory: *PageDirectory = &kernel_page_directory;
 
@@ -458,64 +654,4 @@ fn invalidate_page(virt_addr: u32) void {
         :
         : [addr] "r" (virt_addr),
     );
-}
-
-fn handle_demand_paging(addr: u32, _: bool, user: bool) bool {
-    const aligned_addr = pageAlignedAddress(addr);
-
-    if (aligned_addr >= HEAP_START and aligned_addr < HEAP_START + HEAP_MAX_SIZE) {
-        const phys = alloc_frame();
-        var flags: u32 = PAGE_PRESENT | PAGE_WRITABLE;
-        if (user) flags |= PAGE_USER;
-
-        mapPage(aligned_addr, phys, flags);
-
-        const page_ptr: [*]u8 = @ptrFromInt(aligned_addr);
-        @memset(page_ptr[0..PAGE_SIZE], 0);
-
-        return true;
-    }
-
-    return false;
-}
-
-pub fn map_range(virt_start: u32, phys_start: u32, size: u32, flags: u32) void {
-    var offset: u32 = 0;
-    while (offset < size) : (offset += PAGE_SIZE) {
-        mapPage(virt_start + offset, phys_start + offset, flags);
-    }
-}
-
-fn getPageEntry(page_directory: *PageDirectory, virt_addr: u32) ?*PageTableEntry {
-    const page_dir_index = pageDirectoryIndex(virt_addr);
-    const page_table_index = pageTableIndex(virt_addr);
-
-    const page_dir_entry = page_directory[page_dir_index];
-    if (!page_dir_entry.present) {
-        return null;
-    }
-
-    const table_addr = @as(usize, page_dir_entry.address) << PAGE_SHIFT;
-    const table: *PageTable = @ptrFromInt(table_addr);
-
-    const entry = &table[page_table_index];
-    if (!entry.present) {
-        return null;
-    }
-    return entry;
-}
-
-fn updatePageEntryFlags(entry: *PageTableEntry, flags: u32) void {
-    entry.writable = (flags & PAGE_WRITABLE) != 0;
-    entry.user = (flags & PAGE_USER) != 0;
-    entry.write_through = (flags & PAGE_WRITE_THROUGH) != 0;
-    entry.cache_disabled = (flags & PAGE_CACHE_DISABLE) != 0;
-    entry.global = (flags & PAGE_GLOBAL) != 0;
-}
-
-pub fn set_current_page_flags(virt_addr: u32, flags: u32) void {
-    if (getPageEntry(getCurrentPageDirectory(), virt_addr)) |entry| {
-        updatePageEntryFlags(entry, flags);
-        invalidate_page(virt_addr);
-    }
 }

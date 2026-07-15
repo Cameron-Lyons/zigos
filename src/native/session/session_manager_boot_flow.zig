@@ -82,6 +82,9 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        if (self.runtime_context.constructed) {
+            self.runtime_context.userspace_scheduler.deinit();
+        }
         self.* = SessionManager.init();
         bootstrap_driver_port.reset();
         session_service_bootstrap.resetBootedDataPlanes();

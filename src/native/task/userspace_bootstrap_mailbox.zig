@@ -89,6 +89,18 @@ pub const Mailbox = extern struct {
     last_counter: u32 = 0,
 };
 
+/// Stable i386 wire layout. Host-side artifact tools may have a wider extern
+/// struct tail alignment, so serialized extent checks must not use host
+/// `@sizeOf(Mailbox)`.
+pub const ABI_SIZE_BYTES: usize = 76;
+pub const ABI_ALIGNMENT: usize = 4;
+
+comptime {
+    if (@offsetOf(Mailbox, "last_counter") + @sizeOf(u32) != ABI_SIZE_BYTES) {
+        @compileError("userspace bootstrap mailbox fields no longer match the i386 wire ABI");
+    }
+}
+
 pub fn classifyDetail(component_class: u8, contract_flags: u32) Detail {
     if ((contract_flags & FLAG_PERMISSION_REVIEW) != 0) return .review;
     if ((contract_flags & FLAG_NETWORK_BOUNDARY) != 0) return .network;

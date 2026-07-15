@@ -163,6 +163,7 @@ fn executableImageFromArtifact(artifact: anytype) Error!task_runtime.ExecutableI
     }
     var executable_image = task_runtime.ExecutableImageSpec{
         .entry_point = artifact.entry_point,
+        .bootstrap_mailbox_address = artifact.bootstrap_mailbox_address,
         .stack_top = artifact.stack_top,
         .stack_size_bytes = artifact.stack_size_bytes,
         .file_size_bytes = artifact.file_size_bytes,

@@ -142,7 +142,7 @@ fn identityMapBar(phys: usize) void {
     var offset: u32 = 0;
     while (offset < BAR_MAP_BYTES) : (offset += PAGE_SIZE) {
         const addr: u32 = @intCast(phys + offset);
-        paging.mapPage(addr, addr, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE);
+        paging.mapKernelBorrowedPage(addr, addr, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE);
     }
 }
 
