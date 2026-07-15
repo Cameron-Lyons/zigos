@@ -30,7 +30,12 @@ pub const TASK_OWNER_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const CAPABILITY_INDEX_CAPACITY: usize = MAX_TASK_CAPABILITIES * 2;
 pub const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
 pub const DEFAULT_USER_STACK_SIZE_BYTES: usize = units.kibibytes(64);
-pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = 0x0804_8000;
+pub const USER_PAGE_SIZE: u64 = launch_helpers.USER_PAGE_SIZE;
+pub const USER_VIRTUAL_ADDRESS_MIN: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MIN;
+pub const USER_IMAGE_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_IMAGE_ADDRESS_MAX_EXCLUSIVE;
+pub const USER_STACK_ADDRESS_MIN: u64 = launch_helpers.USER_STACK_ADDRESS_MIN;
+pub const USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE;
+pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = USER_VIRTUAL_ADDRESS_MIN;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: usize = units.kibibytes(8);
 
 pub const TaskState = enum(u8) {
@@ -86,6 +91,7 @@ pub const ExecutableSegmentSpec = struct {
 
 pub const ExecutableImageSpec = struct {
     entry_point: u64 = 0,
+    bootstrap_mailbox_address: u64 = 0,
     stack_top: u64 = DEFAULT_USER_STACK_TOP,
     stack_size_bytes: usize = DEFAULT_USER_STACK_SIZE_BYTES,
     file_size_bytes: usize = 0,
@@ -698,3 +704,137 @@ pub fn syntheticUserspaceImage(label: []const u8, entry: []const u8) ExecutableI
         DEFAULT_SYNTHETIC_IMAGE_BYTES,
     );
 }
+
+fn expectInvalidUserspaceImage(image: ExecutableImageSpec) !void {
+    try std.testing.expectError(error.InvalidUserspaceImage, validateUserspaceImage(image));
+}
+
+test "userspace image validation accepts a bounded executable layout" {
+    const image = syntheticUserspaceImage("layout-test", "layout-test.entry");
+    const validated = try validateUserspaceImage(image);
+
+    try std.testing.expectEqual(DEFAULT_SYNTHETIC_ENTRY_POINT, validated.entry_point);
+    try std.testing.expectEqual(
+        DEFAULT_SYNTHETIC_ENTRY_POINT + launch_helpers.SYNTHETIC_SEGMENT_ALIGNMENT,
+        validated.bootstrap_mailbox_address,
+    );
+}
+
+test "userspace image validation rejects addresses outside the user interval" {
+    const valid = syntheticUserspaceImage("layout-test", "layout-test.entry");
+
+    var below_floor = valid;
+    below_floor.entry_point = USER_VIRTUAL_ADDRESS_MIN - USER_PAGE_SIZE;
+    below_floor.segments[0].virtual_address = below_floor.entry_point;
+    try expectInvalidUserspaceImage(below_floor);
+
+    var segment_overflow = valid;
+    segment_overflow.bootstrap_mailbox_address = 0;
+    segment_overflow.segments[1].virtual_address = std.math.maxInt(u64) - (USER_PAGE_SIZE - 1);
+    try expectInvalidUserspaceImage(segment_overflow);
+
+    var stack_below_floor = valid;
+    stack_below_floor.stack_top = USER_STACK_ADDRESS_MIN;
+    try expectInvalidUserspaceImage(stack_below_floor);
+
+    var segment_in_shared_window = valid;
+    segment_in_shared_window.bootstrap_mailbox_address = 0;
+    segment_in_shared_window.segments[1].virtual_address = USER_IMAGE_ADDRESS_MAX_EXCLUSIVE;
+    try expectInvalidUserspaceImage(segment_in_shared_window);
+}
+
+test "userspace image validation rejects malformed rounded mappings" {
+    const valid = syntheticUserspaceImage("layout-test", "layout-test.entry");
+
+    var unaligned_segment = valid;
+    unaligned_segment.bootstrap_mailbox_address = 0;
+    unaligned_segment.segments[1].virtual_address += 1;
+    try expectInvalidUserspaceImage(unaligned_segment);
+
+    var invalid_alignment = valid;
+    invalid_alignment.segments[0].alignment = 0x1800;
+    try expectInvalidUserspaceImage(invalid_alignment);
+
+    var address_misaligned_for_segment = valid;
+    address_misaligned_for_segment.segments[1].alignment = USER_PAGE_SIZE * 2;
+    try expectInvalidUserspaceImage(address_misaligned_for_segment);
+
+    var overlapping_segments = valid;
+    overlapping_segments.bootstrap_mailbox_address = 0;
+    overlapping_segments.segments[1].virtual_address = overlapping_segments.segments[0].virtual_address;
+    overlapping_segments.segments[1].file_offset = 0;
+    try expectInvalidUserspaceImage(overlapping_segments);
+
+    var stack_collision = valid;
+    stack_collision.stack_size_bytes = USER_PAGE_SIZE;
+    stack_collision.stack_top = valid.segments[1].virtual_address + USER_PAGE_SIZE;
+    try expectInvalidUserspaceImage(stack_collision);
+}
+
+test "userspace image validation rejects invalid file and execution extents" {
+    const valid = syntheticUserspaceImage("layout-test", "layout-test.entry");
+
+    var file_extent = valid;
+    file_extent.segments[1].file_offset = DEFAULT_SYNTHETIC_IMAGE_BYTES;
+    try expectInvalidUserspaceImage(file_extent);
+
+    var entry_in_writable_segment = valid;
+    entry_in_writable_segment.entry_point = entry_in_writable_segment.segments[1].virtual_address;
+    try expectInvalidUserspaceImage(entry_in_writable_segment);
+
+    var entry_in_rounded_padding = valid;
+    entry_in_rounded_padding.segments[0].memory_size = 1;
+    entry_in_rounded_padding.segments[0].file_size = 1;
+    entry_in_rounded_padding.entry_point = entry_in_rounded_padding.segments[0].virtual_address + 1;
+    try expectInvalidUserspaceImage(entry_in_rounded_padding);
+
+    var writable_executable = valid;
+    writable_executable.segments[0].access.write = true;
+    try expectInvalidUserspaceImage(writable_executable);
+}
+
+test "userspace image validation requires the mailbox to fit writable memory" {
+    const valid = syntheticUserspaceImage("layout-test", "layout-test.entry");
+
+    var missing_mailbox = valid;
+    missing_mailbox.bootstrap_mailbox_address = 0;
+    try expectInvalidUserspaceImage(missing_mailbox);
+
+    var mailbox_in_executable_memory = valid;
+    mailbox_in_executable_memory.bootstrap_mailbox_address = mailbox_in_executable_memory.segments[0].virtual_address;
+    try expectInvalidUserspaceImage(mailbox_in_executable_memory);
+
+    var mailbox_straddles_segment = valid;
+    mailbox_straddles_segment.bootstrap_mailbox_address =
+        mailbox_straddles_segment.segments[1].virtual_address + SYNTHETIC_MAILBOX_STRADDLE_OFFSET;
+    try expectInvalidUserspaceImage(mailbox_straddles_segment);
+
+    var misaligned_mailbox = valid;
+    misaligned_mailbox.bootstrap_mailbox_address += 1;
+    try expectInvalidUserspaceImage(misaligned_mailbox);
+}
+
+test "userspace image validation binds exact region boundaries" {
+    const valid = syntheticUserspaceImage("layout-test", "layout-test.entry");
+
+    var image_at_upper_bound = valid;
+    image_at_upper_bound.segments[1].virtual_address = USER_IMAGE_ADDRESS_MAX_EXCLUSIVE - USER_PAGE_SIZE;
+    image_at_upper_bound.bootstrap_mailbox_address = image_at_upper_bound.segments[1].virtual_address;
+    _ = try validateUserspaceImage(image_at_upper_bound);
+
+    var image_crossing_upper_bound = image_at_upper_bound;
+    image_crossing_upper_bound.segments[1].memory_size = @intCast(USER_PAGE_SIZE + 1);
+    try expectInvalidUserspaceImage(image_crossing_upper_bound);
+
+    var stack_at_upper_bound = valid;
+    stack_at_upper_bound.stack_top = USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE;
+    stack_at_upper_bound.stack_size_bytes = USER_PAGE_SIZE;
+    _ = try validateUserspaceImage(stack_at_upper_bound);
+
+    var stack_crossing_upper_bound = stack_at_upper_bound;
+    stack_crossing_upper_bound.stack_top += USER_PAGE_SIZE;
+    try expectInvalidUserspaceImage(stack_crossing_upper_bound);
+}
+
+const SYNTHETIC_MAILBOX_STRADDLE_OFFSET: u64 =
+    launch_helpers.SYNTHETIC_SEGMENT_BYTES - 8;

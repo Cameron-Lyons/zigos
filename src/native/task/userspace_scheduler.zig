@@ -127,6 +127,7 @@ const AcceleratorClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ACCELERATOR_CL
 
 pub const Scheduler = struct {
     executor: *userspace_executor.Executor,
+    executor_binding_claimed: bool = false,
     initialized: bool = false,
     catalog_ptr: ?*userspace_loader.Catalog = null,
     runtime_ptr: ?*task_runtime.Runtime = null,
@@ -158,34 +159,34 @@ pub const Scheduler = struct {
         return .{ .executor = executor };
     }
 
-    pub fn reset(self: *Scheduler) void {
+    pub fn deinit(self: *Scheduler) void {
+        const runtime = self.runtime_ptr;
+        if (builtin.target.os.tag == .freestanding) {
+            if (runtime) |bound_runtime| {
+                if (!bound_runtime.unbindAddressSpaceRetirementSink(self.executor.retirementSink())) {
+                    native_util.impossibleByInvariant("userspace runtime retirement ownership changed while bound");
+                }
+            }
+        }
+        if (self.executor_binding_claimed) {
+            self.executor.deinit();
+            const bound_runtime = runtime orelse
+                native_util.impossibleByInvariant("userspace executor ownership has no runtime");
+            if (!self.executor.releaseRuntimeBinding(self, bound_runtime)) {
+                native_util.impossibleByInvariant("userspace executor ownership changed while bound");
+            }
+        }
+        self.executor_binding_claimed = false;
         self.initialized = false;
         self.catalog_ptr = null;
         self.runtime_ptr = null;
         self.capability_table_ptr = null;
-        self.slots = SchedulerSlotArena.init();
-        self.ready_heads = [_]usize{no_index} ** RESOURCE_CLASS_COUNT;
-        self.ready_tails = [_]usize{no_index} ** RESOURCE_CLASS_COUNT;
-        self.ready_counts = [_]usize{0} ** RESOURCE_CLASS_COUNT;
-        self.ready_task_count = 0;
-        self.accelerator_claims = AcceleratorClaimArena.init();
-        self.accelerator_claim_task_index = AcceleratorClaimTaskIndex.init();
-        self.accelerator_claim_heads = [_]usize{no_index} ** ENGINE_COUNT;
-        self.accelerator_claim_tails = [_]usize{no_index} ** ENGINE_COUNT;
-        self.accelerator_deadline_heads = [_]usize{no_index} ** ENGINE_COUNT;
-        self.accelerator_deadline_tails = [_]usize{no_index} ** ENGINE_COUNT;
-        self.accelerator_claim_counts = [_]usize{0} ** ENGINE_COUNT;
-        self.engine_dispatch_counts = [_]u64{0} ** ENGINE_COUNT;
-        self.engine_denial_counts = [_]u64{0} ** ENGINE_COUNT;
-        self.next_accelerator_claim_id = 1;
-        self.resource_state = .{};
-        self.resource_telemetry_source = .synthetic;
-        self.resource_telemetry_observed_tick = 0;
-        self.resource_hardware_evidence_complete = false;
-        self.last_dispatch_tick = 0;
-        self.ready_marker_printed = false;
-        self.active_marker_printed = false;
-        self.executor.reset();
+    }
+
+    pub fn reset(self: *Scheduler) void {
+        const executor = self.executor;
+        self.deinit();
+        self.* = Scheduler.init(executor);
     }
 
     pub fn bind(
@@ -194,6 +195,18 @@ pub const Scheduler = struct {
         runtime: *task_runtime.Runtime,
         capability_table: *const capability.CapabilityTable,
     ) void {
+        if (self.initialized or self.runtime_ptr != null) self.reset();
+        if (!self.executor.claimRuntimeBinding(self, runtime)) {
+            native_util.impossibleByInvariant("userspace executor already has an owner");
+        }
+        self.executor_binding_claimed = true;
+        if (builtin.target.os.tag == .freestanding) {
+            if (!runtime.bindAddressSpaceRetirementSink(self.executor.retirementSink())) {
+                _ = self.executor.releaseRuntimeBinding(self, runtime);
+                self.executor_binding_claimed = false;
+                native_util.impossibleByInvariant("userspace runtime already has an address-space owner");
+            }
+        }
         self.catalog_ptr = catalog;
         self.runtime_ptr = runtime;
         self.capability_table_ptr = capability_table;

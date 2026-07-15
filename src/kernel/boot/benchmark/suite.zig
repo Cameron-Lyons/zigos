@@ -1537,6 +1537,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
 fn qualityBatterySaverBatchDelay() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    defer scheduler.deinit();
     var catalog = userspace_loader.Catalog.init();
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;
@@ -1572,6 +1573,7 @@ fn qualityBatterySaverBatchDelay() u64 {
 fn qualityThermalCriticalBackgroundDelay() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    defer scheduler.deinit();
     var catalog = userspace_loader.Catalog.init();
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;
@@ -1605,6 +1607,7 @@ fn qualityThermalCriticalBackgroundDelay() u64 {
 fn qualityMemoryPressureBatchDelay() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    defer scheduler.deinit();
     var catalog = userspace_loader.Catalog.init();
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;
@@ -1644,6 +1647,7 @@ fn qualityMemoryPressureBatchDelay() u64 {
 fn qualitySchedulerFairnessRatioPercent() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    defer scheduler.deinit();
     var catalog = userspace_loader.Catalog.init();
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;
@@ -1689,6 +1693,7 @@ fn qualitySchedulerFairnessRatioPercent() u64 {
 fn qualityStarvationResistanceAfterPressure() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    defer scheduler.deinit();
     var catalog = userspace_loader.Catalog.init();
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;
@@ -1741,6 +1746,7 @@ fn qualityStarvationResistanceAfterPressure() u64 {
 fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    defer scheduler.deinit();
     var catalog = userspace_loader.Catalog.init();
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;
@@ -1797,6 +1803,7 @@ fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
 fn qualityAcceleratorClaimDeadlinePriority() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    defer scheduler.deinit();
     var catalog = userspace_loader.Catalog.init();
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;
@@ -1963,6 +1970,7 @@ fn qualityBackgroundThrottlingDelayedDispatches() u64 {
 fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
     var executor = userspace_executor.Executor{};
     var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    defer scheduler.deinit();
     var catalog = userspace_loader.Catalog.init();
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;

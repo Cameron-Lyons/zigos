@@ -3,6 +3,7 @@ const abi = @import("../core/abi.zig");
 const hash_seeds = @import("../core/hash_seeds.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
+const userspace_layout = @import("../core/userspace_layout.zig");
 
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
 pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
@@ -13,8 +14,10 @@ const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
 const MMU_MAPPING_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * (MAX_MAPPINGS_PER_OBJECT + 3);
 const MMU_MAPPING_INDEX_CAPACITY: usize = MMU_MAPPING_CAPACITY * 2;
 const FREESTANDING_PHYSICAL_BASE: u64 = 0x0010_0000;
-const TASK_SHARED_VIRTUAL_BASE: u64 = 0x0000_4000_0000;
-const ACCELERATOR_APERTURE_BASE: u64 = 0x0000_8000_0000;
+const TASK_SHARED_VIRTUAL_BASE: u64 = userspace_layout.shared_start;
+const TASK_SHARED_VIRTUAL_END_EXCLUSIVE: u64 = userspace_layout.shared_end_exclusive;
+const ACCELERATOR_APERTURE_BASE: u64 = userspace_layout.accelerator_start;
+const ACCELERATOR_APERTURE_END_EXCLUSIVE: u64 = userspace_layout.accelerator_end_exclusive;
 
 pub const ComputeTarget = enum(u8) {
     cpu,
@@ -273,16 +276,24 @@ pub const FreestandingMmu = struct {
         const base_page = self.next_task_virtual_page;
         const next_page = std.math.add(u64, base_page, @intCast(page_count)) catch return error.TableFull;
         const page_offset = std.math.mul(u64, base_page, PAGE_SIZE) catch return error.TableFull;
+        const byte_count = std.math.mul(u64, @as(u64, @intCast(page_count)), PAGE_SIZE) catch return error.TableFull;
+        const virtual_base = std.math.add(u64, TASK_SHARED_VIRTUAL_BASE, page_offset) catch return error.TableFull;
+        const virtual_end = std.math.add(u64, virtual_base, byte_count) catch return error.TableFull;
+        if (virtual_end > TASK_SHARED_VIRTUAL_END_EXCLUSIVE) return error.TableFull;
         self.next_task_virtual_page = next_page;
-        return std.math.add(u64, TASK_SHARED_VIRTUAL_BASE, page_offset) catch return error.TableFull;
+        return virtual_base;
     }
 
     fn allocateAcceleratorVirtual(self: *FreestandingMmu, page_count: usize) Error!u64 {
         const base_page = self.next_accelerator_virtual_page;
         const next_page = std.math.add(u64, base_page, @intCast(page_count)) catch return error.TableFull;
         const page_offset = std.math.mul(u64, base_page, PAGE_SIZE) catch return error.TableFull;
+        const byte_count = std.math.mul(u64, @as(u64, @intCast(page_count)), PAGE_SIZE) catch return error.TableFull;
+        const virtual_base = std.math.add(u64, ACCELERATOR_APERTURE_BASE, page_offset) catch return error.TableFull;
+        const virtual_end = std.math.add(u64, virtual_base, byte_count) catch return error.TableFull;
+        if (virtual_end > ACCELERATOR_APERTURE_END_EXCLUSIVE) return error.TableFull;
         self.next_accelerator_virtual_page = next_page;
-        return std.math.add(u64, ACCELERATOR_APERTURE_BASE, page_offset) catch return error.TableFull;
+        return virtual_base;
     }
 
     fn findAny(
@@ -1016,8 +1027,10 @@ test "shared memory objects map through freestanding mmu and revoke accelerator 
     const owner_mapping = try table.freestandingTaskMappingDescriptor(object.id, ids.task(20));
     const peer_mapping = try table.freestandingTaskMappingDescriptor(object.id, ids.task(21));
     try std.testing.expect(owner_mapping.physical_base != 0);
-    try std.testing.expect(owner_mapping.virtual_base != 0);
-    try std.testing.expect(peer_mapping.virtual_base != 0);
+    try std.testing.expect(owner_mapping.virtual_base >= userspace_layout.shared_start);
+    try std.testing.expect(owner_mapping.virtual_base < userspace_layout.shared_end_exclusive);
+    try std.testing.expect(peer_mapping.virtual_base >= userspace_layout.shared_start);
+    try std.testing.expect(peer_mapping.virtual_base < userspace_layout.shared_end_exclusive);
     try std.testing.expect(owner_mapping.virtual_base != peer_mapping.virtual_base);
     try std.testing.expectEqual(owner_mapping.physical_base, peer_mapping.physical_base);
     try std.testing.expectEqual(@as(usize, 2), owner_mapping.page_count);
@@ -1033,7 +1046,8 @@ test "shared memory objects map through freestanding mmu and revoke accelerator 
     try std.testing.expect(gpu_mapping.zero_copy);
     try std.testing.expectEqual(ComputeTarget.gpu, gpu_mapping.target.?);
     try std.testing.expectEqual(owner_mapping.physical_base, gpu_mapping.physical_base);
-    try std.testing.expect(gpu_mapping.virtual_base != owner_mapping.virtual_base);
+    try std.testing.expect(gpu_mapping.virtual_base >= userspace_layout.accelerator_start);
+    try std.testing.expect(gpu_mapping.virtual_base < userspace_layout.accelerator_end_exclusive);
     try std.testing.expectEqual(@as(usize, 3), table.activeFreestandingMappings(object.id));
 
     const other_object = try table.create(ids.task(22), PAGE_SIZE);

@@ -1,4 +1,5 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
+const address_space_retirement = @import("address_space_retirement.zig");
 const builtin = @import("builtin");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const debug_contract = @import("../security/debug_contract.zig");
@@ -38,6 +39,9 @@ pub const AddressSpaceLoadState = model.AddressSpaceLoadState;
 pub const AddressSpaceRegionKind = model.AddressSpaceRegionKind;
 pub const AddressSpaceRegionRecord = model.AddressSpaceRegionRecord;
 pub const AddressSpaceRecord = model.AddressSpaceRecord;
+pub const AddressSpaceRetirementEvent = address_space_retirement.Event;
+pub const AddressSpaceRetirementReason = address_space_retirement.Reason;
+pub const AddressSpaceRetirementSink = address_space_retirement.Sink;
 pub const ExecutionComponentSpec = model.ExecutionComponentSpec;
 pub const ExecutionComponentRecord = model.ExecutionComponentRecord;
 pub const ResourceBudget = model.ResourceBudget;
@@ -100,6 +104,7 @@ pub const Runtime = struct {
     task_state_counts: [TASK_STATE_COUNT]usize = [_]usize{0} ** TASK_STATE_COUNT,
     task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
     address_spaces: model.AddressSpaceArena = model.AddressSpaceArena.init(),
+    address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
 
     pub fn init() Runtime {
         return Runtime{};
@@ -109,7 +114,21 @@ pub const Runtime = struct {
         return Snapshot{};
     }
 
+    pub fn bindAddressSpaceRetirementSink(self: *Runtime, sink: AddressSpaceRetirementSink) bool {
+        if (self.address_space_retirement_sink != null) return false;
+        self.address_space_retirement_sink = sink;
+        return true;
+    }
+
+    pub fn unbindAddressSpaceRetirementSink(self: *Runtime, expected: AddressSpaceRetirementSink) bool {
+        const current = self.address_space_retirement_sink orelse return false;
+        if (!current.eql(expected)) return false;
+        self.address_space_retirement_sink = null;
+        return true;
+    }
+
     pub fn reset(self: *Runtime) void {
+        const retirements = self.captureAddressSpaceRetirements(.runtime_reset);
         self.next_task_id = 1;
         self.next_process_id = 1;
         self.next_address_space_id = 1;
@@ -123,6 +142,7 @@ pub const Runtime = struct {
             cold.* = zeroTaskCold();
         }
         self.address_spaces.reset();
+        self.notifyAddressSpaceRetirements(&retirements);
     }
 
     pub fn writeSnapshot(self: *const Runtime, out: *Snapshot) void {
@@ -152,6 +172,7 @@ pub const Runtime = struct {
     }
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
+        const retirements = self.captureAddressSpaceRetirements(.snapshot_restore);
         self.resetForSnapshotRestore();
         self.next_task_id = state.next_task_id;
         self.next_process_id = state.next_process_id;
@@ -179,6 +200,7 @@ pub const Runtime = struct {
         }
         self.rebuildIndexes();
         self.debugAssertIndexIntegrity();
+        self.notifyAddressSpaceRetirements(&retirements);
     }
 
     fn resetForSnapshotRestore(self: *Runtime) void {
@@ -626,6 +648,7 @@ pub const Runtime = struct {
     pub fn rehostTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
         if (task.state == .terminated) return false;
+        const retired_address_space_id = task.address_space_id;
 
         const host = try reassignHost(
             self,
@@ -653,16 +676,54 @@ pub const Runtime = struct {
             task.launch.release_transparency_root,
             task.launch.release_transparency_log_head,
         ));
-        try self.audit(task_id, .{
+        appendAuditToTask(task, .{
             .kind = .service_restarted,
             .detail = @truncate(task.process_generation),
             .tick = tick,
+        });
+        self.notifyAddressSpaceRetirement(.{
+            .address_space_id = retired_address_space_id,
+            .reason = .rehost,
         });
         return true;
     }
 
     pub fn audit(self: *Runtime, task_id: u64, event: AuditEvent) Error!void {
         const task = self.find(task_id) orelse return error.TaskNotFound;
+        appendAuditToTask(task, event);
+    }
+
+    fn captureAddressSpaceRetirements(self: *const Runtime, reason: AddressSpaceRetirementReason) AddressSpaceRetirementBatch {
+        var batch = AddressSpaceRetirementBatch{};
+        if (self.address_space_retirement_sink == null) return batch;
+        for (&self.address_spaces.slots) |*slot| {
+            if (!slot.in_use) continue;
+            batch.events[batch.count] = .{
+                .address_space_id = slot.address_space.id,
+                .reason = reason,
+            };
+            batch.count += 1;
+        }
+        return batch;
+    }
+
+    fn notifyAddressSpaceRetirements(self: *const Runtime, batch: *const AddressSpaceRetirementBatch) void {
+        const sink = self.address_space_retirement_sink orelse return;
+        for (batch.events[0..batch.count]) |event| sink.notify(event);
+    }
+
+    fn notifyAddressSpaceRetirement(self: *const Runtime, event: AddressSpaceRetirementEvent) void {
+        const sink = self.address_space_retirement_sink orelse return;
+        if (event.address_space_id == 0) return;
+        sink.notify(event);
+    }
+
+    fn removeAddressSpaceRecord(self: *Runtime, address_space_id: u64) void {
+        const slot_index = self.address_spaces.slotIndexOf(address_space_id) orelse return;
+        _ = self.address_spaces.removeIndex(slot_index);
+    }
+
+    fn appendAuditToTask(task: *TaskRecord, event: AuditEvent) void {
         const cold = taskCold(task);
         if (task.audit_count < MAX_AUDIT_EVENTS) {
             const slot_index = (task.audit_start + task.audit_count) % MAX_AUDIT_EVENTS;
@@ -763,15 +824,21 @@ pub const Runtime = struct {
         const slot_index = self.tasks.slotIndexOf(task_id) orelse return error.TaskNotFound;
         const task = &self.tasks.slotAt(slot_index).task;
         if (task.state == .terminated) return false;
+        const retired_address_space_id = task.address_space_id;
 
         self.removeInitialComponentLabelIndex(slot_index, task);
         self.setTaskState(task, .terminated);
         resetTaskCold(taskCold(task));
         task.execution_component_count = 0;
         task.capability_count = 0;
-        try self.audit(task_id, .{
+        appendAuditToTask(task, .{
             .kind = .terminated,
             .tick = tick,
+        });
+        self.removeAddressSpaceRecord(retired_address_space_id);
+        self.notifyAddressSpaceRetirement(.{
+            .address_space_id = retired_address_space_id,
+            .reason = .terminate,
         });
         return true;
     }
@@ -828,6 +895,11 @@ pub const Runtime = struct {
             native_util.impossibleByInvariant("task label index missing task being terminated");
         }
     }
+};
+
+const AddressSpaceRetirementBatch = struct {
+    events: [MAX_TASKS]AddressSpaceRetirementEvent = undefined,
+    count: usize = 0,
 };
 
 fn normalizeTaskId(task_id: u64) u64 {
@@ -897,6 +969,32 @@ fn createTaskIdTestTask(runtime: *Runtime, owner_serial: u64) Error!*TaskRecord 
         .local_only = true,
     });
 }
+
+const RetirementRecorder = struct {
+    events: [MAX_TASKS * 2]AddressSpaceRetirementEvent = undefined,
+    count: usize = 0,
+    runtime_to_observe: ?*const Runtime = null,
+    required_live_address_space_id: ?u64 = null,
+    require_retired_address_space_absent: bool = false,
+    commit_observed: bool = true,
+
+    pub fn retireAddressSpace(self: *RetirementRecorder, event: AddressSpaceRetirementEvent) void {
+        if (self.count >= self.events.len) @panic("retirement recorder capacity exceeded");
+        self.events[self.count] = event;
+        self.count += 1;
+        const runtime = self.runtime_to_observe orelse return;
+        if (self.require_retired_address_space_absent and runtime.findAddressSpaceConst(event.address_space_id) != null) {
+            self.commit_observed = false;
+        }
+        if (self.required_live_address_space_id) |address_space_id| {
+            if (runtime.findAddressSpaceConst(address_space_id) == null) self.commit_observed = false;
+        }
+    }
+
+    fn eventAt(self: *const RetirementRecorder, index: usize) AddressSpaceRetirementEvent {
+        return self.events[index];
+    }
+};
 
 test "new tasks start with zero ambient authority and no capabilities" {
     var runtime = Runtime.init();
@@ -1470,6 +1568,159 @@ test "terminating a task clears its capabilities and marks the state" {
     try std.testing.expectEqual(@as(usize, 0), task.execution_component_count);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
     try std.testing.expectEqual(AuditEventKind.terminated, task.latestAuditEvent().?.kind);
+}
+
+test "address-space retirement follows successful rehost and termination exactly once" {
+    var runtime = Runtime.init();
+    var recorder = RetirementRecorder{
+        .runtime_to_observe = &runtime,
+        .require_retired_address_space_absent = true,
+    };
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(RetirementRecorder, &recorder)));
+    const task = try createTaskIdTestTask(&runtime, 8_001);
+    const task_id = task.id;
+    const original_address_space_id = task.address_space_id;
+
+    try std.testing.expectError(error.TaskNotFound, runtime.rehostTask(task_id + 1_000, 1));
+    try std.testing.expectEqual(@as(usize, 0), recorder.count);
+
+    try std.testing.expect(try runtime.rehostTask(task_id, 2));
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    try std.testing.expectEqual(original_address_space_id, recorder.eventAt(0).address_space_id);
+    try std.testing.expectEqual(AddressSpaceRetirementReason.rehost, recorder.eventAt(0).reason);
+    try std.testing.expect(runtime.findAddressSpaceConst(original_address_space_id) == null);
+
+    const rehosted_address_space_id = runtime.find(task_id).?.address_space_id;
+    try std.testing.expect(try runtime.terminateTask(task_id, 3));
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+    try std.testing.expectEqual(rehosted_address_space_id, recorder.eventAt(1).address_space_id);
+    try std.testing.expectEqual(AddressSpaceRetirementReason.terminate, recorder.eventAt(1).reason);
+    try std.testing.expect(runtime.findAddressSpaceConst(rehosted_address_space_id) == null);
+    try std.testing.expect(recorder.commit_observed);
+
+    try std.testing.expect(!(try runtime.terminateTask(task_id, 4)));
+    try std.testing.expect(!(try runtime.rehostTask(task_id, 5)));
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+}
+
+test "address-space retirement reset is idempotent and keeps the sink bound" {
+    var runtime = Runtime.init();
+    const first = try createTaskIdTestTask(&runtime, 8_101);
+    const first_address_space_id = first.address_space_id;
+    const second = try createTaskIdTestTask(&runtime, 8_102);
+    const second_address_space_id = second.address_space_id;
+    var recorder = RetirementRecorder{
+        .runtime_to_observe = &runtime,
+        .require_retired_address_space_absent = true,
+    };
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(RetirementRecorder, &recorder)));
+
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+    try std.testing.expectEqual(first_address_space_id, recorder.eventAt(0).address_space_id);
+    try std.testing.expectEqual(second_address_space_id, recorder.eventAt(1).address_space_id);
+    try std.testing.expectEqual(AddressSpaceRetirementReason.runtime_reset, recorder.eventAt(0).reason);
+    try std.testing.expectEqual(AddressSpaceRetirementReason.runtime_reset, recorder.eventAt(1).reason);
+    try std.testing.expect(recorder.commit_observed);
+
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+
+    const replacement = try createTaskIdTestTask(&runtime, 8_103);
+    const replacement_address_space_id = replacement.address_space_id;
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 3), recorder.count);
+    try std.testing.expectEqual(replacement_address_space_id, recorder.eventAt(2).address_space_id);
+    try std.testing.expectEqual(AddressSpaceRetirementReason.runtime_reset, recorder.eventAt(2).reason);
+}
+
+test "address-space retirement binding is exclusive and compare-and-unbind preserves a newer sink" {
+    var runtime = Runtime.init();
+    var original_recorder = RetirementRecorder{};
+    var newer_recorder = RetirementRecorder{};
+    const original_sink = AddressSpaceRetirementSink.init(RetirementRecorder, &original_recorder);
+    const newer_sink = AddressSpaceRetirementSink.init(RetirementRecorder, &newer_recorder);
+    const different_callback_sink = AddressSpaceRetirementSink{
+        .context = original_sink.context,
+        .notify_fn = struct {
+            fn notify(_: *anyopaque, _: AddressSpaceRetirementEvent) void {}
+        }.notify,
+    };
+
+    try std.testing.expect(original_sink.eql(original_sink));
+    try std.testing.expect(!original_sink.eql(newer_sink));
+    try std.testing.expect(!original_sink.eql(different_callback_sink));
+
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(original_sink));
+    try std.testing.expect(!runtime.bindAddressSpaceRetirementSink(original_sink));
+    try std.testing.expect(!runtime.bindAddressSpaceRetirementSink(newer_sink));
+
+    _ = try createTaskIdTestTask(&runtime, 8_151);
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 1), original_recorder.count);
+    try std.testing.expectEqual(@as(usize, 0), newer_recorder.count);
+
+    try std.testing.expect(runtime.unbindAddressSpaceRetirementSink(original_sink));
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(newer_sink));
+    try std.testing.expect(!runtime.unbindAddressSpaceRetirementSink(original_sink));
+    _ = try createTaskIdTestTask(&runtime, 8_152);
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 1), newer_recorder.count);
+    try std.testing.expect(runtime.unbindAddressSpaceRetirementSink(newer_sink));
+    try std.testing.expect(!runtime.unbindAddressSpaceRetirementSink(newer_sink));
+}
+
+test "address-space retirement on snapshot restore replaces only runtime state and never snapshots the sink" {
+    const source = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(source);
+    source.* = Runtime.init();
+    const source_task = try createTaskIdTestTask(source, 8_201);
+    const source_task_id = source_task.id;
+    const source_address_space_id = source_task.address_space_id;
+    var source_recorder = RetirementRecorder{};
+    try std.testing.expect(source.bindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(RetirementRecorder, &source_recorder)));
+    const snapshot = try std.testing.allocator.create(Snapshot);
+    defer std.testing.allocator.destroy(snapshot);
+    snapshot.* = Runtime.initSnapshot();
+    source.writeSnapshot(snapshot);
+
+    const restored = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(restored);
+    restored.* = Runtime.init();
+    restored.next_address_space_id = 100;
+    const replaced_first = try createTaskIdTestTask(restored, 8_202);
+    const replaced_first_address_space_id = replaced_first.address_space_id;
+    const replaced_second = try createTaskIdTestTask(restored, 8_203);
+    const replaced_second_address_space_id = replaced_second.address_space_id;
+    var restored_recorder = RetirementRecorder{
+        .runtime_to_observe = restored,
+        .required_live_address_space_id = source_address_space_id,
+        .require_retired_address_space_absent = true,
+    };
+    const restored_sink = AddressSpaceRetirementSink.init(RetirementRecorder, &restored_recorder);
+    try std.testing.expect(restored.bindAddressSpaceRetirementSink(restored_sink));
+
+    restored.restoreFromSnapshot(snapshot);
+    try std.testing.expectEqual(@as(usize, 2), restored_recorder.count);
+    try std.testing.expectEqual(replaced_first_address_space_id, restored_recorder.eventAt(0).address_space_id);
+    try std.testing.expectEqual(replaced_second_address_space_id, restored_recorder.eventAt(1).address_space_id);
+    try std.testing.expectEqual(AddressSpaceRetirementReason.snapshot_restore, restored_recorder.eventAt(0).reason);
+    try std.testing.expectEqual(AddressSpaceRetirementReason.snapshot_restore, restored_recorder.eventAt(1).reason);
+    try std.testing.expect(restored.findAddressSpaceConst(source_address_space_id) != null);
+    try std.testing.expect(restored_recorder.commit_observed);
+
+    restored_recorder.required_live_address_space_id = null;
+    try std.testing.expect(try restored.terminateTask(source_task_id, 9));
+    try std.testing.expectEqual(@as(usize, 3), restored_recorder.count);
+    try std.testing.expectEqual(source_address_space_id, restored_recorder.eventAt(2).address_space_id);
+    try std.testing.expectEqual(AddressSpaceRetirementReason.terminate, restored_recorder.eventAt(2).reason);
+    try std.testing.expect(restored_recorder.commit_observed);
+
+    try std.testing.expect(restored.unbindAddressSpaceRetirementSink(restored_sink));
+    restored.restoreFromSnapshot(snapshot);
+    restored.reset();
+    try std.testing.expectEqual(@as(usize, 0), source_recorder.count);
 }
 
 test "task state counts track lifecycle transitions and snapshot restore" {
