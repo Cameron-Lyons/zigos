@@ -68,6 +68,8 @@ pub fn MultimapIndex(
         bucket_index: BucketIndex = BucketIndex.init(),
         buckets: [bucket_capacity]Bucket = [_]Bucket{Bucket{}} ** bucket_capacity,
         next_by_slot: [link_capacity]usize = [_]usize{no_index} ** link_capacity,
+        free_bucket_head: usize = no_index,
+        next_unclaimed_bucket: usize = 0,
 
         pub fn init() Self {
             return .{};
@@ -113,7 +115,10 @@ pub fn MultimapIndex(
 
         pub fn remove(self: *Self, key: u64, slot_index: usize) bool {
             if (key == 0 or slot_index >= link_capacity) return false;
-            const entry = self.bucket(key) orelse return false;
+            const bucket_slot_index = self.bucket_index.lookup(key) orelse return false;
+            if (bucket_slot_index >= bucket_capacity) native_util.impossibleByInvariant("multimap bucket index points outside buckets");
+            const entry = &self.buckets[bucket_slot_index];
+            if (!entry.in_use or entry.key != key) native_util.impossibleByInvariant("multimap bucket index points at the wrong bucket");
 
             var previous: usize = no_index;
             var current = entry.head;
@@ -132,6 +137,7 @@ pub fn MultimapIndex(
                         const bucket_key = entry.key;
                         entry.* = .{};
                         self.bucket_index.remove(bucket_key);
+                        self.pushFreeBucket(bucket_slot_index);
                     }
                     return true;
                 }
@@ -158,16 +164,38 @@ pub fn MultimapIndex(
 
         fn findOrCreateBucket(self: *Self, key: u64) ?*Bucket {
             if (self.bucket(key)) |slot| return slot;
-            for (&self.buckets, 0..) |*slot, bucket_index| {
-                if (slot.in_use) continue;
-                slot.* = .{
-                    .in_use = true,
-                    .key = key,
-                };
-                self.bucket_index.insert(key, bucket_index);
-                return slot;
+            const bucket_slot_index = self.popFreeBucket() orelse return null;
+            const slot = &self.buckets[bucket_slot_index];
+            slot.* = .{
+                .in_use = true,
+                .key = key,
+            };
+            self.bucket_index.insert(key, bucket_slot_index);
+            return slot;
+        }
+
+        fn popFreeBucket(self: *Self) ?usize {
+            if (self.free_bucket_head != no_index) {
+                const bucket_slot_index = self.free_bucket_head;
+                if (bucket_slot_index >= bucket_capacity) native_util.impossibleByInvariant("multimap free bucket index points outside buckets");
+                const free_bucket = &self.buckets[bucket_slot_index];
+                if (free_bucket.in_use) native_util.impossibleByInvariant("multimap free bucket list points at a live bucket");
+                self.free_bucket_head = free_bucket.head;
+                return bucket_slot_index;
             }
-            return null;
+
+            if (self.next_unclaimed_bucket >= bucket_capacity) return null;
+            const bucket_slot_index = self.next_unclaimed_bucket;
+            self.next_unclaimed_bucket += 1;
+            return bucket_slot_index;
+        }
+
+        fn pushFreeBucket(self: *Self, bucket_slot_index: usize) void {
+            if (bucket_slot_index >= bucket_capacity) native_util.impossibleByInvariant("multimap recycled bucket index points outside buckets");
+            const free_bucket = &self.buckets[bucket_slot_index];
+            if (free_bucket.in_use) native_util.impossibleByInvariant("multimap cannot recycle a live bucket");
+            free_bucket.head = self.free_bucket_head;
+            self.free_bucket_head = bucket_slot_index;
         }
     };
 }
@@ -1031,6 +1059,20 @@ test "indexed arena supports maintained multimap indexes" {
     try std.testing.expectEqual(@as(usize, 2), owner_index.head(7));
     try std.testing.expect(owner_index.remove(7, 2));
     try std.testing.expectEqual(@as(usize, 0), owner_index.count(7));
+
+    // Empty buckets return directly to the free list. Filling the remaining
+    // distinct-key capacity proves that reuse does not depend on a table scan
+    // and that live buckets are never overwritten.
+    try std.testing.expect(owner_index.append(9, 0));
+    try std.testing.expect(owner_index.append(10, 2));
+    try std.testing.expect(owner_index.append(11, 3));
+    try std.testing.expect(!owner_index.append(12, 0));
+    try std.testing.expectEqual(@as(usize, 1), owner_index.count(8));
+    try std.testing.expectEqual(@as(usize, 1), owner_index.count(9));
+
+    try std.testing.expect(owner_index.remove(10, 2));
+    try std.testing.expect(owner_index.append(12, 2));
+    try std.testing.expectEqual(@as(usize, 1), owner_index.count(12));
 }
 
 test "paged indexed arena uses slab pages and invalidates stale handles" {
