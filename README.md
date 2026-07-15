@@ -302,7 +302,7 @@ QEMU proof runs are script-backed:
 - `scripts/run-zigos-native-smoke.sh`
 - `scripts/run-storage-durability-qemu.sh`
 - `scripts/run-kernel-recovery.sh`
-- `scripts/run-kernel-benchmark.sh`
+- `scripts/capture-kernel-benchmark.sh` (capture helper; `zig build benchmark` runs the strict gate)
 - `scripts/run-uefi-boot-test.sh`
 - `scripts/qemu-harness.sh`
 

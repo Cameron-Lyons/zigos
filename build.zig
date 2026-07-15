@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const benchmarks_build = @import("build_support/benchmarks.zig");
 const checks_build = @import("build_support/checks.zig");
 const shared = @import("build_support/shared.zig");
 const kernel_build = @import("build_support/kernel.zig");
@@ -137,15 +138,21 @@ pub fn build(b: *std.Build) void {
     spec_conformance_step.dependOn(&recovery_qemu_cmd.step);
 
     const benchmark_cmd = qemu_build.addBenchmarkCommand(b, kernels.benchmark, userspace_images);
+    const benchmark_gate = benchmarks_build.addBenchmarkGate(b, optimize, benchmark_cmd);
+    check_steps.host_tests.dependOn(&benchmark_gate.tests.step);
+
+    const benchmark_check_tests_step = b.step("benchmark-check-tests", "Run adversarial tests for the typed benchmark gate");
+    benchmark_check_tests_step.dependOn(&benchmark_gate.tests.step);
+
     const benchmark_step = b.step("benchmark", "Build and run the spec-aligned native benchmark suite in QEMU");
-    benchmark_step.dependOn(&benchmark_cmd.step);
+    benchmark_step.dependOn(&benchmark_gate.check.step);
 
     _ = checks_build.addVerifyStep(
         b,
         check_steps,
         kernel_steps.kernel,
         zigos_native_smoke_test_step,
-        benchmark_cmd,
+        benchmark_gate.check,
         verify_smoke,
         verify_benchmark,
     );
