@@ -91,9 +91,12 @@ pub const PassRequest = struct {
     audit: AuditMetadata = .{},
 };
 
-pub const Error = error{
+pub const LookupError = error{
     CapabilityNotFound,
     CapabilityRevoked,
+};
+
+pub const Error = LookupError || error{
     InvalidCapabilityRights,
     LeaseEscalation,
     RightsEscalation,
@@ -102,6 +105,11 @@ pub const Error = error{
     DelegationDepthExceeded,
     GrantPlanFull,
     TargetTableFull,
+};
+
+pub const Inspection = struct {
+    capability: *const Capability,
+    usable: bool,
 };
 
 const CapabilitySlot = struct {
@@ -302,28 +310,25 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn query(self: *const Self, capability_id: u64) ?Capability {
-            const capability_ref = self.queryRef(capability_id) orelse return null;
-            return capability_ref.*;
-        }
-
-        pub fn queryRef(self: *const Self, capability_id: u64) ?*const Capability {
             const slot = self.findConstSlot(capability_id) orelse return null;
-            return &slot.capability;
+            return slot.capability;
         }
 
-        pub fn isUsable(self: *const Self, capability: Capability, now_ticks: u64) bool {
-            return self.isUsableRef(&capability, now_ticks);
+        /// Returns a table-backed view of a live grant and its current lease and
+        /// target-generation state. The pointer remains valid only until the
+        /// capability table is mutated.
+        pub fn inspect(self: *const Self, capability_id: u64, now_ticks: u64) ?Inspection {
+            const slot = self.findConstSlot(capability_id) orelse return null;
+            return .{
+                .capability = &slot.capability,
+                .usable = self.isUsableSlot(slot, now_ticks),
+            };
         }
 
-        pub fn isUsableRef(self: *const Self, capability: *const Capability, now_ticks: u64) bool {
-            return capability.lease.isActive(now_ticks) and
-                self.currentTargetGeneration(capability.target) == capability.revocation_generation;
-        }
-
-        pub fn requireUsable(self: *const Self, capability_id: u64, now_ticks: u64) Error!*const Capability {
-            const slot = self.findConstSlot(capability_id) orelse return error.CapabilityNotFound;
-            if (!self.isUsableSlot(slot, now_ticks)) return error.CapabilityRevoked;
-            return &slot.capability;
+        pub fn requireUsable(self: *const Self, capability_id: u64, now_ticks: u64) LookupError!*const Capability {
+            const inspected = self.inspect(capability_id, now_ticks) orelse return error.CapabilityNotFound;
+            if (!inspected.usable) return error.CapabilityRevoked;
+            return inspected.capability;
         }
 
         fn nextReservableCapabilityId(self: *const Self) ?u64 {
@@ -383,13 +388,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         fn targetGenerationAtMut(self: *Self, target_generation_index: u8) *TargetGeneration {
             return &self.target_generations.slots[target_generation_index];
-        }
-
-        fn currentTargetGeneration(self: *const Self, target: CapabilityTarget) u32 {
-            if (self.findTargetGenerationIndex(target)) |index| {
-                return self.targetGenerationAt(index).generation;
-            }
-            return 1;
         }
 
         fn reserveGrantPlan(self: *const Self, plan: *const GrantPlan) Error!GrantReservation {
@@ -748,12 +746,13 @@ test "capabilities derive narrower rights and grant revocation leaves sibling au
         .audit = .{ .policy_generation = 1, .source_task_id = 100, .broker_service_id = 42 },
     });
 
-    try std.testing.expect(table.isUsable(parent, 10));
-    try std.testing.expect(table.isUsable(derived, 10));
+    _ = try table.requireUsable(parent.id, 10);
+    _ = try table.requireUsable(derived.id, 10);
 
     try table.revokeGrant(parent.id);
     try std.testing.expect(table.query(parent.id) == null);
-    try std.testing.expect(table.isUsable(derived, 10));
+    try std.testing.expectError(error.CapabilityNotFound, table.requireUsable(parent.id, 10));
+    _ = try table.requireUsable(derived.id, 10);
 }
 
 test "capability delegation depth budget stops transitive derive and pass chains" {
@@ -861,8 +860,12 @@ test "target authority revocation invalidates sibling and derived capabilities" 
     });
 
     try table.revokeTargetAuthority(parent.id);
-    try std.testing.expect(!table.isUsable(sibling, 10));
-    try std.testing.expect(!table.isUsable(derived, 10));
+    try std.testing.expect(table.inspect(parent.id, 10) == null);
+    const sibling_inspection = table.inspect(sibling.id, 10);
+    try std.testing.expect(sibling_inspection != null);
+    try std.testing.expect(!sibling_inspection.?.usable);
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(sibling.id, 10));
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(derived.id, 10));
 }
 
 test "derive rejects rights and scope escalation" {
@@ -980,9 +983,9 @@ test "expired capabilities are no longer usable" {
         .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 20, .renewable = false },
     });
 
-    try std.testing.expect(!table.isUsable(capability, 9));
-    try std.testing.expect(table.isUsable(capability, 15));
-    try std.testing.expect(!table.isUsable(capability, 21));
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(capability.id, 9));
+    _ = try table.requireUsable(capability.id, 15);
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(capability.id, 21));
 }
 
 test "capability table capacity is configurable" {
@@ -1194,8 +1197,9 @@ test "grant plan reserves target generation slots in the arena" {
     var output: [2]Capability = undefined;
     _ = try table.applyGrantPlan(&plan, &output);
     try std.testing.expectEqual(@as(usize, 2), table.target_generations.countInUse());
-    try std.testing.expect(table.target_generations.slotIndexOf(targetKey(.{ .kind = .workspace, .id = 2 })) != null);
-    try std.testing.expectEqual(@as(u32, 1), table.currentTargetGeneration(.{ .kind = .workspace, .id = 2 }));
+    const workspace_generation_index = table.target_generations.slotIndexOf(targetKey(.{ .kind = .workspace, .id = 2 }));
+    try std.testing.expect(workspace_generation_index != null);
+    try std.testing.expectEqual(@as(u32, 1), table.target_generations.slots[workspace_generation_index.?].generation);
 
     try std.testing.expectError(error.TargetTableFull, table.mintBootRoot(.{
         .holder = holder,

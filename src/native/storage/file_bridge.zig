@@ -93,7 +93,6 @@ pub const Bridge = struct {
         const authority = self.capability_table.requireUsable(authority_capability_id, now_ticks) catch |err| switch (err) {
             error.CapabilityNotFound => return error.CapabilityNotFound,
             error.CapabilityRevoked => return error.CapabilityRevoked,
-            else => native_util.impossibleByInvariantError("file bridge authority lookup only reports not-found or revoked capabilities", err),
         };
         if (!authority.holder.eql(requester)) return error.PermissionDenied;
         if (authority.scope.workspace_id) |workspace_id| {

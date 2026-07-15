@@ -170,7 +170,7 @@ pub const Directory = struct {
     }
 
     pub fn registerSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
-        const authority = try validateSignedRequest(request);
+        const authority_capability_id = try validateSignedRequest(request);
 
         if (self.findByServiceAndClass(request.service_id, request.device_class) != null) return error.DuplicateServiceId;
         if (self.findByBinding(request.device_class, request.device_id) != null) return error.DuplicateDeviceBinding;
@@ -178,7 +178,7 @@ pub const Directory = struct {
         const dma_domain_id = self.nextReservableDmaDomainId() orelse return error.DriverTableFull;
         const slot_index = self.slots.reserveIndex(driverServiceClassKey(request.service_id, request.device_class)) orelse return error.DriverTableFull;
         const slot = &self.slots.slots[slot_index];
-        slot.driver = self.recordFromRequest(request, authority, 1, dma_domain_id);
+        slot.driver = self.recordFromRequest(request, authority_capability_id, 1, dma_domain_id);
         self.indexDriver(slot_index);
         self.advanceNextDmaDomainIdFrom(dma_domain_id);
         return &slot.driver;
@@ -191,10 +191,10 @@ pub const Directory = struct {
         }
         const next_generation = slot.driver.restart_generation + 1;
         const previous_dma_domain_id = slot.driver.dma_domain_id;
-        const authority = try validateSignedRequest(request);
+        const authority_capability_id = try validateSignedRequest(request);
         const dma_domain_id = self.nextReservableDmaDomainId() orelse return error.DriverTableFull;
         _ = device_broker.invalidateDmaIsolation(slot.driver.device_id, previous_dma_domain_id);
-        slot.driver = self.recordFromRequest(request, authority, next_generation, dma_domain_id);
+        slot.driver = self.recordFromRequest(request, authority_capability_id, next_generation, dma_domain_id);
         self.advanceNextDmaDomainIdFrom(dma_domain_id);
         return &slot.driver;
     }
@@ -298,7 +298,7 @@ pub const Directory = struct {
     fn recordFromRequest(
         self: *Directory,
         request: SignedRegistrationRequest,
-        authority: capability.Capability,
+        authority_capability_id: u64,
         restart_generation: u32,
         dma_domain_id: u64,
     ) DriverRecord {
@@ -308,7 +308,7 @@ pub const Directory = struct {
             .owner_task_id = request.owner_task_id,
             .device_id = request.device_id,
             .device_class = request.device_class,
-            .authority_capability_id = authority.id,
+            .authority_capability_id = authority_capability_id,
             .restart_generation = restart_generation,
             .bootstrap_transport = request.bootstrap_transport,
             .dma_domain_id = dma_domain_id,
@@ -482,11 +482,12 @@ fn rightsAreSubset(owned: capability.CapabilityRights, allowed: capability.Capab
     return (owned_bits & ~allowed_bits) == 0;
 }
 
-fn validateSignedRequest(request: SignedRegistrationRequest) Error!capability.Capability {
-    const authority = request.capability_table.query(request.authority_capability_id) orelse return error.CapabilityNotFound;
+fn validateSignedRequest(request: SignedRegistrationRequest) Error!u64 {
+    const inspected = request.capability_table.inspect(request.authority_capability_id, request.now_ticks) orelse return error.CapabilityNotFound;
     if (request.signer.len == 0) return error.InvalidBundleSignature;
     if (!request.require_iommu) return error.IommuRequired;
-    if (!request.capability_table.isUsable(authority, request.now_ticks)) return error.CapabilityRevoked;
+    if (!inspected.usable) return error.CapabilityRevoked;
+    const authority = inspected.capability;
     if (!authority.holder.eql(request.requester)) return error.AuthorityHolderMismatch;
     if (authority.scope.task_id) |task_id| {
         if (task_id != request.owner_task_id) return error.AuthorityScopeViolation;
@@ -502,7 +503,7 @@ fn validateSignedRequest(request: SignedRegistrationRequest) Error!capability.Ca
     {
         return error.InvalidBootstrapTransport;
     }
-    return authority;
+    return authority.id;
 }
 
 fn writeSigner(record: *DriverRecord, signer: []const u8) void {

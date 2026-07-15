@@ -58,7 +58,7 @@ pub const KernelCallContext = struct {
 const AuthorizationInput = struct {
     request_task_id: ?u64 = null,
     request_local_only: ?bool = null,
-    target_capability: ?capability.Capability = null,
+    target_capability: ?*const capability.Capability = null,
 };
 
 pub const Error = task_runtime.Error || capability.Error || device_broker.Error || endpoint.Error || shared_memory.Error || error{
@@ -179,11 +179,10 @@ pub const Kernel = struct {
     ) Error!void {
         const endpoint_capability = try self.authorizeOperation(.endpoint_send, context, now_ticks, .{});
         if (attached_capability_id) |capability_id| {
-            if (context.caller_task_id != 0) {
-                try self.requireTaskCapability(context.caller_task_id, capability_id, now_ticks);
-            }
-            const attached = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
-            if (!self.capability_table.isUsable(attached, now_ticks)) return error.CapabilityRevoked;
+            const attached = if (context.caller_task_id != 0)
+                try self.requireTaskCapability(context.caller_task_id, capability_id, now_ticks)
+            else
+                try self.capability_table.requireUsable(capability_id, now_ticks);
             if (!attached.rights.has(.capability_pass)) return error.PermissionDenied;
             if (attached.scope.task_id != endpoint_capability.scope.task_id) return error.ScopeViolation;
         }
@@ -413,7 +412,7 @@ pub const Kernel = struct {
     pub fn capabilityRevoke(self: *Kernel, context: KernelCallContext, capability_id: u64, now_ticks: u64) Error!void {
         const revoked = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
         _ = try self.authorizeOperation(.capability_revoke, context, now_ticks, .{
-            .target_capability = revoked,
+            .target_capability = &revoked,
         });
         try self.capability_table.revokeTargetAuthority(capability_id);
         if (revoked.scope.task_id) |task_id| {
@@ -429,7 +428,7 @@ pub const Kernel = struct {
     ) Error!abi.CapabilityDescriptor {
         const queried = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
         _ = try self.authorizeOperation(.capability_query, context, now_ticks, .{
-            .target_capability = queried,
+            .target_capability = &queried,
         });
         return capabilityDescriptor(queried);
     }
@@ -600,15 +599,15 @@ pub const Kernel = struct {
         task_id: u64,
         capability_id: u64,
         now_ticks: u64,
-    ) Error!void {
+    ) Error!*const capability.Capability {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        const owned = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
-        if (!self.capability_table.isUsable(owned, now_ticks)) return error.CapabilityRevoked;
+        const owned = try self.capability_table.requireUsable(capability_id, now_ticks);
         if (!self.runtime.hasCapability(task_id, capability_id)) return error.CapabilityNotFound;
         if (!task.owner.eql(owned.holder)) return error.PermissionDenied;
         if (owned.scope.task_id) |scoped_task_id| {
             if (scoped_task_id != task_id) return error.ScopeViolation;
         }
+        return owned;
     }
 
     pub fn taskAuthorityGraph(
@@ -621,8 +620,8 @@ pub const Kernel = struct {
         var count: usize = 0;
         for (task.capabilityIds()) |capability_id| {
             if (count >= output.len) break;
-            const owned = self.capability_table.query(capability_id) orelse continue;
-            output[count] = debug_contract.authorityGraphEdge(task_id, owned, self.capability_table.isUsable(owned, now_ticks));
+            const inspected = self.capability_table.inspect(capability_id, now_ticks) orelse continue;
+            output[count] = debug_contract.authorityGraphEdge(task_id, inspected.capability.*, inspected.usable);
             count += 1;
         }
         return output[0..count];
@@ -634,7 +633,7 @@ pub const Kernel = struct {
         context: KernelCallContext,
         now_ticks: u64,
         input: AuthorizationInput,
-    ) Error!capability.Capability {
+    ) Error!*const capability.Capability {
         const descriptor = operation_metadata.declarationFor(expected_operation);
         if (context.operation != descriptor.operation) return error.UnexpectedOperation;
 
@@ -645,14 +644,11 @@ pub const Kernel = struct {
         else
             null;
 
-        // Fetch and usability-check the presented capability exactly once, by
-        // reference. Both the caller-subject check and the rights/target check
-        // below validate the same id, so the previous code paid for two full
-        // Capability copies and two generation-index lookups per syscall. No
-        // capability-table mutation happens before the final copy-out, so the
-        // reference stays valid for the duration of this call.
-        const owned = self.capability_table.queryRef(context.presented_capability_id) orelse return error.CapabilityNotFound;
-        if (!self.capability_table.isUsableRef(owned, now_ticks)) return error.CapabilityRevoked;
+        // Resolve live table membership, lease state, and target generation in
+        // one indexed lookup. Callers consume the immutable record before any
+        // capability-table mutation, so authorization never needs to copy the
+        // full capability record.
+        const owned = try self.capability_table.requireUsable(context.presented_capability_id, now_ticks);
 
         if (subject_task) |task| {
             if (!self.runtime.hasCapability(context.caller_task_id, context.presented_capability_id)) return error.CapabilityNotFound;
@@ -681,7 +677,7 @@ pub const Kernel = struct {
             },
         }
         try validateOperationScope(descriptor.scope_rule, owned.scope, input);
-        return owned.*;
+        return owned;
     }
 
     fn requireTargetedCapability(
@@ -690,7 +686,7 @@ pub const Kernel = struct {
         now_ticks: u64,
         needed_rights: capability.CapabilityRights,
         target_kind: capability.CapabilityTargetKind,
-    ) Error!capability.Capability {
+    ) Error!*const capability.Capability {
         return kernel_access.requireTargetedCapability(
             Error,
             self,
@@ -706,7 +702,7 @@ pub const Kernel = struct {
         peer_endpoint_capability_id: u64,
         peer_endpoint_id: u64,
         now_ticks: u64,
-    ) Error!capability.Capability {
+    ) Error!*const capability.Capability {
         const peer = try self.requireTargetedCapability(
             peer_endpoint_capability_id,
             now_ticks,

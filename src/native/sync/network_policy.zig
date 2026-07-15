@@ -471,7 +471,6 @@ pub const EgressBroker = struct {
         const presented = self.capabilities.requireUsable(request.capability_id, request.now_ticks) catch |err| switch (err) {
             error.CapabilityNotFound => return denyEgress(request, .capability_missing, .{ .allowed = false }),
             error.CapabilityRevoked => return denyEgress(request, .capability_revoked, .{ .allowed = false }),
-            else => return denyEgress(request, .capability_revoked, .{ .allowed = false }),
         };
 
         if (!presented.holder.eql(request.principal_id)) {
