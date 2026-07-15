@@ -1,6 +1,6 @@
 capability.derive.workspace_object 109368.94 200
 capability.mint_reuse_free_slot 1080715.88 200
-capability.target_generation_lookup 782517.04 200
+capability.target_generation_lookup 1000.00 200
 permission.review.render_grants 29101.57 200
 network_policy.authorize_connection 1068.07 200
 background_dispatch.allowed_sync 10897.73 200

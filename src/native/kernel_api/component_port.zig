@@ -568,7 +568,7 @@ fn validateCallerCapability(
     now_ticks: u64,
 ) Error!void {
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
-    try self.kernel.requireTaskCapability(header.subject_task_id, capability_id, now_ticks);
+    _ = try self.kernel.requireTaskCapability(header.subject_task_id, capability_id, now_ticks);
 }
 
 fn validateOptionalCallerCapability(
