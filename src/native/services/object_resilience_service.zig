@@ -12,6 +12,7 @@ pub const Error = event_ledger.Error || error{
     DeviceTrustMismatch,
     PolicyDenied,
     SourceTaskMismatch,
+    SnapshotIdExhausted,
     SnapshotNotFound,
     SnapshotSubjectMismatch,
     SnapshotRevoked,
@@ -105,7 +106,15 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
+        if (self.slots.countInUse() >= MAX_SNAPSHOTS) {
+            try recordBackup(ledger, request, 0, false);
+            return error.SnapshotTableFull;
+        }
         const snapshot_id = self.next_snapshot_id;
+        if (snapshot_id == 0) {
+            try recordBackup(ledger, request, 0, false);
+            return error.SnapshotIdExhausted;
+        }
         const snapshot = Snapshot{
             .id = snapshot_id,
             .subject = request.subject,
@@ -196,8 +205,10 @@ pub const Service = struct {
     }
 
     fn advanceNextSnapshotId(self: *Service) void {
-        self.next_snapshot_id +%= 1;
-        if (self.next_snapshot_id == 0) self.next_snapshot_id = 1;
+        self.next_snapshot_id = if (self.next_snapshot_id == std.math.maxInt(u64))
+            0
+        else
+            self.next_snapshot_id + 1;
     }
 };
 
@@ -383,7 +394,7 @@ test "object resilience binds restore and revoke to snapshot subject and source 
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=object_resilience") != null);
 }
 
-test "object resilience snapshot ids wrap without publishing id zero" {
+test "object resilience snapshot ids stop after the maximum id" {
     var directory = policy_object.Directory.init();
     _ = try directory.create(.{
         .scope = .organization,
@@ -420,10 +431,10 @@ test "object resilience snapshot ids wrap without publishing id zero" {
         .detail = "private object backup contents",
     }, null);
     try std.testing.expectEqual(std.math.maxInt(u64), first.id);
-    try std.testing.expectEqual(@as(u64, 1), service.next_snapshot_id);
+    try std.testing.expectEqual(@as(u64, 0), service.next_snapshot_id);
     try std.testing.expect(service.find(0) == null);
 
-    const second = try service.prepareBackup(&directory, subjects, .{
+    try std.testing.expectError(error.SnapshotIdExhausted, service.prepareBackup(&directory, subjects, .{
         .subject = owner,
         .task_id = 901,
         .workspace_id = 11,
@@ -435,8 +446,8 @@ test "object resilience snapshot ids wrap without publishing id zero" {
         .recovery_key_present = true,
         .now_ticks = 11,
         .detail = "private object backup contents",
-    }, null);
-    try std.testing.expectEqual(@as(u64, 1), second.id);
-    try std.testing.expectEqual(@as(u64, 2), service.next_snapshot_id);
-    try std.testing.expectEqual(@as(usize, 2), service.slots.countInUse());
+    }, null));
+    try std.testing.expectEqual(@as(u64, 0), service.next_snapshot_id);
+    try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
+    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }

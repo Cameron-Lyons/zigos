@@ -13,6 +13,7 @@ pub const Error = event_ledger.Error || error{
     CaptureBudgetExceeded,
     CaptureSessionBindingMismatch,
     CaptureSessionExpired,
+    CaptureSessionIdExhausted,
     CaptureSessionNotFound,
     CaptureSessionRevoked,
     CaptureTableFull,
@@ -165,11 +166,20 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
+        if (self.slots.countInUse() >= MAX_SESSIONS) {
+            try recordStart(ledger, request, 0, false);
+            return error.CaptureTableFull;
+        }
         const session_id = self.next_session_id;
+        if (session_id == 0) {
+            try recordStart(ledger, request, 0, false);
+            return error.CaptureSessionIdExhausted;
+        }
         const slot_index = self.slots.reserveIndex(session_id) orelse {
             try recordStart(ledger, request, 0, false);
             return error.CaptureTableFull;
         };
+        errdefer _ = self.slots.removeIndex(slot_index);
         const slot = &self.slots.slots[slot_index];
         slot.session = .{
             .id = session_id,
@@ -186,9 +196,9 @@ pub const Service = struct {
             .active = true,
             .sensitivity = request.sensitivity,
         };
+        try recordStart(ledger, request, slot.session.id, true);
         self.accountActiveSession(slot_index, &slot.session);
         self.advanceNextSessionId();
-        try recordStart(ledger, request, slot.session.id, true);
         return &slot.session;
     }
 
@@ -256,8 +266,10 @@ pub const Service = struct {
     }
 
     fn advanceNextSessionId(self: *Service) void {
-        self.next_session_id +%= 1;
-        if (self.next_session_id == 0) self.next_session_id = 1;
+        self.next_session_id = if (self.next_session_id == std.math.maxInt(u64))
+            0
+        else
+            self.next_session_id + 1;
     }
 
     pub fn activeSessionCount(self: *const Service) usize {
@@ -697,7 +709,7 @@ test "sensitive capture broker requires foreground visible leased sessions and r
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=sensitive_capture") != null);
 }
 
-test "sensitive capture session ids wrap without publishing id zero" {
+test "sensitive capture session ids stop after the maximum id" {
     const signing = @import("../core/signing.zig");
 
     var policies = policy_object.Directory.init();
@@ -734,10 +746,10 @@ test "sensitive capture session ids wrap without publishing id zero" {
         .detail = "private camera frame allowed",
     }, null);
     try std.testing.expectEqual(std.math.maxInt(u64), first.id);
-    try std.testing.expectEqual(@as(u64, 1), service.next_session_id);
+    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
     try std.testing.expect(service.find(0) == null);
 
-    const second = try service.start(&policies, subjects, .{
+    try std.testing.expectError(error.CaptureSessionIdExhausted, service.start(&policies, subjects, .{
         .subject = app,
         .task_id = 44,
         .device_id = 8,
@@ -748,8 +760,8 @@ test "sensitive capture session ids wrap without publishing id zero" {
         .sample_budget = 1,
         .indicator_visible = true,
         .detail = "private camera frame allowed",
-    }, null);
-    try std.testing.expectEqual(@as(u64, 1), second.id);
-    try std.testing.expectEqual(@as(u64, 2), service.next_session_id);
-    try std.testing.expectEqual(@as(usize, 2), service.activeSessionCount());
+    }, null));
+    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
+    try std.testing.expectEqual(@as(usize, 1), service.activeSessionCount());
+    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }

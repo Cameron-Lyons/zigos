@@ -84,6 +84,7 @@ pub const RevokeRequest = struct {
 pub const Error = network_policy.Error || event_ledger.Error || error{
     ByteLimitExceeded,
     DestinationTooLong,
+    NetworkSessionIdExhausted,
     PolicyDenied,
     SessionCompleted,
     SessionBindingMismatch,
@@ -172,7 +173,9 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
+        if (self.sessions.countInUse() >= MAX_SESSIONS) return error.SessionTableFull;
         const session_id = self.next_session_id;
+        if (session_id == 0) return error.NetworkSessionIdExhausted;
         var record = zeroSession();
         record.id = session_id;
         record.subject = request.subject;
@@ -373,8 +376,10 @@ pub const Service = struct {
     }
 
     fn advanceNextSessionId(self: *Service) void {
-        self.next_session_id +%= 1;
-        if (self.next_session_id == 0) self.next_session_id = 1;
+        self.next_session_id = if (self.next_session_id == std.math.maxInt(u64))
+            0
+        else
+            self.next_session_id + 1;
     }
 };
 
@@ -467,7 +472,7 @@ fn recordNetworkSession(
     }
 }
 
-test "network session open rejects long destinations without publishing slots" {
+test "network session publication rejects invalid destinations and id reuse" {
     const signing = @import("../core/signing.zig");
 
     var network_policies = network_policy.Directory.init();
@@ -553,6 +558,52 @@ test "network session open rejects long destinations without publishing slots" {
     try std.testing.expectEqual(@as(u64, 1), session.id);
     try std.testing.expectEqualStrings("updates.example", session.destinationSlice());
     try std.testing.expectEqual(@as(usize, 1), service.sessions.countInUse());
+
+    service.next_session_id = std.math.maxInt(u64);
+    const final_session = try service.open(
+        &network_policies,
+        &capabilities,
+        &policies,
+        subjects,
+        .{
+            .subject = app,
+            .task_id = 9902,
+            .policy_id = internet.id,
+            .capability_id = network_capability.id,
+            .evidence = .{ .destination = .{ .domain = "final.example" } },
+            .remote_bytes = 16,
+            .max_session_bytes = 16,
+            .expires_at_ticks = 40,
+            .now_ticks = 12,
+            .detail = "final session id opened",
+        },
+        null,
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64), final_session.id);
+    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
+
+    try std.testing.expectError(error.NetworkSessionIdExhausted, service.open(
+        &network_policies,
+        &capabilities,
+        &policies,
+        subjects,
+        .{
+            .subject = app,
+            .task_id = 9902,
+            .policy_id = internet.id,
+            .capability_id = network_capability.id,
+            .evidence = .{ .destination = .{ .domain = "reused.example" } },
+            .remote_bytes = 16,
+            .max_session_bytes = 16,
+            .expires_at_ticks = 40,
+            .now_ticks = 13,
+            .detail = "session id reuse rejected",
+        },
+        null,
+    ));
+    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
+    try std.testing.expectEqual(@as(usize, 2), service.sessions.countInUse());
+    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }
 
 test "network session service opens leased attested sessions and audits revocation" {
