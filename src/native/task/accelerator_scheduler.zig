@@ -412,6 +412,7 @@ pub const BrokeredEngineQueueEvent = struct {
 
 pub const Error = shared_memory.Error || error{
     AcceleratorRequired,
+    ClaimIdExhausted,
     ClaimNotFound,
     ClaimTableFull,
     EngineBusy,
@@ -557,7 +558,7 @@ pub const Controller = struct {
         }
         if (!request.require_accelerator and preferred_engine != .cpu and self.activeEngineClaimId(preferred_engine) != 0) {
             if (request.shared_memory_object_id != null) return error.ZeroCopyUnavailable;
-            const claim_id = self.nextReservableClaimId() orelse return error.ClaimTableFull;
+            const claim_id = try self.nextReservableClaimId();
             var fallback = zeroClaim();
             fallback.id = claim_id;
             fallback.task_id = request.task_id;
@@ -589,7 +590,7 @@ pub const Controller = struct {
             decision.reason = .accelerator_unavailable;
         }
 
-        const claim_id = self.nextReservableClaimId() orelse return error.ClaimTableFull;
+        const claim_id = try self.nextReservableClaimId();
         var attached_object_id: ?ids.SharedMemoryId = null;
         errdefer if (attached_object_id) |object_id| {
             if (shared) |shared_table| {
@@ -708,20 +709,15 @@ pub const Controller = struct {
         return slot.claim;
     }
 
-    fn nextReservableClaimId(self: *Controller) ?u64 {
-        if (self.claims.countInUse() >= MAX_ENGINE_CLAIMS) return null;
-
-        var claim_id = normalizeClaimId(self.next_claim_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_ENGINE_CLAIMS) : (attempts += 1) {
-            if (self.claims.get(claim_id) == null) return claim_id;
-            claim_id = nextClaimIdAfter(claim_id);
-        }
-        return null;
+    fn nextReservableClaimId(self: *Controller) Error!u64 {
+        if (self.claims.countInUse() >= MAX_ENGINE_CLAIMS) return error.ClaimTableFull;
+        if (self.next_claim_id == 0) return error.ClaimIdExhausted;
+        if (self.claims.get(self.next_claim_id) != null) return error.ClaimIdExhausted;
+        return self.next_claim_id;
     }
 
     fn advanceNextClaimIdFrom(self: *Controller, claim_id: u64) void {
-        self.next_claim_id = nextClaimIdAfter(claim_id);
+        self.next_claim_id = claim_id +% 1;
     }
 
     fn availableEngines(self: *const Controller) EngineAvailability {
@@ -773,15 +769,6 @@ pub const Controller = struct {
         }
     }
 };
-
-fn normalizeClaimId(claim_id: u64) u64 {
-    return if (claim_id == 0) 1 else claim_id;
-}
-
-fn nextClaimIdAfter(claim_id: u64) u64 {
-    const next = claim_id +% 1;
-    return normalizeClaimId(next);
-}
 
 pub fn planWithState(state: SystemState, availability: EngineAvailability, request: Request) Decision {
     var decision = Decision{
@@ -1686,7 +1673,7 @@ test "accelerator scheduler reuses released claim slots and revokes through task
     try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
 }
 
-test "accelerator scheduler claim ids wrap without zero and skip active claims" {
+test "accelerator scheduler claim ids stop at exhaustion" {
     var controller = Controller.init();
     controller.next_claim_id = std.math.maxInt(u64);
 
@@ -1695,25 +1682,17 @@ test "accelerator scheduler claim ids wrap without zero and skip active claims" 
         .request = .{ .class = .background_light },
     });
     try std.testing.expectEqual(std.math.maxInt(u64), max_claim.id);
-    try std.testing.expectEqual(@as(u64, 1), controller.next_claim_id);
+    try std.testing.expectEqual(@as(u64, 0), controller.next_claim_id);
     try std.testing.expect(controller.findActiveClaim(0) == null);
+    try std.testing.expect(try controller.releaseClaim(max_claim.id, null));
+    try std.testing.expectEqual(@as(u16, 0), controller.activeClaimCount());
 
-    const wrapped_claim = try controller.claim(.{
+    try std.testing.expectError(error.ClaimIdExhausted, controller.claim(.{
         .task_id = 91,
         .request = .{ .class = .batch_compute },
-    });
-    try std.testing.expectEqual(@as(u64, 1), wrapped_claim.id);
-    try std.testing.expectEqual(@as(u64, 2), controller.next_claim_id);
-    try std.testing.expect(controller.findActiveClaim(0) == null);
-
-    controller.next_claim_id = 1;
-    const skipped_claim = try controller.claim(.{
-        .task_id = 92,
-        .request = .{ .class = .foreground_interactive },
-    });
-    try std.testing.expectEqual(@as(u64, 2), skipped_claim.id);
-    try std.testing.expectEqual(@as(u64, 3), controller.next_claim_id);
-    try std.testing.expect(controller.findActiveClaim(0) == null);
+    }));
+    try std.testing.expectEqual(@as(u64, 0), controller.next_claim_id);
+    try std.testing.expectEqual(@as(u16, 0), controller.activeClaimCount());
 
     var full_controller = Controller.init();
     for (0..MAX_ENGINE_CLAIMS) |index| {

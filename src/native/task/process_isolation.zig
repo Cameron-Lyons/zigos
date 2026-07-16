@@ -86,14 +86,16 @@ pub const Broker = struct {
             return error.ContinuousOperationDenied;
         }
 
-        const owned = self.capability_table.query(request.capability_id) orelse {
-            try self.auditDenied(request, 0, .capability_missing);
-            return error.CapabilityNotFound;
+        const owned = self.capability_table.requireUsable(request.capability_id, request.now_ticks) catch |err| switch (err) {
+            error.CapabilityNotFound => {
+                try self.auditDenied(request, 0, .capability_missing);
+                return error.CapabilityNotFound;
+            },
+            error.CapabilityRevoked => {
+                try self.auditDenied(request, request.capability_id, .capability_revoked);
+                return error.CapabilityRevoked;
+            },
         };
-        if (!self.capability_table.isUsable(owned, request.now_ticks)) {
-            try self.auditDenied(request, owned.id, .capability_revoked);
-            return error.CapabilityRevoked;
-        }
         if (!self.runtime.hasCapability(request.caller_task_id, owned.id)) {
             try self.auditDenied(request, owned.id, .capability_missing);
             return error.CapabilityNotFound;

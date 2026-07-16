@@ -95,6 +95,7 @@ pub const Notification = struct {
 };
 
 pub const Error = error{
+    NotificationIdExhausted,
     NotificationTableFull,
     NotificationNotFound,
 };
@@ -138,7 +139,9 @@ pub const Center = struct {
     }
 
     pub fn post(self: *Center, request: PostRequest) Error!*Notification {
-        const notification_id = self.nextReservableNotificationId() orelse return error.NotificationTableFull;
+        if (!self.hasReusableNotificationSlot()) return error.NotificationTableFull;
+        const notification_id = self.next_notification_id;
+        if (notification_id == 0) return error.NotificationIdExhausted;
         var notification = zeroNotification();
         notification.id = notification_id;
         notification.reason = request.reason;
@@ -157,7 +160,7 @@ pub const Center = struct {
             native_util.impossibleByInvariant("notification source/reason index covers notification slots");
         }
         self.accountPostedAttention(slot_index, &slot.notification);
-        self.advanceNextNotificationIdFrom(notification_id);
+        self.next_notification_id +%= 1;
         return &slot.notification;
     }
 
@@ -291,25 +294,9 @@ pub const Center = struct {
         return null;
     }
 
-    fn nextReservableNotificationId(self: *Center) ?u64 {
-        if (!self.hasReusableNotificationSlot()) return null;
-
-        var notification_id = normalizeNotificationId(self.next_notification_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_NOTIFICATIONS) : (attempts += 1) {
-            if (self.find(notification_id) == null) return notification_id;
-            notification_id = nextNotificationIdAfter(notification_id);
-        }
-        return null;
-    }
-
     fn hasReusableNotificationSlot(self: *const Center) bool {
         if (self.countNotifications() < MAX_NOTIFICATIONS) return true;
         return self.firstSuppressedSlotIndex() != null;
-    }
-
-    fn advanceNextNotificationIdFrom(self: *Center, notification_id: u64) void {
-        self.next_notification_id = nextNotificationIdAfter(notification_id);
     }
 
     fn countNotifications(self: *const Center) usize {
@@ -438,15 +425,6 @@ pub const Center = struct {
     }
 };
 
-fn normalizeNotificationId(notification_id: u64) u64 {
-    return if (notification_id == 0) 1 else notification_id;
-}
-
-fn nextNotificationIdAfter(notification_id: u64) u64 {
-    const next = notification_id +% 1;
-    return normalizeNotificationId(next);
-}
-
 fn deny(
     reason: AttentionDecisionReason,
     counts: AttentionCounts,
@@ -573,7 +551,7 @@ test "notification center applies structured suppression policies before posting
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason_task, task_replacement.suppression_policy);
 }
 
-test "notification center ids wrap without zero and full posts do not suppress" {
+test "notification center stops at id exhaustion and full posts do not suppress" {
     var center = Center.init();
     const source = principal.PrincipalId{ .kind = .service, .serial = 10 };
 
@@ -585,29 +563,18 @@ test "notification center ids wrap without zero and full posts do not suppress" 
         .detail = "max id notification",
     });
     try std.testing.expectEqual(std.math.maxInt(u64), max_notification.id);
-    try std.testing.expectEqual(@as(u64, 1), center.next_notification_id);
+    try std.testing.expectEqual(@as(u64, 0), center.next_notification_id);
     try std.testing.expect(center.find(0) == null);
 
-    const wrapped_notification = try center.post(.{
+    try std.testing.expectError(error.NotificationIdExhausted, center.post(.{
         .source = source,
         .reason = .sync_conflict,
         .urgency = .high,
-        .detail = "wrapped id notification",
-    });
-    try std.testing.expectEqual(@as(u64, 1), wrapped_notification.id);
-    try std.testing.expectEqual(@as(u64, 2), center.next_notification_id);
-    try std.testing.expect(center.find(0) == null);
-
-    center.next_notification_id = 1;
-    const skipped_notification = try center.post(.{
-        .source = source,
-        .reason = .sync_conflict,
-        .urgency = .high,
-        .detail = "skipped id notification",
-    });
-    try std.testing.expectEqual(@as(u64, 2), skipped_notification.id);
-    try std.testing.expectEqual(@as(u64, 3), center.next_notification_id);
-    try std.testing.expect(center.find(0) == null);
+        .detail = "exhausted id notification",
+        .suppression_policy = .replace_same_source_reason,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), center.activeCount(1));
+    try std.testing.expect(!max_notification.suppressed);
 
     var full_center = Center.init();
     for (0..MAX_NOTIFICATIONS) |index| {

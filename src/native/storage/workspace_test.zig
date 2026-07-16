@@ -430,3 +430,34 @@ test "aborting a transaction discards staged entries and reopens the workspace" 
     _ = try directory.commit(notes.id, 11);
     _ = try directory.resolve(notes.id, "documents/notes.md");
 }
+
+test "workspace and snapshot identifiers stop at exhaustion" {
+    var directory = Directory.init();
+    directory.next_workspace_id = std.math.maxInt(u64);
+
+    const workspace_record = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 1 },
+        .label = "final-workspace",
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), workspace_record.id.raw());
+    try std.testing.expectEqual(@as(u64, 0), directory.next_workspace_id);
+    try std.testing.expectError(error.WorkspaceIdExhausted, directory.create(.{
+        .owner = .{ .kind = .user, .serial = 2 },
+        .label = "must-not-publish",
+    }));
+    try std.testing.expectEqual(@as(usize, 1), directory.workspaceCount());
+
+    directory.next_snapshot_id = std.math.maxInt(u64);
+    const signer = signing.SignerIdentity{
+        .label = "snapshot-id-exhaustion",
+        .seed = signing.seedFromByte(0x69),
+    };
+    const snapshot_record = try directory.snapshot(workspace_record.id, "final-snapshot", signer);
+    try std.testing.expectEqual(std.math.maxInt(u64), snapshot_record.id.raw());
+    try std.testing.expectEqual(@as(u64, 0), directory.next_snapshot_id);
+    try std.testing.expectError(
+        error.SnapshotIdExhausted,
+        directory.snapshot(workspace_record.id, "must-not-publish", signer),
+    );
+    try std.testing.expectEqual(@as(usize, 1), directory.snapshotCount());
+}

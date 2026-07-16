@@ -50,6 +50,7 @@ pub const Endpoint = struct {
 
 pub const Error = error{
     EndpointBusy,
+    EndpointIdExhausted,
     EndpointNotFound,
     MessageTooLarge,
     PeerNotConnected,
@@ -75,7 +76,8 @@ pub const Table = struct {
     }
 
     pub fn create(self: *Table, owner_task_id: ids.TaskId, label: []const u8, flags: EndpointFlags) Error!Endpoint {
-        const endpoint_id = self.nextReservableEndpointId() orelse return error.TableFull;
+        if (self.arena.countInUse() >= MAX_ENDPOINTS) return error.TableFull;
+        const endpoint_id = self.nextEndpointId() orelse return error.EndpointIdExhausted;
         const slot_index = self.arena.reserveIndex(endpoint_id) orelse return error.TableFull;
         const slot = &self.arena.slots[slot_index];
         slot.endpoint = .{
@@ -181,21 +183,12 @@ pub const Table = struct {
         return @intCast(self.owner_index.count(task_id.raw()));
     }
 
-    fn nextReservableEndpointId(self: *const Table) ?ids.EndpointId {
-        if (self.arena.countInUse() >= MAX_ENDPOINTS) return null;
-
-        var endpoint_id = normalizeEndpointId(self.next_endpoint_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_ENDPOINTS) : (attempts += 1) {
-            const candidate = ids.endpoint(endpoint_id);
-            if (self.findConst(candidate) == null) return candidate;
-            endpoint_id = nextEndpointIdAfter(endpoint_id);
-        }
-        return null;
+    fn nextEndpointId(self: *const Table) ?ids.EndpointId {
+        return if (self.next_endpoint_id == 0) null else ids.endpoint(self.next_endpoint_id);
     }
 
     fn advanceNextEndpointIdFrom(self: *Table, endpoint_id: ids.EndpointId) void {
-        self.next_endpoint_id = nextEndpointIdAfter(endpoint_id.raw());
+        self.next_endpoint_id = endpoint_id.raw() +% 1;
     }
 
     fn find(self: *Table, endpoint_id: ids.EndpointId) ?*Endpoint {
@@ -211,15 +204,6 @@ pub const Table = struct {
 
 fn endpointSlotId(slot: *const EndpointSlot) ids.EndpointId {
     return slot.endpoint.id;
-}
-
-fn normalizeEndpointId(endpoint_id: u64) u64 {
-    return if (endpoint_id == 0) 1 else endpoint_id;
-}
-
-fn nextEndpointIdAfter(endpoint_id: u64) u64 {
-    const next = endpoint_id +% 1;
-    return normalizeEndpointId(next);
 }
 
 fn zeroMessage() Message {
@@ -272,24 +256,17 @@ test "endpoint descriptors track peer links and queue depth" {
     try std.testing.expect(descriptor.label_hash != 0);
 }
 
-test "endpoint ids wrap without zero and skip active endpoints" {
+test "endpoint ids stop at exhaustion" {
     var table = Table.init();
 
     table.next_endpoint_id = std.math.maxInt(u64);
     const max_endpoint = try table.create(ids.task(10), "max", .{});
     try std.testing.expectEqual(std.math.maxInt(u64), max_endpoint.id.raw());
-    try std.testing.expectEqual(@as(u64, 1), table.next_endpoint_id);
+    try std.testing.expectEqual(@as(u64, 0), table.next_endpoint_id);
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(ids.EndpointId.zero));
 
-    const wrapped_endpoint = try table.create(ids.task(11), "wrapped", .{});
-    try std.testing.expectEqual(@as(u64, 1), wrapped_endpoint.id.raw());
-    try std.testing.expectEqual(@as(u64, 2), table.next_endpoint_id);
-    try std.testing.expectError(error.EndpointNotFound, table.descriptor(ids.EndpointId.zero));
-
-    table.next_endpoint_id = 1;
-    const skipped_endpoint = try table.create(ids.task(12), "skipped", .{});
-    try std.testing.expectEqual(@as(u64, 2), skipped_endpoint.id.raw());
-    try std.testing.expectEqual(@as(u64, 3), table.next_endpoint_id);
+    try std.testing.expectError(error.EndpointIdExhausted, table.create(ids.task(11), "exhausted", .{}));
+    try std.testing.expectEqual(@as(u64, 0), table.next_endpoint_id);
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(ids.EndpointId.zero));
 }
 

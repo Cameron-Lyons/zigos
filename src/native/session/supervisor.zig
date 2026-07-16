@@ -64,7 +64,6 @@ pub const Error = error{
 pub const DriverRecoveryReport = struct {
     notification_id: ?u64 = null,
     visible_impact: bool = false,
-    runtime_activation_observed: bool = false,
     runtime_activation_generation: u32 = 0,
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
@@ -78,19 +77,17 @@ pub const DriverHotSwapReport = struct {
     next_dma_domain_id: u64 = 0,
     previous_restart_generation: u32 = 0,
     next_restart_generation: u32 = 0,
-    runtime_activation_observed: bool = false,
     runtime_activation_generation: u32 = 0,
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
     userspace_brokered_data_plane: bool = false,
 };
 
-const DriverActivationObservation = struct {
-    observed: bool = false,
-    activation_generation: u32 = 0,
-    dma_domain_id: u64 = 0,
-    exclusive_claim: bool = false,
-    userspace_brokered_data_plane: bool = false,
+const DriverActivationState = struct {
+    activation_generation: u32,
+    dma_domain_id: u64,
+    exclusive_claim: bool,
+    userspace_brokered_data_plane: bool,
 };
 
 const ServiceSlot = struct {
@@ -264,7 +261,9 @@ pub const Supervisor = struct {
 
         _ = self.requestRestart(service_id, tick + 1);
         _ = directory.markRestarted(service_id);
-        _ = deactivateRuntimeDriver(runtime, driver.service_id, driver.device_class);
+        if (!runtime.deactivateDriver(driver.service_id, driver.device_class)) {
+            return error.DriverDeactivationFailed;
+        }
         const activation = try activateRuntimeDriver(runtime, driver, tick + 2);
         _ = self.completeRestart(service_id, tick + 2);
 
@@ -290,7 +289,6 @@ pub const Supervisor = struct {
         return .{
             .notification_id = notification_id,
             .visible_impact = visible_impact,
-            .runtime_activation_observed = activation.observed,
             .runtime_activation_generation = activation.activation_generation,
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
@@ -322,11 +320,13 @@ pub const Supervisor = struct {
         const visible_impact = driverImpactIsVisible(request.device_class);
 
         _ = self.requestRestart(request.service_id, tick);
-        _ = deactivateRuntimeDriver(runtime, request.service_id, request.device_class);
+        if (!runtime.deactivateDriver(request.service_id, request.device_class)) {
+            return error.DriverDeactivationFailed;
+        }
 
         const swapped = try directory.hotSwapSigned(request);
         if (previous.authority_capability_id != request.authority_capability_id and
-            !revokeRuntimeCapability(runtime, previous.owner_task_id, previous.authority_capability_id))
+            !(try runtime.revokeCapability(previous.owner_task_id, previous.authority_capability_id)))
         {
             return error.CapabilityRevokeFailed;
         }
@@ -361,7 +361,6 @@ pub const Supervisor = struct {
             .next_dma_domain_id = swapped.dma_domain_id,
             .previous_restart_generation = previous.restart_generation,
             .next_restart_generation = swapped.restart_generation,
-            .runtime_activation_observed = activation.observed,
             .runtime_activation_generation = activation.activation_generation,
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
@@ -386,42 +385,24 @@ pub const Supervisor = struct {
     }
 
     fn nextReservableServiceId(self: *const Supervisor) ?u64 {
-        if (self.serviceCount() >= MAX_SERVICES) return null;
-
-        var service_id = normalizeServiceId(self.next_service_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_SERVICES) : (attempts += 1) {
-            if (self.findConst(service_id) == null) return service_id;
-            service_id = nextServiceIdAfter(service_id);
+        if (self.serviceCount() >= MAX_SERVICES or self.next_service_id == 0) return null;
+        if (self.findConst(self.next_service_id) != null) {
+            native_util.impossibleByInvariant("monotonic supervisor service ids are never reused");
         }
-        return null;
+        return self.next_service_id;
     }
 
     fn advanceNextServiceIdFrom(self: *Supervisor, service_id: u64) void {
-        self.next_service_id = nextServiceIdAfter(service_id);
+        self.next_service_id = service_id +% 1;
     }
 
     fn nextReservableIsolationDomainId(self: *const Supervisor) ?u64 {
-        if (self.serviceCount() >= MAX_SERVICES) return null;
-
-        var isolation_domain_id = normalizeIsolationDomainId(self.next_isolation_domain_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_SERVICES) : (attempts += 1) {
-            if (!self.isolationDomainInUse(isolation_domain_id)) return isolation_domain_id;
-            isolation_domain_id = nextIsolationDomainIdAfter(isolation_domain_id);
-        }
-        return null;
+        if (self.serviceCount() >= MAX_SERVICES or self.next_isolation_domain_id == 0) return null;
+        return self.next_isolation_domain_id;
     }
 
     fn advanceNextIsolationDomainIdFrom(self: *Supervisor, isolation_domain_id: u64) void {
-        self.next_isolation_domain_id = nextIsolationDomainIdAfter(isolation_domain_id);
-    }
-
-    fn isolationDomainInUse(self: *const Supervisor, isolation_domain_id: u64) bool {
-        for (&self.service_arena.slots) |*slot| {
-            if (slot.in_use and slot.service.isolation_domain_id == isolation_domain_id) return true;
-        }
-        return false;
+        self.next_isolation_domain_id = isolation_domain_id +% 1;
     }
 
     fn record(
@@ -480,27 +461,12 @@ pub const Supervisor = struct {
     }
 
     fn nextDiagnosticSequence(self: *Supervisor) u64 {
-        const sequence = self.nextReservableDiagnosticSequence() orelse
-            native_util.impossibleByInvariant("scanning one more candidate than the diagnostic table holds always finds a free sequence");
-        self.next_diagnostic_sequence = nextDiagnosticSequenceAfter(sequence);
+        const sequence = self.next_diagnostic_sequence;
+        if (sequence == 0) {
+            native_util.impossibleByInvariant("supervisor diagnostic sequence exhausted");
+        }
+        self.next_diagnostic_sequence = sequence +% 1;
         return sequence;
-    }
-
-    fn nextReservableDiagnosticSequence(self: *const Supervisor) ?u64 {
-        var sequence = normalizeDiagnosticSequence(self.next_diagnostic_sequence);
-        var attempts: usize = 0;
-        while (attempts <= MAX_DIAGNOSTICS) : (attempts += 1) {
-            if (!self.diagnosticSequenceInUse(sequence)) return sequence;
-            sequence = nextDiagnosticSequenceAfter(sequence);
-        }
-        return null;
-    }
-
-    fn diagnosticSequenceInUse(self: *const Supervisor, sequence: u64) bool {
-        for (self.diagnostics[0..self.diagnostic_count]) |event| {
-            if (event.sequence == sequence) return true;
-        }
-        return false;
     }
 
     fn findConst(self: *const Supervisor, service_id: u64) ?*const ServiceRecord {
@@ -523,33 +489,6 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
 
 fn serviceClassKey(class: contract.ServiceClass) u64 {
     return @as(u64, @intFromEnum(class)) + 1;
-}
-
-fn normalizeServiceId(service_id: u64) u64 {
-    return if (service_id == 0) 1 else service_id;
-}
-
-fn nextServiceIdAfter(service_id: u64) u64 {
-    const next = service_id +% 1;
-    return normalizeServiceId(next);
-}
-
-fn normalizeIsolationDomainId(isolation_domain_id: u64) u64 {
-    return if (isolation_domain_id == 0) 1 else isolation_domain_id;
-}
-
-fn nextIsolationDomainIdAfter(isolation_domain_id: u64) u64 {
-    const next = isolation_domain_id +% 1;
-    return normalizeIsolationDomainId(next);
-}
-
-fn normalizeDiagnosticSequence(sequence: u64) u64 {
-    return if (sequence == 0) 1 else sequence;
-}
-
-fn nextDiagnosticSequenceAfter(sequence: u64) u64 {
-    const next = sequence +% 1;
-    return normalizeDiagnosticSequence(next);
 }
 
 fn diagnosticServiceKey(service_id: u64) u64 {
@@ -640,48 +579,14 @@ fn activateRuntimeDriver(
     runtime: anytype,
     driver: *const driver_service.DriverRecord,
     tick: u64,
-) !DriverActivationObservation {
-    if (@hasDecl(@TypeOf(runtime.*), "activateAt")) {
-        return observeDriverActivation(try runtime.activateAt(driver, tick));
-    }
-    return observeDriverActivation(try runtime.activate(driver));
-}
-
-fn deactivateRuntimeDriver(runtime: anytype, service_id: u64, device_class: driver_service.DeviceClass) bool {
-    if (@hasDecl(@TypeOf(runtime.*), "deactivateDriver")) {
-        return runtime.deactivateDriver(service_id, device_class);
-    }
-    if (@hasDecl(@TypeOf(runtime.*), "deactivate")) {
-        return runtime.deactivate(service_id);
-    }
-    return false;
-}
-
-fn revokeRuntimeCapability(runtime: anytype, task_id: u64, capability_id: u64) bool {
-    if (@hasDecl(@TypeOf(runtime.*), "revokeCapability")) {
-        return runtime.revokeCapability(task_id, capability_id) catch false;
-    }
-    return true;
-}
-
-fn observeDriverActivation(result: anytype) DriverActivationObservation {
-    const T = @TypeOf(result);
-    if (T == void) return .{};
-
-    var observation = DriverActivationObservation{ .observed = true };
-    if (@hasField(T, "activation_generation")) {
-        observation.activation_generation = result.activation_generation;
-    }
-    if (@hasField(T, "dma_domain_id")) {
-        observation.dma_domain_id = result.dma_domain_id;
-    }
-    if (@hasField(T, "exclusive_claim")) {
-        observation.exclusive_claim = result.exclusive_claim;
-    }
-    if (@hasField(T, "mode")) {
-        observation.userspace_brokered_data_plane = std.mem.eql(u8, @tagName(result.mode), "userspace_brokered_data_plane");
-    }
-    return observation;
+) !DriverActivationState {
+    const result = try runtime.activateAt(driver, tick);
+    return .{
+        .activation_generation = result.activation_generation,
+        .dma_domain_id = result.dma_domain_id,
+        .exclusive_claim = result.exclusive_claim,
+        .userspace_brokered_data_plane = result.mode == .userspace_brokered_data_plane,
+    };
 }
 
 test "supervisor registers services using the contract boundary map" {
@@ -696,7 +601,7 @@ test "supervisor registers services using the contract boundary map" {
     try std.testing.expectEqual(ServiceState.healthy, service.state);
 }
 
-test "supervisor service ids wrap without zero and skip active records" {
+test "supervisor service and isolation identifiers stop at exhaustion" {
     var supervisor = Supervisor.init();
 
     supervisor.next_service_id = std.math.maxInt(u64);
@@ -704,25 +609,10 @@ test "supervisor service ids wrap without zero and skip active records" {
     const max_service = try supervisor.register(.session_manager, .{ .kind = .service, .serial = 10 });
     try std.testing.expectEqual(std.math.maxInt(u64), max_service.id);
     try std.testing.expectEqual(std.math.maxInt(u64), max_service.isolation_domain_id);
-    try std.testing.expectEqual(@as(u64, 1), supervisor.next_service_id);
-    try std.testing.expectEqual(@as(u64, 1), supervisor.next_isolation_domain_id);
+    try std.testing.expectEqual(@as(u64, 0), supervisor.next_service_id);
+    try std.testing.expectEqual(@as(u64, 0), supervisor.next_isolation_domain_id);
     try std.testing.expect(supervisor.find(0) == null);
-
-    const wrapped_service = try supervisor.register(.task_runtime, .{ .kind = .service, .serial = 11 });
-    try std.testing.expectEqual(@as(u64, 1), wrapped_service.id);
-    try std.testing.expectEqual(@as(u64, 1), wrapped_service.isolation_domain_id);
-    try std.testing.expectEqual(@as(u64, 2), supervisor.next_service_id);
-    try std.testing.expectEqual(@as(u64, 2), supervisor.next_isolation_domain_id);
-    try std.testing.expect(supervisor.find(0) == null);
-
-    supervisor.next_service_id = 1;
-    supervisor.next_isolation_domain_id = 1;
-    const skipped_service = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 12 });
-    try std.testing.expectEqual(@as(u64, 2), skipped_service.id);
-    try std.testing.expectEqual(@as(u64, 2), skipped_service.isolation_domain_id);
-    try std.testing.expectEqual(@as(u64, 3), supervisor.next_service_id);
-    try std.testing.expectEqual(@as(u64, 3), supervisor.next_isolation_domain_id);
-    try std.testing.expect(supervisor.find(0) == null);
+    try std.testing.expectError(error.ServiceTableFull, supervisor.register(.task_runtime, .{ .kind = .service, .serial = 11 }));
 }
 
 test "supervisor service ids do not advance when the table is full" {
@@ -739,22 +629,13 @@ test "supervisor service ids do not advance when the table is full" {
     try std.testing.expectEqual(MAX_SERVICES, supervisor.serviceCount());
 }
 
-test "supervisor diagnostic sequences wrap without zero and skip retained diagnostics" {
+test "supervisor diagnostic sequences stop at exhaustion" {
     var supervisor = Supervisor.init();
 
     supervisor.next_diagnostic_sequence = std.math.maxInt(u64);
     const service = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 20 });
     try std.testing.expectEqual(std.math.maxInt(u64), supervisor.latestDiagnostic(service.id).?.sequence);
-    try std.testing.expectEqual(@as(u64, 1), supervisor.next_diagnostic_sequence);
-
-    try std.testing.expect(supervisor.markHealthy(service.id, 10));
-    try std.testing.expectEqual(@as(u64, 1), supervisor.latestDiagnostic(service.id).?.sequence);
-    try std.testing.expectEqual(@as(u64, 2), supervisor.next_diagnostic_sequence);
-
-    supervisor.next_diagnostic_sequence = 1;
-    try std.testing.expect(supervisor.recordCrash(service.id, 11, 0xD1));
-    try std.testing.expectEqual(@as(u64, 2), supervisor.latestDiagnostic(service.id).?.sequence);
-    try std.testing.expectEqual(@as(u64, 3), supervisor.next_diagnostic_sequence);
+    try std.testing.expectEqual(@as(u64, 0), supervisor.next_diagnostic_sequence);
 
     for (supervisor.diagnostics[0..supervisor.diagnostic_count]) |event| {
         try std.testing.expect(event.sequence != 0);
@@ -827,12 +708,32 @@ test "services can be located by class for mediated routing" {
 
 test "driver recovery restarts the failed driver and emits visible diagnostics only when needed" {
     const FakeRuntime = struct {
+        const ActivationMode = enum(u8) { userspace_brokered_data_plane };
+        const ActivationRecord = struct {
+            activation_generation: u32,
+            dma_domain_id: u64,
+            exclusive_claim: bool,
+            mode: ActivationMode,
+        };
+
+        deactivation_count: usize = 0,
         activation_count: usize = 0,
         last_service_id: u64 = 0,
 
-        fn activate(self: *@This(), driver: *const driver_service.DriverRecord) !void {
+        pub fn deactivateDriver(self: *@This(), _: u64, _: driver_service.DeviceClass) bool {
+            self.deactivation_count += 1;
+            return true;
+        }
+
+        pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, _: u64) !ActivationRecord {
             self.activation_count += 1;
             self.last_service_id = driver.service_id;
+            return .{
+                .activation_generation = @intCast(self.activation_count),
+                .dma_domain_id = driver.dma_domain_id,
+                .exclusive_claim = true,
+                .mode = .userspace_brokered_data_plane,
+            };
         }
     };
 
@@ -906,6 +807,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
 
     try std.testing.expect(recovery.visible_impact);
     try std.testing.expect(recovery.notification_id != null);
+    try std.testing.expectEqual(@as(usize, 1), runtime.deactivation_count);
     try std.testing.expectEqual(@as(usize, 1), runtime.activation_count);
     try std.testing.expectEqual(compositor.id, runtime.last_service_id);
     try std.testing.expectEqual(ServiceState.healthy, compositor.state);
@@ -936,8 +838,10 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
         last_deactivated_service_id: u64 = 0,
         last_activated_service_id: u64 = 0,
         last_dma_domain_id: u64 = 0,
+        revoked_task_id: u64 = 0,
+        revoked_capability_id: u64 = 0,
 
-        pub fn deactivate(self: *@This(), service_id: u64) bool {
+        pub fn deactivateDriver(self: *@This(), service_id: u64, _: driver_service.DeviceClass) bool {
             self.deactivation_count += 1;
             self.last_deactivated_service_id = service_id;
             return true;
@@ -953,6 +857,12 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
                 .exclusive_claim = true,
                 .mode = .userspace_brokered_data_plane,
             };
+        }
+
+        pub fn revokeCapability(self: *@This(), task_id: u64, capability_id: u64) !bool {
+            self.revoked_task_id = task_id;
+            self.revoked_capability_id = capability_id;
+            return true;
         }
     };
 
@@ -1015,7 +925,6 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     try std.testing.expectEqual(first_dma_domain, report.previous_dma_domain_id);
     try std.testing.expect(swapped.dma_domain_id != first_dma_domain);
     try std.testing.expectEqual(swapped.dma_domain_id, report.next_dma_domain_id);
-    try std.testing.expect(report.runtime_activation_observed);
     try std.testing.expectEqual(@as(u32, 1), report.runtime_activation_generation);
     try std.testing.expectEqual(swapped.dma_domain_id, report.runtime_dma_domain_id);
     try std.testing.expect(report.runtime_exclusive_claim);
@@ -1027,6 +936,8 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     try std.testing.expectEqual(compositor.id, runtime.last_deactivated_service_id);
     try std.testing.expectEqual(compositor.id, runtime.last_activated_service_id);
     try std.testing.expectEqual(swapped.dma_domain_id, runtime.last_dma_domain_id);
+    try std.testing.expectEqual(@as(u64, 501), runtime.revoked_task_id);
+    try std.testing.expectEqual(first_authority.id, runtime.revoked_capability_id);
     try std.testing.expectEqual(ServiceState.healthy, compositor.state);
     try std.testing.expectEqual(@as(u16, 1), compositor.restart_count);
     try std.testing.expectEqual(ServiceState.healthy, storage.state);

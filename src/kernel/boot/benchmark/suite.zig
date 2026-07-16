@@ -65,6 +65,8 @@ const PERMISSION_REVIEW_BENCH_BUFFER_BYTES: usize = kibibytes(2);
 const EVENT_LEDGER_BENCH_BUFFER_BYTES: usize = kibibytes(2);
 const DENIAL_EXPLANATION_BENCH_BUFFER_BYTES: usize = 192;
 const CAPABILITY_REUSE_MINTED_IDS: usize = 128;
+const CAPABILITY_LOOKUP_TARGET_COUNT: usize = 96;
+const CAPABILITY_LOOKUP_LIVE_COUNT: usize = CAPABILITY_LOOKUP_TARGET_COUNT - 1;
 const FAIRNESS_BACKGROUND_TASKS: usize = 4;
 const LATENCY_BACKGROUND_TASKS: usize = 4;
 const UPDATE_HEALTH_CORE_SERVICE_COUNT: usize = 3;
@@ -78,6 +80,13 @@ const ScalingCapabilityTable = capability.CapabilityTableWith(.{
     .max_target_generations = 128,
     .debug_index_checks = false,
 });
+
+const CapabilityLookupContext = struct {
+    table: ScalingCapabilityTable = ScalingCapabilityTable.init(),
+    live_capability_ids: [CAPABILITY_LOOKUP_LIVE_COUNT]u64 = [_]u64{0} ** CAPABILITY_LOOKUP_LIVE_COUNT,
+    revoked_sibling_id: u64 = 0,
+    revoked_target_id: u64 = 0,
+};
 
 const FileBridgeContext = struct {
     expected_workspace_id: u64 = 0,
@@ -419,6 +428,7 @@ var media_context = MediaContext{};
 var event_ledger_context = EventLedgerContext{};
 var secret_store_context = SecretStoreContext{};
 var overlay_session_context = OverlaySessionContext{};
+var capability_lookup_context = CapabilityLookupContext{};
 var recovery_context = RecoveryContext{};
 var update_health_context = UpdateHealthContext{};
 var benchmark_image_context = BenchmarkImageContext{};
@@ -450,6 +460,7 @@ pub fn run() noreturn {
 
 fn prepareFixtures() void {
     prepareBenchmarkUserspaceImages();
+    prepareCapabilityLookupFixture();
     prepareFileBridgeFixture();
     preparePermissionReviewFixture();
     prepareNetworkPolicyFixture();
@@ -460,6 +471,59 @@ fn prepareFixtures() void {
     prepareTaskCheckpointFixture();
     preparePackageFixture();
     restoreStorageVolumeSeedImage();
+}
+
+fn prepareCapabilityLookupFixture() void {
+    capability_lookup_context = .{};
+    var revoke_trigger_id: u64 = 0;
+
+    for (0..CAPABILITY_LOOKUP_TARGET_COUNT) |index| {
+        const target_id = 12_000 + @as(u64, @intCast(index));
+        const minted = capability_lookup_context.table.mintBootRoot(.{
+            .holder = app(3000 + @as(u32, @intCast(index % 31))),
+            .issuer = policyAuthority(4),
+            .target = .{ .kind = .service, .id = target_id },
+            .rights = .{ .service = .{
+                .capability_query = true,
+                .capability_revoke = true,
+            } },
+            .scope = .{
+                .task_id = 4000 + @as(u64, @intCast(index)),
+                .local_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = 1,
+                .expires_at_ticks = 1000,
+            },
+        }) catch |err| benchmark_reporting.benchStepFailure("capability lookup fixture", err);
+        if (index < CAPABILITY_LOOKUP_LIVE_COUNT) {
+            capability_lookup_context.live_capability_ids[index] = minted.id;
+        } else {
+            revoke_trigger_id = minted.id;
+            capability_lookup_context.revoked_target_id = target_id;
+        }
+    }
+
+    const revoked_sibling = capability_lookup_context.table.mintBootRoot(.{
+        .holder = app(3999),
+        .issuer = policyAuthority(4),
+        .target = .{ .kind = .service, .id = capability_lookup_context.revoked_target_id },
+        .rights = .{ .service = .{
+            .capability_query = true,
+            .capability_revoke = true,
+        } },
+        .scope = .{
+            .task_id = 4999,
+            .local_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 1,
+            .expires_at_ticks = 1000,
+        },
+    }) catch |err| benchmark_reporting.benchStepFailure("capability lookup fixture", err);
+    capability_lookup_context.revoked_sibling_id = revoked_sibling.id;
+    capability_lookup_context.table.revokeTargetAuthority(revoke_trigger_id) catch |err|
+        benchmark_reporting.benchStepFailure("capability lookup fixture", err);
 }
 
 // The storage volume fixture is built lazily inside the case bodies so its
@@ -982,39 +1046,13 @@ fn benchmarkCapabilityMintReuseFreeSlot(iteration: u32) u64 {
 }
 
 fn benchmarkCapabilityTargetGenerationLookup(iteration: u32) u64 {
-    var table = ScalingCapabilityTable.init();
-    var capabilities: [96]capability.Capability = undefined;
-    var checksum: u64 = iteration;
-
-    for (&capabilities, 0..) |*slot, index| {
-        const target_id = 12_000 + iteration * 128 + @as(u32, @intCast(index));
-        slot.* = table.mintBootRoot(.{
-            .holder = app(3000 + @as(u32, @intCast(index % 31))),
-            .issuer = policyAuthority(4),
-            .target = .{ .kind = .service, .id = target_id },
-            .rights = .{ .service = .{
-                .capability_query = true,
-                .capability_revoke = true,
-            } },
-            .scope = .{
-                .task_id = 4000 + @as(u32, @intCast(index)),
-                .local_only = true,
-            },
-            .lease = .{
-                .issued_at_ticks = 1,
-                .expires_at_ticks = 1000,
-            },
-        }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-        checksum +%= slot.id;
-    }
-
-    for (capabilities, 0..) |capability_record, index| {
-        if (table.isUsable(capability_record, 10)) checksum +%= @as(u64, @intCast(index + 1));
-    }
-
-    table.revokeTargetAuthority(capabilities[capabilities.len - 1].id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    if (!table.isUsable(capabilities[capabilities.len - 1], 10)) checksum +%= capabilities[capabilities.len - 1].target.id;
-    return checksum;
+    const live_index = @as(usize, @intCast(iteration)) % CAPABILITY_LOOKUP_LIVE_COUNT;
+    const live = capability_lookup_context.table.requireUsable(capability_lookup_context.live_capability_ids[live_index], 10) catch |err|
+        benchmark_reporting.benchStepFailure("benchmark live capability lookup", err);
+    const sibling_state = capability_lookup_context.table.inspect(capability_lookup_context.revoked_sibling_id, 10) orelse
+        benchmark_reporting.benchStepFailure("benchmark target-generation sibling lookup", error.CapabilityNotFound);
+    if (sibling_state.usable) benchmark_reporting.benchStepFailure("benchmark target-generation revocation", error.CapabilityRevoked);
+    return live.id + live.target.id + sibling_state.capability.id + capability_lookup_context.revoked_target_id + iteration;
 }
 
 fn benchmarkPermissionReviewRender(iteration: u32) u64 {
@@ -2103,10 +2141,30 @@ fn createLoadTask(
 }
 
 const DriverRecoveryRuntime = struct {
+    const ActivationMode = enum(u8) { userspace_brokered_data_plane };
+    const ActivationRecord = struct {
+        activation_generation: u32,
+        dma_domain_id: u64,
+        exclusive_claim: bool,
+        mode: ActivationMode,
+    };
+
+    deactivation_count: usize = 0,
     activation_count: usize = 0,
 
-    pub fn activate(self: *@This(), _: *const driver_service.DriverRecord) !void {
+    pub fn deactivateDriver(self: *@This(), _: u64, _: driver_service.DeviceClass) bool {
+        self.deactivation_count += 1;
+        return true;
+    }
+
+    pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, _: u64) !ActivationRecord {
         self.activation_count += 1;
+        return .{
+            .dma_domain_id = driver.dma_domain_id,
+            .activation_generation = @intCast(self.activation_count),
+            .exclusive_claim = true,
+            .mode = .userspace_brokered_data_plane,
+        };
     }
 };
 

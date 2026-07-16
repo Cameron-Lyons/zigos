@@ -1303,15 +1303,23 @@ test "personal context service leases local semantic memory with scoped audit" {
         .now_ticks = 27,
         .detail = "private empty context pack",
     };
+    empty_service.next_receipt_id = std.math.maxInt(u64);
     const empty_packs = try empty_service.retrievePacks(&empty_index, &empty_policies, subjects, empty_request, &empty_results_buffer, &empty_packs_buffer, &empty_ledger);
     try std.testing.expectEqual(@as(usize, 0), empty_packs.packs.len);
     try std.testing.expectEqual(@as(u16, 0), empty_packs.receipt.pack_count);
     try std.testing.expectEqual(empty_index.generation, empty_packs.accounting.index_generation);
     try std.testing.expectEqual(empty_index.generation, empty_packs.receipt.index_generation);
+    try std.testing.expectEqual(std.math.maxInt(u64), empty_packs.receipt.receipt_id);
+    try std.testing.expectEqual(@as(u64, 0), empty_service.next_receipt_id);
     try std.testing.expect(empty_packs.receipt.complete());
     try std.testing.expectEqual(manifest.DataSensitivity.public_data, empty_packs.receipt.max_pack_sensitivity);
     try std.testing.expect(!std.mem.eql(u8, &empty_packs.receipt.request_fingerprint, &crypto_hash.zero_digest));
     try std.testing.expect(!std.mem.eql(u8, &empty_packs.receipt.pack_digest, &crypto_hash.zero_digest));
+    const bytes_before_exhaustion = empty_lease.bytes_used;
+    const events_before_exhaustion = empty_ledger.userVisibleDiagnosticSummary().semantic_memory_events;
+    try std.testing.expectError(error.ReceiptIdExhausted, empty_service.retrievePacks(&empty_index, &empty_policies, subjects, empty_request, &empty_results_buffer, &empty_packs_buffer, &empty_ledger));
+    try std.testing.expectEqual(bytes_before_exhaustion, empty_lease.bytes_used);
+    try std.testing.expectEqual(events_before_exhaustion, empty_ledger.userVisibleDiagnosticSummary().semantic_memory_events);
     try std.testing.expect(verifyPackReceipt(empty_packs.receipt, empty_request, empty_packs.accounting, empty_packs.packs));
     try std.testing.expect(verifyPackReceiptAt(empty_packs.receipt, empty_request, empty_packs.accounting, empty_packs.packs, 28));
     try std.testing.expect(try empty_service.consumePackReceipt(&empty_policies, subjects, empty_packs.receipt, empty_request, empty_packs.accounting, empty_packs.packs, empty_index.generation, 28, &empty_ledger, "private empty receipt consumption"));
@@ -1323,7 +1331,7 @@ test "personal context service leases local semantic memory with scoped audit" {
     try std.testing.expectEqual(@as(usize, 1), empty_summary.semantic_memory_receipt_denials);
 }
 
-test "personal context lease ids stop after the maximum id" {
+test "personal context lease ids stop at exhaustion" {
     var policies = policy_object.Directory.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 920 };
     const app = principal.PrincipalId{ .kind = .app, .serial = 921 };

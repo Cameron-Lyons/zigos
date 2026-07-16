@@ -368,3 +368,71 @@ test "object store capacity is configurable" {
     try std.testing.expectEqual(@as(usize, 64), store.blobSlotCapacity());
     try std.testing.expectEqual(@as(usize, 64), store.chunkSlotCapacity());
 }
+
+test "object store stops generated object identifiers at exhaustion" {
+    var store = Store.init();
+    store.next_object_id = std.math.maxInt(u64);
+    const signer = signing.SignerIdentity{
+        .label = "object-id-exhaustion",
+        .seed = signing.seedFromByte(0x67),
+    };
+
+    const final = try store.putVersion(.{
+        .object_type = .document,
+        .payload = "final object",
+        .metadata = try signMetadata(signer, "final", "text/plain", .document, "final object", 1),
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), final.object_id.raw());
+    try std.testing.expectEqual(@as(u64, 0), store.next_object_id);
+
+    const object_count = store.objectCount();
+    const version_count = store.versionCount();
+    const blob_count = store.blobCount();
+    const chunk_count = store.chunkCount();
+    const next_version_id = store.next_version_id;
+    try std.testing.expectError(error.ObjectIdExhausted, store.putVersion(.{
+        .preferred_object_id = ids.object(17),
+        .object_type = .document,
+        .payload = "must not publish",
+        .metadata = try signMetadata(signer, "rejected", "text/plain", .document, "must not publish", 2),
+    }));
+    try std.testing.expectEqual(object_count, store.objectCount());
+    try std.testing.expectEqual(version_count, store.versionCount());
+    try std.testing.expectEqual(blob_count, store.blobCount());
+    try std.testing.expectEqual(chunk_count, store.chunkCount());
+    try std.testing.expectEqual(next_version_id, store.next_version_id);
+}
+
+test "object store stops version identifiers before publishing a new object" {
+    var store = Store.init();
+    store.next_version_id = std.math.maxInt(u64);
+    const signer = signing.SignerIdentity{
+        .label = "version-id-exhaustion",
+        .seed = signing.seedFromByte(0x68),
+    };
+
+    const final = try store.putVersion(.{
+        .preferred_object_id = ids.object(77),
+        .object_type = .document,
+        .payload = "final version",
+        .metadata = try signMetadata(signer, "final", "text/plain", .document, "final version", 1),
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), final.version_id.raw());
+    try std.testing.expectEqual(@as(u64, 0), store.next_version_id);
+
+    const object_count = store.objectCount();
+    const blob_count = store.blobCount();
+    const chunk_count = store.chunkCount();
+    const next_object_id = store.next_object_id;
+    try std.testing.expectError(error.VersionIdExhausted, store.putVersion(.{
+        .preferred_object_id = ids.object(78),
+        .object_type = .document,
+        .payload = "must not publish",
+        .metadata = try signMetadata(signer, "rejected", "text/plain", .document, "must not publish", 2),
+    }));
+    try std.testing.expectEqual(object_count, store.objectCount());
+    try std.testing.expectEqual(@as(usize, 1), store.versionCount());
+    try std.testing.expectEqual(blob_count, store.blobCount());
+    try std.testing.expectEqual(chunk_count, store.chunkCount());
+    try std.testing.expectEqual(next_object_id, store.next_object_id);
+}

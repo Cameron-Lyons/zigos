@@ -17,6 +17,7 @@ pub const Error = secure_secret_store.Error || event_ledger.Error || error{
     PolicyDenied,
     SecretRevokeBindingMismatch,
     SecretOwnerMismatch,
+    VaultHandleIdExhausted,
     VaultHandleNotFound,
 };
 
@@ -177,10 +178,15 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const handle_id = self.nextReservableHandleId() orelse {
+        if (self.handles.countInUse() >= MAX_HANDLES) {
             try recordLend(ledger, request, 0, false);
             return error.HandleTableFull;
-        };
+        }
+        const handle_id = self.next_handle_id;
+        if (handle_id == 0) {
+            try recordLend(ledger, request, 0, false);
+            return error.VaultHandleIdExhausted;
+        }
         const store_handle = try self.store.lendHandle(
             request.secret_id,
             request.holder,
@@ -207,7 +213,7 @@ pub const Service = struct {
         if (!self.active_handle_index.append(ACTIVE_HANDLE_KEY, slot_index)) {
             native_util.impossibleByInvariant("secret vault active-handle index covers handle slots");
         }
-        self.advanceNextHandleIdFrom(handle_id);
+        self.next_handle_id +%= 1;
         self.active_handle_count += 1;
         try recordLend(ledger, request, slot.handle.id, true);
         return &slot.handle;
@@ -361,22 +367,6 @@ pub const Service = struct {
         return count;
     }
 
-    fn nextReservableHandleId(self: *const Service) ?u64 {
-        if (self.handles.countInUse() >= MAX_HANDLES) return null;
-
-        var handle_id = normalizeVaultHandleId(self.next_handle_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_HANDLES) : (attempts += 1) {
-            if (self.handles.getConst(handle_id) == null) return handle_id;
-            handle_id = nextVaultHandleIdAfter(handle_id);
-        }
-        return null;
-    }
-
-    fn advanceNextHandleIdFrom(self: *Service, handle_id: u64) void {
-        self.next_handle_id = nextVaultHandleIdAfter(handle_id);
-    }
-
     fn revokeSecretHandles(self: *Service, secret_id: u64) usize {
         var revoked_count: usize = 0;
         var slot_index = self.secret_handle_index.head(secret_id);
@@ -414,15 +404,6 @@ pub const Service = struct {
 
 fn handleSlotId(slot: *const HandleSlot) u64 {
     return slot.handle.id;
-}
-
-fn normalizeVaultHandleId(handle_id: u64) u64 {
-    return if (handle_id == 0) 1 else handle_id;
-}
-
-fn nextVaultHandleIdAfter(handle_id: u64) u64 {
-    const next = handle_id +% 1;
-    return normalizeVaultHandleId(next);
 }
 
 fn recordImport(
@@ -926,7 +907,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=secret_vault") != null);
 }
 
-test "secret vault lending stages capacity before lower store handles and wraps ids" {
+test "secret vault lending stages id and capacity before lower store handles" {
     const signing = @import("../core/signing.zig");
 
     var policies = policy_object.Directory.init();
@@ -962,10 +943,11 @@ test "secret vault lending stages capacity before lower store handles and wraps 
         .detail = "private wrap token lent at max handle id",
     }, null);
     try std.testing.expectEqual(std.math.maxInt(u64), max_handle.id);
-    try std.testing.expectEqual(@as(u64, 1), wrap_service.next_handle_id);
+    try std.testing.expectEqual(@as(u64, 0), wrap_service.next_handle_id);
     try std.testing.expect(wrap_service.findHandle(0) == null);
 
-    const wrapped_handle = try wrap_service.lendHandle(&policies, subjects, .{
+    const store_next_before_exhaustion = wrap_service.store.next_handle_id;
+    try std.testing.expectError(error.VaultHandleIdExhausted, wrap_service.lendHandle(&policies, subjects, .{
         .owner = user,
         .holder = app,
         .task_id = 82,
@@ -974,11 +956,10 @@ test "secret vault lending stages capacity before lower store handles and wraps 
         .now_ticks = 11,
         .allow_raw_export = true,
         .hardware_backed = false,
-        .detail = "private wrap token lent after handle id wrap",
-    }, null);
-    try std.testing.expectEqual(@as(u64, 1), wrapped_handle.id);
-    try std.testing.expectEqual(@as(u64, 2), wrap_service.next_handle_id);
-    try std.testing.expect(wrap_service.findHandle(0) == null);
+        .detail = "private wrap token denied after handle id exhaustion",
+    }, null));
+    try std.testing.expectEqual(store_next_before_exhaustion, wrap_service.store.next_handle_id);
+    try std.testing.expectEqual(@as(usize, 1), wrap_service.handles.countInUse());
 
     var full_service = Service.init();
     const full_secret = try full_service.store.importSecret(user, "full-token", "private full token", false, true);

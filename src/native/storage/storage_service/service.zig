@@ -5,7 +5,6 @@ const file_bridge = @import("../file_bridge.zig");
 const object_store = @import("../object_store.zig");
 const checkpoint_support = @import("../storage_service_checkpoint.zig");
 const ids = @import("../../core/ids.zig");
-const native_util = @import("../../core/util.zig");
 const principal = @import("../../core/principal.zig");
 const service_authority = @import("../../services/service_authority.zig");
 const shared_memory = @import("../../kernel_api/shared_memory.zig");
@@ -952,7 +951,6 @@ pub const StoragePort = struct {
                     error.CapabilityRevoked,
                 );
             },
-            else => native_util.impossibleByInvariantError("storage authority lookup only reports not-found or revoked capabilities", err),
         };
     }
 

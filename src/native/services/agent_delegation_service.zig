@@ -13,6 +13,7 @@ pub const Error = event_ledger.Error || error{
     ActionBudgetExceeded,
     ContextBudgetExceeded,
     DelegationBindingMismatch,
+    DelegationIdExhausted,
     DelegationNotFound,
     DelegationRevoked,
     DelegationTableFull,
@@ -135,7 +136,9 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const delegation_id = self.nextReservableDelegationId() orelse return error.DelegationTableFull;
+        if (self.slots.countInUse() >= MAX_DELEGATIONS) return error.DelegationTableFull;
+        const delegation_id = self.next_delegation_id;
+        if (delegation_id == 0) return error.DelegationIdExhausted;
         const delegation = Delegation{
             .id = delegation_id,
             .subject = request.subject,
@@ -156,7 +159,7 @@ pub const Service = struct {
         const slot = &self.slots.slots[slot_index];
         slot.delegation = delegation;
         self.accountActiveDelegation(slot_index, &slot.delegation);
-        self.advanceNextDelegationIdFrom(delegation_id);
+        self.next_delegation_id +%= 1;
         return &slot.delegation;
     }
 
@@ -357,34 +360,10 @@ pub const Service = struct {
         self.lowest_active_generation = lowest;
     }
 
-    fn nextReservableDelegationId(self: *Service) ?u64 {
-        if (self.slots.countInUse() >= MAX_DELEGATIONS) return null;
-
-        var delegation_id = normalizeDelegationId(self.next_delegation_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_DELEGATIONS) : (attempts += 1) {
-            if (self.slots.get(delegation_id) == null) return delegation_id;
-            delegation_id = nextDelegationIdAfter(delegation_id);
-        }
-        return null;
-    }
-
-    fn advanceNextDelegationIdFrom(self: *Service, delegation_id: u64) void {
-        self.next_delegation_id = nextDelegationIdAfter(delegation_id);
-    }
 };
 
 fn generationKey(generation: u32) u64 {
     return @as(u64, generation) + 1;
-}
-
-fn normalizeDelegationId(delegation_id: u64) u64 {
-    return if (delegation_id == 0) 1 else delegation_id;
-}
-
-fn nextDelegationIdAfter(delegation_id: u64) u64 {
-    const next = delegation_id +% 1;
-    return normalizeDelegationId(next);
 }
 
 fn recordSessionBoundary(
@@ -869,7 +848,7 @@ test "agent delegation service audits denied actions and enforces cumulative con
     try std.testing.expect(std.mem.indexOf(u8, redacted, "private wrong session") == null);
 }
 
-test "agent delegation service ids wrap without zero and skip active delegations" {
+test "agent delegation service ids stop at exhaustion" {
     var policies = policy_object.Directory.init();
     _ = try policies.create(.{
         .scope = .organization,
@@ -912,10 +891,10 @@ test "agent delegation service ids wrap without zero and skip active delegations
         .detail = "private max id agent session",
     }, null);
     try std.testing.expectEqual(std.math.maxInt(u64), max_delegation.id);
-    try std.testing.expectEqual(@as(u64, 1), service.next_delegation_id);
+    try std.testing.expectEqual(@as(u64, 0), service.next_delegation_id);
     try std.testing.expect(service.find(0) == null);
 
-    const wrapped_delegation = try service.authorize(&policies, subjects, .{
+    try std.testing.expectError(error.DelegationIdExhausted, service.authorize(&policies, subjects, .{
         .subject = subject,
         .task_id = 7001,
         .session_id = 8001,
@@ -928,31 +907,9 @@ test "agent delegation service ids wrap without zero and skip active delegations
         .delegation_generation = 1,
         .user_visible_plan = true,
         .now_tick = 41,
-        .detail = "private wrapped id agent session",
-    }, null);
-    try std.testing.expectEqual(@as(u64, 1), wrapped_delegation.id);
-    try std.testing.expectEqual(@as(u64, 2), service.next_delegation_id);
-    try std.testing.expect(service.find(0) == null);
-
-    service.next_delegation_id = 1;
-    const skipped_delegation = try service.authorize(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7002,
-        .session_id = 8002,
-        .autonomous_actions = 1,
-        .remote_calls = 1,
-        .user_confirmed = true,
-        .audit_enabled = true,
-        .local_context_only = true,
-        .context_bytes = 128,
-        .delegation_generation = 1,
-        .user_visible_plan = true,
-        .now_tick = 42,
-        .detail = "private skipped id agent session",
-    }, null);
-    try std.testing.expectEqual(@as(u64, 2), skipped_delegation.id);
-    try std.testing.expectEqual(@as(u64, 3), service.next_delegation_id);
-    try std.testing.expectEqual(@as(usize, 3), service.activeCount());
+        .detail = "private exhausted id agent session",
+    }, null));
+    try std.testing.expectEqual(@as(usize, 1), service.activeCount());
 
     var full_service = Service.init();
     for (0..MAX_DELEGATIONS) |index| {
