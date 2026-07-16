@@ -1,3 +1,4 @@
+const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -6,6 +7,7 @@ const copyTextExact = native_util.copyTextExact;
 
 pub const Error = manifest.ValidationError || error{
     InstallSourceTooLong,
+    RevisionIdExhausted,
 };
 
 pub fn validateInstallTarget(
@@ -133,9 +135,12 @@ pub fn installRevisionValidated(
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
 ) Error!void {
+    const revision_id = bundle.next_revision_id;
+    if (revision_id == 0) return error.RevisionIdExhausted;
+
     const target_slot = bundle.inactiveRevisionSlot();
-    try writeRevision(&bundle.revisions[target_slot], source, source_identity, data_schema_version, permission_digest, bundle.next_revision_id);
-    bundle.next_revision_id += 1;
+    try writeRevision(&bundle.revisions[target_slot], source, source_identity, data_schema_version, permission_digest, revision_id);
+    bundle.next_revision_id = if (revision_id == std.math.maxInt(@TypeOf(revision_id))) 0 else revision_id + 1;
     if (bundle.revision_count == 0) {
         bundle.revision_count = 1;
     } else if (bundle.revision_count < bundle.revisions.len) {
@@ -361,7 +366,7 @@ fn writeRevision(
     source_identity: []const u8,
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
-    revision_id: u32,
+    revision_id: u64,
 ) Error!void {
     revision.revision_id = revision_id;
     revision.display_name_len = copyTextExact(&revision.display_name, source.display_name) catch return error.DisplayNameTooLong;

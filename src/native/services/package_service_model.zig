@@ -385,7 +385,7 @@ pub const ResolvedManifest = struct {
 };
 
 pub const BundleRevision = struct {
-    revision_id: u32 = 0,
+    revision_id: u64 = 0,
     display_name_len: usize = 0,
     display_name: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     publisher_len: usize = 0,
@@ -440,7 +440,7 @@ pub const InstalledBundle = struct {
     bundle_id_len: usize,
     bundle_id: [MAX_LABEL_BYTES]u8,
     revision_count: usize,
-    next_revision_id: u32,
+    next_revision_id: u64,
     active_revision_slot: u8,
     rollback_revision_slot: ?u8,
     revisions: [2]BundleRevision,
