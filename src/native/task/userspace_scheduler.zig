@@ -361,7 +361,7 @@ pub const Scheduler = struct {
             return claim_id;
         }
 
-        const claim_id = self.nextAcceleratorClaimId();
+        const claim_id = self.nextAcceleratorClaimId() orelse return null;
         const claim_index = self.accelerator_claims.reserveIndex(claim_id) orelse return null;
         const slot = &self.accelerator_claims.slots[claim_index];
         slot.record = .{
@@ -378,6 +378,7 @@ pub const Scheduler = struct {
             return null;
         }
         self.insertAcceleratorClaimIndex(request.engine, claim_index);
+        self.next_accelerator_claim_id +%= 1;
         if (task_slot.pending_accelerator_claim_id == 0) {
             task_slot.pending_accelerator_claim_id = claim_id;
             task_slot.pending_accelerator_engine = request.engine;
@@ -1066,11 +1067,11 @@ pub const Scheduler = struct {
         return null;
     }
 
-    fn nextAcceleratorClaimId(self: *Scheduler) u64 {
-        const claim_id = self.next_accelerator_claim_id;
-        self.next_accelerator_claim_id +%= 1;
-        if (self.next_accelerator_claim_id == 0) self.next_accelerator_claim_id = 1;
-        return claim_id;
+    fn nextAcceleratorClaimId(self: *Scheduler) ?u64 {
+        if (self.accelerator_claims.countInUse() >= MAX_ACCELERATOR_CLAIMS) return null;
+        if (self.next_accelerator_claim_id == 0) return null;
+        if (self.accelerator_claims.get(self.next_accelerator_claim_id) != null) return null;
+        return self.next_accelerator_claim_id;
     }
 };
 
@@ -1684,6 +1685,47 @@ test "userspace scheduler indexes accelerator claims by task across grants and u
     try std.testing.expect(scheduler.unregisterTask(task.id));
     try std.testing.expectEqual(@as(usize, 0), scheduler.accelerator_claim_task_index.count(acceleratorClaimTaskKey(task.id)));
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.gpu));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
+}
+
+test "userspace scheduler stops accelerator claim ids at exhaustion" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+
+    const task = try createRunnableSchedulerTask(
+        &runtime,
+        251,
+        .media_export,
+        "final-claim-task",
+        "app.example.final-claim-task",
+        251,
+    );
+    try std.testing.expect(scheduler.registerTask(task.id));
+    scheduler.next_accelerator_claim_id = std.math.maxInt(u64);
+
+    const final_claim_id = scheduler.enqueueAcceleratorClaim(.{
+        .task_id = task.id,
+        .engine = .gpu,
+        .resource_class = .media_export,
+        .requested_at_tick = 1,
+    }).?;
+    try std.testing.expectEqual(std.math.maxInt(u64), final_claim_id);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.next_accelerator_claim_id);
+    try std.testing.expect(scheduler.unregisterTask(task.id));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.gpu));
+
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(scheduler.enqueueAcceleratorClaim(.{
+        .task_id = task.id,
+        .engine = .media,
+        .resource_class = .media_export,
+        .requested_at_tick = 2,
+    }) == null);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.next_accelerator_claim_id);
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
 }
 
