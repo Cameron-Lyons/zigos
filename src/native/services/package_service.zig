@@ -1232,6 +1232,48 @@ test "package service rejects invalid signatures and rollback before any update"
     try std.testing.expectError(error.NoRollbackVersion, service.rollback(rollbackRequestForActive(service.find("app.notes").?)));
 }
 
+test "package revision identifiers issue the maximum once and stop before mutation" {
+    var bundle = zeroBundle();
+    const v1 = manifest_fixtures.notesBundle();
+    const permission_digest = bundle_digest.permissionDigest(v1.requested_permissions);
+    try bundle_ops.installNewValidated(
+        &bundle,
+        v1,
+        "store:zigos",
+        1,
+        permission_digest,
+    );
+
+    try std.testing.expectEqual(@as(u64, 1), bundle.activeRevision().revision_id);
+    bundle.next_revision_id = std.math.maxInt(u64);
+
+    var v2 = v1;
+    v2.version_minor = 1;
+    try bundle_ops.installRevisionValidated(
+        &bundle,
+        v2,
+        "store:zigos",
+        1,
+        permission_digest,
+    );
+
+    try std.testing.expectEqual(std.math.maxInt(u64), bundle.activeRevision().revision_id);
+    try std.testing.expectEqual(@as(u64, 1), bundle.rollbackRevision().?.revision_id);
+    try std.testing.expectEqual(@as(u64, 0), bundle.next_revision_id);
+
+    const exhausted = bundle;
+    var v3 = v2;
+    v3.version_minor = 2;
+    try std.testing.expectError(error.RevisionIdExhausted, bundle_ops.installRevisionValidated(
+        &bundle,
+        v3,
+        "store:zigos",
+        1,
+        permission_digest,
+    ));
+    try std.testing.expectEqualDeep(exhausted, bundle);
+}
+
 test "package service rejects stale update metadata publisher drift and channel drift" {
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
