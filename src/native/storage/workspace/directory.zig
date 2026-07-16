@@ -334,6 +334,7 @@ pub const Error = error{
     NoActiveTransaction,
     PathTooLong,
     ShareTableFull,
+    SnapshotIdExhausted,
     SnapshotNotFound,
     SnapshotTableFull,
     TransactionAlreadyOpen,
@@ -343,6 +344,7 @@ pub const Error = error{
     SignatureSignerTooLong,
     UnsignedExport,
     UnsignedSnapshot,
+    WorkspaceIdExhausted,
     WorkspaceNotFound,
     WorkspaceTableFull,
 };
@@ -478,10 +480,12 @@ pub const Directory = struct {
     pub fn createRef(self: *Directory, request: *const CreateRequest) Error!*WorkspaceRecord {
         var label: [MAX_WORKSPACE_LABEL_BYTES]u8 = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES;
         const label_len = native_util.copyTextExact(&label, request.label) catch return error.LabelTooLong;
+        if (self.workspaceCount() >= MAX_WORKSPACES) return error.WorkspaceTableFull;
+        if (self.next_workspace_id == 0) return error.WorkspaceIdExhausted;
         const workspace_id = ids.workspace(self.next_workspace_id);
         const slot_index = self.workspaces.reserveIndex(workspace_id) orelse return error.WorkspaceTableFull;
         const slot = &self.workspaces.slots[slot_index];
-        self.next_workspace_id += 1;
+        self.next_workspace_id +%= 1;
         slot.workspace = zeroWorkspace();
         slot.workspace.id = workspace_id;
         slot.workspace.owner = request.owner;
@@ -750,6 +754,8 @@ pub const Directory = struct {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         var label_copy: [MAX_WORKSPACE_LABEL_BYTES]u8 = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES;
         const label_len = native_util.copyTextExact(&label_copy, label) catch return error.LabelTooLong;
+        if (self.snapshotCount() >= MAX_SNAPSHOTS) return error.SnapshotTableFull;
+        if (self.next_snapshot_id == 0) return error.SnapshotIdExhausted;
 
         const snapshot_id = ids.snapshot(self.next_snapshot_id);
         var snapshot_record = zeroSnapshot();
@@ -765,7 +771,7 @@ pub const Directory = struct {
 
         const slot_index = self.snapshots.reserveIndex(snapshot_id) orelse return error.SnapshotTableFull;
         const slot = &self.snapshots.slots[slot_index];
-        self.next_snapshot_id += 1;
+        self.next_snapshot_id +%= 1;
         slot.snapshot = snapshot_record;
         self.snapshot_label_index.insert(snapshotLabelKey(slot.snapshot.workspace_id, slot.snapshot.labelSlice()), slot_index);
         self.recordWorkspaceSnapshotGeneration(slot.snapshot.workspace_id, slot.snapshot.generation);
