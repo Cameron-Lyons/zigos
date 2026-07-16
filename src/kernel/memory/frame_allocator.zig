@@ -115,10 +115,7 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             const start = self.findRun(self.search_frame_hint, frame_count, count) orelse
                 self.findRun(0, frame_count, count) orelse return null;
 
-            var frame = start;
-            while (frame < start + count) : (frame += 1) {
-                self.setBit(&self.allocated_bitmap, frame);
-            }
+            self.setRange(&self.allocated_bitmap, start, count);
             self.allocated_count += count;
             self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
 
@@ -184,26 +181,75 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
 
         fn findRun(self: *const Self, start: u32, end: u32, count: u32) ?u32 {
             if (start >= end or count > end - start) return null;
+            if (count == 1) return self.findFreeFrame(start, end);
 
             var candidate: u32 = start;
             var contiguous: u32 = 0;
-            var frame = start;
-            while (frame < end) : (frame += 1) {
-                if (self.isUnavailable(frame)) {
+
+            var word_index = start / bitmap_word_bits;
+            const last_word_index = (end - 1) / bitmap_word_bits;
+            while (word_index <= last_word_index) : (word_index += 1) {
+                const word_start = word_index * bitmap_word_bits;
+                const range_start = @max(start, word_start);
+                const range_end = word_start + @min(bitmap_word_bits, end - word_start);
+                const range_mask = wordRangeMask(range_start - word_start, range_end - word_start);
+                const available = ~(self.reserved_bitmap[word_index] | self.allocated_bitmap[word_index]) & range_mask;
+
+                if (available == 0) {
                     contiguous = 0;
-                    candidate = frame + 1;
                     continue;
                 }
 
-                contiguous += 1;
-                if (contiguous == count) return candidate;
+                if (available == range_mask) {
+                    if (contiguous == 0) candidate = range_start;
+                    contiguous += range_end - range_start;
+                    if (contiguous >= count) return candidate;
+                    continue;
+                }
+
+                var frame = range_start;
+                while (frame < range_end) : (frame += 1) {
+                    const bit: u5 = @intCast(frame - word_start);
+                    if ((available & (@as(u32, 1) << bit)) == 0) {
+                        contiguous = 0;
+                        continue;
+                    }
+
+                    if (contiguous == 0) candidate = frame;
+                    contiguous += 1;
+                    if (contiguous == count) return candidate;
+                }
             }
             return null;
         }
 
-        fn isUnavailable(self: *const Self, frame: u32) bool {
-            return self.bitIsSet(&self.reserved_bitmap, frame) or
-                self.bitIsSet(&self.allocated_bitmap, frame);
+        fn findFreeFrame(self: *const Self, start: u32, end: u32) ?u32 {
+            var word_index = start / bitmap_word_bits;
+            const last_word_index = (end - 1) / bitmap_word_bits;
+            while (word_index <= last_word_index) : (word_index += 1) {
+                const word_start = word_index * bitmap_word_bits;
+                const range_start = @max(start, word_start);
+                const range_end = word_start + @min(bitmap_word_bits, end - word_start);
+                const range_mask = wordRangeMask(range_start - word_start, range_end - word_start);
+                const available = ~(self.reserved_bitmap[word_index] | self.allocated_bitmap[word_index]) & range_mask;
+                if (available == 0) continue;
+
+                const free_bit: u32 = @intCast(@ctz(available));
+                return word_start + free_bit;
+            }
+            return null;
+        }
+
+        fn setRange(_: *Self, bitmap: *[bitmap_word_count]u32, start: u32, count: u32) void {
+            const end = start + count;
+            var word_index = start / bitmap_word_bits;
+            const last_word_index = (end - 1) / bitmap_word_bits;
+            while (word_index <= last_word_index) : (word_index += 1) {
+                const word_start = word_index * bitmap_word_bits;
+                const range_start = @max(start, word_start);
+                const range_end = word_start + @min(bitmap_word_bits, end - word_start);
+                bitmap[word_index] |= wordRangeMask(range_start - word_start, range_end - word_start);
+            }
         }
 
         fn bitIsSet(_: *const Self, bitmap: *const [bitmap_word_count]u32, frame: u32) bool {
@@ -222,6 +268,16 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             const word: usize = @intCast(frame / bitmap_word_bits);
             const bit: u5 = @truncate(frame % bitmap_word_bits);
             bitmap[word] &= ~(@as(u32, 1) << bit);
+        }
+
+        fn wordRangeMask(start_bit: u32, end_bit: u32) u32 {
+            return lowBitsMask(end_bit) & ~lowBitsMask(start_bit);
+        }
+
+        fn lowBitsMask(bit_count: u32) u32 {
+            if (bit_count >= bitmap_word_bits) return std.math.maxInt(u32);
+            const shift: u5 = @intCast(bit_count);
+            return (@as(u32, 1) << shift) - 1;
         }
     };
 }
@@ -271,6 +327,117 @@ test "contiguous allocation respects fragmentation and physical boundaries" {
     try std.testing.expect(allocator.allocate(2) == null);
     try std.testing.expectEqual(@as(u32, 0), allocator.allocate(1).?.base);
     try std.testing.expectEqual(@as(u32, 2 * 4096), allocator.allocate(1).?.base);
+}
+
+test "single-frame allocation skips unavailable bitmap words" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(96 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 64 });
+    allocator.search_frame_hint = 0;
+
+    const run = allocator.allocate(1).?;
+    try std.testing.expectEqual(@as(u32, 64 * page_size), run.base);
+    try std.testing.expectEqual(@as(u32, 1), run.count);
+}
+
+test "single-frame allocation wraps from a non-word-aligned hint" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(70 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 2 });
+    try allocator.reserve(.{ .base = 3 * page_size, .count = 67 });
+    allocator.search_frame_hint = 33;
+
+    try std.testing.expectEqual(@as(u32, 2 * page_size), allocator.allocate(1).?.base);
+}
+
+test "contiguous allocation wraps from a non-word-aligned hint" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(70 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 2 });
+    try allocator.reserve(.{ .base = 5 * page_size, .count = 65 });
+    allocator.search_frame_hint = 33;
+
+    try std.testing.expectEqual(@as(u32, 2 * page_size), allocator.allocate(3).?.base);
+}
+
+test "contiguous allocation crosses bitmap word boundaries" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(96 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 30 });
+    try allocator.reserve(.{ .base = 35 * page_size, .count = 61 });
+    allocator.search_frame_hint = 0;
+
+    const run = allocator.allocate(5).?;
+    try std.testing.expectEqual(@as(u32, 30 * page_size), run.base);
+    try std.testing.expectEqual(@as(u32, 5), run.count);
+    for (30..35) |frame| {
+        try std.testing.expect(allocator.isAllocated(@intCast(frame * page_size)));
+    }
+    try std.testing.expect(!allocator.isAllocated(29 * page_size));
+    try std.testing.expect(!allocator.isAllocated(35 * page_size));
+}
+
+test "contiguous allocation consumes complete free bitmap words" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(128 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 32 });
+    try allocator.reserve(.{ .base = 96 * page_size, .count = 32 });
+    allocator.search_frame_hint = 0;
+
+    const run = allocator.allocate(64).?;
+    try std.testing.expectEqual(@as(u32, 32 * page_size), run.base);
+    try std.testing.expectEqual(@as(u32, 64), run.count);
+    try std.testing.expect(allocator.isAllocated(32 * page_size));
+    try std.testing.expect(allocator.isAllocated(95 * page_size));
+}
+
+test "fragmented bitmap rejects unavailable contiguous runs" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(64 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    var frame: u32 = 0;
+    while (frame < Allocator.total_frames) : (frame += 2) {
+        try allocator.reserve(.{ .base = frame * page_size, .count = 1 });
+    }
+
+    try std.testing.expectEqual(@as(u32, page_size), allocator.allocate(1).?.base);
+    try std.testing.expect(allocator.allocate(2) == null);
+}
+
+test "partial final bitmap word never exposes out-of-range frames" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(35 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 34 });
+    allocator.search_frame_hint = 0;
+
+    try std.testing.expectEqual(@as(u32, 34 * page_size), allocator.allocate(1).?.base);
+    try std.testing.expect(allocator.allocate(1) == null);
+}
+
+test "contiguous allocation can consume a partial final bitmap word" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(35 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 32 });
+
+    const run = allocator.allocate(3).?;
+    try std.testing.expectEqual(@as(u32, 32 * page_size), run.base);
+    try std.testing.expectEqual(@as(u32, 3), run.count);
+    try std.testing.expectEqual(@as(u32, 35), allocator.stats().reserved + allocator.stats().allocated);
 }
 
 test "partially allocated run release is rejected transactionally" {
