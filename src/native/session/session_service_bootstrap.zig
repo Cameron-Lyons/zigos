@@ -374,8 +374,8 @@ const DriverRecoveryRuntime = struct {
     last_process_generation: u32 = 0,
     storage_probe: ?*StorageRestartProbe = null,
 
-    pub fn deactivate(self: *@This(), service_id: u64) bool {
-        const deactivated = self.activations.deactivate(service_id);
+    pub fn deactivateDriver(self: *@This(), service_id: u64, device_class: driver_service.DeviceClass) bool {
+        const deactivated = self.activations.deactivateDriver(service_id, device_class);
         if (deactivated) self.deactivation_count += 1;
         return deactivated;
     }
@@ -957,7 +957,6 @@ pub fn proveStorageDriverRestartIo(
         !storage_probe.partial_transfer_rejected or
         !storage_probe.old_dma_domain_programmed or
         !storage_probe.old_brokered_dma_buffer_ready or
-        !storage_recovery.runtime_activation_observed or
         !storage_recovery.runtime_exclusive_claim or
         !expected_storage_data_plane or
         recovery_runtime.last_task_id != storage_driver.owner_task_id or

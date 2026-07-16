@@ -2141,10 +2141,30 @@ fn createLoadTask(
 }
 
 const DriverRecoveryRuntime = struct {
+    const ActivationMode = enum(u8) { userspace_brokered_data_plane };
+    const ActivationRecord = struct {
+        activation_generation: u32,
+        dma_domain_id: u64,
+        exclusive_claim: bool,
+        mode: ActivationMode,
+    };
+
+    deactivation_count: usize = 0,
     activation_count: usize = 0,
 
-    pub fn activate(self: *@This(), _: *const driver_service.DriverRecord) !void {
+    pub fn deactivateDriver(self: *@This(), _: u64, _: driver_service.DeviceClass) bool {
+        self.deactivation_count += 1;
+        return true;
+    }
+
+    pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, _: u64) !ActivationRecord {
         self.activation_count += 1;
+        return .{
+            .dma_domain_id = driver.dma_domain_id,
+            .activation_generation = @intCast(self.activation_count),
+            .exclusive_claim = true,
+            .mode = .userspace_brokered_data_plane,
+        };
     }
 };
 

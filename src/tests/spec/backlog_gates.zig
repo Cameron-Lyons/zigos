@@ -1619,8 +1619,8 @@ pub fn bootedDriverKernelBoundaryGate() !void {
             return activation;
         }
 
-        pub fn deactivate(self: *@This(), service_id: u64) bool {
-            const deactivated = self.activations.deactivate(service_id);
+        pub fn deactivateDriver(self: *@This(), service_id: u64, device_class: driver_service.DeviceClass) bool {
+            const deactivated = self.activations.deactivateDriver(service_id, device_class);
             if (deactivated) self.deactivation_count += 1;
             return deactivated;
         }
