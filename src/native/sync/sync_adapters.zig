@@ -340,9 +340,8 @@ pub const TransportQueue = struct {
     }
 
     pub fn enqueue(self: *TransportQueue, request: QueueFrameRequest) Error!TransportFrame {
-        const frame_id = self.nextFrameId();
-        const slot_index = self.frames.reserveIndex(frame_id) orelse return error.TransportQueueFull;
-        const slot = &self.frames.slots[slot_index];
+        if (request.path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
+        const frame_id = try self.pendingFrameId();
         var frame = TransportFrame{
             .id = frame_id,
             .source_frame_id = if (request.source_frame_id == 0) frame_id else request.source_frame_id,
@@ -357,6 +356,8 @@ pub const TransportQueue = struct {
             .workspace_generation = request.workspace_generation,
         };
         frame.path_len = try state_support.copyTransportPath(&frame.path, request.path);
+        const slot_index = self.frames.reserveIndex(frame_id) orelse return error.TransportQueueFull;
+        const slot = &self.frames.slots[slot_index];
         slot.frame = frame;
         if (!self.target_index.append(transportFrameTargetKey(frame.workspace_id, frame.target_device), slot_index)) {
             _ = self.frames.removeIndex(slot_index);
@@ -367,6 +368,7 @@ pub const TransportQueue = struct {
             _ = self.frames.removeIndex(slot_index);
             return error.TransportQueueFull;
         }
+        self.commitFrameId(frame_id);
         return slot.frame;
     }
 
@@ -390,6 +392,7 @@ pub const TransportQueue = struct {
     }
 
     pub fn latestFrameId(self: *const TransportQueue) u64 {
+        if (self.next_frame_id == 0) return std.math.maxInt(u64);
         if (self.next_frame_id == 1) return 0;
         return self.next_frame_id - 1;
     }
@@ -444,9 +447,14 @@ pub const TransportQueue = struct {
         return latest;
     }
 
-    fn nextFrameId(self: *TransportQueue) u64 {
-        defer self.next_frame_id += 1;
+    fn pendingFrameId(self: *const TransportQueue) Error!u64 {
+        if (self.next_frame_id == 0) return error.TransportFrameIdExhausted;
         return self.next_frame_id;
+    }
+
+    fn commitFrameId(self: *TransportQueue, frame_id: u64) void {
+        std.debug.assert(frame_id == self.next_frame_id);
+        self.next_frame_id = state_support.advanceTransportFrameId(frame_id);
     }
 };
 
@@ -852,6 +860,7 @@ test "transport queue records encrypted semantic replication frames" {
     try std.testing.expectEqual(latest_frame.id, latest.id);
     try std.testing.expectEqualStrings("secrets/token", latest.pathSlice());
 
+    const latest_before_rejected_frame = queue.latestFrameId();
     const overlong_path: [workspace.MAX_ENTRY_PATH_BYTES + 1]u8 = [_]u8{'a'} ** (workspace.MAX_ENTRY_PATH_BYTES + 1);
     try std.testing.expectError(error.PathTooLong, queue.enqueue(.{
         .workspace_id = 42,
@@ -864,4 +873,39 @@ test "transport queue records encrypted semantic replication frames" {
         .encrypted = true,
         .path = overlong_path[0..],
     }));
+    try std.testing.expectEqual(latest_before_rejected_frame, queue.latestFrameId());
+}
+
+test "transport queue issues the maximum frame identifier once and stops without mutation" {
+    var queue = TransportQueue.init();
+    queue.next_frame_id = std.math.maxInt(u64);
+
+    const maximum = try queue.enqueue(.{
+        .workspace_id = 42,
+        .object_id = 80,
+        .version_id = 81,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = .{ .kind = .device, .serial = 2 },
+        .transport = .relay_assisted,
+        .semantic = .secure_transfer,
+        .encrypted = true,
+        .path = "secrets/token",
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), maximum.id);
+    try std.testing.expectEqual(std.math.maxInt(u64), queue.latestFrameId());
+    try std.testing.expectEqual(@as(u64, 0), queue.next_frame_id);
+
+    const exhausted = queue;
+    try std.testing.expectError(error.TransportFrameIdExhausted, queue.enqueue(.{
+        .workspace_id = 42,
+        .object_id = 82,
+        .version_id = 83,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = .{ .kind = .device, .serial = 2 },
+        .transport = .relay_assisted,
+        .semantic = .secure_transfer,
+        .encrypted = true,
+        .path = "secrets/token",
+    }));
+    try std.testing.expectEqualDeep(exhausted, queue);
 }

@@ -249,8 +249,14 @@ pub const TransportFrameRequest = struct {
 pub const DurableTransportFrameSlot = struct {
     in_use: bool = false,
     duplicate_count: u16 = 0,
+    next_frame_id_after_publish: u64 = 1,
     frame: TransportFrame = .{},
 };
+
+pub fn advanceTransportFrameId(frame_id: u64) u64 {
+    std.debug.assert(frame_id != 0);
+    return if (frame_id == std.math.maxInt(u64)) 0 else frame_id + 1;
+}
 
 pub const Error = error{
     BundleIdTooLong,
@@ -284,6 +290,7 @@ pub const Error = error{
     ServiceIdentityTooLong,
     TransportDenied,
     TransportDuplicateFrame,
+    TransportFrameIdExhausted,
     TransportQueueFull,
     TransportReplayRejected,
     TooManyDocumentOperations,
@@ -442,6 +449,7 @@ pub const PersistentState = struct {
 pub const ResidentState = struct {
     persisted_state: PersistentState = .{},
     has_persisted_state: bool = false,
+    transport_cursor_loaded: bool = false,
     user_root_signers: [device_graph.MAX_USER_ROOTS][MAX_LABEL_BYTES]u8 =
         [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** device_graph.MAX_USER_ROOTS,
     device_signature_signers: [device_graph.MAX_DEVICES][4][MAX_LABEL_BYTES]u8 =
@@ -452,12 +460,14 @@ pub const ResidentState = struct {
 
     pub fn resetForServiceInit(self: *ResidentState) void {
         self.persisted_state.reset();
+        self.transport_cursor_loaded = false;
         self.resetSignatureStorage();
     }
 
     pub fn resetPersistent(self: *ResidentState) void {
         self.persisted_state.reset();
         self.has_persisted_state = false;
+        self.transport_cursor_loaded = false;
         self.resetSignatureStorage();
         self.next_state_tick = 1;
     }

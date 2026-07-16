@@ -283,6 +283,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         pub fn latestTransportFrameId(self: *const Self) u64 {
             const next_id = self.stateConst().next_transport_frame_id;
+            if (next_id == 0) return std.math.maxInt(u64);
             return if (next_id == 1) 0 else next_id - 1;
         }
 
@@ -1699,7 +1700,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn enqueueTransportFrame(self: *Self, queue_kind: TransportQueueKind, request: TransportFrameRequest) Error!TransportFrame {
             if (request.path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
-            const frame_id = self.nextTransportFrameId();
+            const frame_id = try self.pendingTransportFrameId();
             const slot_index = self.allocateTransportFrameSlotIndex(queue_kind, frame_id) orelse
                 self.reclaimInboundTransportFrameSlotIndex(queue_kind, frame_id) orelse
                 return error.TransportQueueFull;
@@ -1707,6 +1708,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             errdefer _ = self.transportFrameArena(queue_kind).removeIndex(slot_index);
             slot.in_use = true;
             slot.duplicate_count = 0;
+            slot.next_frame_id_after_publish = state_support.advanceTransportFrameId(frame_id);
             slot.frame = .{
                 .id = frame_id,
                 .source_frame_id = if (request.source_frame_id == 0) frame_id else request.source_frame_id,
@@ -1727,15 +1729,20 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .inbound => self.indexInboundTransportTargetSlot(slot_index),
             }
             self.incrementTransportFrameSlotCount(queue_kind);
+            self.commitTransportFrameId(frame_id);
             self.resident().markDirty();
             return slot.frame;
         }
 
-        fn nextTransportFrameId(self: *Self) u64 {
+        fn pendingTransportFrameId(self: *const Self) Error!u64 {
             const frame_id = self.stateConst().next_transport_frame_id;
-            self.state().next_transport_frame_id +%= 1;
-            if (self.stateConst().next_transport_frame_id == 0) self.state().next_transport_frame_id = 1;
+            if (frame_id == 0) return error.TransportFrameIdExhausted;
             return frame_id;
+        }
+
+        fn commitTransportFrameId(self: *Self, frame_id: u64) void {
+            std.debug.assert(frame_id == self.stateConst().next_transport_frame_id);
+            self.state().next_transport_frame_id = state_support.advanceTransportFrameId(frame_id);
         }
 
         fn allocateTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind, frame_id: u64) ?usize {
@@ -2112,4 +2119,78 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &self.residentConst().persisted_state;
         }
     };
+}
+
+test "durable transport frame identifiers advance only after queue admission" {
+    var service = Service.init(9_900, 9_901, .{ .kind = .service, .serial = 9_900 });
+    var index: usize = 0;
+    while (index < MAX_TRANSPORT_FRAMES) : (index += 1) {
+        _ = try service.enqueueTransportFrame(.outbound, .{
+            .workspace_id = 42,
+            .object_id = @as(u64, @intCast(index + 1)),
+            .version_id = @as(u64, @intCast(index + 101)),
+            .source_device = .{ .kind = .device, .serial = 1 },
+            .target_device = .{ .kind = .device, .serial = 2 },
+            .transport = .relay_assisted,
+            .semantic = .mergeable_crdt,
+            .encrypted = true,
+            .path = "documents/notes.md",
+        });
+    }
+
+    const next_frame_id = service.stateConst().next_transport_frame_id;
+    const next_slot_index = service.next_outbound_transport_frame_slot_index;
+    try std.testing.expectEqual(@as(u64, MAX_TRANSPORT_FRAMES + 1), next_frame_id);
+    try std.testing.expectError(error.TransportQueueFull, service.enqueueTransportFrame(.outbound, .{
+        .workspace_id = 42,
+        .object_id = 1_000,
+        .version_id = 1_001,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = .{ .kind = .device, .serial = 2 },
+        .transport = .relay_assisted,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .path = "documents/notes.md",
+    }));
+    try std.testing.expectEqual(next_frame_id, service.stateConst().next_transport_frame_id);
+    try std.testing.expectEqual(next_slot_index, service.next_outbound_transport_frame_slot_index);
+    try std.testing.expectEqual(MAX_TRANSPORT_FRAMES, service.transportFrameCount());
+    try std.testing.expectEqual(@as(u64, MAX_TRANSPORT_FRAMES), service.latestTransportFrameId());
+}
+
+test "durable transport frame identifiers issue the maximum once and stop" {
+    var service = Service.init(9_910, 9_911, .{ .kind = .service, .serial = 9_910 });
+    service.state().next_transport_frame_id = std.math.maxInt(u64);
+
+    const maximum = try service.enqueueTransportFrame(.outbound, .{
+        .workspace_id = 42,
+        .object_id = 80,
+        .version_id = 81,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = .{ .kind = .device, .serial = 2 },
+        .transport = .relay_assisted,
+        .semantic = .secure_transfer,
+        .encrypted = true,
+        .path = "secrets/token",
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), maximum.id);
+    try std.testing.expectEqual(std.math.maxInt(u64), service.latestTransportFrameId());
+    try std.testing.expectEqual(@as(u64, 0), service.stateConst().next_transport_frame_id);
+
+    const frame_count = service.transportFrameCount();
+    const next_slot_index = service.next_outbound_transport_frame_slot_index;
+    try std.testing.expectError(error.TransportFrameIdExhausted, service.enqueueTransportFrame(.outbound, .{
+        .workspace_id = 42,
+        .object_id = 82,
+        .version_id = 83,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = .{ .kind = .device, .serial = 2 },
+        .transport = .relay_assisted,
+        .semantic = .secure_transfer,
+        .encrypted = true,
+        .path = "secrets/token",
+    }));
+    try std.testing.expectEqual(frame_count, service.transportFrameCount());
+    try std.testing.expectEqual(next_slot_index, service.next_outbound_transport_frame_slot_index);
+    try std.testing.expectEqual(@as(u64, 0), service.stateConst().next_transport_frame_id);
 }
