@@ -12,6 +12,7 @@ pub const MAX_CONTEXT_LEASES: usize = 16;
 
 pub const Error = event_ledger.Error || indexing_service.Error || error{
     LeaseExpired,
+    LeaseIdExhausted,
     LeaseNotFound,
     LeasePrivacyMismatch,
     LeaseRevoked,
@@ -197,7 +198,15 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
+        if (self.slots.countInUse() >= MAX_CONTEXT_LEASES) {
+            try recordSemantic(ledger, request.subject, request.task_id, false, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
+            return error.LeaseTableFull;
+        }
         const lease_id = self.next_lease_id;
+        if (lease_id == 0) {
+            try recordSemantic(ledger, request.subject, request.task_id, false, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
+            return error.LeaseIdExhausted;
+        }
         const lease = ContextLease{
             .id = lease_id,
             .subject = request.subject,
@@ -218,7 +227,7 @@ pub const Service = struct {
         errdefer _ = self.slots.remove(lease_id);
         try recordSemantic(ledger, request.subject, request.task_id, true, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
         slot.lease = lease;
-        self.advanceNextLeaseId();
+        self.next_lease_id +%= 1;
         return &slot.lease;
     }
 
@@ -306,7 +315,7 @@ pub const Service = struct {
         output: *[indexing_service.MAX_RESULTS]ContextPack,
         ledger: ?*event_ledger.Ledger,
     ) Error!PackResult {
-        if (self.next_receipt_id == std.math.maxInt(u64)) return error.ReceiptIdExhausted;
+        if (self.next_receipt_id == 0) return error.ReceiptIdExhausted;
         const retrieval = try self.retrieve(index, policies, subjects, request, scratch_results, ledger);
         for (retrieval.results, 0..) |result, result_index| {
             output[result_index] = contextPackFromResult(result, request);
@@ -314,7 +323,7 @@ pub const Service = struct {
         const lease = self.find(request.lease_id).?;
         const packs = output[0..retrieval.results.len];
         const receipt_id = self.next_receipt_id;
-        self.next_receipt_id += 1;
+        self.next_receipt_id +%= 1;
         return .{
             .accounting = retrieval.accounting,
             .packs = packs,
@@ -344,11 +353,6 @@ pub const Service = struct {
     pub fn findConst(self: *const Service, lease_id: u64) ?*const ContextLease {
         const slot = self.slots.getConst(lease_id) orelse return null;
         return &slot.lease;
-    }
-
-    fn advanceNextLeaseId(self: *Service) void {
-        self.next_lease_id +%= 1;
-        if (self.next_lease_id == 0) self.next_lease_id = 1;
     }
 
     pub fn consumePackReceipt(
@@ -1286,15 +1290,23 @@ test "personal context service leases local semantic memory with scoped audit" {
         .now_ticks = 27,
         .detail = "private empty context pack",
     };
+    empty_service.next_receipt_id = std.math.maxInt(u64);
     const empty_packs = try empty_service.retrievePacks(&empty_index, &empty_policies, subjects, empty_request, &empty_results_buffer, &empty_packs_buffer, &empty_ledger);
     try std.testing.expectEqual(@as(usize, 0), empty_packs.packs.len);
     try std.testing.expectEqual(@as(u16, 0), empty_packs.receipt.pack_count);
     try std.testing.expectEqual(empty_index.generation, empty_packs.accounting.index_generation);
     try std.testing.expectEqual(empty_index.generation, empty_packs.receipt.index_generation);
+    try std.testing.expectEqual(std.math.maxInt(u64), empty_packs.receipt.receipt_id);
+    try std.testing.expectEqual(@as(u64, 0), empty_service.next_receipt_id);
     try std.testing.expect(empty_packs.receipt.complete());
     try std.testing.expectEqual(manifest.DataSensitivity.public_data, empty_packs.receipt.max_pack_sensitivity);
     try std.testing.expect(!std.mem.eql(u8, &empty_packs.receipt.request_fingerprint, &crypto_hash.zero_digest));
     try std.testing.expect(!std.mem.eql(u8, &empty_packs.receipt.pack_digest, &crypto_hash.zero_digest));
+    const bytes_before_exhaustion = empty_lease.bytes_used;
+    const events_before_exhaustion = empty_ledger.userVisibleDiagnosticSummary().semantic_memory_events;
+    try std.testing.expectError(error.ReceiptIdExhausted, empty_service.retrievePacks(&empty_index, &empty_policies, subjects, empty_request, &empty_results_buffer, &empty_packs_buffer, &empty_ledger));
+    try std.testing.expectEqual(bytes_before_exhaustion, empty_lease.bytes_used);
+    try std.testing.expectEqual(events_before_exhaustion, empty_ledger.userVisibleDiagnosticSummary().semantic_memory_events);
     try std.testing.expect(verifyPackReceipt(empty_packs.receipt, empty_request, empty_packs.accounting, empty_packs.packs));
     try std.testing.expect(verifyPackReceiptAt(empty_packs.receipt, empty_request, empty_packs.accounting, empty_packs.packs, 28));
     try std.testing.expect(try empty_service.consumePackReceipt(&empty_policies, subjects, empty_packs.receipt, empty_request, empty_packs.accounting, empty_packs.packs, empty_index.generation, 28, &empty_ledger, "private empty receipt consumption"));
@@ -1306,7 +1318,7 @@ test "personal context service leases local semantic memory with scoped audit" {
     try std.testing.expectEqual(@as(usize, 1), empty_summary.semantic_memory_receipt_denials);
 }
 
-test "personal context lease ids wrap without publishing id zero" {
+test "personal context lease ids stop at exhaustion" {
     var policies = policy_object.Directory.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 920 };
     const app = principal.PrincipalId{ .kind = .app, .serial = 921 };
@@ -1339,10 +1351,10 @@ test "personal context lease ids wrap without publishing id zero" {
         .detail = "private personal context lease",
     }, null);
     try std.testing.expectEqual(std.math.maxInt(u64), first.id);
-    try std.testing.expectEqual(@as(u64, 1), service.next_lease_id);
+    try std.testing.expectEqual(@as(u64, 0), service.next_lease_id);
     try std.testing.expect(service.find(0) == null);
 
-    const second = try service.issueLease(&policies, subjects, .{
+    try std.testing.expectError(error.LeaseIdExhausted, service.issueLease(&policies, subjects, .{
         .subject = app,
         .task_id = 721,
         .workspace_id = 43,
@@ -1350,8 +1362,6 @@ test "personal context lease ids wrap without publishing id zero" {
         .expires_at_ticks = 100,
         .now_ticks = 11,
         .detail = "private personal context lease",
-    }, null);
-    try std.testing.expectEqual(@as(u64, 1), second.id);
-    try std.testing.expectEqual(@as(u64, 2), service.next_lease_id);
-    try std.testing.expectEqual(@as(usize, 2), service.slots.countInUse());
+    }, null));
+    try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
 }
