@@ -17,8 +17,9 @@ const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 const record_magic = "ZGSYNCR";
-const record_version: u16 = 6;
-const record_prefix = "state/v6/";
+const record_version: u16 = 7;
+const record_prefix = "state/v7/";
+const transport_cursor_path = record_prefix ++ "qc";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
 const max_record_bytes: usize = 2048;
@@ -33,6 +34,7 @@ const RecordKind = enum(u8) {
     database_contract = 7,
     overlay = 8,
     transport_frame = 9,
+    transport_cursor = 10,
 };
 
 const Envelope = struct {
@@ -87,14 +89,15 @@ pub fn load(
     const entries = try storage.entries(workspace_id);
     for (entries) |entry| {
         const path = entry.pathSlice();
-        if (!isRecordPath(path)) continue;
+        if (!isCurrentRecordPath(path)) continue;
         const version = storage.version(entry.version_id) orelse return error.CorruptState;
         try decodeRecordInto(resident, try storage.versionPayload(version));
         loaded = true;
     }
 
     if (!loaded) return false;
-    repairNextIds(resident);
+    if (!resident.transport_cursor_loaded) return error.CorruptState;
+    try repairNextIds(resident);
     resident.has_persisted_state = true;
     return true;
 }
@@ -120,6 +123,7 @@ pub fn persist(
     try persistConflicts(storage, workspace_id, resident, tick);
     try persistDatabaseContracts(storage, workspace_id, resident, tick);
     try persistOverlays(storage, workspace_id, resident, tick);
+    try persistTransportCursor(storage, workspace_id, resident, tick);
     try persistTransportFrames(storage, workspace_id, resident, tick);
     _ = try storage.commit(workspace_id, tick);
     resident.has_persisted_state = true;
@@ -127,6 +131,7 @@ pub fn persist(
 
 fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet) Error!void {
     var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    try out.add(transport_cursor_path);
 
     for (resident.persisted_state.graph.user_roots.slots) |slot| {
         if (!slot.in_use) continue;
@@ -180,7 +185,7 @@ fn deleteStaleRecords(
     const entries = try storage.entries(workspace_id);
     for (entries) |entry| {
         const path = entry.pathSlice();
-        if (!isRecordPath(path) or live_paths.contains(path)) continue;
+        if (!isManagedRecordPath(path) or live_paths.contains(path)) continue;
         try stale.add(path);
     }
     if (stale.count == 0) return;
@@ -299,6 +304,13 @@ fn persistTransportFrames(storage: *storage_service.Service, workspace_id: u64, 
     }
 }
 
+fn persistTransportCursor(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+    if (retainedFrameCoversTransportCursor(resident)) return;
+    var payload: [max_record_bytes]u8 = undefined;
+    const bytes = try encodeTransportCursor(payload[0..], resident.persisted_state.next_transport_frame_id);
+    try putRecord(storage, workspace_id, transport_cursor_path, bytes, tick);
+}
+
 fn putRecord(
     storage: *storage_service.Service,
     workspace_id: u64,
@@ -345,6 +357,7 @@ fn decodeRecordInto(resident: *state_support.ResidentState, payload: []const u8)
         .database_contract => try decodeDatabaseContract(resident, &reader),
         .overlay => try decodeOverlay(resident, &reader),
         .transport_frame => try decodeTransportFrame(resident, &reader),
+        .transport_cursor => try decodeTransportCursor(resident, &reader),
     }
     if (reader.offset != payload.len) return error.CorruptState;
 }
@@ -493,7 +506,15 @@ fn encodeTransportFrame(
     try writeEnvelope(&writer, .transport_frame);
     try writer.writeByte(@intFromEnum(queue_kind));
     try writer.writeU16(slot.duplicate_count);
+    try writer.writeU64(slot.next_frame_id_after_publish);
     try writeTransportFrame(&writer, &slot.frame);
+    return buffer[0..writer.offset];
+}
+
+fn encodeTransportCursor(buffer: []u8, next_frame_id: u64) Error![]const u8 {
+    var writer = CursorWriter{ .buffer = buffer };
+    try writeEnvelope(&writer, .transport_cursor);
+    try writer.writeU64(next_frame_id);
     return buffer[0..writer.offset];
 }
 
@@ -652,10 +673,17 @@ fn decodeOverlay(resident: *state_support.ResidentState, reader: *CursorReader) 
 
 fn decodeTransportFrame(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
     const queue_kind = try parseTransportQueueKind(try reader.readByte());
+    const duplicate_count = try reader.readU16();
+    const next_frame_id_after_publish = try reader.readU64();
+    const frame = try readTransportFrame(reader);
+    if (frame.id == 0 or next_frame_id_after_publish != state_support.advanceTransportFrameId(frame.id)) {
+        return error.CorruptState;
+    }
     const decoded = state_support.DurableTransportFrameSlot{
         .in_use = true,
-        .duplicate_count = try reader.readU16(),
-        .frame = try readTransportFrame(reader),
+        .duplicate_count = duplicate_count,
+        .next_frame_id_after_publish = next_frame_id_after_publish,
+        .frame = frame,
     };
     const frame_key = state_support.transportFrameArenaKey(decoded.frame.id);
     const slot = switch (queue_kind) {
@@ -663,6 +691,25 @@ fn decodeTransportFrame(resident: *state_support.ResidentState, reader: *CursorR
         .inbound => resident.persisted_state.inbound_transport_frames.reserve(frame_key) orelse return error.CorruptState,
     };
     slot.* = decoded;
+    observeTransportCursor(resident, next_frame_id_after_publish);
+}
+
+fn decodeTransportCursor(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
+    observeTransportCursor(resident, try reader.readU64());
+}
+
+fn observeTransportCursor(resident: *state_support.ResidentState, next_frame_id: u64) void {
+    if (!resident.transport_cursor_loaded) {
+        resident.persisted_state.next_transport_frame_id = next_frame_id;
+        resident.transport_cursor_loaded = true;
+        return;
+    }
+    if (resident.persisted_state.next_transport_frame_id == 0) return;
+    if (next_frame_id == 0) {
+        resident.persisted_state.next_transport_frame_id = 0;
+        return;
+    }
+    resident.persisted_state.next_transport_frame_id = @max(resident.persisted_state.next_transport_frame_id, next_frame_id);
 }
 
 fn writeTransportFrame(writer: *CursorWriter, frame: *const state_support.TransportFrame) Error!void {
@@ -838,8 +885,12 @@ fn devicePathWithHash(
     }) catch error.PathTooLong;
 }
 
-fn isRecordPath(path: []const u8) bool {
+fn isCurrentRecordPath(path: []const u8) bool {
     return std.mem.startsWith(u8, path, record_prefix);
+}
+
+fn isManagedRecordPath(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "state/v");
 }
 
 fn recordObjectId(workspace_id: u64, path: []const u8) u64 {
@@ -852,7 +903,7 @@ fn recordObjectId(workspace_id: u64, path: []const u8) u64 {
     return 0x8000_0000_0000_0000 | (value & 0x7FFF_FFFF_FFFF_FFFF);
 }
 
-fn repairNextIds(resident: *state_support.ResidentState) void {
+fn repairNextIds(resident: *state_support.ResidentState) Error!void {
     var next_overlay_id: u64 = 1;
     for (resident.persisted_state.overlays.slots) |slot| {
         if (slot.in_use) next_overlay_id = @max(next_overlay_id, slot.overlay.id + 1);
@@ -867,14 +918,28 @@ fn repairNextIds(resident: *state_support.ResidentState) void {
     resident.persisted_state.graph.rebuildIndexes();
     resident.persisted_state.network_policies.next_policy_id = resident.nextPersistedPolicyId();
     resident.persisted_state.network_policies.rebuildIndexes();
-    var next_transport_frame_id: u64 = 1;
     for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
-        if (slot.in_use) next_transport_frame_id = @max(next_transport_frame_id, slot.frame.id + 1);
+        if (slot.in_use) try validateTransportFrameCursor(resident.persisted_state.next_transport_frame_id, slot.frame.id);
     }
     for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
-        if (slot.in_use) next_transport_frame_id = @max(next_transport_frame_id, slot.frame.id + 1);
+        if (slot.in_use) try validateTransportFrameCursor(resident.persisted_state.next_transport_frame_id, slot.frame.id);
     }
-    resident.persisted_state.next_transport_frame_id = next_transport_frame_id;
+}
+
+fn validateTransportFrameCursor(next_frame_id: u64, retained_frame_id: u64) Error!void {
+    if (retained_frame_id == 0) return error.CorruptState;
+    if (next_frame_id != 0 and retained_frame_id >= next_frame_id) return error.CorruptState;
+}
+
+fn retainedFrameCoversTransportCursor(resident: *const state_support.ResidentState) bool {
+    const next_frame_id = resident.persisted_state.next_transport_frame_id;
+    for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
+        if (slot.in_use and slot.next_frame_id_after_publish == next_frame_id) return true;
+    }
+    for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
+        if (slot.in_use and slot.next_frame_id_after_publish == next_frame_id) return true;
+    }
+    return false;
 }
 
 fn parseRecordKind(raw: u8) Error!RecordKind {
@@ -888,6 +953,7 @@ fn parseRecordKind(raw: u8) Error!RecordKind {
         7 => .database_contract,
         8 => .overlay,
         9 => .transport_frame,
+        10 => .transport_cursor,
         else => error.CorruptState,
     };
 }
@@ -966,4 +1032,72 @@ fn parseTransportQueueKind(raw: u8) Error!state_support.TransportQueueKind {
         1 => .inbound,
         else => error.CorruptState,
     };
+}
+
+test "transport frame cursor persists without retained frames and preserves exhaustion" {
+    var checkpoint_store = storage_service.CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 9_920 };
+    var storage = storage_service.Service.initWithStore(9_921, 9_922, owner, &checkpoint_store);
+    const workspace_id = try ensureWorkspace(&storage, owner);
+
+    var resident = state_support.ResidentState{};
+    resident.persisted_state.next_transport_frame_id = 777;
+    try persist(&storage, workspace_id, &resident);
+    const initial_cursor_entry = try storage.resolve(workspace_id, transport_cursor_path);
+
+    var restored = state_support.ResidentState{};
+    try std.testing.expect(try load(&storage, workspace_id, &restored));
+    try std.testing.expect(restored.transport_cursor_loaded);
+    try std.testing.expectEqual(@as(u64, 777), restored.persisted_state.next_transport_frame_id);
+    try std.testing.expectEqual(@as(usize, 0), restored.outboundTransportFrameCount());
+    try std.testing.expectEqual(@as(usize, 0), restored.inboundTransportFrameCount());
+
+    const frame_key = state_support.transportFrameArenaKey(777);
+    const frame_slot = resident.persisted_state.outbound_transport_frames.reserve(frame_key) orelse return error.TransportQueueFull;
+    frame_slot.* = .{
+        .in_use = true,
+        .next_frame_id_after_publish = 778,
+        .frame = .{
+            .id = 777,
+            .source_frame_id = 777,
+            .workspace_id = 42,
+            .object_id = 80,
+            .version_id = 81,
+            .source_device = .{ .kind = .device, .serial = 1 },
+            .target_device = .{ .kind = .device, .serial = 2 },
+            .transport = .relay_assisted,
+            .semantic = .secure_transfer,
+            .encrypted = true,
+        },
+    };
+    resident.persisted_state.next_transport_frame_id = 778;
+    try persist(&storage, workspace_id, &resident);
+    const covered_cursor_entry = try storage.resolve(workspace_id, transport_cursor_path);
+    try std.testing.expectEqual(initial_cursor_entry.version_id, covered_cursor_entry.version_id);
+
+    var restored_with_frame = state_support.ResidentState{};
+    try std.testing.expect(try load(&storage, workspace_id, &restored_with_frame));
+    try std.testing.expectEqual(@as(u64, 778), restored_with_frame.persisted_state.next_transport_frame_id);
+    try std.testing.expectEqual(@as(usize, 1), restored_with_frame.outboundTransportFrameCount());
+
+    const frame_slot_index = resident.persisted_state.outbound_transport_frames.slotIndexOf(frame_key) orelse return error.CorruptState;
+    _ = resident.persisted_state.outbound_transport_frames.removeIndex(frame_slot_index);
+    try persist(&storage, workspace_id, &resident);
+
+    var restored_without_frame = state_support.ResidentState{};
+    try std.testing.expect(try load(&storage, workspace_id, &restored_without_frame));
+    try std.testing.expectEqual(@as(u64, 778), restored_without_frame.persisted_state.next_transport_frame_id);
+    try std.testing.expectEqual(@as(usize, 0), restored_without_frame.outboundTransportFrameCount());
+
+    resident.persisted_state.next_transport_frame_id = 0;
+    try persist(&storage, workspace_id, &resident);
+
+    var exhausted = state_support.ResidentState{};
+    try std.testing.expect(try load(&storage, workspace_id, &exhausted));
+    try std.testing.expect(exhausted.transport_cursor_loaded);
+    try std.testing.expectEqual(@as(u64, 0), exhausted.persisted_state.next_transport_frame_id);
+    _ = try storage.resolve(workspace_id, transport_cursor_path);
 }
