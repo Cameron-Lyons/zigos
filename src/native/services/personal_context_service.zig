@@ -227,7 +227,7 @@ pub const Service = struct {
         errdefer _ = self.slots.remove(lease_id);
         try recordSemantic(ledger, request.subject, request.task_id, true, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
         slot.lease = lease;
-        self.next_lease_id +%= 1;
+        self.next_lease_id = nextPersonalContextIdAfter(lease_id);
         return &slot.lease;
     }
 
@@ -315,19 +315,20 @@ pub const Service = struct {
         output: *[indexing_service.MAX_RESULTS]ContextPack,
         ledger: ?*event_ledger.Ledger,
     ) Error!PackResult {
-        if (self.next_receipt_id == 0) return error.ReceiptIdExhausted;
+        const receipt_id = self.next_receipt_id;
+        if (receipt_id == 0) return error.ReceiptIdExhausted;
         const retrieval = try self.retrieve(index, policies, subjects, request, scratch_results, ledger);
         for (retrieval.results, 0..) |result, result_index| {
             output[result_index] = contextPackFromResult(result, request);
         }
         const lease = self.find(request.lease_id).?;
         const packs = output[0..retrieval.results.len];
-        const receipt_id = self.next_receipt_id;
-        self.next_receipt_id +%= 1;
+        const receipt = issuePackReceipt(receipt_id, request, lease.*, retrieval.accounting, packs);
+        self.next_receipt_id = nextPersonalContextIdAfter(receipt_id);
         return .{
             .accounting = retrieval.accounting,
             .packs = packs,
-            .receipt = issuePackReceipt(receipt_id, request, lease.*, retrieval.accounting, packs),
+            .receipt = receipt,
         };
     }
 
@@ -430,6 +431,10 @@ pub const Service = struct {
         return lease;
     }
 };
+
+fn nextPersonalContextIdAfter(id: u64) u64 {
+    return if (id == std.math.maxInt(u64)) 0 else id + 1;
+}
 
 pub fn verifyPackReceipt(
     receipt: ContextPackReceipt,
@@ -793,6 +798,7 @@ test "personal context service leases local semantic memory with scoped audit" {
         .now_ticks = 13,
         .detail = "private packed context retrieval",
     };
+    service.next_receipt_id = std.math.maxInt(u64);
     const packs = try service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger);
     try std.testing.expectEqual(@as(usize, 1), packs.packs.len);
     try std.testing.expectEqual(@as(u64, 1001), packs.packs[0].object_id);
@@ -810,7 +816,12 @@ test "personal context service leases local semantic memory with scoped audit" {
     try std.testing.expectEqual(@as(usize, 30), packs.accounting.bytes_used);
     try std.testing.expectEqual(@as(usize, 34), packs.accounting.bytes_remaining);
     try std.testing.expect(packs.receipt.complete());
-    try std.testing.expect(packs.receipt.receipt_id != 0);
+    try std.testing.expectEqual(std.math.maxInt(u64), packs.receipt.receipt_id);
+    try std.testing.expectEqual(@as(u64, 0), service.next_receipt_id);
+    const bytes_used_before_receipt_exhaustion = service.find(lease.id).?.bytes_used;
+    try std.testing.expectError(error.ReceiptIdExhausted, service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger));
+    try std.testing.expectEqual(bytes_used_before_receipt_exhaustion, service.find(lease.id).?.bytes_used);
+    try std.testing.expectEqual(@as(u64, 0), service.next_receipt_id);
     try std.testing.expectEqual(semantic_index.generation, packs.receipt.index_generation);
     try std.testing.expectEqual(privacyFlagsFromRequest(pack_request), packs.receipt.privacy_mode_flags);
     try std.testing.expectEqual(manifest.DataSensitivity.private_user_data, packs.receipt.max_pack_sensitivity);
@@ -825,7 +836,7 @@ test "personal context service leases local semantic memory with scoped audit" {
     try std.testing.expect(!verifyPackReceiptAt(packs.receipt, pack_request, packs.accounting, packs.packs, 100));
     try std.testing.expect(!verifyPackReceiptAt(packs.receipt, pack_request, packs.accounting, packs.packs, 12));
     var tampered_receipt = packs.receipt;
-    tampered_receipt.receipt_id += 1;
+    tampered_receipt.receipt_id -= 1;
     try std.testing.expect(!verifyPackReceipt(tampered_receipt, pack_request, packs.accounting, packs.packs));
     try std.testing.expect(!(try service.consumePackReceipt(&policies, subjects, tampered_receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 99, &ledger, "private receipt tamper")));
     var malformed_receipt = packs.receipt;
@@ -965,6 +976,7 @@ test "personal context service leases local semantic memory with scoped audit" {
             .now_ticks = 10,
         }, null);
     }
+    full_service.next_lease_id = 0;
     try std.testing.expectError(error.LeaseTableFull, full_service.issueLease(&policies, subjects, .{
         .subject = app,
         .task_id = 900,
@@ -973,6 +985,7 @@ test "personal context service leases local semantic memory with scoped audit" {
         .expires_at_ticks = 100,
         .now_ticks = 10,
     }, null));
+    try std.testing.expectEqual(@as(u64, 0), full_service.next_lease_id);
 
     const summary = ledger.userVisibleDiagnosticSummary();
     try std.testing.expectEqual(@as(usize, 16), summary.semantic_memory_events);
@@ -1363,5 +1376,7 @@ test "personal context lease ids stop at exhaustion" {
         .now_ticks = 11,
         .detail = "private personal context lease",
     }, null));
+    try std.testing.expectEqual(@as(u64, 0), service.next_lease_id);
     try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
+    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }
