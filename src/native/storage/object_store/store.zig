@@ -340,12 +340,14 @@ pub const Error = error{
     ContentTypeTooLong,
     InvalidSignature,
     LabelTooLong,
+    ObjectIdExhausted,
     ObjectNotFound,
     ObjectTableFull,
     ParentMismatch,
     PayloadTooLarge,
     TypeMismatch,
     UnsignedMetadata,
+    VersionIdExhausted,
     VersionNotFound,
     VersionTableFull,
     BlobNotFound,
@@ -590,41 +592,51 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 return error.InvalidSignature;
             }
 
-            var created_new_object = false;
-            const object_record = blk: {
-                if (request.parent_version_id) |parent_version_id| {
-                    const parent = self.version(parent_version_id) orelse return error.VersionNotFound;
-                    if (parent.object_type != request.object_type) return error.TypeMismatch;
-                    const existing = self.object(parent.object_id) orelse return error.ObjectNotFound;
-                    if (!existing.latest_version_id.eql(parent_version_id)) return error.ParentMismatch;
-                    if (request.preferred_object_id) |preferred_object_id| {
-                        if (!preferred_object_id.eql(existing.id)) return error.ParentMismatch;
-                    }
-                    break :blk existing;
-                }
-
+            var object_record: ?*ObjectRecord = null;
+            var pending_object_id: ?ids.ObjectId = null;
+            if (request.parent_version_id) |parent_version_id| {
+                const parent = self.version(parent_version_id) orelse return error.VersionNotFound;
+                if (parent.object_type != request.object_type) return error.TypeMismatch;
+                const existing = self.object(parent.object_id) orelse return error.ObjectNotFound;
+                if (!existing.latest_version_id.eql(parent_version_id)) return error.ParentMismatch;
                 if (request.preferred_object_id) |preferred_object_id| {
-                    if (self.object(preferred_object_id)) |existing| {
-                        if (existing.object_type != request.object_type) return error.TypeMismatch;
-                        break :blk existing;
-                    }
-                    created_new_object = true;
-                    break :blk try self.createObject(preferred_object_id, request.object_type);
+                    if (!preferred_object_id.eql(existing.id)) return error.ParentMismatch;
                 }
+                object_record = existing;
+            } else if (request.preferred_object_id) |preferred_object_id| {
+                if (self.object(preferred_object_id)) |existing| {
+                    if (existing.object_type != request.object_type) return error.TypeMismatch;
+                    object_record = existing;
+                } else {
+                    pending_object_id = preferred_object_id;
+                }
+            } else {
+                if (self.objectCount() >= MAX_STORE_OBJECTS) return error.ObjectTableFull;
+                pending_object_id = try self.nextObjectId();
+            }
 
+            if (pending_object_id != null) {
+                if (self.objectCount() >= MAX_STORE_OBJECTS) return error.ObjectTableFull;
+                if (self.next_object_id == 0) return error.ObjectIdExhausted;
+            }
+            if (self.versionCount() >= MAX_STORE_VERSIONS) return error.VersionTableFull;
+            const version_id = try self.nextVersionId();
+
+            var created_new_object = false;
+            if (pending_object_id) |object_id| {
+                object_record = try self.createObject(object_id, request.object_type);
                 created_new_object = true;
-                break :blk try self.createObject(self.nextObjectId(), request.object_type);
-            };
+            }
+            const target_object = object_record orelse native_util.impossibleByInvariant("version target must resolve to an object");
 
             const previous_version_id = if (request.parent_version_id) |parent_version_id|
                 parent_version_id
             else
-                object_record.latest_version_id;
-            if (!object_record.latest_version_id.isZero() and !previous_version_id.eql(object_record.latest_version_id)) {
+                target_object.latest_version_id;
+            if (!target_object.latest_version_id.isZero() and !previous_version_id.eql(target_object.latest_version_id)) {
                 return error.ParentMismatch;
             }
 
-            const version_id = self.nextVersionId();
             var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
             const chunk_count = try buildChunkRefs(request.payload, &chunk_refs);
             const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
@@ -635,7 +647,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const version_address = computeVersionAddress(parents[0..@as(usize, @intCast(parent_count))], request.metadata, blob_address);
             try self.insertVersion(.{
                 .id = version_id,
-                .object_id = object_record.id,
+                .object_id = target_object.id,
                 .previous_version_id = previous_version_id,
                 .parent_count = parent_count,
                 .parent_version_ids = parents,
@@ -647,26 +659,26 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 .blob_slot_index = blob_slot_index,
             });
 
-            object_record.latest_version_id = version_id;
-            object_record.version_count += 1;
-            object_record.provenance.updated_at_ticks = request.metadata.created_at_ticks;
-            if (!object_record.provenance.creator_signature.isPresent()) {
-                object_record.provenance.created_at_ticks = request.metadata.created_at_ticks;
-                object_record.provenance.creator_signature = request.metadata.signature;
+            target_object.latest_version_id = version_id;
+            target_object.version_count += 1;
+            target_object.provenance.updated_at_ticks = request.metadata.created_at_ticks;
+            if (!target_object.provenance.creator_signature.isPresent()) {
+                target_object.provenance.created_at_ticks = request.metadata.created_at_ticks;
+                target_object.provenance.creator_signature = request.metadata.signature;
             }
-            object_record.provenance.latest_version_addressed = true;
-            object_record.snapshot_state.snapshot_count += 1;
-            object_record.snapshot_state.latest_snapshot_version_id = version_id;
-            object_record.sync_state.sync_generation += 1;
-            object_record.sync_state.version_watermark = object_record.version_count;
-            object_record.sync_state.last_synced_version_id = version_id;
-            object_record.recovery_history.recovery_generation += 1;
-            object_record.recovery_history.latest_recoverable_version_id = previous_version_id;
-            self.markObjectDirty(object_record.id);
+            target_object.provenance.latest_version_addressed = true;
+            target_object.snapshot_state.snapshot_count += 1;
+            target_object.snapshot_state.latest_snapshot_version_id = version_id;
+            target_object.sync_state.sync_generation += 1;
+            target_object.sync_state.version_watermark = target_object.version_count;
+            target_object.sync_state.last_synced_version_id = version_id;
+            target_object.recovery_history.recovery_generation += 1;
+            target_object.recovery_history.latest_recoverable_version_id = previous_version_id;
+            self.markObjectDirty(target_object.id);
             self.markVersionDirty(version_id);
 
             return .{
-                .object_id = object_record.id,
+                .object_id = target_object.id,
                 .version_id = version_id,
                 .blob_address = blob_address,
                 .version_address = version_address,
@@ -912,17 +924,19 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             self.versions.clearDirty();
         }
 
-        fn nextObjectId(self: *Self) ids.ObjectId {
-            defer self.next_object_id += 1;
+        fn nextObjectId(self: *Self) Error!ids.ObjectId {
+            if (self.next_object_id == 0) return error.ObjectIdExhausted;
             return ids.object(self.next_object_id);
         }
 
-        fn nextVersionId(self: *Self) ids.VersionId {
-            defer self.next_version_id += 1;
+        fn nextVersionId(self: *Self) Error!ids.VersionId {
+            if (self.next_version_id == 0) return error.VersionIdExhausted;
             return ids.version(self.next_version_id);
         }
 
         fn createObject(self: *Self, object_id: ids.ObjectId, object_type: ObjectType) Error!*ObjectRecord {
+            if (self.objects.countInUse() >= MAX_STORE_OBJECTS) return error.ObjectTableFull;
+            if (self.next_object_id == 0) return error.ObjectIdExhausted;
             const slot_index = self.objects.reserveIndex(object_id) orelse return error.ObjectTableFull;
             const slot = &self.objects.slots[slot_index];
             slot.object = .{
@@ -933,7 +947,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             };
             self.indexObjectTypeSlot(slot_index);
             if (object_id.raw() >= self.next_object_id) {
-                self.next_object_id = object_id.raw() + 1;
+                self.next_object_id = object_id.raw() +% 1;
             }
             return &slot.object;
         }
@@ -981,7 +995,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.version.blob_slot_index = request.blob_slot_index;
             slot.version.chunk_count = @intCast(chunkCountForLen(request.payload_len));
             if (request.id.raw() >= self.next_version_id) {
-                self.next_version_id = request.id.raw() + 1;
+                self.next_version_id = request.id.raw() +% 1;
             }
             self.recordLatestInsertedVersionId(request.id);
         }

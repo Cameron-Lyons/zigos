@@ -312,7 +312,7 @@ fn mapStorageError(err: anyerror) CreateWorkspaceResult {
             .status = .label_too_long,
             .denial_reason = .invalid_target,
         },
-        error.WorkspaceTableFull => .{
+        error.WorkspaceIdExhausted, error.WorkspaceTableFull => .{
             .status = .workspace_table_full,
             .denial_reason = .budget_exhausted,
         },
