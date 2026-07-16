@@ -88,6 +88,7 @@ pub const Error = network_policy.Error || event_ledger.Error || error{
     SessionCompleted,
     SessionBindingMismatch,
     SessionExpired,
+    SessionIdExhausted,
     SessionNotFound,
     SessionRevoked,
     SessionTableFull,
@@ -172,7 +173,9 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
+        if (self.sessions.countInUse() >= MAX_SESSIONS) return error.SessionTableFull;
         const session_id = self.next_session_id;
+        if (session_id == 0) return error.SessionIdExhausted;
         var record = zeroSession();
         record.id = session_id;
         record.subject = request.subject;
@@ -206,7 +209,7 @@ pub const Service = struct {
         );
         const slot = &self.sessions.slots[slot_index];
         slot.record = record;
-        self.advanceNextSessionId();
+        self.next_session_id +%= 1;
         return &slot.record;
     }
 
@@ -372,10 +375,6 @@ pub const Service = struct {
         return session;
     }
 
-    fn advanceNextSessionId(self: *Service) void {
-        self.next_session_id +%= 1;
-        if (self.next_session_id == 0) self.next_session_id = 1;
-    }
 };
 
 fn zeroSession() SessionRecord {
@@ -467,7 +466,7 @@ fn recordNetworkSession(
     }
 }
 
-test "network session open rejects long destinations without publishing slots" {
+test "network session open validates destinations and stops at id exhaustion" {
     const signing = @import("../core/signing.zig");
 
     var network_policies = network_policy.Directory.init();
@@ -531,27 +530,39 @@ test "network session open rejects long destinations without publishing slots" {
     try std.testing.expect(service.find(1) == null);
     try std.testing.expectEqual(@as(u64, 1), service.next_session_id);
 
+    service.next_session_id = std.math.maxInt(u64);
+    const valid_request = OpenRequest{
+        .subject = app,
+        .task_id = 9902,
+        .policy_id = internet.id,
+        .capability_id = network_capability.id,
+        .evidence = .{ .destination = .{ .domain = "updates.example" } },
+        .remote_bytes = 16,
+        .max_session_bytes = 16,
+        .expires_at_ticks = 40,
+        .now_ticks = 11,
+        .detail = "valid destination opened",
+    };
     const session = try service.open(
         &network_policies,
         &capabilities,
         &policies,
         subjects,
-        .{
-            .subject = app,
-            .task_id = 9902,
-            .policy_id = internet.id,
-            .capability_id = network_capability.id,
-            .evidence = .{ .destination = .{ .domain = "updates.example" } },
-            .remote_bytes = 16,
-            .max_session_bytes = 16,
-            .expires_at_ticks = 40,
-            .now_ticks = 11,
-            .detail = "valid destination opened",
-        },
+        valid_request,
         null,
     );
-    try std.testing.expectEqual(@as(u64, 1), session.id);
+    try std.testing.expectEqual(std.math.maxInt(u64), session.id);
     try std.testing.expectEqualStrings("updates.example", session.destinationSlice());
+    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
+    try std.testing.expectEqual(@as(usize, 1), service.sessions.countInUse());
+    try std.testing.expectError(error.SessionIdExhausted, service.open(
+        &network_policies,
+        &capabilities,
+        &policies,
+        subjects,
+        valid_request,
+        null,
+    ));
     try std.testing.expectEqual(@as(usize, 1), service.sessions.countInUse());
 }
 
