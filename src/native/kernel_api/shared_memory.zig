@@ -106,6 +106,7 @@ pub const Error = error{
     MappingDescriptorMismatch,
     MappingNotFound,
     Revoked,
+    SharedMemoryIdExhausted,
     SizeZero,
     StaleMappingDescriptor,
     TableFull,
@@ -371,8 +372,9 @@ pub const Table = struct {
         compute_access: ComputeAccess,
     ) Error!Object {
         if (size_bytes == 0) return error.SizeZero;
+        if (self.arena.countInUse() >= MAX_SHARED_MEMORY_OBJECTS) return error.TableFull;
 
-        const object_id = self.nextReservableObjectId() orelse return error.TableFull;
+        const object_id = self.nextObjectId() orelse return error.SharedMemoryIdExhausted;
         const page_count = pageCount(size_bytes);
         const page_base = try self.mmu.allocatePhysicalFrames(page_count);
         const slot_index = self.arena.reserveIndex(object_id) orelse return error.TableFull;
@@ -662,21 +664,12 @@ pub const Table = struct {
         return self.object_task_mapping_index.contains(objectTaskMappingKey(object_id, task_id));
     }
 
-    fn nextReservableObjectId(self: *const Table) ?ids.SharedMemoryId {
-        if (self.arena.countInUse() >= MAX_SHARED_MEMORY_OBJECTS) return null;
-
-        var object_id = normalizeObjectId(self.next_object_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_SHARED_MEMORY_OBJECTS) : (attempts += 1) {
-            const candidate = ids.sharedMemory(object_id);
-            if (self.findConst(candidate) == null) return candidate;
-            object_id = nextObjectIdAfter(object_id);
-        }
-        return null;
+    fn nextObjectId(self: *const Table) ?ids.SharedMemoryId {
+        return if (self.next_object_id == 0) null else ids.sharedMemory(self.next_object_id);
     }
 
     fn advanceNextObjectIdFrom(self: *Table, object_id: ids.SharedMemoryId) void {
-        self.next_object_id = nextObjectIdAfter(object_id.raw());
+        self.next_object_id = object_id.raw() +% 1;
     }
 
     fn find(self: *Table, object_id: ids.SharedMemoryId) ?*Object {
@@ -692,15 +685,6 @@ pub const Table = struct {
 
 fn objectSlotId(slot: *const ObjectSlot) ids.SharedMemoryId {
     return slot.object.id;
-}
-
-fn normalizeObjectId(object_id: u64) u64 {
-    return if (object_id == 0) 1 else object_id;
-}
-
-fn nextObjectIdAfter(object_id: u64) u64 {
-    const next = object_id +% 1;
-    return normalizeObjectId(next);
 }
 
 fn mmuMappingKey(object_id: ids.SharedMemoryId, kind: MmuMappingKind, domain_id: u64) u64 {
@@ -944,24 +928,17 @@ test "shared memory objects map unmap and revoke across tasks" {
     try std.testing.expectError(error.Revoked, table.map(object.id, ids.task(9)));
 }
 
-test "shared memory object ids wrap without zero and skip active objects" {
+test "shared memory object ids stop at exhaustion" {
     var table = Table.init();
 
     table.next_object_id = std.math.maxInt(u64);
     const max_object = try table.create(ids.task(7), PAGE_SIZE);
     try std.testing.expectEqual(std.math.maxInt(u64), max_object.id.raw());
-    try std.testing.expectEqual(@as(u64, 1), table.next_object_id);
+    try std.testing.expectEqual(@as(u64, 0), table.next_object_id);
     try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(ids.SharedMemoryId.zero));
 
-    const wrapped_object = try table.create(ids.task(8), PAGE_SIZE);
-    try std.testing.expectEqual(@as(u64, 1), wrapped_object.id.raw());
-    try std.testing.expectEqual(@as(u64, 2), table.next_object_id);
-    try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(ids.SharedMemoryId.zero));
-
-    table.next_object_id = 1;
-    const skipped_object = try table.create(ids.task(9), PAGE_SIZE);
-    try std.testing.expectEqual(@as(u64, 2), skipped_object.id.raw());
-    try std.testing.expectEqual(@as(u64, 3), table.next_object_id);
+    try std.testing.expectError(error.SharedMemoryIdExhausted, table.create(ids.task(8), PAGE_SIZE));
+    try std.testing.expectEqual(@as(u64, 0), table.next_object_id);
     try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(ids.SharedMemoryId.zero));
 }
 
