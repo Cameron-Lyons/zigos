@@ -318,12 +318,32 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "retry_safe=no") != null);
 
     const FakeRuntime = struct {
+        const ActivationMode = enum(u8) { userspace_brokered_data_plane };
+        const ActivationRecord = struct {
+            activation_generation: u32,
+            dma_domain_id: u64,
+            exclusive_claim: bool,
+            mode: ActivationMode,
+        };
+
+        deactivation_count: usize = 0,
         activation_count: usize = 0,
         last_service_id: u64 = 0,
 
-        pub fn activate(self: *@This(), driver: *const driver_service.DriverRecord) !void {
+        pub fn deactivateDriver(self: *@This(), _: u64, _: driver_service.DeviceClass) bool {
+            self.deactivation_count += 1;
+            return true;
+        }
+
+        pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, _: u64) !ActivationRecord {
             self.activation_count += 1;
             self.last_service_id = driver.service_id;
+            return .{
+                .dma_domain_id = driver.dma_domain_id,
+                .activation_generation = @intCast(self.activation_count),
+                .exclusive_claim = true,
+                .mode = .userspace_brokered_data_plane,
+            };
         }
     };
 
@@ -378,6 +398,7 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
 
     try std.testing.expect(!recovery.visible_impact);
     try std.testing.expectEqual(@as(?u64, null), recovery.notification_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.deactivation_count);
     try std.testing.expectEqual(@as(usize, 1), runtime.activation_count);
     try std.testing.expectEqual(storage_record.id, runtime.last_service_id);
     try std.testing.expectEqual(supervisor.ServiceState.healthy, storage_record.state);
