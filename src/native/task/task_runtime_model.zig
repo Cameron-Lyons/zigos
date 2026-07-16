@@ -661,14 +661,6 @@ pub fn validateUserspaceImage(image: ExecutableImageSpec) Error!ExecutableImageS
     return launch_helpers.validateUserspaceImage(Error, MAX_EXECUTABLE_SEGMENTS, image);
 }
 
-pub fn installAddressSpace(
-    self: anytype,
-    replace_address_space_id: ?u64,
-    address_space: AddressSpaceRecord,
-) Error!void {
-    return runtime_host.installAddressSpace(Error, self, replace_address_space_id, address_space);
-}
-
 pub fn findAddressSpaceSlot(self: anytype, address_space_id: u64) ?*AddressSpaceSlot {
     return runtime_host.findAddressSpaceSlot(self, address_space_id);
 }
@@ -687,10 +679,6 @@ pub fn defaultInitialComponent(request: TaskCreateRequest) ExecutionComponentSpe
 
 pub fn makeLaunchProvenance(spec: LaunchProvenanceSpec) LaunchProvenanceRecord {
     return launch_helpers.makeLaunchProvenance(LaunchProvenanceRecord, spec);
-}
-
-pub fn makeExecutionComponent(runtime: anytype, component: ExecutionComponentSpec) ExecutionComponentRecord {
-    return launch_helpers.makeExecutionComponent(ExecutionComponentRecord, runtime, component);
 }
 
 pub fn syntheticUserspaceImage(label: []const u8, entry: []const u8) ExecutableImageSpec {

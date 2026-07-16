@@ -14,6 +14,8 @@ else
     @import("storage_volume.zig");
 const workspace = @import("workspace.zig");
 
+const MAX_CHECKPOINT_ATTEMPTS: u8 = 2;
+
 pub const CheckpointStore = struct {
     store: object_store.Store = object_store.Store.init(),
     workspaces: workspace.Directory = workspace.Directory.init(),
@@ -21,6 +23,7 @@ pub const CheckpointStore = struct {
     dirty: bool = false,
     last_checkpoint_generation: u64 = 0,
     last_checkpoint_error: ?storage_volume.Error = null,
+    checkpoint_retry_count: u64 = 0,
     volume: storage_volume.Volume = storage_volume.Volume.init(),
 
     pub fn hasCachedPersistentState(self: *const CheckpointStore) bool {
@@ -38,6 +41,7 @@ pub const CheckpointStore = struct {
         self.dirty = false;
         self.last_checkpoint_generation = 0;
         self.last_checkpoint_error = null;
+        self.checkpoint_retry_count = 0;
     }
 
     pub fn loadPreparedStateFromAttachedVolume(self: *CheckpointStore) bool {
@@ -105,14 +109,29 @@ pub fn flushCheckpoint(service: anytype) void {
         service.checkpoint_store.volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
     }
     if (!service.checkpoint_store.volume.hasAttachedDevice()) return;
-    const result = service.checkpoint_store.volume.saveToVolume(service.store, service.workspaces) catch |err| {
-        service.checkpoint_store.last_checkpoint_error = err;
-        reportFlushError(err);
-        return;
+    var attempt: u8 = 1;
+    const result = while (true) {
+        break service.checkpoint_store.volume.saveToVolume(service.store, service.workspaces) catch |err| {
+            if (attempt >= MAX_CHECKPOINT_ATTEMPTS or !retryableCheckpointError(err)) {
+                service.checkpoint_store.last_checkpoint_error = err;
+                reportFlushError(err);
+                return;
+            }
+            attempt += 1;
+            service.checkpoint_store.checkpoint_retry_count +|= 1;
+            continue;
+        };
     };
     service.checkpoint_store.last_checkpoint_generation = result.generation;
     service.checkpoint_store.last_checkpoint_error = null;
     service.checkpoint_store.dirty = false;
+}
+
+fn retryableCheckpointError(err: storage_volume.Error) bool {
+    return switch (err) {
+        error.CorruptImage, error.DurabilityBarrierFailed => true,
+        else => false,
+    };
 }
 
 // A swallowed flush error leaves the on-disk store one generation behind

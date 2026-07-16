@@ -55,6 +55,54 @@ const FakeStorageVolumeBackend = struct {
     }
 };
 
+const TransientCheckpointBackend = struct {
+    var image: []u8 = &.{};
+    var write_failures_remaining: usize = 0;
+    var flush_failures_remaining: usize = 0;
+
+    fn attach(image_buffer: []u8, write_failures: usize, flush_failures: usize) void {
+        image = image_buffer;
+        write_failures_remaining = write_failures;
+        flush_failures_remaining = flush_failures;
+        storage_volume.attachBackend(.{
+            .sector_count = storage_volume.required_device_sectors,
+            .read = read,
+            .write = write,
+            .flush = flush,
+        });
+    }
+
+    fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+        const buffer = buffer_ptr[0..buffer_len];
+        const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+        const end = start + buffer.len;
+        if (end > image.len) return false;
+        @memcpy(buffer, image[start..end]);
+        return true;
+    }
+
+    fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+        if (write_failures_remaining != 0) {
+            write_failures_remaining -= 1;
+            return false;
+        }
+        const buffer = buffer_ptr[0..buffer_len];
+        const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+        const end = start + buffer.len;
+        if (end > image.len) return false;
+        @memcpy(image[start..end], buffer);
+        return true;
+    }
+
+    fn flush() callconv(.c) bool {
+        if (flush_failures_remaining != 0) {
+            flush_failures_remaining -= 1;
+            return false;
+        }
+        return true;
+    }
+};
+
 test "storage port requires authority context for protected mutations" {
     var checkpoint_store = CheckpointStore{};
     checkpoint_store.resetPersistent();
@@ -1004,6 +1052,57 @@ test "storage service records checkpoint flush failures" {
     try std.testing.expect(checkpoint_store.dirty);
     try std.testing.expect(!checkpoint_store.checkpointHealthy());
     try std.testing.expectEqual(storage_volume.Error.CorruptImage, checkpoint_store.last_checkpoint_error.?);
+    try std.testing.expectEqual(@as(u64, 1), checkpoint_store.checkpoint_retry_count);
+}
+
+test "storage service retries transient checkpoint writes and durability barriers" {
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    var image = [_]u8{0} ** storage_volume.image_bytes;
+    TransientCheckpointBackend.attach(&image, 1, 0);
+    defer storage_volume.clearAttachedBackend();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 50 };
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = signing.seedFromByte(0xAA),
+    };
+    var service = Service.initWithStore(706, 25, owner, &checkpoint_store);
+
+    const first = try service.putVersion(.{
+        .preferred_object_id = ids.object(957),
+        .object_type = .document,
+        .payload = "retry checkpoint",
+        .metadata = try object_store.signMetadata(signer, "retry", "text/plain", .document, "retry checkpoint", 10),
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), TransientCheckpointBackend.write_failures_remaining);
+    try std.testing.expectEqual(@as(u64, 1), checkpoint_store.checkpoint_retry_count);
+    try std.testing.expectEqual(@as(u64, 1), checkpoint_store.last_checkpoint_generation);
+    try std.testing.expect(checkpoint_store.checkpointHealthy());
+    try std.testing.expect(!checkpoint_store.dirty);
+
+    TransientCheckpointBackend.flush_failures_remaining = 1;
+    const second = try service.putVersion(.{
+        .preferred_object_id = ids.object(958),
+        .object_type = .document,
+        .payload = "retry barrier",
+        .metadata = try object_store.signMetadata(signer, "barrier", "text/plain", .document, "retry barrier", 11),
+    });
+    try std.testing.expectEqual(@as(usize, 0), TransientCheckpointBackend.flush_failures_remaining);
+    try std.testing.expectEqual(@as(u64, 2), checkpoint_store.checkpoint_retry_count);
+    try std.testing.expectEqual(@as(u64, 2), checkpoint_store.last_checkpoint_generation);
+    try std.testing.expect(checkpoint_store.checkpointHealthy());
+    try std.testing.expect(!checkpoint_store.dirty);
+
+    checkpoint_store.resetPreparedState();
+    var reloaded = Service.initWithStore(706, 26, owner, &checkpoint_store);
+    try std.testing.expect(reloaded.loaded_from_volume);
+    try std.testing.expectEqual(first.version_id, reloaded.latestVersion(first.object_id).?.id);
+    try std.testing.expectEqual(second.version_id, reloaded.latestVersion(second.object_id).?.id);
+    try std.testing.expectEqualStrings("retry barrier", try reloaded.versionPayload(reloaded.latestVersion(second.object_id).?));
 }
 
 test "workspace commit compacts the mutation log so high-churn workspaces avoid the lifetime cap" {

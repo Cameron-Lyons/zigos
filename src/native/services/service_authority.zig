@@ -1,7 +1,6 @@
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const debug_contract = @import("../security/debug_contract.zig");
-const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const std = @import("std");
 
@@ -36,7 +35,6 @@ pub fn requireServiceAuthority(
             writeTrace(authority_context, service_id, required_right, .denied, .capability_revoked);
             return error.CapabilityRevoked;
         },
-        else => native_util.impossibleByInvariantError("service authority lookup only reports not-found or revoked capabilities", err),
     };
 
     if (!authority.holder.eql(authority_context.principal)) {

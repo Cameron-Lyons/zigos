@@ -115,6 +115,7 @@ pub const ReviewItemRecord = struct {
 };
 
 pub const Error = error{
+    WindowIdExhausted,
     WindowNotFound,
     WindowTableFull,
     ReviewItemNotFound,
@@ -167,6 +168,7 @@ pub const ServiceStatus = enum(u8) {
     table_full = 2,
     invalid_request = 3,
     recovery_missing = 4,
+    id_exhausted = 5,
 };
 
 pub const ServiceRequest = struct {
@@ -527,9 +529,11 @@ pub const Session = struct {
     }
 
     fn allocateWindow(self: *Session) Error!*WindowRecord {
+        if (self.windows.countInUse() >= MAX_WINDOWS) return error.WindowTableFull;
         const window_id = self.next_window_id;
+        if (window_id == 0) return error.WindowIdExhausted;
         const slot_index = self.windows.reserveIndex(window_id) orelse return error.WindowTableFull;
-        self.next_window_id += 1;
+        self.next_window_id +%= 1;
         const slot = &self.windows.slots[slot_index];
         slot.window = zeroWindow();
         slot.window.id = window_id;
@@ -1054,6 +1058,7 @@ fn titlePrefixForView(view_type: ViewType) []const u8 {
 
 fn statusForError(err: Error) ServiceStatus {
     return switch (err) {
+        error.WindowIdExhausted => .id_exhausted,
         error.WindowNotFound, error.ReviewItemNotFound, error.TaskNotFound => .not_found,
         error.WindowTableFull, error.ReviewItemTableFull => .table_full,
         error.RecoveryStateMissing => .recovery_missing,
@@ -1692,4 +1697,31 @@ test "compositor session opens document workspace and full-screen task views" {
     const fullscreen_rendered = try renderWindowToBuffer(&buffer, fullscreen);
     try std.testing.expect(std.mem.indexOf(u8, fullscreen_rendered, "type=full_screen_task_view") != null);
     try std.testing.expect(session.probeVisibleWindow(&buffer));
+}
+
+test "compositor window ids stop at exhaustion" {
+    var runtime = task_runtime.Runtime.init();
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 4 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 8,
+        .local_only = true,
+    });
+
+    var session = Session.init();
+    session.next_window_id = std.math.maxInt(u64);
+    const final_window = try session.openDocumentView(app_task, 42, "documents/final.md");
+    try std.testing.expectEqual(std.math.maxInt(u64), final_window.id);
+    try std.testing.expectEqual(@as(u64, 0), session.next_window_id);
+    try std.testing.expectError(error.WindowIdExhausted, session.openWorkspaceView(app_task, 42, "Final Project"));
+    try std.testing.expectEqual(@as(usize, 1), session.window_count);
+    try std.testing.expect(session.findWindowConst(0) == null);
+    try std.testing.expectEqual(ServiceStatus.id_exhausted, statusForError(error.WindowIdExhausted));
+
+    const snapshot = session.snapshot();
+    var restored = Session.init();
+    restored.restore(snapshot);
+    try std.testing.expectEqual(@as(u64, 0), restored.next_window_id);
+    try std.testing.expectError(error.WindowIdExhausted, restored.openTaskView(app_task, "Final Task"));
 }

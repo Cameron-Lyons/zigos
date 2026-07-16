@@ -75,6 +75,7 @@ pub const FlowRecord = struct {
 };
 
 pub const Error = error{
+    FlowIdExhausted,
     FlowTableFull,
 } || task_runtime.Error || workspace.Error || sync_service.Error || sync_service.AuthorityError;
 
@@ -327,11 +328,12 @@ pub const Controller = struct {
     ) Error!*FlowRecord {
         if (self.flow_count >= MAX_FLOWS) return error.FlowTableFull;
         const flow_id = self.next_flow_id;
+        if (flow_id == 0) return error.FlowIdExhausted;
         const slot = self.flows.reserve(flow_id) orelse return error.FlowTableFull;
         const flow = &slot.flow;
         flow.* = zeroFlow();
         flow.id = flow_id;
-        self.next_flow_id += 1;
+        self.next_flow_id +%= 1;
         flow.kind = kind;
         flow.task_id = task_id;
         flow.workspace_id = workspace_id;
@@ -541,4 +543,17 @@ test "native ux records app lifecycle sync containment and removal flows" {
     try std.testing.expect(!controller.flowAtOrder(5).?.approved);
     try std.testing.expectEqual(FlowKind.remove_app, controller.flowAtOrder(6).?.kind);
     try std.testing.expectEqualStrings("app.trip", controller.flowAtOrder(6).?.bundleIdSlice());
+}
+
+test "native ux flow ids stop at exhaustion" {
+    var controller = Controller.init();
+    const subject = principal.PrincipalId{ .kind = .user, .serial = 12 };
+    controller.next_flow_id = std.math.maxInt(u64);
+
+    const final_flow = try controller.installApp(subject, "app.final");
+    try std.testing.expectEqual(std.math.maxInt(u64), final_flow.id);
+    try std.testing.expectEqual(@as(u64, 0), controller.next_flow_id);
+    try std.testing.expectError(error.FlowIdExhausted, controller.removeApp(subject, "app.final"));
+    try std.testing.expectEqual(@as(usize, 1), controller.flow_count);
+    try std.testing.expect(controller.flowById(0) == null);
 }

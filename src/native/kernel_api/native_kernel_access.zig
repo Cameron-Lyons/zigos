@@ -32,9 +32,11 @@ pub fn requireCapability(
     capability_id: u64,
     now_ticks: u64,
     needed_rights: capability.CapabilityRights,
-) ErrorSet!capability.Capability {
-    const owned = kernel.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
-    if (!kernel.capability_table.isUsable(owned, now_ticks)) return error.CapabilityRevoked;
+) ErrorSet!*const capability.Capability {
+    const owned = kernel.capability_table.requireUsable(capability_id, now_ticks) catch |err| switch (err) {
+        error.CapabilityNotFound => return error.CapabilityNotFound,
+        error.CapabilityRevoked => return error.CapabilityRevoked,
+    };
     if (!owned.rights.containsAll(needed_rights)) return error.PermissionDenied;
     return owned;
 }
@@ -46,7 +48,7 @@ pub fn requireTargetedCapability(
     now_ticks: u64,
     needed_rights: capability.CapabilityRights,
     target_kind: capability.CapabilityTargetKind,
-) ErrorSet!capability.Capability {
+) ErrorSet!*const capability.Capability {
     const owned = try requireCapability(ErrorSet, kernel, capability_id, now_ticks, needed_rights);
     if (owned.target.kind != target_kind) return error.InvalidCapabilityTarget;
     return owned;

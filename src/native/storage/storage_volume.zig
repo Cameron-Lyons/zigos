@@ -679,8 +679,8 @@ fn buildRootState(
         .next_version_id = store.next_version_id,
         .next_workspace_id = workspaces.next_workspace_id,
         .next_snapshot_id = workspaces.next_snapshot_id,
-        .last_version_id = if (store.next_version_id > 0) store.next_version_id - 1 else 0,
-        .last_snapshot_id = if (workspaces.next_snapshot_id > 0) workspaces.next_snapshot_id - 1 else 0,
+        .last_version_id = lastIssuedId(store.next_version_id),
+        .last_snapshot_id = lastIssuedId(workspaces.next_snapshot_id),
     };
     for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
@@ -692,6 +692,10 @@ fn buildRootState(
         root.workspace_summary_count += 1;
     }
     return root;
+}
+
+fn lastIssuedId(next_id: u64) u64 {
+    return if (next_id == 0) std.math.maxInt(u64) else next_id - 1;
 }
 
 fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {

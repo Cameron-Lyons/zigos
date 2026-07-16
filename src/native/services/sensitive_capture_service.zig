@@ -11,9 +11,9 @@ pub const MAX_SESSIONS: usize = 16;
 pub const Error = event_ledger.Error || error{
     BackgroundCaptureDenied,
     CaptureBudgetExceeded,
+    CaptureSessionIdExhausted,
     CaptureSessionBindingMismatch,
     CaptureSessionExpired,
-    CaptureSessionIdExhausted,
     CaptureSessionNotFound,
     CaptureSessionRevoked,
     CaptureTableFull,
@@ -180,6 +180,7 @@ pub const Service = struct {
             return error.CaptureTableFull;
         };
         errdefer _ = self.slots.removeIndex(slot_index);
+        try recordStart(ledger, request, session_id, true);
         const slot = &self.slots.slots[slot_index];
         slot.session = .{
             .id = session_id,
@@ -196,9 +197,8 @@ pub const Service = struct {
             .active = true,
             .sensitivity = request.sensitivity,
         };
-        try recordStart(ledger, request, slot.session.id, true);
         self.accountActiveSession(slot_index, &slot.session);
-        self.advanceNextSessionId();
+        self.next_session_id +%= 1;
         return &slot.session;
     }
 
@@ -263,13 +263,6 @@ pub const Service = struct {
     pub fn find(self: *Service, session_id: u64) ?*Session {
         const slot = self.slots.get(session_id) orelse return null;
         return &slot.session;
-    }
-
-    fn advanceNextSessionId(self: *Service) void {
-        self.next_session_id = if (self.next_session_id == std.math.maxInt(u64))
-            0
-        else
-            self.next_session_id + 1;
     }
 
     pub fn activeSessionCount(self: *const Service) usize {
@@ -709,7 +702,7 @@ test "sensitive capture broker requires foreground visible leased sessions and r
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=sensitive_capture") != null);
 }
 
-test "sensitive capture session ids stop after the maximum id" {
+test "sensitive capture session ids stop at exhaustion" {
     const signing = @import("../core/signing.zig");
 
     var policies = policy_object.Directory.init();
@@ -763,5 +756,6 @@ test "sensitive capture session ids stop after the maximum id" {
     }, null));
     try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
     try std.testing.expectEqual(@as(usize, 1), service.activeSessionCount());
+    try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
     try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }

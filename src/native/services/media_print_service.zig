@@ -64,6 +64,7 @@ pub const JobRecord = struct {
 };
 
 pub const Error = error{
+    JobIdExhausted,
     JobNotFound,
     JobTableFull,
     LabelTooLong,
@@ -104,7 +105,8 @@ pub const Service = struct {
 
         if (self.jobs.countInUse() >= MAX_JOBS) return error.JobTableFull;
 
-        const job_id = self.nextReservableJobId() orelse return error.JobTableFull;
+        const job_id = self.next_job_id;
+        if (job_id == 0) return error.JobIdExhausted;
         var job = zeroJob();
         job.id = job_id;
         job.kind = request.kind;
@@ -143,7 +145,7 @@ pub const Service = struct {
             native_util.impossibleByInvariant("prechecked print job slot reservation must succeed");
         const slot = &self.jobs.slots[slot_index];
         slot.job = job;
-        self.advanceNextJobIdFrom(job_id);
+        self.next_job_id +%= 1;
         return &slot.job;
     }
 
@@ -191,35 +193,7 @@ pub const Service = struct {
         return &slot.job;
     }
 
-    fn nextReservableJobId(self: *Service) ?u64 {
-        if (self.countJobs() >= MAX_JOBS) return null;
-
-        var job_id = normalizeJobId(self.next_job_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_JOBS) : (attempts += 1) {
-            if (self.find(job_id) == null) return job_id;
-            job_id = nextJobIdAfter(job_id);
-        }
-        return null;
-    }
-
-    fn advanceNextJobIdFrom(self: *Service, job_id: u64) void {
-        self.next_job_id = nextJobIdAfter(job_id);
-    }
-
-    fn countJobs(self: *const Service) usize {
-        return self.jobs.countInUse();
-    }
 };
-
-fn normalizeJobId(job_id: u64) u64 {
-    return if (job_id == 0) 1 else job_id;
-}
-
-fn nextJobIdAfter(job_id: u64) u64 {
-    const next = job_id +% 1;
-    return normalizeJobId(next);
-}
 
 fn schedulerRequest(kind: JobKind) accelerator_scheduler.Request {
     return switch (kind) {
@@ -345,7 +319,7 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
-test "media print service job ids wrap without zero and full tables do not consume ids" {
+test "media print service job ids stop at exhaustion and full tables do not consume ids" {
     var scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
@@ -361,33 +335,19 @@ test "media print service job ids wrap without zero and full tables do not consu
         .visibility = .hidden,
     }, &scheduler, &notifications, 10);
     try std.testing.expectEqual(std.math.maxInt(u64), max_job.id);
-    try std.testing.expectEqual(@as(u64, 1), service.next_job_id);
+    try std.testing.expectEqual(@as(u64, 0), service.next_job_id);
     try std.testing.expect(service.find(0) == null);
 
-    const wrapped_job = try service.submit(.{
+    try std.testing.expectError(error.JobIdExhausted, service.submit(.{
         .kind = .print_document,
         .task_id = 91,
         .workspace_id = 7,
         .source_principal = source,
-        .label = "wrapped id print",
+        .label = "exhausted id print",
         .visibility = .hidden,
-    }, &scheduler, &notifications, 11);
-    try std.testing.expectEqual(@as(u64, 1), wrapped_job.id);
-    try std.testing.expectEqual(@as(u64, 2), service.next_job_id);
-    try std.testing.expect(service.find(0) == null);
-
-    service.next_job_id = 1;
-    const skipped_job = try service.submit(.{
-        .kind = .print_document,
-        .task_id = 92,
-        .workspace_id = 7,
-        .source_principal = source,
-        .label = "skipped id print",
-        .visibility = .hidden,
-    }, &scheduler, &notifications, 12);
-    try std.testing.expectEqual(@as(u64, 2), skipped_job.id);
-    try std.testing.expectEqual(@as(u64, 3), service.next_job_id);
-    try std.testing.expect(service.find(0) == null);
+    }, &scheduler, &notifications, 11));
+    try std.testing.expectEqual(@as(usize, 1), service.jobs.countInUse());
+    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
 
     var full_scheduler = accelerator_scheduler.Controller.init();
     var full_notifications = notification_center.Center.init();

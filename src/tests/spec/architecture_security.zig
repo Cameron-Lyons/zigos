@@ -461,9 +461,8 @@ fn invariantRevocationAlwaysWins() !void {
         });
 
         try table.revokeTargetAuthority(parent.id);
-        try std.testing.expect(!table.isUsable(derived, 4));
-        try std.testing.expect(!table.isUsable(passed, 4));
         try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(derived.id, 4));
+        try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(passed.id, 4));
         try std.testing.expectError(error.CapabilityRevoked, table.pass(.{
             .capability_id = passed.id,
             .new_holder = spec_support.app(60 + index),
@@ -483,8 +482,7 @@ fn invariantExpiredLeasesFailEverywhere() !void {
         .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 20, .renewable = false },
     });
 
-    try std.testing.expect(!table.isUsable(expiring, 9));
-    try std.testing.expect(!table.isUsable(expiring, 21));
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(expiring.id, 9));
     try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(expiring.id, 21));
     try std.testing.expectError(error.CapabilityRevoked, table.derive(.{
         .parent_capability_id = expiring.id,
@@ -561,8 +559,8 @@ fn invariantTargetKindsDisambiguateHashedIds() !void {
     try table.revokeGrant(object_cap.id);
     try std.testing.expect(table.query(object_cap.id) == null);
     try std.testing.expectError(error.CapabilityNotFound, table.requireUsable(object_cap.id, 2));
-    try std.testing.expect(table.isUsable(network_cap, 2));
-    try std.testing.expect(table.isUsable(device_cap, 2));
+    _ = try table.requireUsable(network_cap.id, 2);
+    _ = try table.requireUsable(device_cap.id, 2);
 }
 
 pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {

@@ -122,6 +122,7 @@ pub const Error = error{
     DriverTableFull,
     DuplicateServiceId,
     DuplicateDeviceBinding,
+    DmaDomainExhausted,
     InvalidBundleSignature,
     InvalidAuthorityTarget,
     AuthorityRightsEscalation,
@@ -170,15 +171,15 @@ pub const Directory = struct {
     }
 
     pub fn registerSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
-        const authority = try validateSignedRequest(request);
+        const authority_capability_id = try validateSignedRequest(request);
 
         if (self.findByServiceAndClass(request.service_id, request.device_class) != null) return error.DuplicateServiceId;
         if (self.findByBinding(request.device_class, request.device_id) != null) return error.DuplicateDeviceBinding;
 
-        const dma_domain_id = self.nextReservableDmaDomainId() orelse return error.DriverTableFull;
+        const dma_domain_id = self.nextReservableDmaDomainId() orelse return error.DmaDomainExhausted;
         const slot_index = self.slots.reserveIndex(driverServiceClassKey(request.service_id, request.device_class)) orelse return error.DriverTableFull;
         const slot = &self.slots.slots[slot_index];
-        slot.driver = self.recordFromRequest(request, authority, 1, dma_domain_id);
+        slot.driver = self.recordFromRequest(request, authority_capability_id, 1, dma_domain_id);
         self.indexDriver(slot_index);
         self.advanceNextDmaDomainIdFrom(dma_domain_id);
         return &slot.driver;
@@ -191,10 +192,10 @@ pub const Directory = struct {
         }
         const next_generation = slot.driver.restart_generation + 1;
         const previous_dma_domain_id = slot.driver.dma_domain_id;
-        const authority = try validateSignedRequest(request);
-        const dma_domain_id = self.nextReservableDmaDomainId() orelse return error.DriverTableFull;
+        const authority_capability_id = try validateSignedRequest(request);
+        const dma_domain_id = self.nextReservableDmaDomainId() orelse return error.DmaDomainExhausted;
         _ = device_broker.invalidateDmaIsolation(slot.driver.device_id, previous_dma_domain_id);
-        slot.driver = self.recordFromRequest(request, authority, next_generation, dma_domain_id);
+        slot.driver = self.recordFromRequest(request, authority_capability_id, next_generation, dma_domain_id);
         self.advanceNextDmaDomainIdFrom(dma_domain_id);
         return &slot.driver;
     }
@@ -241,26 +242,11 @@ pub const Directory = struct {
     }
 
     fn nextReservableDmaDomainId(self: *const Directory) ?u64 {
-        var dma_domain_id = normalizeDmaDomainId(self.next_dma_domain_id);
-        var attempts: usize = 0;
-        while (attempts <= MAX_DRIVER_SERVICES) : (attempts += 1) {
-            if (!self.hasActiveDmaDomainId(dma_domain_id)) return dma_domain_id;
-            dma_domain_id = nextDmaDomainIdAfter(dma_domain_id);
-        }
-        return null;
+        return if (self.next_dma_domain_id == 0) null else self.next_dma_domain_id;
     }
 
     fn advanceNextDmaDomainIdFrom(self: *Directory, dma_domain_id: u64) void {
-        self.next_dma_domain_id = nextDmaDomainIdAfter(dma_domain_id);
-    }
-
-    fn hasActiveDmaDomainId(self: *const Directory, dma_domain_id: u64) bool {
-        if (dma_domain_id == 0) return false;
-        for (&self.slots.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.driver.dma_domain_id == dma_domain_id) return true;
-        }
-        return false;
+        self.next_dma_domain_id = dma_domain_id +% 1;
     }
 
     fn findSlotByService(self: *Directory, service_id: u64) ?*DriverSlot {
@@ -298,7 +284,7 @@ pub const Directory = struct {
     fn recordFromRequest(
         self: *Directory,
         request: SignedRegistrationRequest,
-        authority: capability.Capability,
+        authority_capability_id: u64,
         restart_generation: u32,
         dma_domain_id: u64,
     ) DriverRecord {
@@ -308,7 +294,7 @@ pub const Directory = struct {
             .owner_task_id = request.owner_task_id,
             .device_id = request.device_id,
             .device_class = request.device_class,
-            .authority_capability_id = authority.id,
+            .authority_capability_id = authority_capability_id,
             .restart_generation = restart_generation,
             .bootstrap_transport = request.bootstrap_transport,
             .dma_domain_id = dma_domain_id,
@@ -385,15 +371,6 @@ pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
             .device_use = true,
         } },
     };
-}
-
-fn normalizeDmaDomainId(dma_domain_id: u64) u64 {
-    return if (dma_domain_id == 0) 1 else dma_domain_id;
-}
-
-fn nextDmaDomainIdAfter(dma_domain_id: u64) u64 {
-    const next = dma_domain_id +% 1;
-    return normalizeDmaDomainId(next);
 }
 
 pub const DriverAuthorityRequest = struct {
@@ -482,11 +459,12 @@ fn rightsAreSubset(owned: capability.CapabilityRights, allowed: capability.Capab
     return (owned_bits & ~allowed_bits) == 0;
 }
 
-fn validateSignedRequest(request: SignedRegistrationRequest) Error!capability.Capability {
-    const authority = request.capability_table.query(request.authority_capability_id) orelse return error.CapabilityNotFound;
+fn validateSignedRequest(request: SignedRegistrationRequest) Error!u64 {
+    const inspected = request.capability_table.inspect(request.authority_capability_id, request.now_ticks) orelse return error.CapabilityNotFound;
     if (request.signer.len == 0) return error.InvalidBundleSignature;
     if (!request.require_iommu) return error.IommuRequired;
-    if (!request.capability_table.isUsable(authority, request.now_ticks)) return error.CapabilityRevoked;
+    if (!inspected.usable) return error.CapabilityRevoked;
+    const authority = inspected.capability;
     if (!authority.holder.eql(request.requester)) return error.AuthorityHolderMismatch;
     if (authority.scope.task_id) |task_id| {
         if (task_id != request.owner_task_id) return error.AuthorityScopeViolation;
@@ -502,7 +480,7 @@ fn validateSignedRequest(request: SignedRegistrationRequest) Error!capability.Ca
     {
         return error.InvalidBootstrapTransport;
     }
-    return authority;
+    return authority.id;
 }
 
 fn writeSigner(record: *DriverRecord, signer: []const u8) void {
@@ -705,7 +683,7 @@ test "driver dma ranges reject overflowing spans" {
     try std.testing.expect(!(DmaRange{ .base = std.math.maxInt(u64) - 7, .length = 16 }).contains(std.math.maxInt(u64) - 7, 8));
 }
 
-test "driver dma domain ids wrap without zero and skip active drivers" {
+test "driver dma domain ids stop at exhaustion" {
     var directory = Directory.init();
     var capabilities = capability.CapabilityTable.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 70 };
@@ -713,21 +691,15 @@ test "driver dma domain ids wrap without zero and skip active drivers" {
     directory.next_dma_domain_id = std.math.maxInt(u64);
     const max_driver = try registerDriverForTest(&directory, &capabilities, owner, 70, 700, 0x7000, .network_adapter, "driver-max");
     try std.testing.expectEqual(std.math.maxInt(u64), max_driver.dma_domain_id);
-    try std.testing.expectEqual(@as(u64, 1), directory.next_dma_domain_id);
-
-    const wrapped_driver = try registerDriverForTest(&directory, &capabilities, owner, 71, 701, 0x7001, .network_adapter, "driver-wrap");
-    try std.testing.expectEqual(@as(u64, 1), wrapped_driver.dma_domain_id);
-    try std.testing.expectEqual(@as(u64, 2), directory.next_dma_domain_id);
+    try std.testing.expectEqual(@as(u64, 0), directory.next_dma_domain_id);
     try std.testing.expect(max_driver.dma_domain_id != 0);
-    try std.testing.expect(wrapped_driver.dma_domain_id != 0);
-
-    directory.next_dma_domain_id = 1;
-    const skipped_driver = try registerDriverForTest(&directory, &capabilities, owner, 72, 702, 0x7002, .network_adapter, "driver-skip");
-    try std.testing.expectEqual(@as(u64, 2), skipped_driver.dma_domain_id);
-    try std.testing.expectEqual(@as(u64, 3), directory.next_dma_domain_id);
+    try std.testing.expectError(
+        error.DmaDomainExhausted,
+        registerDriverForTest(&directory, &capabilities, owner, 71, 701, 0x7001, .network_adapter, "driver-exhausted"),
+    );
 }
 
-test "driver dma domain ids skip active drivers on restart and hot-swap" {
+test "driver restart and hot-swap stop when dma domains are exhausted" {
     var directory = Directory.init();
     var capabilities = capability.CapabilityTable.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 71 };
@@ -738,10 +710,11 @@ test "driver dma domain ids skip active drivers on restart and hot-swap" {
     try std.testing.expectEqual(@as(u64, 1), first.dma_domain_id);
     try std.testing.expectEqual(@as(u64, 2), second.dma_domain_id);
 
-    directory.next_dma_domain_id = 1;
+    directory.next_dma_domain_id = std.math.maxInt(u64);
     try std.testing.expect(directory.markRestarted(80));
-    try std.testing.expectEqual(@as(u64, 3), first.dma_domain_id);
-    try std.testing.expectEqual(@as(u64, 4), directory.next_dma_domain_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), first.dma_domain_id);
+    try std.testing.expectEqual(@as(u64, 0), directory.next_dma_domain_id);
+    try std.testing.expect(!directory.markRestarted(81));
 
     const second_authority_v2 = try mintDriverAuthority(&capabilities, .{
         .holder = owner,
@@ -749,8 +722,7 @@ test "driver dma domain ids skip active drivers on restart and hot-swap" {
         .device_id = second_device_id,
         .device_class = .network_adapter,
     });
-    directory.next_dma_domain_id = 2;
-    const swapped = try directory.hotSwapSigned(.{
+    try std.testing.expectError(error.DmaDomainExhausted, directory.hotSwapSigned(.{
         .service_id = 81,
         .owner_task_id = 801,
         .device_id = second_device_id,
@@ -760,9 +732,9 @@ test "driver dma domain ids skip active drivers on restart and hot-swap" {
         .requester = owner,
         .now_ticks = 2,
         .signer = "second-v2",
-    });
-    try std.testing.expectEqual(@as(u64, 4), swapped.dma_domain_id);
-    try std.testing.expectEqual(@as(u64, 5), directory.next_dma_domain_id);
+    }));
+    try std.testing.expectEqual(@as(u64, 2), second.dma_domain_id);
+    try std.testing.expectEqual(@as(u64, 0), directory.next_dma_domain_id);
 }
 
 test "driver dma domain ids do not advance when registration fails" {

@@ -135,7 +135,7 @@ pub const Service = struct {
         errdefer _ = self.slots.remove(snapshot_id);
         try recordBackup(ledger, request, snapshot_id, true);
         slot.snapshot = snapshot;
-        self.advanceNextSnapshotId();
+        self.next_snapshot_id +%= 1;
         return &slot.snapshot;
     }
 
@@ -202,13 +202,6 @@ pub const Service = struct {
     pub fn find(self: *Service, snapshot_id: u64) ?*Snapshot {
         const slot = self.slots.get(snapshot_id) orelse return null;
         return &slot.snapshot;
-    }
-
-    fn advanceNextSnapshotId(self: *Service) void {
-        self.next_snapshot_id = if (self.next_snapshot_id == std.math.maxInt(u64))
-            0
-        else
-            self.next_snapshot_id + 1;
     }
 };
 
@@ -394,7 +387,7 @@ test "object resilience binds restore and revoke to snapshot subject and source 
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=object_resilience") != null);
 }
 
-test "object resilience snapshot ids stop after the maximum id" {
+test "object resilience snapshot ids stop at exhaustion" {
     var directory = policy_object.Directory.init();
     _ = try directory.create(.{
         .scope = .organization,

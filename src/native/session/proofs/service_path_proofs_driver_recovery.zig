@@ -30,12 +30,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
         last_process_generation: u32 = 0,
         last_dma_domain_id: u64 = 0,
 
-        pub fn deactivate(self: *@This(), service_id: u64) bool {
-            const deactivated = self.activations.deactivate(service_id);
-            if (deactivated) self.deactivation_count += 1;
-            return deactivated;
-        }
-
         pub fn deactivateDriver(self: *@This(), service_id: u64, device_class: driver_service.DeviceClass) bool {
             const deactivated = self.activations.deactivateDriver(service_id, device_class);
             if (deactivated) self.deactivation_count += 1;
@@ -140,7 +134,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     const recovered_task = runtime.find(recovered_driver.owner_task_id).?;
     try std.testing.expect(!recovery.visible_impact);
     try std.testing.expect(recovery.notification_id == null);
-    try std.testing.expect(recovery.runtime_activation_observed);
     try std.testing.expect(recovery.runtime_activation_generation > initial_activation.activation_generation);
     try std.testing.expectEqual(recovered_driver.dma_domain_id, recovery.runtime_dma_domain_id);
     try std.testing.expect(recovery.runtime_exclusive_claim);
@@ -234,7 +227,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(hot_swap_dma_before, hot_swap.previous_dma_domain_id);
     try std.testing.expect(swapped_driver.dma_domain_id != hot_swap_dma_before);
     try std.testing.expectEqual(swapped_driver.dma_domain_id, hot_swap.next_dma_domain_id);
-    try std.testing.expect(hot_swap.runtime_activation_observed);
     try std.testing.expect(hot_swap.runtime_activation_generation > recovery.runtime_activation_generation);
     try std.testing.expectEqual(swapped_driver.dma_domain_id, hot_swap.runtime_dma_domain_id);
     try std.testing.expect(hot_swap.runtime_exclusive_claim);
@@ -347,7 +339,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(graphics_dma_before, graphics_hot_swap.previous_dma_domain_id);
     try std.testing.expect(swapped_graphics.dma_domain_id != graphics_dma_before);
     try std.testing.expectEqual(swapped_graphics.dma_domain_id, graphics_hot_swap.next_dma_domain_id);
-    try std.testing.expect(graphics_hot_swap.runtime_activation_observed);
     try std.testing.expectEqual(swapped_graphics.dma_domain_id, graphics_hot_swap.runtime_dma_domain_id);
     try std.testing.expect(graphics_hot_swap.runtime_exclusive_claim);
     try std.testing.expect(!graphics_hot_swap.userspace_brokered_data_plane);

@@ -3,6 +3,7 @@ const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_volume = @import("storage_volume.zig");
+const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
 
 const Volume = storage_volume.Volume;
@@ -217,6 +218,26 @@ test "storage volume exposes the first supported product capacity envelope" {
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
     try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
+}
+
+test "storage volume preserves exhausted identifier watermarks" {
+    const allocator = std.testing.allocator;
+    const image = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(image);
+    @memset(image, 0);
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.reset();
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    store.next_version_id = 0;
+    workspaces.next_snapshot_id = 0;
+    _ = try volume.saveToImage(image, &store, &workspaces);
+
+    const loaded_root = (try volume_root_slot.findLatestImageRoot(image)).?;
+    try std.testing.expectEqual(std.math.maxInt(u64), loaded_root.root.last_version_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), loaded_root.root.last_snapshot_id);
 }
 
 test "storage quota policy rejects writes above the first supported envelope" {
