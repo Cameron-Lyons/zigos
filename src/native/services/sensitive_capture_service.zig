@@ -754,6 +754,8 @@ test "sensitive capture session ids stop at exhaustion" {
         .indicator_visible = true,
         .detail = "private camera frame allowed",
     }, null));
+    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
     try std.testing.expectEqual(@as(usize, 1), service.activeSessionCount());
     try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
+    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }

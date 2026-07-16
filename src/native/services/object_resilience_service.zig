@@ -203,7 +203,6 @@ pub const Service = struct {
         const slot = self.slots.get(snapshot_id) orelse return null;
         return &slot.snapshot;
     }
-
 };
 
 fn recordBackup(
@@ -441,5 +440,7 @@ test "object resilience snapshot ids stop at exhaustion" {
         .now_ticks = 11,
         .detail = "private object backup contents",
     }, null));
+    try std.testing.expectEqual(@as(u64, 0), service.next_snapshot_id);
     try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
+    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }

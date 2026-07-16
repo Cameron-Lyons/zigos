@@ -374,7 +374,6 @@ pub const Service = struct {
         }
         return session;
     }
-
 };
 
 fn zeroSession() SessionRecord {
@@ -563,7 +562,9 @@ test "network session open validates destinations and stops at id exhaustion" {
         valid_request,
         null,
     ));
+    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
     try std.testing.expectEqual(@as(usize, 1), service.sessions.countInUse());
+    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }
 
 test "network session service opens leased attested sessions and audits revocation" {
