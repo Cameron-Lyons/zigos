@@ -22,7 +22,7 @@ pub const Client = struct {
     now_ticks: u64,
     process_generation: u32,
     device_id: u64 = 0,
-    broker_generation: u32 = 0,
+    broker_generation: u64 = 0,
     next_correlation_id: u64 = 1,
 
     pub fn init(

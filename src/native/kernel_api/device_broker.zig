@@ -157,8 +157,8 @@ pub const IommuFaultEvidence = struct {
     length: u64,
     direction: DmaDirection,
     reason: IommuFaultReason,
-    program_generation: u32,
-    fault_count: u32,
+    program_generation: u64,
+    fault_count: u64,
 };
 
 pub const DmaIsolationStatus = struct {
@@ -167,10 +167,10 @@ pub const DmaIsolationStatus = struct {
     mode: DmaIsolationMode,
     hardware_iommu_programmed: bool,
     bus_master_dma_enabled: bool,
-    program_generation: u32,
+    program_generation: u64,
     window_count: usize,
     iommu_program: IommuProgramEvidence,
-    fault_count: u32,
+    fault_count: u64,
 };
 
 pub const BrokeredDmaBuffer = struct {
@@ -179,7 +179,7 @@ pub const BrokeredDmaBuffer = struct {
     address: u64,
     length: u64,
     direction: DmaDirection,
-    program_generation: u32,
+    program_generation: u64,
 };
 
 pub const MmioWindow = struct {
@@ -201,13 +201,18 @@ pub const ControllerDescriptor = struct {
 };
 
 pub const Error = error{
+    ControllerGenerationExhausted,
+    ControllerTableFull,
     DeviceNotFound,
     DmaDomainNotProgrammed,
+    DmaProgramGenerationExhausted,
+    DmaProgramIdExhausted,
     DmaTableFull,
     DmaWindowDenied,
     InvalidPort,
     InvalidDmaDomain,
     InvalidDmaWindow,
+    InvalidDevice,
     InvalidIommuProgram,
     UnsupportedMmioWindow,
     UnsupportedBusMasterDma,
@@ -237,7 +242,7 @@ const ControllerSlot = struct {
     transfer_lba: u64 = 0,
     transfer_sector_count: u16 = 0,
     transfer_byte_offset: usize = 0,
-    broker_generation: u32 = 1,
+    broker_generation: u64 = 0,
     host_write_staging: [host_write_staging_bytes]u8 = [_]u8{0} ** host_write_staging_bytes,
 };
 
@@ -248,12 +253,12 @@ const DmaProgramSlot = struct {
     dma_domain_id: u64 = 0,
     mode: DmaIsolationMode = .programmed_io_only,
     bus_master_dma_enabled: bool = false,
-    program_generation: u32 = 0,
+    program_generation: u64 = 0,
     window_count: usize = 0,
     windows: [MAX_DMA_WINDOWS]DmaWindow = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
     iommu_program: IommuProgramEvidence = zeroIommuProgramEvidence(),
     last_fault: ?IommuFaultEvidence = null,
-    fault_count: u32 = 0,
+    fault_count: u64 = 0,
 };
 
 const ControllerArena = struct {
@@ -482,19 +487,27 @@ pub const dma_program_indexing = .{
 var controllers: ControllerArena = ControllerArena.init();
 var dma_programs: DmaProgramArena = DmaProgramArena.init();
 var dma_program_device_index: DmaProgramDeviceIndex = DmaProgramDeviceIndex.init();
+var next_broker_generation: u64 = 1;
 var next_dma_program_id: u64 = 1;
-var next_dma_program_generation: u32 = 1;
+var next_dma_program_generation: u64 = 1;
 
 pub fn reset() void {
     controllers.reset();
     dma_programs = DmaProgramArena.init();
     dma_program_device_index = DmaProgramDeviceIndex.init();
+    next_broker_generation = 1;
     next_dma_program_id = 1;
     next_dma_program_generation = 1;
 }
 
 pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) bool {
-    if (device_id == 0) return false;
+    publishAtaControllerChecked(device_id, grant) catch return false;
+    return true;
+}
+
+pub fn publishAtaControllerChecked(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) Error!void {
+    if (device_id == 0) return error.InvalidDevice;
+    const generation = try pendingBrokerGeneration();
     if (findControllerSlotIndex(device_id)) |slot_index| {
         const slot = &controllers.slots[slot_index];
         controllers.markPublished(slot_index);
@@ -502,16 +515,18 @@ pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBr
         slot.grant = grant;
         slot.host_registers = [_]u32{0} ** slot.host_registers.len;
         finishHostTransfer(slot);
-        return true;
+        slot.broker_generation = generation;
+        next_broker_generation = nextMonotonicId(generation);
+        return;
     }
-    const slot = reserveControllerSlot(device_id) orelse return false;
+    const slot = reserveControllerSlot(device_id) orelse return error.ControllerTableFull;
     slot.published = true;
     slot.device_id = device_id;
     slot.grant = grant;
-    slot.broker_generation = 1;
+    slot.broker_generation = generation;
     slot.host_registers = [_]u32{0} ** slot.host_registers.len;
     finishHostTransfer(slot);
-    return true;
+    next_broker_generation = nextMonotonicId(generation);
 }
 
 pub fn revokeAtaController(device_id: u64) bool {
@@ -521,14 +536,12 @@ pub fn revokeAtaController(device_id: u64) bool {
     finishHostTransfer(slot);
     slot.published = false;
     slot.host_registers = [_]u32{0} ** slot.host_registers.len;
-    slot.broker_generation +%= 1;
-    if (slot.broker_generation == 0) slot.broker_generation = 1;
     controllers.markUnpublished(slot_index);
     invalidateDmaForDevice(device_id);
     return true;
 }
 
-pub fn brokerGeneration(device_id: u64) ?u32 {
+pub fn brokerGeneration(device_id: u64) ?u64 {
     const slot = findController(device_id) orelse return null;
     return slot.broker_generation;
 }
@@ -599,7 +612,10 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
 
     const iommu_program = try iommuProgramFromRequest(request);
 
-    const slot = findDmaProgramSlot(request.device_id, request.dma_domain_id) orelse try reserveDmaProgramSlot(request.device_id);
+    const existing_slot = findDmaProgramSlot(request.device_id, request.dma_domain_id);
+    if (existing_slot == null and dma_programs.countInUse() >= MAX_DMA_PROGRAMS) return error.DmaTableFull;
+    const program_generation = try pendingDmaProgramGeneration();
+    const slot = existing_slot orelse try reserveDmaProgramSlot(request.device_id);
     const program_id = slot.program_id;
     slot.* = .{
         .in_use = true,
@@ -608,7 +624,7 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
         .dma_domain_id = request.dma_domain_id,
         .mode = request.mode,
         .bus_master_dma_enabled = request.bus_master_dma_enabled,
-        .program_generation = allocateDmaProgramGeneration(),
+        .program_generation = program_generation,
         .window_count = request.windows.len,
         .windows = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
         .iommu_program = iommu_program,
@@ -619,6 +635,7 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
     for (request.windows, 0..) |window, index| {
         slot.windows[index] = window;
     }
+    next_dma_program_generation = nextMonotonicId(program_generation);
 
     return statusFromProgram(slot);
 }
@@ -701,7 +718,6 @@ pub fn latestDmaFault(device_id: u64, dma_domain_id: u64) ?IommuFaultEvidence {
 pub fn invalidateDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
     const slot_index = findDmaProgramSlotIndex(device_id, dma_domain_id) orelse return false;
     removeDmaProgramSlot(slot_index);
-    _ = allocateDmaProgramGeneration();
     return true;
 }
 
@@ -805,7 +821,6 @@ fn invalidateDmaForDevice(device_id: u64) void {
         removeDmaProgramSlot(slot_index);
         slot_index = next_slot_index;
     }
-    _ = allocateDmaProgramGeneration();
 }
 
 fn findDmaProgram(device_id: u64, dma_domain_id: u64) ?*const DmaProgramSlot {
@@ -832,7 +847,7 @@ fn findDmaProgramSlotIndex(device_id: u64, dma_domain_id: u64) ?usize {
 }
 
 fn reserveDmaProgramSlot(device_id: u64) Error!*DmaProgramSlot {
-    const program_id = allocateDmaProgramId();
+    const program_id = try pendingDmaProgramId();
     const slot_index = dma_programs.reserveIndex(program_id) orelse return error.DmaTableFull;
     if (!dma_program_device_index.append(dmaProgramDeviceKey(device_id), slot_index)) {
         _ = dma_programs.removeIndex(slot_index);
@@ -840,6 +855,7 @@ fn reserveDmaProgramSlot(device_id: u64) Error!*DmaProgramSlot {
     }
     const slot = &dma_programs.slots[slot_index];
     slot.program_id = program_id;
+    next_dma_program_id = nextMonotonicId(program_id);
     return slot;
 }
 
@@ -851,18 +867,24 @@ fn removeDmaProgramSlot(slot_index: usize) void {
     _ = dma_programs.removeIndex(slot_index);
 }
 
-fn allocateDmaProgramId() u64 {
-    const program_id = next_dma_program_id;
-    next_dma_program_id +%= 1;
-    if (next_dma_program_id == 0) next_dma_program_id = 1;
-    return program_id;
+fn pendingBrokerGeneration() Error!u64 {
+    if (next_broker_generation == 0) return error.ControllerGenerationExhausted;
+    return next_broker_generation;
 }
 
-fn allocateDmaProgramGeneration() u32 {
-    const generation = next_dma_program_generation;
-    next_dma_program_generation +%= 1;
-    if (next_dma_program_generation == 0) next_dma_program_generation = 1;
-    return generation;
+fn pendingDmaProgramId() Error!u64 {
+    if (next_dma_program_id == 0) return error.DmaProgramIdExhausted;
+    return next_dma_program_id;
+}
+
+fn pendingDmaProgramGeneration() Error!u64 {
+    if (next_dma_program_generation == 0) return error.DmaProgramGenerationExhausted;
+    return next_dma_program_generation;
+}
+
+fn nextMonotonicId(id: u64) u64 {
+    std.debug.assert(id != 0);
+    return if (id == std.math.maxInt(u64)) 0 else id + 1;
 }
 
 fn resetControllerSlot(slot: *ControllerSlot) void {
@@ -882,7 +904,7 @@ fn resetControllerSlot(slot: *ControllerSlot) void {
     slot.transfer_lba = 0;
     slot.transfer_sector_count = 0;
     slot.transfer_byte_offset = 0;
-    slot.broker_generation = 1;
+    slot.broker_generation = 0;
     @memset(slot.host_write_staging[0..], 0);
 }
 
@@ -986,8 +1008,7 @@ fn recordDmaFault(
     direction: DmaDirection,
     reason: IommuFaultReason,
 ) void {
-    program.fault_count +%= 1;
-    if (program.fault_count == 0) program.fault_count = 1;
+    if (program.fault_count != std.math.maxInt(u64)) program.fault_count += 1;
     program.last_fault = .{
         .device_id = program.device_id,
         .dma_domain_id = program.dma_domain_id,
@@ -1280,8 +1301,92 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
     ));
     const permission_fault = latestDmaFault(0x1F001, 0xD170).?;
     try std.testing.expectEqual(IommuFaultReason.write_not_permitted, permission_fault.reason);
-    try std.testing.expectEqual(@as(u32, 1), permission_fault.fault_count);
-    try std.testing.expectEqual(@as(u32, 1), (try dmaIsolationStatus(0x1F001, 0xD170)).fault_count);
+    try std.testing.expectEqual(@as(u64, 1), permission_fault.fault_count);
+    try std.testing.expectEqual(@as(u64, 1), (try dmaIsolationStatus(0x1F001, 0xD170)).fault_count);
+}
+
+test "device broker exhausts authority epochs without reusing stale generations" {
+    reset();
+
+    const device_id: u64 = 0x1F004;
+    const grant = storage_driver_protocol.AtaBrokerGrant{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = test_ata_sector_count,
+    };
+    try std.testing.expectError(error.InvalidDevice, publishAtaControllerChecked(0, grant));
+    try publishAtaControllerChecked(device_id, grant);
+    const first_publication_generation = brokerGeneration(device_id).?;
+    var republished_grant = grant;
+    republished_grant.base_port = 0x170;
+    try publishAtaControllerChecked(device_id, republished_grant);
+    try std.testing.expect(brokerGeneration(device_id).? != first_publication_generation);
+    try std.testing.expectEqual(republished_grant.base_port, (try describe(device_id)).base_port);
+
+    reset();
+    next_broker_generation = std.math.maxInt(u64);
+    try publishAtaControllerChecked(device_id, grant);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), brokerGeneration(device_id).?);
+    try std.testing.expectEqual(@as(u64, 0), next_broker_generation);
+
+    var changed_grant = grant;
+    changed_grant.base_port = 0x170;
+    try std.testing.expectError(
+        error.ControllerGenerationExhausted,
+        publishAtaControllerChecked(device_id, changed_grant),
+    );
+    try std.testing.expectEqual(grant.base_port, (try describe(device_id)).base_port);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), brokerGeneration(device_id).?);
+    try std.testing.expect(revokeAtaController(device_id));
+    try std.testing.expectError(
+        error.ControllerGenerationExhausted,
+        publishAtaControllerChecked(device_id, grant),
+    );
+    try std.testing.expectEqual(@as(?u64, null), brokerGeneration(device_id));
+
+    reset();
+    try publishAtaControllerChecked(device_id, grant);
+    next_dma_program_generation = std.math.maxInt(u64);
+    const terminal_status = try programBrokeredDmaIsolation(device_id, 0xD401);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), terminal_status.program_generation);
+    try std.testing.expectEqual(@as(u64, 0), next_dma_program_generation);
+    const window = defaultBrokeredDmaWindow(device_id);
+    const terminal_buffer = try authorizeDmaBuffer(device_id, 0xD401, window.base, iommu_page_size, .bidirectional);
+    try std.testing.expectError(
+        error.DmaProgramGenerationExhausted,
+        programBrokeredDmaIsolation(device_id, 0xD401),
+    );
+    try std.testing.expect(brokeredDmaBufferStillValid(terminal_buffer));
+    try std.testing.expectEqual(
+        @as(u64, std.math.maxInt(u64)),
+        (try dmaIsolationStatus(device_id, 0xD401)).program_generation,
+    );
+
+    const terminal_program = findDmaProgramSlot(device_id, 0xD401).?;
+    terminal_program.fault_count = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.DmaWindowDenied,
+        validateDmaAccess(device_id, 0xD401, window.base + window.length, 1, .device_read),
+    );
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), latestDmaFault(device_id, 0xD401).?.fault_count);
+
+    reset();
+    try publishAtaControllerChecked(device_id, grant);
+    next_dma_program_id = std.math.maxInt(u64);
+    _ = try programBrokeredDmaIsolation(device_id, 0xD402);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), findDmaProgram(device_id, 0xD402).?.program_id);
+    try std.testing.expectEqual(@as(u64, 0), next_dma_program_id);
+    try std.testing.expect(invalidateDmaIsolation(device_id, 0xD402));
+    const generation_before_id_exhaustion = next_dma_program_generation;
+    try std.testing.expectError(
+        error.DmaProgramIdExhausted,
+        programBrokeredDmaIsolation(device_id, 0xD403),
+    );
+    try std.testing.expectEqual(@as(usize, 0), dma_programs.countInUse());
+    try std.testing.expectEqual(@as(u64, 0), next_dma_program_id);
+    try std.testing.expectEqual(generation_before_id_exhaustion, next_dma_program_generation);
 }
 
 test "device broker indexes DMA programs by device and reuses invalidated capacity with new generations" {
@@ -1295,7 +1400,7 @@ test "device broker indexes DMA programs by device and reuses invalidated capaci
         .sector_count = test_ata_sector_count,
     }));
 
-    var first_generation: u32 = 0;
+    var first_generation: u64 = 0;
     var reclaimed_domain: u64 = 0;
     var domain_index: usize = 0;
     while (domain_index < MAX_DMA_PROGRAMS) : (domain_index += 1) {
@@ -1309,7 +1414,9 @@ test "device broker indexes DMA programs by device and reuses invalidated capaci
         }
     }
 
+    const program_id_before_full = next_dma_program_id;
     try std.testing.expectError(error.DmaTableFull, programBrokeredDmaIsolation(0x1F003, 0xD2FF));
+    try std.testing.expectEqual(program_id_before_full, next_dma_program_id);
     try std.testing.expect(invalidateDmaIsolation(0x1F003, reclaimed_domain));
     try std.testing.expectError(error.DmaDomainNotProgrammed, dmaIsolationStatus(0x1F003, reclaimed_domain));
 
@@ -1490,7 +1597,7 @@ test "device broker indexes controller slots across full table and inactive rema
     const revoked_device_id = 0x2F001;
     const revoked_generation = brokerGeneration(revoked_device_id).?;
     try std.testing.expect(revokeAtaController(revoked_device_id));
-    try std.testing.expectEqual(@as(?u32, null), brokerGeneration(revoked_device_id));
+    try std.testing.expectEqual(@as(?u64, null), brokerGeneration(revoked_device_id));
     try std.testing.expectEqual(@as(usize, MAX_DEVICES), controllers.countInUse());
     try std.testing.expectEqual(@as(usize, 1), controllers.unpublishedCount());
 

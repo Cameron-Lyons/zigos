@@ -1005,7 +1005,21 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         error.Timeout,
         storage_driver_task.readAtaBootstrapSessionChecked(&brokered_session, 8, timeout_read[0..]),
     );
+    const timed_out_session = brokered_session;
     try std.testing.expect(device_broker.publishAtaController(device_id, ata_grant));
+    var stale_timed_out_session = timed_out_session;
+    try std.testing.expectError(
+        error.StaleBrokerSession,
+        storage_driver_task.readAtaBootstrapSessionChecked(&stale_timed_out_session, 8, timeout_read[0..]),
+    );
+    brokered_session = storage_driver_task.establishAtaBootstrapSession(
+        &kernel_port,
+        device_id,
+        device_authority.id,
+        driver_task.id,
+        0xD170,
+        12,
+    ) orelse return error.MissingBootedDriverBinding;
 
     var active_io_before: [storage_volume.sector_size]u8 = undefined;
     var active_io_attempted: [storage_volume.sector_size]u8 = undefined;
