@@ -110,10 +110,6 @@ test "native store root adoption only accepts production NVMe PCI volumes" {
     volume.attachAtaBootstrapBrokerBackend(production_backend);
     try @import("std").testing.expect(!canAdoptProductionRootVolume(&volume));
 
-    var ata_device: u8 = 0;
-    volume.attachAtaBootstrapDevice(&ata_device, storage_volume.required_device_sectors);
-    try @import("std").testing.expect(!canAdoptProductionRootVolume(&volume));
-
     const undersized_nvme_backend = storage_volume.Backend{
         .sector_count = storage_volume.required_device_sectors - 1,
         .read = BackendFns.read,

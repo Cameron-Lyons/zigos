@@ -1061,9 +1061,6 @@ fn readDirectMeasuredBootSector(storage_service_id: u64, buffer: *[direct_measur
     if (!@hasDecl(root, "storage_volume")) return false;
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
-    if (root_volume.attached_ata_device) |device| {
-        return volume_backend.readAtaBootstrap(device, direct_measured_boot_lba, buffer[0..]);
-    }
     return root_volume.attached_backend_read(direct_measured_boot_lba, buffer.ptr, buffer.len);
 }
 

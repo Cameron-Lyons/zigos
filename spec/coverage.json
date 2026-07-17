@@ -1885,7 +1885,7 @@
         },
         {
           "file": "src/native/drivers/storage_driver_task.zig",
-          "name": "storage driver task attaches only through the kernel device broker"
+          "name": "storage driver task establishes ATA sessions only through the kernel device broker"
         }
       ]
     },

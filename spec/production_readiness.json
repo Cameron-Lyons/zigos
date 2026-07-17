@@ -213,8 +213,7 @@
           "src/arch",
           "spec/release_security/memory_safety_inventory.json",
           "src/check_release_security_gate.zig",
-          "src/native/kernel_api/syscall_dispatch.zig",
-          "src/native/drivers/storage_driver_task.zig"
+          "src/native/kernel_api/syscall_dispatch.zig"
         ],
         "current_evidence": [
           "The kernel and native syscall paths centralize many low-level boundaries and have targeted negative tests around user memory and brokered devices.",
@@ -403,7 +402,7 @@
         "Host tests cover corrupted payload rejection, malformed root-log metadata, torn-record rejection, compaction, page-sized payload reload, undersized image rejection without state mutation, power-loss before root commit, partial-sector log corruption fallback, long-running replay/compaction gates, indexed workspace/snapshot replay, production storage attachment-kind separation, and shared-memory transfer into the storage service.",
         "Workspace share grants now keep a resident principal index rebuilt with workspace state, workspace path indexes maintain object-id slots, workspace and snapshot arenas expose resident counts and indexed snapshot-id lookup, workspaces cache the oldest live snapshot generation for mutation-log compaction guards, and the object store tracks the latest inserted version id, max blob payload bytes, and object-type buckets, so object access, any-access, reshare policy checks, object-to-path share resolution, latest-version retrieval, type-scoped object queries, snapshot existence checks, dirty-snapshot persistence, compaction safety checks, and quota payload usage use keyed or cached lookups instead of scanning storage tables.",
         "The first supported storage envelope is exported from storage_volume.first_supported_capacity_envelope and checked before image or attached-volume persistence.",
-        "Writes that exceed the first supported envelope have an explicit user-facing quota policy: reject without partial persistence, report storage.quota.* limit codes, surface NoSpaceLeft at the persistence gate, and reject undersized demo images instead of carrying migration paths; attached-volume production persistence and native-store root adoption require a capacity-checked NVMe PCI backend rather than generic callback, ATA bootstrap, or brokered ATA backends.",
+        "Writes that exceed the first supported envelope have an explicit user-facing quota policy: reject without partial persistence, report storage.quota.* limit codes, surface NoSpaceLeft at the persistence gate, and reject undersized demo images instead of carrying migration paths; attached-volume production persistence and native-store root adoption require a capacity-checked NVMe PCI backend rather than generic callback or brokered ATA backends.",
         "The storage durability QEMU target reuses one native store image across forced reboots, interrupted writes, and one bad root slot, while benchmark thresholds now gate segmented replay and forced checkpoint compaction."
       ],
       "capacity_envelope": [
@@ -844,7 +843,7 @@
       "current_evidence": [
         "Driver registration checks signed bundles, device-class authority, DMA range metadata, restart generations, and a constrained first target of brokered storage DMA domains: programmed-I/O ATA or window-confined NVMe bus mastering, never unconfined bus-master DMA.",
         "The device broker now indexes controller slots and programmed DMA domains by device using arena/index-backed tables; unconfined bus mastering is rejected, and bus mastering is accepted only as a brokered-buffer program whose declared windows enumerate the exact queue or bounce frames the real NVMe engine may touch.",
-        "Storage driver tasks attach through the kernel device broker and the ATA bootstrap path exports checked read/write bridges for freestanding volume access.",
+        "Storage driver tasks attach through the kernel device broker, and the active ATA publication installs broker callbacks into the freestanding volume without storing an opaque session pointer or exporting a parallel C bridge.",
         "The driver boundary spec gate exercises brokered ATA read/write I/O, programs an IOMMU-style DMA domain, authorizes brokered DMA buffers, and rejects stale task authority, stale DMA buffers, stale broker sessions, expired leases, invalid ports, explicit broker revocation, and post-restart target generation mismatches.",
         "The storage data-plane gate covers timeout propagation, active-I/O restart, and partial-transfer recovery by proving incomplete ATA writes are discarded before a restarted userspace driver reissues I/O.",
         "The native network driver path reauthorizes brokered service-identity sends through the egress broker, so revoked network-policy capabilities stop already-open userspace network paths before transmit; network activation now fails closed until the published transport device id matches detected production Intel I225-LM inventory, and the booted sync path captures an encrypted native transport ABI frame that matches the active network driver transmit.",

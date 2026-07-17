@@ -422,9 +422,6 @@ fn readRootVolumeSector(buffer: *[sector_size]u8) bool {
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= sector_lba) return false;
-    if (root_volume.attached_ata_device) |device| {
-        return volume_backend.readAtaBootstrap(device, sector_lba, buffer[0..]);
-    }
     return root_volume.attached_backend_read(sector_lba, buffer.ptr, buffer.len);
 }
 

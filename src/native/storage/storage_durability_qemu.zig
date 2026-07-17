@@ -208,9 +208,6 @@ fn readProofSector(buffer: *[proof_sector_size]u8) bool {
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= proof_lba) return false;
-    if (root_volume.attached_ata_device) |device| {
-        return volume_backend.readAtaBootstrap(device, proof_lba, buffer[0..]);
-    }
     return root_volume.attached_backend_read(proof_lba, buffer.ptr, buffer.len);
 }
 
