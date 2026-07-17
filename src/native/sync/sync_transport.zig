@@ -42,6 +42,7 @@ pub const Error = harness.Error || endpoint.Error || network_driver_task.Error |
     NativeTransportHardwareProofMissing,
     NativeTransportMalformedFrame,
     NativeTransportReplayRejected,
+    NativeTransportSequenceExhausted,
     PacketCaptureFull,
 };
 
@@ -408,27 +409,9 @@ pub const NativeTransportService = struct {
             self.congestion_drop_count += 1;
             return error.NativeTransportCongested;
         }
-        const sequence = connection.next_sequence;
-        if (sequence <= connection.highest_sent_sequence or sequence + sync_state.TRANSPORT_REPLAY_WINDOW <= connection.highest_delivered_sequence) {
-            self.replay_rejection_count += 1;
-            return error.NativeTransportReplayRejected;
-        }
+        const sequence = try self.pendingSequence(connection);
         try self.capture.ensureCapacity();
         const signed_frame = try self.harness.encryptSignedFrame(&connection.session, plaintext, signer);
-        try self.endpoints.send(
-            connection.source_endpoint_id,
-            ids.task(connection.source_task_id),
-            signed_frame.packet.session_id,
-            plaintext,
-            null,
-            false,
-        );
-        self.endpoint_frame_count += 1;
-        connection.in_flight_frames += 1;
-        connection.next_sequence += 1;
-        connection.highest_sent_sequence = sequence;
-
-        var network_delivered = false;
         var wire_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeNativeSyncFrame(
             wire_frame[0..],
@@ -438,8 +421,19 @@ pub const NativeTransportService = struct {
             sequence,
             &signed_frame,
         );
+        try self.endpoints.send(
+            connection.source_endpoint_id,
+            ids.task(connection.source_task_id),
+            signed_frame.packet.session_id,
+            plaintext,
+            null,
+            false,
+        );
         try self.capture.record(encoded);
-        network_delivered = network_driver_task.sendActiveFrame(encoded);
+        const network_delivered = network_driver_task.sendActiveFrame(encoded);
+        self.endpoint_frame_count += 1;
+        connection.in_flight_frames += 1;
+        markSequenceSent(connection, sequence);
         if (network_delivered) self.network_frame_count += 1;
 
         return .{
@@ -472,7 +466,7 @@ pub const NativeTransportService = struct {
                 try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
                 try self.ensureProductionSessionReady(&connection.session);
                 try self.ensureHardwareBackedNetworkReady();
-                const sequence = connection.next_sequence;
+                const sequence = try self.pendingSequence(connection);
                 const signed_frame = try self.harness.encryptSignedFrame(&connection.session, plaintext, signer);
                 try relay_service.submitSignedFrame(connection.session.task_id, &connection.session, signed_frame);
                 markSequenceSent(connection, sequence);
@@ -584,13 +578,25 @@ pub const NativeTransportService = struct {
             try session.requireProductionAttestation();
         }
     }
+
+    fn pendingSequence(self: *NativeTransportService, connection: *const NativeConnection) Error!u64 {
+        const sequence = connection.next_sequence;
+        if (sequence == 0) return error.NativeTransportSequenceExhausted;
+        if (sequence <= connection.highest_sent_sequence or
+            (sequence <= connection.highest_delivered_sequence and
+                connection.highest_delivered_sequence - sequence >= sync_state.TRANSPORT_REPLAY_WINDOW))
+        {
+            self.replay_rejection_count += 1;
+            return error.NativeTransportReplayRejected;
+        }
+        return sequence;
+    }
 };
 
 fn markSequenceSent(connection: *NativeConnection, sequence: u64) void {
     if (sequence > connection.highest_sent_sequence) connection.highest_sent_sequence = sequence;
     if (connection.next_sequence == sequence) {
-        connection.next_sequence +%= 1;
-        if (connection.next_sequence == 0) connection.next_sequence = 1;
+        connection.next_sequence = if (sequence == std.math.maxInt(u64)) 0 else sequence + 1;
     }
 }
 
@@ -1110,6 +1116,31 @@ test "native sync transport captures encrypted driver packets and handles replay
     connection.next_sequence = 3;
     try std.testing.expectError(error.NativeTransportReplayRejected, native_transport.sendSigned(&connection, "replay", signer));
     try std.testing.expectEqual(@as(usize, 1), native_transport.replay_rejection_count);
+
+    connection.next_sequence = std.math.maxInt(u64);
+    connection.highest_sent_sequence = std.math.maxInt(u64) - 1;
+    connection.highest_delivered_sequence = std.math.maxInt(u64) - 1;
+    connection.in_flight_frames = 0;
+    const last_delivery = try native_transport.sendSigned(&connection, "last sequence", signer);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), last_delivery.sequence);
+    try std.testing.expectEqual(@as(u64, 0), connection.next_sequence);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), connection.highest_sent_sequence);
+    try std.testing.expectEqual(@as(usize, 1), connection.in_flight_frames);
+    native_transport.acknowledge(&connection, std.math.maxInt(u64));
+    try std.testing.expectEqual(@as(usize, 0), connection.in_flight_frames);
+
+    const endpoint_frames_before_exhaustion = native_transport.endpoint_frame_count;
+    const network_frames_before_exhaustion = native_transport.network_frame_count;
+    const captured_frames_before_exhaustion = native_transport.capture.captured_count;
+    try std.testing.expectError(
+        error.NativeTransportSequenceExhausted,
+        native_transport.sendSigned(&connection, "exhausted", signer),
+    );
+    try std.testing.expectEqual(@as(u64, 0), connection.next_sequence);
+    try std.testing.expectEqual(endpoint_frames_before_exhaustion, native_transport.endpoint_frame_count);
+    try std.testing.expectEqual(network_frames_before_exhaustion, native_transport.network_frame_count);
+    try std.testing.expectEqual(captured_frames_before_exhaustion, native_transport.capture.captured_count);
+    try std.testing.expectEqual(@as(usize, 1), native_transport.replay_rejection_count);
 }
 
 fn verifiedSyncPeerBoot(generation: u64) !measured_boot.BootRecord {
@@ -1504,4 +1535,24 @@ test "native sync transport falls back through booted relay and encrypts object 
     native_transport.reconnect(&connection);
     const after_fallback = try native_transport.sendSigned(&connection, "after fallback", signer);
     try std.testing.expectEqual(@as(u64, 2), after_fallback.sequence);
+
+    native_transport.disconnect(&connection);
+    connection.next_sequence = std.math.maxInt(u64);
+    connection.highest_sent_sequence = std.math.maxInt(u64) - 1;
+    connection.highest_delivered_sequence = std.math.maxInt(u64) - 1;
+    const last_fallback = try native_transport.sendWithRelayFallback(&connection, &relay_service, "last fallback", signer);
+    try std.testing.expect(last_fallback.relay_fallback);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), last_fallback.sequence);
+    try std.testing.expectEqual(@as(u64, 0), connection.next_sequence);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), connection.highest_sent_sequence);
+
+    const accepted_before_exhaustion = relay_service.accepted_packets;
+    const fallbacks_before_exhaustion = native_transport.relay_fallback_count;
+    try std.testing.expectError(
+        error.NativeTransportSequenceExhausted,
+        native_transport.sendWithRelayFallback(&connection, &relay_service, "exhausted fallback", signer),
+    );
+    try std.testing.expectEqual(@as(u64, 0), connection.next_sequence);
+    try std.testing.expectEqual(accepted_before_exhaustion, relay_service.accepted_packets);
+    try std.testing.expectEqual(fallbacks_before_exhaustion, native_transport.relay_fallback_count);
 }

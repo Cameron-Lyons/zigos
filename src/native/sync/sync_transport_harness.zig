@@ -24,7 +24,9 @@ pub const Error = error{
     FrameSigningFailed,
     ProductionAttestationRequired,
     RelayDomainTooLong,
+    RelayPacketIdExhausted,
     RelayQueueFull,
+    TransportSessionIdExhausted,
 };
 
 pub const EncryptedPacket = struct {
@@ -93,7 +95,7 @@ pub const Relay = struct {
         if (!packet.encrypted or !packet.egress_allowed) return error.EgressDenied;
         if (packet.ciphertext_len == 0) return error.PacketEmpty;
         if (packet.ciphertext_len > packet.ciphertext.len) return error.PacketTooLarge;
-        const packet_id = self.nextPacketId();
+        const packet_id = try self.pendingPacketId();
         const slot_index = self.packets.reserveIndex(packet_id) orelse return error.RelayQueueFull;
         const slot = &self.packets.slots[slot_index];
         slot.packet_id = packet_id;
@@ -102,6 +104,7 @@ pub const Relay = struct {
             _ = self.packets.removeIndex(slot_index);
             native_util.impossibleByInvariant("relay session index capacity covers relay packet slots");
         }
+        self.next_packet_id = nextMonotonicId(packet_id);
         self.accepted_packets += 1;
     }
 
@@ -129,11 +132,9 @@ pub const Relay = struct {
         return plaintext;
     }
 
-    fn nextPacketId(self: *Relay) u64 {
-        const packet_id = self.next_packet_id;
-        self.next_packet_id +%= 1;
-        if (self.next_packet_id == 0) self.next_packet_id = 1;
-        return packet_id;
+    fn pendingPacketId(self: *const Relay) Error!u64 {
+        if (self.next_packet_id == 0) return error.RelayPacketIdExhausted;
+        return self.next_packet_id;
     }
 };
 
@@ -458,10 +459,11 @@ pub const Harness = struct {
             self.denied_sessions += 1;
             return error.EgressDenied;
         }
+        const session_id = try self.pendingSessionId();
         const trust_posture = sessionTrustPosture(request.evidence, decision.policy_decision);
 
         var session = TransportSession{
-            .id = self.nextSessionId(),
+            .id = session_id,
             .task_id = request.task_id,
             .transport = transport,
             .policy_id = request.policy_id,
@@ -482,18 +484,21 @@ pub const Harness = struct {
         };
         session.relay_domain_len = @min(relay_domain.len, session.relay_domain.len);
         @memcpy(session.relay_domain[0..session.relay_domain_len], relay_domain[0..session.relay_domain_len]);
+        self.next_session_id = nextMonotonicId(session_id);
         self.created_sessions += 1;
         return session;
     }
 
-    fn nextSessionId(self: *Harness) u64 {
-        if (self.next_session_id == 0) self.next_session_id = 1;
-        const session_id = self.next_session_id;
-        self.next_session_id +%= 1;
-        if (self.next_session_id == 0) self.next_session_id = 1;
-        return session_id;
+    fn pendingSessionId(self: *const Harness) Error!u64 {
+        if (self.next_session_id == 0) return error.TransportSessionIdExhausted;
+        return self.next_session_id;
     }
 };
+
+fn nextMonotonicId(id: u64) u64 {
+    std.debug.assert(id != 0);
+    return if (id == std.math.maxInt(u64)) 0 else id + 1;
+}
 
 pub const EmulatedNativeTransport = struct {
     harness: Harness = Harness.init(),
@@ -796,6 +801,28 @@ test "encrypted transport harness only creates sessions after egress approval" {
     try std.testing.expectEqual(@as(usize, 1 + extra_packets), relay_queue.accepted_packets);
     try std.testing.expectEqual(@as(usize, 1 + extra_packets), relay_queue.delivered_packets);
 
+    var exhausted_relay = Relay.init();
+    exhausted_relay.next_packet_id = std.math.maxInt(u64);
+    try exhausted_relay.submit(packet);
+    try std.testing.expect(exhausted_relay.packets.getConst(std.math.maxInt(u64)) != null);
+    try std.testing.expectEqual(@as(u64, 0), exhausted_relay.next_packet_id);
+    try std.testing.expectEqual(@as(usize, 1), exhausted_relay.accepted_packets);
+    try std.testing.expectError(error.RelayPacketIdExhausted, exhausted_relay.submit(packet));
+    try std.testing.expectEqual(@as(u64, 0), exhausted_relay.next_packet_id);
+    try std.testing.expectEqual(@as(usize, 1), exhausted_relay.packets.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), exhausted_relay.accepted_packets);
+
+    var full_relay = Relay.init();
+    var full_index: usize = 0;
+    while (full_index < MAX_RELAY_PACKETS) : (full_index += 1) {
+        try full_relay.submit(packet);
+    }
+    const packet_id_before_full = full_relay.next_packet_id;
+    try std.testing.expectError(error.RelayQueueFull, full_relay.submit(packet));
+    try std.testing.expectEqual(packet_id_before_full, full_relay.next_packet_id);
+    try std.testing.expectEqual(MAX_RELAY_PACKETS, full_relay.packets.countInUse());
+    try std.testing.expectEqual(MAX_RELAY_PACKETS, full_relay.accepted_packets);
+
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, .{
         .task_id = 42,
         .principal_id = app,
@@ -826,9 +853,15 @@ test "encrypted transport harness only creates sessions after egress approval" {
     var wrapping_harness = Harness.init();
     wrapping_harness.next_session_id = std.math.maxInt(u64);
     const last_session = try wrapping_harness.openRelay(&broker, relay_request, source, target, "relay.sync.example");
-    const wrapped_session = try wrapping_harness.openRelay(&broker, relay_request, source, target, "relay.sync.example");
     try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), last_session.id);
-    try std.testing.expectEqual(@as(u64, 1), wrapped_session.id);
+    try std.testing.expectEqual(@as(u64, 0), wrapping_harness.next_session_id);
+    try std.testing.expectEqual(@as(usize, 1), wrapping_harness.created_sessions);
+    try std.testing.expectError(
+        error.TransportSessionIdExhausted,
+        wrapping_harness.openRelay(&broker, relay_request, source, target, "relay.sync.example"),
+    );
+    try std.testing.expectEqual(@as(u64, 0), wrapping_harness.next_session_id);
+    try std.testing.expectEqual(@as(usize, 1), wrapping_harness.created_sessions);
 }
 
 test "booted overlay relay service rejects unauthorized relay and target changes" {
