@@ -290,6 +290,11 @@ test "storage quota policy rejects writes above the first supported envelope" {
 }
 
 test "storage volume separates generic, target nvme, and brokered ata attachments" {
+    try std.testing.expect(!@hasField(Volume, "attached_ata_device"));
+    try std.testing.expect(!@hasDecl(Volume, "attachAtaBootstrapDevice"));
+    try std.testing.expect(!@hasDecl(storage_volume, "attachAtaBootstrapDevice"));
+    try std.testing.expect(std.meta.stringToEnum(storage_volume.AttachedBackendKind, "ata_bootstrap") == null);
+
     const BackendFns = struct {
         fn read(_: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
             @memset(buffer_ptr[0..buffer_len], 0);

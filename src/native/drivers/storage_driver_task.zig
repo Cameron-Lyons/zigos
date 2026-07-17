@@ -4,11 +4,7 @@ const abi = @import("../core/abi.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const device_broker_client = @import("../kernel_api/device_broker_client.zig");
-const root = @import("root");
-const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
-    root.storage_volume
-else
-    @import("../storage/storage_volume.zig");
+const storage_volume = @import("../storage/storage_volume.zig");
 const x86 = if (builtin.target.os.tag == .freestanding)
     @import("../../arch/x86.zig")
 else
@@ -117,10 +113,6 @@ pub fn establishAtaBootstrapSession(
     };
 }
 
-pub fn attachAtaBootstrapSession(session: *AtaControllerSession) void {
-    storage_volume.attachAtaBootstrapDevice(@ptrCast(session), session.sector_count);
-}
-
 pub fn readAtaBootstrapSession(session: *AtaControllerSession, start_lba: u64, buffer: []u8) bool {
     readAtaBootstrapSessionChecked(session, start_lba, buffer) catch return false;
     return true;
@@ -194,31 +186,6 @@ pub fn staleDmaPortAccessRejectedAfterGenerationChange(session: *const AtaContro
 
 pub fn staleBrokeredDmaBufferRejectedAfterGenerationChange(session: *const AtaControllerSession) bool {
     return !device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
-}
-
-export fn zigosStorageBootstrapAtaRead(
-    device_ptr: *const anyopaque,
-    start_lba: u64,
-    buffer_ptr: [*]u8,
-    buffer_len: usize,
-) callconv(.c) bool {
-    const session: *AtaControllerSession = @ptrCast(@alignCast(@constCast(device_ptr)));
-    return readAtaBootstrapSession(session, start_lba, buffer_ptr[0..buffer_len]);
-}
-
-export fn zigosStorageBootstrapAtaWrite(
-    device_ptr: *const anyopaque,
-    start_lba: u64,
-    buffer_ptr: [*]const u8,
-    buffer_len: usize,
-) callconv(.c) bool {
-    const session: *AtaControllerSession = @ptrCast(@alignCast(@constCast(device_ptr)));
-    return writeAtaBootstrapSession(session, start_lba, buffer_ptr[0..buffer_len]);
-}
-
-export fn zigosStorageBootstrapAtaFlush(device_ptr: *const anyopaque) callconv(.c) bool {
-    const session: *AtaControllerSession = @ptrCast(@alignCast(@constCast(device_ptr)));
-    return flushAtaBootstrapSession(session);
 }
 
 fn readSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []u8) AtaDriverError!void {
@@ -395,7 +362,7 @@ fn mapBrokerError(err: anyerror) AtaDriverError {
     };
 }
 
-test "storage driver task attaches only through the kernel device broker" {
+test "storage driver task establishes ATA sessions only through the kernel device broker" {
     const capability = @import("../kernel_api/capability.zig");
     const endpoint = @import("../kernel_api/endpoint.zig");
     const native_kernel = @import("../kernel_api/native_kernel.zig");
@@ -404,8 +371,11 @@ test "storage driver task attaches only through the kernel device broker" {
     const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
     const task_runtime = @import("../task/task_runtime.zig");
 
-    storage_volume.clearAttachedBackend();
-    defer storage_volume.clearAttachedBackend();
+    try std.testing.expect(!@hasDecl(@This(), "attachAtaBootstrapSession"));
+    try std.testing.expect(!@hasDecl(@This(), "zigosStorageBootstrapAtaRead"));
+    try std.testing.expect(!@hasDecl(@This(), "zigosStorageBootstrapAtaWrite"));
+    try std.testing.expect(!@hasDecl(@This(), "zigosStorageBootstrapAtaFlush"));
+
     device_broker.reset();
     defer device_broker.reset();
 
@@ -482,6 +452,4 @@ test "storage driver task attaches only through the kernel device broker" {
         error.InvalidParameter,
         writeAtaBootstrapSessionChecked(&session, 0, readback[0 .. storage_volume.sector_size / 2]),
     );
-    attachAtaBootstrapSession(&session);
-    try std.testing.expect(storage_volume.hasAttachedDevice());
 }
