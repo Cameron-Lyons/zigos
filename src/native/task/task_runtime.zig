@@ -156,10 +156,10 @@ pub const Runtime = struct {
         out.task_count = 0;
         var slot_index: usize = 0;
         while (slot_index < MAX_TASKS) : (slot_index += 1) {
-            const slot = self.tasks.slotAtConst(slot_index).*;
+            const slot = self.tasks.slotAtConst(slot_index);
             if (!slot.in_use) continue;
             const dense_index = out.task_count;
-            out.tasks[dense_index] = slot;
+            out.tasks[dense_index] = slot.*;
             copyTaskColdForTask(&out.task_cold[dense_index], &self.task_cold[slot_index], &slot.task);
             out.task_count += 1;
         }
@@ -184,23 +184,29 @@ pub const Runtime = struct {
 
         var task_index: usize = 0;
         while (task_index < state.task_count) : (task_index += 1) {
+            if (!state.tasks[task_index].in_use) {
+                native_util.impossibleByInvariant("counted task snapshot records are live");
+            }
             const task_id = state.tasks[task_index].task.id;
             const slot_index = self.tasks.reserveIndexAt(task_id, task_index) orelse {
                 native_util.impossibleByInvariant("task snapshot count is bounded by task arena capacity");
             };
-            self.tasks.slotAt(slot_index).* = state.tasks[task_index];
+            self.tasks.slotAt(slot_index).task = state.tasks[task_index].task;
             copyTaskColdForTask(&self.task_cold[task_index], &state.task_cold[task_index], &state.tasks[task_index].task);
+            self.rebuildTaskDerivedIndexesAt(slot_index);
         }
 
         var address_space_index: usize = 0;
         while (address_space_index < state.address_space_count) : (address_space_index += 1) {
+            if (!state.address_spaces[address_space_index].in_use) {
+                native_util.impossibleByInvariant("counted address-space snapshot records are live");
+            }
             const address_space_id = state.address_spaces[address_space_index].address_space.id;
             const slot_index = self.address_spaces.reserveIndexAt(address_space_id, address_space_index) orelse {
                 native_util.impossibleByInvariant("address-space snapshot count is bounded by address-space arena capacity");
             };
-            self.address_spaces.slots[slot_index] = state.address_spaces[address_space_index];
+            self.address_spaces.slots[slot_index].address_space = state.address_spaces[address_space_index].address_space;
         }
-        self.rebuildIndexes();
         self.debugAssertIndexIntegrity();
         self.notifyAddressSpaceRetirements(&retirements);
     }
@@ -229,16 +235,21 @@ pub const Runtime = struct {
         while (slot_index < MAX_TASKS) : (slot_index += 1) {
             const slot = self.tasks.slotAt(slot_index);
             if (!slot.in_use) continue;
-            slot.task.cold_state = &self.task_cold[slot_index];
-            if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
-                native_util.impossibleByInvariant("task owner index capacity covers task slots");
-            }
-            self.task_state_counts[taskStateIndex(slot.task.state)] += 1;
-            if (!self.appendInitialComponentLabelIndex(slot_index, &slot.task)) {
-                native_util.impossibleByInvariant("task label index capacity covers task slots");
-            }
-            rebuildCapabilityIndex(&slot.task);
+            self.rebuildTaskDerivedIndexesAt(slot_index);
         }
+    }
+
+    fn rebuildTaskDerivedIndexesAt(self: *Runtime, slot_index: usize) void {
+        const slot = self.tasks.slotAt(slot_index);
+        slot.task.cold_state = &self.task_cold[slot_index];
+        if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
+            native_util.impossibleByInvariant("task owner index capacity covers task slots");
+        }
+        self.task_state_counts[taskStateIndex(slot.task.state)] += 1;
+        if (!self.appendInitialComponentLabelIndex(slot_index, &slot.task)) {
+            native_util.impossibleByInvariant("task label index capacity covers task slots");
+        }
+        rebuildCapabilityIndex(&slot.task);
     }
 
     pub fn createTask(self: *Runtime, request: TaskCreateRequest) Error!*TaskRecord {
@@ -1205,14 +1216,53 @@ test "restoring a snapshot rebuilds authoritative indexes" {
     runtime.writeSnapshot(&snapshot);
 
     var restored = Runtime.init();
+    restored.next_task_id = 100;
+    restored.next_process_id = 100;
+    restored.next_address_space_id = 100;
+    restored.next_namespace_id = 100;
+    const stale_owner: principal.PrincipalId = .{ .kind = .app, .serial = 99 };
+    const stale_task = try restored.createTask(.{
+        .owner = stale_owner,
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = TEST_MINIMAL_MEMORY_BYTES,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+        },
+        .local_only = true,
+        .initial_component = .{
+            .label = "stale-service",
+            .entry = "zigos.stale.service",
+        },
+    });
+    const stale_task_id = stale_task.id;
+    const stale_address_space_id = stale_task.address_space_id;
+    try restored.grantCapability(stale_task_id, 92);
+    try std.testing.expect(try restored.suspendTask(stale_task_id, 1));
+
     restored.restoreFromSnapshot(&snapshot);
 
     const restored_task = restored.find(task_id).?;
+    try std.testing.expect(restored.find(stale_task_id) == null);
+    try std.testing.expect(restored.findAddressSpaceConst(stale_address_space_id) == null);
+    try std.testing.expect(restored.findByOwner(stale_owner) == null);
+    try std.testing.expect(restored.findByInitialComponentLabel("stale-service") == null);
+    try std.testing.expect(!restored.hasCapability(stale_task_id, 92));
+    try std.testing.expectEqual(@as(usize, 1), restored.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.suspended));
     try std.testing.expect(restored.findAddressSpaceConst(address_space_id) != null);
+    try std.testing.expectEqual(task_id, restored.findByOwner(.{ .kind = .service, .serial = 22 }).?.id);
     try std.testing.expect(restored.hasCapability(task_id, 91));
     try std.testing.expectEqual(@as(usize, 2), restored_task.provenance_count);
     try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_grant, restored_task.latestProvenanceEvent().?.kind);
     try std.testing.expectEqual(@as(u64, 91), restored_task.latestProvenanceEvent().?.capability_id);
+
+    const post_restore_task = try createTaskIdTestTask(&restored, 23);
+    try std.testing.expectEqual(snapshot.next_task_id, post_restore_task.id);
+    const pre_rehost_address_space_id = restored.find(task_id).?.address_space_id;
+    try std.testing.expect(try restored.rehostTask(task_id, 2));
+    try std.testing.expect(restored.findAddressSpaceConst(pre_rehost_address_space_id) == null);
 }
 
 test "explicit resource classes override the default task classification" {
