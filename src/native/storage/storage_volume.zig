@@ -201,14 +201,14 @@ pub const Volume = struct {
         if (!self.hasAttachedDevice()) return .{ .generation = 0 };
         if (self.attached_backend_sector_count < required_device_sectors) return error.ImageTooSmall;
 
-        const current = volume_root_slot.findLatestBackendRoot(self) catch null;
-        return saveIncremental(self, current, store, workspaces, BackendWriteFns{ .volume = self });
+        const selection = selectBackendSaveRoot(self);
+        return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, BackendWriteFns{ .volume = self });
     }
 
     pub fn saveToImage(self: *Volume, image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
         if (image.len < image_bytes) return error.ImageTooSmall;
-        const current = volume_root_slot.findLatestImageRoot(image) catch null;
-        return saveIncremental(self, current, store, workspaces, ImageWriteFns{ .image = image });
+        const selection = selectImageSaveRoot(image);
+        return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, ImageWriteFns{ .image = image });
     }
 
     pub fn loadFromImage(self: *Volume, image: []const u8, store: *object_store.Store, workspaces: *workspace.Directory) !u64 {
@@ -230,6 +230,11 @@ const WorkspaceSummary = volume_root_slot.WorkspaceSummary;
 const RootState = volume_root_slot.RootState;
 const LoadedRoot = volume_root_slot.LoadedRoot;
 const BuiltLog = volume_log.BuiltLog;
+
+const SaveRootSelection = struct {
+    current: ?LoadedRoot = null,
+    force_compaction: bool = false,
+};
 
 pub fn attachBackend(backend: Backend) void {
     default_volume.attachBackend(backend);
@@ -294,6 +299,7 @@ const ImageWriteFns = struct {
 fn saveIncremental(
     self: *Volume,
     current: ?LoadedRoot,
+    force_compaction: bool,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
     writer: anytype,
@@ -304,16 +310,29 @@ fn saveIncremental(
         workspaces.dirtyWorkspaceIds().len != 0 or
         workspaces.dirtySnapshotIds().len != 0;
     const current_generation = if (current) |loaded| loaded.root.generation else 0;
+    const can_append = !force_compaction and if (current) |loaded|
+        canAppendToRoot(loaded.root, store, workspaces)
+    else
+        false;
     const state_hashes = &self.workspace_state_hashes;
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         state_hashes.invalidate(workspace_id.raw());
     }
     const delta = if (current) |loaded|
+        if (can_append)
         try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
+        else
+            BuiltLog{}
     else
         BuiltLog{};
 
-    if (current != null and delta.bytes_len == 0) {
+    // The selected root can be visible through a write-back cache even when
+    // its final durability barrier failed. Settle it before a forced
+    // compaction chooses the opposite region, which may still back the prior
+    // durable root.
+    if (current != null and !can_append) try flushWrites(writer);
+
+    if (can_append and delta.bytes_len == 0) {
         // A failed post-root barrier can leave the new root visible through a
         // write-back controller cache while its corresponding dirty state remains
         // set. Retry the barrier before accepting that visible root as durable.
@@ -323,7 +342,7 @@ fn saveIncremental(
         return .{ .generation = current_generation };
     }
 
-    if (current != null and appendLogFits(current.?.root, delta)) {
+    if (can_append and appendLogFits(current.?.root, delta)) {
         const next_generation = current_generation + 1;
         const data_offset = current.?.root.data_offset;
         const next_log_bytes = current.?.root.log_bytes + @as(u32, @intCast(delta.bytes_len));
@@ -372,6 +391,39 @@ fn saveIncremental(
     store.clearDirty();
     workspaces.clearDirty();
     return .{ .generation = next_generation };
+}
+
+fn selectImageSaveRoot(image: []const u8) SaveRootSelection {
+    var selection = SaveRootSelection{};
+    var sector_index: u32 = 0;
+    while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
+        const offset = @as(usize, sector_index) * sector_size;
+        const sector = image[offset .. offset + sector_size];
+        if (!volume_root_slot.hasRootMagic(sector)) continue;
+        const loaded = volume_root_slot.readImageRoot(image, sector_index) catch {
+            selection.force_compaction = true;
+            continue;
+        };
+        if (selection.current == null or loaded.root.generation > selection.current.?.root.generation) {
+            selection.current = loaded;
+        }
+    }
+    return selection;
+}
+
+fn selectBackendSaveRoot(self: *Volume) SaveRootSelection {
+    var selection = SaveRootSelection{};
+    var sector_index: u32 = 0;
+    while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
+        const loaded = volume_root_slot.readBackendRoot(self, sector_index) catch {
+            if (volume_root_slot.hasRootMagic(self.sector_buffer[0..])) selection.force_compaction = true;
+            continue;
+        };
+        if (selection.current == null or loaded.root.generation > selection.current.?.root.generation) {
+            selection.current = loaded;
+        }
+    }
+    return selection;
 }
 
 fn appendLogFits(root: RootState, delta: BuiltLog) bool {
@@ -463,8 +515,7 @@ fn loadImageRootCandidate(
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
     const region_start = data_start_byte + loaded.root.data_offset;
     if (region_start + loaded.root.log_bytes > image.len) return error.CorruptImage;
-    @memcpy(self.io_log_buffer[0..loaded.root.log_bytes], image[region_start .. region_start + loaded.root.log_bytes]);
-    try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+    try replayLog(self, store, workspaces, image[region_start .. region_start + loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
@@ -646,6 +697,59 @@ fn buildDeltaLog(
     };
 }
 
+fn canAppendToRoot(root: RootState, store: *const object_store.Store, workspaces: *const workspace.Directory) bool {
+    if (!volume_root_slot.hasCanonicalDeltaWatermarks(root)) return false;
+    if (volume_root_slot.lastIssuedId(root.next_object_id) > volume_root_slot.lastIssuedId(store.next_object_id)) return false;
+    if (root.last_version_id > volume_root_slot.lastIssuedId(store.next_version_id)) return false;
+    if (volume_root_slot.lastIssuedId(root.next_workspace_id) > volume_root_slot.lastIssuedId(workspaces.next_workspace_id)) return false;
+    if (root.last_snapshot_id > volume_root_slot.lastIssuedId(workspaces.next_snapshot_id)) return false;
+
+    // Dirty identifiers at or below a root watermark are ambiguous: they can
+    // come from a visible root whose final durability barrier failed, or from a
+    // corrupted root that falsely claims data is already present. Compacting
+    // is safe in both cases and avoids silently clearing unpersisted records.
+    for (store.dirtyObjectIds()) |object_id| {
+        const object_record = store.objectConst(object_id) orelse return false;
+        if (object_record.latest_version_id.raw() <= root.last_version_id) return false;
+    }
+    for (store.dirtyVersionIds()) |version_id| {
+        _ = store.versionConst(version_id) orelse return false;
+        if (version_id.raw() <= root.last_version_id) return false;
+    }
+    for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
+        _ = workspaces.findConst(workspace_id) orelse return false;
+    }
+    for (workspaces.dirtySnapshotIds()) |snapshot_id| {
+        _ = workspaces.findSnapshotConst(snapshot_id) orelse return false;
+        if (snapshot_id.raw() <= root.last_snapshot_id) return false;
+    }
+    return true;
+}
+
+fn replayedIdsFitRoot(root: RootState, store: *const object_store.Store, workspaces: *const workspace.Directory) bool {
+    for (&store.objects.slots) |*slot| {
+        if (!slot.in_use) continue;
+        if (!issuedBeforeNext(slot.object.id.raw(), root.next_object_id)) return false;
+    }
+    for (&store.versions.slots) |*slot| {
+        if (!slot.in_use) continue;
+        if (slot.version.id.raw() > root.last_version_id) return false;
+    }
+    for (&workspaces.workspaces.slots) |*slot| {
+        if (!slot.in_use) continue;
+        if (!issuedBeforeNext(slot.workspace.id.raw(), root.next_workspace_id)) return false;
+    }
+    for (&workspaces.snapshots.slots) |*slot| {
+        if (!slot.in_use) continue;
+        if (slot.snapshot.id.raw() > root.last_snapshot_id) return false;
+    }
+    return true;
+}
+
+fn issuedBeforeNext(id: u64, next_id: u64) bool {
+    return next_id == 0 or id < next_id;
+}
+
 fn buildRootState(
     generation: u64,
     log_bytes: u32,
@@ -660,8 +764,8 @@ fn buildRootState(
         .next_version_id = store.next_version_id,
         .next_workspace_id = workspaces.next_workspace_id,
         .next_snapshot_id = workspaces.next_snapshot_id,
-        .last_version_id = lastIssuedId(store.next_version_id),
-        .last_snapshot_id = lastIssuedId(workspaces.next_snapshot_id),
+        .last_version_id = volume_root_slot.lastIssuedId(store.next_version_id),
+        .last_snapshot_id = volume_root_slot.lastIssuedId(workspaces.next_snapshot_id),
     };
     for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
@@ -675,10 +779,6 @@ fn buildRootState(
     return root;
 }
 
-fn lastIssuedId(next_id: u64) u64 {
-    return if (next_id == 0) std.math.maxInt(u64) else next_id - 1;
-}
-
 fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
     var index: usize = 0;
     while (index < root.workspace_summary_count) : (index += 1) {
@@ -689,6 +789,7 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
 }
 
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
+    if (!volume_root_slot.hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     store.reset();
     workspaces.reset();
     // The directory contents are replaced wholesale below and replay clears
@@ -698,21 +799,19 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     if (root.log_segment_count > max_log_segments) return error.CorruptImage;
 
     var reader = CursorReader{ .buffer = log };
-    var saw_checkpoint = false;
     var replayed_records: u16 = 0;
     var replayed_segments: u16 = 0;
     while (reader.offset < reader.buffer.len) {
         const header = try volume_log.readRecordHeader(&reader);
         const payload = try reader.readSlice(header.payload_len);
         if (volume_hashing.checksumBytes(payload) != header.checksum) return error.ChecksumMismatch;
+        if (replayed_records == 0 and header.kind != .checkpoint) return error.MissingCheckpoint;
+        if (replayed_records != 0 and header.kind == .checkpoint) return error.CorruptImage;
         replayed_records += 1;
         if (replayed_records > max_replay_log_records) return error.CorruptImage;
 
         switch (header.kind) {
-            .checkpoint => {
-                try deserializeState(self, store, workspaces, payload);
-                saw_checkpoint = true;
-            },
+            .checkpoint => try deserializeState(self, store, workspaces, payload),
             .segment_boundary => {
                 if (payload.len != 0) return error.CorruptImage;
                 replayed_segments += 1;
@@ -726,16 +825,17 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
             .snapshot_state => try applySnapshotRecord(self, workspaces, payload),
         }
     }
-    if (!saw_checkpoint) return error.MissingCheckpoint;
+    if (replayed_records == 0) return error.MissingCheckpoint;
     if (replayed_records != root.log_record_count) return error.CorruptImage;
     if (replayed_segments != root.log_segment_count) return error.CorruptImage;
+    if (!replayedIdsFitRoot(root, store, workspaces)) return error.CorruptImage;
 
     store.next_object_id = root.next_object_id;
     store.next_version_id = root.next_version_id;
     workspaces.next_workspace_id = root.next_workspace_id;
     workspaces.next_snapshot_id = root.next_snapshot_id;
-    store.rebuildIndexes();
-    workspaces.rebuildIndexes();
+    store.rebuildDerivedIndexes();
+    workspaces.rebuildDerivedIndexes();
 }
 
 fn countLogRecords(log: []const u8) Error!u16 {
@@ -893,7 +993,7 @@ fn encodeSnapshotBody(writer: *CursorWriter, record: *const workspace.SnapshotRe
 fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
     const object_id = ids.object(try reader.readU64());
-    const slot_index = store.objects.slotIndexOf(object_id) orelse store.objects.reserveIndex(object_id) orelse return error.CorruptImage;
+    const slot_index = store.objects.slotIndexOf(object_id) orelse store.objects.reserveIndexClean(object_id) orelse return error.CorruptImage;
     const object_type = try parseObjectType(try reader.readByte());
     const latest_version_id = ids.version(try reader.readU64());
     const version_count = try reader.readU16();
@@ -910,7 +1010,7 @@ fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const
 fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
     const version_id = ids.version(try reader.readU64());
-    const slot_index = store.versions.reserveIndex(version_id) orelse return error.CorruptImage;
+    const slot_index = store.versions.reserveIndexClean(version_id) orelse return error.CorruptImage;
     store.versions.slots[slot_index].version.id = version_id;
     store.versions.slots[slot_index].version.object_id = ids.object(try reader.readU64());
     store.versions.slots[slot_index].version.previous_version_id = ids.version(try reader.readU64());
@@ -980,7 +1080,7 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     var reader = CursorReader{ .buffer = payload };
     const workspace_id = ids.workspace(try reader.readU64());
     const slot = workspaces.workspaces.get(workspace_id) orelse
-        workspaces.workspaces.reserve(workspace_id) orelse return error.CorruptImage;
+        workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
     slot.workspace = zeroWorkspaceRecord();
     slot.workspace.id = workspace_id;
     slot.workspace.owner = try readPrincipal(&reader);
@@ -1015,7 +1115,7 @@ fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload:
     var reader = CursorReader{ .buffer = payload };
     const snapshot_id = ids.snapshot(try reader.readU64());
     const slot_index = workspaces.snapshots.slotIndexOf(snapshot_id) orelse
-        workspaces.snapshots.reserveIndex(snapshot_id) orelse return error.CorruptImage;
+        workspaces.snapshots.reserveIndexClean(snapshot_id) orelse return error.CorruptImage;
     workspaces.snapshots.slots[slot_index].snapshot = zeroSnapshotRecord();
     workspaces.snapshots.slots[slot_index].snapshot.id = snapshot_id;
     workspaces.snapshots.slots[slot_index].snapshot.workspace_id = ids.workspace(try reader.readU64());
@@ -1080,9 +1180,6 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
 }
 
 fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, payload: []const u8) Error!void {
-    store.reset();
-    workspaces.reset();
-
     var reader = CursorReader{ .buffer = payload };
     var payload_magic_bytes: [payload_magic.len]u8 = undefined;
     try reader.readBytes(&payload_magic_bytes);
@@ -1112,7 +1209,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, object_count)) |_| {
         const object_id = ids.object(try reader.readU64());
-        const slot_index = store.objects.reserveIndex(object_id) orelse return error.CorruptImage;
+        const slot_index = store.objects.reserveIndexClean(object_id) orelse return error.CorruptImage;
         const slot = &store.objects.slots[slot_index];
         slot.object.id = object_id;
         slot.object.object_type = try parseObjectType(try reader.readByte());
@@ -1150,7 +1247,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, version_count)) |_| {
         const version_id = ids.version(try reader.readU64());
-        const slot_index = store.versions.reserveIndex(version_id) orelse return error.CorruptImage;
+        const slot_index = store.versions.reserveIndexClean(version_id) orelse return error.CorruptImage;
         store.versions.slots[slot_index].version.id = version_id;
         store.versions.slots[slot_index].version.object_id = ids.object(try reader.readU64());
         store.versions.slots[slot_index].version.previous_version_id = ids.version(try reader.readU64());
@@ -1174,7 +1271,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, workspace_count_value)) |_| {
         const workspace_id = ids.workspace(try reader.readU64());
-        const slot = workspaces.workspaces.reserve(workspace_id) orelse return error.CorruptImage;
+        const slot = workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
         slot.workspace = zeroWorkspaceRecord();
         slot.workspace.id = workspace_id;
         slot.workspace.owner = try readPrincipal(&reader);
@@ -1207,7 +1304,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, snapshot_count_value)) |_| {
         const snapshot_id = ids.snapshot(try reader.readU64());
-        const slot_index = workspaces.snapshots.reserveIndex(snapshot_id) orelse return error.CorruptImage;
+        const slot_index = workspaces.snapshots.reserveIndexClean(snapshot_id) orelse return error.CorruptImage;
         workspaces.snapshots.slots[slot_index].snapshot = zeroSnapshotRecord();
         workspaces.snapshots.slots[slot_index].snapshot.id = snapshot_id;
         workspaces.snapshots.slots[slot_index].snapshot.workspace_id = ids.workspace(try reader.readU64());
@@ -1219,8 +1316,6 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
     }
 
-    store.rebuildIndexes();
-    workspaces.rebuildIndexes();
 }
 
 fn writeMetadata(writer: *CursorWriter, metadata: object_store.SignedMetadata) Error!void {
@@ -1442,6 +1537,81 @@ fn zeroWorkspaceRecord() workspace.WorkspaceRecord {
 
 fn zeroSnapshotRecord() workspace.SnapshotRecord {
     return workspace.emptySnapshotRecord();
+}
+
+test "storage replay requires exactly one leading checkpoint" {
+    const allocator = std.testing.allocator;
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.reset();
+
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    store.* = object_store.Store.init();
+
+    const workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(workspaces);
+    workspaces.* = workspace.Directory.init();
+
+    const checkpoint_payload = try allocator.alloc(u8, max_payload_bytes);
+    defer allocator.free(checkpoint_payload);
+    const checkpoint_payload_len = try serializeState(store, workspaces, checkpoint_payload);
+    const log = try allocator.alloc(u8, 2 * (volume_log.recordHeaderLen() + checkpoint_payload_len));
+    defer allocator.free(log);
+
+    var missing_writer = CursorWriter{ .buffer = log };
+    try volume_log.appendRecordPayload(&missing_writer, .segment_boundary, "");
+    try std.testing.expectError(error.MissingCheckpoint, replayLog(
+        volume,
+        store,
+        workspaces,
+        log[0..missing_writer.offset],
+        .{ .log_record_count = 1, .log_segment_count = 1 },
+    ));
+
+    var late_writer = CursorWriter{ .buffer = log };
+    try volume_log.appendRecordPayload(&late_writer, .segment_boundary, "");
+    try volume_log.appendRecordPayload(&late_writer, .checkpoint, checkpoint_payload[0..checkpoint_payload_len]);
+    try std.testing.expectError(error.MissingCheckpoint, replayLog(
+        volume,
+        store,
+        workspaces,
+        log[0..late_writer.offset],
+        .{ .log_record_count = 2, .log_segment_count = 1 },
+    ));
+
+    var duplicate_writer = CursorWriter{ .buffer = log };
+    try volume_log.appendRecordPayload(&duplicate_writer, .checkpoint, checkpoint_payload[0..checkpoint_payload_len]);
+    try volume_log.appendRecordPayload(&duplicate_writer, .checkpoint, checkpoint_payload[0..checkpoint_payload_len]);
+    try std.testing.expectError(error.CorruptImage, replayLog(
+        volume,
+        store,
+        workspaces,
+        log[0..duplicate_writer.offset],
+        .{ .log_record_count = 2 },
+    ));
+}
+
+test "storage append rejects issuance watermark rewind" {
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    store.* = object_store.Store.init();
+    const workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(workspaces);
+    workspaces.* = workspace.Directory.init();
+
+    try std.testing.expect(canAppendToRoot(.{}, store, workspaces));
+    try std.testing.expect(!canAppendToRoot(.{ .next_object_id = 2 }, store, workspaces));
+    try std.testing.expect(!canAppendToRoot(.{
+        .next_version_id = 2,
+        .last_version_id = 1,
+    }, store, workspaces));
+    try std.testing.expect(!canAppendToRoot(.{ .next_workspace_id = 2 }, store, workspaces));
+    try std.testing.expect(!canAppendToRoot(.{
+        .next_snapshot_id = 2,
+        .last_snapshot_id = 1,
+    }, store, workspaces));
 }
 
 pub const testing = struct {

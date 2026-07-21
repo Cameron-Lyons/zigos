@@ -154,7 +154,7 @@ fn expectBarrierFailurePreservesDirtyState(failing_flush: usize, object_serial: 
     // that root before it is allowed to clear the dirty sets.
     WriteBackBackend.beginAttempt(0);
     const retried = try volume.saveToVolume(&store, &workspaces);
-    try std.testing.expectEqual(@as(u64, 1), retried.generation);
+    try std.testing.expectEqual(@as(u64, if (failing_flush == 2) 2 else 1), retried.generation);
     try std.testing.expectEqual(@as(usize, 0), store.dirtyObjectIds().len);
     try std.testing.expectEqual(@as(usize, 0), store.dirtyVersionIds().len);
     try std.testing.expectEqual(@as(usize, 0), workspaces.dirtyWorkspaceIds().len);
@@ -238,6 +238,151 @@ test "storage volume preserves exhausted identifier watermarks" {
     const loaded_root = (try volume_root_slot.findLatestImageRoot(image)).?;
     try std.testing.expectEqual(std.math.maxInt(u64), loaded_root.root.last_version_id);
     try std.testing.expectEqual(std.math.maxInt(u64), loaded_root.root.last_snapshot_id);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    _ = try volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
+    try std.testing.expectEqual(@as(u64, 0), loaded_store.next_version_id);
+    try std.testing.expectEqual(@as(u64, 0), loaded_workspaces.next_snapshot_id);
+}
+
+test "storage volume compacts instead of trusting ahead delta watermarks" {
+    const allocator = std.testing.allocator;
+    const image = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(image);
+    @memset(image, 0);
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.reset();
+
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-watermark",
+        .seed = signing.seedFromByte(0x57),
+    };
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const first = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(941),
+        .object_type = .document,
+        .payload = "first",
+        .metadata = try object_store.signMetadata(signer, "watermark", "text/plain", .document, "first", 1),
+    });
+    const notes = try workspaces.create(.{
+        .owner = .{ .kind = .user, .serial = 941 },
+        .label = "watermark-notes",
+    });
+    _ = try volume.saveToImage(image, &store, &workspaces);
+
+    var loaded_root = (try volume_root_slot.findLatestImageRoot(image)).?;
+    loaded_root.root.next_version_id += 4;
+    loaded_root.root.last_version_id = volume_root_slot.lastIssuedId(loaded_root.root.next_version_id);
+    loaded_root.root.next_snapshot_id += 4;
+    loaded_root.root.last_snapshot_id = volume_root_slot.lastIssuedId(loaded_root.root.next_snapshot_id);
+    try volume_root_slot.writeImageRoot(image, loaded_root.sector_index, loaded_root.root);
+
+    const second = try store.putVersion(.{
+        .preferred_object_id = first.object_id,
+        .object_type = .document,
+        .payload = "second",
+        .metadata = try object_store.signMetadata(signer, "watermark", "text/plain", .document, "second", 2),
+        .parent_version_id = first.version_id,
+    });
+    _ = try workspaces.snapshot(notes.id, "after-watermark", signer);
+
+    const saved = try volume.saveToImage(image, &store, &workspaces);
+    try std.testing.expectEqual(@as(u64, 2), saved.generation);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    _ = try volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
+    try std.testing.expectEqual(second.version_id, loaded_store.object(first.object_id).?.latest_version_id);
+    const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 941 }, "watermark-notes").?;
+    try std.testing.expect(loaded_workspaces.findSnapshotByLabel(loaded_notes.id, "after-watermark") != null);
+}
+
+test "storage volume compacts around a noncanonical newer root" {
+    const allocator = std.testing.allocator;
+    const image = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(image);
+    @memset(image, 0);
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.reset();
+
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-root-selection",
+        .seed = signing.seedFromByte(0x52),
+    };
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const first = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(942),
+        .object_type = .document,
+        .payload = "first",
+        .metadata = try object_store.signMetadata(signer, "root-selection", "text/plain", .document, "first", 1),
+    });
+    _ = try volume.saveToImage(image, &store, &workspaces);
+    const second = try store.putVersion(.{
+        .preferred_object_id = first.object_id,
+        .object_type = .document,
+        .payload = "second",
+        .metadata = try object_store.signMetadata(signer, "root-selection", "text/plain", .document, "second", 2),
+        .parent_version_id = first.version_id,
+    });
+    _ = try volume.saveToImage(image, &store, &workspaces);
+
+    var newest = (try volume_root_slot.findLatestImageRoot(image)).?;
+    newest.root.last_version_id = newest.root.next_version_id;
+    try volume_root_slot.writeImageRoot(image, newest.sector_index, newest.root);
+
+    const third = try store.putVersion(.{
+        .preferred_object_id = first.object_id,
+        .object_type = .document,
+        .payload = "third",
+        .metadata = try object_store.signMetadata(signer, "root-selection", "text/plain", .document, "third", 3),
+        .parent_version_id = second.version_id,
+    });
+    const saved = try volume.saveToImage(image, &store, &workspaces);
+    try std.testing.expectEqual(@as(u64, 2), saved.generation);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    _ = try volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
+    try std.testing.expectEqual(@as(usize, 3), loaded_store.versionCount());
+    try std.testing.expect(loaded_store.version(second.version_id) != null);
+    try std.testing.expectEqual(third.version_id, loaded_store.object(first.object_id).?.latest_version_id);
+}
+
+test "storage volume rejects replayed identifiers beyond root watermarks" {
+    const allocator = std.testing.allocator;
+    const image = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(image);
+    @memset(image, 0);
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.reset();
+
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-root-rewind",
+        .seed = signing.seedFromByte(0x51),
+    };
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    _ = try store.putVersion(.{
+        .object_type = .document,
+        .payload = "issued",
+        .metadata = try object_store.signMetadata(signer, "root-rewind", "text/plain", .document, "issued", 1),
+    });
+    _ = try volume.saveToImage(image, &store, &workspaces);
+
+    var root = (try volume_root_slot.findLatestImageRoot(image)).?;
+    root.root.next_version_id = 1;
+    root.root.last_version_id = 0;
+    try volume_root_slot.writeImageRoot(image, root.sector_index, root.root);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    try std.testing.expectError(error.CorruptImage, volume.loadFromImage(image, &loaded_store, &loaded_workspaces));
 }
 
 test "storage quota policy rejects writes above the first supported envelope" {
