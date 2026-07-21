@@ -993,6 +993,26 @@ fn deviceBrokerNegativeAuthorityGate() !void {
 
     try expectBrokeredStorageSessionWriteRead(&brokered_session, 8, "broker-before-rehost", 0x62);
 
+    const pre_reset_session = brokered_session;
+    device_broker.reset();
+    try device_broker.publishAtaControllerChecked(device_id, ata_grant);
+    _ = try device_broker.programBrokeredDmaIsolation(device_id, pre_reset_session.dma_domain_id);
+    var stale_reset_session = pre_reset_session;
+    var stale_reset_read: [storage_volume.sector_size]u8 = undefined;
+    try std.testing.expectError(
+        error.StaleBrokerSession,
+        storage_driver_task.readAtaBootstrapSessionChecked(&stale_reset_session, 8, stale_reset_read[0..]),
+    );
+    try std.testing.expect(!storage_driver_task.brokeredDmaBufferReady(&pre_reset_session));
+    brokered_session = storage_driver_task.establishAtaBootstrapSession(
+        &kernel_port,
+        device_id,
+        device_authority.id,
+        driver_task.id,
+        pre_reset_session.dma_domain_id,
+        12,
+    ) orelse return error.MissingBootedDriverBinding;
+
     var timeout_read: [storage_volume.sector_size]u8 = undefined;
     try kernel.devicePortWrite(
         kernelContext(driver_task.id, .device_port_write, device_authority.id, .{ .device = device_id }),

@@ -495,9 +495,11 @@ pub fn reset() void {
     controllers.reset();
     dma_programs = DmaProgramArena.init();
     dma_program_device_index = DmaProgramDeviceIndex.init();
-    next_broker_generation = 1;
-    next_dma_program_id = 1;
-    next_dma_program_generation = 1;
+
+    // This is an operational reset, not a machine reboot. Authority held by
+    // the discarded tables can still exist in clients, so rewinding any of
+    // these cursors would let stale sessions or DMA buffers alias newly
+    // published state with the same device and domain identifiers.
 }
 
 pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) bool {
@@ -1307,6 +1309,7 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
 
 test "device broker exhausts authority epochs without reusing stale generations" {
     reset();
+    defer reset();
 
     const device_id: u64 = 0x1F004;
     const grant = storage_driver_protocol.AtaBrokerGrant{
@@ -1325,68 +1328,124 @@ test "device broker exhausts authority epochs without reusing stale generations"
     try std.testing.expect(brokerGeneration(device_id).? != first_publication_generation);
     try std.testing.expectEqual(republished_grant.base_port, (try describe(device_id)).base_port);
 
-    reset();
-    next_broker_generation = std.math.maxInt(u64);
-    try publishAtaControllerChecked(device_id, grant);
-    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), brokerGeneration(device_id).?);
-    try std.testing.expectEqual(@as(u64, 0), next_broker_generation);
+    {
+        reset();
+        const resume_generation = next_broker_generation;
+        defer {
+            reset();
+            next_broker_generation = resume_generation;
+        }
+        next_broker_generation = std.math.maxInt(u64);
+        try publishAtaControllerChecked(device_id, grant);
+        try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), brokerGeneration(device_id).?);
+        try std.testing.expectEqual(@as(u64, 0), next_broker_generation);
 
-    var changed_grant = grant;
-    changed_grant.base_port = 0x170;
-    try std.testing.expectError(
-        error.ControllerGenerationExhausted,
-        publishAtaControllerChecked(device_id, changed_grant),
-    );
-    try std.testing.expectEqual(grant.base_port, (try describe(device_id)).base_port);
-    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), brokerGeneration(device_id).?);
-    try std.testing.expect(revokeAtaController(device_id));
-    try std.testing.expectError(
-        error.ControllerGenerationExhausted,
-        publishAtaControllerChecked(device_id, grant),
-    );
-    try std.testing.expectEqual(@as(?u64, null), brokerGeneration(device_id));
+        var changed_grant = grant;
+        changed_grant.base_port = 0x170;
+        try std.testing.expectError(
+            error.ControllerGenerationExhausted,
+            publishAtaControllerChecked(device_id, changed_grant),
+        );
+        try std.testing.expectEqual(grant.base_port, (try describe(device_id)).base_port);
+        try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), brokerGeneration(device_id).?);
+        try std.testing.expect(revokeAtaController(device_id));
+        try std.testing.expectError(
+            error.ControllerGenerationExhausted,
+            publishAtaControllerChecked(device_id, grant),
+        );
+        try std.testing.expectEqual(@as(?u64, null), brokerGeneration(device_id));
+    }
 
+    {
+        try publishAtaControllerChecked(device_id, grant);
+        const resume_generation = next_dma_program_generation;
+        defer {
+            reset();
+            next_dma_program_generation = resume_generation;
+        }
+        next_dma_program_generation = std.math.maxInt(u64);
+        const terminal_status = try programBrokeredDmaIsolation(device_id, 0xD401);
+        try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), terminal_status.program_generation);
+        try std.testing.expectEqual(@as(u64, 0), next_dma_program_generation);
+        const window = defaultBrokeredDmaWindow(device_id);
+        const terminal_buffer = try authorizeDmaBuffer(device_id, 0xD401, window.base, iommu_page_size, .bidirectional);
+        try std.testing.expectError(
+            error.DmaProgramGenerationExhausted,
+            programBrokeredDmaIsolation(device_id, 0xD401),
+        );
+        try std.testing.expect(brokeredDmaBufferStillValid(terminal_buffer));
+        try std.testing.expectEqual(
+            @as(u64, std.math.maxInt(u64)),
+            (try dmaIsolationStatus(device_id, 0xD401)).program_generation,
+        );
+
+        const terminal_program = findDmaProgramSlot(device_id, 0xD401).?;
+        terminal_program.fault_count = std.math.maxInt(u64);
+        try std.testing.expectError(
+            error.DmaWindowDenied,
+            validateDmaAccess(device_id, 0xD401, window.base + window.length, 1, .device_read),
+        );
+        try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), latestDmaFault(device_id, 0xD401).?.fault_count);
+    }
+
+    {
+        try publishAtaControllerChecked(device_id, grant);
+        const resume_program_id = next_dma_program_id;
+        defer {
+            reset();
+            next_dma_program_id = resume_program_id;
+        }
+        next_dma_program_id = std.math.maxInt(u64);
+        _ = try programBrokeredDmaIsolation(device_id, 0xD402);
+        try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), findDmaProgram(device_id, 0xD402).?.program_id);
+        try std.testing.expectEqual(@as(u64, 0), next_dma_program_id);
+        try std.testing.expect(invalidateDmaIsolation(device_id, 0xD402));
+        const generation_before_id_exhaustion = next_dma_program_generation;
+        try std.testing.expectError(
+            error.DmaProgramIdExhausted,
+            programBrokeredDmaIsolation(device_id, 0xD403),
+        );
+        try std.testing.expectEqual(@as(usize, 0), dma_programs.countInUse());
+        try std.testing.expectEqual(@as(u64, 0), next_dma_program_id);
+        try std.testing.expectEqual(generation_before_id_exhaustion, next_dma_program_generation);
+    }
+}
+
+test "device broker reset never reuses stale authority epochs" {
     reset();
+    defer reset();
+
+    const device_id: u64 = 0x1F005;
+    const dma_domain_id: u64 = 0xD501;
+    const grant = storage_driver_protocol.AtaBrokerGrant{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = test_ata_sector_count,
+    };
     try publishAtaControllerChecked(device_id, grant);
-    next_dma_program_generation = std.math.maxInt(u64);
-    const terminal_status = try programBrokeredDmaIsolation(device_id, 0xD401);
-    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), terminal_status.program_generation);
-    try std.testing.expectEqual(@as(u64, 0), next_dma_program_generation);
+    const stale_broker_generation = brokerGeneration(device_id).?;
+    const stale_dma_status = try programBrokeredDmaIsolation(device_id, dma_domain_id);
+    const stale_program_id = findDmaProgram(device_id, dma_domain_id).?.program_id;
     const window = defaultBrokeredDmaWindow(device_id);
-    const terminal_buffer = try authorizeDmaBuffer(device_id, 0xD401, window.base, iommu_page_size, .bidirectional);
-    try std.testing.expectError(
-        error.DmaProgramGenerationExhausted,
-        programBrokeredDmaIsolation(device_id, 0xD401),
+    const stale_buffer = try authorizeDmaBuffer(
+        device_id,
+        dma_domain_id,
+        window.base,
+        iommu_page_size,
+        .bidirectional,
     );
-    try std.testing.expect(brokeredDmaBufferStillValid(terminal_buffer));
-    try std.testing.expectEqual(
-        @as(u64, std.math.maxInt(u64)),
-        (try dmaIsolationStatus(device_id, 0xD401)).program_generation,
-    );
-
-    const terminal_program = findDmaProgramSlot(device_id, 0xD401).?;
-    terminal_program.fault_count = std.math.maxInt(u64);
-    try std.testing.expectError(
-        error.DmaWindowDenied,
-        validateDmaAccess(device_id, 0xD401, window.base + window.length, 1, .device_read),
-    );
-    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), latestDmaFault(device_id, 0xD401).?.fault_count);
 
     reset();
     try publishAtaControllerChecked(device_id, grant);
-    next_dma_program_id = std.math.maxInt(u64);
-    _ = try programBrokeredDmaIsolation(device_id, 0xD402);
-    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), findDmaProgram(device_id, 0xD402).?.program_id);
-    try std.testing.expectEqual(@as(u64, 0), next_dma_program_id);
-    try std.testing.expect(invalidateDmaIsolation(device_id, 0xD402));
-    const generation_before_id_exhaustion = next_dma_program_generation;
-    try std.testing.expectError(
-        error.DmaProgramIdExhausted,
-        programBrokeredDmaIsolation(device_id, 0xD403),
-    );
-    try std.testing.expectEqual(@as(usize, 0), dma_programs.countInUse());
-    try std.testing.expectEqual(@as(u64, 0), next_dma_program_id);
-    try std.testing.expectEqual(generation_before_id_exhaustion, next_dma_program_generation);
+    const current_dma_status = try programBrokeredDmaIsolation(device_id, dma_domain_id);
+    const current_program_id = findDmaProgram(device_id, dma_domain_id).?.program_id;
+
+    try std.testing.expect(brokerGeneration(device_id).? != stale_broker_generation);
+    try std.testing.expect(current_dma_status.program_generation != stale_dma_status.program_generation);
+    try std.testing.expect(current_program_id != stale_program_id);
+    try std.testing.expect(!brokeredDmaBufferStillValid(stale_buffer));
 }
 
 test "device broker indexes DMA programs by device and reuses invalidated capacity with new generations" {
