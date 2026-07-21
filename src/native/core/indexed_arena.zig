@@ -276,13 +276,29 @@ pub fn IndexedArenaWithKeyOptions(
             return &self.slots[slot_index];
         }
 
+        /// Reserve state restored from a trusted persistence boundary without
+        /// adding it to the incremental dirty set.
+        pub fn reserveClean(self: *Self, key: Key) ?*Slot {
+            const slot_index = self.reserveIndexClean(key) orelse return null;
+            return &self.slots[slot_index];
+        }
+
         pub fn reserveIndex(self: *Self, key: Key) ?usize {
+            return self.reserveIndexWithDirty(key, true);
+        }
+
+        pub fn reserveIndexClean(self: *Self, key: Key) ?usize {
+            if (!options.track_dirty) @compileError("clean reservation is only available on dirty-tracked arenas");
+            return self.reserveIndexWithDirty(key, false);
+        }
+
+        fn reserveIndexWithDirty(self: *Self, key: Key, mark_dirty: bool) ?usize {
             const raw_key = ids.raw(key);
             if (raw_key == 0) return null;
             if (self.primary_index.lookup(raw_key) != null) return null;
 
             const slot_index = self.popFreeIndex() orelse return null;
-            self.claimSlot(key, raw_key, slot_index);
+            self.claimSlot(key, raw_key, slot_index, mark_dirty);
             return slot_index;
         }
 
@@ -298,17 +314,17 @@ pub fn IndexedArenaWithKeyOptions(
             if (self.slots[slot_index].in_use) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
 
-            self.claimSlot(key, raw_key, slot_index);
+            self.claimSlot(key, raw_key, slot_index, true);
             return slot_index;
         }
 
-        fn claimSlot(self: *Self, key: Key, raw_key: u64, slot_index: usize) void {
+        fn claimSlot(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
             self.slots[slot_index] = Slot{};
             self.slots[slot_index].in_use = true;
             self.slot_keys[slot_index] = key;
             self.primary_index.insert(raw_key, slot_index);
             self.used_count += 1;
-            self.noteDirty(key);
+            if (mark_dirty) self.noteDirty(key);
         }
 
         pub fn availableIndexExcluding(
@@ -498,7 +514,7 @@ pub fn IndexedArenaWithKeyOptions(
 
         pub fn clearDirty(self: *Self) void {
             if (!options.track_dirty) @compileError("this arena does not track dirty ids; instantiate it with DirtyTrackedIndexedArenaWithKey");
-            @memset(self.dirty_ids[0..], ids.zero(Key));
+            @memset(self.dirty_ids[0..self.dirty_count], ids.zero(Key));
             self.dirty_count = 0;
         }
 
@@ -986,6 +1002,14 @@ test "indexed arena reserves reuses indexes and tracks dirty ids" {
     try std.testing.expectEqual(@as(usize, 2), arena.countInUse());
     arena.clearDirty();
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
+
+    const restored = arena.reserveClean(45).?;
+    restored.record = .{ .id = 45, .owner = 11, .label = "restored" };
+    const restored_index = arena.reserveIndexClean(46).?;
+    arena.slots[restored_index].record = .{ .id = 46, .owner = 12, .label = "restored-index" };
+    try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
+    try std.testing.expectEqualStrings("restored", arena.get(45).?.record.label);
+    try std.testing.expectEqualStrings("restored-index", arena.get(46).?.record.label);
 }
 
 test "indexed arena reuses tombstoned primary index slots" {

@@ -42,6 +42,34 @@ pub const LoadedRoot = struct {
     root: RootState,
 };
 
+pub fn lastIssuedId(next_id: u64) u64 {
+    return if (next_id == 0) std.math.maxInt(u64) else next_id - 1;
+}
+
+pub fn hasCanonicalDeltaWatermarks(root: RootState) bool {
+    return root.last_version_id == lastIssuedId(root.next_version_id) and
+        root.last_snapshot_id == lastIssuedId(root.next_snapshot_id);
+}
+
+pub fn hasRootMagic(buffer: []const u8) bool {
+    return buffer.len >= volume_layout.root_magic.len and
+        std.mem.eql(u8, buffer[0..volume_layout.root_magic.len], volume_layout.root_magic);
+}
+
+test "delta watermarks accept initial normal and exhausted states" {
+    try std.testing.expect(hasCanonicalDeltaWatermarks(.{}));
+    try std.testing.expect(hasCanonicalDeltaWatermarks(.{
+        .next_version_id = 42,
+        .last_version_id = 41,
+        .next_snapshot_id = 0,
+        .last_snapshot_id = std.math.maxInt(u64),
+    }));
+    try std.testing.expect(!hasCanonicalDeltaWatermarks(.{
+        .next_version_id = 42,
+        .last_version_id = 42,
+    }));
+}
+
 pub fn nextRootSector(current: ?LoadedRoot) u32 {
     return if (current) |loaded|
         if (loaded.sector_index == 0) 1 else 0
@@ -167,5 +195,6 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
     const checksum_offset = reader.offset;
     const checksum = try reader.readU64();
     if (checksum != volume_hashing.checksumBytes(buffer[0..checksum_offset])) return error.ChecksumMismatch;
+    if (!hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     return root;
 }

@@ -457,6 +457,10 @@ pub const Directory = struct {
     pub fn rebuildIndexes(self: *Directory) void {
         self.workspaces.rebuildPrimaryIndex();
         self.snapshots.rebuildPrimaryIndex();
+        self.rebuildDerivedIndexes();
+    }
+
+    pub fn rebuildDerivedIndexes(self: *Directory) void {
         self.workspace_owner_label_index.reset();
         self.workspace_label_index.reset();
         self.snapshot_label_index.reset();

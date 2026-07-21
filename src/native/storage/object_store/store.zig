@@ -573,10 +573,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn rebuildIndexes(self: *Self) void {
             self.objects.rebuildPrimaryIndex();
-            self.rebuildObjectTypeIndex();
             self.versions.rebuildPrimaryIndex();
             self.blobs.rebuildPrimaryIndex();
             self.chunks.rebuildPrimaryIndex();
+            self.rebuildDerivedIndexes();
+        }
+
+        pub fn rebuildDerivedIndexes(self: *Self) void {
+            self.rebuildObjectTypeIndex();
             self.rebuildLatestInsertedVersionId();
             self.rebuildMaxBlobPayloadBytes();
         }
