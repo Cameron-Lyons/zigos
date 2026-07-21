@@ -214,8 +214,9 @@ is_sha256_hex "$ZIGOS_RELEASE_SIGNING_KEY_ID" ||
 is_positive_integer "${ZIGOS_RELEASE_SEQUENCE:-}" || fail_finalization "ZIGOS_RELEASE_SEQUENCE must be a positive integer"
 is_positive_integer "${ZIGOS_RELEASE_EXPIRES_AT:-}" || fail_finalization "ZIGOS_RELEASE_EXPIRES_AT must be a positive Unix timestamp"
 
-[ -f "$ZIGOS_RELEASE_VERIFIER" ] && [ -x "$ZIGOS_RELEASE_VERIFIER" ] && [ ! -L "$ZIGOS_RELEASE_VERIFIER" ] ||
+if [ ! -f "$ZIGOS_RELEASE_VERIFIER" ] || [ ! -x "$ZIGOS_RELEASE_VERIFIER" ] || [ -L "$ZIGOS_RELEASE_VERIFIER" ]; then
   fail_finalization "release verifier must be an executable regular file, not a symlink"
+fi
 canonical_release_verifier="$(realpath "$ZIGOS_RELEASE_VERIFIER")"
 case "$canonical_release_verifier" in
   "$ARTIFACT_ROOT" | "$ARTIFACT_ROOT"/*)

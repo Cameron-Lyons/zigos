@@ -46,8 +46,9 @@ case "$TRUST_STATE" in
 esac
 is_sha256_hex "$VERIFIER_SHA256" || fail "verifier pin must be lowercase SHA-256"
 is_sha256_hex "$ROOT_SHA256" || fail "root pin must be lowercase SHA-256"
-[ -f "$VERIFIER" ] && [ -x "$VERIFIER" ] && [ ! -L "$VERIFIER" ] ||
+if [ ! -f "$VERIFIER" ] || [ ! -x "$VERIFIER" ] || [ -L "$VERIFIER" ]; then
   fail "verifier must be an executable regular file, not a symlink"
+fi
 [ -f "$TRUSTED_ROOT" ] || fail "trusted root is missing"
 [ -d "$BUNDLE_INPUT" ] || fail "bundle directory is missing"
 [ -d "$ARTIFACT_ROOT_INPUT" ] || fail "artifact root is missing"
