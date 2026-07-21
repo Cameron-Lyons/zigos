@@ -169,10 +169,10 @@ prepare_fresh_output() {
     exit 1
   }
   if [ -e "$OUTPUT_PATH" ]; then
-    [ -d "$OUTPUT_PATH" ] && [ ! -L "$OUTPUT_PATH" ] || {
+    if [ ! -d "$OUTPUT_PATH" ] || [ -L "$OUTPUT_PATH" ]; then
       printf 'Proof output must be a regular directory, not a symlink: %s\n' "$OUTPUT_DIR" >&2
       exit 1
-    }
+    fi
     [ "$(realpath "$OUTPUT_PATH")" = "$OUTPUT_PATH" ] || {
       printf 'Proof output resolves outside the trusted output base: %s\n' "$OUTPUT_DIR" >&2
       exit 1

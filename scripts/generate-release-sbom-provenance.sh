@@ -164,8 +164,9 @@ validate_dsse_signing_environment() {
     fail_release_generation "trusted root metadata file is missing"
   [ -f "$ZIGOS_RELEASE_TRUST_POLICY" ] ||
     fail_release_generation "signed trust policy file is missing"
-  [ -f "$ZIGOS_RELEASE_VERIFIER" ] && [ -x "$ZIGOS_RELEASE_VERIFIER" ] && [ ! -L "$ZIGOS_RELEASE_VERIFIER" ] ||
+  if [ ! -f "$ZIGOS_RELEASE_VERIFIER" ] || [ ! -x "$ZIGOS_RELEASE_VERIFIER" ] || [ -L "$ZIGOS_RELEASE_VERIFIER" ]; then
     fail_release_generation "release verifier must be an executable regular file, not a symlink"
+  fi
   canonical_release_verifier="$(realpath "$ZIGOS_RELEASE_VERIFIER")"
   case "$canonical_release_verifier" in
     "$ROOT_DIR" | "$ROOT_DIR"/*)
@@ -516,8 +517,9 @@ case "$(realpath "$disclosure_audit_path")" in
 esac
 
 for evidence_name in "${GENERATOR_EVIDENCE_NAMES[@]}"; do
-  [ -f "$WORK_PATH/$evidence_name" ] && [ ! -L "$WORK_PATH/$evidence_name" ] ||
+  if [ ! -f "$WORK_PATH/$evidence_name" ] || [ -L "$WORK_PATH/$evidence_name" ]; then
     fail_release_generation "generator did not stage required evidence: $evidence_name"
+  fi
   mv -f -- "$WORK_PATH/$evidence_name" "$OUTPUT_PATH/$evidence_name"
 done
 mv -f -- \

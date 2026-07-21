@@ -907,10 +907,11 @@ fn writeTrustStateAtomic(
     file_open = false;
     try std.Io.Dir.rename(transaction.parent, temporary_name, transaction.parent, transaction.basename, io);
     temporary_exists = false;
-    const directory_file: std.Io.File = .{
-        .handle = transaction.parent.handle,
-        .flags = .{ .nonblocking = false },
-    };
+    var directory_file = try transaction.parent.openFile(io, ".", .{
+        .allow_directory = true,
+        .follow_symlinks = false,
+    });
+    defer directory_file.close(io);
     try directory_file.sync(io);
 }
 
@@ -1421,7 +1422,7 @@ test "trust state rejects insecure parent and state file modes" {
     const fixture = try writeExactFixture(allocator, tmp.dir, try testingRootPath(allocator, tmp.sub_path[0..]), 7);
 
     {
-        var trust_dir = try tmp.dir.openDir(std.testing.io, "trust", .{});
+        var trust_dir = try tmp.dir.openDir(std.testing.io, "trust", .{ .iterate = true });
         defer trust_dir.close(std.testing.io);
         try trust_dir.setPermissions(std.testing.io, std.Io.File.Permissions.fromMode(0o777));
         defer trust_dir.setPermissions(std.testing.io, std.Io.File.Permissions.fromMode(0o700)) catch {};
