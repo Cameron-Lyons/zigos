@@ -24,6 +24,7 @@ const release_key_encoding_ml_dsa65 = "hex-ml-dsa-65-raw";
 const fips_204_standard = "FIPS 204";
 const fips_validation_text = "validated";
 const release_source_control_jj = "jj";
+const release_optimize_mode = "ReleaseFast";
 const release_slsa_build_type = "https://github.com/Cameron-Lyons/zigos/release-security-gate";
 const release_slsa_builder_id = "zigos-local-release-security-gate";
 const jj_change_id_len: usize = 32;
@@ -63,6 +64,7 @@ const SourceIdentity = struct {
     change_id: []const u8,
     commit_id: []const u8,
     zig_version: []const u8,
+    optimize_mode: []const u8,
 };
 
 const ReleaseKey = struct {
@@ -420,11 +422,16 @@ fn verifySlsaSourceParameters(statement: std.json.Value) !SourceIdentity {
     if (!validZigVersion(zig_version)) {
         return error.InvalidSlsaZigVersion;
     }
+    const optimize_mode = try stringField(external_parameters, "optimizeMode");
+    if (!std.mem.eql(u8, optimize_mode, release_optimize_mode)) {
+        return error.InvalidSlsaOptimizeMode;
+    }
     return .{
         .repository = repository,
         .change_id = change_id,
         .commit_id = commit_id,
         .zig_version = zig_version,
+        .optimize_mode = optimize_mode,
     };
 }
 
@@ -457,7 +464,8 @@ fn sourceIdentitiesEqual(a: SourceIdentity, b: SourceIdentity) bool {
     return std.mem.eql(u8, a.repository, b.repository) and
         std.mem.eql(u8, a.change_id, b.change_id) and
         std.mem.eql(u8, a.commit_id, b.commit_id) and
-        std.mem.eql(u8, a.zig_version, b.zig_version);
+        std.mem.eql(u8, a.zig_version, b.zig_version) and
+        std.mem.eql(u8, a.optimize_mode, b.optimize_mode);
 }
 
 fn verifyArtifactMeasurements(
@@ -524,11 +532,16 @@ fn verifyReproducibleBuildDigests(
     if (!validZigVersion(zig_version)) {
         return error.ReproducibleBuildZigVersionInvalid;
     }
+    const optimize_mode = try stringField(root, "optimize_mode");
+    if (!std.mem.eql(u8, optimize_mode, release_optimize_mode)) {
+        return error.ReproducibleBuildOptimizeModeMismatch;
+    }
     if (!sourceIdentitiesEqual(expected_source_identity, .{
         .repository = repository,
         .change_id = change_id,
         .commit_id = commit_id,
         .zig_version = zig_version,
+        .optimize_mode = optimize_mode,
     })) {
         return error.ReproducibleBuildSourceIdentityMismatch;
     }
@@ -1027,6 +1040,28 @@ test "customer release verifier rejects signed SLSA provenance without Jujutsu s
     );
 }
 
+test "customer release verifier rejects non-ReleaseFast signed provenance" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const root_path = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer allocator.free(root_path);
+    try writeValidFixture(allocator, tmp.dir, "fixture-artifact", false, "shadow");
+
+    const artifact_digest = try sha256HexAlloc(allocator, fixture_artifact_bytes);
+    try writeProvenanceFixture(allocator, tmp.dir, "fixture-artifact", artifact_digest, .{
+        .optimize_mode = "Debug",
+    });
+
+    try std.testing.expectError(
+        error.InvalidSlsaOptimizeMode,
+        verifyReleaseBundle(allocator, std.testing.io, root_path, root_path, .{}),
+    );
+}
+
 test "customer release verifier rejects untrusted SLSA builder identity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1092,7 +1127,7 @@ test "customer release verifier rejects reproducible-build evidence without Juju
 
     const reproducible_json = try std.fmt.allocPrint(
         allocator,
-        "{{\"schema_version\":1,\"repo_vcs\":\"git\",\"repository\":\"{s}\",\"repo_change_id\":\"{s}\",\"commit\":\"{s}\",\"dirty_workspace_file_count\":0,\"zig_version\":\"{s}\",\"status\":\"passed\",\"digest_manifest\":\"build/release-security/reproducible-artifact-digests.sha256\"}}\n",
+        "{{\"schema_version\":1,\"repo_vcs\":\"git\",\"repository\":\"{s}\",\"repo_change_id\":\"{s}\",\"commit\":\"{s}\",\"dirty_workspace_file_count\":0,\"zig_version\":\"{s}\",\"optimize_mode\":\"ReleaseFast\",\"status\":\"passed\",\"digest_manifest\":\"build/release-security/reproducible-artifact-digests.sha256\"}}\n",
         .{ fixture_repository, fixture_jj_change_id, fixture_commit_id, fixture_zig_version },
     );
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "reproducible-build.json", .data = reproducible_json });
@@ -1116,7 +1151,7 @@ test "customer release verifier rejects reproducible-build evidence for a differ
 
     const reproducible_json = try std.fmt.allocPrint(
         allocator,
-        "{{\"schema_version\":1,\"repo_vcs\":\"{s}\",\"repository\":\"{s}\",\"repo_change_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"commit\":\"2222222222222222222222222222222222222222\",\"dirty_workspace_file_count\":0,\"zig_version\":\"{s}\",\"status\":\"passed\",\"digest_manifest\":\"build/release-security/reproducible-artifact-digests.sha256\"}}\n",
+        "{{\"schema_version\":1,\"repo_vcs\":\"{s}\",\"repository\":\"{s}\",\"repo_change_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"commit\":\"2222222222222222222222222222222222222222\",\"dirty_workspace_file_count\":0,\"zig_version\":\"{s}\",\"optimize_mode\":\"ReleaseFast\",\"status\":\"passed\",\"digest_manifest\":\"build/release-security/reproducible-artifact-digests.sha256\"}}\n",
         .{ release_source_control_jj, fixture_repository, fixture_zig_version },
     );
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "reproducible-build.json", .data = reproducible_json });
@@ -1150,12 +1185,39 @@ test "customer release verifier rejects dirty SLSA or reproducible-build evidenc
     try writeProvenanceFixture(allocator, tmp.dir, "fixture-artifact", artifact_digest, .{});
     const dirty_reproducible_json = try std.fmt.allocPrint(
         allocator,
-        "{{\"schema_version\":1,\"repo_vcs\":\"{s}\",\"repository\":\"{s}\",\"repo_change_id\":\"{s}\",\"commit\":\"{s}\",\"dirty_workspace_file_count\":1,\"zig_version\":\"{s}\",\"status\":\"passed\",\"digest_manifest\":\"build/release-security/reproducible-artifact-digests.sha256\"}}\n",
+        "{{\"schema_version\":1,\"repo_vcs\":\"{s}\",\"repository\":\"{s}\",\"repo_change_id\":\"{s}\",\"commit\":\"{s}\",\"dirty_workspace_file_count\":1,\"zig_version\":\"{s}\",\"optimize_mode\":\"ReleaseFast\",\"status\":\"passed\",\"digest_manifest\":\"build/release-security/reproducible-artifact-digests.sha256\"}}\n",
         .{ release_source_control_jj, fixture_repository, fixture_jj_change_id, fixture_commit_id, fixture_zig_version },
     );
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "reproducible-build.json", .data = dirty_reproducible_json });
     try std.testing.expectError(
         error.ReproducibleBuildDirtyWorkspace,
+        verifyReleaseBundle(allocator, std.testing.io, root_path, root_path, .{}),
+    );
+}
+
+test "customer release verifier rejects a reproducible build with another optimize mode" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const root_path = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer allocator.free(root_path);
+    try writeValidFixture(allocator, tmp.dir, "fixture-artifact", false, "shadow");
+
+    const reproducible_path = try std.fs.path.join(allocator, &.{ root_path, "reproducible-build.json" });
+    const reproducible_json = try readFileAlloc(std.testing.io, reproducible_path, allocator, max_release_metadata_bytes);
+    const debug_json = try replaceOnceForTest(
+        allocator,
+        reproducible_json,
+        "\"optimize_mode\":\"ReleaseFast\"",
+        "\"optimize_mode\":\"Debug\"",
+    );
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "reproducible-build.json", .data = debug_json });
+
+    try std.testing.expectError(
+        error.ReproducibleBuildOptimizeModeMismatch,
         verifyReleaseBundle(allocator, std.testing.io, root_path, root_path, .{}),
     );
 }
@@ -1358,7 +1420,7 @@ fn writeValidFixture(
     try dir.writeFile(std.testing.io, .{ .sub_path = "reproducible-artifact-digests.sha256", .data = digest_manifest });
     const reproducible_json = try std.fmt.allocPrint(
         allocator,
-        "{{\"schema_version\":1,\"generated_at\":\"2026-01-01T00:00:00Z\",\"repo_vcs\":\"{s}\",\"repository\":\"{s}\",\"repo_change_id\":\"{s}\",\"commit\":\"{s}\",\"dirty_workspace_file_count\":0,\"zig_version\":\"{s}\",\"status\":\"passed\",\"digest_manifest\":\"build/release-security/reproducible-artifact-digests.sha256\"}}\n",
+        "{{\"schema_version\":1,\"generated_at\":\"2026-01-01T00:00:00Z\",\"repo_vcs\":\"{s}\",\"repository\":\"{s}\",\"repo_change_id\":\"{s}\",\"commit\":\"{s}\",\"dirty_workspace_file_count\":0,\"zig_version\":\"{s}\",\"optimize_mode\":\"ReleaseFast\",\"status\":\"passed\",\"digest_manifest\":\"build/release-security/reproducible-artifact-digests.sha256\"}}\n",
         .{ release_source_control_jj, fixture_repository, fixture_jj_change_id, fixture_commit_id, fixture_zig_version },
     );
     try dir.writeFile(std.testing.io, .{ .sub_path = "reproducible-build.json", .data = reproducible_json });
@@ -1453,6 +1515,7 @@ const FixtureProvenanceOptions = struct {
     commit_id: []const u8 = fixture_commit_id,
     repository: []const u8 = fixture_repository,
     zig_version: []const u8 = fixture_zig_version,
+    optimize_mode: []const u8 = release_optimize_mode,
     started_on: []const u8 = "2026-01-01T00:00:00Z",
     dirty_workspace_file_count: u32 = 0,
     extra_subject_path: ?[]const u8 = null,
@@ -1491,7 +1554,7 @@ fn provenanceEnvelopeFixtureAlloc(
     );
     const statement = try std.fmt.allocPrint(
         allocator,
-        "{{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{s}],\"predicateType\":\"https://slsa.dev/provenance/v1\",\"predicate\":{{\"buildDefinition\":{{\"buildType\":\"{s}\",\"externalParameters\":{{\"repository\":\"{s}\",\"sourceControl\":\"{s}\",\"changeId\":\"{s}\",\"commit\":\"{s}\",\"zigVersion\":\"{s}\"}}}},\"runDetails\":{{\"builder\":{{\"id\":\"{s}\"}},\"metadata\":{{\"invocationId\":\"{s}\",\"startedOn\":\"{s}\",\"dirtyWorkspaceFileCount\":{d}}}}}}}}}\n",
+        "{{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{s}],\"predicateType\":\"https://slsa.dev/provenance/v1\",\"predicate\":{{\"buildDefinition\":{{\"buildType\":\"{s}\",\"externalParameters\":{{\"repository\":\"{s}\",\"sourceControl\":\"{s}\",\"changeId\":\"{s}\",\"commit\":\"{s}\",\"zigVersion\":\"{s}\",\"optimizeMode\":\"{s}\"}}}},\"runDetails\":{{\"builder\":{{\"id\":\"{s}\"}},\"metadata\":{{\"invocationId\":\"{s}\",\"startedOn\":\"{s}\",\"dirtyWorkspaceFileCount\":{d}}}}}}}}}\n",
         .{
             subject_entries,
             options.build_type,
@@ -1500,6 +1563,7 @@ fn provenanceEnvelopeFixtureAlloc(
             options.change_id,
             options.commit_id,
             options.zig_version,
+            options.optimize_mode,
             options.builder_id,
             options.started_on,
             options.started_on,

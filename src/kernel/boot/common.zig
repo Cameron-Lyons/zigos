@@ -12,6 +12,12 @@ pub fn printBootProfile() void {
     console.print("\n");
 }
 
+pub fn printKernelRole() void {
+    console.print("BOOT:ROLE:");
+    console.print(@tagName(config.kernelRole()));
+    console.print("\n");
+}
+
 pub fn printCpuCount(count: u32) void {
     var cpu_str: [10]u8 = undefined;
     var cpu_count = count;

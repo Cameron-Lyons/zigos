@@ -3,6 +3,7 @@ const shared = @import("shared.zig");
 const userspace_build = @import("userspace.zig");
 
 pub const NativeSmokeMode = enum {
+    production,
     full,
     driver_restart,
     tampered_artifact_manifest,
@@ -22,6 +23,7 @@ pub const NativeSmokeMode = enum {
 
     fn fileStem(self: NativeSmokeMode) []const u8 {
         return switch (self) {
+            .production => "production",
             .full => "full",
             .driver_restart => "driver-restart",
             .tampered_artifact_manifest => "tampered-artifact-manifest",
@@ -79,7 +81,7 @@ pub fn addNativeRunSteps(
     });
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(&native_store.command.step);
-    command.step.dependOn(userspace_images.step);
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
 
     const run_step = b.step("run", "Run the native-only Zigos kernel in QEMU");
     run_step.dependOn(&command.step);
@@ -109,11 +111,10 @@ pub fn addNativeSmokeCommand(
         log_path,
         store_path,
     });
-    if (mode.arg()) |arg| {
-        command.addArg(arg);
-    }
+    command.addArg(mode.arg() orelse "full");
+    command.addArg(b.getInstallPath(.bin, ""));
     command.step.dependOn(kernel.install_step);
-    command.step.dependOn(userspace_images.step);
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
 
@@ -123,7 +124,7 @@ pub fn addNativeFaultSmokeCommand(
     userspace_images: userspace_build.ArtifactSet,
     mode: NativeSmokeMode,
 ) *std.Build.Step.Run {
-    std.debug.assert(mode != .full and mode != .driver_restart);
+    std.debug.assert(mode != .production and mode != .full and mode != .driver_restart);
     const file_stem = mode.fileStem();
     return addNativeSmokeCommand(
         b,
@@ -147,7 +148,7 @@ pub fn addRecoveryQemuCommand(
         "build/kernel-recovery.log",
     });
     command.step.dependOn(kernel.install_step);
-    command.step.dependOn(userspace_images.step);
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
 
@@ -164,7 +165,7 @@ pub fn addStorageDurabilityQemuCommand(
         "build/native-store-storage-durability.img",
     });
     command.step.dependOn(kernel.install_step);
-    command.step.dependOn(userspace_images.step);
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
 
@@ -182,7 +183,7 @@ pub fn addSyncTwoNodeQemuCommand(
         "build/native-store-sync-node-b.img",
     });
     command.step.dependOn(kernel.install_step);
-    command.step.dependOn(userspace_images.step);
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
 
@@ -199,7 +200,7 @@ pub fn addBenchmarkCommand(
         "build/kernel-benchmark-summary.md",
     });
     command.step.dependOn(kernel.install_step);
-    command.step.dependOn(userspace_images.step);
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
 
@@ -207,28 +208,44 @@ pub fn addIsoCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
+    output_path: []const u8,
+    staging_path: []const u8,
 ) *std.Build.Step.Run {
     const command = b.addSystemCommand(&.{
         "bash",
         "scripts/build-grub-iso.sh",
         kernel.output_path,
-        "build/os.iso",
-        "build/iso",
+        output_path,
+        staging_path,
     });
     command.step.dependOn(kernel.install_step);
-    command.step.dependOn(userspace_images.step);
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
+}
+
+fn userspaceStepForKernel(
+    kernel: shared.KernelArtifact,
+    userspace_images: userspace_build.ArtifactSet,
+) *std.Build.Step {
+    return switch (kernel.kernel_role) {
+        .production => userspace_images.production_step,
+        .verification => userspace_images.verification_step,
+    };
 }
 
 pub fn addUefiQemuCommand(
     b: *std.Build,
     iso_command: *std.Build.Step.Run,
+    iso_path: []const u8,
+    log_path: []const u8,
+    expected_role: []const u8,
 ) *std.Build.Step.Run {
     const command = b.addSystemCommand(&.{
         "bash",
         "scripts/run-uefi-boot-test.sh",
-        "build/os.iso",
-        "build/uefi-boot-qemu.log",
+        iso_path,
+        log_path,
+        expected_role,
     });
     command.step.dependOn(&iso_command.step);
     return command;

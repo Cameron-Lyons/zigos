@@ -152,7 +152,7 @@ Use the pinned toolchain and repo entrypoints:
 - Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
-- OVMF or edk2-ovmf firmware for `uefi-qemu-test`
+- OVMF or edk2-ovmf firmware for the production and verification UEFI tests
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
   them when available
@@ -184,7 +184,7 @@ or `pacman`.
 # Confirm the pinned Zig version.
 ./scripts/zig.sh version
 
-# Build the native kernel and embedded userspace archive.
+# Build the production kernel and embedded userspace archive.
 ./scripts/zig.sh build kernel
 
 # Build or preserve the native storage image used by QEMU run targets.
@@ -212,10 +212,22 @@ The most common local gate is:
 The most common build artifacts are:
 
 ```bash
-./scripts/zig.sh build userspace-images
-./scripts/zig.sh build kernel
+./scripts/zig.sh build -Doptimize=ReleaseFast userspace-production-images
+./scripts/zig.sh build -Doptimize=ReleaseFast kernel
 ./scripts/zig.sh build native-store-image
 ./scripts/zig.sh build iso
+```
+
+`kernel-zigos-native.elf` and `build/os.iso` are production artifacts. Synthetic
+driver crashes, negative isolation proofs, rollback fault matrices, and scripted
+desktop journeys live only in `kernel-zigos-native-verification.elf` and
+`build/os-verification.iso`. Production embeds 24 stripped userspace ELFs;
+verification adds five proof or synthetic-journey images. Build and check that
+boundary with:
+
+```bash
+./scripts/zig.sh build kernel-role-check
+./scripts/zig.sh build iso-verification
 ```
 
 The full target matrix lives in `CONTRIBUTING.md`, which is the source of truth
@@ -232,19 +244,29 @@ The first real-machine gate is an Intel NUC11TNKi5 proof bundle. Prepare the
 bundle skeleton and exact artifact digests with:
 
 ```bash
-scripts/prepare-nuc11tnki5-hardware-proof.sh --build
+scripts/prepare-nuc11tnki5-hardware-proof.sh \
+  --build \
+  --nonce <fresh-verifier-issued-64-hex>
 ```
 
-After the NUC run fills `build/hardware-proofs/nuc11tnki5/serial.log`,
-`proof-manifest.txt`, `firmware-settings.txt`, `power-cycle-notes.txt`, and
-`attestation-lifecycle.txt`, validate it with:
+Capture one production boot in `production-serial.log`, one verification boot
+in `verification-serial.log`, and each repeated hardware cycle in its own
+hashed `cycles/*.log`. After filling the stable device identity, sidecars, and
+two role-specific hardware quote/signature pairs, write the canonical capture
+statement and validate it with an external trusted verifier:
 
 ```bash
-scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5
+scripts/write-nuc11tnki5-capture-statement.sh build/hardware-proofs/nuc11tnki5
+ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex> \
+ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
+ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
+  scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5
 ```
 
 The same check is exposed as `./scripts/zig.sh build hardware-proof` and is a
-hard dependency of `./scripts/zig.sh build release-security-gate`.
+hard dependency of
+`./scripts/zig.sh build -Doptimize=ReleaseFast release-security-gate`; normal mode
+fails closed when any external trust setting is absent.
 
 ## Verification Model
 
@@ -261,7 +283,7 @@ fault injection, scale, transport, and operational validation.
 The secure-by-design release gate is part of the production-readiness manifest
 and is validated by `./scripts/zig.sh build prod-readiness`, which also runs the
 fast `release-security-check` gate. Public security releases must pass
-`./scripts/zig.sh build release-security-gate`, covering fuzzing, fault
+`./scripts/zig.sh build -Doptimize=ReleaseFast release-security-gate`, covering fuzzing, fault
 injection, reproducible builds, DSSE-wrapped SBOM/provenance, threat-model
 tests, memory-safety audits for unsafe Zig and kernel sections, crash dump
 redaction, the vulnerability disclosure process in `SECURITY.md`, and the
@@ -270,6 +292,9 @@ be signed per DSSE payload through
 `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a hardware-backed TPM, secure enclave,
 HSM, or KMS key and verified with `zig-out/bin/zigos-verify-release
 build/release-security .` before distribution.
+The `release-bundle-check` target serializes SBOM/provenance and reproducible
+evidence generation, then runs that customer verifier against the exact
+ReleaseFast production artifacts.
 The release keyring also carries the PQC transition policy: FIPS 203
 ML-KEM is reserved for key establishment, FIPS 204 ML-DSA is the production
 signature path once a validated provider is linked, and FIPS 205 SLH-DSA is the
@@ -284,18 +309,20 @@ target gate. Real-machine proof must cover UEFI boot, ACPI, APIC/timer, GOP
 framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM networking,
 suspend/resume, compositor framebuffer presentation, crash recovery,
 crash-record persistence, and update rollback across power cycles. Required
-serial markers live in
-`spec/hardware/nuc11tnki5-required-markers.txt`, and captured logs can be
-checked with `scripts/check-nuc11tnki5-hardware-proof.sh`. A complete proof is
-a directory described by `spec/hardware/nuc11tnki5-proof-bundle.md`, with
-`proof-manifest.txt`, `serial.log`, `firmware-settings.txt`,
-`power-cycle-notes.txt`, `attestation-lifecycle.txt`, and
-`artifact-digests.sha256`. The checker rejects emulator-sourced logs and
-requires the real-hardware metadata markers, the current Jujutsu change ID and
-commit, `repo_dirty_files=0`, and the target cycle counters. The
-UEFI preflight entrypoint is `./scripts/zig.sh build uefi-qemu-test`; set
-`OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not installed in a
-standard path.
+serial markers live in the production and verification contracts under
+`spec/hardware/`. A complete proof is a directory described by
+`spec/hardware/nuc11tnki5-proof-bundle.md`, with distinct
+`production-serial.log` and `verification-serial.log` single-boot captures,
+individually hashed cycle logs, stable identity and lifecycle sidecars, two
+role-specific quote/signature pairs, and a canonical capture statement. The
+checker independently recomputes every bound SHA-256, derives counts from
+unique cycle-manifest entries, rejects emulator-sourced logs, and requires an
+external nonce plus a verifier executable matching an externally pinned
+digest. The
+UEFI preflight entrypoints are `./scripts/zig.sh build uefi-qemu-test` for the
+production ISO and `./scripts/zig.sh build uefi-verification-qemu-test` for the
+proof image; set `OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not
+installed in a standard path.
 
 QEMU proof runs are script-backed:
 

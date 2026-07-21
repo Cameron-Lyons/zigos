@@ -13,6 +13,10 @@ const ready_required = [_][]const u8{smoke_markers.ready};
 
 const marker_groups = [_]MarkerGroup{
     .{ .name = "ready", .markers = &ready_required },
+    .{ .name = "production", .markers = &smoke_markers.production_required },
+    .{ .name = "production_forbidden", .markers = &smoke_markers.production_forbidden },
+    .{ .name = "production_first_boot", .markers = &smoke_markers.production_first_boot_required },
+    .{ .name = "production_reboot", .markers = &smoke_markers.production_reboot_required },
     .{ .name = "cold_boot", .markers = &smoke_markers.cold_boot_required },
     .{ .name = "first_boot", .markers = &smoke_markers.first_boot_required },
     .{ .name = "cold_reboot", .markers = &smoke_markers.cold_reboot_required },

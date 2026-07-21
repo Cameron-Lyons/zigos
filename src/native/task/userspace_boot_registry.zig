@@ -1,11 +1,14 @@
 const builtin = @import("builtin");
 const contract = @import("../session/contract.zig");
 const manifest = @import("../policy/manifest.zig");
-const registry = @import("userspace_registry.zig");
 const service_catalog = @import("../session/service_catalog.zig");
 const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
 const archive_index = @import("userspace_archive_index.zig");
+const role_registry = if (archive_index.includes_verification_images)
+    @import("userspace_verification_registry.zig")
+else
+    @import("userspace_registry.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 const console = if (builtin.target.os.tag == .freestanding)
@@ -29,13 +32,20 @@ pub const Error = userspace_loader.Error || SigningError || error{
 };
 
 const GeneratedArtifact = archive_index.GeneratedArtifact;
+const active_boot_image_specs: []const role_registry.ImageSpec = &role_registry.role_boot_image_specs;
 
-pub fn specCount() usize {
-    return registry.boot_image_specs.len;
+comptime {
+    if (active_boot_image_specs.len != archive_index.artifacts.len) {
+        @compileError("generated userspace archive does not match its role-specific boot catalog");
+    }
 }
 
-pub fn find(bundle_id: []const u8) ?*const registry.ImageSpec {
-    return registry.find(bundle_id);
+pub fn specCount() usize {
+    return active_boot_image_specs.len;
+}
+
+pub fn find(bundle_id: []const u8) ?*const role_registry.ImageSpec {
+    return role_registry.findForRole(bundle_id);
 }
 
 pub fn manifestFor(bundle_id: []const u8) Error!manifest.BundleManifest {
@@ -50,7 +60,7 @@ pub fn signerFor(bundle_id: []const u8) Error![]const u8 {
 
 pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
     try validateGeneratedArchiveHasOnlyRegisteredSpecs();
-    for (registry.boot_image_specs) |spec| {
+    for (active_boot_image_specs) |spec| {
         const artifact = generatedArtifactFor(spec.bundle_id) orelse return error.GeneratedArtifactMissing;
         try validateGeneratedArtifactMatchesSpec(&spec, artifact);
         const bundle = try bundleForSpec(&spec);
@@ -82,7 +92,7 @@ fn generatedArtifactFor(bundle_id: []const u8) ?GeneratedArtifact {
     return archive_index.artifactFor(bundle_id);
 }
 
-pub fn validateGeneratedArtifactMatchesSpec(spec: *const registry.ImageSpec, artifact: anytype) Error!void {
+pub fn validateGeneratedArtifactMatchesSpec(spec: *const role_registry.ImageSpec, artifact: anytype) Error!void {
     if (!std.mem.eql(u8, artifact.bundle_id, spec.bundle_id) or
         !std.mem.eql(u8, artifact.display_name, spec.display_name) or
         !std.mem.eql(u8, artifact.publisher, spec.publisher) or
@@ -113,7 +123,7 @@ fn signatureFor(bundle: manifest.BundleManifest, signed: bool) SigningError!mani
     return userspace_manifest_signing.signBundle(bundle);
 }
 
-fn bundleForSpec(spec: *const registry.ImageSpec) Error!manifest.BundleManifest {
+fn bundleForSpec(spec: *const role_registry.ImageSpec) Error!manifest.BundleManifest {
     var bundle = manifest.BundleManifest{
         .bundle_id = spec.bundle_id,
         .display_name = spec.display_name,
@@ -128,14 +138,14 @@ fn bundleForSpec(spec: *const registry.ImageSpec) Error!manifest.BundleManifest 
     return bundle;
 }
 
-fn initialComponentForSpec(spec: *const registry.ImageSpec) task_runtime.ExecutionComponentSpec {
+fn initialComponentForSpec(spec: *const role_registry.ImageSpec) task_runtime.ExecutionComponentSpec {
     return .{
         .label = spec.label,
         .entry = spec.entry,
     };
 }
 
-fn componentClassForSpec(spec: *const registry.ImageSpec) task_runtime.ComponentClass {
+fn componentClassForSpec(spec: *const role_registry.ImageSpec) task_runtime.ComponentClass {
     return switch (spec.component_class) {
         .session_manager => .session_manager,
         .app_component => .app_component,
@@ -195,7 +205,7 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     var catalog = userspace_loader.Catalog.init();
     try registerAll(&catalog);
 
-    try std.testing.expect(specCount() >= 10);
+    try std.testing.expectEqual(archive_index.artifacts.len, specCount());
     try std.testing.expectEqual(specCount(), catalog.imageCount());
     try std.testing.expect(find("zigos.system.session-manager") != null);
     try std.testing.expect(find("app.notes") != null);
@@ -210,6 +220,11 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.hasTypedContract());
     try std.testing.expect(catalog.findByBundleId("app.capture").?.hasTypedContract());
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.bundle_signed);
+    if (archive_index.includes_verification_images) {
+        try std.testing.expect(find("zigos.proof.mmu-isolation") != null);
+    } else {
+        try std.testing.expect(find("zigos.proof.mmu-isolation") == null);
+    }
 }
 
 test "boot registry rejects generated archive records that diverge from registry specs" {

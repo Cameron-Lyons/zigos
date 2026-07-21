@@ -53,7 +53,7 @@ pub const ImageSpec = struct {
     signed: bool = true,
 };
 
-const StandaloneImageSpec = struct {
+pub const StandaloneImageSpec = struct {
     bundle_id: []const u8,
     artifact_name: []const u8,
     source_path: []const u8 = "src/userspace/component_main.zig",
@@ -94,7 +94,7 @@ fn serviceImageSpec(class: contract.ServiceClass, component_class: ComponentClas
     };
 }
 
-fn standaloneImageSpec(spec: StandaloneImageSpec) ImageSpec {
+pub fn standaloneImageSpec(spec: StandaloneImageSpec) ImageSpec {
     return .{
         .bundle_id = spec.bundle_id,
         .artifact_name = spec.artifact_name,
@@ -116,7 +116,7 @@ fn standaloneImageSpec(spec: StandaloneImageSpec) ImageSpec {
     };
 }
 
-pub const boot_image_specs = [_]ImageSpec{
+pub const production_boot_image_specs = [_]ImageSpec{
     serviceImageSpec(.session_manager, .session_manager),
     serviceImageSpec(.permission_review_ui, .service_component),
     serviceImageSpec(.service_registry, .service_component),
@@ -130,25 +130,6 @@ pub const boot_image_specs = [_]ImageSpec{
         .role_tag = 0xA103,
         .heartbeat_increment = 3,
         .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_STORAGE_BOUNDARY,
-    }),
-    standaloneImageSpec(.{
-        .bundle_id = "zigos.system.transport-probe",
-        .artifact_name = "userspace-transport-probe.elf",
-        .display_name = "Transport Probe",
-        .label = "transport-probe",
-        .entry = "app.transport.probe",
-        .role_tag = 0xA104,
-        .heartbeat_increment = 4,
-        .contract_flags = FLAG_OWNS_UI_SURFACE,
-    }),
-    standaloneImageSpec(.{
-        .bundle_id = "zigos.system.termination-probe",
-        .artifact_name = "userspace-termination-probe.elf",
-        .display_name = "Termination Probe",
-        .label = "termination-probe",
-        .entry = "app.termination.probe",
-        .role_tag = 0xA105,
-        .heartbeat_increment = 5,
     }),
     standaloneImageSpec(.{
         .bundle_id = "app.viewer",
@@ -177,21 +158,6 @@ pub const boot_image_specs = [_]ImageSpec{
         .update_channel = .beta,
         .role_tag = 0xA107,
         .heartbeat_increment = 7,
-        .contract_flags = FLAG_OWNS_UI_SURFACE,
-    }),
-    standaloneImageSpec(.{
-        .bundle_id = "app.notes.daily",
-        .artifact_name = "userspace-notes-daily.elf",
-        .display_name = "Notes Daily",
-        .publisher = "zigos.dev",
-        .label = "notes-daily",
-        .entry = "app.notes",
-        .provided_interfaces = &.{.{ .name = "zigos.workspace.document" }},
-        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
-        .assets = &.{.{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" }},
-        .update_channel = .stable,
-        .role_tag = 0xA11D,
-        .heartbeat_increment = 27,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
     }),
     standaloneImageSpec(.{
@@ -248,50 +214,64 @@ pub const boot_image_specs = [_]ImageSpec{
     serviceImageSpec(.secure_pasteboard, .service_component),
     serviceImageSpec(.object_resilience, .service_component),
     serviceImageSpec(.secret_vault, .service_component),
-    standaloneImageSpec(.{
-        .bundle_id = "zigos.system.service-client",
-        .artifact_name = "userspace-service-client.elf",
-        .display_name = "Service Client",
-        .label = "service-client",
-        .entry = "app.service.client",
-        .role_tag = 0xA114,
-        .heartbeat_increment = 20,
-        .contract_flags = FLAG_OWNS_UI_SURFACE,
-    }),
-    standaloneImageSpec(.{
-        .bundle_id = "zigos.proof.mmu-isolation",
-        .artifact_name = "userspace-mmu-isolation-proof.elf",
-        .display_name = "MMU Isolation Proof",
-        .label = "mmu-isolation-proof",
-        .entry = "zigos.proof.mmu-isolation",
-        .role_tag = userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG,
-        .heartbeat_increment = 22,
-        .contract_flags = FLAG_MMU_PROOF_PROBE,
-    }),
 };
 
-const BUNDLE_INDEX_CAPACITY: usize = boot_image_specs.len * 2;
-const bundle_index = buildBundleIndex();
-const SERVICE_CLASS_INDEX_CAPACITY: usize = boot_image_specs.len * 2;
-const service_class_index = buildServiceClassIndex();
+pub const role_boot_image_specs = production_boot_image_specs;
 
-pub fn find(bundle_id: []const u8) ?*const ImageSpec {
-    const key = bundleIndexKey(bundle_id);
-    const spec_index = id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, key) orelse {
-        debugAssertBundleIndexMissAbsent(bundle_id);
-        return null;
-    };
-    if (spec_index >= boot_image_specs.len) {
-        native_util.impossibleByInvariant("boot bundle id index points outside registry specs");
+comptime {
+    if (production_boot_image_specs.len != 24) {
+        @compileError("production userspace catalog must contain exactly 24 images");
     }
-    if (!std.mem.eql(u8, boot_image_specs[spec_index].bundle_id, bundle_id)) {
-        native_util.impossibleByInvariant("boot bundle id index points at the wrong registry spec");
+    for (production_boot_image_specs) |spec| {
+        if ((spec.contract_flags & FLAG_MMU_PROOF_PROBE) != 0) {
+            @compileError("production userspace catalog cannot enable the MMU isolation probe");
+        }
     }
-    return &boot_image_specs[spec_index];
 }
 
-pub fn contractFor(bundle_id: []const u8) ?ContractSpec {
-    const spec = find(bundle_id) orelse return null;
+const PRODUCTION_BUNDLE_INDEX_CAPACITY: usize = production_boot_image_specs.len * 2;
+const production_bundle_index = buildBundleIndex(
+    PRODUCTION_BUNDLE_INDEX_CAPACITY,
+    &production_boot_image_specs,
+);
+const SERVICE_CLASS_INDEX_CAPACITY: usize = production_boot_image_specs.len * 2;
+const service_class_index = buildServiceClassIndex();
+
+pub fn findProduction(bundle_id: []const u8) ?*const ImageSpec {
+    return findInCatalog(
+        PRODUCTION_BUNDLE_INDEX_CAPACITY,
+        &production_boot_image_specs,
+        &production_bundle_index,
+        bundle_id,
+    );
+}
+
+pub fn findForRole(bundle_id: []const u8) ?*const ImageSpec {
+    return findProduction(bundle_id);
+}
+
+fn findInCatalog(
+    comptime capacity: usize,
+    specs: []const ImageSpec,
+    index: *const [capacity]id_index.Slot,
+    bundle_id: []const u8,
+) ?*const ImageSpec {
+    const key = bundleIndexKey(bundle_id);
+    const spec_index = id_index.lookup(capacity, index, key) orelse {
+        debugAssertBundleIndexMissAbsent(specs, bundle_id);
+        return null;
+    };
+    if (spec_index >= specs.len) {
+        native_util.impossibleByInvariant("boot bundle id index points outside registry specs");
+    }
+    if (!std.mem.eql(u8, specs[spec_index].bundle_id, bundle_id)) {
+        native_util.impossibleByInvariant("boot bundle id index points at the wrong registry spec");
+    }
+    return &specs[spec_index];
+}
+
+pub fn productionContractFor(bundle_id: []const u8) ?ContractSpec {
+    const spec = findProduction(bundle_id) orelse return null;
     return contractForSpec(spec);
 }
 
@@ -301,10 +281,10 @@ pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
         debugAssertServiceClassIndexMissAbsent(class);
         return null;
     };
-    if (spec_index >= boot_image_specs.len) {
+    if (spec_index >= production_boot_image_specs.len) {
         native_util.impossibleByInvariant("boot service class index points outside registry specs");
     }
-    const spec = &boot_image_specs[spec_index];
+    const spec = &production_boot_image_specs[spec_index];
     if (spec.service_class) |spec_class| {
         if (spec_class != class) {
             native_util.impossibleByInvariant("boot service class index points at the wrong registry spec");
@@ -333,18 +313,21 @@ pub fn serviceClassIndexKey(class: contract.ServiceClass) u64 {
     return @as(u64, @intFromEnum(class)) + 1;
 }
 
-fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot {
+fn buildBundleIndex(
+    comptime capacity: usize,
+    comptime specs: []const ImageSpec,
+) [capacity]id_index.Slot {
     @setEvalBranchQuota(10_000);
-    var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
-    for (boot_image_specs, 0..) |spec, spec_index| {
-        id_index.insert(BUNDLE_INDEX_CAPACITY, &index, bundleIndexKey(spec.bundle_id), spec_index, "boot bundle id index covers userspace registry");
+    var index = id_index.emptyTable(capacity);
+    for (specs, 0..) |spec, spec_index| {
+        id_index.insert(capacity, &index, bundleIndexKey(spec.bundle_id), spec_index, "boot bundle id index covers userspace registry");
     }
     return index;
 }
 
-fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
+fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const u8) void {
     if (@import("builtin").mode != .Debug) return;
-    for (boot_image_specs) |spec| {
+    for (specs) |spec| {
         if (std.mem.eql(u8, spec.bundle_id, bundle_id)) {
             native_util.impossibleByInvariant("boot bundle id index missed a registry spec");
         }
@@ -354,7 +337,7 @@ fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
 fn buildServiceClassIndex() [SERVICE_CLASS_INDEX_CAPACITY]id_index.Slot {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(SERVICE_CLASS_INDEX_CAPACITY);
-    for (boot_image_specs, 0..) |spec, spec_index| {
+    for (production_boot_image_specs, 0..) |spec, spec_index| {
         const class = spec.service_class orelse continue;
         id_index.insert(SERVICE_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(class), spec_index, "boot service class index covers userspace registry");
     }
@@ -363,7 +346,7 @@ fn buildServiceClassIndex() [SERVICE_CLASS_INDEX_CAPACITY]id_index.Slot {
 
 fn debugAssertServiceClassIndexMissAbsent(class: contract.ServiceClass) void {
     if (@import("builtin").mode != .Debug) return;
-    for (boot_image_specs) |spec| {
+    for (production_boot_image_specs) |spec| {
         if (spec.service_class) |spec_class| {
             if (spec_class == class) {
                 native_util.impossibleByInvariant("boot service class index missed a registry spec");
@@ -373,7 +356,7 @@ fn debugAssertServiceClassIndexMissAbsent(class: contract.ServiceClass) void {
 }
 
 test "userspace registry definitions stay unique and keep typed contract metadata attached" {
-    for (boot_image_specs, 0..) |spec, index| {
+    for (production_boot_image_specs, 0..) |spec, index| {
         try std.testing.expect(spec.role_tag != 0);
         try std.testing.expect(spec.heartbeat_increment != 0);
         if (spec.service_class) |class| {
@@ -383,10 +366,10 @@ test "userspace registry definitions stay unique and keep typed contract metadat
 
         var peer_index: usize = 0;
         while (peer_index < index) : (peer_index += 1) {
-            try std.testing.expect(!std.mem.eql(u8, boot_image_specs[peer_index].bundle_id, spec.bundle_id));
-            try std.testing.expect(boot_image_specs[peer_index].role_tag != spec.role_tag);
+            try std.testing.expect(!std.mem.eql(u8, production_boot_image_specs[peer_index].bundle_id, spec.bundle_id));
+            try std.testing.expect(production_boot_image_specs[peer_index].role_tag != spec.role_tag);
             if (spec.service_class) |class| {
-                if (boot_image_specs[peer_index].service_class) |peer_class| {
+                if (production_boot_image_specs[peer_index].service_class) |peer_class| {
                     try std.testing.expect(peer_class != class);
                 }
             }
@@ -416,12 +399,13 @@ test "core platform services use the parameterized userspace service entrypoint"
     try std.testing.expectEqualStrings("src/userspace/component_main.zig", findByServiceClass(.policy_mediation).?.source_path);
 }
 
-test "userspace registry keeps the freestanding MMU isolation proof in the boot catalog" {
-    const proof = find("zigos.proof.mmu-isolation") orelse return error.MissingMmuIsolationProof;
+test "production userspace registry contains exactly the production boot catalog" {
+    try std.testing.expectEqual(@as(usize, 24), production_boot_image_specs.len);
 
-    try std.testing.expectEqual(userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG, proof.role_tag);
-    try std.testing.expect((proof.contract_flags & FLAG_MMU_PROOF_PROBE) != 0);
-    try std.testing.expectEqual(ComponentClass.app_component, proof.component_class);
-    try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", proof.artifact_name);
-    try std.testing.expectEqualStrings("zigos.proof.mmu-isolation", proof.entry);
+    for (production_boot_image_specs) |spec| {
+        const production_spec = findProduction(spec.bundle_id) orelse return error.MissingProductionImage;
+        try std.testing.expectEqualStrings(spec.bundle_id, production_spec.bundle_id);
+        try std.testing.expectEqual(@as(u32, 0), spec.contract_flags & FLAG_MMU_PROOF_PROBE);
+    }
+    try std.testing.expect(findProduction("app.notes.daily") == null);
 }

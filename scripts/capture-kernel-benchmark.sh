@@ -25,6 +25,7 @@ fi
 for marker in \
   "BOOT:START" \
   "BOOT:PROFILE:benchmark" \
+  "BOOT:ROLE:verification" \
   "BOOT:CORE_READY" \
   "BENCH:START" \
   "BENCH:QUALITY_SUMMARY" \

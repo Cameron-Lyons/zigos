@@ -6,6 +6,11 @@ pub const BootProfile = enum {
     benchmark,
 };
 
+pub const KernelRole = enum {
+    production,
+    verification,
+};
+
 pub const SmokeFaultMode = enum {
     none,
     tampered_artifact_manifest,
@@ -22,6 +27,7 @@ pub const KernelArtifact = struct {
     compile_step: *std.Build.Step.Compile,
     install_step: *std.Build.Step,
     output_path: []const u8,
+    kernel_role: KernelRole,
 };
 
 pub const native_store_image_path = "build/native-store.img";

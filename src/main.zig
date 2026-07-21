@@ -1,13 +1,17 @@
 pub const kernel = @import("kernel/boot/entry.zig");
 pub const isr = @import("kernel/interrupts/isr.zig");
 pub const panic = @import("kernel/utils/builtin.zig").panic;
-pub const session_manager = @import("native/session/session_manager.zig");
+pub const session_manager = if (config.isNativeProfile())
+    @import("native/session/session_manager.zig")
+else
+    struct {};
 pub const production_artifact_manifest = @import("production_artifact_manifest");
 pub const storage_volume = @import("native/storage/storage_volume.zig");
 const abi = @import("native/core/abi.zig");
 const component_port = @import("native/kernel_api/component_port.zig");
 const crypto_hash = @import("native/core/crypto_hash.zig");
 const config = @import("kernel/config.zig");
+const embedded_userspace_archive = @import("userspace_archive");
 const syscall_surface = @import("native/kernel_api/syscall_surface.zig");
 const userspace_executor = @import("native/task/userspace_executor.zig");
 const timer = @import("kernel/timer/timer.zig");
@@ -84,9 +88,13 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
 
 fn currentKernelPort() ?*component_port.KernelPort {
     if (published_kernel_port_addr != 0) return @ptrFromInt(published_kernel_port_addr);
-    return session_manager.kernelPort();
+    if (comptime config.isNativeProfile()) return session_manager.kernelPort();
+    return null;
 }
 
 comptime {
     _ = isr;
+    if (embedded_userspace_archive.includes_verification_images != config.includesVerificationEvidence()) {
+        @compileError("kernel role and embedded userspace archive role must match");
+    }
 }

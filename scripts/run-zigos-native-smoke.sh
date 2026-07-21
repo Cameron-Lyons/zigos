@@ -5,6 +5,7 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 ZIG="${ROOT_DIR}/scripts/zig.sh"
 MARKER_TOOL="${ROOT_DIR}/src/print_native_smoke_markers.zig"
+PRODUCTION_BOOT_LOG_CHECKER="${ROOT_DIR}/scripts/check-production-boot-log.sh"
 
 # shellcheck source=scripts/qemu-harness.sh
 source "$ROOT_DIR/scripts/qemu-harness.sh"
@@ -13,6 +14,7 @@ KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
 MODE="${4:-full}"
+USERSPACE_BIN_DIR="${5:-$ROOT_DIR/zig-out/bin}"
 # Per-boot cap on waiting for the validation marker. The harness stops QEMU as
 # soon as the marker appears, so this only bounds the failure path; keep it
 # generous enough that a slow shared runner does not fail an otherwise healthy
@@ -33,6 +35,9 @@ first_marker_for_group() {
 validation_marker_for_mode() {
   local mode="$1"
   case "$mode" in
+    production)
+      last_marker_for_group production
+      ;;
     full)
       last_marker_for_group ready
       ;;
@@ -102,6 +107,28 @@ assert_marker_group() {
       exit 1
     fi
   done < <("$ZIG" run "$MARKER_TOOL" -- "$group")
+}
+
+assert_marker_group_absent() {
+  local log_path="$1"
+  local group="$2"
+  local needle
+
+  while IFS= read -r needle; do
+    [ -n "$needle" ] || continue
+    if grep -Fq "$needle" "$log_path"; then
+      echo "Zigos native smoke test failed: verification-only marker '$needle' found in production log $log_path" >&2
+      cat "$log_path" >&2
+      exit 1
+    fi
+  done < <("$ZIG" run "$MARKER_TOOL" -- "$group")
+}
+
+assert_production_boot_markers() {
+  local log_path="$1"
+  assert_marker_group "$log_path" production
+  assert_marker_group_absent "$log_path" production_forbidden
+  bash "$PRODUCTION_BOOT_LOG_CHECKER" "$log_path" >/dev/null
 }
 
 assert_boot_markers() {
@@ -210,14 +237,42 @@ sha256_file() {
 append_build_artifact_measurements() {
   local kernel_digest
   local artifact
+  local artifact_name
+  if [ ! -d "$USERSPACE_BIN_DIR" ]; then
+    echo "Zigos native smoke test failed: userspace artifact directory not found: $USERSPACE_BIN_DIR" >&2
+    exit 1
+  fi
   kernel_digest="$(sha256_file "$KERNEL_PATH")"
   printf '\n=== BUILD ARTIFACT MEASUREMENTS ===\n'
   printf 'MEASURED_BOOT:BUILD_ARTIFACT bootloader source=src/boot/boot64.S sha256=%s\n' "$(sha256_file "$ROOT_DIR/src/boot/boot64.S")"
   printf 'MEASURED_BOOT:BUILD_ARTIFACT kernel path=%s sha256=%s\n' "$KERNEL_PATH" "$kernel_digest"
-  find "$ROOT_DIR/zig-out/bin" -maxdepth 1 -type f -name 'userspace-*.elf' | LC_ALL=C sort |
+  find "$USERSPACE_BIN_DIR" -maxdepth 1 -type f -name 'userspace-*.elf' | LC_ALL=C sort |
     while IFS= read -r artifact; do
+      artifact_name="${artifact##*/}"
+      if [ "$MODE" = "production" ]; then
+        case "$artifact_name" in
+          userspace-notes-daily.elf | \
+            userspace-transport-probe.elf | \
+            userspace-termination-probe.elf | \
+            userspace-service-client.elf | \
+            userspace-mmu-isolation-proof.elf)
+            continue
+            ;;
+        esac
+      fi
       printf 'MEASURED_BOOT:BUILD_ARTIFACT userspace path=%s sha256=%s\n' "${artifact#"$ROOT_DIR"/}" "$(sha256_file "$artifact")"
     done
+}
+
+assert_measured_userspace_count() {
+  local log_path="$1"
+  local expected="$2"
+  local actual
+  actual="$(grep -Fc 'MEASURED_BOOT:BUILD_ARTIFACT userspace path=' "$log_path" || true)"
+  if [ "$actual" -ne "$expected" ]; then
+    echo "Zigos native smoke test failed: expected $expected measured userspace artifacts, found $actual" >&2
+    exit 1
+  fi
 }
 
 append_measured_boot_comparison() {
@@ -262,6 +317,27 @@ run_negative_boot() {
 }
 
 case "$MODE" in
+  production)
+    run_boot "$BOOT1_LOG" reset
+    assert_production_boot_markers "$BOOT1_LOG"
+    assert_marker_group "$BOOT1_LOG" production_first_boot
+
+    run_boot "$BOOT2_LOG" preserve
+    assert_production_boot_markers "$BOOT2_LOG"
+    assert_marker_group "$BOOT2_LOG" production_reboot
+
+    {
+      cat "$BOOT1_LOG"
+      printf '\n=== COLD REBOOT ===\n'
+      cat "$BOOT2_LOG"
+      append_measured_boot_comparison
+      append_build_artifact_measurements
+    } >"$LOG_PATH"
+    assert_marker_group_absent "$LOG_PATH" production_forbidden
+    assert_measured_userspace_count "$LOG_PATH" 24
+
+    echo "Zigos production smoke test passed across cold reboot. Logs: $LOG_PATH"
+    ;;
   full)
     run_boot "$BOOT1_LOG" reset
     assert_boot_markers "$BOOT1_LOG"
@@ -284,6 +360,7 @@ case "$MODE" in
       append_measured_boot_comparison
       append_build_artifact_measurements
     } >"$LOG_PATH"
+    assert_measured_userspace_count "$LOG_PATH" 29
 
     echo "Zigos native smoke test passed across cold reboot. Logs: $LOG_PATH"
     ;;
