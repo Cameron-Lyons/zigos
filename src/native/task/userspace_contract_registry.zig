@@ -2,6 +2,7 @@ const std = @import("std");
 const id_index = @import("../core/id_index.zig");
 const native_util = @import("../core/util.zig");
 const registry = @import("userspace_registry.zig");
+const verification_registry = @import("userspace_verification_registry.zig");
 
 pub const FLAG_SYSTEM_BUNDLE = registry.FLAG_SYSTEM_BUNDLE;
 pub const FLAG_OWNS_UI_SURFACE = registry.FLAG_OWNS_UI_SURFACE;
@@ -15,8 +16,8 @@ pub const FLAG_DRIVER_BOUNDARY = registry.FLAG_DRIVER_BOUNDARY;
 pub const ContractSpec = registry.ContractSpec;
 
 pub const contracts = blk: {
-    var derived: [registry.boot_image_specs.len]ContractSpec = undefined;
-    for (registry.boot_image_specs, 0..) |spec, index| {
+    var derived: [verification_registry.verification_boot_image_specs.len]ContractSpec = undefined;
+    for (verification_registry.verification_boot_image_specs, 0..) |spec, index| {
         derived[index] = registry.contractForSpec(&spec);
     }
     break :blk derived;
@@ -59,7 +60,7 @@ fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
 }
 
 test "userspace contracts stay unique and cover every boot artifact" {
-    try std.testing.expectEqual(registry.boot_image_specs.len, contracts.len);
+    try std.testing.expectEqual(verification_registry.verification_boot_image_specs.len, contracts.len);
 
     for (contracts, 0..) |contract, index| {
         try std.testing.expect(contract.role_tag != 0);

@@ -54,7 +54,11 @@ pub const Builder = struct {
         };
     }
 
-    pub fn bootProduction(self: *Builder, graph: *ServiceGraph) bool {
+    pub fn bootProduction(
+        self: *Builder,
+        graph: *ServiceGraph,
+        comptime include_verification_evidence: bool,
+    ) bool {
         const env_snapshot = graph.env;
         const state_snapshot = graph.state;
         self.service_bindings = ServiceBindings.init();
@@ -66,21 +70,23 @@ pub const Builder = struct {
         )) {
             return false;
         }
-        if (!session_service_bootstrap.connectClient(
-            &env_snapshot,
-            &state_snapshot,
-            graph.kernel_port,
-            &self.service_bindings,
-        )) {
-            return false;
-        }
-        if (!session_service_bootstrap.proveDriverCrashRestart(
-            &env_snapshot,
-            &state_snapshot,
-            graph.kernel_port,
-            &self.service_bindings,
-        )) {
-            return false;
+        if (comptime include_verification_evidence) {
+            if (!session_service_bootstrap.connectClient(
+                &env_snapshot,
+                &state_snapshot,
+                graph.kernel_port,
+                &self.service_bindings,
+            )) {
+                return false;
+            }
+            if (!session_service_bootstrap.proveDriverCrashRestart(
+                &env_snapshot,
+                &state_snapshot,
+                graph.kernel_port,
+                &self.service_bindings,
+            )) {
+                return false;
+            }
         }
         graph.env = env_snapshot;
         graph.state = state_snapshot;

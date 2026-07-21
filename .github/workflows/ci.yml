@@ -63,7 +63,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Kernel Build
-      command: ./scripts/zig.sh build kernel
+      command: ./scripts/zig.sh build -Doptimize=ReleaseFast kernel
       install-build-dependencies: false
 
   spec-conformance:
@@ -104,6 +104,6 @@ jobs:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
-      job-name: ISO Build
-      command: ./scripts/zig.sh build iso
+      job-name: Production and Verification ISO Build
+      command: ./scripts/zig.sh build -Doptimize=ReleaseFast iso iso-verification
       timeout-minutes: 20

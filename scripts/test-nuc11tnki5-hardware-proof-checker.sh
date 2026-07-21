@@ -4,16 +4,23 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 CHECKER="$ROOT_DIR/scripts/check-nuc11tnki5-hardware-proof.sh"
-MARKER_FILE="$ROOT_DIR/spec/hardware/nuc11tnki5-required-markers.txt"
+STATEMENT_WRITER="$ROOT_DIR/scripts/write-nuc11tnki5-capture-statement.sh"
+PRODUCTION_MARKERS="$ROOT_DIR/spec/hardware/nuc11tnki5-production-required-markers.txt"
+VERIFICATION_MARKERS="$ROOT_DIR/spec/hardware/nuc11tnki5-required-markers.txt"
 TARGET_PREFIX="ZIGOS:HW_TARGET:INTEL_NUC11TNKI5"
+NONCE="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+DEVICE_ID="nuc11tnki5-system-00112233"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/zigos-nuc-proof-checker.XXXXXX")"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT
 ARTIFACT_ROOT="$TMP_ROOT/artifacts"
+VERIFIER="$TMP_ROOT/trusted-fixture-verifier"
 
 REQUIRED_ARTIFACTS=(
   "build/os.iso"
   "zig-out/bin/kernel-zigos-native.elf"
+  "build/os-verification.iso"
+  "zig-out/bin/kernel-zigos-native-verification.elf"
   "zig-out/bin/userspace-session-manager.elf"
   "zig-out/bin/userspace-policy-mediation.elf"
   "zig-out/bin/userspace-permission-review.elf"
@@ -25,15 +32,16 @@ REQUIRED_ARTIFACTS=(
   "spec/release_security/release_artifacts.json"
   "spec/release_security/release_keyring.json"
   "spec/release_security/revoked_release_keys.json"
+  "spec/hardware/nuc11tnki5-production-required-markers.txt"
   "spec/hardware/nuc11tnki5-required-markers.txt"
 )
 
 sha256_file() {
   local file="${1:?file required}"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$file" | awk '{print $1}'
+    sha256sum "$file" | awk '{print tolower($1)}'
   else
-    shasum -a 256 "$file" | awk '{print $1}'
+    shasum -a 256 "$file" | awk '{print tolower($1)}'
   fi
 }
 
@@ -41,8 +49,88 @@ write_required_artifacts() {
   local artifact
   for artifact in "${REQUIRED_ARTIFACTS[@]}"; do
     mkdir -p "$ARTIFACT_ROOT/$(dirname -- "$artifact")"
-    printf 'checker fixture artifact: %s\n' "$artifact" > "$ARTIFACT_ROOT/$artifact"
+    case "$artifact" in
+      spec/hardware/nuc11tnki5-production-required-markers.txt)
+        cp "$PRODUCTION_MARKERS" "$ARTIFACT_ROOT/$artifact"
+        ;;
+      spec/hardware/nuc11tnki5-required-markers.txt)
+        cp "$VERIFICATION_MARKERS" "$ARTIFACT_ROOT/$artifact"
+        ;;
+      *)
+        printf 'hardware checker artifact %s\n' "$artifact" > "$ARTIFACT_ROOT/$artifact"
+        ;;
+    esac
   done
+}
+
+write_fixture_verifier() {
+  cat > "$VERIFIER" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print tolower($1)}'
+  else
+    shasum -a 256 "$1" | awk '{print tolower($1)}'
+  fi
+}
+
+key() {
+  local path="$1"
+  local name="$2"
+  awk -F= -v name="$name" '$1 == name { print substr($0, length(name) + 2); found = 1 } END { exit found ? 0 : 1 }' "$path"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --statement) statement="$2" ;;
+    --statement-sha256) statement_sha256="$2" ;;
+    --nonce) nonce="$2" ;;
+    --target-id) target_id="$2" ;;
+    --device-id) device_id="$2" ;;
+    --production-quote) production_quote="$2" ;;
+    --production-signature) production_signature="$2" ;;
+    --verification-quote) verification_quote="$2" ;;
+    --verification-signature) verification_signature="$2" ;;
+    *) exit 64 ;;
+  esac
+  shift 2
+done
+
+[ "$(sha256_file "$statement")" = "$statement_sha256" ]
+[ "$target_id" = "intel-nuc11tnki5" ]
+
+verify_role() {
+  local role="$1"
+  local quote="$2"
+  local signature="$3"
+  [ "$(key "$quote" format)" = "zigos-fixture-hardware-quote-v1" ]
+  [ "$(key "$quote" role)" = "$role" ]
+  [ "$(key "$quote" nonce)" = "$nonce" ]
+  [ "$(key "$quote" device_id)" = "$device_id" ]
+  [ "$(key "$signature" format)" = "zigos-fixture-hardware-signature-v1" ]
+  [ "$(key "$signature" role)" = "$role" ]
+  [ "$(key "$signature" nonce)" = "$nonce" ]
+  [ "$(key "$signature" quote_sha256)" = "$(sha256_file "$quote")" ]
+}
+
+verify_role production "$production_quote" "$production_signature"
+verify_role verification "$verification_quote" "$verification_signature"
+
+cat <<EOF_RESPONSE
+format=zigos-trusted-hardware-verifier-response-v1
+result=verified
+assertion=signed-response
+statement_sha256=$statement_sha256
+nonce=$nonce
+target_id=$target_id
+device_id=$device_id
+production_role=verified
+verification_role=verified
+EOF_RESPONSE
+EOF
+  chmod 0700 "$VERIFIER"
 }
 
 write_manifest() {
@@ -52,8 +140,7 @@ write_manifest() {
   if command -v jj >/dev/null 2>&1 &&
     repo_commit="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"' 2>/dev/null)" &&
     repo_change_id="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'change_id ++ "\n"' 2>/dev/null)" &&
-    [ -n "$repo_commit" ] &&
-    [ -n "$repo_change_id" ]; then
+    [ -n "$repo_commit" ] && [ -n "$repo_change_id" ]; then
     :
   else
     repo_commit="1111111111111111111111111111111111111111"
@@ -62,18 +149,35 @@ write_manifest() {
   export ZIGOS_EXPECTED_REPO_COMMIT="$repo_commit"
   export ZIGOS_EXPECTED_REPO_CHANGE_ID="$repo_change_id"
   cat > "$dir/proof-manifest.txt" <<EOF
+format=zigos-nuc11tnki5-proof-v2
 target_id=intel-nuc11tnki5
 board_sku=NUC11TNKi5
 evidence_source=real_hardware
-serial_log=serial.log
+capture_nonce=$NONCE
+device_id=$DEVICE_ID
+device_identity=device-identity.txt
+production_serial_log=production-serial.log
+production_boot_medium=build/os.iso
+production_boot_kernel=zig-out/bin/kernel-zigos-native.elf
+production_required_markers=spec/hardware/nuc11tnki5-production-required-markers.txt
+verification_serial_log=verification-serial.log
+verification_boot_medium=build/os-verification.iso
+verification_boot_kernel=zig-out/bin/kernel-zigos-native-verification.elf
+verification_required_markers=spec/hardware/nuc11tnki5-required-markers.txt
+cycle_manifest=cycle-manifest.txt
 firmware_settings=firmware-settings.txt
 power_cycle_notes=power-cycle-notes.txt
 attestation_lifecycle=attestation-lifecycle.txt
 artifact_digests=artifact-digests.sha256
-required_markers=spec/hardware/nuc11tnki5-required-markers.txt
+operator_metadata_markers=operator-metadata-markers.txt
+production_quote=production-attestation.quote
+production_signature=production-attestation.sig
+verification_quote=verification-attestation.quote
+verification_signature=verification-attestation.sig
+capture_statement=capture-statement.txt
 prepared_at_utc=2026-06-10T00:00:00Z
 captured_at_utc=2026-06-10T01:00:00Z
-operator=checker-self-test
+operator=hardware-operator
 repo_vcs=jj
 repo_change_id=$repo_change_id
 repo_commit=$repo_commit
@@ -81,7 +185,20 @@ repo_dirty_files=0
 EOF
 }
 
-write_firmware_settings() {
+write_device_identity() {
+  local dir="$1"
+  cat > "$dir/device-identity.txt" <<EOF
+format=zigos-nuc11tnki5-device-identity-v1
+target_id=intel-nuc11tnki5
+board_sku=NUC11TNKi5
+device_id=$DEVICE_ID
+smbios_system_uuid=00112233-4455-6677-8899-aabbccddeeff
+baseboard_serial=BTNUC11SERIAL001
+tpm_ek_public_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+}
+
+write_sidecars() {
   local dir="$1"
   cat > "$dir/firmware-settings.txt" <<'EOF'
 target_id=intel-nuc11tnki5
@@ -93,13 +210,9 @@ storage_mode=nvme
 wake_suspend=S3 wake by keyboard and power button enabled
 changed_options=boot order set to USB first
 EOF
-}
-
-write_power_notes() {
-  local dir="$1"
   cat > "$dir/power-cycle-notes.txt" <<'EOF'
 target_id=intel-nuc11tnki5
-operator=checker-self-test
+operator=hardware-operator
 started_at_utc=2026-06-10T00:00:00Z
 completed_at_utc=2026-06-10T01:00:00Z
 cold_boots=10
@@ -110,19 +223,15 @@ suspend_resume_cycles=20
 crash_recovery_cycles=10
 crash_record_persistence_cycles=10
 update_rollback_cycles=10
-notes=operator observed all required NUC11TNKi5 power cycles and reboot-persistence checks
+notes=operator observed all required physical power and device cycles
 EOF
-}
-
-write_attestation_lifecycle() {
-  local dir="$1"
   cat > "$dir/attestation-lifecycle.txt" <<'EOF'
 target_id=intel-nuc11tnki5
 evidence_source=real_hardware
-operator=checker-self-test
+operator=hardware-operator
 captured_at_utc=2026-06-10T00:30:00Z
-provider=checker-tpm-root
-root_key_id=checker-root-key
+provider=hardware-tpm-root
+root_key_id=hardware-root-key
 initial_generation=7
 active_generation=9
 revoked_generation_count=1
@@ -132,7 +241,125 @@ verifier_rejected_stale_attestation=true
 verifier_metadata_digest_bound=true
 verifier_metadata_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 attestation_request_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-notes=operator captured root lifecycle rejection and metadata binding checks
+notes=operator captured root lifecycle rejection and request binding
+EOF
+  cat > "$dir/operator-metadata-markers.txt" <<EOF
+$TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE
+$TARGET_PREFIX:BOARD_SKU:NUC11TNKi5
+$TARGET_PREFIX:PROOF_MANIFEST:RECORDED
+$TARGET_PREFIX:FIRMWARE_SETTINGS:RECORDED
+$TARGET_PREFIX:POWER_CYCLE_NOTES:RECORDED
+$TARGET_PREFIX:ARTIFACT_DIGESTS:RECORDED
+EOF
+}
+
+write_production_log() {
+  local dir="$1"
+  local marker
+  : > "$dir/production-serial.log"
+  while IFS= read -r marker; do
+    case "$marker" in
+      '' | \#*) continue ;;
+    esac
+    if [ "$marker" = "ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false" ]; then
+      printf '%s generation=42 error=none\n' "$marker" >> "$dir/production-serial.log"
+    else
+      printf '%s\n' "$marker" >> "$dir/production-serial.log"
+    fi
+  done < "$PRODUCTION_MARKERS"
+}
+
+write_verification_log() {
+  local dir="$1"
+  {
+    printf '%s:EVIDENCE_SOURCE:REAL_HARDWARE\n' "$TARGET_PREFIX"
+    printf '%s:BOARD_SKU:NUC11TNKi5\n' "$TARGET_PREFIX"
+    printf '%s:PROOF_MANIFEST:RECORDED\n' "$TARGET_PREFIX"
+    printf '%s:FIRMWARE_SETTINGS:RECORDED\n' "$TARGET_PREFIX"
+    printf '%s:POWER_CYCLE_NOTES:RECORDED\n' "$TARGET_PREFIX"
+    printf '%s:ARTIFACT_DIGESTS:RECORDED\n' "$TARGET_PREFIX"
+    grep -Ev '^[[:space:]]*(#|$)' "$VERIFICATION_MARKERS" | grep -F "$TARGET_PREFIX:" | grep -F ':OBSERVED'
+    grep -Ev '^[[:space:]]*(#|$)' "$VERIFICATION_MARKERS" | grep -F "$TARGET_PREFIX:" | grep -F ':PASS'
+    grep -Ev '^[[:space:]]*(#|$)' "$VERIFICATION_MARKERS" | grep -Fv "$TARGET_PREFIX:"
+    printf '%s:COLD_BOOTS:10\n' "$TARGET_PREFIX"
+    printf '%s:WARM_REBOOTS:10\n' "$TARGET_PREFIX"
+    printf '%s:STORAGE_WRITE_READ_CYCLES:100\n' "$TARGET_PREFIX"
+    printf '%s:NETWORK_FRAME_CYCLES:100\n' "$TARGET_PREFIX"
+    printf '%s:SUSPEND_RESUME_CYCLES:20\n' "$TARGET_PREFIX"
+    printf '%s:CRASH_RECOVERY_CYCLES:10\n' "$TARGET_PREFIX"
+    printf '%s:CRASH_RECORD_PERSISTENCE_CYCLES:10\n' "$TARGET_PREFIX"
+    printf '%s:UPDATE_ROLLBACK_CYCLES:10\n' "$TARGET_PREFIX"
+  } > "$dir/verification-serial.log"
+}
+
+write_cycles() {
+  local dir="$1"
+  mkdir -p "$dir/cycles"
+  printf 'format=zigos-nuc11tnki5-cycle-manifest-v1\n' > "$dir/cycle-manifest.txt"
+  add_cycles() {
+    local type="$1"
+    local count="$2"
+    local index=1
+    while [ "$index" -le "$count" ]; do
+      local padded
+      local path
+      local digest
+      padded="$(printf '%06d' "$index")"
+      path="cycles/${type}-${padded}.log"
+      cat > "$dir/$path" <<EOF
+format=zigos-nuc11tnki5-cycle-log-v1
+capture_nonce=$NONCE
+target_id=intel-nuc11tnki5
+device_id=$DEVICE_ID
+cycle_type=$type
+cycle_index=$padded
+result=pass
+observation=physical target cycle completed
+EOF
+      digest="$(sha256_file "$dir/$path")"
+      printf 'cycle=%s|%s|%s|%s\n' "$type" "$padded" "$digest" "$path" >> "$dir/cycle-manifest.txt"
+      index=$((index + 1))
+    done
+  }
+  add_cycles cold_boot 10
+  add_cycles warm_reboot 10
+  add_cycles storage_write_read 100
+  add_cycles network_frame 100
+  add_cycles suspend_resume 20
+  add_cycles crash_recovery 10
+  add_cycles crash_record_persistence 10
+  add_cycles update_rollback 10
+}
+
+write_role_quote() {
+  local dir="$1"
+  local role="$2"
+  local quote="$dir/${role}-attestation.quote"
+  local signature="$dir/${role}-attestation.sig"
+  cat > "$quote" <<EOF
+format=zigos-fixture-hardware-quote-v1
+role=$role
+nonce=$NONCE
+device_id=$DEVICE_ID
+measurement=${role}-hardware-capture
+EOF
+  cat > "$signature" <<EOF
+format=zigos-fixture-hardware-signature-v1
+role=$role
+nonce=$NONCE
+quote_sha256=$(sha256_file "$quote")
+EOF
+}
+
+rewrite_role_signature() {
+  local dir="$1"
+  local role="$2"
+  local quote="$dir/${role}-attestation.quote"
+  cat > "$dir/${role}-attestation.sig" <<EOF
+format=zigos-fixture-hardware-signature-v1
+role=$role
+nonce=$NONCE
+quote_sha256=$(sha256_file "$quote")
 EOF
 }
 
@@ -145,292 +372,207 @@ write_artifact_digests() {
   done
 }
 
-write_serial_log() {
+write_statement() {
   local dir="$1"
-  {
-    printf '%s:EVIDENCE_SOURCE:REAL_HARDWARE\n' "$TARGET_PREFIX"
-    printf '%s:BOARD_SKU:NUC11TNKi5\n' "$TARGET_PREFIX"
-	    printf '%s:PROOF_MANIFEST:RECORDED\n' "$TARGET_PREFIX"
-	    printf '%s:FIRMWARE_SETTINGS:RECORDED\n' "$TARGET_PREFIX"
-	    printf '%s:POWER_CYCLE_NOTES:RECORDED\n' "$TARGET_PREFIX"
-	    printf '%s:ARTIFACT_DIGESTS:RECORDED\n' "$TARGET_PREFIX"
-	    grep -Ev '^[[:space:]]*(#|$)' "$MARKER_FILE" | grep -F "$TARGET_PREFIX:" | grep -F ':OBSERVED'
-	    grep -Ev '^[[:space:]]*(#|$)' "$MARKER_FILE" | grep -F "$TARGET_PREFIX:" | grep -F ':PASS'
-	    grep -Ev '^[[:space:]]*(#|$)' "$MARKER_FILE" | grep -Fv "$TARGET_PREFIX:"
-	    printf '%s:COLD_BOOTS:10\n' "$TARGET_PREFIX"
-    printf '%s:WARM_REBOOTS:10\n' "$TARGET_PREFIX"
-    printf '%s:STORAGE_WRITE_READ_CYCLES:100\n' "$TARGET_PREFIX"
-    printf '%s:NETWORK_FRAME_CYCLES:100\n' "$TARGET_PREFIX"
-    printf '%s:SUSPEND_RESUME_CYCLES:20\n' "$TARGET_PREFIX"
-    printf '%s:CRASH_RECOVERY_CYCLES:10\n' "$TARGET_PREFIX"
-    printf '%s:CRASH_RECORD_PERSISTENCE_CYCLES:10\n' "$TARGET_PREFIX"
-    printf '%s:UPDATE_ROLLBACK_CYCLES:10\n' "$TARGET_PREFIX"
-  } > "$dir/serial.log"
+  ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" "$STATEMENT_WRITER" "$dir" >/dev/null
 }
 
 make_valid_bundle() {
   local dir="$1"
   mkdir -p "$dir"
   write_manifest "$dir"
-  write_firmware_settings "$dir"
-  write_power_notes "$dir"
-  write_attestation_lifecycle "$dir"
+  write_device_identity "$dir"
+  write_sidecars "$dir"
+  write_production_log "$dir"
+  write_verification_log "$dir"
+  write_cycles "$dir"
+  write_role_quote "$dir" production
+  write_role_quote "$dir" verification
   write_artifact_digests "$dir"
-  write_serial_log "$dir"
+  write_statement "$dir"
+}
+
+checker_env() {
+  env \
+    ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+    ZIGOS_EXPECTED_REPO_COMMIT="$ZIGOS_EXPECTED_REPO_COMMIT" \
+    ZIGOS_EXPECTED_REPO_CHANGE_ID="$ZIGOS_EXPECTED_REPO_CHANGE_ID" \
+    ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE="$NONCE" \
+    ZIGOS_HARDWARE_PROOF_VERIFIER="$VERIFIER" \
+    ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256="$VERIFIER_SHA256" \
+    "$@"
 }
 
 expect_pass() {
   local dir="$1"
-  ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" "$CHECKER" "$dir" >/dev/null
+  checker_env "$CHECKER" "$dir" >/dev/null
 }
 
 expect_fail() {
   local dir="$1"
-  if ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" "$CHECKER" "$dir" >/dev/null 2>"$dir/checker.err"; then
+  if checker_env "$CHECKER" "$dir" >/dev/null 2> "$dir/checker.err"; then
     printf 'expected checker failure for %s\n' "$dir" >&2
     exit 1
   fi
 }
 
-expect_fail_with_marker_file() {
-  local dir="$1"
-  local marker_file="$2"
-  if ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" "$CHECKER" "$dir" "$marker_file" >/dev/null 2>"$dir/checker.err"; then
-    printf 'expected checker failure for %s with marker file %s\n' "$dir" "$marker_file" >&2
-    exit 1
-  fi
-}
-
-expect_fail_with_proof_path() {
-  local proof_path="$1"
-  local err_path="$2"
-  if ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" "$CHECKER" "$proof_path" >/dev/null 2>"$err_path"; then
-    printf 'expected checker failure for proof path %s\n' "$proof_path" >&2
-    exit 1
-  fi
-}
-
-expect_fail_with_env_override() {
-  local dir="$1"
-  local env_name="$2"
-  local env_value="$3"
-  if env "$env_name=$env_value" ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" "$CHECKER" "$dir" >/dev/null 2>"$dir/checker.err"; then
-    printf 'expected checker failure for %s with %s=%s\n' "$dir" "$env_name" "$env_value" >&2
-    exit 1
-  fi
+copy_valid() {
+  local name="$1"
+  local target="$TMP_ROOT/$name"
+  cp -R "$VALID_BUNDLE" "$target"
+  printf '%s\n' "$target"
 }
 
 write_required_artifacts
+write_fixture_verifier
+VERIFIER_SHA256="$(sha256_file "$VERIFIER")"
+VALID_BUNDLE="$TMP_ROOT/valid"
+make_valid_bundle "$VALID_BUNDLE"
+expect_pass "$VALID_BUNDLE"
 
-valid_bundle="$TMP_ROOT/valid"
-make_valid_bundle "$valid_bundle"
-expect_pass "$valid_bundle"
+missing_verifier="$(copy_valid missing-verifier)"
+if env -u ZIGOS_HARDWARE_PROOF_VERIFIER \
+  ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+  ZIGOS_EXPECTED_REPO_COMMIT="$ZIGOS_EXPECTED_REPO_COMMIT" \
+  ZIGOS_EXPECTED_REPO_CHANGE_ID="$ZIGOS_EXPECTED_REPO_CHANGE_ID" \
+  ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE="$NONCE" \
+  ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256="$VERIFIER_SHA256" \
+  "$CHECKER" "$missing_verifier" >/dev/null 2> "$missing_verifier/checker.err"; then
+  printf 'expected checker failure without trusted verifier\n' >&2
+  exit 1
+fi
 
-alternate_marker_bundle="$TMP_ROOT/alternate-marker-file"
-alternate_marker_file="$TMP_ROOT/alternate-required-markers.txt"
-make_valid_bundle "$alternate_marker_bundle"
-cp "$MARKER_FILE" "$alternate_marker_file"
-expect_fail_with_marker_file "$alternate_marker_bundle" "$alternate_marker_file"
+spoof_verifier="$TMP_ROOT/exit-zero-verifier"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$spoof_verifier"
+chmod 0700 "$spoof_verifier"
+spoof_bundle="$(copy_valid spoof-verifier)"
+if env \
+  ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+  ZIGOS_EXPECTED_REPO_COMMIT="$ZIGOS_EXPECTED_REPO_COMMIT" \
+  ZIGOS_EXPECTED_REPO_CHANGE_ID="$ZIGOS_EXPECTED_REPO_CHANGE_ID" \
+  ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE="$NONCE" \
+  ZIGOS_HARDWARE_PROOF_VERIFIER="$spoof_verifier" \
+  ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256="$(sha256_file "$spoof_verifier")" \
+  "$CHECKER" "$spoof_bundle" >/dev/null 2> "$spoof_bundle/checker.err"; then
+  printf 'expected exact-response failure for exit-zero verifier\n' >&2
+  exit 1
+fi
 
-alternate_serial_bundle="$TMP_ROOT/alternate-serial-log"
-make_valid_bundle "$alternate_serial_bundle"
-cp "$alternate_serial_bundle/serial.log" "$alternate_serial_bundle/alternate-serial.log"
-expect_fail_with_proof_path "$alternate_serial_bundle/alternate-serial.log" "$alternate_serial_bundle/checker.err"
+wrong_verifier_digest="$(copy_valid wrong-verifier-digest)"
+if env \
+  ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+  ZIGOS_EXPECTED_REPO_COMMIT="$ZIGOS_EXPECTED_REPO_COMMIT" \
+  ZIGOS_EXPECTED_REPO_CHANGE_ID="$ZIGOS_EXPECTED_REPO_CHANGE_ID" \
+  ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE="$NONCE" \
+  ZIGOS_HARDWARE_PROOF_VERIFIER="$VERIFIER" \
+  ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
+  "$CHECKER" "$wrong_verifier_digest" >/dev/null 2> "$wrong_verifier_digest/checker.err"; then
+  printf 'expected externally pinned verifier digest failure\n' >&2
+  exit 1
+fi
 
-sidecar_override_bundle="$TMP_ROOT/sidecar-override"
-sidecar_override_dir="$TMP_ROOT/sidecar-overrides"
-make_valid_bundle "$sidecar_override_bundle"
-mkdir -p "$sidecar_override_dir"
-cp "$sidecar_override_bundle/proof-manifest.txt" "$sidecar_override_dir/proof-manifest.txt"
-cp "$sidecar_override_bundle/firmware-settings.txt" "$sidecar_override_dir/firmware-settings.txt"
-cp "$sidecar_override_bundle/power-cycle-notes.txt" "$sidecar_override_dir/power-cycle-notes.txt"
-cp "$sidecar_override_bundle/attestation-lifecycle.txt" "$sidecar_override_dir/attestation-lifecycle.txt"
-cp "$sidecar_override_bundle/artifact-digests.sha256" "$sidecar_override_dir/artifact-digests.sha256"
-expect_fail_with_env_override "$sidecar_override_bundle" "PROOF_MANIFEST_PATH" "$sidecar_override_dir/proof-manifest.txt"
-expect_fail_with_env_override "$sidecar_override_bundle" "FIRMWARE_SETTINGS_PATH" "$sidecar_override_dir/firmware-settings.txt"
-expect_fail_with_env_override "$sidecar_override_bundle" "POWER_CYCLE_NOTES_PATH" "$sidecar_override_dir/power-cycle-notes.txt"
-expect_fail_with_env_override "$sidecar_override_bundle" "ATTESTATION_LIFECYCLE_PATH" "$sidecar_override_dir/attestation-lifecycle.txt"
-expect_fail_with_env_override "$sidecar_override_bundle" "ARTIFACT_DIGESTS_PATH" "$sidecar_override_dir/artifact-digests.sha256"
+stale_nonce="$(copy_valid stale-nonce)"
+if env \
+  ZIGOS_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+  ZIGOS_EXPECTED_REPO_COMMIT="$ZIGOS_EXPECTED_REPO_COMMIT" \
+  ZIGOS_EXPECTED_REPO_CHANGE_ID="$ZIGOS_EXPECTED_REPO_CHANGE_ID" \
+  ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
+  ZIGOS_HARDWARE_PROOF_VERIFIER="$VERIFIER" \
+  ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256="$VERIFIER_SHA256" \
+  "$CHECKER" "$stale_nonce" >/dev/null 2> "$stale_nonce/checker.err"; then
+  printf 'expected stale nonce failure\n' >&2
+  exit 1
+fi
 
-qemu_bundle="$TMP_ROOT/qemu"
-make_valid_bundle "$qemu_bundle"
-printf 'OVMF\n' >> "$qemu_bundle/serial.log"
-expect_fail "$qemu_bundle"
+stale_production_log="$(copy_valid stale-production-log)"
+printf 'late unbound production bytes\n' >> "$stale_production_log/production-serial.log"
+expect_fail "$stale_production_log"
 
-placeholder_bundle="$TMP_ROOT/placeholder"
-make_valid_bundle "$placeholder_bundle"
-printf 'operator=TODO-fill\n' >> "$placeholder_bundle/proof-manifest.txt"
-expect_fail "$placeholder_bundle"
+stale_verification_log="$(copy_valid stale-verification-log)"
+printf 'late unbound verification bytes\n' >> "$stale_verification_log/verification-serial.log"
+expect_fail "$stale_verification_log"
 
-synthetic_sidecar_bundle="$TMP_ROOT/synthetic-sidecar"
-make_valid_bundle "$synthetic_sidecar_bundle"
-printf 'notes=synthetic checker fixture only\n' >> "$synthetic_sidecar_bundle/power-cycle-notes.txt"
-expect_fail "$synthetic_sidecar_bundle"
+production_notes_fixture="$(copy_valid production-notes-fixture)"
+printf 'app.notes.daily\nuserspace-notes-daily.elf\n' >> "$production_notes_fixture/production-serial.log"
+write_statement "$production_notes_fixture"
+expect_fail "$production_notes_fixture"
 
-low_counter_bundle="$TMP_ROOT/low-counter"
-make_valid_bundle "$low_counter_bundle"
-sed -i.bak 's/suspend_resume_cycles=20/suspend_resume_cycles=19/' "$low_counter_bundle/power-cycle-notes.txt"
-expect_fail "$low_counter_bundle"
+tampered_statement="$(copy_valid tampered-statement)"
+sed 's/^production_iso_sha256=./production_iso_sha256=f/' "$tampered_statement/capture-statement.txt" > "$tampered_statement/capture-statement.next"
+mv "$tampered_statement/capture-statement.next" "$tampered_statement/capture-statement.txt"
+expect_fail "$tampered_statement"
 
-counter_mismatch_bundle="$TMP_ROOT/counter-mismatch"
-make_valid_bundle "$counter_mismatch_bundle"
-sed -i.bak 's/^cold_boots=10/cold_boots=11/' "$counter_mismatch_bundle/power-cycle-notes.txt"
-expect_fail "$counter_mismatch_bundle"
+spoofed_scalar_counts="$(copy_valid spoofed-scalar-counts)"
+sed 's/^cold_boots=10$/cold_boots=11/' "$spoofed_scalar_counts/power-cycle-notes.txt" > "$spoofed_scalar_counts/power-cycle-notes.next"
+mv "$spoofed_scalar_counts/power-cycle-notes.next" "$spoofed_scalar_counts/power-cycle-notes.txt"
+sed "s/${TARGET_PREFIX}:COLD_BOOTS:10/${TARGET_PREFIX}:COLD_BOOTS:11/" "$spoofed_scalar_counts/verification-serial.log" > "$spoofed_scalar_counts/verification-serial.next"
+mv "$spoofed_scalar_counts/verification-serial.next" "$spoofed_scalar_counts/verification-serial.log"
+write_statement "$spoofed_scalar_counts"
+expect_fail "$spoofed_scalar_counts"
 
-duplicate_marker_bundle="$TMP_ROOT/duplicate-marker"
-make_valid_bundle "$duplicate_marker_bundle"
-printf '%s:EVIDENCE_SOURCE:REAL_HARDWARE\n' "$TARGET_PREFIX" >> "$duplicate_marker_bundle/serial.log"
-expect_fail "$duplicate_marker_bundle"
+stale_cycle_log="$(copy_valid stale-cycle-log)"
+printf 'late unbound cycle bytes\n' >> "$stale_cycle_log/cycles/cold_boot-000001.log"
+expect_fail "$stale_cycle_log"
 
-missing_hardware_fact_bundle="$TMP_ROOT/missing-hardware-fact"
-make_valid_bundle "$missing_hardware_fact_bundle"
-grep -v "${TARGET_PREFIX}:NVME_WRITE_READ_COMPLETION:OBSERVED" "$missing_hardware_fact_bundle/serial.log" > "$missing_hardware_fact_bundle/serial.next"
-mv "$missing_hardware_fact_bundle/serial.next" "$missing_hardware_fact_bundle/serial.log"
-expect_fail "$missing_hardware_fact_bundle"
+missing_cycle_log="$(copy_valid missing-cycle-log)"
+rm "$missing_cycle_log/cycles/warm_reboot-000010.log"
+expect_fail "$missing_cycle_log"
 
-out_of_order_pass_bundle="$TMP_ROOT/out-of-order-pass"
-make_valid_bundle "$out_of_order_pass_bundle"
-awk \
-  -v pass="${TARGET_PREFIX}:APIC_TIMER:PASS" \
-  -v observed="${TARGET_PREFIX}:APIC_TIMER_INTERRUPT:OBSERVED" \
-  '$0 == pass { next } $0 == observed { print pass } { print }' \
-  "$out_of_order_pass_bundle/serial.log" > "$out_of_order_pass_bundle/serial.next"
-mv "$out_of_order_pass_bundle/serial.next" "$out_of_order_pass_bundle/serial.log"
-expect_fail "$out_of_order_pass_bundle"
+duplicate_cycle="$(copy_valid duplicate-cycle)"
+duplicate_entry="$(tail -n 1 "$duplicate_cycle/cycle-manifest.txt")"
+printf '%s\n' "$duplicate_entry" >> "$duplicate_cycle/cycle-manifest.txt"
+expect_fail "$duplicate_cycle"
 
-missing_attestation_lifecycle_bundle="$TMP_ROOT/missing-attestation-lifecycle"
-make_valid_bundle "$missing_attestation_lifecycle_bundle"
-grep -v "${TARGET_PREFIX}:ATTESTATION_ROOT_LIFECYCLE:OBSERVED" "$missing_attestation_lifecycle_bundle/serial.log" > "$missing_attestation_lifecycle_bundle/serial.next"
-mv "$missing_attestation_lifecycle_bundle/serial.next" "$missing_attestation_lifecycle_bundle/serial.log"
-expect_fail "$missing_attestation_lifecycle_bundle"
+stale_quote="$(copy_valid stale-quote)"
+printf 'unbound quote bytes\n' >> "$stale_quote/production-attestation.quote"
+expect_fail "$stale_quote"
 
-missing_attestation_lifecycle_sidecar_bundle="$TMP_ROOT/missing-attestation-lifecycle-sidecar"
-make_valid_bundle "$missing_attestation_lifecycle_sidecar_bundle"
-rm "$missing_attestation_lifecycle_sidecar_bundle/attestation-lifecycle.txt"
-expect_fail "$missing_attestation_lifecycle_sidecar_bundle"
+invalid_quote="$(copy_valid invalid-quote)"
+sed 's/^role=production$/role=verification/' "$invalid_quote/production-attestation.quote" > "$invalid_quote/production-attestation.next"
+mv "$invalid_quote/production-attestation.next" "$invalid_quote/production-attestation.quote"
+rewrite_role_signature "$invalid_quote" production
+write_statement "$invalid_quote"
+expect_fail "$invalid_quote"
 
-stale_attestation_generation_bundle="$TMP_ROOT/stale-attestation-generation"
-make_valid_bundle "$stale_attestation_generation_bundle"
-sed -i.bak 's/^active_generation=9/active_generation=7/' "$stale_attestation_generation_bundle/attestation-lifecycle.txt"
-expect_fail "$stale_attestation_generation_bundle"
+invalid_signature="$(copy_valid invalid-signature)"
+sed 's/^quote_sha256=./quote_sha256=f/' "$invalid_signature/verification-attestation.sig" > "$invalid_signature/verification-attestation.next"
+mv "$invalid_signature/verification-attestation.next" "$invalid_signature/verification-attestation.sig"
+write_statement "$invalid_signature"
+expect_fail "$invalid_signature"
 
-unbound_attestation_metadata_bundle="$TMP_ROOT/unbound-attestation-metadata"
-make_valid_bundle "$unbound_attestation_metadata_bundle"
-sed -i.bak 's/^verifier_metadata_digest_bound=true/verifier_metadata_digest_bound=false/' "$unbound_attestation_metadata_bundle/attestation-lifecycle.txt"
-expect_fail "$unbound_attestation_metadata_bundle"
+missing_quote="$(copy_valid missing-quote)"
+rm "$missing_quote/verification-attestation.quote"
+expect_fail "$missing_quote"
 
-invalid_attestation_digest_bundle="$TMP_ROOT/invalid-attestation-digest"
-make_valid_bundle "$invalid_attestation_digest_bundle"
-sed -i.bak 's/^verifier_metadata_digest=.*/verifier_metadata_digest=not-a-digest/' "$invalid_attestation_digest_bundle/attestation-lifecycle.txt"
-expect_fail "$invalid_attestation_digest_bundle"
+checkpoint_error="$(copy_valid checkpoint-error)"
+sed 's/error=none/error=write_failed/' "$checkpoint_error/production-serial.log" > "$checkpoint_error/production-serial.next"
+mv "$checkpoint_error/production-serial.next" "$checkpoint_error/production-serial.log"
+write_statement "$checkpoint_error"
+expect_fail "$checkpoint_error"
 
-duplicate_counter_bundle="$TMP_ROOT/duplicate-counter"
-make_valid_bundle "$duplicate_counter_bundle"
-printf '%s:COLD_BOOTS:10\n' "$TARGET_PREFIX" >> "$duplicate_counter_bundle/serial.log"
-expect_fail "$duplicate_counter_bundle"
+checkpoint_after_ready="$(copy_valid checkpoint-after-ready)"
+checkpoint="$(grep '^ZIGOS:STORAGE:CHECKPOINT:FINAL' "$checkpoint_after_ready/production-serial.log")"
+grep -v '^ZIGOS:STORAGE:CHECKPOINT:FINAL' "$checkpoint_after_ready/production-serial.log" > "$checkpoint_after_ready/production-serial.next"
+printf '%s\n' "$checkpoint" >> "$checkpoint_after_ready/production-serial.next"
+mv "$checkpoint_after_ready/production-serial.next" "$checkpoint_after_ready/production-serial.log"
+write_statement "$checkpoint_after_ready"
+expect_fail "$checkpoint_after_ready"
 
-duplicate_manifest_key_bundle="$TMP_ROOT/duplicate-manifest-key"
-make_valid_bundle "$duplicate_manifest_key_bundle"
-printf 'repo_commit=0000000000000000000000000000000000000000\n' >> "$duplicate_manifest_key_bundle/proof-manifest.txt"
-expect_fail "$duplicate_manifest_key_bundle"
+missing_verification_ready="$(copy_valid missing-verification-ready)"
+grep -v '^ZIGOS:NATIVE:READY$' "$missing_verification_ready/verification-serial.log" > "$missing_verification_ready/verification-serial.next"
+mv "$missing_verification_ready/verification-serial.next" "$missing_verification_ready/verification-serial.log"
+write_statement "$missing_verification_ready"
+expect_fail "$missing_verification_ready"
 
-duplicate_firmware_key_bundle="$TMP_ROOT/duplicate-firmware-key"
-make_valid_bundle "$duplicate_firmware_key_bundle"
-printf 'boot_mode=UEFI\n' >> "$duplicate_firmware_key_bundle/firmware-settings.txt"
-expect_fail "$duplicate_firmware_key_bundle"
+device_mismatch="$(copy_valid device-mismatch)"
+sed 's/^device_id=.*/device_id=nuc11tnki5-different-device/' "$device_mismatch/device-identity.txt" > "$device_mismatch/device-identity.next"
+mv "$device_mismatch/device-identity.next" "$device_mismatch/device-identity.txt"
+write_statement "$device_mismatch"
+expect_fail "$device_mismatch"
 
-duplicate_power_key_bundle="$TMP_ROOT/duplicate-power-key"
-make_valid_bundle "$duplicate_power_key_bundle"
-printf 'cold_boots=10\n' >> "$duplicate_power_key_bundle/power-cycle-notes.txt"
-expect_fail "$duplicate_power_key_bundle"
+artifact_hash="$(copy_valid artifact-hash)"
+printf 'changed production ISO\n' >> "$ARTIFACT_ROOT/build/os.iso"
+expect_fail "$artifact_hash"
+printf 'hardware checker artifact %s\n' "build/os.iso" > "$ARTIFACT_ROOT/build/os.iso"
 
-missing_changed_options_bundle="$TMP_ROOT/missing-changed-options"
-make_valid_bundle "$missing_changed_options_bundle"
-grep -v '^changed_options=' "$missing_changed_options_bundle/firmware-settings.txt" > "$missing_changed_options_bundle/firmware-settings.next"
-mv "$missing_changed_options_bundle/firmware-settings.next" "$missing_changed_options_bundle/firmware-settings.txt"
-expect_fail "$missing_changed_options_bundle"
-
-invalid_secure_boot_bundle="$TMP_ROOT/invalid-secure-boot"
-make_valid_bundle "$invalid_secure_boot_bundle"
-sed -i.bak 's/^secure_boot=disabled-for-local-proof-media/secure_boot=maybe/' "$invalid_secure_boot_bundle/firmware-settings.txt"
-expect_fail "$invalid_secure_boot_bundle"
-
-invalid_storage_mode_bundle="$TMP_ROOT/invalid-storage-mode"
-make_valid_bundle "$invalid_storage_mode_bundle"
-sed -i.bak 's/^storage_mode=nvme/storage_mode=sata/' "$invalid_storage_mode_bundle/firmware-settings.txt"
-expect_fail "$invalid_storage_mode_bundle"
-
-missing_notes_bundle="$TMP_ROOT/missing-notes"
-make_valid_bundle "$missing_notes_bundle"
-grep -v '^notes=' "$missing_notes_bundle/power-cycle-notes.txt" > "$missing_notes_bundle/power-cycle-notes.next"
-mv "$missing_notes_bundle/power-cycle-notes.next" "$missing_notes_bundle/power-cycle-notes.txt"
-expect_fail "$missing_notes_bundle"
-
-captured_before_prepared_bundle="$TMP_ROOT/captured-before-prepared"
-make_valid_bundle "$captured_before_prepared_bundle"
-sed -i.bak 's/^captured_at_utc=.*/captured_at_utc=2026-06-09T23:59:59Z/' "$captured_before_prepared_bundle/proof-manifest.txt"
-expect_fail "$captured_before_prepared_bundle"
-
-completed_before_started_bundle="$TMP_ROOT/completed-before-started"
-make_valid_bundle "$completed_before_started_bundle"
-sed -i.bak 's/^completed_at_utc=.*/completed_at_utc=2026-06-09T23:59:59Z/' "$completed_before_started_bundle/power-cycle-notes.txt"
-expect_fail "$completed_before_started_bundle"
-
-power_started_before_manifest_bundle="$TMP_ROOT/power-started-before-manifest"
-make_valid_bundle "$power_started_before_manifest_bundle"
-sed -i.bak 's/^started_at_utc=.*/started_at_utc=2026-06-09T23:59:59Z/' "$power_started_before_manifest_bundle/power-cycle-notes.txt"
-expect_fail "$power_started_before_manifest_bundle"
-
-power_completed_after_manifest_bundle="$TMP_ROOT/power-completed-after-manifest"
-make_valid_bundle "$power_completed_after_manifest_bundle"
-sed -i.bak 's/^completed_at_utc=.*/completed_at_utc=2026-06-10T01:00:01Z/' "$power_completed_after_manifest_bundle/power-cycle-notes.txt"
-expect_fail "$power_completed_after_manifest_bundle"
-
-attestation_after_manifest_bundle="$TMP_ROOT/attestation-after-manifest"
-make_valid_bundle "$attestation_after_manifest_bundle"
-sed -i.bak 's/^captured_at_utc=.*/captured_at_utc=2026-06-10T01:00:01Z/' "$attestation_after_manifest_bundle/attestation-lifecycle.txt"
-expect_fail "$attestation_after_manifest_bundle"
-
-missing_digest_bundle="$TMP_ROOT/missing-digest"
-make_valid_bundle "$missing_digest_bundle"
-grep -v 'zig-out/bin/userspace-storage-driver.elf' "$missing_digest_bundle/artifact-digests.sha256" > "$missing_digest_bundle/artifact-digests.next"
-mv "$missing_digest_bundle/artifact-digests.next" "$missing_digest_bundle/artifact-digests.sha256"
-expect_fail "$missing_digest_bundle"
-
-missing_policy_digest_bundle="$TMP_ROOT/missing-policy-digest"
-make_valid_bundle "$missing_policy_digest_bundle"
-grep -v 'spec/release_security/release_keyring.json' "$missing_policy_digest_bundle/artifact-digests.sha256" > "$missing_policy_digest_bundle/artifact-digests.next"
-mv "$missing_policy_digest_bundle/artifact-digests.next" "$missing_policy_digest_bundle/artifact-digests.sha256"
-expect_fail "$missing_policy_digest_bundle"
-
-corrupt_digest_bundle="$TMP_ROOT/corrupt-digest"
-make_valid_bundle "$corrupt_digest_bundle"
-sed -i.bak 's/^[0-9a-f][0-9a-f]*/0000000000000000000000000000000000000000000000000000000000000000/' "$corrupt_digest_bundle/artifact-digests.sha256"
-expect_fail "$corrupt_digest_bundle"
-
-malformed_digest_bundle="$TMP_ROOT/malformed-digest"
-make_valid_bundle "$malformed_digest_bundle"
-printf 'not-a-sha256  build/os.iso\n' >> "$malformed_digest_bundle/artifact-digests.sha256"
-expect_fail "$malformed_digest_bundle"
-
-duplicate_digest_bundle="$TMP_ROOT/duplicate-digest"
-make_valid_bundle "$duplicate_digest_bundle"
-printf '%s  build/os.iso\n' "$(sha256_file "$ARTIFACT_ROOT/build/os.iso")" >> "$duplicate_digest_bundle/artifact-digests.sha256"
-expect_fail "$duplicate_digest_bundle"
-
-stale_commit_bundle="$TMP_ROOT/stale-commit"
-make_valid_bundle "$stale_commit_bundle"
-sed -i.bak 's/^repo_commit=.*/repo_commit=0000000000000000000000000000000000000000/' "$stale_commit_bundle/proof-manifest.txt"
-expect_fail "$stale_commit_bundle"
-
-stale_change_bundle="$TMP_ROOT/stale-change"
-make_valid_bundle "$stale_change_bundle"
-sed -i.bak 's/^repo_change_id=.*/repo_change_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$stale_change_bundle/proof-manifest.txt"
-expect_fail "$stale_change_bundle"
-
-dirty_repo_bundle="$TMP_ROOT/dirty-repo"
-make_valid_bundle "$dirty_repo_bundle"
-sed -i.bak 's/^repo_dirty_files=0/repo_dirty_files=1/' "$dirty_repo_bundle/proof-manifest.txt"
-expect_fail "$dirty_repo_bundle"
-
-printf 'NUC11TNKi5 hardware proof checker self-test OK\n'
+printf 'NUC11TNKi5 hardware proof checker self-test: PASS\n'

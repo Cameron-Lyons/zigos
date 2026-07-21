@@ -17,6 +17,7 @@ pub fn kernelMain() void {
     console.init();
     common.printBootMarker(boot_markers.boot_start);
     common.printBootProfile();
+    common.printKernelRole();
     const hardening = cpu_features.detect();
     cpu_features.enable(hardening);
     common.printBootMarker(if (hardening.smep) boot_markers.cpu_smep_enabled else boot_markers.cpu_smep_absent);
@@ -32,7 +33,7 @@ pub fn kernelMain() void {
     init_runtime.init();
 
     common.printBootMarker(boot_markers.boot_core_ready);
-    switch (config.bootProfile()) {
+    switch (comptime config.bootProfile()) {
         .zigos_native => @import("profiles/zigos_native.zig").run(),
         .recovery => @import("profiles/recovery.zig").run(),
         .benchmark => @import("profiles/benchmark.zig").run(),

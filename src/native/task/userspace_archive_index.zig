@@ -4,7 +4,16 @@ const id_index = @import("../core/id_index.zig");
 const native_util = @import("../core/util.zig");
 
 pub const GeneratedArtifact = @TypeOf(archive.artifacts[0]);
+pub const ArchiveRole = archive.ArchiveRole;
+pub const archive_role: ArchiveRole = archive.archive_role;
+pub const includes_verification_images = archive.includes_verification_images;
 pub const artifacts = archive.artifacts;
+
+comptime {
+    if (includes_verification_images != (archive_role == .verification)) {
+        @compileError("generated userspace archive role metadata is inconsistent");
+    }
+}
 
 const BUNDLE_INDEX_CAPACITY: usize = archive.artifacts.len * 2;
 const bundle_index = buildBundleIndex();

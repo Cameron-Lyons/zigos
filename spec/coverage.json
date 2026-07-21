@@ -239,8 +239,8 @@
           "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
         },
         {
-          "file": "src/native/task/userspace_registry.zig",
-          "name": "userspace registry keeps the freestanding MMU isolation proof in the boot catalog"
+          "file": "src/native/task/userspace_verification_registry.zig",
+          "name": "verification registry keeps the freestanding MMU isolation proof"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",

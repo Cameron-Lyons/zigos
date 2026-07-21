@@ -70,6 +70,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS = [_][]const u8{
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
+    "BOOT:ROLE:verification",
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
     "ZIGOS:USERSPACE:EXEC_PROBE:OK",
@@ -98,14 +99,81 @@ const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "ZIGOS:PLATFORM:HEALTH_CHECKS:STORAGE_ROLLBACK",
     "ZIGOS:PLATFORM:CRASH_RECORD:PERSISTED",
     "ZIGOS:PLATFORM:UPDATE_ROLLBACK:POWER_CYCLE_OK",
+    "ZIGOS:NATIVE:READY",
+};
+const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
+    "BOOT:START",
+    "BOOT:PROFILE:zigos_native",
+    "BOOT:ROLE:production",
+    "BOOT:CORE_READY",
+    "ZIGOS:KERNEL_NETWORK:DEFERRED",
+    "ZIGOS:NATIVE:BOOTSTRAP",
+    "ZIGOS:TCB:DEFINED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:EVIDENCE_SOURCE:REAL_HARDWARE",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:BOARD_SKU:NUC11TNKi5",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SMBIOS_SKU:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:MULTIBOOT_MEMORY_MAP:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_RSDP:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_MADT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_FADT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS",
+    "ZIGOS:USERSPACE:SCHEDULER:READY",
+    "ZIGOS:USERSPACE:ARTIFACTS:READY",
+    "ZIGOS:USERSPACE:EXEC_PROBE:OK",
+    "ZIGOS:USERSPACE:RESUME:OK",
+    "ZIGOS:TRANSPORT:NATIVE_KERNEL:READY",
+    "ZIGOS:TRANSPORT:NO_ROOT",
+    "ZIGOS:TRANSPORT:COMPONENT_ABI:READY",
+    "ZIGOS:SUPERVISOR:READY",
+    "ZIGOS:SERVICE_BOOT:CONTRACT_MAP:READY",
+    "ZIGOS:POLICY:READY",
+    "ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:NETWORK_READY",
+    "ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY",
+    "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
+    "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED",
+    "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED",
+    "ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED",
+    "ZIGOS:PLATFORM:ARTIFACT_MANIFEST:VERIFIED",
+    "ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED",
+    "ZIGOS:PLATFORM:MEASURED_BOOT:VERIFIED_ROOT",
+    "ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false",
+    "ZIGOS:TASK:SESSION_READY",
+    "ZIGOS:NATIVE:READY",
+};
+const FIRST_HARDWARE_TARGET_FORBIDDEN_PRODUCTION_MARKERS = [_][]const u8{
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER_INTERRUPT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:USB_INPUT_XHCI:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_WRITE_READ_COMPLETION:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_BLOCK:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:I225_LM_FRAME_INTERRUPT:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NETWORK_I225_LM:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME_POWER:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECOVERY:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ATTESTATION_ROOT_LIFECYCLE:OBSERVED",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS = [_][]const u8{
     "src/native/platform/hardware_target.zig",
+    "spec/hardware/nuc11tnki5-production-required-markers.txt",
     "spec/hardware/nuc11tnki5-required-markers.txt",
     "spec/hardware/nuc11tnki5-proof-bundle.md",
     "scripts/prepare-nuc11tnki5-hardware-proof.sh",
+    "scripts/write-nuc11tnki5-capture-statement.sh",
     "scripts/check-nuc11tnki5-hardware-proof.sh",
     "scripts/test-nuc11tnki5-hardware-proof-checker.sh",
+};
+const FIRST_HARDWARE_TARGET_REQUIRED_QEMU_PREFLIGHT_COMMANDS = [_][]const u8{
+    "./scripts/zig.sh build iso",
+    "./scripts/zig.sh build iso-verification",
+    "./scripts/zig.sh build uefi-qemu-test",
+    "./scripts/zig.sh build uefi-verification-qemu-test",
 };
 const FIRST_HARDWARE_TARGET_LIST_FIELDS = [_][]const u8{
     "required_subsystems",
@@ -526,6 +594,19 @@ fn validateFirstHardwareTarget(
     for (reference_artifacts) |artifact| {
         if (!common.pathExists(io, artifact)) {
             try common.addError(errors, allocator, "first_hardware_target references missing artifact: {s}", .{artifact});
+        }
+    }
+    const qemu_preflight_commands = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(target, "qemu_preflight_commands"),
+        "first_hardware_target qemu_preflight_commands",
+        true,
+    );
+    var qemu_preflight_command_set = try common.collectUniqueStrings(allocator, errors, qemu_preflight_commands, "first hardware target QEMU preflight command");
+    for (FIRST_HARDWARE_TARGET_REQUIRED_QEMU_PREFLIGHT_COMMANDS) |required_command| {
+        if (!qemu_preflight_command_set.contains(required_command)) {
+            try common.addError(errors, allocator, "first_hardware_target missing required QEMU preflight command: {s}", .{required_command});
         }
     }
     try validateNuc11tnki5MarkerFile(allocator, io, errors);
@@ -978,6 +1059,16 @@ fn validateNuc11tnki5KernelProofSources(
     }
 }
 
+fn markerFileHasActiveLine(source: []const u8, expected: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (std.mem.eql(u8, line, expected)) return true;
+    }
+    return false;
+}
+
 fn validateNuc11tnki5MarkerFile(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -990,18 +1081,35 @@ fn validateNuc11tnki5MarkerFile(
     }
     const source = try common.readFileAlloc(allocator, io, marker_path, common.source_file_max_bytes);
     for (FIRST_HARDWARE_TARGET_REQUIRED_MARKERS) |marker| {
-        if (std.mem.indexOf(u8, source, marker) == null) {
+        if (!markerFileHasActiveLine(source, marker)) {
             try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required marker: {s}", .{marker});
         }
     }
     for (FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS) |marker| {
-        if (std.mem.indexOf(u8, source, marker) == null) {
+        if (!markerFileHasActiveLine(source, marker)) {
             try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required hardware fact marker: {s}", .{marker});
         }
     }
     for (FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS) |marker| {
-        if (std.mem.indexOf(u8, source, marker) == null) {
+        if (!markerFileHasActiveLine(source, marker)) {
             try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required booted proof marker: {s}", .{marker});
+        }
+    }
+
+    const production_marker_path = "spec/hardware/nuc11tnki5-production-required-markers.txt";
+    if (!common.pathExists(io, production_marker_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 production marker file is missing: {s}", .{production_marker_path});
+        return;
+    }
+    const production_source = try common.readFileAlloc(allocator, io, production_marker_path, common.source_file_max_bytes);
+    for (FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS) |marker| {
+        if (!markerFileHasActiveLine(production_source, marker)) {
+            try common.addError(errors, allocator, "NUC11TNKi5 production marker file is missing required marker: {s}", .{marker});
+        }
+    }
+    for (FIRST_HARDWARE_TARGET_FORBIDDEN_PRODUCTION_MARKERS) |marker| {
+        if (markerFileHasActiveLine(production_source, marker)) {
+            try common.addError(errors, allocator, "NUC11TNKi5 production marker file must not require unreachable exhaustive marker: {s}", .{marker});
         }
     }
 }
@@ -1018,6 +1126,34 @@ fn validateNuc11tnki5ProofPreparation(
     }
     const source = try common.readFileAlloc(allocator, io, prep_path, common.source_file_max_bytes);
     const required_snippets = [_][]const u8{
+        "build/os.iso",
+        "build/os-verification.iso",
+        "zig-out/bin/kernel-zigos-native.elf",
+        "zig-out/bin/kernel-zigos-native-verification.elf",
+        "--nonce",
+        "ZIGOS_HARDWARE_PROOF_NONCE",
+        "zigos-nuc11tnki5-proof-v2",
+        "capture_nonce=$CAPTURE_NONCE",
+        "device_identity=device-identity.txt",
+        "production_serial_log=production-serial.log",
+        "production_boot_medium=build/os.iso",
+        "production_boot_kernel=zig-out/bin/kernel-zigos-native.elf",
+        "production_required_markers=spec/hardware/nuc11tnki5-production-required-markers.txt",
+        "verification_serial_log=verification-serial.log",
+        "verification_boot_medium=build/os-verification.iso",
+        "verification_boot_kernel=zig-out/bin/kernel-zigos-native-verification.elf",
+        "verification_required_markers=spec/hardware/nuc11tnki5-required-markers.txt",
+        "cycle_manifest=cycle-manifest.txt",
+        "production_quote=production-attestation.quote",
+        "production_signature=production-attestation.sig",
+        "verification_quote=verification-attestation.quote",
+        "verification_signature=verification-attestation.sig",
+        "capture_statement=capture-statement.txt",
+        "release-sbom-provenance iso iso-verification",
+        "Perform two separate single-boot captures",
+        "production-serial.log",
+        "verification-serial.log",
+        "cycle-manifest.txt",
         "operator-metadata-markers.txt",
         "$TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE",
         "$TARGET_PREFIX:BOARD_SKU:NUC11TNKi5",
@@ -1029,6 +1165,40 @@ fn validateNuc11tnki5ProofPreparation(
     for (required_snippets) |snippet| {
         if (std.mem.indexOf(u8, source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 proof preparation script must emit metadata marker snippet: {s}", .{snippet});
+        }
+    }
+
+    const statement_writer_path = "scripts/write-nuc11tnki5-capture-statement.sh";
+    if (!common.pathExists(io, statement_writer_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 capture-statement writer is missing: {s}", .{statement_writer_path});
+        return;
+    }
+    const statement_source = try common.readFileAlloc(allocator, io, statement_writer_path, common.source_file_max_bytes);
+    const statement_snippets = [_][]const u8{
+        "format=zigos-nuc11tnki5-capture-statement-v1",
+        "capture_nonce=$nonce",
+        "device_identity_sha256=",
+        "production_serial_sha256=",
+        "verification_serial_sha256=",
+        "cycle_manifest_sha256=",
+        "production_iso_sha256=",
+        "production_kernel_sha256=",
+        "verification_iso_sha256=",
+        "verification_kernel_sha256=",
+        "production_marker_contract_sha256=",
+        "verification_marker_contract_sha256=",
+        "firmware_settings_sha256=",
+        "power_cycle_notes_sha256=",
+        "attestation_lifecycle_sha256=",
+        "artifact_digests_sha256=",
+        "production_quote_sha256=",
+        "production_signature_sha256=",
+        "verification_quote_sha256=",
+        "verification_signature_sha256=",
+    };
+    for (statement_snippets) |snippet| {
+        if (std.mem.indexOf(u8, statement_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 capture-statement writer must bind snippet: {s}", .{snippet});
         }
     }
 }
@@ -1045,85 +1215,48 @@ fn validateNuc11tnki5ProofChecker(
     }
     const source = try common.readFileAlloc(allocator, io, checker_path, common.source_file_max_bytes);
     const required_snippets = [_][]const u8{
-        "EVIDENCE_SOURCE:REAL_HARDWARE",
-        "BOARD_SKU:NUC11TNKi5",
-        "PROOF_MANIFEST:RECORDED",
-        "FIRMWARE_SETTINGS:RECORDED",
-        "POWER_CYCLE_NOTES:RECORDED",
-        "ARTIFACT_DIGESTS:RECORDED",
+        "zigos-nuc11tnki5-proof-v2",
         "proof-manifest.txt",
-        "target_id",
-        "REQUIRED_MARKERS_PATH",
-        "EXPECTED_MARKER_FILE",
-        "absolute_path",
-        "EXPECTED_LOG_PATH",
-        "EXPECTED_PROOF_MANIFEST_PATH",
-        "EXPECTED_FIRMWARE_SETTINGS_PATH",
-        "EXPECTED_POWER_CYCLE_NOTES_PATH",
-        "EXPECTED_ATTESTATION_LIFECYCLE_PATH",
-        "EXPECTED_ARTIFACT_DIGESTS_PATH",
-        "require_expected_bundle_path",
-        "does not match proof bundle path",
-        "does not match proof manifest required_markers",
-        "non-real proof evidence text",
-        "synthetic|simulated|mock|fake|fixture|test[-_ ]only|emulated",
-        "captured_at_utc",
-        "require_timestamp_not_before",
-        "require_timestamp_value_not_before",
-        "require_timestamp_value_not_after",
-        "is before",
-        "is after",
-        "proof_prepared_at",
-        "proof_captured_at",
-        "power_started_at",
-        "power_completed_at",
-        "attestation_captured_at",
-        "proof manifest prepared_at_utc",
-        "proof manifest captured_at_utc",
-        "started_at_utc",
-        "completed_at_utc",
-        "changed_options",
-        "disabled-for-local-proof-media",
-        "\"storage_mode\" \"nvme\"",
-        "\"notes\"",
-        "repo_vcs",
-        "repo_change_id",
-        "repo_commit",
-        "ZIGOS_EXPECTED_REPO_CHANGE_ID",
-        "ZIGOS_EXPECTED_REPO_COMMIT",
-        "ZIGOS_ARTIFACT_ROOT",
-        "sha256_file",
-        "artifact digest mismatch",
-        "require_digest_manifest_format",
-        "malformed artifact digest line",
-        "digest_count",
-        "sha256 lines for",
-        "grep -Fxc",
-        "marker_line_number",
-        "require_marker_before",
-        "must appear before",
-        "APIC_TIMER_INTERRUPT:OBSERVED",
-        "APIC_TIMER:PASS",
-        "FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
-        "FRAMEBUFFER_GOP:PASS",
-        "XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
-        "USB_INPUT_XHCI:PASS",
-        "NVME_WRITE_READ_COMPLETION:OBSERVED",
-        "NVME_BLOCK:PASS",
-        "I225_LM_FRAME_INTERRUPT:OBSERVED",
-        "NETWORK_I225_LM:PASS",
-        "SUSPEND_RESUME_POWER:OBSERVED",
-        "SUSPEND_RESUME:PASS",
-        "CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
-        "CRASH_RECOVERY:PASS",
-        "UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
-        "ZIGOS:PLATFORM:UPDATE_ROLLBACK:POWER_CYCLE_OK",
-        "ZIGOS:PLATFORM:CRASH_RECORD:PERSISTED",
-        "ZIGOS:PERMISSION:XHCI_KEYBOARD:REPORT",
-        "ZIGOS:SYNC:NATIVE_DRIVER:FRAME_SENT",
-        "key_line_count",
-        "require_unique_key",
-        "jj -R \"$ROOT_DIR\" log -r @ --no-graph",
+        "device-identity.txt",
+        "production-serial.log",
+        "verification-serial.log",
+        "cycle-manifest.txt",
+        "production-attestation.quote",
+        "production-attestation.sig",
+        "verification-attestation.quote",
+        "verification-attestation.sig",
+        "capture-statement.txt",
+        "ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE",
+        "ZIGOS_HARDWARE_PROOF_VERIFIER",
+        "ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256",
+        "externally pinned lowercase SHA-256 digest",
+        "fresh externally issued 64-hex capture nonce",
+        "actual_verifier_sha256",
+        "trusted verifier executable digest does not match",
+        "trusted verifier must be external to the proof bundle",
+        "format=zigos-nuc11tnki5-capture-statement-v1",
+        "write_expected_statement",
+        "production_serial_sha256=",
+        "verification_serial_sha256=",
+        "cycle_manifest_sha256=",
+        "production_iso_sha256=",
+        "production_kernel_sha256=",
+        "verification_iso_sha256=",
+        "verification_kernel_sha256=",
+        "production_marker_contract_sha256=",
+        "verification_marker_contract_sha256=",
+        "production_quote_sha256=",
+        "production_signature_sha256=",
+        "verification_quote_sha256=",
+        "verification_signature_sha256=",
+        "capture statement is not the canonical statement recomputed",
+        "format=zigos-nuc11tnki5-cycle-manifest-v1",
+        "zigos-nuc11tnki5-cycle-log-v1",
+        "cycle manifest is malformed, non-canonical, out of order, non-contiguous, or contains duplicate evidence",
+        "cycles directory must contain exactly the logs named",
+        "cycle log digest mismatch",
+        "valid unique",
+        "does not match $count valid cycle entries",
         "COLD_BOOTS",
         "WARM_REBOOTS",
         "STORAGE_WRITE_READ_CYCLES",
@@ -1132,31 +1265,43 @@ fn validateNuc11tnki5ProofChecker(
         "CRASH_RECOVERY_CYCLES",
         "CRASH_RECORD_PERSISTENCE_CYCLES",
         "UPDATE_ROLLBACK_CYCLES",
-        "repo_dirty_files",
-        "require_unique_counter",
-        "appears",
-        "require_counter_matches_sidecar",
-        "does not match serial counter",
-        "attestation-lifecycle.txt",
-        "attestation_lifecycle",
-        "initial_generation",
-        "active_generation",
-        "revoked_generation_count",
+        "BOOT:ROLE:production",
+        "BOOT:ROLE:verification",
+        "ZIGOS:NATIVE:READY",
+        "exactly one BOOT:ROLE marker",
+        "ZIGOS:STORAGE:CHECKPOINT:FINAL",
+        "enabled=true",
+        "dirty=false",
+        "generation=[0-9]+",
+        "error=none",
+        "ZIGOS:TASK:SESSION_READY",
+        "require_marker_before",
+        "EVIDENCE_SOURCE:REAL_HARDWARE",
+        "BOARD_SKU:NUC11TNKi5",
+        "APIC_TIMER_INTERRUPT:OBSERVED",
+        "FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
+        "XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
+        "NVME_WRITE_READ_COMPLETION:OBSERVED",
+        "I225_LM_FRAME_INTERRUPT:OBSERVED",
+        "SUSPEND_RESUME_POWER:OBSERVED",
+        "CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
+        "active_marker_lines",
+        "production marker contract under artifact root differs",
+        "verification marker contract under artifact root differs",
+        "app.notes.daily",
+        "userspace-notes-daily.elf",
+        "artifact digest mismatch",
         "stale_generation_rejected",
         "revoked_generation_rejected",
         "verifier_rejected_stale_attestation",
-        "verifier_metadata_digest_bound",
-        "verifier_metadata_digest",
-        "attestation_request_digest",
-        "artifact-digests.sha256",
-        "zig-out/bin/kernel-zigos-native.elf",
-        "zig-out/bin/userspace-network-stack.elf",
-        "zig-out/bin/userspace-policy-mediation.elf",
-        "zig-out/bin/userspace-storage-driver.elf",
-        "SECURITY.md",
-        "spec/release_security/release_artifacts.json",
-        "spec/release_security/release_keyring.json",
-        "spec/release_security/revoked_release_keys.json",
+        "format=zigos-trusted-hardware-verifier-response-v1",
+        "assertion=signed-response",
+        "statement_sha256=$statement_sha256",
+        "nonce=$capture_nonce",
+        "production_role=verified",
+        "verification_role=verified",
+        "cmp -s \"$expected_response\" \"$verifier_response\"",
+        "did not return the exact signed-response assertion",
         "QEMU",
     };
     for (required_snippets) |snippet| {
@@ -2140,4 +2285,18 @@ test "synthetic userspace marker gate accepts model-only marker" {
         "// " ++ MODEL_ONLY_SYNTHETIC_IMAGE_MARKER ++ "\nconst image = task_runtime.syntheticUserspaceImage(\"label\", \"entry\");\n",
     );
     try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+}
+
+test "hardware marker lookup ignores commented requirements" {
+    const source =
+        "# ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS\n" ++
+        "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS\n";
+
+    try std.testing.expect(!markerFileHasActiveLine(source, "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS"));
+    try std.testing.expect(markerFileHasActiveLine(source, "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS"));
+}
+
+test "hardware marker lookup requires a complete active line" {
+    const source = "prefix ZIGOS:NATIVE:READY suffix\nZIGOS:NATIVE:READY_EXTRA\n";
+    try std.testing.expect(!markerFileHasActiveLine(source, "ZIGOS:NATIVE:READY"));
 }

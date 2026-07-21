@@ -1,8 +1,10 @@
-# Required serial markers for the first real hardware target.
-# These must come from an Intel NUC 11 Pro Kit NUC11TNKi5 boot, not QEMU.
-# The proof checker also requires proof-manifest metadata, cycle counters,
-# firmware settings, power-cycle notes, and artifact digests described in
-# nuc11tnki5-proof-bundle.md.
+# Required verification-kernel serial markers for the first real hardware
+# target. These must come from booting build/os-verification.iso on an Intel
+# NUC 11 Pro Kit NUC11TNKi5, not QEMU. The production ISO and kernel are
+# separately bound by artifact digests; this single-boot log is not a
+# production-kernel boot claim. Repeated cycles live in individually hashed
+# cycle logs and the counters here are summaries, never count authority.
+BOOT:ROLE:verification
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER:PASS
@@ -29,7 +31,9 @@ ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ATTESTATION_ROOT_LIFECYCLE:OBSERVED
 
-# Booted production evidence markers captured from the same real hardware run.
+# Booted verification-workload markers captured from the same real hardware
+# run. They validate shared code and hardware paths through the verification
+# image; the verification binary is not the shipped production kernel.
 ZIGOS:USERSPACE:ARTIFACTS:READY
 ZIGOS:USERSPACE:SCHEDULER:READY
 ZIGOS:USERSPACE:EXEC_PROBE:OK
@@ -98,3 +102,4 @@ ZIGOS:NOTES_DAILY:TYPED_SYNC:OK
 ZIGOS:NOTES_DAILY:TYPED_RECOVERY:OK
 ZIGOS:NOTES_DAILY:TYPED_LOOP:COMPLETE
 ZIGOS:NOTES_DAILY:COMPLETE
+ZIGOS:NATIVE:READY

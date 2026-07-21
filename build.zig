@@ -39,6 +39,43 @@ pub fn build(b: *std.Build) void {
     const kernels = kernel_build.addKernelProfiles(b, target, optimize, userspace_images);
     const kernel_steps = kernel_build.addKernelProfileSteps(b, kernels, userspace_images);
 
+    const kernel_role_check_tool = b.addExecutable(.{
+        .name = "check-kernel-roles",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_kernel_roles.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const kernel_role_check_cmd = b.addRunArtifact(kernel_role_check_tool);
+    kernel_role_check_cmd.addFileArg(kernels.zigos_native.compile_step.getEmittedBin());
+    kernel_role_check_cmd.addFileArg(kernels.zigos_native_verification.compile_step.getEmittedBin());
+    kernel_role_check_cmd.addArg("--production-userspace");
+    for (userspace_images.production_compile_steps) |compile_step| {
+        kernel_role_check_cmd.addFileArg(compile_step.getEmittedBin());
+    }
+    kernel_role_check_cmd.addArg("--verification-userspace");
+    for (userspace_images.verification_only_compile_steps) |compile_step| {
+        kernel_role_check_cmd.addFileArg(compile_step.getEmittedBin());
+    }
+    const kernel_role_check_tests = b.addTest(.{
+        .name = "check-kernel-roles-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_kernel_roles.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const kernel_role_check_test_cmd = b.addRunArtifact(kernel_role_check_tests);
+    const kernel_role_check_step = b.step("kernel-role-check", "Reject verification proof code or state in the production kernel");
+    kernel_role_check_step.dependOn(&kernel_role_check_cmd.step);
+    kernel_role_check_step.dependOn(&kernel_role_check_test_cmd.step);
+    userspace_build.gateArtifactInstalls(userspace_images, kernel_role_check_step);
+    kernel_build.gateArtifactInstalls(kernels, kernel_role_check_step);
+    kernel_steps.kernel.dependOn(kernel_role_check_step);
+    kernel_steps.zigos_native.dependOn(kernel_role_check_step);
+    kernel_steps.zigos_native_verification.dependOn(kernel_role_check_step);
+
     const signing_cli = b.addExecutable(.{
         .name = "zigos-sign",
         .root_module = b.createModule(.{
@@ -64,11 +101,24 @@ pub fn build(b: *std.Build) void {
     verify_release_cli_step.dependOn(&verify_release_cli_install.step);
 
     const native_store = qemu_build.addNativeStoreImageStep(b);
-    _ = qemu_build.addNativeRunSteps(b, kernels.zigos_native, userspace_images, native_store);
+    const native_run_steps = qemu_build.addNativeRunSteps(b, kernels.zigos_native, userspace_images, native_store);
+    native_run_steps.command.step.dependOn(kernel_role_check_step);
+
+    const zigos_native_production_smoke_cmd = qemu_build.addNativeSmokeCommand(
+        b,
+        kernels.zigos_native,
+        userspace_images,
+        "build/zigos-native-production.log",
+        "build/native-store-production-smoke.img",
+        .production,
+    );
+    const zigos_native_production_smoke_step = b.step("zigos-native-production-smoke-test", "Boot the production kernel across a cold reboot without verification workloads");
+    zigos_native_production_smoke_step.dependOn(&zigos_native_production_smoke_cmd.step);
+    zigos_native_production_smoke_step.dependOn(kernel_role_check_step);
 
     const zigos_native_smoke_test_cmd = qemu_build.addNativeSmokeCommand(
         b,
-        kernels.zigos_native,
+        kernels.zigos_native_verification,
         userspace_images,
         "build/zigos-native-smoke.log",
         shared.native_store_smoke_image_path,
@@ -86,13 +136,15 @@ pub fn build(b: *std.Build) void {
     };
 
     const zigos_native_smoke_test_step = b.step("zigos-native-smoke-test", "Run the Zigos native bootstrap smoke test in QEMU");
+    zigos_native_smoke_test_cmd.step.dependOn(&zigos_native_production_smoke_cmd.step);
     zigos_native_smoke_test_step.dependOn(&zigos_native_smoke_test_cmd.step);
+    zigos_native_smoke_test_step.dependOn(kernel_role_check_step);
     serializeRunCommands(zigos_native_smoke_test_cmd, &negative_smoke_cmds);
     dependOnRunCommands(zigos_native_smoke_test_step, &negative_smoke_cmds);
 
     const driver_restart_qemu_cmd = qemu_build.addNativeSmokeCommand(
         b,
-        kernels.zigos_native,
+        kernels.zigos_native_verification,
         userspace_images,
         "build/driver-restart-qemu.log",
         "build/native-store-driver-restart.img",
@@ -112,7 +164,7 @@ pub fn build(b: *std.Build) void {
 
     const sync_two_node_qemu_cmd = qemu_build.addSyncTwoNodeQemuCommand(
         b,
-        kernels.zigos_native,
+        kernels.zigos_native_verification,
         userspace_images,
     );
     const sync_two_node_qemu_step = b.step("sync-two-node-qemu-test", "Run two QEMU native nodes with socket-backed sync transport");
@@ -125,7 +177,7 @@ pub fn build(b: *std.Build) void {
     const check_steps = checks_build.addCheckSteps(b, optimize, test_artifacts);
     const spec_smoke_cmd = qemu_build.addNativeSmokeCommand(
         b,
-        kernels.zigos_native,
+        kernels.zigos_native_verification,
         userspace_images,
         "build/zigos-native-spec.log",
         shared.native_store_smoke_image_path,
@@ -147,7 +199,7 @@ pub fn build(b: *std.Build) void {
     const benchmark_step = b.step("benchmark", "Build and run the spec-aligned native benchmark suite in QEMU");
     benchmark_step.dependOn(&benchmark_gate.check.step);
 
-    _ = checks_build.addVerifyStep(
+    const verify_step = checks_build.addVerifyStep(
         b,
         check_steps,
         kernel_steps.kernel,
@@ -156,14 +208,51 @@ pub fn build(b: *std.Build) void {
         verify_smoke,
         verify_benchmark,
     );
+    verify_step.dependOn(kernel_role_check_step);
 
-    const iso_cmd = qemu_build.addIsoCommand(b, kernels.zigos_native, userspace_images);
+    const iso_cmd = qemu_build.addIsoCommand(
+        b,
+        kernels.zigos_native,
+        userspace_images,
+        "build/os.iso",
+        "build/iso",
+    );
     const iso_step = b.step("iso", "Build a bootable native-only ISO");
     iso_step.dependOn(&iso_cmd.step);
+    iso_step.dependOn(kernel_role_check_step);
 
-    const uefi_qemu_cmd = qemu_build.addUefiQemuCommand(b, iso_cmd);
+    const verification_iso_cmd = qemu_build.addIsoCommand(
+        b,
+        kernels.zigos_native_verification,
+        userspace_images,
+        "build/os-verification.iso",
+        "build/iso-verification",
+    );
+    const verification_iso_step = b.step("iso-verification", "Build bootable verification media for proof workloads");
+    verification_iso_step.dependOn(&verification_iso_cmd.step);
+    verification_iso_step.dependOn(kernel_role_check_step);
+
+    const uefi_qemu_cmd = qemu_build.addUefiQemuCommand(
+        b,
+        iso_cmd,
+        "build/os.iso",
+        "build/uefi-boot-qemu.log",
+        "production",
+    );
     const uefi_qemu_step = b.step("uefi-qemu-test", "Run the ISO through an OVMF UEFI boot preflight in QEMU");
     uefi_qemu_step.dependOn(&uefi_qemu_cmd.step);
+    uefi_qemu_step.dependOn(kernel_role_check_step);
+
+    const verification_uefi_qemu_cmd = qemu_build.addUefiQemuCommand(
+        b,
+        verification_iso_cmd,
+        "build/os-verification.iso",
+        "build/uefi-verification-boot-qemu.log",
+        "verification",
+    );
+    const verification_uefi_qemu_step = b.step("uefi-verification-qemu-test", "Run verification media through an OVMF UEFI boot preflight in QEMU");
+    verification_uefi_qemu_step.dependOn(&verification_uefi_qemu_cmd.step);
+    verification_uefi_qemu_step.dependOn(kernel_role_check_step);
 
     const hardware_proof_cmd = b.addSystemCommand(&.{
         "bash",
@@ -177,11 +266,16 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/generate-release-sbom-provenance.sh",
         "build/release-security",
+        "ReleaseFast",
     });
+    if (optimize != .ReleaseFast) {
+        release_sbom_cmd.step.dependOn(&b.addFail("public release artifacts require -Doptimize=ReleaseFast").step);
+    }
     release_sbom_cmd.step.dependOn(&iso_cmd.step);
+    release_sbom_cmd.step.dependOn(kernel_role_check_step);
     release_sbom_cmd.step.dependOn(&signing_cli_install.step);
     release_sbom_cmd.step.dependOn(&verify_release_cli_install.step);
-    release_sbom_cmd.step.dependOn(userspace_images.step);
+    release_sbom_cmd.step.dependOn(userspace_images.production_step);
     const release_sbom_step = b.step("release-sbom-provenance", "Generate release SPDX SBOM, artifact digests, artifact measurements, DSSE in-toto/SLSA provenance, keyring/revocation metadata, customer verification policy, and disclosure dry-run bundle");
     release_sbom_step.dependOn(&release_sbom_cmd.step);
 
@@ -193,18 +287,30 @@ pub fn build(b: *std.Build) void {
     const reproducible_build_step = b.step("reproducible-build-check", "Build release artifacts twice in isolated tracked-workspace copies and compare digests");
     reproducible_build_step.dependOn(&reproducible_build_cmd.step);
 
+    const release_bundle_verify_cmd = b.addRunArtifact(verify_release_cli);
+    release_bundle_verify_cmd.addArg("build/release-security");
+    release_bundle_verify_cmd.addArg(".");
+    release_bundle_verify_cmd.step.dependOn(&release_sbom_cmd.step);
+    release_bundle_verify_cmd.step.dependOn(&reproducible_build_cmd.step);
+    const release_bundle_verify_step = b.step("release-bundle-check", "Verify the complete release bundle against production artifacts and reproducible-build evidence");
+    release_bundle_verify_step.dependOn(&release_bundle_verify_cmd.step);
+
     const release_security_gate_step = b.step("release-security-gate", "Run the public-release security gate: fuzz, reproducibility, SBOM/provenance, audits, redaction, disclosure, QEMU fault proofs, and real NUC hardware proof");
     release_security_gate_step.dependOn(check_steps.prod_readiness);
     release_security_gate_step.dependOn(check_steps.host_tests);
     release_security_gate_step.dependOn(check_steps.spec_tests);
     release_security_gate_step.dependOn(release_sbom_step);
     release_security_gate_step.dependOn(reproducible_build_step);
+    release_security_gate_step.dependOn(release_bundle_verify_step);
+    release_security_gate_step.dependOn(kernel_role_check_step);
+    release_security_gate_step.dependOn(zigos_native_production_smoke_step);
     release_security_gate_step.dependOn(zigos_native_smoke_test_step);
     release_security_gate_step.dependOn(storage_durability_qemu_step);
     release_security_gate_step.dependOn(driver_restart_qemu_step);
     release_security_gate_step.dependOn(recovery_qemu_step);
     release_security_gate_step.dependOn(sync_two_node_qemu_step);
     release_security_gate_step.dependOn(uefi_qemu_step);
+    release_security_gate_step.dependOn(verification_uefi_qemu_step);
     release_security_gate_step.dependOn(hardware_proof_step);
 }
 

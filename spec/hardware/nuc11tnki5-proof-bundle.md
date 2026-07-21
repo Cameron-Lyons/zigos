@@ -1,121 +1,187 @@
-# Intel NUC11TNKi5 Hardware Proof Bundle
+# Intel NUC11TNKi5 Authenticated Hardware Proof Bundle
 
-This bundle is the release gate for the first real hardware target. QEMU,
-OVMF, emulator, or virtual-machine logs are preflight evidence only and must
-not be archived as NUC11TNKi5 hardware proof.
+This bundle is the real-machine release proof for the first hardware target.
+It is fail-closed: the normal checker rejects a bundle unless the caller
+supplies a fresh external challenge and a separately installed trusted
+verifier whose executable matches an externally pinned SHA-256 digest.
 
-Archive a completed run under `build/hardware-proofs/nuc11tnki5/` with these
-files:
+The proof uses two single-boot captures from the same stable device identity:
 
-- `proof-manifest.txt`: key/value manifest tying the bundle to
-  `intel-nuc11tnki5`, `NUC11TNKi5`, `real_hardware`, `serial.log`, the sidecar
-  files, the marker contract, `repo_vcs=jj`, the current Jujutsu change ID and
-  commit ID, a clean `repo_dirty_files=0` state, preparation/capture times, and
-  operator.
-- `serial.log`: concatenated serial output, framebuffer transcription, or HDMI
-  capture transcript from the Intel NUC 11 Pro Kit `NUC11TNKi5`, plus the
-  finalized operator metadata marker lines after the sidecars are filled.
-- `firmware-settings.txt`: BIOS/UEFI version, `boot_mode=UEFI`, explicit
-  Secure Boot state (`enabled`, `disabled`, or
-  `disabled-for-local-proof-media`), `storage_mode=nvme`, wake/suspend
-  settings, and any changed firmware options.
-- `power-cycle-notes.txt`: operator notes for the ten cold boots, ten warm
-  reboots, twenty suspend/resume cycles, ten induced crash-recovery cycles,
-  ten crash-record persistence checks, and ten update rollback power cycles.
-- `attestation-lifecycle.txt`: operator and verifier notes for the
-  real-hardware attestation root rotation, active generation, revoked
-  generation count, stale/revoked-generation rejection, stale-attestation
-  verifier rejection, bound verifier metadata digest, and attestation request
-  digest.
-- `artifact-digests.sha256`: SHA-256 digest lines for the exact ISO or USB
-  image, kernel, userspace archive, production artifact manifest, release
-  policy artifacts, and driver image artifacts used for the run.
+1. Boot shipped `build/os.iso`, containing
+   `zig-out/bin/kernel-zigos-native.elf`, and capture only that boot in
+   `production-serial.log`.
+2. Boot `build/os-verification.iso`, containing
+   `zig-out/bin/kernel-zigos-native-verification.elf`, and capture only that
+   boot in `verification-serial.log`.
 
-The sidecar timestamps are part of the same capture window as the proof
-manifest: `power-cycle-notes.txt` cannot start before `prepared_at_utc` or
-finish after `captured_at_utc`, and `attestation-lifecycle.txt` cannot report a
-capture time outside that interval.
+Never concatenate reboots or cycle output into either single-boot log. Each
+repeated cold boot, warm reboot, device operation, suspend/resume, crash, or
+rollback cycle has its own file under `cycles/` and its own digest in the
+canonical cycle manifest. QEMU, OVMF, hypervisor, emulator, or virtual-machine
+logs are preflight evidence only.
 
-`serial.log` must include every subsystem, concrete hardware fact, and booted
-production-evidence marker from `nuc11tnki5-required-markers.txt` as exact
-lines. Concrete hardware fact markers must appear before the subsystem PASS
-markers or booted production-evidence markers that depend on them. The hardware
-fact section preserves the observations behind the PASS
-markers: SMBIOS SKU match, Multiboot memory map, RSDP/MADT/FADT discovery,
-APIC timer interrupt delivery, GOP scanout, xHCI boot-keyboard reports, NVMe
-write/read completion, I225-LM frame interrupts, suspend/resume power cycles,
-crash-record reboot persistence, update rollback power cycles, and attestation
-root lifecycle proof from a real-target root rotation/revocation run whose
-verifier rejects stale attestations with request-bound verifier metadata. The
-booted evidence section covers generated userspace startup, service IPC,
-permission review, sync replication/restart, driver restart/rebind with
-programmed DMA-domain, brokered-buffer, broker-revocation, republish evidence,
-and accelerator queue ownership plus completion-interrupt evidence, compositor
-presentation, persisted crash diagnostics, update rollback health checks, and
-the Notes daily-driver lifecycle plus typed editor edit/sync/recovery markers
-from the same real hardware run. The log must also include these metadata
-markers:
+## Bundle contents
 
-```text
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:EVIDENCE_SOURCE:REAL_HARDWARE
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:BOARD_SKU:NUC11TNKi5
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:PROOF_MANIFEST:RECORDED
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FIRMWARE_SETTINGS:RECORDED
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:POWER_CYCLE_NOTES:RECORDED
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ARTIFACT_DIGESTS:RECORDED
-```
+Archive the completed bundle under `build/hardware-proofs/nuc11tnki5/`:
 
-`attestation-lifecycle.txt` must include exact key/value evidence that matches
-the typed proof requirements: `target_id=intel-nuc11tnki5`,
-`evidence_source=real_hardware`, nonempty `operator`, RFC3339-style
-`captured_at_utc`, nonempty `provider` and `root_key_id`, positive
-`initial_generation`, `active_generation` greater than `initial_generation`,
-positive `revoked_generation_count`, `stale_generation_rejected=true`,
-`revoked_generation_rejected=true`, `verifier_rejected_stale_attestation=true`,
-`verifier_metadata_digest_bound=true`, 64-hex `verifier_metadata_digest`,
-64-hex `attestation_request_digest`, and nonempty `notes`.
+- `proof-manifest.txt` uses `format=zigos-nuc11tnki5-proof-v2` and binds the
+  fresh `capture_nonce`, stable `device_id`, fixed target/SKU, both log names,
+  both ISO/kernel pairs, both marker contracts, every sidecar name, Jujutsu
+  change/commit IDs, clean working-copy state, operator, and capture window.
+- `device-identity.txt` records the stable device ID, SMBIOS system UUID,
+  baseboard serial, and SHA-256 of the TPM endorsement public key.
+- `production-serial.log` is one production boot and contains exactly one
+  `BOOT:ROLE:production` plus every active production marker.
+- `verification-serial.log` is one verification boot and contains exactly one
+  `BOOT:ROLE:verification`, every active verification marker, and exactly one
+  `ZIGOS:NATIVE:READY`. Its scalar cycle counters are summaries only.
+- `cycle-manifest.txt` is the canonical index of individually hashed
+  `cycles/*.log` evidence.
+- `firmware-settings.txt`, `power-cycle-notes.txt`,
+  `attestation-lifecycle.txt`, `artifact-digests.sha256`, and
+  `operator-metadata-markers.txt` are bound sidecars.
+- `production-attestation.quote` and `production-attestation.sig` are the
+  production-role hardware quote and signature for the issued nonce.
+- `verification-attestation.quote` and `verification-attestation.sig` are the
+  separate verification-role hardware quote and signature for that nonce.
+- `capture-statement.txt` is the canonical statement produced after every
+  other bundle input is final.
 
-`serial.log` must also include numeric counters meeting the minimums encoded in
-`src/native/platform/hardware_target.zig`:
+Symlinks are rejected for authenticated inputs. Template placeholders,
+emulator text, stale repository IDs, duplicate required keys, and alternate
+bundle paths are rejected.
+
+## Canonical cycle evidence
+
+`cycle-manifest.txt` has no comments or blank lines. Its first line is:
 
 ```text
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:COLD_BOOTS:10
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:WARM_REBOOTS:10
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:STORAGE_WRITE_READ_CYCLES:100
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NETWORK_FRAME_CYCLES:100
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME_CYCLES:20
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECOVERY_CYCLES:10
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECORD_PERSISTENCE_CYCLES:10
-ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UPDATE_ROLLBACK_CYCLES:10
+format=zigos-nuc11tnki5-cycle-manifest-v1
 ```
 
-Prepare the bundle skeleton and exact artifact digests with:
+Every following line is:
+
+```text
+cycle=<type>|<six-digit-index>|<lowercase-sha256>|cycles/<type>-<six-digit-index>.log
+```
+
+Types occur in this fixed order, and indices for each type are contiguous from
+`000001`: `cold_boot`, `warm_reboot`, `storage_write_read`, `network_frame`,
+`suspend_resume`, `crash_recovery`, `crash_record_persistence`, and
+`update_rollback`. Paths and digests must be unique. The `cycles/` directory
+must contain exactly the listed log files.
+
+Every cycle log contains exactly one value for this envelope:
+
+```text
+format=zigos-nuc11tnki5-cycle-log-v1
+capture_nonce=<fresh-64-hex-challenge>
+target_id=intel-nuc11tnki5
+device_id=<stable-device-id>
+cycle_type=<manifest-type>
+cycle_index=<manifest-index>
+result=pass
+```
+
+The checker hashes every cycle log independently and derives the accepted
+counts only from valid, unique manifest entries. It requires at least ten cold
+boots, ten warm reboots, one hundred storage read/write cycles, one hundred
+network frame cycles, twenty suspend/resume cycles, ten crash-recovery cycles,
+ten crash-record persistence cycles, and ten update rollback cycles. The
+numeric summaries in `power-cycle-notes.txt` and `verification-serial.log`
+must exactly equal those derived counts; changing the summaries cannot create
+evidence.
+
+## Canonical capture statement and verifier
+
+After all inputs are final,
+`scripts/write-nuc11tnki5-capture-statement.sh` writes a fixed-order v1
+statement. The statement binds:
+
+- the fresh nonce, fixed target/SKU, stable device ID, and Jujutsu IDs;
+- SHA-256 of both single-boot logs and the canonical cycle manifest;
+- SHA-256 of both production ISO/kernel and verification ISO/kernel pairs;
+- SHA-256 of both active marker contracts;
+- SHA-256 of the proof manifest, stable device identity, firmware settings,
+  power-cycle notes, attestation lifecycle, artifact digest manifest, and
+  operator metadata sidecars; and
+- four distinct role inputs: production quote, production signature,
+  verification quote, and verification signature.
+
+The checker independently reconstructs this statement and every referenced
+hash. It then invokes the configured verifier with the statement path and
+digest, nonce, target/device identity, and both role-specific quote/signature
+pairs. Successful exit status is insufficient. Standard output must exactly
+equal this assertion for the current values, with no extra bytes:
+
+```text
+format=zigos-trusted-hardware-verifier-response-v1
+result=verified
+assertion=signed-response
+statement_sha256=<recomputed-statement-sha256>
+nonce=<fresh-externally-issued-nonce>
+target_id=intel-nuc11tnki5
+device_id=<stable-device-id>
+production_role=verified
+verification_role=verified
+```
+
+The verifier is responsible for cryptographically validating both hardware
+quotes, signatures, nonce binding, device root, and role measurements before
+returning the assertion. The checker requires an absolute, executable,
+non-symlink verifier path outside the bundle. Its actual digest must equal
+`ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256`; this expected digest is supplied by
+release policy outside the proof bundle. The expected fresh nonce is likewise
+supplied out of band through `ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE`.
+
+## Production checkpoint and ordering
+
+The production log contains one and only one structured line:
+
+```text
+ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false generation=<number> error=none
+```
+
+The checker requires measured-boot verified root before that checkpoint, the
+checkpoint before `ZIGOS:TASK:SESSION_READY`, and task readiness before
+`ZIGOS:NATIVE:READY`. Production evidence must not contain verification-only
+markers or images, including the Notes daily-journey fixture.
+
+Hardware fact observations in the verification log must precede their PASS or
+dependent markers. Active marker contracts are parsed line by line; commented
+text never satisfies a requirement.
+
+## Workflow
+
+Obtain a fresh 32-byte challenge from the external verifier or release
+orchestrator, then prepare the skeleton:
 
 ```bash
-scripts/prepare-nuc11tnki5-hardware-proof.sh --build
+scripts/prepare-nuc11tnki5-hardware-proof.sh \
+  --build \
+  --nonce <64-lowercase-hex>
 ```
 
-The preparation script writes TODO-bearing sidecar templates on purpose. The
-generated `operator-metadata-markers.txt` contains the exact real-hardware
-source, board SKU, manifest, firmware, power-cycle, and artifact-digest marker
-lines to append after the sidecars are completed. The checker rejects
-placeholders, stale Jujutsu change IDs, stale commit IDs, dirty
-repo metadata, missing `proof-manifest.txt` fields, missing or malformed
-attestation lifecycle fields, low sidecar counters, sidecar counters that
-disagree with `serial.log`, reversed manifest, attestation lifecycle, or
-power-cycle timestamps, alternate serial log paths, marker contracts, or
-sidecar paths, missing concrete hardware fact markers including attestation
-root lifecycle evidence from the typed proof path, duplicate required
-markers or cycle-counter lines, duplicate sidecar keys, invalid Secure Boot
-values, non-NVMe storage mode, emulator/OVMF/QEMU text, artifact digest
-manifests that omit the boot ISO, native kernel, required userspace service
-images, release policy artifacts, production readiness manifest, release
-artifact manifest, or marker contract, duplicate artifact digest entries for
-required paths, and malformed artifact digest rows or digest values that do not
-match the checked artifact root.
-
-Validate the completed bundle with:
+Fill the identity and sidecars, capture the two single boots, record and hash
+the cycle logs, and collect the two role-specific quotes/signatures. Once the
+manifest is final, write the statement:
 
 ```bash
-scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5
+scripts/write-nuc11tnki5-capture-statement.sh \
+  build/hardware-proofs/nuc11tnki5
 ```
+
+Validate using only external trust configuration:
+
+```bash
+ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<64-lowercase-hex> \
+ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
+ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
+scripts/check-nuc11tnki5-hardware-proof.sh \
+  build/hardware-proofs/nuc11tnki5
+```
+
+Without all three external values, normal validation fails. The repository
+self-test uses an explicitly configured local verifier solely to exercise pass
+and adversarial paths; it is not accepted by the release workflow unless its
+digest is deliberately supplied by that test invocation.

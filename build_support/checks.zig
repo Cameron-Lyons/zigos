@@ -22,6 +22,13 @@ pub fn addCheckSteps(
     host_tests_step.dependOn(&zig_test_roots_cmd.step);
     host_tests_step.dependOn(&test_artifacts.run_host_tests.step);
     host_tests_step.dependOn(&test_artifacts.run_userspace_runtime_tests.step);
+    const production_boot_log_checker_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/test-production-boot-log-checker.sh",
+    });
+    const production_boot_log_checker_step = b.step("production-boot-log-checker-test", "Exercise exact production checkpoint and readiness ordering checks");
+    production_boot_log_checker_step.dependOn(&production_boot_log_checker_cmd.step);
+    host_tests_step.dependOn(&production_boot_log_checker_cmd.step);
 
     const fmt_check_script =
         \\jj file list -T 'path ++ "\0"' '*.zig' | while IFS= read -r -d '' file; do [ -e "$file" ] && printf '%s\0' "$file"; done | xargs -0 ./scripts/zig.sh fmt --check
@@ -78,6 +85,7 @@ pub fn addCheckSteps(
     const prod_readiness_step = b.step("prod-readiness", "Validate production-readiness tracking and the secure-by-design release gate");
     prod_readiness_step.dependOn(&prod_readiness_cmd.step);
     prod_readiness_step.dependOn(&hardware_proof_checker_cmd.step);
+    prod_readiness_step.dependOn(&production_boot_log_checker_cmd.step);
 
     const release_security_cmd = addReleaseSecurityGateRun(b, optimize);
     const release_security_test_cmd = addReleaseSecurityGateTestRun(b, optimize);

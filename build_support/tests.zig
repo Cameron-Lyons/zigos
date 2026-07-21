@@ -56,6 +56,6 @@ fn addNativeTestImports(
 ) void {
     module.addImport("binary_cursor", wire.binary_cursor);
     module.addImport("userspace_wire", wire.userspace_wire);
-    module.addImport("userspace_archive", userspace_images.archive_module);
-    module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
+    module.addImport("userspace_archive", userspace_images.verification_archive_module);
+    module.addImport("production_artifact_manifest", userspace_images.verification_manifest_module);
 }

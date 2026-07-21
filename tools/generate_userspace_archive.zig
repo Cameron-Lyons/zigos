@@ -14,6 +14,11 @@ const max_bootloader_source_bytes: usize = units.mebibytes(1);
 const max_build_artifact_entries: usize = 32;
 const build_artifact_manifest_payload_buffer_bytes: usize = units.kibibytes(4);
 
+const ArchiveRole = enum {
+    production,
+    verification,
+};
+
 const Artifact = struct {
     source_path: []const u8,
     embedded_name: []const u8,
@@ -90,21 +95,27 @@ pub fn main(init: std.process.Init) !void {
     const arena = arena_state.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 4) return error.MissingOutputPath;
+    if (args.len < 5) return error.MissingOutputPath;
     const output_dir = args[1];
     const boot_profile = args[2];
-    const bootloader_path = args[3];
+    const archive_role: ArchiveRole = if (std.mem.eql(u8, args[3], "production"))
+        .production
+    else if (std.mem.eql(u8, args[3], "verification"))
+        .verification
+    else
+        return error.InvalidArchiveRole;
+    const bootloader_path = args[4];
 
     var artifacts = std.ArrayList(Artifact).empty;
     defer artifacts.deinit(allocator);
 
-    for (args[4..]) |path| {
+    for (args[5..]) |path| {
         try artifacts.append(allocator, try parseArtifact(arena, allocator, cwd, io, path));
     }
 
     if (artifacts.items.len == 0) return error.MissingArtifactInput;
-    try writeArchive(cwd, io, allocator, output_dir, artifacts.items);
-    try writeProductionArtifactManifest(cwd, io, allocator, output_dir, boot_profile, bootloader_path, artifacts.items);
+    try writeArchive(cwd, io, allocator, output_dir, archive_role, artifacts.items);
+    try writeBuildArtifactManifest(cwd, io, allocator, output_dir, boot_profile, archive_role, bootloader_path, artifacts.items);
 }
 
 fn parseArtifact(
@@ -231,12 +242,17 @@ fn writeArchive(
     io: std.Io,
     allocator: std.mem.Allocator,
     output_dir: []const u8,
+    archive_role: ArchiveRole,
     artifacts: []const Artifact,
 ) !void {
     try cwd.createDirPath(io, output_dir);
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const writer = &aw.writer;
+
+    try writer.writeAll("pub const ArchiveRole = enum { production, verification };\n");
+    try writer.print("pub const archive_role: ArchiveRole = .{s};\n", .{@tagName(archive_role)});
+    try writer.writeAll("pub const includes_verification_images = archive_role == .verification;\n\n");
 
     try writer.writeAll(
         \\const builtin = @import("builtin");
@@ -361,12 +377,13 @@ fn writeArchive(
     });
 }
 
-fn writeProductionArtifactManifest(
+fn writeBuildArtifactManifest(
     cwd: std.Io.Dir,
     io: std.Io,
     allocator: std.mem.Allocator,
     output_dir: []const u8,
     boot_profile: []const u8,
+    archive_role: ArchiveRole,
     bootloader_path: []const u8,
     artifacts: []const Artifact,
 ) !void {
@@ -417,7 +434,11 @@ fn writeProductionArtifactManifest(
     }
     try writer.writeAll("};\n");
 
-    const manifest_path = try std.fs.path.join(allocator, &.{ output_dir, "production_artifact_manifest.zig" });
+    const manifest_filename = switch (archive_role) {
+        .production => "production_artifact_manifest.zig",
+        .verification => "verification_artifact_manifest.zig",
+    };
+    const manifest_path = try std.fs.path.join(allocator, &.{ output_dir, manifest_filename });
     defer allocator.free(manifest_path);
     try cwd.writeFile(io, .{
         .sub_path = manifest_path,

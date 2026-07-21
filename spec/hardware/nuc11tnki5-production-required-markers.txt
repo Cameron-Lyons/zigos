@@ -1,0 +1,54 @@
+# Required serial markers from the shipped production kernel on the first real
+# hardware target. Capture these by booting build/os.iso on an Intel NUC 11 Pro
+# Kit NUC11TNKi5. This is a separate run from the exhaustive verification
+# single-boot workload captured in verification-serial.log.
+
+# Shipped kernel identity and native core readiness.
+BOOT:START
+BOOT:PROFILE:zigos_native
+BOOT:ROLE:production
+BOOT:CORE_READY
+ZIGOS:KERNEL_NETWORK:DEFERRED
+ZIGOS:NATIVE:BOOTSTRAP
+ZIGOS:TCB:DEFINED
+
+# Real-target identity and early hardware facts that the production runtime can
+# emit today. Exhaustive device and power-path facts remain the verification
+# workload's responsibility. The UEFI pass marker is not required here because
+# its current emitter also depends on later framebuffer proof that production
+# does not yet populate through a runtime path.
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:EVIDENCE_SOURCE:REAL_HARDWARE
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:BOARD_SKU:NUC11TNKi5
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SMBIOS_SKU:OBSERVED
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:MULTIBOOT_MEMORY_MAP:OBSERVED
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_RSDP:OBSERVED
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_MADT:OBSERVED
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_FADT:OBSERVED
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS
+
+# Essential production userspace, services, artifact verification, measured
+# boot, clean persistence, and final native readiness.
+ZIGOS:USERSPACE:SCHEDULER:READY
+ZIGOS:USERSPACE:ARTIFACTS:READY
+ZIGOS:USERSPACE:EXEC_PROBE:OK
+ZIGOS:USERSPACE:RESUME:OK
+ZIGOS:TRANSPORT:NATIVE_KERNEL:READY
+ZIGOS:TRANSPORT:NO_ROOT
+ZIGOS:TRANSPORT:COMPONENT_ABI:READY
+ZIGOS:SUPERVISOR:READY
+ZIGOS:SERVICE_BOOT:CONTRACT_MAP:READY
+ZIGOS:POLICY:READY
+ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:NETWORK_READY
+ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY
+ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY
+ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED
+ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED
+ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED
+ZIGOS:PLATFORM:ARTIFACT_MANIFEST:VERIFIED
+ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED
+ZIGOS:PLATFORM:MEASURED_BOOT:VERIFIED_ROOT
+# The checker parses the one structured checkpoint line and requires this
+# state, a numeric generation, error=none, and checkpoint-before-ready order.
+ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false
+ZIGOS:TASK:SESSION_READY
+ZIGOS:NATIVE:READY

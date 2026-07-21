@@ -5,7 +5,6 @@ const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
-const booted_evidence = @import("booted_evidence.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -16,7 +15,6 @@ const native_util = @import("../core/util.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
 const package_service = @import("../services/package_service.zig");
-const runtime_negative_proofs = @import("runtime_negative_proofs.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
 const session_contexts = @import("session_manager_contexts.zig");
 const service_catalog = @import("service_catalog.zig");
@@ -64,6 +62,15 @@ else
     struct {
         pub fn reportPeak() void {}
     };
+const kernel_config = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/config.zig")
+else
+    struct {
+        pub fn includesVerificationEvidence() bool {
+            return true;
+        }
+    };
+const include_verification_evidence = kernel_config.includesVerificationEvidence();
 
 pub const SessionManager = struct {
     initialized: bool = false,
@@ -205,43 +212,55 @@ pub const SessionManager = struct {
             return;
         }
         const graph = self.buildProductionServiceGraph() orelse return;
+        if (comptime !include_verification_evidence) {
+            self.storageServicePtr().checkpoint_enabled = true;
+        }
         var trust = self.trustBoot();
         if (!trust.recordProductionMeasuredBoot(&graph)) {
             self.failBoot();
             return;
         }
-        if (!runtime_negative_proofs.runAndPrint()) {
-            self.failBoot();
-            return;
-        }
-        if (!runtime_negative_proofs.runFreestandingAndPrint(
-            &self.runtime_context.userspace_catalog,
-            &self.runtime_context.runtime,
-            &self.runtime_context.userspace_scheduler,
-        )) {
-            self.failBoot();
-            return;
-        }
-        if (builtin.target.os.tag == .freestanding and !booted_evidence.runProduction(self, &graph)) {
-            self.failBoot();
-            return;
+        if (comptime include_verification_evidence) {
+            const runtime_negative_proofs = @import("runtime_negative_proofs.zig");
+            if (!runtime_negative_proofs.runAndPrint()) {
+                self.failBoot();
+                return;
+            }
+            if (!runtime_negative_proofs.runFreestandingAndPrint(
+                &self.runtime_context.userspace_catalog,
+                &self.runtime_context.runtime,
+                &self.runtime_context.userspace_scheduler,
+            )) {
+                self.failBoot();
+                return;
+            }
+            if (builtin.target.os.tag == .freestanding) {
+                const booted_evidence = @import("booted_evidence.zig");
+                if (!booted_evidence.runProduction(self, &graph)) {
+                    self.failBoot();
+                    return;
+                }
+            }
         }
         stack_watermark.reportPeak();
         userspace_executor.reportTrapStackPeak();
-        self.reportFinalCheckpointState();
+        const checkpoint_clean = self.reportFinalCheckpointState();
+        if (comptime !include_verification_evidence) {
+            if (!checkpoint_clean) {
+                self.failBoot();
+                return;
+            }
+        }
         common.printBootMarker(boot_markers.task_session_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
     }
 
-    // Report-only: the storage crash-restart proof deliberately disables
-    // checkpointing partway through boot, so dirty=true here is the designed
-    // end state, not a fault. Forcing a flush instead persists post-proof
-    // runtime state that was never meant to round-trip and changes what the
-    // next cold boot reloads. The line exists so a boot log records which
-    // generation the disk was left at and whether any flush error was
-    // swallowed on the way.
-    fn reportFinalCheckpointState(self: *SessionManager) void {
+    // Report-only: production reaches ready with checkpointing enabled and a
+    // clean store. Verification may deliberately leave proof-only mutations
+    // dirty after disabling checkpoints so a later cold boot cannot mistake
+    // synthetic state for production state.
+    fn reportFinalCheckpointState(self: *SessionManager) bool {
         const storage = self.storageServicePtr();
         const checkpoint_error: []const u8 = if (storage.checkpoint_store.last_checkpoint_error) |err| @errorName(err) else "none";
         // SAFETY: filled by the subsequent std.fmt.bufPrint call
@@ -255,8 +274,11 @@ pub const SessionManager = struct {
                 storage.checkpoint_store.last_checkpoint_generation,
                 checkpoint_error,
             },
-        ) catch return;
+        ) catch return false;
         common.printBootMarker(line);
+        return storage.checkpoint_enabled and
+            !storage.pendingCheckpointMutations() and
+            storage.checkpoint_store.last_checkpoint_error == null;
     }
 
     fn bootStorageDurabilityProof(self: *SessionManager) void {
@@ -307,20 +329,22 @@ pub const SessionManager = struct {
 
     pub fn buildProductionServiceGraph(self: *SessionManager) ?ServiceGraph {
         var graph = self.beginServiceGraph() orelse return null;
-        if (!self.service_graph_builder.bootProduction(&graph)) {
+        if (!self.service_graph_builder.bootProduction(&graph, include_verification_evidence)) {
             self.failBoot();
             return null;
         }
         self.bindProductionStorageService(&graph);
         self.runtime_context.runtime_service.checkpoint(60);
         var trust = self.trustBoot();
-        if (!trust.proveProductionAbImageRollback(&graph)) {
-            self.failBoot();
-            return null;
-        }
-        if (!trust.proveProductionPostActivationHealthChecks(&graph)) {
-            self.failBoot();
-            return null;
+        if (comptime include_verification_evidence) {
+            if (!trust.proveProductionAbImageRollback(&graph)) {
+                self.failBoot();
+                return null;
+            }
+            if (!trust.proveProductionPostActivationHealthChecks(&graph)) {
+                self.failBoot();
+                return null;
+            }
         }
         if (!trust.verifyProductionArtifactManifest(&graph)) {
             self.failBoot();

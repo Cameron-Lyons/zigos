@@ -24,6 +24,64 @@ const CRASH_DUMP_REDACTION_PATH = "spec/release_security/crash_dump_redaction.js
 const VULNERABILITY_DISCLOSURE_PATH = "spec/release_security/vulnerability_disclosure.json";
 const SECURITY_POLICY_PATH = "SECURITY.md";
 
+const REQUIRED_RELEASE_EXACT_PATHS = [_][]const u8{
+    "zig-out/bin/kernel-zigos-native.elf",
+    "zig-out/bin/zigos-sign",
+    "zig-out/bin/zigos-verify-release",
+    "build/os.iso",
+    "spec/production_readiness.json",
+    "spec/release_security/release_artifacts.json",
+    "spec/release_security/release_keyring.json",
+    "spec/release_security/revoked_release_keys.json",
+    "spec/release_security/fuzz_corpus.json",
+    "spec/release_security/memory_safety_inventory.json",
+    "spec/release_security/threat_model.json",
+    "spec/release_security/crash_dump_redaction.json",
+    "spec/release_security/vulnerability_disclosure.json",
+};
+
+const REQUIRED_PRODUCTION_USERSPACE_PATHS = [_][]const u8{
+    "zig-out/bin/userspace-session-manager.elf",
+    "zig-out/bin/userspace-permission-review.elf",
+    "zig-out/bin/userspace-service-registry.elf",
+    "zig-out/bin/userspace-workspace-storage.elf",
+    "zig-out/bin/userspace-viewer.elf",
+    "zig-out/bin/userspace-notes.elf",
+    "zig-out/bin/userspace-sync.elf",
+    "zig-out/bin/userspace-capture.elf",
+    "zig-out/bin/userspace-policy-mediation.elf",
+    "zig-out/bin/userspace-network-stack.elf",
+    "zig-out/bin/userspace-storage-object.elf",
+    "zig-out/bin/userspace-storage-driver.elf",
+    "zig-out/bin/userspace-package-service.elf",
+    "zig-out/bin/userspace-compositor.elf",
+    "zig-out/bin/userspace-indexing-search.elf",
+    "zig-out/bin/userspace-personal-context.elf",
+    "zig-out/bin/userspace-sync-service.elf",
+    "zig-out/bin/userspace-media-print.elf",
+    "zig-out/bin/userspace-attention-broker.elf",
+    "zig-out/bin/userspace-task-lifecycle.elf",
+    "zig-out/bin/userspace-sensitive-capture.elf",
+    "zig-out/bin/userspace-secure-pasteboard.elf",
+    "zig-out/bin/userspace-object-resilience.elf",
+    "zig-out/bin/userspace-secret-vault.elf",
+};
+
+const REQUIRED_FORBIDDEN_RELEASE_PATTERNS = [_][]const u8{
+    "build/os-verification.iso",
+    "zig-out/bin/kernel-zigos-native-verification.elf",
+    "zig-out/bin/kernel-zigos-native-tampered-*.elf",
+    "zig-out/bin/kernel-zigos-native-rollback-slot-failure.elf",
+    "zig-out/bin/kernel-zigos-native-storage-durability.elf",
+    "zig-out/bin/kernel-recovery.elf",
+    "zig-out/bin/kernel-benchmark.elf",
+    "zig-out/bin/userspace-transport-probe.elf",
+    "zig-out/bin/userspace-termination-probe.elf",
+    "zig-out/bin/userspace-service-client.elf",
+    "zig-out/bin/userspace-mmu-isolation-proof.elf",
+    "zig-out/bin/userspace-notes-daily.elf",
+};
+
 const REQUIRED_HARNESS_IDS = [_][]const u8{
     "binary-cursor",
     "userspace-descriptor",
@@ -355,6 +413,156 @@ fn fuzzManifestPermissions(input: []const u8) void {
     }) catch {};
 }
 
+const ReleaseArtifactSelection = struct {
+    exact_paths: []const []const u8,
+    production_userspace_paths: []const []const u8,
+    forbidden_path_patterns: []const []const u8,
+};
+
+fn validateReleaseArtifactSelectionPolicy(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    root: std.json.Value,
+) !?ReleaseArtifactSelection {
+    const policy = try common.expectObjectField(
+        allocator,
+        errors,
+        root,
+        "release artifacts",
+        "release_artifact_selection",
+    ) orelse return null;
+    try expectFalseBoolField(allocator, errors, policy, "release artifact selection", "directory_sweeps_allowed");
+    try expectTrueBoolField(allocator, errors, policy, "release artifact selection", "reject_unlisted_artifacts");
+    try expectTrueBoolField(allocator, errors, policy, "release artifact selection", "verification_artifacts_forbidden");
+
+    const exact_paths = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(policy, "exact_paths"),
+        "release artifact selection exact_paths",
+        true,
+    );
+    var exact_path_set = try common.collectUniqueStrings(
+        allocator,
+        errors,
+        exact_paths,
+        "release artifact selection exact path",
+    );
+    for (REQUIRED_RELEASE_EXACT_PATHS) |required_path| {
+        if (!exact_path_set.contains(required_path)) {
+            try common.addError(errors, allocator, "release artifact selection exact_paths must include {s}", .{required_path});
+        }
+    }
+    for (exact_paths) |path| {
+        if (!isOneOf(path, &REQUIRED_RELEASE_EXACT_PATHS)) {
+            try common.addError(errors, allocator, "release artifact selection contains an unapproved exact path: {s}", .{path});
+        }
+    }
+
+    const production_userspace_paths = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(policy, "production_userspace_paths"),
+        "release artifact selection production_userspace_paths",
+        true,
+    );
+    var production_userspace_set = try common.collectUniqueStrings(
+        allocator,
+        errors,
+        production_userspace_paths,
+        "release artifact selection production userspace path",
+    );
+    for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |required_path| {
+        if (!production_userspace_set.contains(required_path)) {
+            try common.addError(errors, allocator, "release artifact selection production_userspace_paths must include {s}", .{required_path});
+        }
+    }
+    for (production_userspace_paths) |path| {
+        if (!isOneOf(path, &REQUIRED_PRODUCTION_USERSPACE_PATHS)) {
+            try common.addError(errors, allocator, "release artifact selection contains an unapproved production userspace path: {s}", .{path});
+        }
+    }
+
+    const forbidden_path_patterns = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(policy, "forbidden_path_patterns"),
+        "release artifact selection forbidden_path_patterns",
+        true,
+    );
+    var forbidden_pattern_set = try common.collectUniqueStrings(
+        allocator,
+        errors,
+        forbidden_path_patterns,
+        "release artifact selection forbidden path pattern",
+    );
+    for (REQUIRED_FORBIDDEN_RELEASE_PATTERNS) |required_pattern| {
+        if (!forbidden_pattern_set.contains(required_pattern)) {
+            try common.addError(errors, allocator, "release artifact selection forbidden_path_patterns must include {s}", .{required_pattern});
+        }
+    }
+
+    return .{
+        .exact_paths = exact_paths,
+        .production_userspace_paths = production_userspace_paths,
+        .forbidden_path_patterns = forbidden_path_patterns,
+    };
+}
+
+fn releaseArtifactPathAllowed(selection: ReleaseArtifactSelection, path: []const u8) bool {
+    return stringArrayContains(selection.exact_paths, path) or
+        stringArrayContains(selection.production_userspace_paths, path);
+}
+
+fn validateShellReleaseArtifactArray(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    source: []const u8,
+    variable_name: []const u8,
+    expected_paths: []const []const u8,
+) !void {
+    const marker = try std.fmt.allocPrint(allocator, "{s}=(", .{variable_name});
+    const marker_offset = std.mem.indexOf(u8, source, marker) orelse {
+        try common.addError(errors, allocator, "release script must declare {s} as a literal path array", .{variable_name});
+        return;
+    };
+    const body_start = marker_offset + marker.len;
+    const body_end_offset = std.mem.indexOf(u8, source[body_start..], "\n)") orelse {
+        try common.addError(errors, allocator, "release script {s} array must have a closing parenthesis", .{variable_name});
+        return;
+    };
+    const body = source[body_start .. body_start + body_end_offset];
+
+    var declared_paths = std.ArrayList([]const u8).empty;
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0) continue;
+        if (line.len < 2 or line[0] != '"' or line[line.len - 1] != '"') {
+            try common.addError(errors, allocator, "release script {s} entries must be literal quoted paths: {s}", .{ variable_name, line });
+            continue;
+        }
+        try declared_paths.append(allocator, line[1 .. line.len - 1]);
+    }
+
+    var declared_set = try common.collectUniqueStrings(
+        allocator,
+        errors,
+        declared_paths.items,
+        try std.fmt.allocPrint(allocator, "release script {s} path", .{variable_name}),
+    );
+    for (expected_paths) |path| {
+        if (!declared_set.contains(path)) {
+            try common.addError(errors, allocator, "release script {s} must include {s}", .{ variable_name, path });
+        }
+    }
+    for (declared_paths.items) |path| {
+        if (!isOneOf(path, expected_paths)) {
+            try common.addError(errors, allocator, "release script {s} contains an unapproved path: {s}", .{ variable_name, path });
+        }
+    }
+}
+
 fn validateReleaseArtifacts(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -376,15 +584,20 @@ fn validateReleaseArtifacts(
             "dirty_count=\"$(jj -R \"$ROOT_DIR\" diff -r @ --name-only",
             "sourceControl",
             "changeId",
+            "RELEASE_OPTIMIZE_MODE",
+            "optimizeMode",
             "buildType",
             "https://github.com/Cameron-Lyons/zigos/release-security-gate",
             "zigos-local-release-security-gate",
             "require_artifact_path",
             "missing_required_artifacts",
             "missing required release artifact",
-            "require_artifact_path \"build/os.iso\"",
-            "require_artifact_path \"zig-out/bin\"",
-            "require_artifact_path \"spec/release_security/release_keyring.json\"",
+            "REQUIRED_RELEASE_ARTIFACTS",
+            "PRODUCTION_USERSPACE_ARTIFACTS",
+            "is_forbidden_release_artifact",
+            "is_allowed_release_artifact",
+            "collect_production_userspace_artifacts",
+            "artifact is outside the production release allowlist",
             "validate_dsse_signing_environment",
             "ZIGOS_RELEASE_LOCAL_PREVIEW_STATIC_DSSE",
             "ZIGOS_RELEASE_HARDWARE_BACKED:-}\" = \"true\" ] && [ -z \"${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}\"",
@@ -398,8 +611,31 @@ fn validateReleaseArtifacts(
                 try common.addError(errors, allocator, "release artifact generator must enforce Jujutsu provenance snippet: {s}", .{snippet});
             }
         }
+        try validateShellReleaseArtifactArray(allocator, errors, generator_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_EXACT_PATHS);
+        try validateShellReleaseArtifactArray(allocator, errors, generator_source, "PRODUCTION_USERSPACE_ARTIFACTS", &REQUIRED_PRODUCTION_USERSPACE_PATHS);
+        for (REQUIRED_RELEASE_EXACT_PATHS) |path| {
+            if (std.mem.indexOf(u8, generator_source, path) == null) {
+                try common.addError(errors, allocator, "release artifact generator production allowlist must include {s}", .{path});
+            }
+        }
+        for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |path| {
+            if (std.mem.indexOf(u8, generator_source, path) == null) {
+                try common.addError(errors, allocator, "release artifact generator production userspace allowlist must include {s}", .{path});
+            }
+        }
+        for (REQUIRED_FORBIDDEN_RELEASE_PATTERNS) |pattern| {
+            if (std.mem.indexOf(u8, generator_source, pattern) == null) {
+                try common.addError(errors, allocator, "release artifact generator must reject verification artifact pattern {s}", .{pattern});
+            }
+        }
         if (std.mem.indexOf(u8, generator_source, "git -C \"$ROOT_DIR\"") != null) {
             try common.addError(errors, allocator, "release artifact generator must use Jujutsu metadata instead of raw git -C provenance lookups", .{});
+        }
+        if (std.mem.indexOf(u8, generator_source, "require_artifact_path \"zig-out/bin\"") != null or
+            std.mem.indexOf(u8, generator_source, "find \"$absolute_path\" -type f") != null or
+            std.mem.indexOf(u8, generator_source, "find \"$userspace_dir\"") != null)
+        {
+            try common.addError(errors, allocator, "release artifact generator must not sweep an output directory into the production release", .{});
         }
     }
     const repro_checker = try common.expectStringField(allocator, errors, root, "release artifacts", "reproducible_build_checker") orelse "";
@@ -420,14 +656,41 @@ fn validateReleaseArtifacts(
             "\"repository\":",
             "\"repo_change_id\":",
             "\"dirty_workspace_file_count\":",
+            "\"optimize_mode\": \"ReleaseFast\"",
+            "-Doptimize=ReleaseFast",
+            "REQUIRED_RELEASE_ARTIFACTS",
+            "PRODUCTION_USERSPACE_ARTIFACTS",
+            "is_forbidden_release_artifact",
+            "is_allowed_release_artifact",
+            "outside the production release allowlist",
         };
         for (required_repro_snippets) |snippet| {
             if (std.mem.indexOf(u8, repro_source, snippet) == null) {
                 try common.addError(errors, allocator, "reproducible build checker must enforce Jujutsu provenance snippet: {s}", .{snippet});
             }
         }
+        try validateShellReleaseArtifactArray(allocator, errors, repro_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_EXACT_PATHS);
+        try validateShellReleaseArtifactArray(allocator, errors, repro_source, "PRODUCTION_USERSPACE_ARTIFACTS", &REQUIRED_PRODUCTION_USERSPACE_PATHS);
+        for (REQUIRED_RELEASE_EXACT_PATHS) |path| {
+            if (std.mem.indexOf(u8, repro_source, path) == null) {
+                try common.addError(errors, allocator, "reproducible build production allowlist must include {s}", .{path});
+            }
+        }
+        for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |path| {
+            if (std.mem.indexOf(u8, repro_source, path) == null) {
+                try common.addError(errors, allocator, "reproducible build production userspace allowlist must include {s}", .{path});
+            }
+        }
+        for (REQUIRED_FORBIDDEN_RELEASE_PATTERNS) |pattern| {
+            if (std.mem.indexOf(u8, repro_source, pattern) == null) {
+                try common.addError(errors, allocator, "reproducible build checker must reject verification artifact pattern {s}", .{pattern});
+            }
+        }
         if (std.mem.indexOf(u8, repro_source, "git -C \"$ROOT_DIR\"") != null) {
             try common.addError(errors, allocator, "reproducible build checker must use Jujutsu metadata instead of raw git -C provenance lookups", .{});
+        }
+        if (std.mem.indexOf(u8, repro_source, "find \"$tree/zig-out/bin\"") != null) {
+            try common.addError(errors, allocator, "reproducible build checker must not sweep the binary output directory into the production manifest", .{});
         }
     }
     const customer_verifier_source = try common.expectStringField(allocator, errors, root, "release artifacts", "customer_verifier_source") orelse "";
@@ -449,6 +712,9 @@ fn validateReleaseArtifacts(
             "\"repo_change_id\"",
             "\"dirty_workspace_file_count\"",
             "\"dirtyWorkspaceFileCount\"",
+            "\"optimizeMode\"",
+            "\"optimize_mode\"",
+            "release_optimize_mode",
             "InvalidSlsaSourceControl",
             "InvalidSlsaBuildType",
             "InvalidSlsaBuilderId",
@@ -457,6 +723,7 @@ fn validateReleaseArtifacts(
             "InvalidSlsaCommitId",
             "InvalidSlsaRepository",
             "InvalidSlsaZigVersion",
+            "InvalidSlsaOptimizeMode",
             "SlsaDirtyWorkspaceEvidence",
             "SlsaSourceIdentityMismatch",
             "ReproducibleBuildSourceControlMismatch",
@@ -466,6 +733,7 @@ fn validateReleaseArtifacts(
             "ReproducibleBuildDirtyCountInvalid",
             "ReproducibleBuildDirtyWorkspace",
             "ReproducibleBuildZigVersionInvalid",
+            "ReproducibleBuildOptimizeModeMismatch",
             "ReproducibleBuildSourceIdentityMismatch",
             "ReproducibleDigestCoverageMismatch",
             "DuplicateArtifactMeasurement",
@@ -496,6 +764,7 @@ fn validateReleaseArtifacts(
         try common.addError(errors, allocator, "release artifacts must declare artifact-measurements.json output", .{});
     }
     try expectTrueBoolField(allocator, errors, root, "release artifacts", "generator_requires_all_release_artifacts");
+    const artifact_selection = try validateReleaseArtifactSelectionPolicy(allocator, errors, root) orelse return;
     const required_generator_inputs = try common.collectStringArray(
         allocator,
         errors,
@@ -503,18 +772,12 @@ fn validateReleaseArtifacts(
         "release artifacts required_generator_inputs",
         true,
     );
-    const required_generator_artifacts = [_][]const u8{
-        "zig-out/bin/kernel-zigos-native.elf",
-        "zig-out/bin/zigos-sign",
-        "zig-out/bin/zigos-verify-release",
-        "build/os.iso",
-        "zig-out/bin",
-        "spec/production_readiness.json",
-        "spec/release_security/release_artifacts.json",
-        "spec/release_security/release_keyring.json",
-        "spec/release_security/revoked_release_keys.json",
-    };
-    for (required_generator_artifacts) |artifact_path| {
+    for (REQUIRED_RELEASE_EXACT_PATHS) |artifact_path| {
+        if (!stringArrayContains(required_generator_inputs, artifact_path)) {
+            try common.addError(errors, allocator, "release artifacts required_generator_inputs must include {s}", .{artifact_path});
+        }
+    }
+    for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |artifact_path| {
         if (!stringArrayContains(required_generator_inputs, artifact_path)) {
             try common.addError(errors, allocator, "release artifacts required_generator_inputs must include {s}", .{artifact_path});
         }
@@ -617,13 +880,47 @@ fn validateReleaseArtifacts(
     if (artifacts.len < 4) {
         try common.addError(errors, allocator, "release_artifacts must cover kernel, userspace, ISO, and policy artifacts", .{});
     }
+    var has_production_userspace_set = false;
     for (artifacts, 0..) |artifact, index| {
         if (artifact != .object) {
             try common.addError(errors, allocator, "release artifact at index {d} must be an object", .{index});
             continue;
         }
         const id = try common.expectStringField(allocator, errors, artifact, "release artifact", "id") orelse "<unknown>";
-        _ = try common.expectStringField(allocator, errors, artifact, id, "path");
+        const has_path = common.field(artifact, "path") != null;
+        const has_paths = common.field(artifact, "paths") != null;
+        if (has_path == has_paths) {
+            try common.addError(errors, allocator, "release artifact {s} must include exactly one of path or paths", .{id});
+        } else if (has_path) {
+            const path = try common.expectStringField(allocator, errors, artifact, id, "path") orelse "";
+            if (path.len > 0 and !releaseArtifactPathAllowed(artifact_selection, path)) {
+                try common.addError(errors, allocator, "release artifact {s} path is outside the production release allowlist: {s}", .{ id, path });
+            }
+        } else {
+            const paths = try common.collectStringArray(
+                allocator,
+                errors,
+                common.field(artifact, "paths"),
+                try std.fmt.allocPrint(allocator, "release artifact {s} paths", .{id}),
+                true,
+            );
+            if (!std.mem.eql(u8, id, "production-userspace-images")) {
+                try common.addError(errors, allocator, "only production-userspace-images may declare a release artifact path set", .{});
+            } else {
+                has_production_userspace_set = true;
+            }
+            var path_set = try common.collectUniqueStrings(allocator, errors, paths, "release artifact path");
+            for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |required_path| {
+                if (!path_set.contains(required_path)) {
+                    try common.addError(errors, allocator, "production-userspace-images paths must include {s}", .{required_path});
+                }
+            }
+            for (paths) |path| {
+                if (!isOneOf(path, &REQUIRED_PRODUCTION_USERSPACE_PATHS)) {
+                    try common.addError(errors, allocator, "production-userspace-images contains an unapproved path: {s}", .{path});
+                }
+            }
+        }
         _ = try common.expectStringField(allocator, errors, artifact, id, "kind");
         try expectTrueBoolField(allocator, errors, artifact, id, "digest_required");
         try expectTrueBoolField(allocator, errors, artifact, id, "sbom_required");
@@ -631,6 +928,9 @@ fn validateReleaseArtifacts(
         try expectTrueBoolField(allocator, errors, artifact, id, "dsse_required");
         try expectTrueBoolField(allocator, errors, artifact, id, "reproducible_required");
         try expectTrueBoolField(allocator, errors, artifact, id, "customer_verifiable");
+    }
+    if (!has_production_userspace_set) {
+        try common.addError(errors, allocator, "release_artifacts must declare the production-userspace-images path set", .{});
     }
 
     const customer_bundle = try common.collectStringArray(
@@ -650,6 +950,7 @@ fn validateReleaseArtifacts(
         "build/release-security/release-keyring.json",
         "build/release-security/revoked-release-keys.json",
         "build/release-security/reproducible-build.json",
+        "build/release-security/reproducible-artifact-digests.sha256",
         "zig-out/bin/zigos-verify-release",
     };
     for (required_customer_bundle_artifacts) |artifact| {
@@ -843,6 +1144,130 @@ fn expectConfiguredHexKey(
     if (!hexTextOfLength(public_key, expected_hex_len)) {
         try common.addError(errors, allocator, "active release key {s} public_key must be {d} hex characters", .{ key_id, expected_hex_len });
     }
+}
+
+const release_artifact_selection_fixture =
+    \\{
+    \\  "release_artifact_selection": {
+    \\    "directory_sweeps_allowed": false,
+    \\    "reject_unlisted_artifacts": true,
+    \\    "verification_artifacts_forbidden": true,
+    \\    "exact_paths": [
+    \\      "zig-out/bin/kernel-zigos-native.elf",
+    \\      "zig-out/bin/zigos-sign",
+    \\      "zig-out/bin/zigos-verify-release",
+    \\      "build/os.iso",
+    \\      "spec/production_readiness.json",
+    \\      "spec/release_security/release_artifacts.json",
+    \\      "spec/release_security/release_keyring.json",
+    \\      "spec/release_security/revoked_release_keys.json",
+    \\      "spec/release_security/fuzz_corpus.json",
+    \\      "spec/release_security/memory_safety_inventory.json",
+    \\      "spec/release_security/threat_model.json",
+    \\      "spec/release_security/crash_dump_redaction.json",
+    \\      "spec/release_security/vulnerability_disclosure.json"
+    \\    ],
+    \\    "production_userspace_paths": [
+    \\      "zig-out/bin/userspace-session-manager.elf",
+    \\      "zig-out/bin/userspace-permission-review.elf",
+    \\      "zig-out/bin/userspace-service-registry.elf",
+    \\      "zig-out/bin/userspace-workspace-storage.elf",
+    \\      "zig-out/bin/userspace-viewer.elf",
+    \\      "zig-out/bin/userspace-notes.elf",
+    \\      "zig-out/bin/userspace-sync.elf",
+    \\      "zig-out/bin/userspace-capture.elf",
+    \\      "zig-out/bin/userspace-policy-mediation.elf",
+    \\      "zig-out/bin/userspace-network-stack.elf",
+    \\      "zig-out/bin/userspace-storage-object.elf",
+    \\      "zig-out/bin/userspace-storage-driver.elf",
+    \\      "zig-out/bin/userspace-package-service.elf",
+    \\      "zig-out/bin/userspace-compositor.elf",
+    \\      "zig-out/bin/userspace-indexing-search.elf",
+    \\      "zig-out/bin/userspace-personal-context.elf",
+    \\      "zig-out/bin/userspace-sync-service.elf",
+    \\      "zig-out/bin/userspace-media-print.elf",
+    \\      "zig-out/bin/userspace-attention-broker.elf",
+    \\      "zig-out/bin/userspace-task-lifecycle.elf",
+    \\      "zig-out/bin/userspace-sensitive-capture.elf",
+    \\      "zig-out/bin/userspace-secure-pasteboard.elf",
+    \\      "zig-out/bin/userspace-object-resilience.elf",
+    \\      "zig-out/bin/userspace-secret-vault.elf"
+    \\    ],
+    \\    "forbidden_path_patterns": [
+    \\      "build/os-verification.iso",
+    \\      "zig-out/bin/kernel-zigos-native-verification.elf",
+    \\      "zig-out/bin/kernel-zigos-native-tampered-*.elf",
+    \\      "zig-out/bin/kernel-zigos-native-rollback-slot-failure.elf",
+    \\      "zig-out/bin/kernel-zigos-native-storage-durability.elf",
+    \\      "zig-out/bin/kernel-recovery.elf",
+    \\      "zig-out/bin/kernel-benchmark.elf",
+    \\      "zig-out/bin/userspace-transport-probe.elf",
+    \\      "zig-out/bin/userspace-termination-probe.elf",
+    \\      "zig-out/bin/userspace-service-client.elf",
+    \\      "zig-out/bin/userspace-mmu-isolation-proof.elf",
+    \\      "zig-out/bin/userspace-notes-daily.elf"
+    \\    ]
+    \\  }
+    \\}
+;
+
+fn expectReleaseArtifactSelectionError(source: []const u8, needle: []const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
+    var errors = std.ArrayList([]const u8).empty;
+    _ = try validateReleaseArtifactSelectionPolicy(allocator, &errors, parsed.value);
+    for (errors.items) |message| {
+        if (std.mem.indexOf(u8, message, needle) != null) return;
+    }
+    try std.testing.expect(false);
+}
+
+test "release artifact selection admits production outputs and rejects verification media" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, release_artifact_selection_fixture, .{});
+    var errors = std.ArrayList([]const u8).empty;
+    const selection = (try validateReleaseArtifactSelectionPolicy(allocator, &errors, parsed.value)).?;
+
+    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+    try std.testing.expect(releaseArtifactPathAllowed(selection, "zig-out/bin/kernel-zigos-native.elf"));
+    try std.testing.expect(releaseArtifactPathAllowed(selection, "zig-out/bin/userspace-session-manager.elf"));
+    try std.testing.expect(!releaseArtifactPathAllowed(selection, "zig-out/bin"));
+    try std.testing.expect(!releaseArtifactPathAllowed(selection, "zig-out/bin/kernel-zigos-native-verification.elf"));
+    try std.testing.expect(!releaseArtifactPathAllowed(selection, "build/os-verification.iso"));
+    try std.testing.expect(!releaseArtifactPathAllowed(selection, "zig-out/bin/userspace-mmu-isolation-proof.elf"));
+}
+
+test "release artifact selection rejects directory sweeps and unapproved exact paths" {
+    const broad_sweep = try replaceOnceForTest(
+        std.testing.allocator,
+        release_artifact_selection_fixture,
+        "\"directory_sweeps_allowed\": false",
+        "\"directory_sweeps_allowed\": true",
+    );
+    defer std.testing.allocator.free(broad_sweep);
+    try expectReleaseArtifactSelectionError(broad_sweep, "directory_sweeps_allowed must be false");
+
+    const verification_kernel = try replaceOnceForTest(
+        std.testing.allocator,
+        release_artifact_selection_fixture,
+        "\"zig-out/bin/kernel-zigos-native.elf\"",
+        "\"zig-out/bin/kernel-zigos-native-verification.elf\"",
+    );
+    defer std.testing.allocator.free(verification_kernel);
+    try expectReleaseArtifactSelectionError(verification_kernel, "unapproved exact path");
+
+    const verification_userspace = try replaceOnceForTest(
+        std.testing.allocator,
+        release_artifact_selection_fixture,
+        "\"zig-out/bin/userspace-session-manager.elf\"",
+        "\"zig-out/bin/userspace-mmu-isolation-proof.elf\"",
+    );
+    defer std.testing.allocator.free(verification_userspace);
+    try expectReleaseArtifactSelectionError(verification_userspace, "unapproved production userspace path");
 }
 
 const release_keyring_fixture =

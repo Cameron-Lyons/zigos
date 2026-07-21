@@ -9,6 +9,7 @@ const manifest = @import("../policy/manifest.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
+const session_demo_boot = @import("../demo/session_demo_boot.zig");
 const session_manager = @import("session_manager.zig");
 const signing = @import("../core/signing.zig");
 const supervisor_mod = @import("supervisor.zig");
@@ -128,7 +129,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();
 
-    session_manager.bootScenarioWorld();
+    session_demo_boot.bootScenarioWorld(session_manager.system());
 
     const service_directory = session_manager.testing.serviceDirectoryPtr();
     const runtime_service = session_manager.testing.runtimeServicePtr();

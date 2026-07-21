@@ -3,9 +3,73 @@ const boot_markers = @import("kernel/boot/markers.zig");
 
 pub const ready = boot_markers.native_ready;
 
+pub const production_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_production,
+    boot_markers.boot_core_ready,
+    boot_markers.kernel_network_deferred,
+    boot_markers.native_bootstrap,
+    boot_markers.tcb_defined,
+    boot_markers.userspace_scheduler_ready,
+    boot_markers.userspace_artifacts_ready,
+    boot_markers.userspace_exec_probe_ok,
+    boot_markers.userspace_resume_ok,
+    boot_markers.transport_native_kernel_ready,
+    boot_markers.transport_no_root,
+    boot_markers.transport_component_abi_ready,
+    boot_markers.supervisor_ready,
+    boot_markers.service_contract_map_ready,
+    boot_markers.policy_ready,
+    boot_markers.service_boot_driver_service_network_ready,
+    boot_markers.service_boot_driver_service_storage_ready,
+    boot_markers.service_boot_service_contracts_ready,
+    boot_markers.platform_bootloader_measurement_provided,
+    boot_markers.platform_build_artifact_manifest_verified,
+    boot_markers.platform_bootloader_handoff_verified,
+    boot_markers.platform_artifact_manifest_verified,
+    boot_markers.platform_measured_boot_recorded,
+    boot_markers.platform_measured_boot_verified_root,
+    boot_markers.storage_checkpoint_final_clean,
+    boot_markers.task_session_ready,
+    boot_markers.native_ready,
+};
+
+pub const production_forbidden = [_][]const u8{
+    boot_markers.kernel_role_verification,
+    boot_markers.runtime_proof_process_isolation,
+    boot_markers.service_boot_ipc_connect_all_ok,
+    boot_markers.service_boot_supervisor_crash_recorded,
+    boot_markers.service_boot_driver_rehost_ok,
+    boot_markers.platform_activation_rollback_ok,
+    boot_markers.platform_health_checks_boot_rollback,
+    boot_markers.permission_review_port_ready,
+    boot_markers.notes_daily_driver_complete,
+    "app.notes.daily",
+    "userspace-notes-daily.elf",
+    "zigos.system.transport-probe",
+    "userspace-transport-probe.elf",
+    "zigos.system.termination-probe",
+    "userspace-termination-probe.elf",
+    "zigos.system.service-client",
+    "userspace-service-client.elf",
+    "zigos.proof.mmu-isolation",
+    "userspace-mmu-isolation-proof.elf",
+};
+
+pub const production_first_boot_required = [_][]const u8{
+    boot_markers.platform_measured_boot_first,
+};
+
+pub const production_reboot_required = [_][]const u8{
+    boot_markers.platform_measured_boot_same_root,
+    boot_markers.platform_measured_boot_same_shape,
+};
+
 pub const cold_boot_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.boot_core_ready,
     boot_markers.kernel_network_deferred,
     boot_markers.native_bootstrap,
@@ -109,6 +173,7 @@ pub const first_boot_required = [_][]const u8{
 };
 
 pub const driver_restart_required = [_][]const u8{
+    boot_markers.kernel_role_verification,
     boot_markers.service_boot_supervisor_crash_recorded,
     boot_markers.service_boot_driver_rehost_ok,
     boot_markers.service_boot_supervisor_restart_ok,
@@ -193,48 +258,56 @@ pub const update_rollback_required = [_][]const u8{
 pub const tampered_artifact_manifest_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.platform_artifact_manifest_tamper_rejected,
 };
 
 pub const tampered_bootloader_measurement_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.platform_bootloader_measurement_tamper_rejected,
 };
 
 pub const tampered_kernel_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.platform_artifact_kernel_tamper_rejected,
 };
 
 pub const tampered_userspace_image_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.platform_artifact_userspace_image_tamper_rejected,
 };
 
 pub const tampered_policy_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.platform_artifact_policy_tamper_rejected,
 };
 
 pub const tampered_driver_set_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.platform_artifact_driver_set_tamper_rejected,
 };
 
 pub const rollback_slot_failure_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.platform_base_selector_rollback_slot_failure_rejected,
 };
 
 pub const storage_durability_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.boot_core_ready,
     boot_markers.storage_durability_start,
     boot_markers.storage_durability_baseline_checkpointed,
@@ -248,6 +321,7 @@ pub const storage_durability_required = [_][]const u8{
 pub const sync_two_node_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
+    boot_markers.kernel_role_verification,
     boot_markers.transport_native_kernel_ready,
     boot_markers.sync_device_graph_rooted,
     "ZIGOS:SYNC:DEVICE_ENROLL:OK",
@@ -287,6 +361,7 @@ pub const notes_daily_driver_required = [_][]const u8{
 pub const recovery_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_recovery,
+    boot_markers.kernel_role_verification,
     boot_markers.boot_core_ready,
     boot_markers.recovery_start,
     boot_markers.recovery_break_glass_audited,
@@ -304,6 +379,45 @@ fn contains(group: []const []const u8, marker: []const u8) bool {
         if (std.mem.eql(u8, candidate, marker)) return true;
     }
     return false;
+}
+
+test "production smoke gate requires core readiness and excludes verification evidence" {
+    const required = [_][]const u8{
+        boot_markers.boot_start,
+        boot_markers.boot_profile_zigos_native,
+        boot_markers.kernel_role_production,
+        boot_markers.boot_core_ready,
+        boot_markers.userspace_artifacts_ready,
+        boot_markers.service_boot_service_contracts_ready,
+        boot_markers.platform_artifact_manifest_verified,
+        boot_markers.platform_measured_boot_verified_root,
+        boot_markers.native_ready,
+    };
+    for (required) |marker| {
+        try std.testing.expect(contains(&production_required, marker));
+    }
+    for (production_forbidden) |marker| {
+        try std.testing.expect(!contains(&production_required, marker));
+    }
+    try std.testing.expect(contains(&production_first_boot_required, boot_markers.platform_measured_boot_first));
+    try std.testing.expect(contains(&production_reboot_required, boot_markers.platform_measured_boot_same_root));
+    try std.testing.expect(contains(&production_reboot_required, boot_markers.platform_measured_boot_same_shape));
+}
+
+test "verification smoke groups require the verification kernel role" {
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&driver_restart_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&tampered_artifact_manifest_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&tampered_bootloader_measurement_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&tampered_kernel_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&tampered_userspace_image_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&tampered_policy_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&tampered_driver_set_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&rollback_slot_failure_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&storage_durability_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(contains(&recovery_required, boot_markers.kernel_role_verification));
+    try std.testing.expect(!contains(&cold_boot_required, boot_markers.kernel_role_production));
 }
 
 test "native smoke gate requires runtime isolation proof markers" {

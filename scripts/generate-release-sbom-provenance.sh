@@ -4,7 +4,13 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${1:-build/release-security}"
+RELEASE_OPTIMIZE_MODE="${2:-ReleaseFast}"
 OUTPUT_PATH="$ROOT_DIR/$OUTPUT_DIR"
+
+if [ "$RELEASE_OPTIMIZE_MODE" != "ReleaseFast" ]; then
+  printf 'Release generation requires optimize mode ReleaseFast, got %s\n' "$RELEASE_OPTIMIZE_MODE" >&2
+  exit 2
+fi
 
 mkdir -p "$OUTPUT_PATH"
 
@@ -103,10 +109,91 @@ validate_dsse_signing_environment
 
 artifact_files=()
 
+REQUIRED_RELEASE_ARTIFACTS=(
+  "zig-out/bin/kernel-zigos-native.elf"
+  "zig-out/bin/zigos-sign"
+  "zig-out/bin/zigos-verify-release"
+  "build/os.iso"
+  "spec/production_readiness.json"
+  "spec/release_security/release_artifacts.json"
+  "spec/release_security/release_keyring.json"
+  "spec/release_security/revoked_release_keys.json"
+  "spec/release_security/fuzz_corpus.json"
+  "spec/release_security/memory_safety_inventory.json"
+  "spec/release_security/threat_model.json"
+  "spec/release_security/crash_dump_redaction.json"
+  "spec/release_security/vulnerability_disclosure.json"
+)
+
+PRODUCTION_USERSPACE_ARTIFACTS=(
+  "zig-out/bin/userspace-session-manager.elf"
+  "zig-out/bin/userspace-permission-review.elf"
+  "zig-out/bin/userspace-service-registry.elf"
+  "zig-out/bin/userspace-workspace-storage.elf"
+  "zig-out/bin/userspace-viewer.elf"
+  "zig-out/bin/userspace-notes.elf"
+  "zig-out/bin/userspace-sync.elf"
+  "zig-out/bin/userspace-capture.elf"
+  "zig-out/bin/userspace-policy-mediation.elf"
+  "zig-out/bin/userspace-network-stack.elf"
+  "zig-out/bin/userspace-storage-object.elf"
+  "zig-out/bin/userspace-storage-driver.elf"
+  "zig-out/bin/userspace-package-service.elf"
+  "zig-out/bin/userspace-compositor.elf"
+  "zig-out/bin/userspace-indexing-search.elf"
+  "zig-out/bin/userspace-personal-context.elf"
+  "zig-out/bin/userspace-sync-service.elf"
+  "zig-out/bin/userspace-media-print.elf"
+  "zig-out/bin/userspace-attention-broker.elf"
+  "zig-out/bin/userspace-task-lifecycle.elf"
+  "zig-out/bin/userspace-sensitive-capture.elf"
+  "zig-out/bin/userspace-secure-pasteboard.elf"
+  "zig-out/bin/userspace-object-resilience.elf"
+  "zig-out/bin/userspace-secret-vault.elf"
+)
+
+is_forbidden_release_artifact() {
+  local relative_path="${1:?artifact path required}"
+  case "$relative_path" in
+    build/os-verification.iso | \
+      zig-out/bin/kernel-zigos-native-verification.elf | \
+      zig-out/bin/kernel-zigos-native-tampered-*.elf | \
+      zig-out/bin/kernel-zigos-native-rollback-slot-failure.elf | \
+      zig-out/bin/kernel-zigos-native-storage-durability.elf | \
+      zig-out/bin/kernel-recovery.elf | \
+      zig-out/bin/kernel-benchmark.elf | \
+      zig-out/bin/userspace-transport-probe.elf | \
+      zig-out/bin/userspace-termination-probe.elf | \
+      zig-out/bin/userspace-service-client.elf | \
+      zig-out/bin/userspace-mmu-isolation-proof.elf | \
+      zig-out/bin/userspace-notes-daily.elf)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+is_explicit_release_artifact() {
+  local relative_path="${1:?artifact path required}"
+  local allowed_path
+  for allowed_path in "${REQUIRED_RELEASE_ARTIFACTS[@]}" "${PRODUCTION_USERSPACE_ARTIFACTS[@]}"; do
+    if [ "$relative_path" = "$allowed_path" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_allowed_release_artifact() {
+  local relative_path="${1:?artifact path required}"
+  ! is_forbidden_release_artifact "$relative_path" || return 1
+  is_explicit_release_artifact "$relative_path"
+}
+
 require_artifact_path() {
   local relative_path="${1:?artifact path required}"
   local absolute_path="$ROOT_DIR/$relative_path"
-  if [ ! -e "$absolute_path" ]; then
+  if [ ! -f "$absolute_path" ]; then
     printf 'missing required release artifact: %s\n' "$relative_path" >&2
     return 1
   fi
@@ -116,40 +203,35 @@ require_artifact_path() {
 add_artifact_path() {
   local relative_path="${1:?artifact path required}"
   local absolute_path="$ROOT_DIR/$relative_path"
+  if ! is_allowed_release_artifact "$relative_path"; then
+    fail_release_generation "artifact is outside the production release allowlist: $relative_path"
+  fi
   if [ -f "$absolute_path" ]; then
     artifact_files+=("$relative_path")
-    return
-  fi
-  if [ -d "$absolute_path" ]; then
-    while IFS= read -r -d '' file; do
-      artifact_files+=("${file#"$ROOT_DIR"/}")
-    done < <(find "$absolute_path" -type f -print0)
   fi
 }
 
+collect_production_userspace_artifacts() {
+  local relative_path
+  local missing_artifacts=0
+  for relative_path in "${PRODUCTION_USERSPACE_ARTIFACTS[@]}"; do
+    require_artifact_path "$relative_path" || missing_artifacts=1
+  done
+  return "$missing_artifacts"
+}
+
 missing_required_artifacts=0
-require_artifact_path "zig-out/bin/kernel-zigos-native.elf" || missing_required_artifacts=1
-require_artifact_path "zig-out/bin/zigos-sign" || missing_required_artifacts=1
-require_artifact_path "zig-out/bin/zigos-verify-release" || missing_required_artifacts=1
-require_artifact_path "build/os.iso" || missing_required_artifacts=1
-require_artifact_path "zig-out/bin" || missing_required_artifacts=1
-require_artifact_path "spec/production_readiness.json" || missing_required_artifacts=1
-require_artifact_path "spec/release_security/release_artifacts.json" || missing_required_artifacts=1
-require_artifact_path "spec/release_security/release_keyring.json" || missing_required_artifacts=1
-require_artifact_path "spec/release_security/revoked_release_keys.json" || missing_required_artifacts=1
+for required_artifact in "${REQUIRED_RELEASE_ARTIFACTS[@]}"; do
+  require_artifact_path "$required_artifact" || missing_required_artifacts=1
+done
+collect_production_userspace_artifacts || missing_required_artifacts=1
 if [ "$missing_required_artifacts" -ne 0 ]; then
-  printf 'Build iso, signing-cli, verify-release-cli, userspace-images, and release policy artifacts before generating SBOM/provenance.\n' >&2
+  printf 'Build the production ISO, kernel, release tools, userspace images, and release policy artifacts before generating SBOM/provenance.\n' >&2
   exit 1
 fi
 
-add_artifact_path "spec/release_security/fuzz_corpus.json"
-add_artifact_path "spec/release_security/memory_safety_inventory.json"
-add_artifact_path "spec/release_security/threat_model.json"
-add_artifact_path "spec/release_security/crash_dump_redaction.json"
-add_artifact_path "spec/release_security/vulnerability_disclosure.json"
-
 if [ "${#artifact_files[@]}" -eq 0 ]; then
-  echo "No release artifacts were found. Build iso, signing-cli, and userspace-images before generating SBOM/provenance." >&2
+  echo "No release artifacts were found. Build iso, signing-cli, and userspace-production-images before generating SBOM/provenance." >&2
   exit 1
 fi
 
@@ -157,6 +239,9 @@ sorted_artifacts="$(mktemp "${TMPDIR:-/tmp}/zigos-release-artifacts.XXXXXX")"
 printf '%s\n' "${artifact_files[@]}" | LC_ALL=C sort -u > "$sorted_artifacts"
 artifact_files=()
 while IFS= read -r file; do
+  if ! is_allowed_release_artifact "$file"; then
+    fail_release_generation "selected artifact is outside the production release allowlist: $file"
+  fi
   artifact_files+=("$file")
 done < "$sorted_artifacts"
 rm -f -- "$sorted_artifacts"
@@ -250,7 +335,7 @@ release_key_id="${ZIGOS_RELEASE_SIGNING_KEY_ID:-zigos-release-signing-required}"
 for file in "${artifact_files[@]}"; do
   digest="$(sha256_file "$ROOT_DIR/$file")"
   escaped_file="$(json_escape "$file")"
-  statement="{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{\"name\":\"$escaped_file\",\"digest\":{\"sha256\":\"$digest\"}}],\"predicateType\":\"https://slsa.dev/provenance/v1\",\"predicate\":{\"buildDefinition\":{\"buildType\":\"https://github.com/Cameron-Lyons/zigos/release-security-gate\",\"externalParameters\":{\"repository\":\"$(json_escape "$repo_url")\",\"sourceControl\":\"$repo_vcs\",\"changeId\":\"$(json_escape "$repo_change_id")\",\"commit\":\"$(json_escape "$commit_sha")\",\"zigVersion\":\"$(json_escape "$zig_version")\"}},\"runDetails\":{\"builder\":{\"id\":\"zigos-local-release-security-gate\"},\"metadata\":{\"invocationId\":\"$created_utc\",\"startedOn\":\"$created_utc\",\"dirtyWorkspaceFileCount\":$dirty_count}}}}"
+  statement="{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{\"name\":\"$escaped_file\",\"digest\":{\"sha256\":\"$digest\"}}],\"predicateType\":\"https://slsa.dev/provenance/v1\",\"predicate\":{\"buildDefinition\":{\"buildType\":\"https://github.com/Cameron-Lyons/zigos/release-security-gate\",\"externalParameters\":{\"repository\":\"$(json_escape "$repo_url")\",\"sourceControl\":\"$repo_vcs\",\"changeId\":\"$(json_escape "$repo_change_id")\",\"commit\":\"$(json_escape "$commit_sha")\",\"zigVersion\":\"$(json_escape "$zig_version")\",\"optimizeMode\":\"$RELEASE_OPTIMIZE_MODE\"}},\"runDetails\":{\"builder\":{\"id\":\"zigos-local-release-security-gate\"},\"metadata\":{\"invocationId\":\"$created_utc\",\"startedOn\":\"$created_utc\",\"dirtyWorkspaceFileCount\":$dirty_count}}}}"
   printf '%s\n' "$statement" >> "$provenance_path"
   payload_b64="$(printf '%s' "$statement" | base64_no_wrap)"
   release_signature_b64="$(sign_dsse_statement "$statement")"
@@ -386,6 +471,7 @@ cat > "$OUTPUT_PATH/customer-verification-policy.json" <<EOF
   "release_keyring": "$OUTPUT_DIR/release-keyring.json",
   "revoked_release_keys": "$OUTPUT_DIR/revoked-release-keys.json",
   "reproducible_build_evidence": "$OUTPUT_DIR/reproducible-build.json",
+  "reproducible_artifact_digests": "$OUTPUT_DIR/reproducible-artifact-digests.sha256",
   "required_predicate_type": "https://slsa.dev/provenance/v1",
   "required_payload_type": "application/vnd.in-toto+json",
   "require_hardware_backed_release_key": true,

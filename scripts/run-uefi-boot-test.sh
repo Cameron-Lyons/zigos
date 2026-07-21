@@ -9,7 +9,17 @@ source "$ROOT_DIR/scripts/qemu-harness.sh"
 
 ISO_PATH="${1:?iso path required}"
 LOG_PATH="${2:?serial log path required}"
+EXPECTED_ROLE="${3:?expected kernel role required}"
 UEFI_BOOT_TEST_SECONDS="${UEFI_BOOT_TEST_SECONDS:-20}"
+
+case "$EXPECTED_ROLE" in
+  production | verification)
+    ;;
+  *)
+    echo "UEFI boot test failed: unsupported kernel role '$EXPECTED_ROLE'" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "$(dirname "$LOG_PATH")"
 rm -f "$LOG_PATH"
@@ -21,7 +31,7 @@ if [ ! -s "$LOG_PATH" ]; then
   exit 1
 fi
 
-for marker in "BOOT:START" "Welcome to Zigos" "Initializing GDT" "BOOT:CORE_READY"; do
+for marker in "BOOT:START" "BOOT:ROLE:${EXPECTED_ROLE}" "Welcome to Zigos" "Initializing GDT" "BOOT:CORE_READY"; do
   if ! grep -Fq "$marker" "$LOG_PATH"; then
     echo "UEFI boot test failed: missing marker '$marker'" >&2
     cat "$LOG_PATH" >&2

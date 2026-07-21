@@ -104,7 +104,7 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     signalFault(detail, faultCode(msg));
 }
 
-pub fn zigos_userspace_contract_main() callconv(.c) noreturn {
+pub fn zigos_userspace_contract_main(comptime run_mmu_isolation_probe: bool) noreturn {
     const descriptor = &contract_bindings.zigos_userspace_descriptor;
     userspace_descriptor.validate(descriptor) catch signalFault(.unknown, 1);
 
@@ -116,7 +116,10 @@ pub fn zigos_userspace_contract_main() callconv(.c) noreturn {
         runStartupQueries(detail);
     }
 
-    if (descriptor.role_tag == mailbox.MMU_ISOLATION_PROOF_ROLE_TAG) {
+    if (comptime run_mmu_isolation_probe) {
+        if (descriptor.role_tag != mailbox.MMU_ISOLATION_PROOF_ROLE_TAG) {
+            signalFault(detail, mailbox.PROOF_FOREIGN_MEMORY_ACCESS_FAULT_CODE);
+        }
         runMmuIsolationProbe(detail);
     }
 

@@ -2,6 +2,8 @@ pub const boot_start = "BOOT:START";
 pub const boot_profile_zigos_native = "BOOT:PROFILE:zigos_native";
 pub const boot_profile_recovery = "BOOT:PROFILE:recovery";
 pub const boot_profile_benchmark = "BOOT:PROFILE:benchmark";
+pub const kernel_role_production = "BOOT:ROLE:production";
+pub const kernel_role_verification = "BOOT:ROLE:verification";
 pub const boot_core_ready = "BOOT:CORE_READY";
 
 pub const cpu_smep_enabled = "ZIGOS:CPU:SMEP:ENABLED";
@@ -34,6 +36,7 @@ pub const userspace_scheduler_ready = "ZIGOS:USERSPACE:SCHEDULER:READY";
 pub const userspace_exec_probe_ok = "ZIGOS:USERSPACE:EXEC_PROBE:OK";
 pub const userspace_resume_ok = "ZIGOS:USERSPACE:RESUME:OK";
 pub const userspace_scheduler_active = "ZIGOS:USERSPACE:SCHEDULER:ACTIVE";
+pub const storage_checkpoint_final_clean = "ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false";
 
 pub const supervisor_ready = "ZIGOS:SUPERVISOR:READY";
 pub const service_contract_map_ready = "ZIGOS:SERVICE_BOOT:CONTRACT_MAP:READY";
