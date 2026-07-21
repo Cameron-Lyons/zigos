@@ -55,8 +55,10 @@ requests.
 - The secure-by-design release gate is `blocked` until the real NUC11TNKi5
   hardware proof bundle passes. Release artifacts are measured, DSSE
   in-toto/SLSA provenance is generated through a hardware-backed
-  TPM/secure-enclave/HSM/KMS signing command, and customers get a native
-  `zigos-verify-release` verifier for signatures, revocation, subjects,
+  TPM/secure-enclave/HSM/KMS signing command. Customers obtain
+  `zigos-verify-release` and its SHA-256 pin independently of the release;
+  the host verifier is deliberately not one of the signed OS targets or a
+  trust bootstrap for itself. It checks signatures, revocation, subjects,
   reproducible digests, measurements, and post-quantum rollout policy.
   Ed25519 is the classical signing baseline; production PQC is represented
   by a separate ML-DSA-65 provider boundary with FIPS validation metadata
@@ -240,14 +242,21 @@ Optional QEMU gates can be added to `verify`:
 ./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
 ```
 
-The first real-machine gate is an Intel NUC11TNKi5 proof bundle. Prepare the
-bundle skeleton and exact artifact digests with:
+The first real-machine gate is an Intel NUC11TNKi5 proof bundle. First complete
+the phase-A `release-bundle-check` ceremony described below. Once that command
+returns, freeze the authenticated release bundle and the exact 33 signed target
+files; do not run any generator again. Prepare a fresh proof skeleton bound to
+that candidate:
 
 ```bash
 scripts/prepare-nuc11tnki5-hardware-proof.sh \
-  --build \
-  --nonce <fresh-verifier-issued-64-hex>
+  --nonce <fresh-verifier-issued-64-hex> \
+  --output build/hardware-proofs/<fresh-name>
 ```
+
+The proof output must be a fresh empty direct child of
+`build/hardware-proofs`; populated directories are never reused across
+ceremonies.
 
 Capture one production boot in `production-serial.log`, one verification boot
 in `verification-serial.log`, and each repeated hardware cycle in its own
@@ -256,17 +265,24 @@ two role-specific hardware quote/signature pairs, write the canonical capture
 statement and validate it with an external trusted verifier:
 
 ```bash
-scripts/write-nuc11tnki5-capture-statement.sh build/hardware-proofs/nuc11tnki5
+scripts/write-nuc11tnki5-capture-statement.sh build/hardware-proofs/<fresh-name>
 ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex> \
 ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
 ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
-  scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5
+ZIGOS_RELEASE_VERIFIER=/absolute/path/to/independently-pinned-zigos-verify-release \
+ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
+ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
+ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
+ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
+  scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/<fresh-name>
 ```
 
-The same check is exposed as `./scripts/zig.sh build hardware-proof` and is a
-hard dependency of
-`./scripts/zig.sh build -Doptimize=ReleaseFast release-security-gate`; normal mode
-fails closed when any external trust setting is absent.
+The same check is exposed as `./scripts/zig.sh build
+-Dhardware-proof-dir=build/hardware-proofs/<fresh-name> hardware-proof` and is
+the only dependency of the final, verify-only `release-security-gate`. That
+phase uses the five root, state, and independently pinned verifier build
+options shown below plus the hardware-proof environment; it never regenerates
+or signs release artifacts.
 
 ## Verification Model
 
@@ -282,26 +298,146 @@ fault injection, scale, transport, and operational validation.
 
 The secure-by-design release gate is part of the production-readiness manifest
 and is validated by `./scripts/zig.sh build prod-readiness`, which also runs the
-fast `release-security-check` gate. Public security releases must pass
-`./scripts/zig.sh build -Doptimize=ReleaseFast release-security-gate`, covering fuzzing, fault
-injection, reproducible builds, DSSE-wrapped SBOM/provenance, threat-model
-tests, memory-safety audits for unsafe Zig and kernel sections, crash dump
-redaction, the vulnerability disclosure process in `SECURITY.md`, and the
-completed NUC11TNKi5 real-hardware proof bundle. Public release provenance must
-be signed per DSSE payload through
-`ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a hardware-backed TPM, secure enclave,
-HSM, or KMS key and verified with `zig-out/bin/zigos-verify-release
-build/release-security .` before distribution.
-The `release-bundle-check` target serializes SBOM/provenance and reproducible
-evidence generation, then runs that customer verifier against the exact
-ReleaseFast production artifacts.
-The release keyring also carries the PQC transition policy: FIPS 203
-ML-KEM is reserved for key establishment, FIPS 204 ML-DSA is the production
-signature path once a validated provider is linked, and FIPS 205 SLH-DSA is the
-hash-based diversity path for long-lived or recovery roots. `ZIGOS_RELEASE_PQC_MODE`
-defaults to `shadow` and may move through `canary` to `required`; required mode
-is rejected unless the verifier can validate production ML-DSA signatures from
-the published keyring.
+fast `release-security-check` gate. A public release has two ordered phases.
+`release-security-preflight` runs every mutable audit, fixture, build, smoke,
+fault, recovery, sync, and UEFI-QEMU check. `release-bundle-check` depends on
+that preflight, creates the candidate, verifies it before publication, then
+publishes and statefully verifies its manifest. After the candidate's exact 33
+target files and release bundle are frozen, the verify-only
+`release-security-gate` rechecks the existing bundle and seals it with the
+completed NUC11TNKi5 proof; it has no generator or signer dependency. Public
+release provenance must be signed per
+DSSE payload through `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a
+hardware-backed TPM, secure enclave, HSM, or KMS key. The signer key must be
+delegated by a root-threshold-signed trust policy whose root metadata and
+lowercase SHA-256 digest were obtained independently of the release bundle. The
+bundled root copy is consistency evidence, never a trust bootstrap.
+
+Trust metadata is strict JSON: unknown or duplicate fields are rejected. Raw
+root metadata has exactly `schemaVersion`, `namespace`, `channel`, `version`,
+`minimumPolicyVersion`, `issuedAt`, `expiresAt`, `threshold`, and `keys`; each
+root key has `keyId`, `algorithm`, and `publicKey`. The signed trust-policy
+payload has exactly `rootVersion`, `policyVersion`, `minimumReleaseSequence`,
+`issuedAt`, `expiresAt`, `releaseRole`, `releaseKeys`, `revocations`,
+`artifactProfile`, and `pqcPolicy`. Release keys also declare generation,
+status, custody, hardware backing, and validity window; revocations bind key ID
+and generation. The artifact profile must equal the catalogs in
+`src/tools/release_catalog.zig`.
+
+Ed25519 public keys are lowercase hex encodings of the raw 32-byte public key,
+and their key ID is the lowercase SHA-256 of those raw bytes. Root policy
+thresholds may use multiple distinct signers. The current production generator
+and finalizer emit one release signature, so `releaseRole.threshold` must be
+exactly `1`. `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` receives the complete DSSE v1
+pre-authentication encoding on standard input and must emit only the standard
+base64 Ed25519 signature.
+
+The `release-bundle-check` target coordinates eight generator-side evidence
+files and two independently rebuilt reproducibility files for exactly 33 OS
+targets: nine fixed production artifacts and 24 userspace images. The
+independently distributed host verifier is outside that catalog. After both
+evidence paths succeed, `release-manifest-finalize` holds a sibling ceremony
+lock, verifies a private candidate, atomically publishes the release-key-signed
+`release-manifest.dsse.json`, and performs a full stateful verification. That
+authenticated manifest is the sole digest authority. Digest projections,
+measurements, provenance, and reproducibility evidence are checked for exact
+consistency; the SBOM digest and `spdxVersion` are checked, but this verifier
+does not claim full SPDX graph-semantic validation.
+
+```sh
+export ZIGOS_RELEASE_DSSE_SIGN_COMMAND='/absolute/path/to/hardware-signer'
+export ZIGOS_RELEASE_SIGNING_KEY_ID='<derived-lowercase-sha256-key-id>'
+export ZIGOS_RELEASE_HARDWARE_BACKED=true
+export ZIGOS_RELEASE_SEQUENCE='<strictly-increasing-sequence-for-this-new-candidate>'
+export ZIGOS_RELEASE_EXPIRES_AT='<future-unix-timestamp>'
+
+./scripts/zig.sh build -Doptimize=ReleaseFast \
+  -Drelease-trust-root=/absolute/independent/root-metadata.json \
+  -Drelease-trust-root-sha256=<pinned-lowercase-sha256> \
+  -Drelease-trust-policy=/absolute/independent/release-trust-policy.dsse.json \
+  -Drelease-trust-state=/absolute/persistent/zigos-release-state.json \
+  -Drelease-verifier=/absolute/path/to/independently-pinned-zigos-verify-release \
+  -Drelease-verifier-sha256=<externally-pinned-verifier-64-hex> \
+  release-bundle-check
+```
+
+Run `release-security-preflight` by itself for an early mutable-only check; the
+candidate command above always depends on it and cannot bypass it.
+
+From the start of candidate generation through final hardware sealing, the
+exact 33 target files and `build/release-security` inputs must be private,
+owner-controlled, and quiescent: no process outside the ceremony may replace
+them while they are being hashed. Prefer read-only or immutable staging for
+those inputs. The fresh hardware-proof sibling remains writable for capture;
+it is not one of the verifier's 33 target paths. Verification does not claim
+safety against a concurrent writer already authorized as the same host user.
+
+With the completed proof directory and external hardware-proof variables set,
+seal the frozen candidate without regenerating it:
+
+```sh
+export ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex>
+export ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier
+export ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex>
+
+./scripts/zig.sh build \
+  -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> \
+  -Drelease-trust-root=/absolute/independent/root-metadata.json \
+  -Drelease-trust-root-sha256=<pinned-lowercase-sha256> \
+  -Drelease-trust-state=/absolute/persistent/zigos-release-state.json \
+  -Drelease-verifier=/absolute/path/to/independently-pinned-zigos-verify-release \
+  -Drelease-verifier-sha256=<externally-pinned-verifier-64-hex> \
+  release-security-gate
+```
+
+The state directory must already exist, be owned by the effective user, and be
+owner-controlled (for example, mode `0700`); an existing state file and adjacent
+lock file must also be owner-only. On macOS, all three must have no extended
+ACL. The verifier serializes the entire check-and-advance operation
+with an adjacent owner-only OS lock file. Back up both state and independently
+distributed checkpoints: deleting or replacing local state forgets observed
+history, while root `minimumPolicyVersion` and policy
+`minimumReleaseSequence` provide the first-use rollback floors. Use a separate
+protected state file for each independently pinned release channel.
+
+To verify an already downloaded bundle without regenerating it:
+
+```sh
+trusted_verifier=/absolute/path/to/independently-obtained-zigos-verify-release
+expected_verifier_sha256=<externally-pinned-verifier-64-hex>
+umask 077
+verifier_stage="$(mktemp -d "${TMPDIR:-/tmp}/zigos-release-verifier.XXXXXX")"
+trap 'rm -rf -- "$verifier_stage"' EXIT
+cp "$trusted_verifier" "$verifier_stage/zigos-verify-release"
+chmod 0500 "$verifier_stage/zigos-verify-release"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_verifier_sha256="$(sha256sum "$verifier_stage/zigos-verify-release" | awk '{print $1}')"
+else
+  actual_verifier_sha256="$(shasum -a 256 "$verifier_stage/zigos-verify-release" | awk '{print $1}')"
+fi
+[ "$actual_verifier_sha256" = "$expected_verifier_sha256" ] || exit 1
+
+"$verifier_stage/zigos-verify-release" verify \
+  --bundle build/release-security \
+  --artifacts . \
+  --trusted-root /absolute/independent/root-metadata.json \
+  --trusted-root-sha256 <pinned-lowercase-root-sha256> \
+  --trust-state /absolute/persistent/zigos-release-state.json
+```
+
+This hashes and executes the same private copy, avoiding a path replacement
+between pin verification and execution. The repository
+`scripts/verify-release-bundle.sh` wrapper automates that flow for maintainers,
+but it is not a signed OS target or trust bootstrap; customers must obtain the
+wrapper itself from a trusted, pinned source if they rely on it. The verifier
+rejects policy or release rollback, authenticated-payload equivocation, clock
+rollback, implicit root changes, unknown or repeated threshold signers, path
+traversal, and verification-only artifacts. Automatic root rotation is not
+claimed; changing the pinned root requires an explicit external migration.
+
+The authenticated trust policy also carries the PQC transition state. FIPS 204
+ML-DSA is the required production signature algorithm when the policy reaches
+`required`; until a validated ML-DSA verifier is linked, that mode fails closed.
 
 The first real hardware target is Intel NUC 11 Pro Kit `NUC11TNKi5`. QEMU proof
 runs remain required preflight evidence, but they do not satisfy the hardware

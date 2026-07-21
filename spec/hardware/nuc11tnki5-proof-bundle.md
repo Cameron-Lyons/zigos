@@ -2,8 +2,9 @@
 
 This bundle is the real-machine release proof for the first hardware target.
 It is fail-closed: the normal checker rejects a bundle unless the caller
-supplies a fresh external challenge and a separately installed trusted
-verifier whose executable matches an externally pinned SHA-256 digest.
+supplies a fresh external challenge, a separately installed hardware verifier,
+and a separately distributed release verifier. Each exact executable must
+match its independently supplied SHA-256 pin.
 
 The proof uses two single-boot captures from the same stable device identity:
 
@@ -22,7 +23,8 @@ logs are preflight evidence only.
 
 ## Bundle contents
 
-Archive the completed bundle under `build/hardware-proofs/nuc11tnki5/`:
+Archive each completed bundle under its fresh ceremony directory,
+`build/hardware-proofs/<fresh-name>/`:
 
 - `proof-manifest.txt` uses `format=zigos-nuc11tnki5-proof-v2` and binds the
   fresh `capture_nonce`, stable `device_id`, fixed target/SKU, both log names,
@@ -154,13 +156,31 @@ text never satisfies a requirement.
 ## Workflow
 
 Obtain a fresh 32-byte challenge from the external verifier or release
-orchestrator, then prepare the skeleton:
+orchestrator, then complete the phase-A `release-bundle-check` ceremony in
+`README.md` once, using a strictly increasing sequence for the newly generated
+candidate. When it returns, the authenticated candidate is frozen: do not run
+the generator, finalizer, reproducibility checker, or `release-bundle-check`
+again. Prepare the proof skeleton from those existing artifacts:
 
 ```bash
 scripts/prepare-nuc11tnki5-hardware-proof.sh \
-  --build \
-  --nonce <64-lowercase-hex>
+  --nonce <64-lowercase-hex> \
+  --output build/hardware-proofs/<fresh-name>
 ```
+
+The output must be a fresh empty direct child of `build/hardware-proofs`.
+Reusing a populated ceremony directory is rejected so old manifests, digests,
+or captures cannot be mixed into a new candidate. Candidate generation and
+verification are phase A; after preparation, keep the release bundle and exact
+33 signed target files private and quiescent while writing only the separate
+hardware-proof directory, then run the final verify-only
+`release-security-gate` without regenerating authenticated inputs.
+
+`--build` remains a one-command phase-A alternative when no candidate exists:
+it runs `release-bundle-check` before preparing the skeleton and requires all
+root, policy, state, verifier, signer, sequence, and expiry inputs documented in
+`README.md`. If that alternative is used, its output is the frozen candidate;
+never follow it with a second generation or finalization command.
 
 Fill the identity and sidecars, capture the two single boots, record and hash
 the cycle logs, and collect the two role-specific quotes/signatures. Once the
@@ -168,7 +188,7 @@ manifest is final, write the statement:
 
 ```bash
 scripts/write-nuc11tnki5-capture-statement.sh \
-  build/hardware-proofs/nuc11tnki5
+  build/hardware-proofs/<fresh-name>
 ```
 
 Validate using only external trust configuration:
@@ -177,11 +197,20 @@ Validate using only external trust configuration:
 ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<64-lowercase-hex> \
 ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
 ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
+ZIGOS_RELEASE_VERIFIER=/absolute/path/to/independently-pinned-zigos-verify-release \
+ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
+ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
+ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
+ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
 scripts/check-nuc11tnki5-hardware-proof.sh \
-  build/hardware-proofs/nuc11tnki5
+  build/hardware-proofs/<fresh-name>
 ```
 
-Without all three external values, normal validation fails. The repository
+Pass that same directory to the final seal as
+`-Dhardware-proof-dir=build/hardware-proofs/<fresh-name>`; never fall back to a
+different default proof directory for the candidate.
+
+Without all eight external values, normal validation fails. The repository
 self-test uses an explicitly configured local verifier solely to exercise pass
 and adversarial paths; it is not accepted by the release workflow unless its
 digest is deliberately supplied by that test invocation.

@@ -24,7 +24,14 @@ pub fn build(b: *std.Build) void {
 
     const verify_smoke = b.option(bool, "verify-smoke", "Include the QEMU native smoke test in `zig build verify`") orelse false;
     const verify_benchmark = b.option(bool, "verify-benchmark", "Include the QEMU benchmark suite in `zig build verify`") orelse false;
-    const hardware_proof_dir = b.option([]const u8, "hardware-proof-dir", "Path to the completed NUC11TNKi5 hardware proof bundle") orelse "build/hardware-proofs/nuc11tnki5";
+    const hardware_proof_dir_option = b.option([]const u8, "hardware-proof-dir", "Path to the completed NUC11TNKi5 hardware proof bundle");
+    const hardware_proof_dir = hardware_proof_dir_option orelse "<missing-hardware-proof-dir>";
+    const release_trust_root = b.option([]const u8, "release-trust-root", "Absolute path to independently provisioned release root metadata");
+    const release_trust_root_sha256 = b.option([]const u8, "release-trust-root-sha256", "Pinned lowercase SHA-256 digest of release root metadata");
+    const release_trust_policy = b.option([]const u8, "release-trust-policy", "Absolute path to the root-threshold-signed release trust policy");
+    const release_trust_state = b.option([]const u8, "release-trust-state", "Persistent verifier state path outside the release bundle and artifact root");
+    const release_verifier = b.option([]const u8, "release-verifier", "Absolute path to an independently provisioned release verifier");
+    const release_verifier_sha256 = b.option([]const u8, "release-verifier-sha256", "Pinned lowercase SHA-256 digest of the independent release verifier");
 
     const target = b.standardTargetOptions(.{
         .default_target = .{
@@ -97,8 +104,20 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const verify_release_cli_install = b.addInstallArtifact(verify_release_cli, .{});
-    const verify_release_cli_step = b.step("verify-release-cli", "Build the customer release verification CLI");
+    const verify_release_cli_step = b.step("verify-release-cli", "Build the host release verifier for independent distribution and local tests");
     verify_release_cli_step.dependOn(&verify_release_cli_install.step);
+
+    const release_bundle_fixture_tests = b.addTest(.{
+        .name = "release-bundle-fixture-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/zigos_verify_release.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const release_bundle_fixture_test_cmd = b.addRunArtifact(release_bundle_fixture_tests);
+    const release_bundle_fixture_test_step = b.step("release-bundle-fixture-test", "Run credential-free authenticated release bundle and rollback attack fixtures");
+    release_bundle_fixture_test_step.dependOn(&release_bundle_fixture_test_cmd.step);
 
     const native_store = qemu_build.addNativeStoreImageStep(b);
     const native_run_steps = qemu_build.addNativeRunSteps(b, kernels.zigos_native, userspace_images, native_store);
@@ -261,6 +280,9 @@ pub fn build(b: *std.Build) void {
     });
     const hardware_proof_step = b.step("hardware-proof", "Validate the completed NUC11TNKi5 real-hardware proof bundle");
     hardware_proof_step.dependOn(&hardware_proof_cmd.step);
+    if (hardware_proof_dir_option == null) {
+        hardware_proof_cmd.step.dependOn(&b.addFail("hardware proof validation requires -Dhardware-proof-dir=build/hardware-proofs/<fresh-name>").step);
+    }
 
     const release_sbom_cmd = b.addSystemCommand(&.{
         "bash",
@@ -273,10 +295,8 @@ pub fn build(b: *std.Build) void {
     }
     release_sbom_cmd.step.dependOn(&iso_cmd.step);
     release_sbom_cmd.step.dependOn(kernel_role_check_step);
-    release_sbom_cmd.step.dependOn(&signing_cli_install.step);
-    release_sbom_cmd.step.dependOn(&verify_release_cli_install.step);
     release_sbom_cmd.step.dependOn(userspace_images.production_step);
-    const release_sbom_step = b.step("release-sbom-provenance", "Generate release SPDX SBOM, artifact digests, artifact measurements, DSSE in-toto/SLSA provenance, keyring/revocation metadata, customer verification policy, and disclosure dry-run bundle");
+    const release_sbom_step = b.step("release-sbom-provenance", "Generate the eight generator-side evidence files for the exact 33-target release catalog");
     release_sbom_step.dependOn(&release_sbom_cmd.step);
 
     const reproducible_build_cmd = b.addSystemCommand(&.{
@@ -287,30 +307,94 @@ pub fn build(b: *std.Build) void {
     const reproducible_build_step = b.step("reproducible-build-check", "Build release artifacts twice in isolated tracked-workspace copies and compare digests");
     reproducible_build_step.dependOn(&reproducible_build_cmd.step);
 
-    const release_bundle_verify_cmd = b.addRunArtifact(verify_release_cli);
-    release_bundle_verify_cmd.addArg("build/release-security");
-    release_bundle_verify_cmd.addArg(".");
-    release_bundle_verify_cmd.step.dependOn(&release_sbom_cmd.step);
-    release_bundle_verify_cmd.step.dependOn(&reproducible_build_cmd.step);
-    const release_bundle_verify_step = b.step("release-bundle-check", "Verify the complete release bundle against production artifacts and reproducible-build evidence");
-    release_bundle_verify_step.dependOn(&release_bundle_verify_cmd.step);
+    const release_manifest_finalize_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/finalize-release-manifest.sh",
+        "build/release-security",
+        ".",
+    });
+    release_manifest_finalize_cmd.step.dependOn(&release_sbom_cmd.step);
+    release_manifest_finalize_cmd.step.dependOn(&reproducible_build_cmd.step);
+    const release_manifest_finalize_step = b.step("release-manifest-finalize", "Candidate-verify, atomically publish, and statefully verify the signed exact manifest");
+    release_manifest_finalize_step.dependOn(&release_manifest_finalize_cmd.step);
 
-    const release_security_gate_step = b.step("release-security-gate", "Run the public-release security gate: fuzz, reproducibility, SBOM/provenance, audits, redaction, disclosure, QEMU fault proofs, and real NUC hardware proof");
-    release_security_gate_step.dependOn(check_steps.prod_readiness);
-    release_security_gate_step.dependOn(check_steps.host_tests);
-    release_security_gate_step.dependOn(check_steps.spec_tests);
-    release_security_gate_step.dependOn(release_sbom_step);
-    release_security_gate_step.dependOn(reproducible_build_step);
-    release_security_gate_step.dependOn(release_bundle_verify_step);
-    release_security_gate_step.dependOn(kernel_role_check_step);
-    release_security_gate_step.dependOn(zigos_native_production_smoke_step);
-    release_security_gate_step.dependOn(zigos_native_smoke_test_step);
-    release_security_gate_step.dependOn(storage_durability_qemu_step);
-    release_security_gate_step.dependOn(driver_restart_qemu_step);
-    release_security_gate_step.dependOn(recovery_qemu_step);
-    release_security_gate_step.dependOn(sync_two_node_qemu_step);
-    release_security_gate_step.dependOn(uefi_qemu_step);
-    release_security_gate_step.dependOn(verification_uefi_qemu_step);
+    const trust_root_arg = release_trust_root orelse "<missing-release-trust-root>";
+    const trust_root_sha256_arg = release_trust_root_sha256 orelse "<missing-release-trust-root-sha256>";
+    const trust_policy_arg = release_trust_policy orelse "<missing-release-trust-policy>";
+    const trust_state_arg = release_trust_state orelse "<missing-release-trust-state>";
+    const release_verifier_arg = release_verifier orelse "<missing-release-verifier>";
+    const release_verifier_sha256_arg = release_verifier_sha256 orelse "<missing-release-verifier-sha256>";
+    if (release_trust_root != null and release_trust_root_sha256 != null and release_trust_policy != null and release_verifier != null and release_verifier_sha256 != null) {
+        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
+        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
+        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+    } else {
+        const missing_trust_inputs = b.addFail("release generation requires -Drelease-trust-root=<absolute path>, -Drelease-trust-root-sha256=<lowercase sha256>, -Drelease-trust-policy=<absolute path>, -Drelease-verifier=<absolute path>, and -Drelease-verifier-sha256=<lowercase sha256>");
+        release_sbom_cmd.step.dependOn(&missing_trust_inputs.step);
+        release_manifest_finalize_cmd.step.dependOn(&missing_trust_inputs.step);
+    }
+    if (release_trust_state) |_| {
+        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
+    } else {
+        const missing_trust_state = b.addFail("release verification requires -Drelease-trust-state=<persistent external state path>");
+        release_manifest_finalize_cmd.step.dependOn(&missing_trust_state.step);
+    }
+
+    const release_bundle_step = b.step("release-bundle-check", "Create, candidate-verify, publish, and statefully verify the authenticated exact release bundle");
+    release_bundle_step.dependOn(&release_manifest_finalize_cmd.step);
+
+    const release_bundle_existing_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/verify-release-bundle.sh",
+        release_verifier_arg,
+        release_verifier_sha256_arg,
+        "build/release-security",
+        ".",
+        trust_root_arg,
+        trust_root_sha256_arg,
+        trust_state_arg,
+    });
+    if (release_trust_root == null or release_trust_root_sha256 == null or release_trust_state == null or release_verifier == null or release_verifier_sha256 == null) {
+        const missing_existing_verify_inputs = b.addFail("existing release verification requires -Drelease-trust-root, -Drelease-trust-root-sha256, -Drelease-trust-state, -Drelease-verifier, and -Drelease-verifier-sha256");
+        release_bundle_existing_cmd.step.dependOn(&missing_existing_verify_inputs.step);
+    }
+    const release_bundle_existing_step = b.step("release-bundle-verify-existing", "Verify an existing frozen bundle with an independently pinned verifier without regenerating evidence");
+    release_bundle_existing_step.dependOn(&release_bundle_existing_cmd.step);
+
+    if (release_trust_root != null and release_trust_root_sha256 != null and release_trust_state != null and release_verifier != null and release_verifier_sha256 != null) {
+        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
+        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+    }
+
+    const release_security_preflight_step = b.step("release-security-preflight", "Run all mutable public-release build, audit, fixture, and QEMU gates before freezing a candidate");
+    release_security_preflight_step.dependOn(check_steps.prod_readiness);
+    release_security_preflight_step.dependOn(check_steps.host_tests);
+    release_security_preflight_step.dependOn(check_steps.spec_tests);
+    release_security_preflight_step.dependOn(release_bundle_fixture_test_step);
+    release_security_preflight_step.dependOn(kernel_role_check_step);
+    release_security_preflight_step.dependOn(zigos_native_production_smoke_step);
+    release_security_preflight_step.dependOn(zigos_native_smoke_test_step);
+    release_security_preflight_step.dependOn(storage_durability_qemu_step);
+    release_security_preflight_step.dependOn(driver_restart_qemu_step);
+    release_security_preflight_step.dependOn(recovery_qemu_step);
+    release_security_preflight_step.dependOn(sync_two_node_qemu_step);
+    release_security_preflight_step.dependOn(uefi_qemu_step);
+    release_security_preflight_step.dependOn(verification_uefi_qemu_step);
+    release_sbom_cmd.step.dependOn(release_security_preflight_step);
+    reproducible_build_cmd.step.dependOn(release_security_preflight_step);
+
+    hardware_proof_cmd.step.dependOn(&release_bundle_existing_cmd.step);
+    const release_security_gate_step = b.step("release-security-gate", "Seal a frozen verified release candidate with its current NUC11TNKi5 hardware proof without regenerating artifacts");
     release_security_gate_step.dependOn(hardware_proof_step);
 }
 

@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${1:-build/release-security}"
 RELEASE_OPTIMIZE_MODE="${2:-ReleaseFast}"
+
+is_safe_relative_dir() {
+  local candidate="${1:-}"
+  local segment
+  local segments=()
+  [[ "$candidate" == build/* ]] && [[ "$candidate" =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+  IFS='/' read -r -a segments <<< "$candidate"
+  for segment in "${segments[@]}"; do
+    [ -n "$segment" ] && [ "$segment" != "." ] && [ "$segment" != ".." ] || return 1
+  done
+}
+
+is_safe_relative_dir "$OUTPUT_DIR" || {
+  printf 'Release output directory must be a safe relative path: %s\n' "$OUTPUT_DIR" >&2
+  exit 2
+}
 OUTPUT_PATH="$ROOT_DIR/$OUTPUT_DIR"
 
 if [ "$RELEASE_OPTIMIZE_MODE" != "ReleaseFast" ]; then
@@ -12,7 +29,51 @@ if [ "$RELEASE_OPTIMIZE_MODE" != "ReleaseFast" ]; then
   exit 2
 fi
 
+[ ! -L "$ROOT_DIR/build" ] || {
+  printf 'Repository build directory must not be a symbolic link.\n' >&2
+  exit 2
+}
+mkdir -p "$ROOT_DIR/build"
+[ "$(realpath "$ROOT_DIR/build")" = "$ROOT_DIR/build" ] || {
+  printf 'Repository build directory resolves outside the workspace.\n' >&2
+  exit 2
+}
 mkdir -p "$OUTPUT_PATH"
+case "$(realpath "$OUTPUT_PATH")" in
+  "$ROOT_DIR/build"/*) ;;
+  *)
+    printf 'Release output directory resolves outside the repository build directory.\n' >&2
+    exit 2
+    ;;
+esac
+
+GENERATOR_EVIDENCE_NAMES=(
+  "artifact-digests.sha256"
+  "artifact-measurements.json"
+  "customer-verification-policy.json"
+  "provenance.dsse.intoto.jsonl"
+  "provenance.intoto.jsonl"
+  "release-trust-policy.dsse.json"
+  "root-metadata.json"
+  "sbom.spdx.json"
+)
+
+# Withhold the publication marker before touching any evidence. Remove only the
+# files owned by this generator so a failed invocation cannot leave a stale mix
+# that a manually invoked finalizer could publish.
+rm -f -- "$OUTPUT_PATH/release-manifest.dsse.json"
+for evidence_name in "${GENERATOR_EVIDENCE_NAMES[@]}"; do
+  rm -f -- "$OUTPUT_PATH/$evidence_name"
+done
+
+# Build every owned evidence file in a same-filesystem staging directory. The
+# final renames replace hostile leaf symlinks or hard links instead of following
+# them, while the absent manifest keeps a partially published set untrusted.
+WORK_PATH="$(mktemp -d "$OUTPUT_PATH/.generate.XXXXXX")"
+cleanup_generation() {
+  rm -rf -- "$WORK_PATH"
+}
+trap cleanup_generation EXIT
 
 json_escape() {
   sed 's/\\/\\\\/g; s/"/\\"/g' <<<"$1"
@@ -37,7 +98,7 @@ base64_no_wrap() {
 }
 
 is_sha256_hex() {
-  [[ "$1" =~ ^[0-9A-Fa-f]{64}$ ]]
+  [[ "$1" =~ ^[0-9a-f]{64}$ ]]
 }
 
 dsse_payload_type="application/vnd.in-toto+json"
@@ -45,10 +106,6 @@ dsse_payload_type="application/vnd.in-toto+json"
 fail_release_generation() {
   printf 'release SBOM/provenance generation failed: %s\n' "$*" >&2
   exit 1
-}
-
-static_dsse_signature_configured() {
-  [ -n "${ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64:-}" ] || [ -n "${ZIGOS_RELEASE_DSSE_SIGNATURE_B64:-}" ]
 }
 
 is_base64_text() {
@@ -68,61 +125,93 @@ require_dsse_signature_b64() {
 }
 
 validate_dsse_signing_environment() {
-  if [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ] && static_dsse_signature_configured; then
-    fail_release_generation "set ZIGOS_RELEASE_DSSE_SIGN_COMMAND or static local-preview DSSE signatures, not both"
-  fi
-  if static_dsse_signature_configured && [ "${ZIGOS_RELEASE_LOCAL_PREVIEW_STATIC_DSSE:-}" != "true" ]; then
-    fail_release_generation "static DSSE signature environment variables require ZIGOS_RELEASE_LOCAL_PREVIEW_STATIC_DSSE=true"
-  fi
-  if static_dsse_signature_configured && [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ]; then
-    fail_release_generation "hardware-backed releases must use ZIGOS_RELEASE_DSSE_SIGN_COMMAND, not static DSSE signatures"
-  fi
-  if [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ] && [ -z "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ]; then
-    fail_release_generation "ZIGOS_RELEASE_HARDWARE_BACKED=true requires ZIGOS_RELEASE_DSSE_SIGN_COMMAND"
-  fi
+  [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ] ||
+    fail_release_generation "ZIGOS_RELEASE_HARDWARE_BACKED=true is required"
+  [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ] ||
+    fail_release_generation "ZIGOS_RELEASE_DSSE_SIGN_COMMAND is required"
+  [ -n "${ZIGOS_RELEASE_SIGNING_KEY_ID:-}" ] ||
+    fail_release_generation "ZIGOS_RELEASE_SIGNING_KEY_ID is required"
+  is_sha256_hex "$ZIGOS_RELEASE_SIGNING_KEY_ID" ||
+    fail_release_generation "ZIGOS_RELEASE_SIGNING_KEY_ID must be a lowercase SHA-256 key id"
+  [ -n "${ZIGOS_RELEASE_TRUST_ROOT:-}" ] ||
+    fail_release_generation "ZIGOS_RELEASE_TRUST_ROOT is required"
+  [ -n "${ZIGOS_RELEASE_TRUST_ROOT_SHA256:-}" ] ||
+    fail_release_generation "ZIGOS_RELEASE_TRUST_ROOT_SHA256 is required"
+  is_sha256_hex "$ZIGOS_RELEASE_TRUST_ROOT_SHA256" ||
+    fail_release_generation "ZIGOS_RELEASE_TRUST_ROOT_SHA256 must be lowercase SHA-256"
+  [ -n "${ZIGOS_RELEASE_TRUST_POLICY:-}" ] ||
+    fail_release_generation "ZIGOS_RELEASE_TRUST_POLICY is required"
+  [ -n "${ZIGOS_RELEASE_VERIFIER:-}" ] ||
+    fail_release_generation "ZIGOS_RELEASE_VERIFIER is required"
+  [ -n "${ZIGOS_RELEASE_VERIFIER_SHA256:-}" ] ||
+    fail_release_generation "ZIGOS_RELEASE_VERIFIER_SHA256 is required"
+  is_sha256_hex "$ZIGOS_RELEASE_VERIFIER_SHA256" ||
+    fail_release_generation "ZIGOS_RELEASE_VERIFIER_SHA256 must be lowercase SHA-256"
+
+  case "$ZIGOS_RELEASE_TRUST_ROOT" in
+    /*) ;;
+    *) fail_release_generation "ZIGOS_RELEASE_TRUST_ROOT must be an absolute, independently provisioned path" ;;
+  esac
+  case "$ZIGOS_RELEASE_TRUST_POLICY" in
+    /*) ;;
+    *) fail_release_generation "ZIGOS_RELEASE_TRUST_POLICY must be an absolute, independently provisioned path" ;;
+  esac
+  case "$ZIGOS_RELEASE_VERIFIER" in
+    /*) ;;
+    *) fail_release_generation "ZIGOS_RELEASE_VERIFIER must be an absolute, independently provisioned path" ;;
+  esac
+  [ -f "$ZIGOS_RELEASE_TRUST_ROOT" ] ||
+    fail_release_generation "trusted root metadata file is missing"
+  [ -f "$ZIGOS_RELEASE_TRUST_POLICY" ] ||
+    fail_release_generation "signed trust policy file is missing"
+  [ -f "$ZIGOS_RELEASE_VERIFIER" ] && [ -x "$ZIGOS_RELEASE_VERIFIER" ] && [ ! -L "$ZIGOS_RELEASE_VERIFIER" ] ||
+    fail_release_generation "release verifier must be an executable regular file, not a symlink"
+  canonical_release_verifier="$(realpath "$ZIGOS_RELEASE_VERIFIER")"
+  case "$canonical_release_verifier" in
+    "$ROOT_DIR" | "$ROOT_DIR"/*)
+      fail_release_generation "release verifier must be provisioned independently of the candidate artifact tree"
+      ;;
+  esac
 }
 
 sign_dsse_statement() {
   local statement="${1:?statement required}"
   local signature_b64
-  if [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ]; then
-    signature_b64="$({
-      printf 'DSSEv1 %d %s %d ' "${#dsse_payload_type}" "$dsse_payload_type" "${#statement}"
-      printf '%s' "$statement"
-    } | bash -c "$ZIGOS_RELEASE_DSSE_SIGN_COMMAND" | tr -d '\n')"
-    require_dsse_signature_b64 "ZIGOS_RELEASE_DSSE_SIGN_COMMAND" "$signature_b64"
-    return
-  fi
-  if [ -n "${ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64:-}" ]; then
-    require_dsse_signature_b64 "ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64" "$ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64"
-    return
-  fi
-  if [ -n "${ZIGOS_RELEASE_DSSE_SIGNATURE_B64:-}" ]; then
-    require_dsse_signature_b64 "ZIGOS_RELEASE_DSSE_SIGNATURE_B64" "$ZIGOS_RELEASE_DSSE_SIGNATURE_B64"
-    return
-  fi
-  signature_b64="$(printf '%s' 'UNSIGNED_LOCAL_PREVIEW_REQUIRES_HARDWARE_RELEASE_SIGNING' | base64_no_wrap)"
-  require_dsse_signature_b64 "unsigned local preview marker" "$signature_b64"
+  signature_b64="$({
+    printf 'DSSEv1 %d %s %d ' "${#dsse_payload_type}" "$dsse_payload_type" "${#statement}"
+    printf '%s' "$statement"
+  } | bash -c "$ZIGOS_RELEASE_DSSE_SIGN_COMMAND" | tr -d '\n')"
+  require_dsse_signature_b64 "ZIGOS_RELEASE_DSSE_SIGN_COMMAND" "$signature_b64"
 }
 
 validate_dsse_signing_environment
 
+release_verifier="$WORK_PATH/pinned-release-verifier"
+cp "$ZIGOS_RELEASE_VERIFIER" "$release_verifier"
+chmod 0500 "$release_verifier"
+[ "$(sha256_file "$release_verifier")" = "$ZIGOS_RELEASE_VERIFIER_SHA256" ] ||
+  fail_release_generation "release verifier copy does not match its independently pinned SHA-256"
+"$release_verifier" trust-info \
+  --trusted-root "$ZIGOS_RELEASE_TRUST_ROOT" \
+  --trusted-root-sha256 "$ZIGOS_RELEASE_TRUST_ROOT_SHA256" \
+  --policy "$ZIGOS_RELEASE_TRUST_POLICY" \
+  --release-key-id "$ZIGOS_RELEASE_SIGNING_KEY_ID"
+
+cp "$ZIGOS_RELEASE_TRUST_ROOT" "$WORK_PATH/root-metadata.json"
+cp "$ZIGOS_RELEASE_TRUST_POLICY" "$WORK_PATH/release-trust-policy.dsse.json"
+
 artifact_files=()
 
 REQUIRED_RELEASE_ARTIFACTS=(
-  "zig-out/bin/kernel-zigos-native.elf"
-  "zig-out/bin/zigos-sign"
-  "zig-out/bin/zigos-verify-release"
   "build/os.iso"
   "spec/production_readiness.json"
-  "spec/release_security/release_artifacts.json"
-  "spec/release_security/release_keyring.json"
-  "spec/release_security/revoked_release_keys.json"
+  "spec/release_security/crash_dump_redaction.json"
   "spec/release_security/fuzz_corpus.json"
   "spec/release_security/memory_safety_inventory.json"
+  "spec/release_security/release_artifacts.json"
   "spec/release_security/threat_model.json"
-  "spec/release_security/crash_dump_redaction.json"
   "spec/release_security/vulnerability_disclosure.json"
+  "zig-out/bin/kernel-zigos-native.elf"
 )
 
 PRODUCTION_USERSPACE_ARTIFACTS=(
@@ -226,12 +315,18 @@ for required_artifact in "${REQUIRED_RELEASE_ARTIFACTS[@]}"; do
 done
 collect_production_userspace_artifacts || missing_required_artifacts=1
 if [ "$missing_required_artifacts" -ne 0 ]; then
-  printf 'Build the production ISO, kernel, release tools, userspace images, and release policy artifacts before generating SBOM/provenance.\n' >&2
+  printf 'Build the production ISO, kernel, policy manifests, and userspace images before generating SBOM/provenance; provision release trust and the verifier independently.\n' >&2
   exit 1
 fi
 
+if [ "${#REQUIRED_RELEASE_ARTIFACTS[@]}" -ne 9 ] ||
+   [ "${#PRODUCTION_USERSPACE_ARTIFACTS[@]}" -ne 24 ] ||
+   [ "${#artifact_files[@]}" -ne 33 ]; then
+  fail_release_generation "production release catalog must contain exactly 9 fixed targets and 24 userspace targets"
+fi
+
 if [ "${#artifact_files[@]}" -eq 0 ]; then
-  echo "No release artifacts were found. Build iso, signing-cli, and userspace-production-images before generating SBOM/provenance." >&2
+  echo "No release artifacts were found. Build iso and userspace-production-images before generating SBOM/provenance." >&2
   exit 1
 fi
 
@@ -245,9 +340,12 @@ while IFS= read -r file; do
   artifact_files+=("$file")
 done < "$sorted_artifacts"
 rm -f -- "$sorted_artifacts"
+if [ "${#artifact_files[@]}" -ne 33 ]; then
+  fail_release_generation "production release catalog contains a duplicate or missing target"
+fi
 
-digests_path="$OUTPUT_PATH/artifact-digests.sha256"
-measurements_path="$OUTPUT_PATH/artifact-measurements.json"
+digests_path="$WORK_PATH/artifact-digests.sha256"
+measurements_path="$WORK_PATH/artifact-measurements.json"
 : > "$digests_path"
 for file in "${artifact_files[@]}"; do
   printf '%s  %s\n' "$(sha256_file "$ROOT_DIR/$file")" "$file" >> "$digests_path"
@@ -285,7 +383,7 @@ dirty_count="$(jj -R "$ROOT_DIR" diff -r @ --name-only | wc -l | tr -d ' ')"
 zig_version="$("$ROOT_DIR/scripts/zig.sh" version 2>/dev/null || printf 'unknown')"
 created_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
-sbom_path="$OUTPUT_PATH/sbom.spdx.json"
+sbom_path="$WORK_PATH/sbom.spdx.json"
 {
   printf '{\n'
   printf '  "spdxVersion": "SPDX-2.3",\n'
@@ -327,11 +425,11 @@ sbom_path="$OUTPUT_PATH/sbom.spdx.json"
   printf '}\n'
 } > "$sbom_path"
 
-provenance_path="$OUTPUT_PATH/provenance.intoto.jsonl"
-dsse_provenance_path="$OUTPUT_PATH/provenance.dsse.intoto.jsonl"
+provenance_path="$WORK_PATH/provenance.intoto.jsonl"
+dsse_provenance_path="$WORK_PATH/provenance.dsse.intoto.jsonl"
 : > "$provenance_path"
 : > "$dsse_provenance_path"
-release_key_id="${ZIGOS_RELEASE_SIGNING_KEY_ID:-zigos-release-signing-required}"
+release_key_id="$ZIGOS_RELEASE_SIGNING_KEY_ID"
 for file in "${artifact_files[@]}"; do
   digest="$(sha256_file "$ROOT_DIR/$file")"
   escaped_file="$(json_escape "$file")"
@@ -344,164 +442,53 @@ for file in "${artifact_files[@]}"; do
 EOF
 done
 
-public_release_allowed=false
-release_key_status="required-not-configured"
-release_public_key="${ZIGOS_RELEASE_SIGNING_PUBLIC_KEY:-TBD}"
-release_public_key_encoding="${ZIGOS_RELEASE_SIGNING_PUBLIC_KEY_ENCODING:-hex-ed25519-raw}"
-release_key_label="${ZIGOS_RELEASE_SIGNING_KEY_LABEL:-$release_key_id}"
-release_custody="${ZIGOS_RELEASE_SIGNING_CUSTODY:-tpm-secure-enclave-hsm-or-kms-required}"
-release_provider_boundary="${ZIGOS_RELEASE_SIGNING_PROVIDER_BOUNDARY:-hardware-backed TPM, secure enclave, offline HSM, or cloud KMS release signing provider}"
-release_key_provider_boundary="${ZIGOS_RELEASE_SIGNING_KEY_PROVIDER_BOUNDARY:-${ZIGOS_RELEASE_SIGNING_PROVIDER_BOUNDARY:-tpm-secure-enclave-hsm-or-kms-required}}"
-release_provider_name="${ZIGOS_RELEASE_SIGNING_PROVIDER_NAME:-TBD}"
-release_verifier_metadata_digest="${ZIGOS_RELEASE_SIGNING_VERIFIER_METADATA_DIGEST:-TBD}"
-release_generation="${ZIGOS_RELEASE_SIGNING_GENERATION:-1}"
-release_not_before="${ZIGOS_RELEASE_SIGNING_NOT_BEFORE:-TBD}"
-release_not_after="${ZIGOS_RELEASE_SIGNING_NOT_AFTER:-TBD}"
-release_pqc_mode="${ZIGOS_RELEASE_PQC_MODE:-shadow}"
-case "$release_pqc_mode" in
-  shadow|canary|required) ;;
-  *)
-    echo "ZIGOS_RELEASE_PQC_MODE must be shadow, canary, or required" >&2
-    exit 1
-    ;;
-esac
-if [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ] &&
-   [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ] &&
-   [ "$release_public_key" != "TBD" ] &&
-   [ "$release_not_before" != "TBD" ] &&
-   [ "$release_not_after" != "TBD" ] &&
-   [ "$release_custody" != "tpm-secure-enclave-hsm-or-kms-required" ] &&
-   [ "$release_key_provider_boundary" != "tpm-secure-enclave-hsm-or-kms-required" ] &&
-   [ "$release_provider_name" != "TBD" ] &&
-   is_sha256_hex "$release_verifier_metadata_digest"; then
-  public_release_allowed=true
-  release_key_status="active"
-fi
-
-cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
+cat > "$WORK_PATH/customer-verification-policy.json" <<EOF
 {
   "schema_version": 1,
   "generated_at": "$created_utc",
-  "public_release_allowed": $public_release_allowed,
-  "required_provider_boundary": "$(json_escape "$release_provider_boundary")",
-  "required_dsse_signature_message": "DSSE v1 pre-authentication encoding over payloadType and payload",
-  "post_quantum_policy": {
-    "mode": "$(json_escape "$release_pqc_mode")",
-    "fips_validated_required": true,
-    "fips_140_validation_required": true,
-    "production_signature_algorithm": "ml-dsa-65",
-    "key_establishment_algorithm": "ml-kem-768",
-    "backup_signature_algorithm": "slh-dsa-sha2-128s",
-    "classical_baseline": "Ed25519 remains the classical DSSE baseline during migration; required mode needs a separately verified FIPS 204 ML-DSA signature from a validated provider.",
-    "standards": [
-      {
-        "fips": "FIPS 203",
-        "algorithm": "ML-KEM",
-        "scope": "key establishment and transport encryption only"
-      },
-      {
-        "fips": "FIPS 204",
-        "algorithm": "ML-DSA",
-        "scope": "release, update, package, and attestation signatures when production PQC is required"
-      },
-      {
-        "fips": "FIPS 205",
-        "algorithm": "SLH-DSA",
-        "scope": "hash-based signature diversity for long-lived offline roots and emergency recovery policy"
-      }
-    ],
-    "rollout": [
-      "shadow: emit policy and verifier measurements while Ed25519 DSSE remains required",
-      "canary: dual-sign selected release channels with Ed25519 and validated ML-DSA, failing closed on malformed PQC signatures",
-      "required: require zigos-verify-release to verify ML-DSA signatures from FIPS-validated providers before accepting public releases"
-    ]
-  },
-  "keys": [
-    {
-      "key_id": "$(json_escape "$release_key_id")",
-      "label": "$(json_escape "$release_key_label")",
-      "status": "$release_key_status",
-      "algorithm": "ed25519",
-      "custody": "$(json_escape "$release_custody")",
-      "hardware_backed": true,
-      "generation": $release_generation,
-      "not_before": "$(json_escape "$release_not_before")",
-      "not_after": "$(json_escape "$release_not_after")",
-      "provider_name": "$(json_escape "$release_provider_name")",
-      "provider_boundary": "$(json_escape "$release_key_provider_boundary")",
-      "rotation_supported": true,
-      "revocation_supported": true,
-      "customer_verifiable": true,
-      "verifier_protocol": "dsse_in_toto_slsa",
-      "public_key_encoding": "$(json_escape "$release_public_key_encoding")",
-      "public_key": "$(json_escape "$release_public_key")",
-      "verifier_metadata_schema": "zigos.release-verifier-metadata",
-      "verifier_metadata_digest": "$(json_escape "$release_verifier_metadata_digest")",
-      "rotation_policy": "new release key generation before not_after or immediately after suspected exposure",
-      "revocation_source": "$OUTPUT_DIR/revoked-release-keys.json"
-    }
-  ],
-  "production_pqc_profiles": [
-    {
-      "profile": "ml-dsa-65",
-      "status": "provider-required-not-configured",
-      "release_allowed": false,
-      "fips_standard": "FIPS 204",
-      "fips_validation_required": true,
-      "fips_140_validated_module_required": true,
-      "public_key_encoding": "hex-ml-dsa-65-raw",
-      "signature_encoding": "base64-ml-dsa-65-raw",
-      "verifier_status": "zigos-verify-release fails closed until a validated ML-DSA provider is linked"
-    }
-  ]
-}
-EOF
-
-cp "$ROOT_DIR/spec/release_security/revoked_release_keys.json" "$OUTPUT_PATH/revoked-release-keys.json"
-
-cat > "$OUTPUT_PATH/customer-verification-policy.json" <<EOF
-{
-  "schema_version": 1,
-  "generated_at": "$created_utc",
+  "release_manifest": "$OUTPUT_DIR/release-manifest.dsse.json",
+  "trusted_root_evidence": "$OUTPUT_DIR/root-metadata.json",
+  "signed_trust_policy": "$OUTPUT_DIR/release-trust-policy.dsse.json",
+  "trusted_root_bootstrap": "supply root metadata and its lowercase SHA-256 digest independently of the release bundle",
+  "verifier_bootstrap": "supply zigos-verify-release and its lowercase SHA-256 digest independently of the release bundle and artifact tree",
+  "rollback_state": "persist outside both the release bundle and artifact root",
+  "automatic_root_rotation_supported": false,
   "artifact_digest_manifest": "$OUTPUT_DIR/artifact-digests.sha256",
   "artifact_measurements": "$OUTPUT_DIR/artifact-measurements.json",
   "spdx_sbom": "$OUTPUT_DIR/sbom.spdx.json",
   "provenance_statements": "$OUTPUT_DIR/provenance.intoto.jsonl",
   "dsse_provenance": "$OUTPUT_DIR/provenance.dsse.intoto.jsonl",
-  "release_keyring": "$OUTPUT_DIR/release-keyring.json",
-  "revoked_release_keys": "$OUTPUT_DIR/revoked-release-keys.json",
   "reproducible_build_evidence": "$OUTPUT_DIR/reproducible-build.json",
   "reproducible_artifact_digests": "$OUTPUT_DIR/reproducible-artifact-digests.sha256",
   "required_predicate_type": "https://slsa.dev/provenance/v1",
   "required_payload_type": "application/vnd.in-toto+json",
+  "required_manifest_payload_type": "application/vnd.zigos.release-manifest.v1+json",
+  "required_trust_policy_payload_type": "application/vnd.zigos.release-trust-policy.v1+json",
   "require_hardware_backed_release_key": true,
-  "post_quantum_policy": {
-    "mode": "$(json_escape "$release_pqc_mode")",
-    "production_signature_algorithm": "ml-dsa-65",
-    "key_establishment_algorithm": "ml-kem-768",
-    "backup_signature_algorithm": "slh-dsa-sha2-128s",
-    "fips_validated_required": true,
-    "fips_140_validation_required": true
-  },
-  "reject_unsigned_local_preview": true,
+  "exact_target_count": 33,
+  "exact_evidence_count": 10,
   "verification_steps": [
-    "Compare each downloaded artifact SHA-256 digest with artifact-digests.sha256.",
-    "Verify every DSSE signature in provenance.dsse.intoto.jsonl against release-keyring.json before parsing payloads; signatures cover the DSSE v1 pre-authentication encoding.",
-    "Recompute each active release key verifier metadata digest from provider name, key id, label, generation, custody, provider boundary, public key, lifecycle controls, verifier protocol, and FIPS posture before trusting the key.",
-    "Verify release-keyring.json post_quantum_policy covers FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements, the classical Ed25519 baseline, and measured rollout.",
-    "Reject signatures from key ids or generations listed in revoked-release-keys.json.",
-    "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1, exactly one subject per signed DSSE envelope, and subject digests matching artifact-digests.sha256.",
+    "Copy the independently obtained zigos-verify-release executable into private staging, compare that exact copy with its independently distributed SHA-256 pin, and execute only the matched copy.",
+    "Obtain root metadata and its SHA-256 digest independently; the bundled root-metadata.json is consistency evidence and never a trust bootstrap.",
+    "Before first-use acceptance, require policyVersion to meet root minimumPolicyVersion and releaseSequence to meet the authenticated policy minimumReleaseSequence.",
+    "Authenticate release-trust-policy.dsse.json with the pinned root threshold before parsing its payload; reject unknown, invalid, and duplicate signer ids.",
+    "Authenticate release-manifest.dsse.json with currently active, unrevoked delegated release keys before parsing its payload.",
+    "Require the authenticated policy and manifest to contain exactly 33 production targets and 10 evidence files; the signed manifest is the sole digest authority.",
+    "Hash and size-check all targets and hash all evidence before parsing any evidence; treat artifact-digests.sha256 only as a consistency projection.",
+    "Verify every DSSE signature in provenance.dsse.intoto.jsonl against the authenticated delegated policy; signatures cover the DSSE v1 pre-authentication encoding.",
+    "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1, exactly one subject per signed DSSE envelope, and subject digests matching the authenticated release manifest.",
     "Require zigos-verify-release to fail closed unless each signed SLSA statement records buildDefinition.buildType=https://github.com/Cameron-Lyons/zigos/release-security-gate, runDetails.builder.id=zigos-local-release-security-gate, sourceControl=jj, the Jujutsu changeId, the commit id, repository, and Zig version used to generate the release, and runDetails.metadata records dirtyWorkspaceFileCount=0.",
-    "Require every active release key not_before/not_after window to cover the signed SLSA runDetails.metadata.startedOn date.",
+    "Require every active release key notBefore/notAfter window to cover the signed SLSA runDetails.metadata.startedOn date.",
     "Compare artifact-measurements.json size and digest measurements against downloaded artifacts, requiring exact one-entry-per-artifact coverage without duplicates.",
     "Compare reproducible-build.json and reproducible-artifact-digests.sha256 against the complete release digest manifest, including fail-closed repo_vcs=jj, repository, Jujutsu change ID, commit id, Zig version, dirty_workspace_file_count=0 evidence, and equality with the signed SLSA source identity.",
-    "Run zig-out/bin/zigos-verify-release build/release-security . before trusting a downloaded release.",
-    "Reject required ML-DSA rollout unless zigos-verify-release verifies a production ML-DSA signature from a validated provider."
+    "Persist root, authenticated policy payload, release sequence, authenticated manifest payload, and trusted-time state outside the downloaded bundle; reject rollback, equivocation, clock rollback, and implicit root changes.",
+    "Run zigos-verify-release verify with explicit --bundle, --artifacts, --trusted-root, --trusted-root-sha256, and --trust-state arguments before trusting a downloaded release.",
+    "Reject required post-quantum rollout unless zigos-verify-release supports and verifies the policy-required production algorithm from a validated provider."
   ]
 }
 EOF
 
-cat > "$OUTPUT_PATH/vulnerability-disclosure-dry-run.json" <<EOF
+cat > "$WORK_PATH/vulnerability-disclosure-dry-run.json" <<EOF
 {
   "schema_version": 1,
   "generated_at": "$created_utc",
@@ -519,4 +506,22 @@ cat > "$OUTPUT_PATH/vulnerability-disclosure-dry-run.json" <<EOF
 }
 EOF
 
-printf 'Release SBOM/provenance generated under %s\n' "$OUTPUT_DIR"
+disclosure_audit_path="$ROOT_DIR/build/release-audit"
+[ ! -L "$disclosure_audit_path" ] ||
+  fail_release_generation "release audit directory must not be a symbolic link"
+mkdir -p "$disclosure_audit_path"
+case "$(realpath "$disclosure_audit_path")" in
+  "$ROOT_DIR/build"/*) ;;
+  *) fail_release_generation "release audit directory resolves outside the repository build directory" ;;
+esac
+
+for evidence_name in "${GENERATOR_EVIDENCE_NAMES[@]}"; do
+  [ -f "$WORK_PATH/$evidence_name" ] && [ ! -L "$WORK_PATH/$evidence_name" ] ||
+    fail_release_generation "generator did not stage required evidence: $evidence_name"
+  mv -f -- "$WORK_PATH/$evidence_name" "$OUTPUT_PATH/$evidence_name"
+done
+mv -f -- \
+  "$WORK_PATH/vulnerability-disclosure-dry-run.json" \
+  "$disclosure_audit_path/vulnerability-disclosure-dry-run.json"
+
+printf 'Authenticated release evidence generated under %s\n' "$OUTPUT_DIR"

@@ -8,6 +8,7 @@ const crash_record = @import("kernel/platform/crash_record.zig");
 const elf_image_inspector = @import("native/task/elf_image_inspector.zig");
 const manifest = @import("native/policy/manifest.zig");
 const object_store = @import("native/storage/object_store.zig");
+const release_catalog = @import("tools/release_catalog.zig");
 const request_header = @import("native/core/request_header.zig");
 const storage_volume = @import("native/storage/storage_volume.zig");
 const sync_state_store = @import("native/sync/sync_state_store.zig");
@@ -17,70 +18,16 @@ const workspace = @import("native/storage/workspace.zig");
 
 const FUZZ_CORPUS_PATH = "spec/release_security/fuzz_corpus.json";
 const RELEASE_ARTIFACTS_PATH = "spec/release_security/release_artifacts.json";
-const RELEASE_KEYRING_PATH = "spec/release_security/release_keyring.json";
 const THREAT_MODEL_PATH = "spec/release_security/threat_model.json";
 const MEMORY_SAFETY_INVENTORY_PATH = "spec/release_security/memory_safety_inventory.json";
 const CRASH_DUMP_REDACTION_PATH = "spec/release_security/crash_dump_redaction.json";
 const VULNERABILITY_DISCLOSURE_PATH = "spec/release_security/vulnerability_disclosure.json";
 const SECURITY_POLICY_PATH = "SECURITY.md";
 
-const REQUIRED_RELEASE_EXACT_PATHS = [_][]const u8{
-    "zig-out/bin/kernel-zigos-native.elf",
-    "zig-out/bin/zigos-sign",
-    "zig-out/bin/zigos-verify-release",
-    "build/os.iso",
-    "spec/production_readiness.json",
-    "spec/release_security/release_artifacts.json",
-    "spec/release_security/release_keyring.json",
-    "spec/release_security/revoked_release_keys.json",
-    "spec/release_security/fuzz_corpus.json",
-    "spec/release_security/memory_safety_inventory.json",
-    "spec/release_security/threat_model.json",
-    "spec/release_security/crash_dump_redaction.json",
-    "spec/release_security/vulnerability_disclosure.json",
-};
-
-const REQUIRED_PRODUCTION_USERSPACE_PATHS = [_][]const u8{
-    "zig-out/bin/userspace-session-manager.elf",
-    "zig-out/bin/userspace-permission-review.elf",
-    "zig-out/bin/userspace-service-registry.elf",
-    "zig-out/bin/userspace-workspace-storage.elf",
-    "zig-out/bin/userspace-viewer.elf",
-    "zig-out/bin/userspace-notes.elf",
-    "zig-out/bin/userspace-sync.elf",
-    "zig-out/bin/userspace-capture.elf",
-    "zig-out/bin/userspace-policy-mediation.elf",
-    "zig-out/bin/userspace-network-stack.elf",
-    "zig-out/bin/userspace-storage-object.elf",
-    "zig-out/bin/userspace-storage-driver.elf",
-    "zig-out/bin/userspace-package-service.elf",
-    "zig-out/bin/userspace-compositor.elf",
-    "zig-out/bin/userspace-indexing-search.elf",
-    "zig-out/bin/userspace-personal-context.elf",
-    "zig-out/bin/userspace-sync-service.elf",
-    "zig-out/bin/userspace-media-print.elf",
-    "zig-out/bin/userspace-attention-broker.elf",
-    "zig-out/bin/userspace-task-lifecycle.elf",
-    "zig-out/bin/userspace-sensitive-capture.elf",
-    "zig-out/bin/userspace-secure-pasteboard.elf",
-    "zig-out/bin/userspace-object-resilience.elf",
-    "zig-out/bin/userspace-secret-vault.elf",
-};
-
-const REQUIRED_FORBIDDEN_RELEASE_PATTERNS = [_][]const u8{
-    "build/os-verification.iso",
-    "zig-out/bin/kernel-zigos-native-verification.elf",
-    "zig-out/bin/kernel-zigos-native-tampered-*.elf",
-    "zig-out/bin/kernel-zigos-native-rollback-slot-failure.elf",
-    "zig-out/bin/kernel-zigos-native-storage-durability.elf",
-    "zig-out/bin/kernel-recovery.elf",
-    "zig-out/bin/kernel-benchmark.elf",
-    "zig-out/bin/userspace-transport-probe.elf",
-    "zig-out/bin/userspace-termination-probe.elf",
-    "zig-out/bin/userspace-service-client.elf",
-    "zig-out/bin/userspace-mmu-isolation-proof.elf",
-    "zig-out/bin/userspace-notes-daily.elf",
-};
+const REQUIRED_RELEASE_BASE_TARGET_PATHS = release_catalog.production_base_target_paths;
+const REQUIRED_PRODUCTION_USERSPACE_PATHS = release_catalog.production_userspace_target_paths;
+const REQUIRED_RELEASE_TARGET_PATHS = release_catalog.production_target_paths;
+const REQUIRED_RELEASE_EVIDENCE_NAMES = release_catalog.release_evidence_names;
 
 const REQUIRED_HARNESS_IDS = [_][]const u8{
     "binary-cursor",
@@ -103,13 +50,6 @@ const REQUIRED_THREAT_DOMAINS = [_][]const u8{
     "sync-trust",
     "diagnostics-privacy",
     "driver-isolation",
-};
-
-const RELEASE_KEY_STATUSES = [_][]const u8{
-    "active",
-    "retired",
-    "revoked",
-    "required-not-configured",
 };
 
 const UNSAFE_SCAN_PATTERNS = [_][]const u8{
@@ -150,7 +90,6 @@ pub fn main(init: std.process.Init) !void {
 
     try validateFuzzCorpus(allocator, io, &errors, &summary);
     try validateReleaseArtifacts(allocator, io, &errors);
-    try validateReleaseKeyring(allocator, io, &errors);
     try validateThreatModel(allocator, io, &errors);
     try validateMemorySafetyInventory(allocator, gpa, io, &errors, &summary);
     try validateCrashDumpRedaction(allocator, io, &errors);
@@ -415,8 +354,7 @@ fn fuzzManifestPermissions(input: []const u8) void {
 
 const ReleaseArtifactSelection = struct {
     exact_paths: []const []const u8,
-    production_userspace_paths: []const []const u8,
-    forbidden_path_patterns: []const []const u8,
+    forbidden_paths: []const []const u8,
 };
 
 fn validateReleaseArtifactSelectionPolicy(
@@ -442,76 +380,40 @@ fn validateReleaseArtifactSelectionPolicy(
         "release artifact selection exact_paths",
         true,
     );
-    var exact_path_set = try common.collectUniqueStrings(
-        allocator,
-        errors,
-        exact_paths,
-        "release artifact selection exact path",
-    );
-    for (REQUIRED_RELEASE_EXACT_PATHS) |required_path| {
-        if (!exact_path_set.contains(required_path)) {
-            try common.addError(errors, allocator, "release artifact selection exact_paths must include {s}", .{required_path});
-        }
-    }
-    for (exact_paths) |path| {
-        if (!isOneOf(path, &REQUIRED_RELEASE_EXACT_PATHS)) {
-            try common.addError(errors, allocator, "release artifact selection contains an unapproved exact path: {s}", .{path});
-        }
-    }
+    release_catalog.requireExactProductionTargets(exact_paths) catch |err| {
+        try common.addError(
+            errors,
+            allocator,
+            "release artifact selection exact_paths must equal the exact 33-target production catalog: {s}",
+            .{@errorName(err)},
+        );
+    };
 
-    const production_userspace_paths = try common.collectStringArray(
+    const forbidden_paths = try common.collectStringArray(
         allocator,
         errors,
-        common.field(policy, "production_userspace_paths"),
-        "release artifact selection production_userspace_paths",
+        common.field(policy, "forbidden_paths"),
+        "release artifact selection forbidden_paths",
         true,
     );
-    var production_userspace_set = try common.collectUniqueStrings(
-        allocator,
-        errors,
-        production_userspace_paths,
-        "release artifact selection production userspace path",
-    );
-    for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |required_path| {
-        if (!production_userspace_set.contains(required_path)) {
-            try common.addError(errors, allocator, "release artifact selection production_userspace_paths must include {s}", .{required_path});
-        }
-    }
-    for (production_userspace_paths) |path| {
-        if (!isOneOf(path, &REQUIRED_PRODUCTION_USERSPACE_PATHS)) {
-            try common.addError(errors, allocator, "release artifact selection contains an unapproved production userspace path: {s}", .{path});
-        }
-    }
-
-    const forbidden_path_patterns = try common.collectStringArray(
-        allocator,
-        errors,
-        common.field(policy, "forbidden_path_patterns"),
-        "release artifact selection forbidden_path_patterns",
-        true,
-    );
-    var forbidden_pattern_set = try common.collectUniqueStrings(
-        allocator,
-        errors,
-        forbidden_path_patterns,
-        "release artifact selection forbidden path pattern",
-    );
-    for (REQUIRED_FORBIDDEN_RELEASE_PATTERNS) |required_pattern| {
-        if (!forbidden_pattern_set.contains(required_pattern)) {
-            try common.addError(errors, allocator, "release artifact selection forbidden_path_patterns must include {s}", .{required_pattern});
-        }
-    }
+    release_catalog.requireExactForbiddenVerificationPaths(forbidden_paths) catch |err| {
+        try common.addError(
+            errors,
+            allocator,
+            "release artifact selection forbidden_paths must equal the exact verification-artifact denylist: {s}",
+            .{@errorName(err)},
+        );
+    };
 
     return .{
         .exact_paths = exact_paths,
-        .production_userspace_paths = production_userspace_paths,
-        .forbidden_path_patterns = forbidden_path_patterns,
+        .forbidden_paths = forbidden_paths,
     };
 }
 
 fn releaseArtifactPathAllowed(selection: ReleaseArtifactSelection, path: []const u8) bool {
-    return stringArrayContains(selection.exact_paths, path) or
-        stringArrayContains(selection.production_userspace_paths, path);
+    _ = selection;
+    return release_catalog.isProductionTarget(path);
 }
 
 fn validateShellReleaseArtifactArray(
@@ -598,12 +500,23 @@ fn validateReleaseArtifacts(
             "is_allowed_release_artifact",
             "collect_production_userspace_artifacts",
             "artifact is outside the production release allowlist",
-            "validate_dsse_signing_environment",
-            "ZIGOS_RELEASE_LOCAL_PREVIEW_STATIC_DSSE",
-            "ZIGOS_RELEASE_HARDWARE_BACKED:-}\" = \"true\" ] && [ -z \"${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}\"",
-            "hardware-backed releases must use ZIGOS_RELEASE_DSSE_SIGN_COMMAND, not static DSSE signatures",
-            "set ZIGOS_RELEASE_DSSE_SIGN_COMMAND or static local-preview DSSE signatures, not both",
-            "require_dsse_signature_b64 \"ZIGOS_RELEASE_DSSE_SIGN_COMMAND\"",
+            "ZIGOS_RELEASE_TRUST_ROOT",
+            "ZIGOS_RELEASE_TRUST_ROOT_SHA256",
+            "ZIGOS_RELEASE_TRUST_POLICY",
+            "ZIGOS_RELEASE_VERIFIER",
+            "ZIGOS_RELEASE_VERIFIER_SHA256",
+            "ZIGOS_RELEASE_DSSE_SIGN_COMMAND",
+            "ZIGOS_RELEASE_SIGNING_KEY_ID",
+            "ZIGOS_RELEASE_HARDWARE_BACKED",
+            "trust-info",
+            "--trusted-root",
+            "--trusted-root-sha256",
+            "--release-key-id",
+            "root-metadata.json",
+            "release-trust-policy.dsse.json",
+            "verifier_bootstrap",
+            "minimumPolicyVersion",
+            "minimumReleaseSequence",
             "produced malformed DSSE signature; expected non-empty standard base64",
         };
         for (required_generator_snippets) |snippet| {
@@ -611,9 +524,9 @@ fn validateReleaseArtifacts(
                 try common.addError(errors, allocator, "release artifact generator must enforce Jujutsu provenance snippet: {s}", .{snippet});
             }
         }
-        try validateShellReleaseArtifactArray(allocator, errors, generator_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_EXACT_PATHS);
+        try validateShellReleaseArtifactArray(allocator, errors, generator_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_BASE_TARGET_PATHS);
         try validateShellReleaseArtifactArray(allocator, errors, generator_source, "PRODUCTION_USERSPACE_ARTIFACTS", &REQUIRED_PRODUCTION_USERSPACE_PATHS);
-        for (REQUIRED_RELEASE_EXACT_PATHS) |path| {
+        for (REQUIRED_RELEASE_BASE_TARGET_PATHS) |path| {
             if (std.mem.indexOf(u8, generator_source, path) == null) {
                 try common.addError(errors, allocator, "release artifact generator production allowlist must include {s}", .{path});
             }
@@ -621,11 +534,6 @@ fn validateReleaseArtifacts(
         for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |path| {
             if (std.mem.indexOf(u8, generator_source, path) == null) {
                 try common.addError(errors, allocator, "release artifact generator production userspace allowlist must include {s}", .{path});
-            }
-        }
-        for (REQUIRED_FORBIDDEN_RELEASE_PATTERNS) |pattern| {
-            if (std.mem.indexOf(u8, generator_source, pattern) == null) {
-                try common.addError(errors, allocator, "release artifact generator must reject verification artifact pattern {s}", .{pattern});
             }
         }
         if (std.mem.indexOf(u8, generator_source, "git -C \"$ROOT_DIR\"") != null) {
@@ -669,9 +577,9 @@ fn validateReleaseArtifacts(
                 try common.addError(errors, allocator, "reproducible build checker must enforce Jujutsu provenance snippet: {s}", .{snippet});
             }
         }
-        try validateShellReleaseArtifactArray(allocator, errors, repro_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_EXACT_PATHS);
+        try validateShellReleaseArtifactArray(allocator, errors, repro_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_BASE_TARGET_PATHS);
         try validateShellReleaseArtifactArray(allocator, errors, repro_source, "PRODUCTION_USERSPACE_ARTIFACTS", &REQUIRED_PRODUCTION_USERSPACE_PATHS);
-        for (REQUIRED_RELEASE_EXACT_PATHS) |path| {
+        for (REQUIRED_RELEASE_BASE_TARGET_PATHS) |path| {
             if (std.mem.indexOf(u8, repro_source, path) == null) {
                 try common.addError(errors, allocator, "reproducible build production allowlist must include {s}", .{path});
             }
@@ -681,16 +589,64 @@ fn validateReleaseArtifacts(
                 try common.addError(errors, allocator, "reproducible build production userspace allowlist must include {s}", .{path});
             }
         }
-        for (REQUIRED_FORBIDDEN_RELEASE_PATTERNS) |pattern| {
-            if (std.mem.indexOf(u8, repro_source, pattern) == null) {
-                try common.addError(errors, allocator, "reproducible build checker must reject verification artifact pattern {s}", .{pattern});
-            }
-        }
         if (std.mem.indexOf(u8, repro_source, "git -C \"$ROOT_DIR\"") != null) {
             try common.addError(errors, allocator, "reproducible build checker must use Jujutsu metadata instead of raw git -C provenance lookups", .{});
         }
         if (std.mem.indexOf(u8, repro_source, "find \"$tree/zig-out/bin\"") != null) {
             try common.addError(errors, allocator, "reproducible build checker must not sweep the binary output directory into the production manifest", .{});
+        }
+    }
+    const finalizer = try common.expectStringField(allocator, errors, root, "release artifacts", "release_manifest_finalizer") orelse "";
+    if (finalizer.len > 0 and !common.pathExists(io, finalizer)) {
+        try common.addError(errors, allocator, "release manifest finalizer is missing: {s}", .{finalizer});
+    }
+    if (finalizer.len > 0 and common.pathExists(io, finalizer)) {
+        const finalizer_source = try common.readFileAlloc(allocator, io, finalizer, common.source_file_max_bytes);
+        const required_finalizer_snippets = [_][]const u8{
+            "ZIGOS_RELEASE_TRUST_ROOT",
+            "ZIGOS_RELEASE_TRUST_ROOT_SHA256",
+            "ZIGOS_RELEASE_TRUST_POLICY",
+            "ZIGOS_RELEASE_TRUST_STATE",
+            "ZIGOS_RELEASE_VERIFIER",
+            "ZIGOS_RELEASE_VERIFIER_SHA256",
+            "ZIGOS_RELEASE_DSSE_SIGN_COMMAND",
+            "ZIGOS_RELEASE_SIGNING_KEY_ID",
+            "ZIGOS_RELEASE_SEQUENCE",
+            "ZIGOS_RELEASE_EXPIRES_AT",
+            "release-manifest.dsse.json",
+            "application/vnd.zigos.release-manifest.v1+json",
+            "trust-info",
+            "verify-candidate",
+            ".finalize.lock",
+            "mkdir -m 0700",
+            "--trusted-root",
+            "--trusted-root-sha256",
+            "--release-key-id",
+        };
+        for (required_finalizer_snippets) |snippet| {
+            if (std.mem.indexOf(u8, finalizer_source, snippet) == null) {
+                try common.addError(errors, allocator, "release manifest finalizer must enforce authenticated publication snippet: {s}", .{snippet});
+            }
+        }
+    }
+    const pinned_verifier_runner = try common.expectStringField(allocator, errors, root, "release artifacts", "pinned_verifier_runner") orelse "";
+    if (pinned_verifier_runner.len > 0 and !common.pathExists(io, pinned_verifier_runner)) {
+        try common.addError(errors, allocator, "pinned release verifier runner is missing: {s}", .{pinned_verifier_runner});
+    }
+    if (pinned_verifier_runner.len > 0 and common.pathExists(io, pinned_verifier_runner)) {
+        const runner_source = try common.readFileAlloc(allocator, io, pinned_verifier_runner, common.source_file_max_bytes);
+        const required_runner_snippets = [_][]const u8{
+            "VERIFIER_SHA256",
+            "mktemp -d",
+            "cp \"$VERIFIER\"",
+            "sha256_file \"$pinned_verifier\"",
+            "--trusted-root-sha256",
+            "--trust-state",
+        };
+        for (required_runner_snippets) |snippet| {
+            if (std.mem.indexOf(u8, runner_source, snippet) == null) {
+                try common.addError(errors, allocator, "pinned release verifier runner must enforce exact-copy execution snippet: {s}", .{snippet});
+            }
         }
     }
     const customer_verifier_source = try common.expectStringField(allocator, errors, root, "release artifacts", "customer_verifier_source") orelse "";
@@ -700,6 +656,19 @@ fn validateReleaseArtifacts(
     if (customer_verifier_source.len > 0 and common.pathExists(io, customer_verifier_source)) {
         const customer_verifier = try common.readFileAlloc(allocator, io, customer_verifier_source, common.source_file_max_bytes);
         const required_customer_verifier_snippets = [_][]const u8{
+            "trust-info",
+            "verify",
+            "verify-candidate",
+            "--bundle",
+            "--artifacts",
+            "--trusted-root",
+            "--trusted-root-sha256",
+            "--trust-state",
+            "release-manifest.dsse.json",
+            "release-trust-policy.dsse.json",
+            "root-metadata.json",
+            "release_catalog",
+            "release_trust",
             "verifySlsaSourceParameters",
             "release_slsa_build_type",
             "release_slsa_builder_id",
@@ -727,27 +696,23 @@ fn validateReleaseArtifacts(
             "SlsaDirtyWorkspaceEvidence",
             "SlsaSourceIdentityMismatch",
             "ReproducibleBuildSourceControlMismatch",
-            "ReproducibleBuildRepositoryInvalid",
-            "ReproducibleBuildChangeIdInvalid",
-            "ReproducibleBuildCommitInvalid",
-            "ReproducibleBuildDirtyCountInvalid",
             "ReproducibleBuildDirtyWorkspace",
-            "ReproducibleBuildZigVersionInvalid",
-            "ReproducibleBuildOptimizeModeMismatch",
             "ReproducibleBuildSourceIdentityMismatch",
             "ReproducibleDigestCoverageMismatch",
             "DuplicateArtifactMeasurement",
-            "seen_measurements.count()",
-            "reproducible_digests.count()",
+            "summary.measurements",
+            "summary.reproducible_digests",
             "sourceIdentitiesEqual",
             "looksLikeJjChangeId",
             "looksLikeGitCommitId",
             "verifySlsaRunMetadata",
             "\"startedOn\"",
             "\"invocationId\"",
-            "validateReleaseKeyCoversSigningDate",
-            "ReleaseKeyNotYetValidForSlsaStartedOn",
-            "ReleaseKeyExpiredForSlsaStartedOn",
+            "TrustStateTransaction",
+            "policyPayloadSha256",
+            "manifestPayloadSha256",
+            "acl_get_fd_np",
+            "TrustStateAclCheckFailed",
         };
         for (required_customer_verifier_snippets) |snippet| {
             if (std.mem.indexOf(u8, customer_verifier, snippet) == null) {
@@ -756,9 +721,23 @@ fn validateReleaseArtifacts(
         }
     }
     const customer_verifier_command = try common.expectStringField(allocator, errors, root, "release artifacts", "customer_verifier_command") orelse "";
-    if (std.mem.indexOf(u8, customer_verifier_command, "zigos-verify-release") == null) {
-        try common.addError(errors, allocator, "release artifacts customer_verifier_command must run zigos-verify-release", .{});
+    const required_customer_command_terms = [_][]const u8{
+        "zigos-verify-release verify",
+        "--bundle",
+        "--artifacts",
+        "--trusted-root",
+        "--trusted-root-sha256",
+        "--trust-state",
+    };
+    for (required_customer_command_terms) |term| {
+        if (std.mem.indexOf(u8, customer_verifier_command, term) == null) {
+            try common.addError(errors, allocator, "release artifacts customer_verifier_command must include {s}", .{term});
+        }
     }
+    if (customer_verifier_command.len == 0 or customer_verifier_command[0] != '/') {
+        try common.addError(errors, allocator, "release artifacts customer_verifier_command must use an absolute independently provisioned verifier", .{});
+    }
+    try expectTrueBoolField(allocator, errors, root, "release artifacts", "customer_verifier_sha256_required");
     const artifact_measurements = try common.expectStringField(allocator, errors, root, "release artifacts", "artifact_measurements") orelse "";
     if (std.mem.indexOf(u8, artifact_measurements, "artifact-measurements.json") == null) {
         try common.addError(errors, allocator, "release artifacts must declare artifact-measurements.json output", .{});
@@ -772,16 +751,14 @@ fn validateReleaseArtifacts(
         "release artifacts required_generator_inputs",
         true,
     );
-    for (REQUIRED_RELEASE_EXACT_PATHS) |artifact_path| {
-        if (!stringArrayContains(required_generator_inputs, artifact_path)) {
-            try common.addError(errors, allocator, "release artifacts required_generator_inputs must include {s}", .{artifact_path});
-        }
-    }
-    for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |artifact_path| {
-        if (!stringArrayContains(required_generator_inputs, artifact_path)) {
-            try common.addError(errors, allocator, "release artifacts required_generator_inputs must include {s}", .{artifact_path});
-        }
-    }
+    release_catalog.requireExactProductionTargets(required_generator_inputs) catch |err| {
+        try common.addError(
+            errors,
+            allocator,
+            "release artifacts required_generator_inputs must equal the exact 33-target production catalog: {s}",
+            .{@errorName(err)},
+        );
+    };
     const sbom_format = try common.expectStringField(allocator, errors, root, "release artifacts", "sbom_format") orelse "";
     if (!std.mem.eql(u8, sbom_format, "SPDX-2.3")) {
         try common.addError(errors, allocator, "release artifacts must require SPDX-2.3 SBOM output", .{});
@@ -803,6 +780,89 @@ fn validateReleaseArtifacts(
     }
     try expectStringValue(allocator, errors, root, "release artifacts", "attestation_payload_type", "application/vnd.in-toto+json");
 
+    const release_bundle = try common.expectObjectField(allocator, errors, root, "release artifacts", "release_bundle") orelse return;
+    try expectStringValue(allocator, errors, release_bundle, "release bundle", "directory", "build/release-security");
+    try expectStringValue(
+        allocator,
+        errors,
+        release_bundle,
+        "release bundle",
+        "publication_marker",
+        "build/release-security/release-manifest.dsse.json",
+    );
+    try expectStringValue(
+        allocator,
+        errors,
+        release_bundle,
+        "release bundle",
+        "manifest_payload_type",
+        "application/vnd.zigos.release-manifest.v1+json",
+    );
+    try expectStringValue(
+        allocator,
+        errors,
+        release_bundle,
+        "release bundle",
+        "trust_policy_payload_type",
+        "application/vnd.zigos.release-trust-policy.v1+json",
+    );
+    try expectTrueBoolField(allocator, errors, release_bundle, "release bundle", "signed_manifest_is_sole_digest_authority");
+    try expectTrueBoolField(allocator, errors, release_bundle, "release bundle", "signature_verified_before_payload_parsing");
+    try expectTrueBoolField(allocator, errors, release_bundle, "release bundle", "candidate_verified_before_publication");
+    try expectTrueBoolField(allocator, errors, release_bundle, "release bundle", "publication_withdrawn_on_final_verification_failure");
+    try expectTrueBoolField(allocator, errors, release_bundle, "release bundle", "finalization_lock_required");
+    try expectTrueBoolField(allocator, errors, release_bundle, "release bundle", "quiescent_authenticated_inputs_required");
+    try expectTrueBoolField(allocator, errors, release_bundle, "release bundle", "exact_target_set_required");
+    try expectTrueBoolField(allocator, errors, release_bundle, "release bundle", "exact_evidence_set_required");
+    const release_evidence_names = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(release_bundle, "evidence_names"),
+        "release bundle evidence_names",
+        true,
+    );
+    release_catalog.requireExactReleaseEvidenceNames(release_evidence_names) catch |err| {
+        try common.addError(
+            errors,
+            allocator,
+            "release bundle evidence_names must equal the exact ten-file evidence catalog: {s}",
+            .{@errorName(err)},
+        );
+    };
+
+    const release_trust = try common.expectObjectField(allocator, errors, root, "release artifacts", "release_trust") orelse return;
+    try expectStringValue(allocator, errors, release_trust, "release trust", "root_metadata_source", "out-of-band");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "root_digest_pin_required");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "root_threshold_signatures_required");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "root_minimum_policy_checkpoint_required");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "policy_minimum_release_checkpoint_required");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "release_policy_root_threshold_signed");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "release_manifest_release_key_signed");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "revocations_in_signed_policy");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "persistent_rollback_state_required");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "rollback_state_external_to_bundle");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "rollback_state_external_to_artifacts");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "rollback_state_transaction_lock_required");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "rollback_state_authenticated_payload_digests");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "rollback_state_darwin_acl_free_storage_required");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "rollback_and_equivocation_rejected");
+    try expectTrueBoolField(allocator, errors, release_trust, "release trust", "independently_pinned_verifier_required");
+    const rollback_claim_scope = try common.expectStringField(allocator, errors, release_trust, "release trust", "rollback_claim_scope") orelse "";
+    if (std.mem.indexOf(u8, rollback_claim_scope, "minimum checkpoints") == null or
+        std.mem.indexOf(u8, rollback_claim_scope, "persistent state") == null)
+    {
+        try common.addError(errors, allocator, "release trust rollback_claim_scope must cover external checkpoints and local persistent state", .{});
+    }
+    try expectFalseBoolField(allocator, errors, release_trust, "release trust", "automatic_root_rotation");
+    try expectStringValue(
+        allocator,
+        errors,
+        release_trust,
+        "release trust",
+        "root_rotation_policy",
+        "manual out-of-band re-pin and state migration only",
+    );
+
     const release_signing = try common.expectObjectField(allocator, errors, root, "release artifacts", "release_signing") orelse return;
     const provider_boundary = try common.expectStringField(allocator, errors, release_signing, "release signing", "provider_boundary") orelse "";
     if (!containsHardwareReleaseBoundary(provider_boundary)) {
@@ -814,10 +874,9 @@ fn validateReleaseArtifacts(
         try common.addError(errors, allocator, "release signing provider_boundary must describe key-handle-only access and no seed material in release code", .{});
     }
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "hardware_backed_required");
-    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "rotation_required");
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "revocation_required");
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "customer_verifiable_required");
-    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "static_dsse_signatures_local_preview_only");
+    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "external_signer_required");
     try expectTrueBoolField(allocator, errors, release_signing, "release signing", "dsse_signature_output_base64_required");
     const post_quantum_policy = try common.expectObjectField(allocator, errors, release_signing, "release signing", "post_quantum_policy") orelse return;
     try validatePostQuantumReleasePolicy(allocator, errors, post_quantum_policy);
@@ -829,7 +888,25 @@ fn validateReleaseArtifacts(
         true,
     );
     const required_verifier_protocol_terms = [_][]const u8{
-        "artifact-digests",
+        "out-of-band",
+        "root metadata",
+        "root threshold",
+        "release-trust-policy.dsse.json",
+        "release-manifest.dsse.json",
+        "sole digest authority",
+        "before parsing",
+        "exact 33",
+        "exact ten",
+        "persistent rollback state",
+        "external to the bundle",
+        "equivocation",
+        "manual root rotation",
+        "minimumPolicyVersion",
+        "minimumReleaseSequence",
+        "descriptor-relative",
+        "authenticated decoded",
+        "extended ACL",
+        "quiescent",
         "DSSE",
         "SLSA",
         "Jujutsu",
@@ -841,7 +918,6 @@ fn validateReleaseArtifacts(
         "ML-DSA",
         "FIPS 205",
         "SLH-DSA",
-        "release-keyring",
         "revoked",
         "required ML-DSA",
         "artifact-measurements",
@@ -853,16 +929,49 @@ fn validateReleaseArtifacts(
             try common.addError(errors, allocator, "release signing verifier_protocols must cover {s}", .{term});
         }
     }
-    const trusted_key_material = try common.collectStringArray(
+    const generator_required_environment = try common.collectStringArray(
         allocator,
         errors,
-        common.field(release_signing, "trusted_key_material"),
-        "release signing trusted_key_material",
+        common.field(release_signing, "generator_required_environment"),
+        "release signing generator_required_environment",
         true,
     );
-    for (trusted_key_material) |path| {
-        if (!common.pathExists(io, path)) {
-            try common.addError(errors, allocator, "release signing references missing trusted key material: {s}", .{path});
+    const required_signing_environment = [_][]const u8{
+        "ZIGOS_RELEASE_TRUST_ROOT",
+        "ZIGOS_RELEASE_TRUST_ROOT_SHA256",
+        "ZIGOS_RELEASE_TRUST_POLICY",
+        "ZIGOS_RELEASE_VERIFIER",
+        "ZIGOS_RELEASE_VERIFIER_SHA256",
+        "ZIGOS_RELEASE_DSSE_SIGN_COMMAND",
+        "ZIGOS_RELEASE_SIGNING_KEY_ID",
+        "ZIGOS_RELEASE_HARDWARE_BACKED",
+    };
+    if (generator_required_environment.len != required_signing_environment.len) {
+        try common.addError(errors, allocator, "release signing generator_required_environment must equal the exact required environment set", .{});
+    }
+    for (required_signing_environment) |name| {
+        if (!stringArrayContains(generator_required_environment, name)) {
+            try common.addError(errors, allocator, "release signing generator_required_environment must include {s}", .{name});
+        }
+    }
+    const finalizer_additional_environment = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(release_signing, "finalizer_additional_environment"),
+        "release signing finalizer_additional_environment",
+        true,
+    );
+    const required_finalizer_environment = [_][]const u8{
+        "ZIGOS_RELEASE_TRUST_STATE",
+        "ZIGOS_RELEASE_SEQUENCE",
+        "ZIGOS_RELEASE_EXPIRES_AT",
+    };
+    if (finalizer_additional_environment.len != required_finalizer_environment.len) {
+        try common.addError(errors, allocator, "release signing finalizer_additional_environment must equal the exact required environment set", .{});
+    }
+    for (required_finalizer_environment) |name| {
+        if (!stringArrayContains(finalizer_additional_environment, name)) {
+            try common.addError(errors, allocator, "release signing finalizer_additional_environment must include {s}", .{name});
         }
     }
 
@@ -881,6 +990,7 @@ fn validateReleaseArtifacts(
         try common.addError(errors, allocator, "release_artifacts must cover kernel, userspace, ISO, and policy artifacts", .{});
     }
     var has_production_userspace_set = false;
+    var declared_target_paths = std.ArrayList([]const u8).empty;
     for (artifacts, 0..) |artifact, index| {
         if (artifact != .object) {
             try common.addError(errors, allocator, "release artifact at index {d} must be an object", .{index});
@@ -893,6 +1003,7 @@ fn validateReleaseArtifacts(
             try common.addError(errors, allocator, "release artifact {s} must include exactly one of path or paths", .{id});
         } else if (has_path) {
             const path = try common.expectStringField(allocator, errors, artifact, id, "path") orelse "";
+            if (path.len > 0) try declared_target_paths.append(allocator, path);
             if (path.len > 0 and !releaseArtifactPathAllowed(artifact_selection, path)) {
                 try common.addError(errors, allocator, "release artifact {s} path is outside the production release allowlist: {s}", .{ id, path });
             }
@@ -904,6 +1015,7 @@ fn validateReleaseArtifacts(
                 try std.fmt.allocPrint(allocator, "release artifact {s} paths", .{id}),
                 true,
             );
+            try declared_target_paths.appendSlice(allocator, paths);
             if (!std.mem.eql(u8, id, "production-userspace-images")) {
                 try common.addError(errors, allocator, "only production-userspace-images may declare a release artifact path set", .{});
             } else {
@@ -932,472 +1044,33 @@ fn validateReleaseArtifacts(
     if (!has_production_userspace_set) {
         try common.addError(errors, allocator, "release_artifacts must declare the production-userspace-images path set", .{});
     }
-
-    const customer_bundle = try common.collectStringArray(
-        allocator,
-        errors,
-        common.field(root, "customer_verification_bundle"),
-        "release artifacts customer_verification_bundle",
-        true,
-    );
-    const required_customer_bundle_artifacts = [_][]const u8{
-        "build/release-security/artifact-digests.sha256",
-        "build/release-security/artifact-measurements.json",
-        "build/release-security/sbom.spdx.json",
-        "build/release-security/provenance.intoto.jsonl",
-        "build/release-security/provenance.dsse.intoto.jsonl",
-        "build/release-security/customer-verification-policy.json",
-        "build/release-security/release-keyring.json",
-        "build/release-security/revoked-release-keys.json",
-        "build/release-security/reproducible-build.json",
-        "build/release-security/reproducible-artifact-digests.sha256",
-        "zig-out/bin/zigos-verify-release",
+    release_catalog.requireExactProductionTargets(declared_target_paths.items) catch |err| {
+        try common.addError(
+            errors,
+            allocator,
+            "release_artifacts must cover the exact 33-target production catalog once: {s}",
+            .{@errorName(err)},
+        );
     };
-    for (required_customer_bundle_artifacts) |artifact| {
-        if (!stringArrayContains(customer_bundle, artifact)) {
-            try common.addError(errors, allocator, "customer_verification_bundle must include {s}", .{artifact});
-        }
-    }
 }
 
-fn validateReleaseKeyring(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    errors: *std.ArrayList([]const u8),
-) !void {
-    const root = try parseJsonFile(allocator, io, errors, RELEASE_KEYRING_PATH) orelse return;
-    try validateReleaseKeyringRoot(allocator, errors, root);
+test "release policy uses the exact authenticated production catalogs" {
+    try std.testing.expectEqual(@as(usize, 33), REQUIRED_RELEASE_TARGET_PATHS.len);
+    try std.testing.expectEqual(@as(usize, 10), REQUIRED_RELEASE_EVIDENCE_NAMES.len);
+    try std.testing.expect(release_catalog.isProductionTarget("build/os.iso"));
+    try std.testing.expect(!release_catalog.isProductionTarget("zig-out/bin/zigos-verify-release"));
+    try std.testing.expect(!release_catalog.isProductionTarget("zig-out/bin/zigos-sign"));
+    try std.testing.expect(!release_catalog.isProductionTarget("build/os-verification.iso"));
+    try std.testing.expect(!release_catalog.isProductionTarget("spec/release_security/release_keyring.json"));
+    try std.testing.expect(!release_catalog.isProductionTarget("spec/release_security/revoked_release_keys.json"));
 }
 
-fn validateReleaseKeyringRoot(
-    allocator: std.mem.Allocator,
-    errors: *std.ArrayList([]const u8),
-    root: std.json.Value,
-) !void {
-    const public_release_allowed = try expectBoolField(allocator, errors, root, "release keyring", "public_release_allowed") orelse false;
-    const required_provider_boundary = try common.expectStringField(allocator, errors, root, "release keyring", "required_provider_boundary") orelse "";
-    if (!containsHardwareReleaseBoundary(required_provider_boundary)) {
-        try common.addError(errors, allocator, "release keyring required_provider_boundary must name TPM, secure enclave, HSM, or KMS custody", .{});
-    }
-    const policy = try common.expectObjectField(allocator, errors, root, "release keyring", "post_quantum_policy") orelse return;
-    try validatePostQuantumReleasePolicy(allocator, errors, policy);
-
-    const keys_value = common.field(root, "keys") orelse {
-        try common.addError(errors, allocator, "release keyring must include keys", .{});
-        return;
-    };
-    const keys = switch (keys_value) {
-        .array => |array| array.items,
-        else => {
-            try common.addError(errors, allocator, "release keyring keys must be an array", .{});
-            return;
-        },
-    };
-    if (keys.len == 0) {
-        try common.addError(errors, allocator, "release keyring keys must be non-empty", .{});
-    }
-    var active_key_count: usize = 0;
-    var unconfigured_key_count: usize = 0;
-    for (keys, 0..) |key, index| {
-        if (key != .object) {
-            try common.addError(errors, allocator, "release keyring key at index {d} must be an object", .{index});
-            continue;
-        }
-        const key_id = try common.expectStringField(allocator, errors, key, "release keyring key", "key_id") orelse "<unknown>";
-        const status = try common.expectStringField(allocator, errors, key, key_id, "status") orelse "";
-        if (status.len > 0 and !isOneOf(status, &RELEASE_KEY_STATUSES)) {
-            try common.addError(errors, allocator, "release keyring key {s} has unsupported status: {s}", .{ key_id, status });
-        }
-        const algorithm = try common.expectStringField(allocator, errors, key, key_id, "algorithm") orelse "";
-        if (!std.mem.eql(u8, algorithm, "ed25519") and !std.mem.eql(u8, algorithm, "ml-dsa-65")) {
-            try common.addError(errors, allocator, "release keyring key {s} algorithm must be ed25519 or ml-dsa-65", .{key_id});
-        }
-        const custody = try common.expectStringField(allocator, errors, key, key_id, "custody") orelse "";
-        if (!containsHardwareReleaseBoundary(custody)) {
-            try common.addError(errors, allocator, "release keyring key {s} custody must name TPM, secure enclave, HSM, or KMS custody", .{key_id});
-        }
-        try expectTrueBoolField(allocator, errors, key, key_id, "hardware_backed");
-        _ = try expectPositiveIntegerField(allocator, errors, key, key_id, "generation");
-        const not_before = try common.expectStringField(allocator, errors, key, key_id, "not_before") orelse "";
-        const not_after = try common.expectStringField(allocator, errors, key, key_id, "not_after") orelse "";
-        const encoding = try common.expectStringField(allocator, errors, key, key_id, "public_key_encoding") orelse "";
-        const public_key = try common.expectStringField(allocator, errors, key, key_id, "public_key") orelse "";
-        try expectStringValue(allocator, errors, key, key_id, "verifier_metadata_schema", "zigos.release-verifier-metadata");
-        const verifier_metadata_digest = try common.expectStringField(allocator, errors, key, key_id, "verifier_metadata_digest") orelse "";
-        const provider_name = try common.expectStringField(allocator, errors, key, key_id, "provider_name") orelse "";
-        const provider_boundary = try common.expectStringField(allocator, errors, key, key_id, "provider_boundary") orelse "";
-        if (!containsHardwareReleaseBoundary(provider_boundary)) {
-            try common.addError(errors, allocator, "release keyring key {s} provider_boundary must name TPM, secure enclave, HSM, or KMS custody", .{key_id});
-        }
-        try expectStringValue(allocator, errors, key, key_id, "revocation_source", "spec/release_security/revoked_release_keys.json");
-        _ = try common.expectStringField(allocator, errors, key, key_id, "rotation_policy");
-
-        const is_active = std.mem.eql(u8, status, "active");
-        const is_unconfigured = std.mem.eql(u8, status, "required-not-configured");
-        if (is_active) {
-            active_key_count += 1;
-            try validateConfiguredReleaseKey(
-                allocator,
-                errors,
-                key_id,
-                algorithm,
-                encoding,
-                public_key,
-                not_before,
-                not_after,
-                verifier_metadata_digest,
-                provider_name,
-            );
-        } else if (is_unconfigured) {
-            unconfigured_key_count += 1;
-            if (public_release_allowed) {
-                try common.addError(errors, allocator, "release keyring cannot allow public releases while key {s} is required-not-configured", .{key_id});
-            }
-            if (!isPlaceholder(not_before) or !isPlaceholder(not_after) or !isPlaceholder(public_key) or
-                !isPlaceholder(verifier_metadata_digest) or !isPlaceholder(provider_name))
-            {
-                try common.addError(errors, allocator, "release keyring key {s} required-not-configured fields must stay explicit placeholders until provisioned", .{key_id});
-            }
-        } else {
-            if (hasReleaseKeyPlaceholder(not_before, not_after, public_key, verifier_metadata_digest, provider_name)) {
-                try common.addError(errors, allocator, "release keyring key {s} status {s} must not contain TBD verifier or key material", .{ key_id, status });
-            }
-        }
-    }
-    if (public_release_allowed and active_key_count == 0) {
-        try common.addError(errors, allocator, "release keyring cannot allow public releases without at least one active hardware-backed release key", .{});
-    }
-    if (public_release_allowed and unconfigured_key_count != 0) {
-        try common.addError(errors, allocator, "release keyring cannot allow public releases with required-not-configured keys", .{});
-    }
-
-    const production_profiles_value = common.field(root, "production_pqc_profiles") orelse {
-        try common.addError(errors, allocator, "release keyring must include production_pqc_profiles", .{});
-        return;
-    };
-    const production_profiles = switch (production_profiles_value) {
-        .array => |array| array.items,
-        else => {
-            try common.addError(errors, allocator, "release keyring production_pqc_profiles must be an array", .{});
-            return;
-        },
-    };
-    var has_ml_dsa65 = false;
-    for (production_profiles, 0..) |profile, index| {
-        if (profile != .object) {
-            try common.addError(errors, allocator, "release keyring production_pqc_profiles entry {d} must be an object", .{index});
-            continue;
-        }
-        const name = try common.expectStringField(allocator, errors, profile, "release keyring production_pqc_profile", "profile") orelse "";
-        if (!std.mem.eql(u8, name, "ml-dsa-65")) continue;
-        has_ml_dsa65 = true;
-        try expectStringValue(allocator, errors, profile, "release keyring production_pqc_profile ml-dsa-65", "fips_standard", "FIPS 204");
-        try expectFalseBoolField(allocator, errors, profile, "release keyring production_pqc_profile ml-dsa-65", "release_allowed");
-        try expectTrueBoolField(allocator, errors, profile, "release keyring production_pqc_profile ml-dsa-65", "fips_validation_required");
-        try expectTrueBoolField(allocator, errors, profile, "release keyring production_pqc_profile ml-dsa-65", "fips_140_validated_module_required");
-    }
-    if (!has_ml_dsa65) {
-        try common.addError(errors, allocator, "release keyring production_pqc_profiles must include ml-dsa-65", .{});
-    }
-}
-
-fn validateConfiguredReleaseKey(
-    allocator: std.mem.Allocator,
-    errors: *std.ArrayList([]const u8),
-    key_id: []const u8,
-    algorithm: []const u8,
-    encoding: []const u8,
-    public_key: []const u8,
-    not_before: []const u8,
-    not_after: []const u8,
-    verifier_metadata_digest: []const u8,
-    provider_name: []const u8,
-) !void {
-    if (hasReleaseKeyPlaceholder(not_before, not_after, public_key, verifier_metadata_digest, provider_name)) {
-        try common.addError(errors, allocator, "active release key {s} must not contain TBD verifier or key material", .{key_id});
-    }
-    if (!looksLikeUtcDate(not_before) or !looksLikeUtcDate(not_after) or std.mem.order(u8, not_before, not_after) != .lt) {
-        try common.addError(errors, allocator, "active release key {s} must have ordered YYYY-MM-DD validity dates", .{key_id});
-    }
-    if (std.mem.eql(u8, algorithm, "ed25519")) {
-        try expectConfiguredHexKey(allocator, errors, key_id, encoding, public_key, "hex-ed25519-raw", 64);
-    } else if (std.mem.eql(u8, algorithm, "ml-dsa-65")) {
-        try expectConfiguredHexKey(allocator, errors, key_id, encoding, public_key, "hex-ml-dsa-65-raw", 3904 * 2);
-    }
-    if (!hexTextOfLength(verifier_metadata_digest, 64)) {
-        try common.addError(errors, allocator, "active release key {s} verifier_metadata_digest must be a SHA-256 hex digest", .{key_id});
-    }
-}
-
-fn expectConfiguredHexKey(
-    allocator: std.mem.Allocator,
-    errors: *std.ArrayList([]const u8),
-    key_id: []const u8,
-    encoding: []const u8,
-    public_key: []const u8,
-    expected_encoding: []const u8,
-    expected_hex_len: usize,
-) !void {
-    if (!std.mem.eql(u8, encoding, expected_encoding)) {
-        try common.addError(errors, allocator, "active release key {s} public_key_encoding must be {s}", .{ key_id, expected_encoding });
-    }
-    if (!hexTextOfLength(public_key, expected_hex_len)) {
-        try common.addError(errors, allocator, "active release key {s} public_key must be {d} hex characters", .{ key_id, expected_hex_len });
-    }
-}
-
-const release_artifact_selection_fixture =
-    \\{
-    \\  "release_artifact_selection": {
-    \\    "directory_sweeps_allowed": false,
-    \\    "reject_unlisted_artifacts": true,
-    \\    "verification_artifacts_forbidden": true,
-    \\    "exact_paths": [
-    \\      "zig-out/bin/kernel-zigos-native.elf",
-    \\      "zig-out/bin/zigos-sign",
-    \\      "zig-out/bin/zigos-verify-release",
-    \\      "build/os.iso",
-    \\      "spec/production_readiness.json",
-    \\      "spec/release_security/release_artifacts.json",
-    \\      "spec/release_security/release_keyring.json",
-    \\      "spec/release_security/revoked_release_keys.json",
-    \\      "spec/release_security/fuzz_corpus.json",
-    \\      "spec/release_security/memory_safety_inventory.json",
-    \\      "spec/release_security/threat_model.json",
-    \\      "spec/release_security/crash_dump_redaction.json",
-    \\      "spec/release_security/vulnerability_disclosure.json"
-    \\    ],
-    \\    "production_userspace_paths": [
-    \\      "zig-out/bin/userspace-session-manager.elf",
-    \\      "zig-out/bin/userspace-permission-review.elf",
-    \\      "zig-out/bin/userspace-service-registry.elf",
-    \\      "zig-out/bin/userspace-workspace-storage.elf",
-    \\      "zig-out/bin/userspace-viewer.elf",
-    \\      "zig-out/bin/userspace-notes.elf",
-    \\      "zig-out/bin/userspace-sync.elf",
-    \\      "zig-out/bin/userspace-capture.elf",
-    \\      "zig-out/bin/userspace-policy-mediation.elf",
-    \\      "zig-out/bin/userspace-network-stack.elf",
-    \\      "zig-out/bin/userspace-storage-object.elf",
-    \\      "zig-out/bin/userspace-storage-driver.elf",
-    \\      "zig-out/bin/userspace-package-service.elf",
-    \\      "zig-out/bin/userspace-compositor.elf",
-    \\      "zig-out/bin/userspace-indexing-search.elf",
-    \\      "zig-out/bin/userspace-personal-context.elf",
-    \\      "zig-out/bin/userspace-sync-service.elf",
-    \\      "zig-out/bin/userspace-media-print.elf",
-    \\      "zig-out/bin/userspace-attention-broker.elf",
-    \\      "zig-out/bin/userspace-task-lifecycle.elf",
-    \\      "zig-out/bin/userspace-sensitive-capture.elf",
-    \\      "zig-out/bin/userspace-secure-pasteboard.elf",
-    \\      "zig-out/bin/userspace-object-resilience.elf",
-    \\      "zig-out/bin/userspace-secret-vault.elf"
-    \\    ],
-    \\    "forbidden_path_patterns": [
-    \\      "build/os-verification.iso",
-    \\      "zig-out/bin/kernel-zigos-native-verification.elf",
-    \\      "zig-out/bin/kernel-zigos-native-tampered-*.elf",
-    \\      "zig-out/bin/kernel-zigos-native-rollback-slot-failure.elf",
-    \\      "zig-out/bin/kernel-zigos-native-storage-durability.elf",
-    \\      "zig-out/bin/kernel-recovery.elf",
-    \\      "zig-out/bin/kernel-benchmark.elf",
-    \\      "zig-out/bin/userspace-transport-probe.elf",
-    \\      "zig-out/bin/userspace-termination-probe.elf",
-    \\      "zig-out/bin/userspace-service-client.elf",
-    \\      "zig-out/bin/userspace-mmu-isolation-proof.elf",
-    \\      "zig-out/bin/userspace-notes-daily.elf"
-    \\    ]
-    \\  }
-    \\}
-;
-
-fn expectReleaseArtifactSelectionError(source: []const u8, needle: []const u8) !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const allocator = arena_state.allocator();
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
-    var errors = std.ArrayList([]const u8).empty;
-    _ = try validateReleaseArtifactSelectionPolicy(allocator, &errors, parsed.value);
-    for (errors.items) |message| {
-        if (std.mem.indexOf(u8, message, needle) != null) return;
-    }
-    try std.testing.expect(false);
-}
-
-test "release artifact selection admits production outputs and rejects verification media" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const allocator = arena_state.allocator();
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, release_artifact_selection_fixture, .{});
-    var errors = std.ArrayList([]const u8).empty;
-    const selection = (try validateReleaseArtifactSelectionPolicy(allocator, &errors, parsed.value)).?;
-
-    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
-    try std.testing.expect(releaseArtifactPathAllowed(selection, "zig-out/bin/kernel-zigos-native.elf"));
-    try std.testing.expect(releaseArtifactPathAllowed(selection, "zig-out/bin/userspace-session-manager.elf"));
-    try std.testing.expect(!releaseArtifactPathAllowed(selection, "zig-out/bin"));
-    try std.testing.expect(!releaseArtifactPathAllowed(selection, "zig-out/bin/kernel-zigos-native-verification.elf"));
-    try std.testing.expect(!releaseArtifactPathAllowed(selection, "build/os-verification.iso"));
-    try std.testing.expect(!releaseArtifactPathAllowed(selection, "zig-out/bin/userspace-mmu-isolation-proof.elf"));
-}
-
-test "release artifact selection rejects directory sweeps and unapproved exact paths" {
-    const broad_sweep = try replaceOnceForTest(
-        std.testing.allocator,
-        release_artifact_selection_fixture,
-        "\"directory_sweeps_allowed\": false",
-        "\"directory_sweeps_allowed\": true",
-    );
-    defer std.testing.allocator.free(broad_sweep);
-    try expectReleaseArtifactSelectionError(broad_sweep, "directory_sweeps_allowed must be false");
-
-    const verification_kernel = try replaceOnceForTest(
-        std.testing.allocator,
-        release_artifact_selection_fixture,
-        "\"zig-out/bin/kernel-zigos-native.elf\"",
-        "\"zig-out/bin/kernel-zigos-native-verification.elf\"",
-    );
-    defer std.testing.allocator.free(verification_kernel);
-    try expectReleaseArtifactSelectionError(verification_kernel, "unapproved exact path");
-
-    const verification_userspace = try replaceOnceForTest(
-        std.testing.allocator,
-        release_artifact_selection_fixture,
-        "\"zig-out/bin/userspace-session-manager.elf\"",
-        "\"zig-out/bin/userspace-mmu-isolation-proof.elf\"",
-    );
-    defer std.testing.allocator.free(verification_userspace);
-    try expectReleaseArtifactSelectionError(verification_userspace, "unapproved production userspace path");
-}
-
-const release_keyring_fixture =
-    \\{
-    \\  "schema_version": 1,
-    \\  "purpose": "test release keyring",
-    \\  "public_release_allowed": false,
-    \\  "required_provider_boundary": "hardware-backed TPM, secure enclave, offline HSM, or cloud KMS release signing provider",
-    \\  "post_quantum_policy": {
-    \\    "mode": "shadow",
-    \\    "fips_validated_required": true,
-    \\    "fips_140_validation_required": true,
-    \\    "production_signature_algorithm": "ml-dsa-65",
-    \\    "key_establishment_algorithm": "ml-kem-768",
-    \\    "backup_signature_algorithm": "slh-dsa-sha2-128s",
-    \\    "classical_baseline": "Ed25519 remains the classical DSSE baseline until releases carry a signature from a separately validated FIPS 204 ML-DSA provider",
-    \\    "standards": [
-    \\      { "fips": "FIPS 203", "algorithm": "ML-KEM", "scope": "key establishment" },
-    \\      { "fips": "FIPS 204", "algorithm": "ML-DSA", "scope": "digital signatures" },
-    \\      { "fips": "FIPS 205", "algorithm": "SLH-DSA", "scope": "hash fallback" }
-    \\    ],
-    \\    "rollout": [
-    \\      "shadow verifier measurement",
-    \\      "canary dual-signature release",
-    \\      "required public-release ML-DSA verification"
-    \\    ]
-    \\  },
-    \\  "keys": [
-    \\    {
-    \\      "key_id": "zigos-release-signing-required",
-    \\      "status": "required-not-configured",
-    \\      "algorithm": "ed25519",
-    \\      "custody": "tpm-secure-enclave-hsm-or-kms-required",
-    \\      "hardware_backed": true,
-    \\      "generation": 1,
-    \\      "not_before": "TBD",
-    \\      "not_after": "TBD",
-    \\      "public_key_encoding": "hex-ed25519-raw",
-    \\      "public_key": "TBD",
-    \\      "verifier_metadata_schema": "zigos.release-verifier-metadata",
-    \\      "verifier_metadata_digest": "TBD",
-    \\      "provider_name": "TBD",
-    \\      "provider_boundary": "tpm-secure-enclave-hsm-or-kms-required",
-    \\      "rotation_policy": "new release key generation before not_after",
-    \\      "revocation_source": "spec/release_security/revoked_release_keys.json"
-    \\    }
-    \\  ],
-    \\  "production_pqc_profiles": [
-    \\    {
-    \\      "profile": "ml-dsa-65",
-    \\      "status": "provider-required-not-configured",
-    \\      "release_allowed": false,
-    \\      "fips_standard": "FIPS 204",
-    \\      "fips_validation_required": true,
-    \\      "fips_140_validated_module_required": true
-    \\    }
-    \\  ]
-    \\}
-;
-
-fn expectNoReleaseKeyringErrors(source: []const u8) !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const allocator = arena_state.allocator();
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
-    var errors = std.ArrayList([]const u8).empty;
-    try validateReleaseKeyringRoot(allocator, &errors, parsed.value);
-    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
-}
-
-fn expectReleaseKeyringError(source: []const u8, needle: []const u8) !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const allocator = arena_state.allocator();
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
-    var errors = std.ArrayList([]const u8).empty;
-    try validateReleaseKeyringRoot(allocator, &errors, parsed.value);
-    for (errors.items) |message| {
-        if (std.mem.indexOf(u8, message, needle) != null) return;
-    }
-    try std.testing.expect(false);
-}
-
-fn replaceOnceForTest(allocator: std.mem.Allocator, source: []const u8, needle: []const u8, replacement: []const u8) ![]const u8 {
-    const offset = std.mem.indexOf(u8, source, needle) orelse return error.MissingFixtureNeedle;
-    const output = try allocator.alloc(u8, source.len - needle.len + replacement.len);
-    @memcpy(output[0..offset], source[0..offset]);
-    @memcpy(output[offset..][0..replacement.len], replacement);
-    @memcpy(output[offset + replacement.len ..], source[offset + needle.len ..]);
-    return output;
-}
-
-test "release keyring gate keeps unconfigured keys non-public" {
-    try expectNoReleaseKeyringErrors(release_keyring_fixture);
-
-    const public_release = try replaceOnceForTest(
-        std.testing.allocator,
-        release_keyring_fixture,
-        "\"public_release_allowed\": false",
-        "\"public_release_allowed\": true",
-    );
-    defer std.testing.allocator.free(public_release);
-    try expectReleaseKeyringError(public_release, "cannot allow public releases");
-}
-
-test "release keyring gate rejects active keys with placeholder verifier material" {
-    const active_placeholder = try replaceOnceForTest(
-        std.testing.allocator,
-        release_keyring_fixture,
-        "\"status\": \"required-not-configured\"",
-        "\"status\": \"active\"",
-    );
-    defer std.testing.allocator.free(active_placeholder);
-    try expectReleaseKeyringError(active_placeholder, "must not contain TBD verifier or key material");
-}
-
-test "release keyring gate accepts configured active hardware release keys" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const allocator = arena_state.allocator();
-
-    var configured = try replaceOnceForTest(allocator, release_keyring_fixture, "\"public_release_allowed\": false", "\"public_release_allowed\": true");
-    configured = try replaceOnceForTest(allocator, configured, "\"status\": \"required-not-configured\"", "\"status\": \"active\"");
-    configured = try replaceOnceForTest(allocator, configured, "\"not_before\": \"TBD\"", "\"not_before\": \"2026-01-01\"");
-    configured = try replaceOnceForTest(allocator, configured, "\"not_after\": \"TBD\"", "\"not_after\": \"2027-01-01\"");
-    configured = try replaceOnceForTest(allocator, configured, "\"public_key\": \"TBD\"", "\"public_key\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"");
-    configured = try replaceOnceForTest(allocator, configured, "\"verifier_metadata_digest\": \"TBD\"", "\"verifier_metadata_digest\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"");
-    configured = try replaceOnceForTest(allocator, configured, "\"provider_name\": \"TBD\"", "\"provider_name\": \"release-kms-ed25519\"");
-
-    try expectNoReleaseKeyringErrors(configured);
+test "release evidence excludes bundle-controlled trust authorities" {
+    try std.testing.expect(release_catalog.isReleaseEvidenceName("root-metadata.json"));
+    try std.testing.expect(release_catalog.isReleaseEvidenceName("release-trust-policy.dsse.json"));
+    try std.testing.expect(!release_catalog.isReleaseEvidenceName("release-manifest.dsse.json"));
+    try std.testing.expect(!release_catalog.isReleaseEvidenceName("release-keyring.json"));
+    try std.testing.expect(!release_catalog.isReleaseEvidenceName("revoked-release-keys.json"));
 }
 
 fn validateThreatModel(
@@ -1960,48 +1633,6 @@ fn stringArrayContainsSubstring(values: []const []const u8, needle: []const u8) 
         if (std.mem.indexOf(u8, value, needle) != null) return true;
     }
     return false;
-}
-
-fn isPlaceholder(value: []const u8) bool {
-    return std.mem.eql(u8, value, "TBD") or
-        std.mem.eql(u8, value, "provider-required") or
-        common.containsAsciiIgnoreCase(value, "not-configured");
-}
-
-fn hasReleaseKeyPlaceholder(
-    not_before: []const u8,
-    not_after: []const u8,
-    public_key: []const u8,
-    verifier_metadata_digest: []const u8,
-    provider_name: []const u8,
-) bool {
-    return isPlaceholder(not_before) or
-        isPlaceholder(not_after) or
-        isPlaceholder(public_key) or
-        isPlaceholder(verifier_metadata_digest) or
-        isPlaceholder(provider_name);
-}
-
-fn looksLikeUtcDate(value: []const u8) bool {
-    if (value.len != "YYYY-MM-DD".len) return false;
-    return std.ascii.isDigit(value[0]) and
-        std.ascii.isDigit(value[1]) and
-        std.ascii.isDigit(value[2]) and
-        std.ascii.isDigit(value[3]) and
-        value[4] == '-' and
-        std.ascii.isDigit(value[5]) and
-        std.ascii.isDigit(value[6]) and
-        value[7] == '-' and
-        std.ascii.isDigit(value[8]) and
-        std.ascii.isDigit(value[9]);
-}
-
-fn hexTextOfLength(value: []const u8, expected_len: usize) bool {
-    if (value.len != expected_len) return false;
-    for (value) |byte| {
-        if (hexValue(byte) == null) return false;
-    }
-    return true;
 }
 
 fn containsHardwareReleaseBoundary(value: []const u8) bool {
