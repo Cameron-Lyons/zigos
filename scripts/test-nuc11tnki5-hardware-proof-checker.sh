@@ -15,25 +15,64 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/zigos-nuc-proof-checker.XXXXXX")"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT
 ARTIFACT_ROOT="$TMP_ROOT/artifacts"
 VERIFIER="$TMP_ROOT/trusted-fixture-verifier"
+RELEASE_VERIFIER="$TMP_ROOT/trusted-release-verifier"
+TRUSTED_ROOT="$TMP_ROOT/trusted-root-metadata.json"
+TRUST_STATE="$TMP_ROOT/persistent-release-trust-state.json"
 
 REQUIRED_ARTIFACTS=(
   "build/os.iso"
+  "spec/production_readiness.json"
+  "spec/release_security/crash_dump_redaction.json"
+  "spec/release_security/fuzz_corpus.json"
+  "spec/release_security/memory_safety_inventory.json"
+  "spec/release_security/release_artifacts.json"
+  "spec/release_security/threat_model.json"
+  "spec/release_security/vulnerability_disclosure.json"
   "zig-out/bin/kernel-zigos-native.elf"
+  "zig-out/bin/userspace-attention-broker.elf"
+  "zig-out/bin/userspace-capture.elf"
+  "zig-out/bin/userspace-compositor.elf"
+  "zig-out/bin/userspace-indexing-search.elf"
+  "zig-out/bin/userspace-media-print.elf"
+  "zig-out/bin/userspace-network-stack.elf"
+  "zig-out/bin/userspace-notes.elf"
+  "zig-out/bin/userspace-object-resilience.elf"
+  "zig-out/bin/userspace-package-service.elf"
+  "zig-out/bin/userspace-permission-review.elf"
+  "zig-out/bin/userspace-personal-context.elf"
+  "zig-out/bin/userspace-policy-mediation.elf"
+  "zig-out/bin/userspace-secret-vault.elf"
+  "zig-out/bin/userspace-secure-pasteboard.elf"
+  "zig-out/bin/userspace-sensitive-capture.elf"
+  "zig-out/bin/userspace-service-registry.elf"
+  "zig-out/bin/userspace-session-manager.elf"
+  "zig-out/bin/userspace-storage-driver.elf"
+  "zig-out/bin/userspace-storage-object.elf"
+  "zig-out/bin/userspace-sync-service.elf"
+  "zig-out/bin/userspace-sync.elf"
+  "zig-out/bin/userspace-task-lifecycle.elf"
+  "zig-out/bin/userspace-viewer.elf"
+  "zig-out/bin/userspace-workspace-storage.elf"
+)
+
+REQUIRED_CAPTURE_INPUTS=(
   "build/os-verification.iso"
   "zig-out/bin/kernel-zigos-native-verification.elf"
-  "zig-out/bin/userspace-session-manager.elf"
-  "zig-out/bin/userspace-policy-mediation.elf"
-  "zig-out/bin/userspace-permission-review.elf"
-  "zig-out/bin/userspace-network-stack.elf"
-  "zig-out/bin/userspace-storage-driver.elf"
-  "zig-out/bin/userspace-sync-service.elf"
-  "SECURITY.md"
-  "spec/production_readiness.json"
-  "spec/release_security/release_artifacts.json"
-  "spec/release_security/release_keyring.json"
-  "spec/release_security/revoked_release_keys.json"
   "spec/hardware/nuc11tnki5-production-required-markers.txt"
   "spec/hardware/nuc11tnki5-required-markers.txt"
+)
+
+RELEASE_EVIDENCE_NAMES=(
+  "artifact-digests.sha256"
+  "artifact-measurements.json"
+  "customer-verification-policy.json"
+  "provenance.dsse.intoto.jsonl"
+  "provenance.intoto.jsonl"
+  "release-trust-policy.dsse.json"
+  "reproducible-artifact-digests.sha256"
+  "reproducible-build.json"
+  "root-metadata.json"
+  "sbom.spdx.json"
 )
 
 sha256_file() {
@@ -47,7 +86,7 @@ sha256_file() {
 
 write_required_artifacts() {
   local artifact
-  for artifact in "${REQUIRED_ARTIFACTS[@]}"; do
+  for artifact in "${REQUIRED_ARTIFACTS[@]}" "${REQUIRED_CAPTURE_INPUTS[@]}"; do
     mkdir -p "$ARTIFACT_ROOT/$(dirname -- "$artifact")"
     case "$artifact" in
       spec/hardware/nuc11tnki5-production-required-markers.txt)
@@ -61,6 +100,17 @@ write_required_artifacts() {
         ;;
     esac
   done
+
+  mkdir -p "$ARTIFACT_ROOT/build/release-security"
+  printf '{"schemaVersion":1,"fixture":"trusted-root"}\n' > "$TRUSTED_ROOT"
+  cp "$TRUSTED_ROOT" "$ARTIFACT_ROOT/build/release-security/root-metadata.json"
+  for evidence_name in "${RELEASE_EVIDENCE_NAMES[@]}"; do
+    if [ "$evidence_name" = "root-metadata.json" ]; then
+      continue
+    fi
+    printf 'authenticated release evidence fixture: %s\n' "$evidence_name" > "$ARTIFACT_ROOT/build/release-security/$evidence_name"
+  done
+  printf 'authenticated exact release manifest fixture\n' > "$ARTIFACT_ROOT/build/release-security/release-manifest.dsse.json"
 }
 
 write_fixture_verifier() {
@@ -133,6 +183,44 @@ EOF
   chmod 0700 "$VERIFIER"
 }
 
+write_fixture_release_verifier() {
+  cat > "$RELEASE_VERIFIER" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print tolower($1)}'
+  else
+    shasum -a 256 "$1" | awk '{print tolower($1)}'
+  fi
+}
+
+[ "${1:-}" = "verify" ]
+shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --bundle) bundle="$2" ;;
+    --artifacts) artifacts="$2" ;;
+    --trusted-root) trusted_root="$2" ;;
+    --trusted-root-sha256) trusted_root_sha256="$2" ;;
+    --trust-state) trust_state="$2" ;;
+    *) exit 64 ;;
+  esac
+  shift 2
+done
+
+[ "$bundle" = "$artifacts/build/release-security" ]
+[ "$(sha256_file "$trusted_root")" = "$trusted_root_sha256" ]
+cmp -s "$trusted_root" "$bundle/root-metadata.json"
+[ -s "$bundle/release-trust-policy.dsse.json" ]
+[ -s "$bundle/release-manifest.dsse.json" ]
+printf '{"fixture":"authenticated-release-state"}\n' > "$trust_state"
+printf 'release bundle verified\n'
+EOF
+  chmod 0700 "$RELEASE_VERIFIER"
+}
+
 write_manifest() {
   local dir="$1"
   local repo_commit
@@ -169,6 +257,13 @@ firmware_settings=firmware-settings.txt
 power_cycle_notes=power-cycle-notes.txt
 attestation_lifecycle=attestation-lifecycle.txt
 artifact_digests=artifact-digests.sha256
+release_bundle=build/release-security
+release_manifest=build/release-security/release-manifest.dsse.json
+release_manifest_sha256=$(sha256_file "$ARTIFACT_ROOT/build/release-security/release-manifest.dsse.json")
+release_root_metadata=build/release-security/root-metadata.json
+release_root_metadata_sha256=$(sha256_file "$ARTIFACT_ROOT/build/release-security/root-metadata.json")
+release_trust_policy=build/release-security/release-trust-policy.dsse.json
+release_trust_policy_sha256=$(sha256_file "$ARTIFACT_ROOT/build/release-security/release-trust-policy.dsse.json")
 operator_metadata_markers=operator-metadata-markers.txt
 production_quote=production-attestation.quote
 production_signature=production-attestation.sig
@@ -370,6 +465,7 @@ write_artifact_digests() {
   for artifact in "${REQUIRED_ARTIFACTS[@]}"; do
     printf '%s  %s\n' "$(sha256_file "$ARTIFACT_ROOT/$artifact")" "$artifact" >> "$dir/artifact-digests.sha256"
   done
+  cp "$dir/artifact-digests.sha256" "$ARTIFACT_ROOT/build/release-security/artifact-digests.sha256"
 }
 
 write_statement() {
@@ -400,6 +496,11 @@ checker_env() {
     ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE="$NONCE" \
     ZIGOS_HARDWARE_PROOF_VERIFIER="$VERIFIER" \
     ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256="$VERIFIER_SHA256" \
+    ZIGOS_RELEASE_VERIFIER="$RELEASE_VERIFIER" \
+    ZIGOS_RELEASE_VERIFIER_SHA256="$RELEASE_VERIFIER_SHA256" \
+    ZIGOS_RELEASE_TRUST_ROOT="$TRUSTED_ROOT" \
+    ZIGOS_RELEASE_TRUST_ROOT_SHA256="$TRUSTED_ROOT_SHA256" \
+    ZIGOS_RELEASE_TRUST_STATE="$TRUST_STATE" \
     "$@"
 }
 
@@ -425,7 +526,15 @@ copy_valid() {
 
 write_required_artifacts
 write_fixture_verifier
+write_fixture_release_verifier
 VERIFIER_SHA256="$(sha256_file "$VERIFIER")"
+RELEASE_VERIFIER_SHA256="$(sha256_file "$RELEASE_VERIFIER")"
+TRUSTED_ROOT_SHA256="$(sha256_file "$TRUSTED_ROOT")"
+export ZIGOS_RELEASE_VERIFIER="$RELEASE_VERIFIER"
+export ZIGOS_RELEASE_VERIFIER_SHA256="$RELEASE_VERIFIER_SHA256"
+export ZIGOS_RELEASE_TRUST_ROOT="$TRUSTED_ROOT"
+export ZIGOS_RELEASE_TRUST_ROOT_SHA256="$TRUSTED_ROOT_SHA256"
+export ZIGOS_RELEASE_TRUST_STATE="$TRUST_STATE"
 VALID_BUNDLE="$TMP_ROOT/valid"
 make_valid_bundle "$VALID_BUNDLE"
 expect_pass "$VALID_BUNDLE"
@@ -569,6 +678,21 @@ sed 's/^device_id=.*/device_id=nuc11tnki5-different-device/' "$device_mismatch/d
 mv "$device_mismatch/device-identity.next" "$device_mismatch/device-identity.txt"
 write_statement "$device_mismatch"
 expect_fail "$device_mismatch"
+
+legacy_digest_entry="$(copy_valid legacy-digest-entry)"
+printf '%064d  spec/release_security/release_keyring.json\n' 0 >> "$legacy_digest_entry/artifact-digests.sha256"
+write_statement "$legacy_digest_entry"
+expect_fail "$legacy_digest_entry"
+
+tampered_release_manifest="$(copy_valid tampered-release-manifest)"
+printf 'unbound replacement release bytes\n' >> "$ARTIFACT_ROOT/build/release-security/release-manifest.dsse.json"
+expect_fail "$tampered_release_manifest"
+printf 'authenticated exact release manifest fixture\n' > "$ARTIFACT_ROOT/build/release-security/release-manifest.dsse.json"
+
+tampered_root_evidence="$(copy_valid tampered-root-evidence)"
+printf 'untrusted bundled root bytes\n' >> "$ARTIFACT_ROOT/build/release-security/root-metadata.json"
+expect_fail "$tampered_root_evidence"
+cp "$TRUSTED_ROOT" "$ARTIFACT_ROOT/build/release-security/root-metadata.json"
 
 artifact_hash="$(copy_valid artifact-hash)"
 printf 'changed production ISO\n' >> "$ARTIFACT_ROOT/build/os.iso"

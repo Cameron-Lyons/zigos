@@ -26,6 +26,15 @@ fail() {
   exit 1
 }
 
+path_is_contained() {
+  local root="${1:?root required}"
+  local candidate="${2:?candidate required}"
+  case "$candidate" in
+    "$root" | "$root"/*) return 0 ;;
+  esac
+  return 1
+}
+
 if [ "$#" -ne 1 ]; then
   fail "usage: scripts/check-nuc11tnki5-hardware-proof.sh BUNDLE_DIRECTORY"
 fi
@@ -36,10 +45,19 @@ if [ ! -d "$PROOF_PATH" ]; then
 fi
 BUNDLE_DIR="$(CDPATH='' cd -- "$PROOF_PATH" && pwd)"
 ARTIFACT_ROOT="${ZIGOS_ARTIFACT_ROOT:-$ROOT_DIR}"
+if [ ! -d "$ARTIFACT_ROOT" ]; then
+  fail "artifact root must be an existing directory: $ARTIFACT_ROOT"
+fi
+ARTIFACT_ROOT="$(CDPATH='' cd -- "$ARTIFACT_ROOT" && pwd)"
 
 TRUSTED_VERIFIER="${ZIGOS_HARDWARE_PROOF_VERIFIER:-}"
 EXPECTED_VERIFIER_SHA256="${ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256:-}"
 EXPECTED_NONCE="${ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE:-}"
+RELEASE_VERIFIER="${ZIGOS_RELEASE_VERIFIER:-}"
+EXPECTED_RELEASE_VERIFIER_SHA256="${ZIGOS_RELEASE_VERIFIER_SHA256:-}"
+TRUSTED_RELEASE_ROOT="${ZIGOS_RELEASE_TRUST_ROOT:-}"
+EXPECTED_RELEASE_ROOT_SHA256="${ZIGOS_RELEASE_TRUST_ROOT_SHA256:-}"
+RELEASE_TRUST_STATE="${ZIGOS_RELEASE_TRUST_STATE:-}"
 
 if [ -z "$TRUSTED_VERIFIER" ]; then
   fail "ZIGOS_HARDWARE_PROOF_VERIFIER must name an external trusted verifier executable"
@@ -51,14 +69,54 @@ esac
 if [ ! -f "$TRUSTED_VERIFIER" ] || [ ! -x "$TRUSTED_VERIFIER" ] || [ -L "$TRUSTED_VERIFIER" ]; then
   fail "trusted verifier must be an executable regular file, not a symlink: $TRUSTED_VERIFIER"
 fi
-case "$TRUSTED_VERIFIER" in
-  "$BUNDLE_DIR"/*) fail "trusted verifier must be external to the proof bundle" ;;
-esac
 if ! [[ "$EXPECTED_VERIFIER_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
   fail "ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256 must be an externally pinned lowercase SHA-256 digest"
 fi
 if ! [[ "$EXPECTED_NONCE" =~ ^[0-9a-f]{64}$ ]]; then
   fail "ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE must be the fresh externally issued 64-hex capture nonce"
+fi
+
+for verifier_name in RELEASE_VERIFIER TRUSTED_RELEASE_ROOT RELEASE_TRUST_STATE; do
+  verifier_path="${!verifier_name}"
+  case "$verifier_path" in
+    /*) ;;
+    *) fail "$verifier_name must be an absolute path" ;;
+  esac
+done
+if [ ! -f "$RELEASE_VERIFIER" ] || [ ! -x "$RELEASE_VERIFIER" ] || [ -L "$RELEASE_VERIFIER" ]; then
+  fail "ZIGOS_RELEASE_VERIFIER must be an external executable regular file, not a symlink"
+fi
+if [ ! -f "$TRUSTED_RELEASE_ROOT" ] || [ -L "$TRUSTED_RELEASE_ROOT" ]; then
+  fail "ZIGOS_RELEASE_TRUST_ROOT must be an external regular file, not a symlink"
+fi
+if ! [[ "$EXPECTED_RELEASE_VERIFIER_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  fail "ZIGOS_RELEASE_VERIFIER_SHA256 must be an externally pinned lowercase SHA-256 digest"
+fi
+if ! [[ "$EXPECTED_RELEASE_ROOT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  fail "ZIGOS_RELEASE_TRUST_ROOT_SHA256 must be an externally pinned lowercase SHA-256 digest"
+fi
+if [ -L "$RELEASE_TRUST_STATE" ]; then
+  fail "release trust state must not be a symlink"
+fi
+release_state_parent="$(dirname "$RELEASE_TRUST_STATE")"
+[ -d "$release_state_parent" ] || fail "release trust state parent directory must already exist"
+TRUSTED_VERIFIER="$(realpath "$TRUSTED_VERIFIER")"
+RELEASE_VERIFIER="$(realpath "$RELEASE_VERIFIER")"
+TRUSTED_RELEASE_ROOT="$(realpath "$TRUSTED_RELEASE_ROOT")"
+release_state_parent="$(realpath "$release_state_parent")"
+RELEASE_TRUST_STATE="$release_state_parent/$(basename "$RELEASE_TRUST_STATE")"
+
+if path_is_contained "$BUNDLE_DIR" "$TRUSTED_VERIFIER" || path_is_contained "$ARTIFACT_ROOT" "$TRUSTED_VERIFIER"; then
+  fail "trusted hardware verifier must be obtained independently of the proof bundle and artifact root"
+fi
+if path_is_contained "$BUNDLE_DIR" "$RELEASE_VERIFIER" || path_is_contained "$ARTIFACT_ROOT" "$RELEASE_VERIFIER"; then
+  fail "release verifier must be obtained independently of the proof bundle and artifact root"
+fi
+if path_is_contained "$BUNDLE_DIR" "$TRUSTED_RELEASE_ROOT" || path_is_contained "$ARTIFACT_ROOT" "$TRUSTED_RELEASE_ROOT"; then
+  fail "trusted release root must be obtained out of band, not from the proof bundle or artifact root"
+fi
+if path_is_contained "$BUNDLE_DIR" "$RELEASE_TRUST_STATE" || path_is_contained "$ARTIFACT_ROOT" "$RELEASE_TRUST_STATE"; then
+  fail "release trust state must persist outside the proof bundle and artifact root"
 fi
 
 PROOF_MANIFEST_PATH="$BUNDLE_DIR/proof-manifest.txt"
@@ -76,25 +134,45 @@ PRODUCTION_SIGNATURE_PATH="$BUNDLE_DIR/production-attestation.sig"
 VERIFICATION_QUOTE_PATH="$BUNDLE_DIR/verification-attestation.quote"
 VERIFICATION_SIGNATURE_PATH="$BUNDLE_DIR/verification-attestation.sig"
 CAPTURE_STATEMENT_PATH="$BUNDLE_DIR/capture-statement.txt"
+RELEASE_BUNDLE_DIR="$ARTIFACT_ROOT/build/release-security"
+RELEASE_MANIFEST_PATH="$RELEASE_BUNDLE_DIR/release-manifest.dsse.json"
+RELEASE_ROOT_EVIDENCE_PATH="$RELEASE_BUNDLE_DIR/root-metadata.json"
+RELEASE_TRUST_POLICY_PATH="$RELEASE_BUNDLE_DIR/release-trust-policy.dsse.json"
 
 REQUIRED_ARTIFACT_DIGEST_PATHS=(
   "build/os.iso"
-  "zig-out/bin/kernel-zigos-native.elf"
-  "build/os-verification.iso"
-  "zig-out/bin/kernel-zigos-native-verification.elf"
-  "zig-out/bin/userspace-session-manager.elf"
-  "zig-out/bin/userspace-policy-mediation.elf"
-  "zig-out/bin/userspace-permission-review.elf"
-  "zig-out/bin/userspace-network-stack.elf"
-  "zig-out/bin/userspace-storage-driver.elf"
-  "zig-out/bin/userspace-sync-service.elf"
-  "SECURITY.md"
   "spec/production_readiness.json"
+  "spec/release_security/crash_dump_redaction.json"
+  "spec/release_security/fuzz_corpus.json"
+  "spec/release_security/memory_safety_inventory.json"
   "spec/release_security/release_artifacts.json"
-  "spec/release_security/release_keyring.json"
-  "spec/release_security/revoked_release_keys.json"
-  "$PRODUCTION_REQUIRED_MARKERS_PATH"
-  "$VERIFICATION_REQUIRED_MARKERS_PATH"
+  "spec/release_security/threat_model.json"
+  "spec/release_security/vulnerability_disclosure.json"
+  "zig-out/bin/kernel-zigos-native.elf"
+  "zig-out/bin/userspace-attention-broker.elf"
+  "zig-out/bin/userspace-capture.elf"
+  "zig-out/bin/userspace-compositor.elf"
+  "zig-out/bin/userspace-indexing-search.elf"
+  "zig-out/bin/userspace-media-print.elf"
+  "zig-out/bin/userspace-network-stack.elf"
+  "zig-out/bin/userspace-notes.elf"
+  "zig-out/bin/userspace-object-resilience.elf"
+  "zig-out/bin/userspace-package-service.elf"
+  "zig-out/bin/userspace-permission-review.elf"
+  "zig-out/bin/userspace-personal-context.elf"
+  "zig-out/bin/userspace-policy-mediation.elf"
+  "zig-out/bin/userspace-secret-vault.elf"
+  "zig-out/bin/userspace-secure-pasteboard.elf"
+  "zig-out/bin/userspace-sensitive-capture.elf"
+  "zig-out/bin/userspace-service-registry.elf"
+  "zig-out/bin/userspace-session-manager.elf"
+  "zig-out/bin/userspace-storage-driver.elf"
+  "zig-out/bin/userspace-storage-object.elf"
+  "zig-out/bin/userspace-sync-service.elf"
+  "zig-out/bin/userspace-sync.elf"
+  "zig-out/bin/userspace-task-lifecycle.elf"
+  "zig-out/bin/userspace-viewer.elf"
+  "zig-out/bin/userspace-workspace-storage.elf"
 )
 
 PRODUCTION_FORBIDDEN_MARKERS=(
@@ -304,6 +382,14 @@ require_digest_manifest_format() {
   ' "$ARTIFACT_DIGESTS_PATH"; then
     fail "artifact digest file contains malformed or unsafe SHA-256 rows"
   fi
+
+  local expected_paths="$TMP_ROOT/release-target-paths.expected"
+  local actual_paths="$TMP_ROOT/release-target-paths.actual"
+  printf '%s\n' "${REQUIRED_ARTIFACT_DIGEST_PATHS[@]}" | LC_ALL=C sort > "$expected_paths"
+  awk 'NF != 0 { print $2 }' "$ARTIFACT_DIGESTS_PATH" | LC_ALL=C sort > "$actual_paths"
+  if ! cmp -s "$expected_paths" "$actual_paths"; then
+    fail "artifact digest file must contain exactly the 33 production targets and no verification or legacy trust artifacts"
+  fi
 }
 
 require_digest_for_path() {
@@ -496,9 +582,39 @@ verification_signature_sha256=$(sha256_file "$VERIFICATION_SIGNATURE_PATH")
 EOF
 }
 
-actual_verifier_sha256="$(sha256_file "$TRUSTED_VERIFIER")"
+PINNED_HARDWARE_VERIFIER="$TMP_ROOT/trusted-hardware-verifier"
+PINNED_RELEASE_VERIFIER="$TMP_ROOT/zigos-verify-release"
+cp "$TRUSTED_VERIFIER" "$PINNED_HARDWARE_VERIFIER"
+cp "$RELEASE_VERIFIER" "$PINNED_RELEASE_VERIFIER"
+chmod 0500 "$PINNED_HARDWARE_VERIFIER" "$PINNED_RELEASE_VERIFIER"
+
+actual_verifier_sha256="$(sha256_file "$PINNED_HARDWARE_VERIFIER")"
 if [ "$actual_verifier_sha256" != "$EXPECTED_VERIFIER_SHA256" ]; then
   fail "trusted verifier executable digest does not match the externally pinned SHA-256"
+fi
+
+if [ "$(sha256_file "$PINNED_RELEASE_VERIFIER")" != "$EXPECTED_RELEASE_VERIFIER_SHA256" ]; then
+  fail "release verifier executable digest does not match the externally pinned SHA-256"
+fi
+if [ "$(sha256_file "$TRUSTED_RELEASE_ROOT")" != "$EXPECTED_RELEASE_ROOT_SHA256" ]; then
+  fail "trusted release root does not match the externally pinned SHA-256"
+fi
+require_regular_file "$RELEASE_MANIFEST_PATH" "authenticated release publication marker"
+require_regular_file "$RELEASE_ROOT_EVIDENCE_PATH" "release root metadata evidence"
+require_regular_file "$RELEASE_TRUST_POLICY_PATH" "root-threshold-signed release trust policy"
+if ! cmp -s "$TRUSTED_RELEASE_ROOT" "$RELEASE_ROOT_EVIDENCE_PATH"; then
+  fail "release root metadata evidence must exactly match the independently pinned root"
+fi
+release_verifier_stdout="$TMP_ROOT/release-verifier.stdout"
+release_verifier_stderr="$TMP_ROOT/release-verifier.stderr"
+if ! "$PINNED_RELEASE_VERIFIER" verify \
+  --bundle "$RELEASE_BUNDLE_DIR" \
+  --artifacts "$ARTIFACT_ROOT" \
+  --trusted-root "$TRUSTED_RELEASE_ROOT" \
+  --trusted-root-sha256 "$EXPECTED_RELEASE_ROOT_SHA256" \
+  --trust-state "$RELEASE_TRUST_STATE" \
+  > "$release_verifier_stdout" 2> "$release_verifier_stderr"; then
+  fail "independently pinned release verifier rejected the exact signed release manifest, root, policy, or rollback state"
 fi
 
 require_completed_text_file "$PROOF_MANIFEST_PATH" "proof manifest"
@@ -527,6 +643,13 @@ require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "firmware_settings" "f
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "power_cycle_notes" "power-cycle-notes.txt"
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "attestation_lifecycle" "attestation-lifecycle.txt"
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "artifact_digests" "artifact-digests.sha256"
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "release_bundle" "build/release-security"
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "release_manifest" "build/release-security/release-manifest.dsse.json"
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "release_manifest_sha256" "$(sha256_file "$RELEASE_MANIFEST_PATH")"
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "release_root_metadata" "build/release-security/root-metadata.json"
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "release_root_metadata_sha256" "$(sha256_file "$RELEASE_ROOT_EVIDENCE_PATH")"
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "release_trust_policy" "build/release-security/release-trust-policy.dsse.json"
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "release_trust_policy_sha256" "$(sha256_file "$RELEASE_TRUST_POLICY_PATH")"
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "operator_metadata_markers" "operator-metadata-markers.txt"
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "production_quote" "production-attestation.quote"
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "production_signature" "production-attestation.sig"
@@ -753,7 +876,7 @@ fi
 
 verifier_response="$TMP_ROOT/verifier.response"
 verifier_stderr="$TMP_ROOT/verifier.stderr"
-if ! "$TRUSTED_VERIFIER" \
+if ! "$PINNED_HARDWARE_VERIFIER" \
   --statement "$CAPTURE_STATEMENT_PATH" \
   --statement-sha256 "$statement_sha256" \
   --nonce "$capture_nonce" \
