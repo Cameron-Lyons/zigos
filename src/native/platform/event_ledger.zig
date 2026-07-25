@@ -1330,7 +1330,7 @@ pub const Ledger = struct {
     pub fn exportText(self: *const Ledger, buffer: []u8, options: ExportOptions) Error![]const u8 {
         var used: usize = 0;
         var index: usize = 0;
-        while (index < self.events.slots.len) : (index += 1) {
+        while (index < self.events.next_unclaimed_index) : (index += 1) {
             const slot = &self.events.slots[index];
             if (!slot.in_use) continue;
             try renderTextEvent(&slot.event, buffer, &used, options.include_protected_content);
@@ -1728,7 +1728,10 @@ pub const Ledger = struct {
 
     fn appendEvent(self: *Ledger, event: *const Event) Error!void {
         const sequence = self.next_sequence;
-        const event_index = self.events.reserveIndex(sequence) orelse reserve: {
+        var stored_event = event.*;
+        stored_event.sequence = sequence;
+        const event_slot = EventSlot{ .event = stored_event };
+        const event_index = self.events.insertIndex(sequence, event_slot) orelse reserve: {
             // The live arena is a bounded most-recent-N ring: the persistence layer
             // already stages deletion of events older than MAX_PERSISTED_EVENTS
             // (see persistRange), so when the in-memory arena fills we evict the
@@ -1736,11 +1739,9 @@ pub const Ledger = struct {
             // tamper-evident audit ledger would permanently stop accepting capability,
             // crash, and sensitive-capture records after MAX_EVENTS lifetime events.
             if (!self.evictOldestEvent()) return error.EventTableFull;
-            break :reserve self.events.reserveIndex(sequence) orelse return error.EventTableFull;
+            break :reserve self.events.insertIndex(sequence, event_slot) orelse return error.EventTableFull;
         };
         const slot = &self.events.slots[event_index];
-        slot.event = event.*;
-        slot.event.sequence = sequence;
         self.next_sequence += 1;
         self.indexEvent(event_index) catch |err| {
             _ = self.events.removeIndex(event_index);
