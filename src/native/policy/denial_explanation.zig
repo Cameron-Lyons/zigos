@@ -2,7 +2,6 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
-const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
 
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -10,19 +9,17 @@ const USER_HELP_BUFFER_BYTES: usize = 256;
 
 pub const Explanation = struct {
     reason: abi.DenialReason = .none,
-    policy_len: usize = 0,
-    policy: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    missing_capability_len: usize = 0,
-    missing_capability: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    policy: []const u8 = "",
+    missing_capability: []const u8 = "",
     user_approval_can_resolve: bool = false,
     retry_safe: bool = false,
 
     pub fn policySlice(self: *const Explanation) []const u8 {
-        return self.policy[0..self.policy_len];
+        return self.policy;
     }
 
     pub fn missingCapabilitySlice(self: *const Explanation) []const u8 {
-        return self.missing_capability[0..self.missing_capability_len];
+        return self.missing_capability;
     }
 };
 
@@ -33,14 +30,13 @@ pub fn none() Explanation {
 }
 
 pub fn forPermissionDecision(kind: manifest.PermissionKind, reason: abi.DenialReason) Explanation {
-    var explanation = Explanation{
+    return .{
         .reason = reason,
+        .policy = policyLabel(reason, kind),
+        .missing_capability = capabilityLabel(kind),
+        .user_approval_can_resolve = approvalCanResolve(reason),
+        .retry_safe = retrySafe(reason),
     };
-    explanation.policy_len = copyText(&explanation.policy, policyLabel(reason, kind));
-    explanation.missing_capability_len = copyText(&explanation.missing_capability, capabilityLabel(kind));
-    explanation.user_approval_can_resolve = approvalCanResolve(reason);
-    explanation.retry_safe = retrySafe(reason);
-    return explanation;
 }
 
 pub fn renderToBuffer(buffer: []u8, explanation: Explanation) RenderError![]const u8 {

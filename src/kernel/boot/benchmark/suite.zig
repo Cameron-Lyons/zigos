@@ -1427,8 +1427,8 @@ fn benchmarkDenialExplanationRender(iteration: u32) u64 {
     const explanation = denial_explanation.forPermissionDecision(kind, reason);
     const rendered = denial_explanation.renderToBuffer(&denial_explanation_buffer, explanation) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return rendered.len +
-        explanation.policy_len +
-        explanation.missing_capability_len +
+        explanation.policySlice().len +
+        explanation.missingCapabilitySlice().len +
         @as(u64, @intFromBool(explanation.user_approval_can_resolve)) +
         @as(u64, @intFromBool(explanation.retry_safe));
 }
