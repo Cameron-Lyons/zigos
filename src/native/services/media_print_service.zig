@@ -103,10 +103,12 @@ pub const Service = struct {
         if (request.label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
         if (request.printer_identity.len > MAX_LABEL_BYTES) return error.PrinterIdentityTooLong;
 
-        if (self.jobs.countInUse() >= MAX_JOBS) return error.JobTableFull;
-
         const job_id = self.next_job_id;
         if (job_id == 0) return error.JobIdExhausted;
+        const retired_job_id = if (self.jobs.countInUse() >= MAX_JOBS)
+            self.oldestCompletedJobId() orelse return error.JobTableFull
+        else
+            0;
         var job = zeroJob();
         job.id = job_id;
         job.kind = request.kind;
@@ -141,6 +143,11 @@ pub const Service = struct {
             job.notification_id = notice.id;
         }
 
+        if (retired_job_id != 0) {
+            if (!self.jobs.remove(retired_job_id)) {
+                native_util.impossibleByInvariant("completed print job disappeared before reuse");
+            }
+        }
         const slot_index = self.jobs.reserveIndex(job_id) orelse
             native_util.impossibleByInvariant("prechecked print job slot reservation must succeed");
         const slot = &self.jobs.slots[slot_index];
@@ -193,6 +200,15 @@ pub const Service = struct {
         return &slot.job;
     }
 
+    fn oldestCompletedJobId(self: *const Service) ?u64 {
+        var oldest_job_id: ?u64 = null;
+        for (&self.jobs.slots) |*slot| {
+            if (!slot.in_use or slot.job.state != .completed) continue;
+            if (oldest_job_id != null and slot.job.id >= oldest_job_id.?) continue;
+            oldest_job_id = slot.job.id;
+        }
+        return oldest_job_id;
+    }
 };
 
 fn schedulerRequest(kind: JobKind) accelerator_scheduler.Request {
@@ -374,7 +390,7 @@ test "media print service job ids stop at exhaustion and full tables do not cons
     try std.testing.expectEqual(next_before_full, full_service.next_job_id);
 }
 
-test "media print service indexes completed jobs and rejects full tables before claiming" {
+test "media print service retains recent completions and recycles the oldest completed job" {
     var scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
@@ -400,7 +416,7 @@ test "media print service indexes completed jobs and rejects full tables before 
     try std.testing.expectEqual(@as(usize, MAX_JOBS), service.jobs.countInUse());
     try std.testing.expectEqual(JobState.completed, service.find(first_job_id).?.state);
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
-    try std.testing.expectError(error.JobTableFull, service.submit(.{
+    const replacement = try service.submit(.{
         .kind = .print_document,
         .task_id = 200,
         .workspace_id = 7,
@@ -409,7 +425,13 @@ test "media print service indexes completed jobs and rejects full tables before 
         .printer_identity = "printer://local",
         .local_only = true,
         .visibility = .hidden,
-    }, &scheduler, &notifications, 99));
+    }, &scheduler, &notifications, 99);
+    try std.testing.expectEqual(@as(u64, MAX_JOBS + 1), replacement.id);
+    try std.testing.expect(service.find(first_job_id) == null);
+    try std.testing.expect(service.find(first_job_id + 1) != null);
+    try std.testing.expectEqual(@as(usize, MAX_JOBS), service.jobs.countInUse());
+    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
+    _ = try service.complete(replacement.id, &scheduler, &notifications, 100);
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
