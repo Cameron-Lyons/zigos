@@ -567,7 +567,7 @@ pub const Controller = struct {
             fallback.degraded = true;
             fallback.reason = .accelerator_unavailable;
             fallback.active = true;
-            const record_claim = try self.upsertClaim(fallback);
+            const record_claim = try self.insertClaim(fallback);
             self.advanceNextClaimIdFrom(claim_id);
             self.markClaimActive(record_claim);
             return record_claim;
@@ -620,7 +620,7 @@ pub const Controller = struct {
             record.queue_generation = queue.generation;
             record.queue_completion_sequence = queue.completion_sequence;
         }
-        const record_claim = try self.upsertClaim(record);
+        const record_claim = try self.insertClaim(record);
         attached_object_id = null;
         self.advanceNextClaimIdFrom(claim_id);
         self.markClaimActive(record_claim);
@@ -686,20 +686,8 @@ pub const Controller = struct {
         return planWithState(self.state, self.availableEngines(), request);
     }
 
-    fn upsertClaim(self: *Controller, record: ClaimRecord) Error!ClaimRecord {
-        if (self.claims.slotIndexOf(record.id)) |slot_index| {
-            const slot = &self.claims.slots[slot_index];
-            if (slot.claim.task_id != record.task_id) {
-                _ = self.claim_task_index.remove(claimTaskKey(slot.claim.task_id), slot_index);
-                if (!self.claim_task_index.append(claimTaskKey(record.task_id), slot_index)) {
-                    native_util.impossibleByInvariant("claim task index capacity covers claim slots");
-                }
-            }
-            slot.claim = record;
-            return slot.claim;
-        }
-
-        const slot_index = self.claims.reserveIndex(record.id) orelse return error.ClaimTableFull;
+    fn insertClaim(self: *Controller, record: ClaimRecord) Error!ClaimRecord {
+        const slot_index = self.claims.reserveIndex(record.id) orelse return error.ClaimIdExhausted;
         if (!self.claim_task_index.append(claimTaskKey(record.task_id), slot_index)) {
             _ = self.claims.removeIndex(slot_index);
             return error.ClaimTableFull;
@@ -712,7 +700,6 @@ pub const Controller = struct {
     fn nextReservableClaimId(self: *Controller) Error!u64 {
         if (self.claims.countInUse() >= MAX_ENGINE_CLAIMS) return error.ClaimTableFull;
         if (self.next_claim_id == 0) return error.ClaimIdExhausted;
-        if (self.claims.get(self.next_claim_id) != null) return error.ClaimIdExhausted;
         return self.next_claim_id;
     }
 
@@ -1707,6 +1694,22 @@ test "accelerator scheduler claim ids stop at exhaustion" {
         .request = .{ .class = .background_light },
     }));
     try std.testing.expectEqual(next_before_full, full_controller.next_claim_id);
+}
+
+test "accelerator scheduler direct claim insertion rejects id collisions" {
+    var controller = Controller.init();
+    const existing = try controller.claim(.{
+        .task_id = 92,
+        .request = .{ .class = .background_light },
+    });
+    controller.next_claim_id = existing.id;
+
+    try std.testing.expectError(error.ClaimIdExhausted, controller.claim(.{
+        .task_id = 93,
+        .request = .{ .class = .background_light },
+    }));
+    try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
+    try std.testing.expectEqual(@as(u64, 92), controller.findActiveClaim(existing.id).?.task_id);
 }
 
 test "accelerator scheduler claim capacity preflights shared memory attachment" {
