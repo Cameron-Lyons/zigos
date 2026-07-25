@@ -303,6 +303,19 @@ pub fn IndexedArenaWithKeyOptions(
             return self.reserveIndexWithDirty(key, true);
         }
 
+        /// Reserve a key and install a complete slot value without first writing
+        /// the slot's default payload. The arena owns the membership flag.
+        pub fn insertIndex(self: *Self, key: Key, value: Slot) ?usize {
+            const raw_key = ids.raw(key);
+            if (raw_key == 0) return null;
+            if (self.primary_index.lookup(raw_key) != null) return null;
+
+            const slot_index = self.popFreeIndex() orelse return null;
+            self.slots[slot_index] = value;
+            self.claimSlotMetadata(key, raw_key, slot_index, true);
+            return slot_index;
+        }
+
         pub fn reserveIndexClean(self: *Self, key: Key) ?usize {
             if (!options.track_dirty) @compileError("clean reservation is only available on dirty-tracked arenas");
             return self.reserveIndexWithDirty(key, false);
@@ -336,6 +349,10 @@ pub fn IndexedArenaWithKeyOptions(
 
         fn claimSlot(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
             self.slots[slot_index] = Slot{};
+            self.claimSlotMetadata(key, raw_key, slot_index, mark_dirty);
+        }
+
+        fn claimSlotMetadata(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
             self.slots[slot_index].in_use = true;
             self.slot_keys[slot_index] = key;
             self.primary_index.insert(raw_key, slot_index);
@@ -1013,8 +1030,10 @@ test "indexed arena reserves reuses indexes and tracks dirty ids" {
     const first = arena.reserve(41).?;
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.reserve(41));
     first.record = .{ .id = 41, .owner = 7, .label = "first" };
-    const second_index = arena.reserveIndex(42).?;
-    arena.slots[second_index].record = .{ .id = 42, .owner = 8, .label = "second" };
+    const second_index = arena.insertIndex(42, .{
+        .record = .{ .id = 42, .owner = 8, .label = "second" },
+    }).?;
+    try std.testing.expect(arena.slots[second_index].in_use);
 
     try std.testing.expectEqual(@as(usize, 2), arena.countInUse());
     try std.testing.expectEqualStrings("first", arena.get(41).?.record.label);
