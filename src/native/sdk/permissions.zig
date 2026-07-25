@@ -129,9 +129,9 @@ pub fn buildReviewPlan(
     }
 
     var plan = ReviewPlan{
-        .session = permission_review.initSession(task_id, bundle, decisions[0..decision_count]),
+        .session = try permission_review.initSession(task_id, bundle, decisions[0..decision_count]),
     };
-    const grants = permission_review.decisionsToGrants(bundle, plan.session.decisions[0..plan.session.decision_count], 1, &plan.grants);
+    const grants = permission_review.decisionsToGrants(&plan.session, 1, &plan.grants);
     plan.grant_count = grants.len;
     buildReviewUi(bundle, &plan);
     return plan;
@@ -139,10 +139,9 @@ pub fn buildReviewPlan(
 
 pub fn renderReviewText(
     plan: *const ReviewPlan,
-    bundle: *const manifest.BundleManifest,
     out: []u8,
 ) ![]const u8 {
-    return permission_review.renderToBuffer(out, &plan.session, bundle);
+    return permission_review.renderToBuffer(out, &plan.session);
 }
 
 pub fn renderReviewUi(plan: *const ReviewPlan, out: []u8) ![]const u8 {
@@ -181,7 +180,7 @@ test "permission SDK builds grants and a native UI review tree" {
     try @import("std").testing.expect(plan.grant_count >= manifest.requiredPermissionCount(package.bundle));
 
     var text_buffer: [MAX_REVIEW_TEXT_BYTES]u8 = undefined;
-    const rendered_text = try renderReviewText(&plan, &package.bundle, &text_buffer);
+    const rendered_text = try renderReviewText(&plan, &text_buffer);
     try @import("std").testing.expect(@import("std").mem.indexOf(u8, rendered_text, "Zigos Studio") != null);
 
     var ui_buffer: [ui.MAX_RENDER_BYTES]u8 = undefined;

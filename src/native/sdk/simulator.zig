@@ -246,7 +246,7 @@ pub const Simulator = struct {
             decision_count += 1;
         }
 
-        const session = permission_review.initSession(
+        const session = try permission_review.initSession(
             SDK_TASK_ID,
             &package.bundle,
             decisions[0..decision_count],
@@ -257,12 +257,10 @@ pub const Simulator = struct {
         const rendered = try permission_review.renderToBuffer(
             &result.review_text,
             &session,
-            &package.bundle,
         );
         result.review_len = rendered.len;
         const grants = permission_review.decisionsToGrants(
-            &package.bundle,
-            session.decisions[0..session.decision_count],
+            &session,
             self.now_ticks,
             &result.grants,
         );
