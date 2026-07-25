@@ -447,8 +447,14 @@ pub const Directory = struct {
     pub fn reset(self: *Directory) void {
         self.next_workspace_id = 1;
         self.next_snapshot_id = 1;
-        self.workspaces.reset();
-        self.snapshots.reset();
+        for (self.workspaces.slots[0..self.workspaces.next_unclaimed_index]) |*slot| {
+            if (slot.in_use) slot.* = WorkspaceSlot{};
+        }
+        self.workspaces.resetRetainingPayloads();
+        for (self.snapshots.slots[0..self.snapshots.next_unclaimed_index]) |*slot| {
+            if (slot.in_use) slot.* = SnapshotSlot{};
+        }
+        self.snapshots.resetRetainingPayloads();
         self.workspace_owner_label_index.reset();
         self.workspace_label_index.reset();
         self.snapshot_label_index.reset();
@@ -1590,4 +1596,31 @@ fn clearEntryPrefix(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: usize) void {
 
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
+}
+
+test "directory reset scrubs live workspace and snapshot records" {
+    var directory = Directory.init();
+
+    const workspace_slot_index = directory.workspaces.reserveIndex(ids.workspace(7)).?;
+    const workspace_slot = &directory.workspaces.slots[workspace_slot_index];
+    workspace_slot.workspace.id = ids.workspace(7);
+    workspace_slot.workspace.label_len = 6;
+    @memcpy(workspace_slot.workspace.label[0..6], "secret");
+    workspace_slot.workspace.path_index.entry_count = 1;
+    workspace_slot.workspace.path_index.entries[0] = try Entry.init("secret", ids.object(8), ids.version(9), .document);
+
+    const snapshot_slot_index = directory.snapshots.reserveIndex(ids.snapshot(10)).?;
+    const snapshot_slot = &directory.snapshots.slots[snapshot_slot_index];
+    snapshot_slot.snapshot.id = ids.snapshot(10);
+    snapshot_slot.snapshot.label_len = 6;
+    @memcpy(snapshot_slot.snapshot.label[0..6], "secret");
+
+    directory.reset();
+
+    try std.testing.expectEqual(@as(usize, 0), directory.workspaces.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), directory.snapshots.countInUse());
+    try std.testing.expect(workspace_slot.workspace.id.isZero());
+    try std.testing.expectEqual(@as(usize, 0), workspace_slot.workspace.label_len);
+    try std.testing.expectEqual(@as(usize, 0), workspace_slot.workspace.path_index.entry_count);
+    try std.testing.expectEqual(@as(usize, 0), snapshot_slot.snapshot.label_len);
 }
