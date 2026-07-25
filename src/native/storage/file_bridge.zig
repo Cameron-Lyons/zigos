@@ -105,11 +105,10 @@ pub const Bridge = struct {
             else => return error.CapabilityRequired,
         }
 
-        const wants_write = request.access == .write;
+        const can_read = authority.rights.has(.object_read);
         // File bridges are derived views. Mutations must go through storage objects
         // and workspace transactions, never through a bridge path.
-        if (wants_write) return error.PermissionDenied;
-        if (!wants_write and !authority.rights.has(.object_read)) return error.PermissionDenied;
+        if (request.access == .write or !can_read) return error.PermissionDenied;
 
         const entry = switch (authority.target.kind) {
             .workspace => blk: {
@@ -130,12 +129,12 @@ pub const Bridge = struct {
             .object_id = entry.object_id.raw(),
             .version_id = entry.version_id.raw(),
             .object_type = entry.object_type,
-            .readable = authority.rights.has(.object_read),
+            .readable = can_read,
             .writable = false,
-            .path_len = 0,
+            .path_len = bridge_path.len,
             .path = [_]u8{0} ** MAX_BRIDGE_PATH_BYTES,
         };
-        view.path_len = native_util.copyTextExact(&view.path, bridge_path) catch return error.PathTooLong;
+        @memcpy(view.path[0..bridge_path.len], bridge_path);
         return view;
     }
 };
