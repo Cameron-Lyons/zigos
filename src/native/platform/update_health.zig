@@ -81,9 +81,9 @@ pub fn evaluate(
     const core_services_started = countStartedServices(supervisor, request.core_service_ids);
     const storage_probe_ok = storageMountHealthy(storage, request.storage_workspace_id, request.storage_probe_path) and
         (!request.require_service_path_probes or request.storage_probe_path.len != 0);
-    const network_service_ok = serviceStarted(supervisor, request.network_service_id) and
+    const network_service_ok = supervisor.isReady(request.network_service_id) and
         networkServiceHealthy(request.network_probe, request.require_service_path_probes);
-    const ui_service_ok = serviceStarted(supervisor, request.ui_service_id) and
+    const ui_service_ok = supervisor.isReady(request.ui_service_id) and
         uiServiceHealthy(request.ui_probe, request.require_service_path_probes);
     const boot_ok = bootActivationHealthy(manager);
 
@@ -176,10 +176,10 @@ pub fn recordBootSuccess(
     _ = try manager.storage.commit(manager.workspace_id, tick);
 }
 
-fn countStartedServices(supervisor: *supervisor_mod.Supervisor, service_ids: []const u64) usize {
+fn countStartedServices(supervisor: *const supervisor_mod.Supervisor, service_ids: []const u64) usize {
     var ready_count: usize = 0;
     for (service_ids) |service_id| {
-        if (serviceStarted(supervisor, service_id)) ready_count += 1;
+        if (supervisor.isReady(service_id)) ready_count += 1;
     }
     return ready_count;
 }
@@ -206,13 +206,6 @@ fn storageMountHealthy(storage: *const storage_service.Service, workspace_id: u6
     _ = storage.object(resolved.object_id) orelse return false;
     const payload = storage.versionPayload(version) catch return false;
     return version.metadata.verifyFor(version.object_type, payload);
-}
-
-fn serviceStarted(supervisor: *supervisor_mod.Supervisor, service_id: u64) bool {
-    const service = supervisor.find(service_id) orelse return false;
-    return service.state == .healthy and
-        supervisor.hasDiagnostic(service_id, .healthy) and
-        supervisor.hasDiagnostic(service_id, .contract_bound);
 }
 
 fn networkServiceHealthy(probe: ?NetworkProbe, require_probe: bool) bool {

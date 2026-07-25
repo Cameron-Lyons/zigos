@@ -9,7 +9,7 @@ pub const QualityGateCase = struct {
     run: *const fn () u64,
 };
 
-pub fn benchmarkCases(handlers: anytype) [22]BenchmarkCase {
+pub fn benchmarkCases(handlers: anytype) [23]BenchmarkCase {
     return .{
         .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = handlers.capability_derive },
         .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = handlers.capability_mint_reuse_free_slot },
@@ -17,6 +17,7 @@ pub fn benchmarkCases(handlers: anytype) [22]BenchmarkCase {
         .{ .name = "permission.review.render_grants", .iterations = 12_000, .runIteration = handlers.permission_review_render },
         .{ .name = "network_policy.authorize_connection", .iterations = 60_000, .runIteration = handlers.network_policy_authorize },
         .{ .name = "background_dispatch.allowed_sync", .iterations = 8_000, .runIteration = handlers.background_dispatch },
+        .{ .name = "service_supervisor.ready_lookup", .iterations = 60_000, .runIteration = handlers.supervisor_ready_lookup },
         .{ .name = "task_runtime.checkpoint.write_restore", .iterations = 8_000, .runIteration = handlers.task_checkpoint_write_restore },
         .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = handlers.accelerator_claim_release },
         .{ .name = "storage.file_bridge.resolve_view", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },

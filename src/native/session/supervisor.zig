@@ -31,6 +31,7 @@ pub const ServiceRecord = struct {
     storage_privilege: contract.StoragePrivilege,
     ui_privilege: contract.UiPrivilege,
     driver_class: ?driver_service.DeviceClass,
+    contract_endpoint_id: u64,
     state: ServiceState,
     restart_count: u16,
     last_transition_tick: u64,
@@ -142,6 +143,7 @@ pub const Supervisor = struct {
             .storage_privilege = descriptor.isolation.storage,
             .ui_privilege = descriptor.isolation.ui,
             .driver_class = descriptor.isolation.driver_class,
+            .contract_endpoint_id = 0,
             .state = .registered,
             .restart_count = 0,
             .last_transition_tick = 0,
@@ -187,6 +189,11 @@ pub const Supervisor = struct {
         return true;
     }
 
+    pub fn isReady(self: *const Supervisor, service_id: u64) bool {
+        const service = self.findConst(service_id) orelse return false;
+        return service.state == .healthy and service.contract_endpoint_id != 0;
+    }
+
     pub fn recordCrash(self: *Supervisor, service_id: u64, tick: u64, code: u32) bool {
         const service = self.find(service_id) orelse return false;
         service.state = .failed;
@@ -215,7 +222,9 @@ pub const Supervisor = struct {
     }
 
     pub fn noteContractBound(self: *Supervisor, service_id: u64, endpoint_id: u64, tick: u64) bool {
+        if (endpoint_id == 0) return false;
         const service = self.find(service_id) orelse return false;
+        service.contract_endpoint_id = endpoint_id;
         self.record(service.*, .contract_bound, tick, endpoint_id, 0);
         return true;
     }
@@ -512,6 +521,7 @@ fn zeroService() ServiceRecord {
         .storage_privilege = .none,
         .ui_privilege = .none,
         .driver_class = null,
+        .contract_endpoint_id = 0,
         .state = .registered,
         .restart_count = 0,
         .last_transition_tick = 0,
@@ -692,6 +702,29 @@ test "supervisor keeps diagnostics indexed while recycling the bounded ring" {
     try std.testing.expect(!supervisor.hasDiagnostic(network.id, .registered));
     try std.testing.expect(supervisor.hasDiagnostic(network.id, .healthy));
     try std.testing.expectEqual(@as(u64, 100 + MAX_DIAGNOSTICS - 1), supervisor.latestDiagnostic(network.id).?.tick);
+}
+
+test "service readiness is live state independent of diagnostic retention" {
+    var supervisor = Supervisor.init();
+    const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 41 });
+
+    try std.testing.expect(!supervisor.isReady(network.id));
+    try std.testing.expect(!supervisor.noteContractBound(network.id, 0, 1));
+    try std.testing.expect(supervisor.noteContractBound(network.id, 101, 2));
+    try std.testing.expect(!supervisor.isReady(network.id));
+    try std.testing.expect(supervisor.markHealthy(network.id, 3));
+    try std.testing.expect(supervisor.isReady(network.id));
+
+    for (0..MAX_DIAGNOSTICS) |index| {
+        try std.testing.expect(supervisor.markHealthy(network.id, 4 + @as(u64, @intCast(index))));
+    }
+
+    try std.testing.expect(!supervisor.hasDiagnostic(network.id, .contract_bound));
+    try std.testing.expect(supervisor.isReady(network.id));
+    try std.testing.expect(supervisor.recordCrash(network.id, 100, 0xBAD));
+    try std.testing.expect(!supervisor.isReady(network.id));
+    try std.testing.expect(supervisor.completeRestart(network.id, 101));
+    try std.testing.expect(supervisor.isReady(network.id));
 }
 
 test "services can be located by class for mediated routing" {

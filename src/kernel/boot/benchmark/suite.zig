@@ -116,6 +116,11 @@ const BackgroundContext = struct {
     task_id: u64 = 0,
 };
 
+const SupervisorReadyContext = struct {
+    supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
+    service_id: u64 = 0,
+};
+
 const WorkspaceCommitContext = struct {
     baseline: workspace.Directory = workspace.Directory.init(),
     workspace_id: ids.WorkspaceId = ids.WorkspaceId.zero,
@@ -221,6 +226,7 @@ const cases = benchmark_cases.benchmarkCases(.{
     .permission_review_render = benchmarkPermissionReviewRender,
     .network_policy_authorize = benchmarkNetworkPolicyAuthorize,
     .background_dispatch = benchmarkBackgroundDispatch,
+    .supervisor_ready_lookup = benchmarkSupervisorReadyLookup,
     .task_checkpoint_write_restore = benchmarkTaskCheckpointWriteRestore,
     .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
     .file_bridge_resolve = benchmarkFileBridgeResolve,
@@ -420,6 +426,7 @@ var storage_volume_context = StorageVolumeContext{};
 var permission_review_context = PermissionReviewContext{};
 var network_policy_context = NetworkPolicyContext{};
 var background_context = BackgroundContext{};
+var supervisor_ready_context = SupervisorReadyContext{};
 var workspace_commit_context = WorkspaceCommitContext{};
 var task_checkpoint_context = TaskCheckpointContext{};
 var package_context = PackageContext{};
@@ -465,6 +472,7 @@ fn prepareFixtures() void {
     preparePermissionReviewFixture();
     prepareNetworkPolicyFixture();
     prepareBackgroundFixture();
+    prepareSupervisorReadyFixture();
     prepareIndexingFixture();
     prepareOverlaySessionFixture();
     prepareWorkspaceCommitFixture();
@@ -647,6 +655,30 @@ fn prepareBackgroundFixture() void {
         },
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     background_context.task_id = task.id;
+}
+
+fn prepareSupervisorReadyFixture() void {
+    supervisor_ready_context = .{};
+    const service_record = supervisor_ready_context.supervisor.register(
+        .network_stack,
+        service(94),
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark supervisor readiness fixture", err);
+    supervisor_ready_context.service_id = service_record.id;
+    if (!supervisor_ready_context.supervisor.noteContractBound(service_record.id, 194, 1)) {
+        benchmark_reporting.benchStepFailure("benchmark supervisor contract binding", error.ContractBindingFailed);
+    }
+    if (!supervisor_ready_context.supervisor.markHealthy(service_record.id, 2)) {
+        benchmark_reporting.benchStepFailure("benchmark supervisor health", error.HealthTransitionFailed);
+    }
+
+    for (0..supervisor_mod.MAX_DIAGNOSTICS) |index| {
+        if (!supervisor_ready_context.supervisor.markHealthy(
+            service_record.id,
+            3 + @as(u64, @intCast(index)),
+        )) {
+            benchmark_reporting.benchStepFailure("benchmark supervisor diagnostic rollover", error.HealthTransitionFailed);
+        }
+    }
 }
 
 fn prepareIndexingFixture() void {
@@ -1113,6 +1145,13 @@ fn benchmarkBackgroundDispatch(iteration: u32) u64 {
         decision.expected_duration_seconds +
         task.background_cpu_consumed_ticks +
         @intFromEnum(task.last_background_network);
+}
+
+fn benchmarkSupervisorReadyLookup(iteration: u32) u64 {
+    if (!supervisor_ready_context.supervisor.isReady(supervisor_ready_context.service_id)) {
+        benchmark_reporting.benchStepFailure("benchmark supervisor readiness", error.ServiceNotReady);
+    }
+    return supervisor_ready_context.service_id + iteration;
 }
 
 fn benchmarkTaskCheckpointWriteRestore(iteration: u32) u64 {
