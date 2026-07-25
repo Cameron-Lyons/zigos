@@ -355,6 +355,19 @@ pub const TaskRecord = struct {
         return self.auditEventAt(self.audit_count - 1);
     }
 
+    pub fn appendAudit(self: *TaskRecord, event: AuditEvent) void {
+        const cold = taskCold(self);
+        if (self.audit_count < MAX_AUDIT_EVENTS) {
+            const slot_index = (self.audit_start + self.audit_count) % MAX_AUDIT_EVENTS;
+            cold.audit_trail[slot_index] = event;
+            self.audit_count += 1;
+            return;
+        }
+
+        cold.audit_trail[self.audit_start] = event;
+        self.audit_start = (self.audit_start + 1) % MAX_AUDIT_EVENTS;
+    }
+
     pub fn provenanceEventAt(self: *const TaskRecord, index: usize) ?ProvenanceRecord {
         if (index >= self.provenance_count) return null;
         return taskColdConst(self).provenance_trail[(self.provenance_start + index) % MAX_TASK_PROVENANCE_EVENTS];

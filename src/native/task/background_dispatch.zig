@@ -204,23 +204,22 @@ pub const Controller = struct {
                 return self.recordPolicyDecision(task_id, background_task_id, trigger, background_task, policy_decision, tick);
             }
         }
-        if (!runtime.canReserveBackgroundWork(task.id, background_task.budget)) {
+        const reservation = task_runtime.planBackgroundWork(
+            task,
+            background_task.budget,
+            background_task.network,
+            background_task.visibility,
+            tick,
+        ) orelse {
             return self.recordDecision(task_id, background_task_id, trigger, background_task, .budget_exceeded, tick);
-        }
+        };
         if (self.activeRecordCount() >= self.policy.max_active_jobs) {
             return self.recordDecision(task_id, background_task_id, trigger, background_task, .throttled, tick);
         }
 
         const decision = try self.recordDecision(task_id, background_task_id, trigger, background_task, .allowed, tick);
-        const reserved = try runtime.reserveBackgroundWork(
-            task.id,
-            background_task.budget,
-            background_task.network,
-            background_task.visibility,
-            tick,
-        );
-        std.debug.assert(reserved);
-        try runtime.audit(task_id, .{
+        task_runtime.commitBackgroundWork(task, reservation);
+        task.appendAudit(.{
             .kind = .background_dispatched,
             .detail = @intFromEnum(trigger),
             .tick = tick,
