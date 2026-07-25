@@ -108,7 +108,7 @@ pub fn installNewValidated(
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
 ) Error!void {
-    bundle.bundle_id_len = copyTextExact(&bundle.bundle_id, source.bundle_id) catch return error.BundleIdTooLong;
+    bundle.bundle_id_len = copyValidatedText(&bundle.bundle_id, source.bundle_id);
     bundle.revision_count = 1;
     bundle.next_revision_id = 2;
     bundle.active_revision_slot = 0;
@@ -343,8 +343,8 @@ fn writeRevision(
     revision_id: u64,
 ) Error!void {
     revision.revision_id = revision_id;
-    revision.display_name_len = copyTextExact(&revision.display_name, source.display_name) catch return error.DisplayNameTooLong;
-    revision.publisher_len = copyTextExact(&revision.publisher, source.publisher) catch return error.PublisherTooLong;
+    revision.display_name_len = copyValidatedText(&revision.display_name, source.display_name);
+    revision.publisher_len = copyValidatedText(&revision.publisher, source.publisher);
     revision.source_identity_len = copyTextExact(&revision.source_identity, source_identity) catch return error.InstallSourceTooLong;
     revision.version_major = source.version_major;
     revision.version_minor = source.version_minor;
@@ -359,44 +359,39 @@ fn writeRevision(
 }
 
 fn writeLaunchMetadata(revision: anytype, source: manifest.BundleManifest) Error!void {
-    if (source.components.len > revision.components.len) return error.TooManyComponents;
     revision.component_count = source.components.len;
     for (source.components, 0..) |component, component_index| {
-        revision.components[component_index].id_len = copyTextExact(&revision.components[component_index].id, component.id) catch return error.ComponentIdTooLong;
-        revision.components[component_index].entry_len = copyTextExact(&revision.components[component_index].entry, component.entry) catch return error.ComponentEntryTooLong;
+        revision.components[component_index].id_len = copyValidatedText(&revision.components[component_index].id, component.id);
+        revision.components[component_index].entry_len = copyValidatedText(&revision.components[component_index].entry, component.entry);
         revision.components[component_index].abi = component.abi;
     }
 
-    if (source.assets.len > revision.assets.len) return error.TooManyAssets;
     revision.asset_count = source.assets.len;
     for (source.assets, 0..) |asset, asset_index| {
-        revision.assets[asset_index].path_len = copyTextExact(&revision.assets[asset_index].path, asset.path) catch return error.AssetPathTooLong;
-        revision.assets[asset_index].content_type_len = copyTextExact(&revision.assets[asset_index].content_type, asset.content_type) catch return error.AssetContentTypeTooLong;
+        revision.assets[asset_index].path_len = copyValidatedText(&revision.assets[asset_index].path, asset.path);
+        revision.assets[asset_index].content_type_len = copyValidatedText(&revision.assets[asset_index].content_type, asset.content_type);
     }
 }
 
 fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Error!void {
-    if (source.provided_interfaces.len > revision.provided_interfaces.len) return error.TooManyProvidedInterfaces;
     revision.provided_interface_count = source.provided_interfaces.len;
     for (source.provided_interfaces, 0..) |interface, interface_index| {
-        revision.provided_interfaces[interface_index].name_len = copyTextExact(&revision.provided_interfaces[interface_index].name, interface.name) catch return error.InterfaceNameTooLong;
+        revision.provided_interfaces[interface_index].name_len = copyValidatedText(&revision.provided_interfaces[interface_index].name, interface.name);
         revision.provided_interfaces[interface_index].version_major = interface.version_major;
         revision.provided_interfaces[interface_index].version_minor = interface.version_minor;
     }
 
-    if (source.consumed_interfaces.len > revision.consumed_interfaces.len) return error.TooManyConsumedInterfaces;
     revision.consumed_interface_count = source.consumed_interfaces.len;
     for (source.consumed_interfaces, 0..) |interface, interface_index| {
-        revision.consumed_interfaces[interface_index].name_len = copyTextExact(&revision.consumed_interfaces[interface_index].name, interface.name) catch return error.InterfaceNameTooLong;
+        revision.consumed_interfaces[interface_index].name_len = copyValidatedText(&revision.consumed_interfaces[interface_index].name, interface.name);
         revision.consumed_interfaces[interface_index].version_major = interface.version_major;
         revision.consumed_interfaces[interface_index].version_minor = interface.version_minor;
     }
 
-    if (source.requested_permissions.len > revision.requested_permissions.len) return error.TooManyPermissions;
     revision.requested_permission_count = source.requested_permissions.len;
     for (source.requested_permissions, 0..) |permission, permission_index| {
         revision.requested_permissions[permission_index].kind = permission.kind;
-        revision.requested_permissions[permission_index].resource_len = copyTextExact(&revision.requested_permissions[permission_index].resource, permission.resource) catch return error.PermissionResourceTooLong;
+        revision.requested_permissions[permission_index].resource_len = copyValidatedText(&revision.requested_permissions[permission_index].resource, permission.resource);
         revision.requested_permissions[permission_index].rights = permission.rights;
         revision.requested_permissions[permission_index].required = permission.required;
         revision.requested_permissions[permission_index].local_only = permission.local_only;
@@ -405,18 +400,17 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
         revision.requested_permissions[permission_index].sensitivity = permission.sensitivity;
         revision.requested_permissions[permission_index].purpose = permission.purpose;
         revision.requested_permissions[permission_index].retention_days = permission.retention_days;
-        revision.requested_permissions[permission_index].user_visible_reason_len = copyTextExact(&revision.requested_permissions[permission_index].user_visible_reason, permission.user_visible_reason) catch return error.PermissionReasonTooLong;
+        revision.requested_permissions[permission_index].user_visible_reason_len = copyValidatedText(&revision.requested_permissions[permission_index].user_visible_reason, permission.user_visible_reason);
         revision.requested_permissions[permission_index].egress_intent_kind = permission.egress_intent.kind;
-        revision.requested_permissions[permission_index].egress_object_len = copyTextExact(&revision.requested_permissions[permission_index].egress_object, permission.egress_intent.object) catch return error.PermissionResourceTooLong;
-        revision.requested_permissions[permission_index].egress_principal_len = copyTextExact(&revision.requested_permissions[permission_index].egress_principal, permission.egress_intent.principal) catch return error.PermissionResourceTooLong;
-        revision.requested_permissions[permission_index].egress_service_len = copyTextExact(&revision.requested_permissions[permission_index].egress_service, permission.egress_intent.service) catch return error.PermissionResourceTooLong;
-        revision.requested_permissions[permission_index].egress_event_type_len = copyTextExact(&revision.requested_permissions[permission_index].egress_event_type, permission.egress_intent.event_type) catch return error.PermissionResourceTooLong;
+        revision.requested_permissions[permission_index].egress_object_len = copyValidatedText(&revision.requested_permissions[permission_index].egress_object, permission.egress_intent.object);
+        revision.requested_permissions[permission_index].egress_principal_len = copyValidatedText(&revision.requested_permissions[permission_index].egress_principal, permission.egress_intent.principal);
+        revision.requested_permissions[permission_index].egress_service_len = copyValidatedText(&revision.requested_permissions[permission_index].egress_service, permission.egress_intent.service);
+        revision.requested_permissions[permission_index].egress_event_type_len = copyValidatedText(&revision.requested_permissions[permission_index].egress_event_type, permission.egress_intent.event_type);
     }
 
-    if (source.background_tasks.len > revision.background_tasks.len) return error.TooManyBackgroundTasks;
     revision.background_task_count = source.background_tasks.len;
     for (source.background_tasks, 0..) |task, background_index| {
-        revision.background_tasks[background_index].id_len = copyTextExact(&revision.background_tasks[background_index].id, task.id) catch return error.BackgroundTaskIdTooLong;
+        revision.background_tasks[background_index].id_len = copyValidatedText(&revision.background_tasks[background_index].id, task.id);
         revision.background_tasks[background_index].trigger = task.trigger;
         revision.background_tasks[background_index].expected_duration_seconds = task.expected_duration_seconds;
         revision.background_tasks[background_index].budget = task.budget;
@@ -425,9 +419,9 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     }
 
     revision.ai_metadata = .{};
-    revision.ai_metadata.model_family_len = copyTextExact(&revision.ai_metadata.model_family, source.ai_metadata.model_family) catch return error.AiModelFamilyTooLong;
-    revision.ai_metadata.model_digest_len = copyTextExact(&revision.ai_metadata.model_digest, source.ai_metadata.model_digest) catch return error.AiModelDigestTooLong;
-    revision.ai_metadata.model_source_identity_len = copyTextExact(&revision.ai_metadata.model_source_identity, source.ai_metadata.model_source_identity) catch return error.AiModelSourceTooLong;
+    revision.ai_metadata.model_family_len = copyValidatedText(&revision.ai_metadata.model_family, source.ai_metadata.model_family);
+    revision.ai_metadata.model_digest_len = copyValidatedText(&revision.ai_metadata.model_digest, source.ai_metadata.model_digest);
+    revision.ai_metadata.model_source_identity_len = copyValidatedText(&revision.ai_metadata.model_source_identity, source.ai_metadata.model_source_identity);
     revision.ai_metadata.locality = source.ai_metadata.locality;
     revision.ai_metadata.offline_required = source.ai_metadata.offline_required;
     revision.ai_metadata.private_context = source.ai_metadata.private_context;
@@ -440,20 +434,20 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.data_rights.portable_export = source.data_rights.portable_export;
     revision.data_rights.deletion_supported = source.data_rights.deletion_supported;
     revision.data_rights.deletion_receipt_required = source.data_rights.deletion_receipt_required;
-    revision.data_rights.export_format_len = copyTextExact(&revision.data_rights.export_format, source.data_rights.export_format) catch return error.DataRightsExportFormatTooLong;
+    revision.data_rights.export_format_len = copyValidatedText(&revision.data_rights.export_format, source.data_rights.export_format);
 
     revision.supply_chain = .{};
-    revision.supply_chain.sbom_digest_len = copyTextExact(&revision.supply_chain.sbom_digest, source.supply_chain.sbom_digest) catch return error.SupplyChainDigestTooLong;
-    revision.supply_chain.source_archive_digest_len = copyTextExact(&revision.supply_chain.source_archive_digest, source.supply_chain.source_archive_digest) catch return error.SupplyChainDigestTooLong;
-    revision.supply_chain.build_recipe_digest_len = copyTextExact(&revision.supply_chain.build_recipe_digest, source.supply_chain.build_recipe_digest) catch return error.SupplyChainDigestTooLong;
-    revision.supply_chain.vulnerability_scan_digest_len = copyTextExact(&revision.supply_chain.vulnerability_scan_digest, source.supply_chain.vulnerability_scan_digest) catch return error.SupplyChainDigestTooLong;
-    revision.supply_chain.build_provenance_identity_len = copyTextExact(&revision.supply_chain.build_provenance_identity, source.supply_chain.build_provenance_identity) catch return error.BuildProvenanceIdentityTooLong;
+    revision.supply_chain.sbom_digest_len = copyValidatedText(&revision.supply_chain.sbom_digest, source.supply_chain.sbom_digest);
+    revision.supply_chain.source_archive_digest_len = copyValidatedText(&revision.supply_chain.source_archive_digest, source.supply_chain.source_archive_digest);
+    revision.supply_chain.build_recipe_digest_len = copyValidatedText(&revision.supply_chain.build_recipe_digest, source.supply_chain.build_recipe_digest);
+    revision.supply_chain.vulnerability_scan_digest_len = copyValidatedText(&revision.supply_chain.vulnerability_scan_digest, source.supply_chain.vulnerability_scan_digest);
+    revision.supply_chain.build_provenance_identity_len = copyValidatedText(&revision.supply_chain.build_provenance_identity, source.supply_chain.build_provenance_identity);
     revision.supply_chain.reproducible_build = source.supply_chain.reproducible_build;
     revision.supply_chain.trusted_builder = source.supply_chain.trusted_builder;
 
     revision.agent_delegation = .{};
     revision.agent_delegation.enabled = source.agent_delegation.enabled;
-    revision.agent_delegation.purpose_len = copyTextExact(&revision.agent_delegation.purpose, source.agent_delegation.purpose) catch return error.AgentDelegationPurposeTooLong;
+    revision.agent_delegation.purpose_len = copyValidatedText(&revision.agent_delegation.purpose, source.agent_delegation.purpose);
     revision.agent_delegation.max_autonomous_actions = source.agent_delegation.max_autonomous_actions;
     revision.agent_delegation.max_remote_calls = source.agent_delegation.max_remote_calls;
     revision.agent_delegation.user_confirmation_required = source.agent_delegation.user_confirmation_required;
@@ -469,7 +463,7 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.accessibility.supports_keyboard_navigation = source.accessibility.supports_keyboard_navigation;
     revision.accessibility.supports_reduced_motion = source.accessibility.supports_reduced_motion;
     revision.accessibility.supports_high_contrast = source.accessibility.supports_high_contrast;
-    revision.accessibility.profile_notes_len = copyTextExact(&revision.accessibility.profile_notes, source.accessibility.profile_notes) catch return error.AccessibilityProfileTooLong;
+    revision.accessibility.profile_notes_len = copyValidatedText(&revision.accessibility.profile_notes, source.accessibility.profile_notes);
 
     revision.object_resilience = .{};
     revision.object_resilience.backup_enabled = source.object_resilience.backup_enabled;
@@ -478,7 +472,7 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.object_resilience.portable_restore = source.object_resilience.portable_restore;
     revision.object_resilience.device_trust_required = source.object_resilience.device_trust_required;
     revision.object_resilience.max_restore_age_days = source.object_resilience.max_restore_age_days;
-    revision.object_resilience.backup_format_len = copyTextExact(&revision.object_resilience.backup_format, source.object_resilience.backup_format) catch return error.ObjectBackupFormatTooLong;
+    revision.object_resilience.backup_format_len = copyValidatedText(&revision.object_resilience.backup_format, source.object_resilience.backup_format);
 
     revision.semantic_index = .{};
     revision.semantic_index.enabled = source.semantic_index.enabled;
@@ -486,15 +480,20 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.semantic_index.encrypted_index = source.semantic_index.encrypted_index;
     revision.semantic_index.redacted_snippets = source.semantic_index.redacted_snippets;
     revision.semantic_index.max_query_bytes = source.semantic_index.max_query_bytes;
-    revision.semantic_index.model_digest_len = copyTextExact(&revision.semantic_index.model_digest, source.semantic_index.model_digest) catch return error.SemanticIndexModelDigestTooLong;
+    revision.semantic_index.model_digest_len = copyValidatedText(&revision.semantic_index.model_digest, source.semantic_index.model_digest);
 
     revision.signature = .{};
-    revision.signature.format_len = copyTextExact(&revision.signature.format, source.signature.format) catch return error.SignatureFormatTooLong;
-    revision.signature.signer_len = copyTextExact(&revision.signature.signer, source.signature.signer) catch return error.SignatureSignerTooLong;
+    revision.signature.format_len = copyValidatedText(&revision.signature.format, source.signature.format);
+    revision.signature.signer_len = copyValidatedText(&revision.signature.signer, source.signature.signer);
     revision.signature.public_key_len = source.signature.public_key_len;
     revision.signature.public_key = source.signature.public_key;
     revision.signature.value_len = source.signature.value_len;
     revision.signature.value = source.signature.value;
+}
+
+fn copyValidatedText(dest: []u8, src: []const u8) usize {
+    @memcpy(dest[0..src.len], src);
+    return src.len;
 }
 
 fn storageType(comptime PtrType: type) type {
