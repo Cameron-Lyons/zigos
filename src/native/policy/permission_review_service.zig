@@ -70,7 +70,7 @@ pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
 pub const PhysicalInputError = xhci.Error || error{ UnsupportedPhysicalInput, PhysicalInputCommandQueueFull };
-pub const Error = task_runtime.Error || manifest.ValidationError || compositor_display.Error || event_ledger.Error || error{
+pub const Error = task_runtime.Error || manifest.ValidationError || compositor_display.Error || event_ledger.Error || permission_review.SessionError || error{
     ReviewCommandTooLong,
     ReviewComplete,
     ReviewIncomplete,
@@ -354,19 +354,18 @@ pub const RenderedReviewSurface = struct {
     ) Error![]const policy_mediation.UserGrant {
         if (self.review_window_id == null) return error.ReviewWindowMissing;
         if (self.active_index < self.bundle.requested_permissions.len) return error.ReviewIncomplete;
-        const reviewed_session = permission_review.initSession(
+        const reviewed_session = try permission_review.initSession(
             self.app_task_id,
             &self.bundle,
             self.decisions[0..self.decision_count],
         );
         var review_buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
-        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &self.bundle) catch return error.ReviewRenderTooLarge;
+        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session) catch return error.ReviewRenderTooLarge;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
 
         const grants = permission_review.decisionsToGrants(
-            &self.bundle,
-            reviewed_session.decisions[0..reviewed_session.decision_count],
+            &reviewed_session,
             self.now_ticks,
             output,
         );
@@ -559,9 +558,9 @@ pub const Service = struct {
             if (decision_count >= decisions.len) return error.TooManyPermissions;
 
             self.presentReviewRequest(review_window_id, bundle, request);
-            const session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
+            const session = try permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
             var prompt_buffer: [REVIEW_PROMPT_BUFFER_BYTES]u8 = undefined;
-            const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, &bundle, index) catch return error.ReviewRenderTooLarge;
+            const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, index) catch return error.ReviewRenderTooLarge;
             console.print(prompt);
             console.print("    command: allow [local] [lease=<ticks>] | deny (revokable later)\n");
 
@@ -581,15 +580,14 @@ pub const Service = struct {
             }
         }
 
-        const reviewed_session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
+        const reviewed_session = try permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
         var review_buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
-        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &bundle) catch return error.ReviewRenderTooLarge;
+        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session) catch return error.ReviewRenderTooLarge;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
 
         const grants = permission_review.decisionsToGrants(
-            &bundle,
-            reviewed_session.decisions[0..reviewed_session.decision_count],
+            &reviewed_session,
             now_ticks,
             output,
         );

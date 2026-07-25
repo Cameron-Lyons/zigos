@@ -40,25 +40,49 @@ pub const CommandError = error{
 
 pub const RenderError = CommandError || error{NoSpaceLeft};
 
-pub const ReviewSession = struct {
-    task_id: u64,
-    bundle_id: []const u8,
-    display_name: []const u8,
-    decision_count: usize,
-    decisions: [MAX_REVIEW_DECISIONS]ReviewDecision,
+pub const SessionError = error{
+    TooManyRequests,
+    TooManyDecisions,
+    DecisionOrderMismatch,
 };
 
-pub fn initSession(task_id: u64, bundle: *const manifest.BundleManifest, decisions: []const ReviewDecision) ReviewSession {
+pub const ReviewSession = struct {
+    task_id: u64,
+    bundle: *const manifest.BundleManifest,
+    decision_count: usize,
+    decisions: [MAX_REVIEW_DECISIONS]ReviewCommand,
+
+    pub fn decisionAt(self: *const ReviewSession, request_index: usize) ?ReviewCommand {
+        if (request_index >= self.decision_count) return null;
+        return self.decisions[request_index];
+    }
+};
+
+pub fn initSession(
+    task_id: u64,
+    bundle: *const manifest.BundleManifest,
+    decisions: []const ReviewDecision,
+) SessionError!ReviewSession {
+    if (bundle.requested_permissions.len > MAX_REVIEW_DECISIONS) return error.TooManyRequests;
+    if (decisions.len > bundle.requested_permissions.len) return error.TooManyDecisions;
+
     var session = ReviewSession{
         .task_id = task_id,
-        .bundle_id = bundle.bundle_id,
-        .display_name = bundle.display_name,
-        .decision_count = @min(decisions.len, MAX_REVIEW_DECISIONS),
-        .decisions = [_]ReviewDecision{emptyDecision()} ** MAX_REVIEW_DECISIONS,
+        .bundle = bundle,
+        .decision_count = decisions.len,
+        .decisions = undefined,
     };
 
-    for (decisions[0..session.decision_count], 0..) |decision, index| {
-        session.decisions[index] = decision;
+    for (decisions, 0..) |decision, index| {
+        const request = bundle.requested_permissions[index];
+        if (decision.kind != request.kind or !std.mem.eql(u8, decision.resource, request.resource)) {
+            return error.DecisionOrderMismatch;
+        }
+        session.decisions[index] = .{
+            .allow = decision.allow,
+            .local_only = decision.local_only,
+            .lease_ticks = decision.lease_ticks,
+        };
     }
     return session;
 }
@@ -66,18 +90,17 @@ pub fn initSession(task_id: u64, bundle: *const manifest.BundleManifest, decisio
 pub fn renderToBuffer(
     buffer: []u8,
     session: *const ReviewSession,
-    bundle: *const manifest.BundleManifest,
 ) ![]const u8 {
     var used: usize = 0;
 
     try appendFmt(buffer, &used, "Permission review for {s} [{s}] task={d}\n", .{
-        session.display_name,
-        session.bundle_id,
+        session.bundle.display_name,
+        session.bundle.bundle_id,
         session.task_id,
     });
 
-    for (bundle.requested_permissions, 0..) |request, index| {
-        try appendRequest(buffer, &used, session, bundle, request, index);
+    for (session.bundle.requested_permissions, 0..) |request, index| {
+        try appendRequest(buffer, &used, session, request, index);
     }
 
     return buffer[0..used];
@@ -86,28 +109,26 @@ pub fn renderToBuffer(
 pub fn renderRequestToBuffer(
     buffer: []u8,
     session: *const ReviewSession,
-    bundle: *const manifest.BundleManifest,
     request_index: usize,
 ) RenderError![]const u8 {
-    if (request_index >= bundle.requested_permissions.len) {
+    if (request_index >= session.bundle.requested_permissions.len) {
         return error.InvalidRequestIndex;
     }
 
     var used: usize = 0;
-    try appendRequest(buffer, &used, session, bundle, bundle.requested_permissions[request_index], request_index);
+    try appendRequest(buffer, &used, session, session.bundle.requested_permissions[request_index], request_index);
     return buffer[0..used];
 }
 
 pub fn decisionsToGrants(
-    bundle: *const manifest.BundleManifest,
-    decisions: []const ReviewDecision,
+    session: *const ReviewSession,
     now_ticks: u64,
     output: *[MAX_REVIEW_DECISIONS]policy_mediation.UserGrant,
 ) []const policy_mediation.UserGrant {
     var count: usize = 0;
 
-    for (bundle.requested_permissions) |request| {
-        const decision = findDecision(decisions, request.kind, request.resource) orelse continue;
+    for (session.bundle.requested_permissions, 0..) |request, index| {
+        const decision = session.decisionAt(index) orelse continue;
         if (!decision.allow) continue;
         if (count >= output.len) break;
 
@@ -166,7 +187,7 @@ pub fn parseCommand(line: []const u8) CommandError!ReviewCommand {
 }
 
 fn resolveDecisionExpiry(
-    decision: ReviewDecision,
+    decision: ReviewCommand,
     request: manifest.PermissionRequest,
     now_ticks: u64,
 ) ?u64 {
@@ -186,27 +207,14 @@ fn leaseEndFromTicks(now_ticks: u64, lease_ticks: u64) u64 {
     return std.math.add(u64, now_ticks, lease_ticks) catch std.math.maxInt(u64);
 }
 
-fn findDecision(
-    decisions: []const ReviewDecision,
-    kind: manifest.PermissionKind,
-    resource: []const u8,
-) ?ReviewDecision {
-    for (decisions) |decision| {
-        if (decision.kind != kind) continue;
-        if (!std.mem.eql(u8, decision.resource, resource)) continue;
-        return decision;
-    }
-    return null;
-}
-
 fn appendRequest(
     buffer: []u8,
     used: *usize,
     session: *const ReviewSession,
-    bundle: *const manifest.BundleManifest,
     request: manifest.PermissionRequest,
     index: usize,
 ) !void {
+    const bundle = session.bundle;
     try appendFmt(buffer, used, "  [{d}/{d}] {s}: {s}\n", .{
         index + 1,
         bundle.requested_permissions.len,
@@ -246,7 +254,7 @@ fn appendRequest(
         try appendFmt(buffer, used, "    requested lease: {d} ticks\n", .{request.max_lease_ticks});
     }
 
-    if (findDecision(session.decisions[0..session.decision_count], request.kind, request.resource)) |decision| {
+    if (session.decisionAt(index)) |decision| {
         if (!decision.allow) {
             try appendText(buffer, used, "    decision: deny\n");
         } else if (decision.lease_ticks) |lease_ticks| {
@@ -272,7 +280,7 @@ fn appendCompactReceipt(
     buffer: []u8,
     used: *usize,
     request: manifest.PermissionRequest,
-    decision: ReviewDecision,
+    decision: ReviewCommand,
 ) !void {
     try appendFmt(buffer, used, "    receipt: granted={s} duration=", .{manifest.permissionDisplayLabel(request.kind)});
     if (decision.lease_ticks) |lease_ticks| {
@@ -381,14 +389,6 @@ fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype
     used.* += rendered.len;
 }
 
-fn emptyDecision() ReviewDecision {
-    return .{
-        .kind = .object_access,
-        .resource = "",
-        .allow = false,
-    };
-}
-
 test "decisionsToGrants clamps lease duration to the manifest request" {
     const permissions = [_]manifest.PermissionRequest{
         .{
@@ -415,8 +415,9 @@ test "decisionsToGrants clamps lease duration to the manifest request" {
             .lease_ticks = 200,
         },
     };
+    const session = try initSession(1, &bundle, &decisions);
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
-    const grants = decisionsToGrants(&bundle, &decisions, 10, &grants_buffer);
+    const grants = decisionsToGrants(&session, 10, &grants_buffer);
 
     try std.testing.expectEqual(@as(usize, 1), grants.len);
     try std.testing.expect(grants[0].local_only);
@@ -443,8 +444,9 @@ test "decisionsToGrants saturates lease expiry instead of wrapping" {
             .lease_ticks = 20,
         },
     };
+    const session = try initSession(1, &bundle, &decisions);
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
-    const grants = decisionsToGrants(&bundle, &decisions, std.math.maxInt(u64) - 5, &grants_buffer);
+    const grants = decisionsToGrants(&session, std.math.maxInt(u64) - 5, &grants_buffer);
 
     try std.testing.expectEqual(@as(usize, 1), grants.len);
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), grants[0].expires_at_ticks);
@@ -480,10 +482,10 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
             .allow = false,
         },
     };
-    const session = initSession(3, &bundle, &decisions);
+    const session = try initSession(3, &bundle, &decisions);
 
     var buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
-    const rendered = try renderToBuffer(&buffer, &session, &bundle);
+    const rendered = try renderToBuffer(&buffer, &session);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission review for Notes") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Object access") != null);
@@ -511,8 +513,11 @@ test "permission review does not grant hidden device access for the example writ
             .local_only = true,
         },
     };
+    try std.testing.expectError(error.TooManyDecisions, initSession(9, &bundle, &decisions));
+
+    const session = try initSession(9, &bundle, decisions[0..bundle.requested_permissions.len]);
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
-    const grants = decisionsToGrants(&bundle, &decisions, 20, &grants_buffer);
+    const grants = decisionsToGrants(&session, 20, &grants_buffer);
 
     try std.testing.expectEqual(@as(usize, 2), grants.len);
     for (grants) |grant| {
@@ -521,15 +526,36 @@ test "permission review does not grant hidden device access for the example writ
         try std.testing.expect(grant.kind != .location);
     }
 
-    const session = initSession(9, &bundle, &decisions);
     var buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
-    const rendered = try renderToBuffer(&buffer, &session, &bundle);
+    const rendered = try renderToBuffer(&buffer, &session);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission review for Writer") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Background execution") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "sync-complete") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "expected duration: 30 seconds") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "network: none") != null);
+}
+
+test "review sessions reject decisions that do not follow manifest order" {
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_read = true } },
+        },
+        .{
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .rights = .{ .workspace = .{ .clipboard_read = true } },
+            .required = false,
+        },
+    };
+    const bundle = manifest_fixtures.basicNotesBundle(&permissions);
+    const decisions = [_]ReviewDecision{
+        decisionFromCommand(permissions[1], .{ .allow = true }),
+    };
+
+    try std.testing.expectError(error.DecisionOrderMismatch, initSession(12, &bundle, &decisions));
 }
 
 test "parseCommand accepts allow local leases and deny commands" {
@@ -561,10 +587,10 @@ test "renderRequestToBuffer marks undecided requests as pending" {
         },
     };
     const bundle = manifest_fixtures.basicNotesBundle(&permissions);
-    const session = initSession(4, &bundle, &.{});
+    const session = try initSession(4, &bundle, &.{});
 
     var buffer: [REVIEW_REQUEST_BUFFER_BYTES]u8 = undefined;
-    const rendered = try renderRequestToBuffer(&buffer, &session, &bundle, 0);
+    const rendered = try renderRequestToBuffer(&buffer, &session, 0);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Data egress") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "sync object workspace:notes with trusted-devices") != null);
@@ -606,9 +632,9 @@ test "renderToBuffer labels expanded location contacts screen capture and notifi
     const decisions = [_]ReviewDecision{
         .{ .kind = .location, .resource = "location.current", .allow = true },
     };
-    const session = initSession(44, &bundle, &decisions);
+    const session = try initSession(44, &bundle, &decisions);
     var buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
-    const rendered = try renderToBuffer(&buffer, &session, &bundle);
+    const rendered = try renderToBuffer(&buffer, &session);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Location") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Contacts") != null);

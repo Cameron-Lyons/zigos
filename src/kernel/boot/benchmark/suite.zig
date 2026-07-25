@@ -1092,15 +1092,13 @@ fn benchmarkPermissionReviewRender(iteration: u32) u64 {
         200 + iteration,
         &permission_review_bundle,
         permission_review_context.decisions[0..],
-    );
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const rendered = permission_review.renderToBuffer(
         &permission_review_buffer,
         &session,
-        &permission_review_bundle,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const grants = permission_review.decisionsToGrants(
-        &permission_review_bundle,
-        permission_review_context.decisions[0..],
+        &session,
         50 + iteration,
         &permission_review_grants,
     );
