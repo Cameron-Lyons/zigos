@@ -564,11 +564,29 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             self.next_version_id = 1;
             self.latest_inserted_version_id = ids.VersionId.zero;
             self.max_blob_payload_bytes = 0;
-            self.objects.reset();
+            for (self.objects.slots[0..self.objects.next_unclaimed_index]) |*slot| {
+                if (slot.in_use) slot.* = ObjectSlot{};
+            }
+            self.objects.resetRetainingPayloads();
             self.object_type_index.reset();
-            self.versions.reset();
-            self.blobs.reset();
-            self.chunks.reset();
+            for (self.versions.slots[0..self.versions.next_unclaimed_index]) |*slot| {
+                if (slot.in_use) slot.* = VersionSlot{};
+            }
+            self.versions.resetRetainingPayloads();
+
+            var slot_index: usize = 0;
+            while (slot_index < self.blobs.next_unclaimed_index) : (slot_index += 1) {
+                const slot = self.blobs.slotAt(slot_index);
+                if (slot.in_use) slot.* = BlobSlot{};
+            }
+            self.blobs.resetRetainingPayloads();
+
+            slot_index = 0;
+            while (slot_index < self.chunks.next_unclaimed_index) : (slot_index += 1) {
+                const slot = self.chunks.slotAt(slot_index);
+                if (slot.in_use) slot.* = ChunkSlot{};
+            }
+            self.chunks.resetRetainingPayloads();
         }
 
         pub fn rebuildIndexes(self: *Self) void {
@@ -1407,4 +1425,39 @@ fn writeLengthPrefixed(writer: *BinaryWriter, bytes: []const u8) error{NoSpaceLe
     if (bytes.len > std.math.maxInt(u16)) return error.NoSpaceLeft;
     try writer.writeU16(@intCast(bytes.len));
     try writer.writeBytes(bytes);
+}
+
+test "store reset scrubs live records before retaining arena capacity" {
+    var store = Store.init();
+
+    const object_index = store.objects.reserveIndex(ids.object(7)).?;
+    const object_slot = &store.objects.slots[object_index];
+    object_slot.object.id = ids.object(7);
+    object_slot.object.version_count = 3;
+
+    const version_index = store.versions.reserveIndex(ids.version(8)).?;
+    const version_slot = &store.versions.slots[version_index];
+    version_slot.version.id = ids.version(8);
+    version_slot.version.metadata.label_len = 6;
+    @memcpy(version_slot.version.metadata.label[0..6], "secret");
+
+    const blob_index = store.blobs.reserveIndex(9).?;
+    const blob_slot = store.blobs.slotAt(blob_index);
+    blob_slot.blob.ref_count = 4;
+
+    const chunk_index = store.chunks.reserveIndex(10).?;
+    const chunk_slot = store.chunks.slotAt(chunk_index);
+    chunk_slot.chunk.payload_len = 6;
+    @memcpy(chunk_slot.chunk.payload[0..6], "secret");
+
+    store.reset();
+
+    try std.testing.expectEqual(@as(usize, 0), store.objects.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), store.versions.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), store.blobs.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), store.chunks.countInUse());
+    try std.testing.expect(object_slot.object.id.isZero());
+    try std.testing.expectEqual(@as(usize, 0), version_slot.version.metadata.label_len);
+    try std.testing.expectEqual(@as(u16, 0), blob_slot.blob.ref_count);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 6), chunk_slot.chunk.payload[0..6]);
 }
