@@ -217,11 +217,11 @@ pub const Runtime = struct {
         self.next_address_space_id = 1;
         self.next_namespace_id = 1;
         self.next_component_id = 1;
-        self.tasks.reset();
+        self.tasks.resetRetainingPayloads();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
         self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
-        self.address_spaces.reset();
+        self.address_spaces.resetRetainingPayloads();
     }
 
     pub fn rebuildIndexes(self: *Runtime) void {
