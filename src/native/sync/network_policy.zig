@@ -270,97 +270,12 @@ pub const Directory = struct {
 
     pub fn authorize(self: *Directory, policy_id: u64, destination: Destination) Error!Decision {
         const policy = self.find(policy_id) orelse return error.PolicyNotFound;
-        return switch (policy.mode) {
-            .none => .{
-                .allowed = false,
-                .reason = .policy_denied,
-                .matched_mode = .none,
-            },
-            .local_network => switch (destination) {
-                .local_network => .{
-                    .allowed = true,
-                    .matched_mode = .local_network,
-                },
-                else => .{
-                    .allowed = false,
-                    .reason = .destination_mismatch,
-                    .matched_mode = .local_network,
-                },
-            },
-            .local_subnet_discovery => switch (destination) {
-                .discovery_class => |discovery_class| .{
-                    .allowed = std.mem.eql(u8, discovery_class, policy.targetSlice()),
-                    .reason = if (std.mem.eql(u8, discovery_class, policy.targetSlice())) .none else .destination_mismatch,
-                    .matched_mode = .local_subnet_discovery,
-                },
-                else => .{
-                    .allowed = false,
-                    .reason = .destination_mismatch,
-                    .matched_mode = .local_subnet_discovery,
-                },
-            },
-            .named_service_identity => switch (destination) {
-                .service_identity => |identity| .{
-                    .allowed = std.mem.eql(u8, identity, policy.targetSlice()),
-                    .reason = if (std.mem.eql(u8, identity, policy.targetSlice())) .none else .destination_mismatch,
-                    .matched_mode = .named_service_identity,
-                },
-                else => .{
-                    .allowed = false,
-                    .reason = .destination_mismatch,
-                    .matched_mode = .named_service_identity,
-                },
-            },
-            .named_domain => switch (destination) {
-                .domain => |domain| .{
-                    .allowed = std.mem.eql(u8, domain, policy.targetSlice()),
-                    .reason = if (std.mem.eql(u8, domain, policy.targetSlice())) .none else .destination_mismatch,
-                    .matched_mode = .named_domain,
-                },
-                else => .{
-                    .allowed = false,
-                    .reason = .destination_mismatch,
-                    .matched_mode = .named_domain,
-                },
-            },
-            .inbound_collaborative_session => switch (destination) {
-                .inbound_session_type => |session_type| .{
-                    .allowed = std.mem.eql(u8, session_type, policy.targetSlice()),
-                    .reason = if (std.mem.eql(u8, session_type, policy.targetSlice())) .none else .destination_mismatch,
-                    .matched_mode = .inbound_collaborative_session,
-                },
-                else => .{
-                    .allowed = false,
-                    .reason = .destination_mismatch,
-                    .matched_mode = .inbound_collaborative_session,
-                },
-            },
-            .unrestricted_internet => blk: {
-                if (!policy.explicit_internet_grant) {
-                    break :blk .{
-                        .allowed = false,
-                        .reason = .explicit_grant_required,
-                        .matched_mode = .unrestricted_internet,
-                    };
-                }
-                break :blk switch (destination) {
-                    .public_internet, .domain => .{
-                        .allowed = true,
-                        .matched_mode = .unrestricted_internet,
-                    },
-                    else => .{
-                        .allowed = false,
-                        .reason = .destination_mismatch,
-                        .matched_mode = .unrestricted_internet,
-                    },
-                };
-            },
-        };
+        return authorizePolicy(policy, destination);
     }
 
     pub fn authorizeConnection(self: *Directory, policy_id: u64, evidence: ConnectionEvidence) Error!Decision {
         const policy = self.find(policy_id) orelse return error.PolicyNotFound;
-        var decision = try self.authorize(policy_id, evidence.destination);
+        var decision = authorizePolicy(policy, evidence.destination);
         if (!decision.allowed) return decision;
 
         if (policy.require_remote_attestation and !evidence.hasVerifiedRemoteAttestation()) {
@@ -449,6 +364,75 @@ pub const Directory = struct {
         }
     }
 };
+
+fn authorizePolicy(policy: *const PolicyRecord, destination: Destination) Decision {
+    return switch (policy.mode) {
+        .none => .{
+            .allowed = false,
+            .reason = .policy_denied,
+            .matched_mode = .none,
+        },
+        .local_network => switch (destination) {
+            .local_network => .{
+                .allowed = true,
+                .matched_mode = .local_network,
+            },
+            else => targetDecision(false, .local_network),
+        },
+        .local_subnet_discovery => switch (destination) {
+            .discovery_class => |discovery_class| targetDecision(
+                std.mem.eql(u8, discovery_class, policy.targetSlice()),
+                .local_subnet_discovery,
+            ),
+            else => targetDecision(false, .local_subnet_discovery),
+        },
+        .named_service_identity => switch (destination) {
+            .service_identity => |identity| targetDecision(
+                std.mem.eql(u8, identity, policy.targetSlice()),
+                .named_service_identity,
+            ),
+            else => targetDecision(false, .named_service_identity),
+        },
+        .named_domain => switch (destination) {
+            .domain => |domain| targetDecision(
+                std.mem.eql(u8, domain, policy.targetSlice()),
+                .named_domain,
+            ),
+            else => targetDecision(false, .named_domain),
+        },
+        .inbound_collaborative_session => switch (destination) {
+            .inbound_session_type => |session_type| targetDecision(
+                std.mem.eql(u8, session_type, policy.targetSlice()),
+                .inbound_collaborative_session,
+            ),
+            else => targetDecision(false, .inbound_collaborative_session),
+        },
+        .unrestricted_internet => blk: {
+            if (!policy.explicit_internet_grant) {
+                break :blk .{
+                    .allowed = false,
+                    .reason = .explicit_grant_required,
+                    .matched_mode = .unrestricted_internet,
+                };
+            }
+            break :blk switch (destination) {
+                .public_internet, .domain => .{
+                    .allowed = true,
+                    .matched_mode = .unrestricted_internet,
+                },
+                else => targetDecision(false, .unrestricted_internet),
+            };
+        },
+    };
+}
+
+fn targetDecision(allowed: bool, mode: PolicyMode) Decision {
+    return .{
+        .allowed = allowed,
+        .reason = if (allowed) .none else .destination_mismatch,
+        .matched_mode = mode,
+    };
+}
 
 pub const EgressBroker = struct {
     policies: *Directory,
