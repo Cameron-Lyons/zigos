@@ -56,6 +56,94 @@ pub const Error = model.Error;
 pub const Snapshot = model.Snapshot;
 pub const syntheticUserspaceImage = model.syntheticUserspaceImage;
 
+pub const BackgroundWorkReservation = struct {
+    task_id: u64,
+    expected_active_count: u16,
+    expected_cpu_consumed_ticks: u64,
+    expected_reserved_memory_bytes: usize,
+    expected_reserved_shared_memory_bytes: usize,
+    active_count: u16,
+    cpu_consumed_ticks: u64,
+    reserved_memory_bytes: usize,
+    reserved_shared_memory_bytes: usize,
+    network: manifest.BackgroundNetworkMode,
+    visibility: manifest.BackgroundVisibility,
+    tick: u64,
+};
+
+const BackgroundCapacity = struct {
+    active_count: u16,
+    cpu_consumed_ticks: u64,
+    reserved_memory_bytes: usize,
+    reserved_shared_memory_bytes: usize,
+};
+
+pub fn planBackgroundWork(
+    task: *const TaskRecord,
+    budget: manifest.BackgroundResourceBudget,
+    network: manifest.BackgroundNetworkMode,
+    visibility: manifest.BackgroundVisibility,
+    tick: u64,
+) ?BackgroundWorkReservation {
+    const capacity = planBackgroundCapacity(task, budget) orelse return null;
+    return .{
+        .task_id = task.id,
+        .expected_active_count = task.background_active_count,
+        .expected_cpu_consumed_ticks = task.background_cpu_consumed_ticks,
+        .expected_reserved_memory_bytes = task.background_reserved_memory_bytes,
+        .expected_reserved_shared_memory_bytes = task.background_reserved_shared_memory_bytes,
+        .active_count = capacity.active_count,
+        .cpu_consumed_ticks = capacity.cpu_consumed_ticks,
+        .reserved_memory_bytes = capacity.reserved_memory_bytes,
+        .reserved_shared_memory_bytes = capacity.reserved_shared_memory_bytes,
+        .network = network,
+        .visibility = visibility,
+        .tick = tick,
+    };
+}
+
+pub fn commitBackgroundWork(task: *TaskRecord, reservation: BackgroundWorkReservation) void {
+    if (task.id != reservation.task_id or
+        task.background_active_count != reservation.expected_active_count or
+        task.background_cpu_consumed_ticks != reservation.expected_cpu_consumed_ticks or
+        task.background_reserved_memory_bytes != reservation.expected_reserved_memory_bytes or
+        task.background_reserved_shared_memory_bytes != reservation.expected_reserved_shared_memory_bytes)
+    {
+        native_util.impossibleByInvariant("background reservation must commit to its unchanged task");
+    }
+
+    task.background_active_count = reservation.active_count;
+    task.background_cpu_consumed_ticks = reservation.cpu_consumed_ticks;
+    task.background_reserved_memory_bytes = reservation.reserved_memory_bytes;
+    task.background_reserved_shared_memory_bytes = reservation.reserved_shared_memory_bytes;
+    task.background_peak_memory_bytes = @max(task.background_peak_memory_bytes, reservation.reserved_memory_bytes);
+    task.background_peak_shared_memory_bytes = @max(task.background_peak_shared_memory_bytes, reservation.reserved_shared_memory_bytes);
+    task.last_background_network = reservation.network;
+    task.last_background_visibility = reservation.visibility;
+    task.last_background_tick = reservation.tick;
+}
+
+fn planBackgroundCapacity(task: *const TaskRecord, budget: manifest.BackgroundResourceBudget) ?BackgroundCapacity {
+    if (task.state != .active or !task.background_allowed) return null;
+
+    const active_count = std.math.add(u16, task.background_active_count, 1) catch return null;
+    const cpu_consumed_ticks = std.math.add(u64, task.background_cpu_consumed_ticks, budget.cpu_time_ticks) catch return null;
+    if (cpu_consumed_ticks > task.budget.cpu_time_ticks) return null;
+
+    const reserved_memory_bytes = std.math.add(usize, task.background_reserved_memory_bytes, budget.memory_bytes) catch return null;
+    if (reserved_memory_bytes > task.budget.memory_bytes) return null;
+
+    const reserved_shared_memory_bytes = std.math.add(usize, task.background_reserved_shared_memory_bytes, budget.shared_memory_bytes) catch return null;
+    if (reserved_shared_memory_bytes > task.budget.shared_memory_bytes) return null;
+
+    return .{
+        .active_count = active_count,
+        .cpu_consumed_ticks = cpu_consumed_ticks,
+        .reserved_memory_bytes = reserved_memory_bytes,
+        .reserved_shared_memory_bytes = reserved_shared_memory_bytes,
+    };
+}
+
 const TaskArena = model.TaskArena;
 pub const TaskHandle = model.TaskHandle;
 const TaskOwnerIndex = model.TaskOwnerIndex;
@@ -660,7 +748,7 @@ pub const Runtime = struct {
             task.launch.release_transparency_root,
             task.launch.release_transparency_log_head,
         ));
-        appendAuditToTask(task, .{
+        task.appendAudit(.{
             .kind = .service_restarted,
             .detail = @truncate(task.process_generation),
             .tick = tick,
@@ -674,7 +762,7 @@ pub const Runtime = struct {
 
     pub fn audit(self: *Runtime, task_id: u64, event: AuditEvent) Error!void {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        appendAuditToTask(task, event);
+        task.appendAudit(event);
     }
 
     fn captureAddressSpaceRetirements(self: *const Runtime, reason: AddressSpaceRetirementReason) AddressSpaceRetirementBatch {
@@ -705,19 +793,6 @@ pub const Runtime = struct {
     fn removeAddressSpaceRecord(self: *Runtime, address_space_id: u64) void {
         const slot_index = self.address_spaces.slotIndexOf(address_space_id) orelse return;
         _ = self.address_spaces.removeIndex(slot_index);
-    }
-
-    fn appendAuditToTask(task: *TaskRecord, event: AuditEvent) void {
-        const cold = taskCold(task);
-        if (task.audit_count < MAX_AUDIT_EVENTS) {
-            const slot_index = (task.audit_start + task.audit_count) % MAX_AUDIT_EVENTS;
-            cold.audit_trail[slot_index] = event;
-            task.audit_count += 1;
-            return;
-        }
-
-        cold.audit_trail[task.audit_start] = event;
-        task.audit_start = (task.audit_start + 1) % MAX_AUDIT_EVENTS;
     }
 
     pub fn recordProvenance(self: *Runtime, task_id: u64, event: ProvenanceRecord) Error!void {
@@ -753,18 +828,7 @@ pub const Runtime = struct {
         budget: manifest.BackgroundResourceBudget,
     ) bool {
         const task = self.findConst(task_id) orelse return false;
-        if (task.state != .active or !task.background_allowed) return false;
-
-        const next_cpu = std.math.add(u64, task.background_cpu_consumed_ticks, budget.cpu_time_ticks) catch return false;
-        if (next_cpu > task.budget.cpu_time_ticks) return false;
-
-        const next_memory = std.math.add(usize, task.background_reserved_memory_bytes, budget.memory_bytes) catch return false;
-        if (next_memory > task.budget.memory_bytes) return false;
-
-        const next_shared = std.math.add(usize, task.background_reserved_shared_memory_bytes, budget.shared_memory_bytes) catch return false;
-        if (next_shared > task.budget.shared_memory_bytes) return false;
-
-        return true;
+        return planBackgroundCapacity(task, budget) != null;
     }
 
     pub fn reserveBackgroundWork(
@@ -775,18 +839,9 @@ pub const Runtime = struct {
         visibility: manifest.BackgroundVisibility,
         tick: u64,
     ) Error!bool {
-        if (!self.canReserveBackgroundWork(task_id, budget)) return false;
         const task = self.find(task_id) orelse return error.TaskNotFound;
-
-        task.background_active_count += 1;
-        task.background_cpu_consumed_ticks += budget.cpu_time_ticks;
-        task.background_reserved_memory_bytes += budget.memory_bytes;
-        task.background_reserved_shared_memory_bytes += budget.shared_memory_bytes;
-        task.background_peak_memory_bytes = @max(task.background_peak_memory_bytes, task.background_reserved_memory_bytes);
-        task.background_peak_shared_memory_bytes = @max(task.background_peak_shared_memory_bytes, task.background_reserved_shared_memory_bytes);
-        task.last_background_network = network;
-        task.last_background_visibility = visibility;
-        task.last_background_tick = tick;
+        const reservation = planBackgroundWork(task, budget, network, visibility, tick) orelse return false;
+        commitBackgroundWork(task, reservation);
         return true;
     }
 
@@ -815,7 +870,7 @@ pub const Runtime = struct {
         resetTaskCold(taskCold(task));
         task.execution_component_count = 0;
         task.capability_count = 0;
-        appendAuditToTask(task, .{
+        task.appendAudit(.{
             .kind = .terminated,
             .tick = tick,
         });
@@ -999,6 +1054,46 @@ test "new tasks start with zero ambient authority and no capabilities" {
     try std.testing.expectEqual(@as(usize, 1), task.provenance_count);
     try std.testing.expectEqual(debug_contract.ProvenanceKind.launch, task.provenanceEventAt(0).?.kind);
     try std.testing.expectEqual(debug_contract.Decision.allowed, task.provenanceEventAt(0).?.decision);
+}
+
+test "background work reservations plan and commit against a resolved task" {
+    var runtime = Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 2 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+            .background_allowed = true,
+        },
+    });
+    const budget = manifest.BackgroundResourceBudget{
+        .cpu_time_ticks = 200,
+        .memory_bytes = TEST_MINIMAL_MEMORY_BYTES,
+        .shared_memory_bytes = 64,
+    };
+
+    const reservation = planBackgroundWork(task, budget, .local_network_only, .status_only, 42).?;
+    try std.testing.expectEqual(@as(u16, 0), task.background_active_count);
+    try std.testing.expectEqual(@as(u64, 0), task.background_cpu_consumed_ticks);
+
+    commitBackgroundWork(task, reservation);
+    try std.testing.expectEqual(@as(u16, 1), task.background_active_count);
+    try std.testing.expectEqual(@as(u64, 200), task.background_cpu_consumed_ticks);
+    try std.testing.expectEqual(TEST_MINIMAL_MEMORY_BYTES, task.background_reserved_memory_bytes);
+    try std.testing.expectEqual(@as(usize, 64), task.background_reserved_shared_memory_bytes);
+    try std.testing.expectEqual(manifest.BackgroundNetworkMode.local_network_only, task.last_background_network);
+    try std.testing.expectEqual(manifest.BackgroundVisibility.status_only, task.last_background_visibility);
+    try std.testing.expectEqual(@as(u64, 42), task.last_background_tick);
+
+    const over_budget = manifest.BackgroundResourceBudget{
+        .cpu_time_ticks = 801,
+        .memory_bytes = 0,
+        .shared_memory_bytes = 0,
+    };
+    try std.testing.expect(planBackgroundWork(task, over_budget, .none, .audit_only, 43) == null);
 }
 
 test "task runtime crosses the first task slab page with indexed handles" {
