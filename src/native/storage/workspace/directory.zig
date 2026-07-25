@@ -566,16 +566,13 @@ pub const Directory = struct {
         workspace.staging.transaction_open = true;
         workspace.staging.staged_entry_count = 0;
         workspace.staging.staged_effective_entry_count = workspace.path_index.entry_count;
-        clearEntries(&workspace.staging.staged_entries);
     }
 
     pub fn abortTransaction(self: *Directory, workspace_id: ids.WorkspaceId) Error!void {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (!workspace.staging.transaction_open) return error.NoActiveTransaction;
-        workspace.staging.transaction_open = false;
-        workspace.staging.staged_entry_count = 0;
+        clearTransactionState(workspace);
         workspace.staging.staged_effective_entry_count = workspace.path_index.entry_count;
-        clearEntries(&workspace.staging.staged_entries);
     }
 
     pub fn stagePut(
@@ -1579,10 +1576,16 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
 }
 
 fn clearTransactionState(workspace: *WorkspaceRecord) void {
+    clearEntryPrefix(&workspace.staging.staged_entries, workspace.staging.staged_entry_count);
     workspace.staging.transaction_open = false;
     workspace.staging.staged_entry_count = 0;
     workspace.staging.staged_effective_entry_count = 0;
-    clearEntries(&workspace.staging.staged_entries);
+}
+
+fn clearEntryPrefix(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: usize) void {
+    for (entries[0..count]) |*entry| {
+        entry.* = Entry{};
+    }
 }
 
 fn debugIndexChecksEnabled() bool {

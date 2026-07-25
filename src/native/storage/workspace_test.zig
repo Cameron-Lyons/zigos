@@ -420,6 +420,10 @@ test "aborting a transaction discards staged entries and reopens the workspace" 
     try directory.beginTransaction(notes.id);
     try directory.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     try directory.abortTransaction(notes.id);
+    try std.testing.expect(!notes.staging.transaction_open);
+    try std.testing.expectEqual(@as(usize, 0), notes.staging.staged_entry_count);
+    try std.testing.expectEqual(@as(usize, 0), notes.staging.staged_entries[0].path_len);
+    try std.testing.expect(notes.staging.staged_entries[0].object_id.isZero());
 
     // The staged put must not survive the abort, and the workspace must be
     // open for the next transaction rather than wedged with
@@ -428,6 +432,8 @@ test "aborting a transaction discards staged entries and reopens the workspace" 
     try directory.beginTransaction(notes.id);
     try directory.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try directory.commit(notes.id, 11);
+    try std.testing.expectEqual(@as(usize, 0), notes.staging.staged_entries[0].path_len);
+    try std.testing.expect(notes.staging.staged_entries[0].object_id.isZero());
     _ = try directory.resolve(notes.id, "documents/notes.md");
 }
 
