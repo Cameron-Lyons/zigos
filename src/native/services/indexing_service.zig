@@ -146,6 +146,13 @@ pub const Service = struct {
         output: *[MAX_RESULTS]SearchResult,
     ) []const SearchResult {
         if (needle.len == 0) return output[0..0];
+        if (needle.len > MAX_BODY_BYTES) return output[0..0];
+
+        var folded_needle_buffer: [MAX_BODY_BYTES]u8 = undefined;
+        for (needle, 0..) |byte, index| {
+            folded_needle_buffer[index] = std.ascii.toLower(byte);
+        }
+        const folded_needle = folded_needle_buffer[0..needle.len];
 
         const snapshot_generation = self.generation;
         var count: usize = 0;
@@ -154,12 +161,12 @@ pub const Service = struct {
             var slot_index = self.workspace_index.head(workspace_id);
             while (slot_index != indexed_arena.no_index) : (slot_index = self.workspace_index.next(slot_index)) {
                 const slot = self.documentSlotForWorkspaceIndex(workspace_id, slot_index);
-                const candidate = scoreDocument(&slot.record, needle, snapshot_generation) orelse continue;
+                const candidate = scoreDocument(&slot.record, folded_needle, snapshot_generation) orelse continue;
                 retainRankedResult(output, &count, candidate);
             }
         }
 
-        std.sort.heap(SearchResult, output[0..count], {}, compareResults);
+        std.sort.insertion(SearchResult, output[0..count], {}, compareResults);
         return output[0..count];
     }
 
@@ -276,12 +283,12 @@ fn worstResultIndex(results: []const SearchResult) usize {
     return worst_index;
 }
 
-fn scoreDocument(record: *const DocumentRecord, needle: []const u8, generation: u64) ?SearchResult {
+fn scoreDocument(record: *const DocumentRecord, folded_needle: []const u8, generation: u64) ?SearchResult {
     // Hit counts are bounded by the stored text sizes, so the score always
     // fits the u16 result fields; keep that proof next to the arithmetic.
     comptime std.debug.assert(MAX_TITLE_BYTES * 4 + MAX_BODY_BYTES <= std.math.maxInt(u16));
-    const title_hits = countOccurrencesFold(record.titleSlice(), needle);
-    const body_hits = countOccurrencesFold(record.bodySlice(), needle);
+    const title_hits = countOccurrencesFolded(record.titleSlice(), folded_needle);
+    const body_hits = countOccurrencesFolded(record.bodySlice(), folded_needle);
     const score = title_hits * 4 + body_hits;
     if (score == 0) return null;
 
@@ -342,15 +349,15 @@ fn makeDocument(
     return record;
 }
 
-fn countOccurrencesFold(haystack: []const u8, needle: []const u8) usize {
-    if (needle.len == 0 or haystack.len < needle.len) return 0;
+fn countOccurrencesFolded(haystack: []const u8, folded_needle: []const u8) usize {
+    if (folded_needle.len == 0 or haystack.len < folded_needle.len) return 0;
 
     var count: usize = 0;
     var index: usize = 0;
-    while (index + needle.len <= haystack.len) : (index += 1) {
+    while (index + folded_needle.len <= haystack.len) : (index += 1) {
         var matches = true;
-        for (needle, 0..) |byte, offset| {
-            if (std.ascii.toLower(haystack[index + offset]) != std.ascii.toLower(byte)) {
+        for (folded_needle, 0..) |byte, offset| {
+            if (std.ascii.toLower(haystack[index + offset]) != byte) {
                 matches = false;
                 break;
             }
@@ -403,6 +410,11 @@ test "indexing service remains permission aware and updates ranked results" {
     try std.testing.expectEqualStrings("Alpha Notes", results[0].titleSlice());
     try std.testing.expect(results[0].title_fingerprint != 0);
     try std.testing.expectEqual(@as(u64, 101), results[1].object_id);
+    const mixed_case_results = service.query(&workspace_one, "AlPhA", &results_buffer);
+    try std.testing.expectEqual(@as(usize, 2), mixed_case_results.len);
+    try std.testing.expectEqual(@as(u64, 100), mixed_case_results[0].object_id);
+    const oversized_query = [_]u8{'a'} ** (MAX_BODY_BYTES + 1);
+    try std.testing.expectEqual(@as(usize, 0), service.query(&workspace_one, &oversized_query, &results_buffer).len);
     const duplicate_workspace_scope = [_]u64{ 1, 1 };
     const deduped_results = service.query(&duplicate_workspace_scope, "alpha", &results_buffer);
     try std.testing.expectEqual(@as(usize, 2), deduped_results.len);
