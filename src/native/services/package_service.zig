@@ -1089,6 +1089,12 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqual(@as(u32, 1), rolled_back.schemaVersion());
     try std.testing.expectEqualStrings("store:zigos", rolled_back.sourceIdentitySlice());
     try std.testing.expectEqual(@as(usize, 1), rolled_back.componentCount());
+    const resolved_v1 = try service.resolveCurrentManifest("app.notes", &resolved);
+    try std.testing.expectEqual(@as(usize, 1), resolved_v1.components.len);
+    try std.testing.expectEqual(@as(usize, 1), resolved_v1.assets.len);
+    try std.testing.expectEqual(@as(usize, 1), resolved_v1.requested_permissions.len);
+    try std.testing.expectEqualStrings("notes-ui", resolved_v1.components[0].id);
+    try std.testing.expectEqualStrings("assets/icon.svg", resolved_v1.assets[0].path);
 
     const removed = try service.remove(removeRequestForActive(service.find("app.notes").?));
     try std.testing.expect(removed.removed_existing);

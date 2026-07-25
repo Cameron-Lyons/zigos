@@ -159,7 +159,6 @@ pub fn rollback(bundle: anytype) void {
 
 pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.BundleManifest {
     const revision = bundle.activeRevision();
-    clearResolvedManifest(resolved);
 
     var index: usize = 0;
     while (index < revision.provided_interface_count) : (index += 1) {
@@ -333,31 +332,6 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .update_channel = revision.channel,
         .signature = resolved.signature,
     };
-}
-
-fn clearResolvedManifest(resolved: anytype) void {
-    resolved.provided_interfaces = [_]manifest.InterfaceDecl{.{ .name = "" }} ** resolved.provided_interfaces.len;
-    resolved.consumed_interfaces = [_]manifest.InterfaceDecl{.{ .name = "" }} ** resolved.consumed_interfaces.len;
-    resolved.components = [_]manifest.ExecutionComponentDecl{.{ .id = "", .entry = "" }} ** resolved.components.len;
-    resolved.assets = [_]manifest.AssetDecl{.{ .path = "", .content_type = "" }} ** resolved.assets.len;
-    resolved.requested_permissions = [_]manifest.PermissionRequest{.{
-        .kind = .object_access,
-        .resource = "",
-        .rights = .{ .policy = .{} },
-    }} ** resolved.requested_permissions.len;
-    resolved.background_tasks = [_]manifest.BackgroundTaskDecl{.{
-        .id = "",
-        .trigger = .user_approved_scheduled_job,
-        .expected_duration_seconds = 0,
-    }} ** resolved.background_tasks.len;
-    resolved.ai_metadata = .{};
-    resolved.data_rights = .{};
-    resolved.supply_chain = .{};
-    resolved.agent_delegation = .{};
-    resolved.accessibility = .{};
-    resolved.object_resilience = .{};
-    resolved.semantic_index = .{};
-    resolved.signature = .{};
 }
 
 fn writeRevision(
