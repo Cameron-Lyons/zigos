@@ -477,6 +477,7 @@
         "Userspace package signatures, boot artifact manifest signatures, generated archive signatures, and attestation statement signatures now route through provider boundaries instead of directly selecting raw Ed25519 operations; the native smoke boot artifact manifest path uses a release-eligible provider fixture so smoke signing exercises key-handle based custody semantics.",
         "Demo seed packages, SDK simulator release bundles, rendered-shell journeys, package-service fixtures, and spec release fixtures now select the Ed25519 provider explicitly where they model release signing behavior.",
         "Package-service update gates now reject exact signed replay, active-version regression, publisher drift, update-channel drift, update-source drift, schema-version regression, empty install sources, oversized install source identities, and invalid data schema versions, including adversarial spec coverage for freshly signed downgrade metadata.",
+        "Post-activation health checks now query live healthy and contract-bound supervisor state in constant time instead of depending on bounded diagnostic history; host tests prove readiness survives audit-ring rollover, drops on crash, and returns after restart, and the kernel benchmark gates the lookup cost.",
         "Installed package launch plans, resolved active manifests, and rollback targets now fail closed when the package publisher key has been revoked, so revocation blocks both future updates and already-installed code paths."
       ],
       "production_gaps": [
