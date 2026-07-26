@@ -204,7 +204,7 @@ pub const Executor = struct {
     probe_marker_printed: bool = false,
     resume_marker_printed: bool = false,
     active_task_id: u64 = 0,
-    active_address_space_id: u64 = 0,
+    active_mapping: ?*MappingEntry = null,
     kernel_page_directory_ptr: usize = 0,
     handoff_completed: bool = false,
     pending_instruction_pointer: u32 = 0,
@@ -272,7 +272,7 @@ pub const Executor = struct {
             self.clearUserPageFaultObservation();
         }
         const mapping = self.findMapping(event.address_space_id) orelse return;
-        if (self.active_task_id != 0 and self.active_address_space_id == event.address_space_id) {
+        if (self.active_task_id != 0 and self.active_mapping == mapping) {
             mapping.state = .retire_pending;
             self.handoff_completed = true;
             zigos_userspace_resume_requested = 1;
@@ -298,7 +298,7 @@ pub const Executor = struct {
         self.probe_marker_printed = false;
         self.resume_marker_printed = false;
         self.active_task_id = 0;
-        self.active_address_space_id = 0;
+        self.active_mapping = null;
         self.kernel_page_directory_ptr = 0;
         self.handoff_completed = false;
         self.pending_instruction_pointer = 0;
@@ -398,8 +398,8 @@ pub const Executor = struct {
             stack_pointer,
         });
 
+        self.active_mapping = mapping;
         self.active_task_id = task_id;
-        self.active_address_space_id = address_space.id;
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
         zigos_userspace_resume_requested = 0;
@@ -414,7 +414,7 @@ pub const Executor = struct {
         }
 
         self.active_task_id = 0;
-        self.active_address_space_id = 0;
+        self.active_mapping = null;
         publishRootActiveTaskId(0);
         zigos_userspace_resume_requested = 0;
 
@@ -471,8 +471,8 @@ pub const Executor = struct {
         const user_page_directory = mapping.pageDirectory();
         const frames_before = freestanding.paging.frameStats().allocated;
 
+        self.active_mapping = mapping;
         self.active_task_id = task_id;
-        self.active_address_space_id = retired_address_space_id;
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
         zigos_userspace_resume_requested = 0;
@@ -488,7 +488,7 @@ pub const Executor = struct {
 
         freestanding.paging.switchPageDirectory(kernel_page_directory);
         self.active_task_id = 0;
-        self.active_address_space_id = 0;
+        self.active_mapping = null;
         publishRootActiveTaskId(0);
         zigos_userspace_resume_requested = 0;
         self.drainPendingRetirements();
@@ -659,6 +659,8 @@ fn selectBootstrapCapability(
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     const executor = registered_executor orelse return;
     if (executor.active_task_id == 0) return;
+    const mapping = executor.active_mapping orelse
+        native_util.impossibleByInvariant("active userspace task has no materialized mapping");
     @call(.never_inline, recordTrapState, .{
         executor,
         frame.eip,
@@ -666,13 +668,11 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
         frame.eax,
     });
 
-    if (executor.findMapping(executor.active_address_space_id)) |mapping| {
-        mapping.resume_valid = true;
-        mapping.resume_instruction_pointer = executor.last_trap_instruction_pointer;
-        mapping.resume_stack_pointer = executor.last_trap_stack_pointer;
-        mapping.yield_count += 1;
-        mapping.last_user_counter = executor.last_trap_counter;
-    }
+    mapping.resume_valid = true;
+    mapping.resume_instruction_pointer = executor.last_trap_instruction_pointer;
+    mapping.resume_stack_pointer = executor.last_trap_stack_pointer;
+    mapping.yield_count += 1;
+    mapping.last_user_counter = executor.last_trap_counter;
 
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
@@ -691,21 +691,21 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
         freestanding.paging.page_fault_handler(frame);
         return;
     }
+    const mapping = executor.active_mapping orelse
+        native_util.impossibleByInvariant("active userspace task has no materialized mapping");
 
     const faulting_address = readFaultAddress();
     @call(.never_inline, recordUserPageFault, .{
         executor,
         executor.active_task_id,
-        executor.active_address_space_id,
+        mapping.address_space_id,
         faulting_address,
         frame.err_code,
     });
 
-    if (executor.findMapping(executor.active_address_space_id)) |mapping| {
-        mapping.page_fault_count += 1;
-        mapping.last_fault_address = faulting_address;
-        mapping.last_fault_error_code = frame.err_code;
-    }
+    mapping.page_fault_count += 1;
+    mapping.last_fault_address = faulting_address;
+    mapping.last_fault_error_code = frame.err_code;
 
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
@@ -840,8 +840,8 @@ test "executor defers active address-space retirement until kernel handoff" {
     var executor = Executor{};
     executor.mappings[0] = .{ .state = .live, .address_space_id = 42 };
     executor.rebuildMappingIndex();
+    executor.active_mapping = &executor.mappings[0];
     executor.active_task_id = 7;
-    executor.active_address_space_id = 42;
 
     executor.retireAddressSpace(.{ .address_space_id = 42, .reason = .terminate });
     try std.testing.expectEqual(MappingState.retire_pending, executor.mappings[0].state);
@@ -850,7 +850,7 @@ test "executor defers active address-space retirement until kernel handoff" {
     try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
 
     executor.active_task_id = 0;
-    executor.active_address_space_id = 0;
+    executor.active_mapping = null;
     executor.drainPendingRetirements();
     try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
     try std.testing.expect(executor.findMapping(42) == null);
