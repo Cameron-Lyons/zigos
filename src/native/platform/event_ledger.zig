@@ -1925,18 +1925,14 @@ pub const Ledger = struct {
             };
         }
 
-        const header_result = try storage.putVersion(.{
+        const header_result = try storage.putLocallySignedVersion(.{
             .preferred_object_id = object_store.ids.object(stateObjectId()),
             .object_type = .document,
             .payload = header_payload,
-            .metadata = try signLedgerMetadata(
-                self.state_signer,
-                "event-ledger-state",
-                "application/zigos-event-ledger",
-                .document,
-                header_payload,
-                latest_tick,
-            ),
+            .signer = self.state_signer,
+            .label = "event-ledger-state",
+            .content_type = "application/zigos-event-ledger",
+            .created_at_ticks = latest_tick,
             .parent_version_id = if (previous_header_version_id != 0) object_store.ids.version(previous_header_version_id) else null,
         });
         try storage.stagePut(self.workspace_id, state_entry_path, header_result.object_id, header_result.version_id, .document);
@@ -1949,18 +1945,14 @@ pub const Ledger = struct {
             const event_path = event_path_buffer[0..try writeEventEntryPath(&event_path_buffer, event.sequence)];
             var payload_record = PersistentEventRecord.fromEvent(PersistentEvent.fromEvent(event));
             const payload = std.mem.asBytes(&payload_record);
-            const result = try storage.putVersion(.{
+            const result = try storage.putLocallySignedVersion(.{
                 .preferred_object_id = object_store.ids.object(eventObjectId(event.sequence)),
                 .object_type = .document,
                 .payload = payload,
-                .metadata = try signLedgerMetadata(
-                    self.state_signer,
-                    "event-ledger-entry",
-                    "application/zigos-event-ledger-entry",
-                    .document,
-                    payload,
-                    event.tick,
-                ),
+                .signer = self.state_signer,
+                .label = "event-ledger-entry",
+                .content_type = "application/zigos-event-ledger-entry",
+                .created_at_ticks = event.tick,
                 .parent_version_id = null,
             });
             try storage.stagePut(self.workspace_id, event_path, result.object_id, result.version_id, .document);
@@ -2516,24 +2508,6 @@ fn appendUnsigned(buffer: []u8, used: *usize, value: anytype) Error!void {
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) Error!void {
     const rendered = std.fmt.bufPrint(buffer[used.*..], fmt, args) catch return error.NoSpaceLeft;
     used.* += rendered.len;
-}
-
-fn signLedgerMetadata(
-    identity: signing.SignerIdentity,
-    label: []const u8,
-    content_type: []const u8,
-    object_type: object_store.ObjectType,
-    payload: []const u8,
-    created_at_ticks: u64,
-) Error!object_store.SignedMetadata {
-    return object_store.signMetadata(
-        identity,
-        label,
-        content_type,
-        object_type,
-        payload,
-        created_at_ticks,
-    ) catch error.SigningFailed;
 }
 
 fn stateObjectId() u64 {
