@@ -134,14 +134,12 @@ pub const Store = struct {
         if (hardware_backed and !exportable) {
             secret.resident_material = false;
             secret.value_len = 0;
-            @memset(&secret.value, 0);
         } else {
             secret.value_len = native_util.copyTextExact(&secret.value, raw) catch return error.SecretTooLarge;
         }
 
-        const slot_index = self.secrets.reserveIndex(secret_id) orelse return error.SecretTableFull;
+        const slot_index = self.secrets.insertIndex(secret_id, .{ .secret = secret }) orelse return error.SecretIdExhausted;
         const slot = &self.secrets.slots[slot_index];
-        slot.secret = secret;
         self.next_secret_id +%= 1;
         return &slot.secret;
     }
@@ -165,9 +163,7 @@ pub const Store = struct {
             .hardware_backed = secret.hardware_backed,
             .export_allowed = allow_raw_export and secret.exportable,
         };
-        const slot_index = self.handles.reserveIndex(handle_id) orelse return error.HandleTableFull;
-        const slot = &self.handles.slots[slot_index];
-        slot.handle = handle;
+        _ = self.handles.insertIndex(handle_id, .{ .handle = handle }) orelse return error.HandleIdExhausted;
         self.next_handle_id +%= 1;
         return handle;
     }
@@ -363,6 +359,24 @@ test "secure secret store stops secret and handle allocation at id exhaustion" {
     try std.testing.expectError(error.HandleTableFull, full_handles.lendHandle(full_handle_secret.id, holder, 94, true));
     try std.testing.expectEqual(handle_next_before, full_handles.next_handle_id);
     try std.testing.expect(full_handles.describeHandle(handle_next_before) == null);
+}
+
+test "secure secret store direct insertion rejects staged id collisions" {
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 5 };
+    const holder = principal.PrincipalId{ .kind = .app, .serial = 47 };
+
+    const original_secret = try store.importSecret(owner, "original", "original material", false, true);
+    store.next_secret_id = original_secret.id;
+    try std.testing.expectError(error.SecretIdExhausted, store.importSecret(owner, "replacement", "replacement material", false, true));
+    try std.testing.expectEqual(@as(usize, 1), store.secrets.countInUse());
+    try std.testing.expectEqualStrings("original material", store.describeSecret(original_secret.id).?.value[0..original_secret.value_len]);
+
+    const original_handle = try store.lendHandle(original_secret.id, holder, 93, true);
+    store.next_handle_id = original_handle.id;
+    try std.testing.expectError(error.HandleIdExhausted, store.lendHandle(original_secret.id, holder, 94, true));
+    try std.testing.expectEqual(@as(usize, 1), store.handles.countInUse());
+    try std.testing.expectEqual(@as(u64, 93), store.describeHandle(original_handle.id).?.task_id);
 }
 
 test "secure secret store indexes secrets and handles through full tables" {

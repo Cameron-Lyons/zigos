@@ -1722,7 +1722,7 @@ fn validateSecretVaultHardwareProviderBoundary(
         "HardwareProviderUnavailable",
         "self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable",
         "secret.hardware_provider_used = true",
-        "slot.secret = secret",
+        "self.secrets.insertIndex(secret_id, .{ .secret = secret })",
         "secure secret store requires a hardware provider before hardware-backed imports",
     };
     for (store_snippets) |snippet| {
