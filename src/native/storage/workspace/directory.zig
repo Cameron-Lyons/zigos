@@ -474,7 +474,7 @@ pub const Directory = struct {
         for (&self.workspaces.slots, 0..) |*slot, slot_index| {
             if (!slot.in_use) continue;
             self.indexWorkspace(slot_index);
-            rebuildWorkspaceIndexes(&slot.workspace);
+            normalizeAndRebuildWorkspaceIndexes(&slot.workspace);
         }
         for (self.snapshots.slots, 0..) |slot, slot_index| {
             if (!slot.in_use) continue;
@@ -1227,7 +1227,8 @@ fn writeLengthPrefixed(writer: *BinaryWriter, bytes: []const u8) error{NoSpaceLe
     try writer.writeBytes(bytes);
 }
 
-fn rebuildWorkspaceIndexes(workspace: *WorkspaceRecord) void {
+fn normalizeAndRebuildWorkspaceIndexes(workspace: *WorkspaceRecord) void {
+    sortEntries(workspace.path_index.entries[0..workspace.path_index.entry_count]);
     rebuildWorkspaceEntryIndex(workspace);
     rebuildShareGrantIndex(workspace);
     workspace.oldest_snapshot_generation = NO_SNAPSHOT_GENERATION;
@@ -1279,7 +1280,6 @@ fn debugAssertShareGrantIndexMissAbsent(workspace: *const WorkspaceRecord, princ
 }
 
 fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
-    sortEntries(workspace.path_index.entries[0..workspace.path_index.entry_count]);
     workspace_index.rebuildPathSlots(
         ENTRY_INDEX_CAPACITY,
         &workspace.path_index.path_slots,
@@ -1596,6 +1596,35 @@ fn clearEntryPrefix(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: usize) void {
 
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
+}
+
+test "workspace commits preserve path order and index rebuilds normalize loaded entries" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .app, .serial = 1 },
+        .label = "sorted-index",
+    });
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "z-last", ids.object(1), ids.version(1), .document);
+    try directory.stagePut(workspace.id, "a-first", ids.object(2), ids.version(2), .document);
+    try directory.stagePut(workspace.id, "m-middle", ids.object(3), ids.version(3), .document);
+    _ = try directory.commit(workspace.id, 1);
+
+    var entries = try directory.entries(workspace.id);
+    try std.testing.expectEqualStrings("a-first", entries[0].pathSlice());
+    try std.testing.expectEqualStrings("m-middle", entries[1].pathSlice());
+    try std.testing.expectEqualStrings("z-last", entries[2].pathSlice());
+
+    std.mem.swap(Entry, &workspace.path_index.entries[0], &workspace.path_index.entries[2]);
+    directory.rebuildDerivedIndexes();
+
+    entries = try directory.entries(workspace.id);
+    try std.testing.expectEqualStrings("a-first", entries[0].pathSlice());
+    try std.testing.expectEqualStrings("m-middle", entries[1].pathSlice());
+    try std.testing.expectEqualStrings("z-last", entries[2].pathSlice());
+    try std.testing.expectEqual(ids.object(2), (try directory.resolve(workspace.id, "a-first")).object_id);
+    try std.testing.expectEqual(ids.object(1), (try directory.resolve(workspace.id, "z-last")).object_id);
 }
 
 test "directory reset scrubs live workspace and snapshot records" {

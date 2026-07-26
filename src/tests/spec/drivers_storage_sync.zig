@@ -523,7 +523,7 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expect(view.export_only);
     try std.testing.expect(view.readable);
     try std.testing.expect(!view.writable);
-    try std.testing.expectEqualStrings("documents/report.md", view.pathSlice());
+    try std.testing.expectEqual(draft_v2.object_id.raw(), view.object_id);
     try std.testing.expectEqual(draft_v2.version_id.raw(), view.version_id);
     try std.testing.expectError(file_bridge.Error.PathAuthorityRejected, storage.bridgeResolve(.{
         .workspace_id = workspace_record.id.raw(),

@@ -20,6 +20,8 @@ pub const ResolveRequest = struct {
     access: AccessMode,
 };
 
+/// Derived object metadata. The request path is an input and is not retained in
+/// the returned view.
 pub const View = struct {
     authoritative: bool = false,
     export_only: bool = true,
@@ -29,12 +31,6 @@ pub const View = struct {
     object_type: object_store.ObjectType,
     readable: bool,
     writable: bool,
-    path_len: usize,
-    path: [MAX_BRIDGE_PATH_BYTES]u8,
-
-    pub fn pathSlice(self: *const View) []const u8 {
-        return self.path[0..self.path_len];
-    }
 };
 
 pub const Error = error{
@@ -124,18 +120,14 @@ pub const Bridge = struct {
 
         if (!self.has_version(self.context, entry.version_id.raw())) return error.ObjectMissing;
 
-        var view = View{
+        return .{
             .workspace_id = request.workspace_id,
             .object_id = entry.object_id.raw(),
             .version_id = entry.version_id.raw(),
             .object_type = entry.object_type,
             .readable = can_read,
             .writable = false,
-            .path_len = bridge_path.len,
-            .path = [_]u8{0} ** MAX_BRIDGE_PATH_BYTES,
         };
-        @memcpy(view.path[0..bridge_path.len], bridge_path);
-        return view;
     }
 };
 
@@ -240,7 +232,6 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     try std.testing.expect(!view.authoritative);
     try std.testing.expect(view.export_only);
     try std.testing.expect(!view.writable);
-    try std.testing.expectEqualStrings("documents/notes.md", view.pathSlice());
     try std.testing.expectEqual(object.version_id.raw(), view.version_id);
 
     try std.testing.expectError(error.PathAuthorityRejected, bridge.resolve(.{
