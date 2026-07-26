@@ -1204,12 +1204,13 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
 
 fn benchmarkFileBridgeResolve(iteration: u32) u64 {
     var bridge = file_bridge_context.bridge.?;
+    const path = "documents/plan.md";
     const view = bridge.resolve(.{
         .workspace_id = file_bridge_context.expected_workspace_id,
-        .path = "documents/plan.md",
+        .path = path,
         .access = .read,
     }, file_bridge_context.requester, file_bridge_context.authority_capability_id, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return view.object_id + view.version_id + view.path_len + @intFromBool(view.readable);
+    return view.object_id + view.version_id + path.len + @intFromBool(view.readable);
 }
 
 fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
