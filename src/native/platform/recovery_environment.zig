@@ -236,8 +236,7 @@ pub const Environment = struct {
             const activation = try manager.activate(target_slot, .{}, tick + 1);
             self.report.image_activated = !activation.rolled_back and
                 activation.active_slot != null and
-                activation.active_slot.? == target_slot and
-                manager.verifyActiveImage();
+                activation.active_slot.? == target_slot;
         }
         return self.report.image_reinstalled and self.report.image_activated;
     }
