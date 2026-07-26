@@ -51,7 +51,7 @@ pub fn sendOverlayRelayFrameViaService(
 }
 
 fn overlayRelayFrameResult(
-    overlay_session: OverlaySession,
+    overlay_session: *const OverlaySession,
     transport_session: sync_transport.TransportSession,
     signed_frame: sync_transport.SignedEncryptedFrame,
     delivered_len: usize,

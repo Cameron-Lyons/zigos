@@ -549,6 +549,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return self.active_overlay_session_count;
         }
 
+        /// Returns an in-process, read-only borrow of the service-owned record.
+        /// The borrow is valid only while this service instance stays at the same
+        /// address. Closing updates the record to `.closed`; a later open may reuse
+        /// its fixed-arena slot, after which this pointer must not be dereferenced.
         pub fn openOverlaySession(
             self: *Self,
             workspace_id: u64,
@@ -558,7 +562,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             transport: TransportMode,
             private_service_label: ?[]const u8,
             tick: u64,
-        ) Error!OverlaySession {
+        ) Error!*const OverlaySession {
             try self.ensureTrustedDevices(from_device, to_device);
             const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
             const overlay = self.findOverlay(workspace_id) orelse return error.OverlayNotFound;
@@ -613,8 +617,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.session = session;
             slot.session.state = .established;
             self.active_overlay_session_count += 1;
-            session.state = .established;
-            return session;
+            return &slot.session;
         }
 
         pub fn probeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {

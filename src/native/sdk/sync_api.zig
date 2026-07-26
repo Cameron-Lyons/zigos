@@ -161,12 +161,16 @@ pub const DevNode = struct {
         return decision.allowed;
     }
 
+    /// Returns an in-process, read-only borrow from this node's embedded service.
+    /// Keep this `DevNode` at a stable address. Closing remains observable as
+    /// `.closed`; after a later open reuses the slot, the pointer must not be
+    /// dereferenced.
     pub fn openPrivateServiceSession(
         self: *DevNode,
         workspace_id: u64,
         service_identity: []const u8,
         private_service_label: []const u8,
-    ) !OverlaySession {
+    ) !*const OverlaySession {
         try self.bootstrap();
         const existing = self.service.findWorkspacePolicy(workspace_id) orelse
             try self.configureLocalFirstWorkspace(workspace_id, &.{});
