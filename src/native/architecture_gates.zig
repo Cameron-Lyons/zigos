@@ -69,10 +69,11 @@ fn probeArenaKey(_: *const ProbeArenaSlot) u64 {
 const ProbeArena = indexed_arena.IndexedArenaWithKey(u64, ProbeArenaSlot, 1, 2, probeArenaKey);
 
 pub const sync_private_overlay = .{
-    .transport_harness = .{
-        .uses_signed_encrypted_frames = @hasField(sync_transport_harness.SignedEncryptedFrame, "signature"),
-        .verifies_signed_frames = @hasDecl(sync_transport_harness, "verifySignedFrame"),
-        .rejects_foreign_session_task_submitters = @hasDecl(sync_transport_harness.BootedOverlayRelayService, "submitSignedFrame"),
+    .native_transport = .{
+        .uses_signed_encrypted_frames = @hasField(sync_transport.SignedEncryptedFrame, "signature"),
+        .verifies_signed_frames = @hasDecl(sync_transport, "verifySignedFrame"),
+        .opens_endpoint_backed_relays = @hasDecl(sync_transport.NativeTransportService, "openRelay"),
+        .falls_back_through_relay_service = @hasDecl(sync_transport.NativeTransportService, "sendWithRelayFallback"),
     },
     .service_test = .{
         .runs_deterministic_two_device_overlay_replication = @hasDecl(sync_service_test, "deterministicTwoDeviceOverlayReplication"),

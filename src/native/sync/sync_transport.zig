@@ -60,6 +60,15 @@ pub const NativeTransportAbi = struct {
     pub const fixed_header_bytes: usize = 4 + 2 + 2 + (4 * @sizeOf(u64)) + 4 + (4 * @sizeOf(u64)) + 2;
 };
 
+pub const NATIVE_FRAME_DIGEST_BYTES: usize = 2 * @sizeOf(crypto_hash.Digest);
+pub const MAX_NATIVE_PAYLOAD_BYTES: usize = @min(
+    MAX_PACKET_BYTES,
+    @min(
+        endpoint.MAX_MESSAGE_BYTES,
+        network_driver_task.MAX_NATIVE_FRAME_BYTES - NativeTransportAbi.fixed_header_bytes - NATIVE_FRAME_DIGEST_BYTES,
+    ),
+);
+
 pub const NativeSyncFrameView = struct {
     abi_version: u16,
     header_len: u16,
@@ -405,6 +414,7 @@ pub const NativeTransportService = struct {
         try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
         try self.ensureProductionSessionReady(&connection.session);
         try self.ensureHardwareBackedNetworkReady();
+        if (plaintext.len > MAX_NATIVE_PAYLOAD_BYTES) return error.PacketTooLarge;
         if (connection.in_flight_frames >= MAX_NATIVE_IN_FLIGHT_FRAMES) {
             self.congestion_drop_count += 1;
             return error.NativeTransportCongested;
@@ -874,10 +884,24 @@ test "native sync transport uses endpoints and reconnects without the in-process
     try std.testing.expect(verifySignedFrame(&delivered.signed_frame));
     const received = try native_transport.receive(&connection);
     try std.testing.expectEqualStrings("sync after reconnect", received.payload());
+    native_transport.acknowledge(&connection, delivered.sequence);
+
+    const max_payload = [_]u8{0xA5} ** MAX_NATIVE_PAYLOAD_BYTES;
+    const max_delivery = try native_transport.sendSigned(&connection, &max_payload, signer);
+    const max_received = try native_transport.receive(&connection);
+    try std.testing.expectEqualSlices(u8, &max_payload, max_received.payload());
+    native_transport.acknowledge(&connection, max_delivery.sequence);
+
+    const oversized_payload = [_]u8{0xA5} ** (MAX_NATIVE_PAYLOAD_BYTES + 1);
+    const endpoint_frames_before_oversized = native_transport.endpoint_frame_count;
+    const captured_frames_before_oversized = native_transport.capture.captured_count;
+    try std.testing.expectError(error.PacketTooLarge, native_transport.sendSigned(&connection, &oversized_payload, signer));
+    try std.testing.expectEqual(endpoint_frames_before_oversized, native_transport.endpoint_frame_count);
+    try std.testing.expectEqual(captured_frames_before_oversized, native_transport.capture.captured_count);
     try std.testing.expectEqual(@as(usize, 1), native_transport.opened_connections);
     try std.testing.expectEqual(@as(usize, 1), native_transport.disconnected_connections);
     try std.testing.expectEqual(@as(usize, 1), native_transport.reconnect_count);
-    try std.testing.expectEqual(@as(usize, 1), native_transport.endpoint_frame_count);
+    try std.testing.expectEqual(@as(usize, 2), native_transport.endpoint_frame_count);
 }
 
 test "native sync transport captures encrypted driver packets and handles replay and congestion" {

@@ -367,7 +367,7 @@ pub fn proveBootedSyncServicePath(
     );
     try std.testing.expect(runtime.processSeparated(sync_task.id, overlay_relay_task.task_id));
     try std.testing.expect(runtime.processSeparated(peer_task.task_id, overlay_relay_task.task_id));
-    var booted_relay_service = try sync_service.transport_harness.BootedOverlayRelayService.init(
+    var booted_relay_service = try sync_service.transport.BootedOverlayRelayService.init(
         sync_record.id + 20_000,
         overlay_relay_task.task_id,
         "relay.service-path.zigos",

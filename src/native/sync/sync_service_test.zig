@@ -1422,7 +1422,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expectEqual(@as(usize, 1), result.summary.conflict_count);
     try std.testing.expectEqual(@as(usize, 4), result.accepted_frame_count);
     try std.testing.expectEqual(@as(usize, 4), result.persisted_object_count);
-    const expected_relay_deliveries = 3 + (media_payload.len + sync_transport.MAX_PACKET_BYTES - 1) / sync_transport.MAX_PACKET_BYTES;
+    const expected_relay_deliveries = 3 + (media_payload.len + sync_transport.MAX_NATIVE_PAYLOAD_BYTES - 1) / sync_transport.MAX_NATIVE_PAYLOAD_BYTES;
     try std.testing.expectEqual(@as(usize, expected_relay_deliveries), result.relay_delivery_count);
     try std.testing.expect(result.used_booted_relay_service);
     const expected_payload_bytes = "source edit".len + media_payload.len + secret_payload.len + database_payload.len;
@@ -1893,11 +1893,11 @@ test "overlay sessions cover sync remote access private service publishing and e
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
         .audit = .{},
     });
-    var relay_queue = sync_transport.Relay.init();
-    try std.testing.expectError(error.EgressDenied, service_port.sendOverlayRelayFrame(
+    var relay_service = try sync_transport.BootedOverlayRelayService.init(9_700, 9_701, "relay.zigos.dev");
+    try std.testing.expectError(error.EgressDenied, service_port.sendOverlayRelayFrameViaService(
         service_authority,
         &network_capabilities,
-        &relay_queue,
+        &relay_service,
         .{
             .workspace_id = workspace_id,
             .from_device = tablet,
@@ -1910,13 +1910,13 @@ test "overlay sessions cover sync remote access private service publishing and e
             .tick = 17,
         },
     ));
-    try std.testing.expectEqual(@as(usize, 0), relay_queue.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 0), relay_service.accepted_packets);
     try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
 
-    const relay_exchange = try service_port.sendOverlayRelayFrame(
+    const relay_exchange = try service_port.sendOverlayRelayFrameViaService(
         service_authority,
         &network_capabilities,
-        &relay_queue,
+        &relay_service,
         .{
             .workspace_id = workspace_id,
             .from_device = tablet,
@@ -1939,8 +1939,8 @@ test "overlay sessions cover sync remote access private service publishing and e
     try std.testing.expectEqualStrings("overlay.workspace.sync", relay_exchange.serviceIdentitySlice());
     try std.testing.expectEqualStrings("relay.zigos.dev", relay_exchange.relayDomainSlice());
     try std.testing.expectEqualStrings("notes.remote", relay_exchange.privateServiceSlice());
-    try std.testing.expectEqual(@as(usize, 1), relay_queue.accepted_packets);
-    try std.testing.expectEqual(@as(usize, 1), relay_queue.delivered_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.delivered_packets);
     try std.testing.expectEqual(@as(usize, 4), service.activeOverlaySessionCount());
     try std.testing.expect(try service_port.closeOverlaySession(service_authority, relay_exchange.overlay_session_id, 19));
     try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
