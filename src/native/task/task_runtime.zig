@@ -242,8 +242,9 @@ pub const Runtime = struct {
         out.next_namespace_id = self.next_namespace_id;
         out.next_component_id = self.next_component_id;
         out.task_count = 0;
+        const task_claimed_count = self.tasks.claimedCount();
         var slot_index: usize = 0;
-        while (slot_index < MAX_TASKS) : (slot_index += 1) {
+        while (slot_index < task_claimed_count) : (slot_index += 1) {
             const slot = self.tasks.slotAtConst(slot_index);
             if (!slot.in_use) continue;
             const dense_index = out.task_count;
@@ -254,7 +255,7 @@ pub const Runtime = struct {
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
 
         out.address_space_count = 0;
-        for (&self.address_spaces.slots) |*slot| {
+        for (self.address_spaces.slots[0..self.address_spaces.claimedCount()]) |*slot| {
             if (!slot.in_use) continue;
             out.address_spaces[out.address_space_count] = slot.*;
             out.address_space_count += 1;
@@ -768,7 +769,7 @@ pub const Runtime = struct {
     fn captureAddressSpaceRetirements(self: *const Runtime, reason: AddressSpaceRetirementReason) AddressSpaceRetirementBatch {
         var batch = AddressSpaceRetirementBatch{};
         if (self.address_space_retirement_sink == null) return batch;
-        for (&self.address_spaces.slots) |*slot| {
+        for (self.address_spaces.slots[0..self.address_spaces.claimedCount()]) |*slot| {
             if (!slot.in_use) continue;
             batch.events[batch.count] = .{
                 .address_space_id = slot.address_space.id,
@@ -1696,6 +1697,87 @@ test "address-space retirement reset is idempotent and keeps the sink bound" {
     try std.testing.expectEqual(@as(usize, 3), recorder.count);
     try std.testing.expectEqual(replacement_address_space_id, recorder.eventAt(2).address_space_id);
     try std.testing.expectEqual(AddressSpaceRetirementReason.runtime_reset, recorder.eventAt(2).reason);
+}
+
+test "sparse checkpoints preserve cross-page slot order and retire only live address spaces" {
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = Runtime.init();
+    const snapshot = try std.testing.allocator.create(Snapshot);
+    defer std.testing.allocator.destroy(snapshot);
+    snapshot.* = Runtime.initSnapshot();
+
+    const task_count = model.TASK_PAGE_SIZE + 4;
+    var task_ids: [task_count]u64 = undefined;
+    for (&task_ids, 0..) |*task_id, index| {
+        const task = try createTaskIdTestTask(runtime, 8_200 + index);
+        task_id.* = task.id;
+    }
+    const first_task_id = task_ids[0];
+    const high_task_id = task_ids[task_ids.len - 1];
+    try runtime.grantCapability(high_task_id, 0xBEEF);
+    try runtime.audit(high_task_id, .{
+        .kind = .policy_allowed,
+        .detail = 0xA11D,
+        .tick = 77,
+    });
+
+    // Remove every intermediate slot in descending order so the replacement
+    // takes slot one while the older high task remains beyond a page boundary.
+    var task_index = task_ids.len - 1;
+    while (task_index > 1) {
+        task_index -= 1;
+        const task_id = task_ids[task_index];
+        const slot_index = runtime.tasks.slotIndexOf(task_id).?;
+        const owner = runtime.tasks.slotAtConst(slot_index).task.owner;
+        try std.testing.expect(try runtime.terminateTask(task_id, @intCast(100 + task_index)));
+        try std.testing.expect(runtime.task_owner_index.remove(taskOwnerIndexKey(owner), slot_index));
+        runtime.task_state_counts[taskStateIndex(.terminated)] -= 1;
+        try std.testing.expect(runtime.tasks.removeIndex(slot_index));
+    }
+
+    const replacement = try createTaskIdTestTask(runtime, 9_000);
+    const replacement_task_id = replacement.id;
+    try std.testing.expect(replacement_task_id > high_task_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.tasks.slotIndexOf(replacement_task_id).?);
+    try std.testing.expectEqual(task_count, runtime.tasks.claimedCount());
+    try std.testing.expectEqual(task_count, runtime.address_spaces.claimedCount());
+
+    runtime.writeSnapshot(snapshot);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.task_count);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.address_space_count);
+    const expected_task_ids = [_]u64{ first_task_id, replacement_task_id, high_task_id };
+    for (expected_task_ids, 0..) |expected_task_id, dense_index| {
+        const snapshot_task = &snapshot.tasks[dense_index].task;
+        try std.testing.expectEqual(expected_task_id, snapshot_task.id);
+        try std.testing.expectEqual(
+            snapshot_task.address_space_id,
+            snapshot.address_spaces[dense_index].address_space.id,
+        );
+    }
+    const high_snapshot_task = &snapshot.tasks[2].task;
+    try std.testing.expectEqualSlices(u64, &.{0xBEEF}, high_snapshot_task.capabilityIds());
+    try std.testing.expectEqual(AuditEventKind.policy_allowed, high_snapshot_task.latestAuditEvent().?.kind);
+    try std.testing.expectEqual(@as(u64, 77), high_snapshot_task.latestAuditEvent().?.tick);
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.launch, high_snapshot_task.provenanceEventAt(0).?.kind);
+
+    var recorder = RetirementRecorder{
+        .runtime_to_observe = runtime,
+        .require_retired_address_space_absent = true,
+    };
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(RetirementRecorder, &recorder)));
+    const expected_address_space_ids = [_]u64{
+        snapshot.tasks[0].task.address_space_id,
+        snapshot.tasks[1].task.address_space_id,
+        snapshot.tasks[2].task.address_space_id,
+    };
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 3), recorder.count);
+    for (expected_address_space_ids, 0..) |expected_address_space_id, event_index| {
+        try std.testing.expectEqual(expected_address_space_id, recorder.eventAt(event_index).address_space_id);
+        try std.testing.expectEqual(AddressSpaceRetirementReason.runtime_reset, recorder.eventAt(event_index).reason);
+    }
+    try std.testing.expect(recorder.commit_observed);
 }
 
 test "address-space retirement binding is exclusive and compare-and-unbind preserves a newer sink" {
