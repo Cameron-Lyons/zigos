@@ -33,7 +33,7 @@ pub fn serviceBindingFlags(task: *const task_runtime.TaskRecord) u16 {
     return flags;
 }
 
-pub fn capabilityDescriptor(owned: capability.Capability) abi.CapabilityDescriptor {
+pub fn capabilityDescriptor(owned: *const capability.Capability) abi.CapabilityDescriptor {
     const flags = abi.ScopeFlags{
         .local_only = owned.scope.local_only,
         .broker_only = owned.scope.broker_only,

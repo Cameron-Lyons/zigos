@@ -680,6 +680,7 @@
         "REQ-PERMISSION-UX"
       ],
       "implementation_anchors": [
+        "src/native/kernel_api/capability.zig",
         "src/native/session/booted_evidence.zig",
         "src/native/demo/permission_flows.zig",
         "src/native/policy/permission_review_service.zig",
@@ -691,6 +692,7 @@
       "current_evidence": [
         "Freestanding QEMU boots now run the permission review flow before native-ready using generated app packages, the permission review service task, compositor-backed review rendering, policy mediation, and explicit grant/deny markers.",
         "Signed policy objects now live in an indexed arena with primary policy-id lookup and a scope multimap, so active-policy decisions and revocation avoid legacy first-free table scans while preserving signed generation ordering.",
+        "Capability derivation now returns a read-only borrow of the authoritative child in its fixed arena slot; the borrow may be used only while the same table instance retains that grant, and owned boundaries copy the record before revocation or removal clears the slot for reuse. Pointer identity plus copy-before-revoke and deterministic slot reuse are host-tested, while paired QEMU samples reduce workspace-object derivation by 1.1 to 1.8 percent with unchanged checksums.",
         "The booted permission proof now feeds every Notes, Sync, and Capture review command through the xHCI HID boot-keyboard report path without the bootstrap review profile, and the native smoke contract requires explicit xHCI keyboard report, review-command, and full boot-flow command markers.",
         "Permission review service paths reject zero audit ticks, oversized scripted commands, and rendered-surface controls before the review window exists, so profiled review flows remain bounded and auditable.",
         "The native smoke marker contract requires review-port readiness, policy-port readiness, rendered review output, zero-authority denials, local grants, explicit device/media decisions, and lease expiry evidence.",
