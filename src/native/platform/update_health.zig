@@ -157,18 +157,14 @@ pub fn recordBootSuccess(
         error.EntryNotFound => null,
         else => return err,
     };
-    const result = try manager.storage.putVersion(.{
+    const result = try manager.storage.putLocallySignedVersion(.{
         .preferred_object_id = object_store.ids.object(bootWitnessObjectId()),
         .object_type = .document,
         .payload = payload,
-        .metadata = try object_store.signMetadata(
-            manager.state_signer,
-            "update-health-boot-success",
-            "application/zigos-update-health-boot-success",
-            .document,
-            payload,
-            tick,
-        ),
+        .signer = manager.state_signer,
+        .label = "update-health-boot-success",
+        .content_type = "application/zigos-update-health-boot-success",
+        .created_at_ticks = tick,
         .parent_version_id = if (existing_entry) |entry| entry.version_id else null,
     });
     try manager.storage.beginTransaction(manager.workspace_id);
@@ -295,18 +291,14 @@ fn seedStorageProbe(
     owner: principal.PrincipalId,
     signer: signing.SignerIdentity,
 ) !u64 {
-    const record = try storage.putVersion(.{
+    const record = try storage.putLocallySignedVersion(.{
         .preferred_object_id = object_store.ids.object(7_700),
         .object_type = .document,
         .payload = "notes-v1",
-        .metadata = try object_store.signMetadata(
-            signer,
-            "notes",
-            "text/plain",
-            .document,
-            "notes-v1",
-            9,
-        ),
+        .signer = signer,
+        .label = "notes",
+        .content_type = "text/plain",
+        .created_at_ticks = 9,
     });
     const workspace_record = try storage.createWorkspace(.{
         .owner = owner,

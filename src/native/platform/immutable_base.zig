@@ -151,18 +151,14 @@ pub const Manager = struct {
     ) Error!*SystemImage {
         if (slot_index >= MAX_SYSTEM_IMAGES) return error.InvalidSlot;
 
-        const result = try self.storage.putVersion(.{
+        const result = try self.storage.putLocallySignedVersion(.{
             .preferred_object_id = object_store.ids.object(imageObjectId(slot_index)),
             .object_type = .model_artifact,
             .payload = payload,
-            .metadata = try object_store.signMetadata(
-                signer,
-                label,
-                "application/zigos-system-image",
-                .model_artifact,
-                payload,
-                tick,
-            ),
+            .signer = signer,
+            .label = label,
+            .content_type = "application/zigos-system-image",
+            .created_at_ticks = tick,
         });
 
         const slot = &self.slots[slot_index];
@@ -297,18 +293,14 @@ pub const Manager = struct {
             error.EntryNotFound => null,
             else => return err,
         };
-        const result = try self.storage.putVersion(.{
+        const result = try self.storage.putLocallySignedVersion(.{
             .preferred_object_id = object_store.ids.object(stateObjectId()),
             .object_type = .document,
             .payload = encoded,
-            .metadata = try object_store.signMetadata(
-                self.state_signer,
-                "immutable-base-state",
-                "application/zigos-immutable-base",
-                .document,
-                encoded,
-                tick,
-            ),
+            .signer = self.state_signer,
+            .label = "immutable-base-state",
+            .content_type = "application/zigos-immutable-base",
+            .created_at_ticks = tick,
             .parent_version_id = if (existing_entry) |entry| entry.version_id else null,
         });
         try self.storage.beginTransaction(self.workspace_id);

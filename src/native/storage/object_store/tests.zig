@@ -335,6 +335,37 @@ test "object store rejects tampered metadata signatures" {
     }));
 }
 
+test "object store locally signs trusted writes and keeps submitted metadata verification" {
+    var store = Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "local-storage-writer",
+        .seed = signing.seedFromByte(0x56),
+    };
+    const result = try store.putLocallySignedVersion(.{
+        .preferred_object_id = ids.object(902),
+        .object_type = .document,
+        .payload = "locally signed",
+        .signer = signer,
+        .label = "local",
+        .content_type = "text/plain",
+        .created_at_ticks = 12,
+    });
+
+    const version = store.version(result.version_id).?;
+    try std.testing.expect(version.metadata.signature.isComplete());
+    try std.testing.expectEqualStrings(signer.label, version.metadata.signature.signer);
+    try std.testing.expect(version.metadata.verifyFor(.document, "locally signed"));
+
+    var submitted = version.metadata;
+    submitted.created_at_ticks += 1;
+    try std.testing.expectError(error.InvalidSignature, store.putVersion(.{
+        .preferred_object_id = ids.object(903),
+        .object_type = .document,
+        .payload = "locally signed",
+        .metadata = submitted,
+    }));
+}
+
 test "object store capacity is configurable" {
     const SmallStore = StoreWith(.{
         .max_objects = 1,
