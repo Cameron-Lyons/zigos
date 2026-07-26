@@ -2323,13 +2323,16 @@ fn redactedForQuery(event: *const Event, query: Query) Event {
 
 fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_protected_content: bool) Error!void {
     const detail = exportDetailSlice(event, include_protected_content);
-    try appendFmt(buffer, used, "#{d} tick={d} kind={s} subject={s}:{d}", .{
-        event.sequence,
-        event.tick,
-        @tagName(event.kind),
-        @tagName(event.subject.kind),
-        event.subject.serial,
-    });
+    try appendText(buffer, used, "#");
+    try appendUnsigned(buffer, used, event.sequence);
+    try appendText(buffer, used, " tick=");
+    try appendUnsigned(buffer, used, event.tick);
+    try appendText(buffer, used, " kind=");
+    try appendText(buffer, used, @tagName(event.kind));
+    try appendText(buffer, used, " subject=");
+    try appendText(buffer, used, @tagName(event.subject.kind));
+    try appendText(buffer, used, ":");
+    try appendUnsigned(buffer, used, event.subject.serial);
     if (event.permission_kind) |permission_kind| {
         try appendFmt(buffer, used, " permission={s} allowed={s}", .{
             @tagName(permission_kind),
@@ -2360,17 +2363,18 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
     }
     switch (event.kind) {
         .update_transition => {
-            try appendFmt(buffer, used, " slot={d} rollback={s} failure={s}", .{
-                event.related_id,
-                yesNo(!event.allowed),
-                updateFailureLabel(event.detail_code),
-            });
+            try appendText(buffer, used, " slot=");
+            try appendUnsigned(buffer, used, event.related_id);
+            try appendText(buffer, used, " rollback=");
+            try appendText(buffer, used, yesNo(!event.allowed));
+            try appendText(buffer, used, " failure=");
+            try appendText(buffer, used, updateFailureLabel(event.detail_code));
         },
         .device_trust_change => {
-            try appendFmt(buffer, used, " device={d} trusted={s}", .{
-                event.related_id,
-                yesNo(event.allowed),
-            });
+            try appendText(buffer, used, " device=");
+            try appendUnsigned(buffer, used, event.related_id);
+            try appendText(buffer, used, " trusted=");
+            try appendText(buffer, used, yesNo(event.allowed));
         },
         .capability_grant, .capability_revocation => {
             try appendFmt(buffer, used, " capability={d}", .{event.related_id});
@@ -2472,23 +2476,41 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
         else => {},
     }
     if (event.workspace_id != 0) {
-        try appendFmt(buffer, used, " workspace={d}", .{event.workspace_id});
+        try appendText(buffer, used, " workspace=");
+        try appendUnsigned(buffer, used, event.workspace_id);
     }
     if (event.related_id != 0 and event.kind != .update_transition and event.kind != .device_trust_change) {
-        try appendFmt(buffer, used, " related={d}", .{event.related_id});
+        try appendText(buffer, used, " related=");
+        try appendUnsigned(buffer, used, event.related_id);
     }
     if (event.detail_code != 0 and event.kind != .update_transition) {
-        try appendFmt(buffer, used, " code={d}", .{event.detail_code});
+        try appendText(buffer, used, " code=");
+        try appendUnsigned(buffer, used, event.detail_code);
     }
     if (event.kind == .process_crash or event.kind == .driver_restart) {
-        try appendFmt(buffer, used, " service={s}", .{@tagName(event.service_class)});
+        try appendText(buffer, used, " service=");
+        try appendText(buffer, used, @tagName(event.service_class));
     }
-    try appendFmt(buffer, used, " detail={s}\n", .{detail});
+    try appendText(buffer, used, " detail=");
+    try appendText(buffer, used, detail);
+    try appendText(buffer, used, "\n");
 }
 
 fn exportDetailSlice(event: *const Event, include_protected_content: bool) []const u8 {
     if (event.detail_protected and !include_protected_content) return "redacted";
     return event.detailSlice();
+}
+
+fn appendText(buffer: []u8, used: *usize, value: []const u8) Error!void {
+    if (value.len > buffer.len -| used.*) return error.NoSpaceLeft;
+    @memcpy(buffer[used.*..][0..value.len], value);
+    used.* += value.len;
+}
+
+fn appendUnsigned(buffer: []u8, used: *usize, value: anytype) Error!void {
+    var number_buffer: [20]u8 = undefined;
+    const number_len = std.fmt.printInt(&number_buffer, value, 10, .lower, .{});
+    try appendText(buffer, used, number_buffer[0..number_len]);
 }
 
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) Error!void {

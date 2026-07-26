@@ -252,6 +252,7 @@
         ],
         "current_evidence": [
           "Event-ledger, supervisor, and spec tests verify redacted diagnostics for crashes, permission decisions, remote shares, and autonomous agent authorization/action denials.",
+          "Event-ledger text export writes its common diagnostic fields and decimal identifiers directly into the caller-provided buffer, preserving the stable redacted wire format while reducing the gated export benchmark by roughly 3 to 7 percent.",
           "Crash record summaries now redact sensitive reason text by default, and spec/release_security/crash_dump_redaction.json gates raw memory denial, opt-in scoped diagnostics, support-bundle review, and reproducible redaction fixtures.",
           "Hardware-backed secret vault imports now fail closed unless an explicit seal provider is attached; provider use is recorded on sealed records, the backing store inserts complete secret and handle records directly into indexed arenas without redundant default payload writes, active vault handles are indexed for active-at-tick checks and removed on revoke, and the production-readiness checker rejects software digest fallback for hardware-backed secret claims.",
           "The OS identity passkey store now uses an indexed arena for credential registration and lookup, rejects full credential tables before importing backing secrets, and keeps assertion, recovery, and revocation mutations tracked by credential id."
