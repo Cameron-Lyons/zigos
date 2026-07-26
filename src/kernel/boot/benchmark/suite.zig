@@ -1341,6 +1341,7 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
 
     _ = media_context.service.complete(print_job.id, &media_context.scheduler, &media_context.notifications, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = media_context.service.complete(export_job.id, &media_context.scheduler, &media_context.notifications, 31 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&media_context.service);
 
     return export_job.id +
         print_job.id +
