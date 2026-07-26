@@ -2428,18 +2428,14 @@ fn seedUpdateHealthStorageProbe(
     identity: signing.SignerIdentity,
     tick: u64,
 ) u64 {
-    const record = storage.putVersion(.{
+    const record = storage.putLocallySignedVersion(.{
         .preferred_object_id = ids.object(7_700),
         .object_type = .document,
         .payload = "notes-v1",
-        .metadata = object_store.signMetadata(
-            identity,
-            "notes",
-            "text/plain",
-            .document,
-            "notes-v1",
-            tick,
-        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
+        .signer = identity,
+        .label = "notes",
+        .content_type = "text/plain",
+        .created_at_ticks = tick,
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const workspace_record = storage.createWorkspace(.{
         .owner = owner,
