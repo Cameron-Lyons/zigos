@@ -496,7 +496,7 @@
         },
         {
           "file": "src/native/policy/permission_review.zig",
-          "name": "renderToBuffer includes bundle name, permission labels, and decisions"
+          "name": "renderToBuffer preserves the exact permission review text"
         },
         {
           "file": "src/native/policy/permission_review_service.zig",

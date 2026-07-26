@@ -1097,6 +1097,7 @@ fn benchmarkPermissionReviewRender(iteration: u32) u64 {
         &permission_review_buffer,
         &session,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&permission_review_buffer);
     const grants = permission_review.decisionsToGrants(
         &session,
         50 + iteration,
