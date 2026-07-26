@@ -199,7 +199,7 @@ test "workspace commit applies multiple staged deletions with one rebuilt index"
     try std.testing.expectEqual(@as(usize, 3), record.deletedCount());
 }
 
-test "workspace path index keeps cached root and lookups current" {
+test "workspace path index keeps cached root and lookups current across incremental updates" {
     var directory = Directory.init();
     const workspace = try directory.create(.{
         .owner = .{ .kind = .user, .serial = 8 },
@@ -225,9 +225,24 @@ test "workspace path index keeps cached root and lookups current" {
     try std.testing.expectEqual(record_after_put.rootAddress(), snapshot_record.root_address);
 
     try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "a.md", ids.object(31), ids.version(303), .document);
+    _ = try directory.commit(workspace.id, 44);
+    const same_object_entries = try directory.entries(workspace.id);
+    try std.testing.expectEqual(workspaceRootAddress(same_object_entries), directory.find(workspace.id).?.rootAddress());
+    try std.testing.expectEqual(ids.version(303), (try directory.resolveObject(workspace.id, ids.object(31))).version_id);
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "a.md", ids.object(33), ids.version(304), .document);
+    _ = try directory.commit(workspace.id, 45);
+    const new_object_entries = try directory.entries(workspace.id);
+    try std.testing.expectEqual(workspaceRootAddress(new_object_entries), directory.find(workspace.id).?.rootAddress());
+    try std.testing.expectError(error.EntryNotFound, directory.resolveObject(workspace.id, ids.object(31)));
+    try std.testing.expectEqual(ids.version(304), (try directory.resolveObject(workspace.id, ids.object(33))).version_id);
+
+    try directory.beginTransaction(workspace.id);
     try directory.stageDelete(workspace.id, "a.md");
     try directory.stagePut(workspace.id, "m.md", ids.object(32), ids.version(302), .document);
-    _ = try directory.commit(workspace.id, 44);
+    _ = try directory.commit(workspace.id, 46);
 
     const entries_after_delta = try directory.entries(workspace.id);
     const record_after_delta = directory.find(workspace.id).?;
@@ -236,6 +251,135 @@ test "workspace path index keeps cached root and lookups current" {
     try std.testing.expectError(error.EntryNotFound, directory.resolveObject(workspace.id, ids.object(31)));
     try std.testing.expectEqual(ids.version(302), (try directory.resolve(workspace.id, "m.md")).version_id);
     try std.testing.expectEqualStrings("m.md", (try directory.resolveObject(workspace.id, ids.object(32))).pathSlice());
+}
+
+test "structural workspace commits scrub the full inactive Merkle tail" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 11 },
+        .label = "merkle-tail",
+    });
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "a.md", ids.object(50), ids.version(500), .document);
+    try directory.stagePut(workspace.id, "b.md", ids.object(51), ids.version(501), .document);
+    try directory.stagePut(workspace.id, "c.md", ids.object(52), ids.version(502), .document);
+    _ = try directory.commit(workspace.id, 47);
+
+    const record = directory.find(workspace.id).?;
+    const poisoned_leaf = record.path_index.root_address;
+    const zero_leaf = workspace_merkle.zeroRootAddress();
+    try std.testing.expect(!std.mem.eql(u8, &poisoned_leaf, &zero_leaf));
+    for (record.path_index.leaf_hashes[record.path_index.entry_count..]) |*leaf_hash| {
+        leaf_hash.* = poisoned_leaf;
+    }
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "b.md");
+    try directory.stagePut(workspace.id, "d.md", ids.object(53), ids.version(503), .document);
+    _ = try directory.commit(workspace.id, 48);
+
+    const entries_after_structural_commit = try directory.entries(workspace.id);
+    const index_after = &directory.find(workspace.id).?.path_index;
+    try std.testing.expectEqual(workspaceRootAddress(entries_after_structural_commit), index_after.root_address);
+    for (index_after.leaf_hashes[index_after.entry_count..]) |leaf_hash| {
+        try std.testing.expectEqual(zero_leaf, leaf_hash);
+    }
+}
+
+test "replacement-only workspace commits preserve duplicate fallbacks and object swaps" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 9 },
+        .label = "replacement-index",
+    });
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "a.md", ids.object(10), ids.version(100), .document);
+    try directory.stagePut(workspace.id, "b.md", ids.object(10), ids.version(101), .document);
+    try directory.stagePut(workspace.id, "c.md", ids.object(20), ids.version(102), .document);
+    try directory.stagePut(workspace.id, "d.md", ids.object(30), ids.version(103), .document);
+    _ = try directory.commit(workspace.id, 47);
+    try std.testing.expectEqualStrings("a.md", (try directory.resolveObject(workspace.id, ids.object(10))).pathSlice());
+
+    // Changing the first sorted duplicate must expose the remaining path.
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "a.md", ids.object(11), ids.version(104), .document);
+    _ = try directory.commit(workspace.id, 48);
+    try std.testing.expectEqualStrings("b.md", (try directory.resolveObject(workspace.id, ids.object(10))).pathSlice());
+    try std.testing.expectEqualStrings("a.md", (try directory.resolveObject(workspace.id, ids.object(11))).pathSlice());
+
+    // Rebuild the object index only after both sides of a swap are installed.
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "c.md", ids.object(30), ids.version(105), .document);
+    try directory.stagePut(workspace.id, "d.md", ids.object(20), ids.version(106), .document);
+    _ = try directory.commit(workspace.id, 49);
+    try std.testing.expectEqualStrings("c.md", (try directory.resolveObject(workspace.id, ids.object(30))).pathSlice());
+    try std.testing.expectEqualStrings("d.md", (try directory.resolveObject(workspace.id, ids.object(20))).pathSlice());
+
+    const root_before = directory.find(workspace.id).?.path_index.root_address;
+    const leaf_0_before = directory.find(workspace.id).?.path_index.leaf_hashes[0];
+    const leaf_1_before = directory.find(workspace.id).?.path_index.leaf_hashes[1];
+    const leaf_2_before = directory.find(workspace.id).?.path_index.leaf_hashes[2];
+    const leaf_3_before = directory.find(workspace.id).?.path_index.leaf_hashes[3];
+    const path_slots_before = directory.find(workspace.id).?.path_index.path_slots;
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "a.md", ids.object(11), ids.version(107), .document);
+    try directory.stagePut(workspace.id, "d.md", ids.object(20), ids.version(108), .document);
+    _ = try directory.commit(workspace.id, 50);
+
+    const entries_after_replacements = try directory.entries(workspace.id);
+    const path_index_after = &directory.find(workspace.id).?.path_index;
+    try std.testing.expectEqual(workspaceRootAddress(entries_after_replacements), path_index_after.root_address);
+    try std.testing.expect(!std.mem.eql(u8, &root_before, &path_index_after.root_address));
+    try std.testing.expect(!std.mem.eql(u8, &leaf_0_before, &path_index_after.leaf_hashes[0]));
+    try std.testing.expectEqual(leaf_1_before, path_index_after.leaf_hashes[1]);
+    try std.testing.expectEqual(leaf_2_before, path_index_after.leaf_hashes[2]);
+    try std.testing.expect(!std.mem.eql(u8, &leaf_3_before, &path_index_after.leaf_hashes[3]));
+    try std.testing.expectEqual(path_slots_before, path_index_after.path_slots);
+    try std.testing.expectEqual(ids.version(107), (try directory.resolveObject(workspace.id, ids.object(11))).version_id);
+    try std.testing.expectEqual(ids.version(108), (try directory.resolveObject(workspace.id, ids.object(20))).version_id);
+}
+
+test "workspace snapshot signing rejects stale cached roots and preserves canonical roots" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 10 },
+        .label = "root-signing",
+    });
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "signed.md", ids.object(40), ids.version(400), .document);
+    _ = try directory.commit(workspace.id, 51);
+
+    const canonical_root = workspaceRootAddress(try directory.entries(workspace.id));
+    const zero_root = workspace_merkle.zeroRootAddress();
+    try std.testing.expect(!std.mem.eql(u8, &canonical_root, &zero_root));
+    workspace.path_index.root_address = zero_root;
+
+    const snapshot_signer = signing.SignerIdentity{
+        .label = "zigos-workspace-key",
+        .seed = signing.seedFromByte(0x69),
+    };
+    try std.testing.expectError(error.InvalidSignature, directory.snapshot(workspace.id, "stale", snapshot_signer));
+    try std.testing.expectEqual(@as(usize, 0), directory.snapshotCount());
+    try std.testing.expectEqual(zero_root, workspace.path_index.root_address);
+
+    directory.rebuildIndexes();
+    try std.testing.expectEqual(canonical_root, workspace.rootAddress());
+    const snapshot_record = try directory.snapshot(workspace.id, "canonical", snapshot_signer);
+    try std.testing.expectEqual(ids.snapshot(1), snapshot_record.id);
+    try std.testing.expectEqual(canonical_root, snapshot_record.root_address);
+
+    const export_signer = signing.SignerIdentity{
+        .label = "zigos-export-key",
+        .seed = signing.seedFromByte(0x6a),
+    };
+    const package = try directory.exportSnapshot(workspace.id, snapshot_record.id, export_signer);
+    try std.testing.expectEqual(canonical_root, package.root_address);
+    const imported = try directory.importWorkspace(.{ .kind = .service, .serial = 12 }, "root-import", package, 52);
+    const imported_entries = try directory.entries(imported.id);
+    try std.testing.expectEqual(workspaceRootAddress(imported_entries), imported.rootAddress());
+    try std.testing.expectEqual(canonical_root, imported.rootAddress());
 }
 
 test "workspace snapshots and exports must stay signed" {

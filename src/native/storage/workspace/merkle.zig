@@ -17,14 +17,21 @@ pub fn rootAddress(entries: anytype) RootAddress {
     return crypto_hash.finalize(&hasher);
 }
 
-pub fn rebuildPathMerkle(index: anytype, comptime max_entries: usize) void {
-    var entry_index: usize = 0;
-    while (entry_index < index.entry_count) : (entry_index += 1) {
-        index.leaf_hashes[entry_index] = entryLeafAddress(index.entries[entry_index]);
+pub fn rebuildPathMerkle(index: anytype) void {
+    for (0..index.entry_count) |entry_index| updatePathLeaf(index, entry_index);
+    // Structural rebuilds retain the old scrubbing guarantee so deleted-entry
+    // digests do not remain visible through the public workspace record.
+    for (index.leaf_hashes[index.entry_count..]) |*leaf_hash| {
+        leaf_hash.* = zeroRootAddress();
     }
-    while (entry_index < max_entries) : (entry_index += 1) {
-        index.leaf_hashes[entry_index] = zeroRootAddress();
-    }
+    refreshPathRoot(index);
+}
+
+pub fn updatePathLeaf(index: anytype, entry_index: usize) void {
+    index.leaf_hashes[entry_index] = entryLeafAddress(index.entries[entry_index]);
+}
+
+pub fn refreshPathRoot(index: anytype) void {
     index.root_address = rootFromLeaves(index.leaf_hashes[0..index.entry_count]);
 }
 
