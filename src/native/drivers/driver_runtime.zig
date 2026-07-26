@@ -543,7 +543,7 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
 
     const previous_dma_domain = driver.dma_domain_id;
     try std.testing.expect(runtime.deactivate(service_id));
-    try std.testing.expect(directory.markRestarted(service_id));
+    try std.testing.expect(directory.markRestarted(driver));
     try std.testing.expect(driver.dma_domain_id != previous_dma_domain);
     const restarted = try runtime.activateAt(driver, 2);
     try std.testing.expectEqual(ActivationMode.published_data_plane, restarted.mode);

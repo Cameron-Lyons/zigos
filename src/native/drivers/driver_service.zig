@@ -231,8 +231,9 @@ pub const Directory = struct {
         return &slot.driver;
     }
 
-    pub fn markRestarted(self: *Directory, service_id: u64) bool {
-        const driver = self.findByService(service_id) orelse return false;
+    /// Rotates the DMA isolation domain for a live record borrowed from this
+    /// directory before the runtime reactivates it.
+    pub fn markRestarted(self: *Directory, driver: *DriverRecord) bool {
         const dma_domain_id = self.nextReservableDmaDomainId() orelse return false;
         _ = device_broker.invalidateDmaIsolation(driver.device_id, driver.dma_domain_id);
         driver.restart_generation += 1;
@@ -609,7 +610,7 @@ test "driver services require signed least-privilege device authority" {
     try std.testing.expect(driver.dma_range_count >= 1);
     try std.testing.expect(driver.allowsDma(driver.dma_ranges[0].base, DMA_TEST_PAGE_BYTES));
     try std.testing.expectEqual(BootstrapTransport.none, driver.bootstrap_transport);
-    try std.testing.expect(directory.markRestarted(44));
+    try std.testing.expect(directory.markRestarted(driver));
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
     try std.testing.expect(driver.dma_domain_id != 1);
 }
@@ -711,10 +712,10 @@ test "driver restart and hot-swap stop when dma domains are exhausted" {
     try std.testing.expectEqual(@as(u64, 2), second.dma_domain_id);
 
     directory.next_dma_domain_id = std.math.maxInt(u64);
-    try std.testing.expect(directory.markRestarted(80));
+    try std.testing.expect(directory.markRestarted(first));
     try std.testing.expectEqual(std.math.maxInt(u64), first.dma_domain_id);
     try std.testing.expectEqual(@as(u64, 0), directory.next_dma_domain_id);
-    try std.testing.expect(!directory.markRestarted(81));
+    try std.testing.expect(!directory.markRestarted(second));
 
     const second_authority_v2 = try mintDriverAuthority(&capabilities, .{
         .holder = owner,
