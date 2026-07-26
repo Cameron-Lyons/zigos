@@ -196,28 +196,18 @@ pub const Supervisor = struct {
 
     pub fn recordCrash(self: *Supervisor, service_id: u64, tick: u64, code: u32) bool {
         const service = self.find(service_id) orelse return false;
-        service.state = .failed;
-        service.last_transition_tick = tick;
-        self.record(service.*, .crash, tick, 0, code);
+        self.recordCrashForService(service, tick, code);
         return true;
     }
 
     pub fn requestRestart(self: *Supervisor, service_id: u64, tick: u64) bool {
         const service = self.find(service_id) orelse return false;
-        if (!service.restartable) return false;
-
-        service.state = .restarting;
-        service.restart_count += 1;
-        service.last_transition_tick = tick;
-        self.record(service.*, .restart_requested, tick, 0, service.restart_count);
-        return true;
+        return self.requestRestartForService(service, tick);
     }
 
     pub fn completeRestart(self: *Supervisor, service_id: u64, tick: u64) bool {
         const service = self.find(service_id) orelse return false;
-        service.state = .healthy;
-        service.last_transition_tick = tick;
-        self.record(service.*, .restart_completed, tick, 0, service.restart_count);
+        self.completeRestartForService(service, tick);
         return true;
     }
 
@@ -237,9 +227,7 @@ pub const Supervisor = struct {
         tick: u64,
     ) bool {
         const service = self.find(service_id) orelse return false;
-        if (!contract.allowsDriverClass(service.class, device_class)) return false;
-        self.record(service.*, .driver_attached, tick, authority_capability_id, @intFromEnum(device_class));
-        return true;
+        return self.noteDriverAttachedForService(service, device_class, authority_capability_id, tick);
     }
 
     pub fn recoverDriverCrash(
@@ -263,18 +251,18 @@ pub const Supervisor = struct {
             defaultDriverRestartDetail(driver.device_class);
         const visible_impact = driverImpactIsVisible(driver.device_class);
 
-        _ = self.recordCrash(service_id, tick, crash_code);
+        self.recordCrashForService(service, tick, crash_code);
         if (ledger) |recording| {
             try recording.recordProcessCrash(service.class, service.owner, tick, crash_code, restart_detail);
         }
 
-        _ = self.requestRestart(service_id, tick + 1);
-        _ = directory.markRestarted(service_id);
+        if (!self.requestRestartForService(service, tick + 1)) return error.ServiceNotRestartable;
+        if (!directory.markRestarted(driver)) return error.DriverRestartFailed;
         if (!runtime.deactivateDriver(driver.service_id, driver.device_class)) {
             return error.DriverDeactivationFailed;
         }
         const activation = try activateRuntimeDriver(runtime, driver, tick + 2);
-        _ = self.completeRestart(service_id, tick + 2);
+        self.completeRestartForService(service, tick + 2);
 
         if (ledger) |recording| {
             try recording.recordDriverRestart(service.class, service.owner, driver.authority_capability_id, tick + 2, restart_detail);
@@ -317,7 +305,7 @@ pub const Supervisor = struct {
     ) !DriverHotSwapReport {
         const service = self.find(request.service_id) orelse return error.ServiceNotFound;
         if (!service.restartable) return error.ServiceNotRestartable;
-        if (!self.allowsDriverAttachment(request.service_id, request.device_class)) {
+        if (!contract.allowsDriverClass(service.class, request.device_class)) {
             return error.DriverAttachmentDenied;
         }
         const previous = (directory.findByServiceAndClass(request.service_id, request.device_class) orelse return error.DriverNotFound).*;
@@ -328,7 +316,7 @@ pub const Supervisor = struct {
             defaultDriverRestartDetail(request.device_class);
         const visible_impact = driverImpactIsVisible(request.device_class);
 
-        _ = self.requestRestart(request.service_id, tick);
+        if (!self.requestRestartForService(service, tick)) return error.ServiceNotRestartable;
         if (!runtime.deactivateDriver(request.service_id, request.device_class)) {
             return error.DriverDeactivationFailed;
         }
@@ -341,8 +329,8 @@ pub const Supervisor = struct {
         }
 
         const activation = try activateRuntimeDriver(runtime, swapped, tick + 1);
-        _ = self.noteDriverAttached(request.service_id, request.device_class, swapped.authority_capability_id, tick + 1);
-        _ = self.completeRestart(request.service_id, tick + 1);
+        _ = self.noteDriverAttachedForService(service, request.device_class, swapped.authority_capability_id, tick + 1);
+        self.completeRestartForService(service, tick + 1);
 
         if (ledger) |recording| {
             try recording.recordDriverRestart(service.class, service.owner, swapped.authority_capability_id, tick + 1, swap_detail);
@@ -399,6 +387,39 @@ pub const Supervisor = struct {
             native_util.impossibleByInvariant("monotonic supervisor service ids are never reused");
         }
         return self.next_service_id;
+    }
+
+    fn recordCrashForService(self: *Supervisor, service: *ServiceRecord, tick: u64, code: u32) void {
+        service.state = .failed;
+        service.last_transition_tick = tick;
+        self.record(service.*, .crash, tick, 0, code);
+    }
+
+    fn requestRestartForService(self: *Supervisor, service: *ServiceRecord, tick: u64) bool {
+        if (!service.restartable) return false;
+        service.state = .restarting;
+        service.restart_count += 1;
+        service.last_transition_tick = tick;
+        self.record(service.*, .restart_requested, tick, 0, service.restart_count);
+        return true;
+    }
+
+    fn completeRestartForService(self: *Supervisor, service: *ServiceRecord, tick: u64) void {
+        service.state = .healthy;
+        service.last_transition_tick = tick;
+        self.record(service.*, .restart_completed, tick, 0, service.restart_count);
+    }
+
+    fn noteDriverAttachedForService(
+        self: *Supervisor,
+        service: *ServiceRecord,
+        device_class: driver_service.DeviceClass,
+        authority_capability_id: u64,
+        tick: u64,
+    ) bool {
+        if (!contract.allowsDriverClass(service.class, device_class)) return false;
+        self.record(service.*, .driver_attached, tick, authority_capability_id, @intFromEnum(device_class));
+        return true;
     }
 
     fn advanceNextServiceIdFrom(self: *Supervisor, service_id: u64) void {
@@ -851,6 +872,22 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
     try std.testing.expectEqual(graphics_authority.id, ledger.latestKind(.driver_restart).?.related_id);
     try std.testing.expectEqual(ServiceState.healthy, storage.state);
     try std.testing.expectEqual(@as(u32, 1), directory.findByService(storage.id).?.restart_generation);
+
+    directory.next_dma_domain_id = 0;
+    try std.testing.expectError(error.DriverRestartFailed, supervisor.recoverDriverCrash(
+        compositor.id,
+        &directory,
+        &runtime,
+        &notifications,
+        &ledger,
+        20,
+        0xD2,
+        "display driver restart without DMA isolation",
+    ));
+    try std.testing.expectEqual(ServiceState.restarting, compositor.state);
+    try std.testing.expectEqual(@as(usize, 1), runtime.deactivation_count);
+    try std.testing.expectEqual(@as(usize, 1), runtime.activation_count);
+    try std.testing.expectEqual(@as(u32, 2), graphics_driver.restart_generation);
 }
 
 test "driver hot-swap rebinds authority and restarts only the owning service" {
