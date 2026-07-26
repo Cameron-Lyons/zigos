@@ -480,8 +480,8 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     try std.testing.expect(resolved_v2.accessibility.supports_high_contrast);
     try std.testing.expectEqualStrings("notes adapts to the user's accessibility profile", resolved_v2.accessibility.profile_notes);
     const launch_plan = try packages.buildLaunchPlan("app.notes");
-    try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);
-    try std.testing.expectEqual(@as(usize, 2), launch_plan.asset_count);
+    try std.testing.expectEqual(@as(usize, 2), launch_plan.components.len);
+    try std.testing.expectEqual(@as(usize, 2), launch_plan.assets.len);
     try std.testing.expectEqualStrings("assets/editor.css", launch_plan.assets[1].pathSlice());
     try std.testing.expect(!org_policy.removable_storage_allowed);
     try std.testing.expect(!org_policy.screen_capture_allowed);

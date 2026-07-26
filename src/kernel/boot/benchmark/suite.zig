@@ -1287,8 +1287,8 @@ fn benchmarkPackageRevision(iteration: u32) u64 {
     const launch_plan = package_context.service.buildLaunchPlan("app.notes") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     package_service_bundle_ops.rollback(&slot.bundle);
     return active.version_minor +
-        launch_plan.component_count +
-        launch_plan.asset_count +
+        launch_plan.components.len +
+        launch_plan.assets.len +
         slot.bundle.activeRevision().version_minor +
         @intFromBool(slot.bundle.rollbackAvailable());
 }
