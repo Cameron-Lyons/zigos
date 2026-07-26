@@ -328,17 +328,22 @@ pub fn IndexedArenaWithKeyOptions(
         /// Discard every live membership without clearing payload bytes that
         /// remain unreachable until a later reservation initializes the slot.
         pub fn resetRetainingPayloads(self: *Self) void {
-            for (&self.slots) |*slot| {
+            const claimed_count = self.claimedCount();
+            const dirty_count = self.dirty_count;
+            if (dirty_count > dirty_capacity) {
+                native_util.impossibleByInvariant("indexed arena dirty count fits its storage");
+            }
+            for (self.slots[0..claimed_count]) |*slot| {
                 slot.in_use = false;
             }
             self.primary_index.reset();
-            self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
-            self.free_next = [_]?usize{null} ** capacity;
+            @memset(self.slot_keys[0..claimed_count], ids.zero(Key));
+            @memset(self.free_next[0..claimed_count], null);
             self.free_head = null;
             self.next_unclaimed_index = 0;
             self.used_count = 0;
             self.dirty_count = 0;
-            self.dirty_ids = [_]Key{ids.zero(Key)} ** dirty_capacity;
+            @memset(self.dirty_ids[0..dirty_count], ids.zero(Key));
         }
 
         pub fn reserve(self: *Self, key: Key) ?*Slot {
@@ -419,16 +424,17 @@ pub fn IndexedArenaWithKeyOptions(
             context: anytype,
             comptime excludes: anytype,
         ) ?usize {
+            const claimed_count = self.claimedCount();
             var next_index = self.free_head;
             var attempts: usize = 0;
             while (next_index) |slot_index| : (attempts += 1) {
-                if (slot_index >= capacity or attempts >= capacity) return null;
+                if (slot_index >= claimed_count or attempts >= claimed_count) return null;
                 next_index = self.free_next[slot_index];
                 if (excludes(context, slot_index)) continue;
                 return slot_index;
             }
 
-            var slot_index = self.next_unclaimed_index;
+            var slot_index = claimed_count;
             while (slot_index < capacity) : (slot_index += 1) {
                 if (excludes(context, slot_index)) continue;
                 return slot_index;
@@ -506,7 +512,7 @@ pub fn IndexedArenaWithKeyOptions(
 
         fn countMatching(self: *const Self, context: anytype, comptime matches: anytype) usize {
             var count: usize = 0;
-            for (&self.slots) |*slot| {
+            for (self.slots[0..self.claimedCount()]) |*slot| {
                 if (!slot.in_use) continue;
                 if (matches(context, slot)) count += 1;
             }
@@ -514,7 +520,7 @@ pub fn IndexedArenaWithKeyOptions(
         }
 
         fn findMatching(self: *Self, context: anytype, comptime matches: anytype) ?*Slot {
-            for (&self.slots) |*slot| {
+            for (self.slots[0..self.claimedCount()]) |*slot| {
                 if (!slot.in_use) continue;
                 if (matches(context, slot)) return slot;
             }
@@ -522,7 +528,7 @@ pub fn IndexedArenaWithKeyOptions(
         }
 
         fn findConstMatching(self: *const Self, context: anytype, comptime matches: anytype) ?*const Slot {
-            for (&self.slots) |*slot| {
+            for (self.slots[0..self.claimedCount()]) |*slot| {
                 if (!slot.in_use) continue;
                 if (matches(context, slot)) return slot;
             }
@@ -631,22 +637,30 @@ pub fn IndexedArenaWithKeyOptions(
 
         fn scanForKey(self: *const Self, key: Key) ?usize {
             const raw_key = ids.raw(key);
-            for (self.slots, 0..) |slot, slot_index| {
+            for (self.slots[0..self.claimedCount()], 0..) |slot, slot_index| {
                 if (slot.in_use and ids.raw(keyOf(&slot)) == raw_key) return slot_index;
             }
             return null;
         }
 
+        inline fn claimedCount(self: *const Self) usize {
+            if (self.next_unclaimed_index > capacity) {
+                native_util.impossibleByInvariant("indexed arena claimed prefix fits its slots");
+            }
+            return self.next_unclaimed_index;
+        }
+
         fn popFreeIndex(self: *Self) ?usize {
+            const claimed_count = self.claimedCount();
             if (self.free_head) |slot_index| {
-                if (slot_index >= capacity) return null;
+                if (slot_index >= claimed_count) return null;
                 self.free_head = self.free_next[slot_index];
                 self.free_next[slot_index] = null;
                 return slot_index;
             }
 
-            if (self.next_unclaimed_index >= capacity) return null;
-            const slot_index = self.next_unclaimed_index;
+            if (claimed_count >= capacity) return null;
+            const slot_index = claimed_count;
             self.next_unclaimed_index += 1;
             return slot_index;
         }
@@ -671,10 +685,12 @@ pub fn IndexedArenaWithKeyOptions(
         }
 
         fn unlinkFreeIndex(self: *Self, slot_index: usize) bool {
+            const claimed_count = self.claimedCount();
+            if (slot_index >= claimed_count) return false;
             var previous: ?usize = null;
             var current = self.free_head;
             while (current) |current_index| {
-                if (current_index >= capacity) return false;
+                if (current_index >= claimed_count) return false;
                 const next = self.free_next[current_index];
                 if (current_index == slot_index) {
                     if (previous) |previous_index| {
@@ -727,6 +743,11 @@ pub fn GenerationalHandle(comptime display_name: []const u8) type {
     };
 }
 
+inline fn nextSlotGeneration(current: u32) u32 {
+    const next = current +% 1;
+    return if (next == 0) 1 else next;
+}
+
 pub fn PagedIndexedArena(
     comptime Slot: type,
     comptime page_size: usize,
@@ -774,12 +795,16 @@ pub fn PagedIndexedArenaWithKey(
             return .{};
         }
 
+        /// Clear all membership and payloads while invalidating issued handles.
         pub fn reset(self: *Self) void {
+            const claimed_count = self.claimedCount();
             var slot_index: usize = 0;
             while (slot_index < capacity) : (slot_index += 1) {
                 self.slotAt(slot_index).* = Slot{};
                 self.slot_keys[slot_index] = ids.zero(Key);
-                self.slot_generations[slot_index] = 0;
+                if (slot_index < claimed_count) {
+                    self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+                }
                 self.free_next[slot_index] = null;
             }
             self.primary_index.reset();
@@ -788,14 +813,16 @@ pub fn PagedIndexedArenaWithKey(
             self.used_count = 0;
         }
 
-        /// Discard every live membership without clearing payload bytes that
-        /// remain unreachable until a later reservation initializes the slot.
+        /// Discard every live membership and invalidate issued handles without
+        /// clearing payload bytes that remain unreachable until a later
+        /// reservation initializes the slot.
         pub fn resetRetainingPayloads(self: *Self) void {
+            const claimed_count = self.claimedCount();
             var slot_index: usize = 0;
-            while (slot_index < capacity) : (slot_index += 1) {
+            while (slot_index < claimed_count) : (slot_index += 1) {
                 self.slotAt(slot_index).in_use = false;
                 self.slot_keys[slot_index] = ids.zero(Key);
-                self.slot_generations[slot_index] = 0;
+                self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
                 self.free_next[slot_index] = null;
             }
             self.primary_index.reset();
@@ -893,8 +920,7 @@ pub fn PagedIndexedArenaWithKey(
             }
             slot.* = Slot{};
             self.slot_keys[slot_index] = ids.zero(Key);
-            self.slot_generations[slot_index] +%= 1;
-            if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
+            self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
             self.used_count -= 1;
             self.pushFreeIndex(slot_index);
             return true;
@@ -976,12 +1002,20 @@ pub fn PagedIndexedArenaWithKey(
 
         fn scanForKey(self: *const Self, key: Key) ?usize {
             const raw_key = ids.raw(key);
+            const claimed_count = self.claimedCount();
             var slot_index: usize = 0;
-            while (slot_index < capacity) : (slot_index += 1) {
+            while (slot_index < claimed_count) : (slot_index += 1) {
                 const slot = self.slotAtConst(slot_index);
                 if (slot.in_use and ids.raw(keyOf(slot)) == raw_key) return slot_index;
             }
             return null;
+        }
+
+        inline fn claimedCount(self: *const Self) usize {
+            if (self.next_unclaimed_index > capacity) {
+                native_util.impossibleByInvariant("paged indexed arena claimed prefix fits its slots");
+            }
+            return self.next_unclaimed_index;
         }
 
         fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
@@ -991,15 +1025,16 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         fn popFreeIndex(self: *Self) ?usize {
+            const claimed_count = self.claimedCount();
             if (self.free_head) |slot_index| {
-                if (slot_index >= capacity) return null;
+                if (slot_index >= claimed_count) return null;
                 self.free_head = self.free_next[slot_index];
                 self.free_next[slot_index] = null;
                 return slot_index;
             }
 
-            if (self.next_unclaimed_index >= capacity) return null;
-            const slot_index = self.next_unclaimed_index;
+            if (claimed_count >= capacity) return null;
+            const slot_index = claimed_count;
             self.next_unclaimed_index += 1;
             return slot_index;
         }
@@ -1024,10 +1059,12 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         fn unlinkFreeIndex(self: *Self, slot_index: usize) bool {
+            const claimed_count = self.claimedCount();
+            if (slot_index >= claimed_count) return false;
             var previous: ?usize = null;
             var current = self.free_head;
             while (current) |current_index| {
-                if (current_index >= capacity) return false;
+                if (current_index >= claimed_count) return false;
                 const next = self.free_next[current_index];
                 if (current_index == slot_index) {
                     if (previous) |previous_index| {
@@ -1156,20 +1193,29 @@ test "indexed arena can reset membership while retaining unreachable payloads" {
 
     const slot_index = arena.reserveIndexAt(41, 2).?;
     arena.slots[slot_index].record = .{ .id = 41, .owner = 7, .label = "retained" };
-    try std.testing.expectEqual(@as(usize, 1), arena.dirtyIds().len);
+    const recycled_index = arena.reserveIndex(42).?;
+    try std.testing.expect(arena.removeIndex(recycled_index));
+    try std.testing.expectEqual(@as(usize, 2), arena.dirtyIds().len);
+    arena.dirty_ids[2] = 99;
 
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), arena.next_unclaimed_index);
+    try std.testing.expectEqual(@as(?usize, null), arena.free_head);
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
+    try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[0]);
+    try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[1]);
+    try std.testing.expectEqual(@as(u64, 99), arena.dirty_ids[2]);
     try std.testing.expect(arena.get(41) == null);
     try std.testing.expect(!arena.slots[slot_index].in_use);
     try std.testing.expectEqualStrings("retained", arena.slots[slot_index].record.label);
 
-    const replacement = arena.reserveAtIndex(42, slot_index).?;
+    try std.testing.expectEqual(@as(usize, 0), arena.reserveIndex(43).?);
+    const replacement = arena.reserveAtIndex(44, slot_index).?;
     try std.testing.expectEqual(@as(u64, 0), replacement.record.id);
     try std.testing.expectEqualStrings("", replacement.record.label);
-    replacement.record = .{ .id = 42, .owner = 8, .label = "replacement" };
-    try std.testing.expectEqualStrings("replacement", arena.get(42).?.record.label);
+    replacement.record = .{ .id = 44, .owner = 8, .label = "replacement" };
+    try std.testing.expectEqualStrings("replacement", arena.get(44).?.record.label);
 }
 
 test "indexed arena supports secondary indexes" {
@@ -1351,22 +1397,63 @@ test "paged indexed arena uses slab pages and invalidates stale handles" {
     try std.testing.expectEqualStrings("reused", arena.get(13).?.record.label);
 }
 
-test "paged indexed arena can reset membership while retaining unreachable payloads" {
+test "paged indexed arena generations advance without using zero" {
+    try std.testing.expectEqual(@as(u32, 1), nextSlotGeneration(0));
+    try std.testing.expectEqual(@as(u32, 2), nextSlotGeneration(1));
+    try std.testing.expectEqual(@as(u32, 1), nextSlotGeneration(std.math.maxInt(u32)));
+}
+
+test "paged indexed arena full reset clears payloads and invalidates handles" {
     const Arena = PagedIndexedArena(TestSlot, 2, 2, 8, testSlotId);
     var arena = Arena.init();
 
-    const slot_index = arena.reserveIndexAt(51, 3).?;
-    arena.slotAt(slot_index).record = .{ .id = 51, .owner = 9, .label = "retained" };
+    const stale_handle = arena.reserveHandle(41).?;
+    arena.getByHandle(stale_handle).?.record = .{ .id = 41, .owner = 7, .label = "discarded" };
+
+    arena.reset();
+    try std.testing.expectEqual(@as(?*TestSlot, null), arena.getByHandle(stale_handle));
+
+    const replacement_handle = arena.reserveHandle(42).?;
+    try std.testing.expectEqual(stale_handle.slotIndex(), replacement_handle.slotIndex());
+    try std.testing.expect(!replacement_handle.eql(stale_handle));
+    try std.testing.expectEqualStrings("", arena.getByHandle(replacement_handle).?.record.label);
+}
+
+test "paged indexed arena can reset membership while retaining unreachable payloads" {
+    const Arena = PagedIndexedArena(TestSlot, 2, 4, 16, testSlotId);
+    var arena = Arena.init();
+
+    const high_slot_index: usize = 5;
+    _ = arena.reserveIndexAt(51, high_slot_index).?;
+    arena.slotAt(high_slot_index).record = .{ .id = 51, .owner = 9, .label = "retained" };
+    const stale_high_handle = arena.handleForIndex(high_slot_index).?;
 
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), arena.next_unclaimed_index);
+    try std.testing.expectEqual(@as(?usize, null), arena.free_head);
     try std.testing.expect(arena.get(51) == null);
-    try std.testing.expect(!arena.slotAt(slot_index).in_use);
-    try std.testing.expectEqualStrings("retained", arena.slotAt(slot_index).record.label);
+    try std.testing.expectEqual(@as(?*TestSlot, null), arena.getByHandle(stale_high_handle));
+    try std.testing.expect(!arena.slotAt(high_slot_index).in_use);
+    try std.testing.expectEqualStrings("retained", arena.slotAt(high_slot_index).record.label);
+    const parked_high_generation = arena.slot_generations[high_slot_index];
 
-    const replacement = arena.reserveAtIndex(52, slot_index).?;
+    // An empty reset and a later reset of only a lower, cross-page prefix must
+    // not roll back the generation parked for the previously claimed high slot.
+    arena.resetRetainingPayloads();
+    _ = arena.reserveIndexAt(52, 2).?;
+    arena.resetRetainingPayloads();
+    try std.testing.expectEqual(parked_high_generation, arena.slot_generations[high_slot_index]);
+    try std.testing.expectEqual(@as(usize, 0), arena.next_unclaimed_index);
+    try std.testing.expectEqual(@as(?usize, null), arena.free_head);
+    try std.testing.expectEqual(@as(usize, 0), arena.reserveIndex(53).?);
+
+    const replacement = arena.reserveAtIndex(54, high_slot_index).?;
     try std.testing.expectEqual(@as(u64, 0), replacement.record.id);
     try std.testing.expectEqualStrings("", replacement.record.label);
-    replacement.record = .{ .id = 52, .owner = 10, .label = "replacement" };
-    try std.testing.expectEqualStrings("replacement", arena.get(52).?.record.label);
+    replacement.record = .{ .id = 54, .owner = 10, .label = "replacement" };
+    const replacement_handle = arena.handleForIndex(high_slot_index).?;
+    try std.testing.expect(!replacement_handle.eql(stale_high_handle));
+    try std.testing.expectEqual(@as(?*TestSlot, null), arena.getByHandle(stale_high_handle));
+    try std.testing.expectEqualStrings("replacement", arena.get(54).?.record.label);
 }
