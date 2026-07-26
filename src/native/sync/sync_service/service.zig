@@ -641,15 +641,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return true;
         }
 
-        pub fn sendOverlayRelayFrame(
-            self: *Self,
-            network_capabilities: *const capability.CapabilityTable,
-            relay: *sync_transport.Relay,
-            request: OverlayRelayFrameRequest,
-        ) (Error || sync_transport.Error)!OverlayRelayFrameResult {
-            return overlay_sessions.sendOverlayRelayFrame(self, network_capabilities, relay, request);
-        }
-
         pub fn sendOverlayRelayFrameViaService(
             self: *Self,
             network_capabilities: *const capability.CapabilityTable,
