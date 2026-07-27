@@ -1,5 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const embedded_file = @import("embedded_file.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 
@@ -14,6 +15,7 @@ pub const Inspection = struct {
 
 pub const Error = error{
     InvalidElfHeader,
+    InvalidEmbeddedFile,
     InvalidElfMagic,
     InvalidLoadableSegment,
     InvalidProgramHeaderTable,
@@ -28,10 +30,15 @@ pub const Error = error{
 };
 
 pub fn inspect(elf_bytes: []const u8) Error!Inspection {
-    if (elf_bytes.len < @sizeOf(std.elf.Elf32_Ehdr)) return error.InvalidElfHeader;
+    return inspectFile(embedded_file.File.fromBytes(elf_bytes));
+}
+
+pub fn inspectFile(file: embedded_file.File) Error!Inspection {
+    const reader = file.reader() orelse return error.InvalidEmbeddedFile;
+    if (file.byte_len < @sizeOf(std.elf.Elf32_Ehdr)) return error.InvalidElfHeader;
 
     var header: std.elf.Elf32_Ehdr = undefined;
-    @memcpy(std.mem.asBytes(&header), elf_bytes[0..@sizeOf(std.elf.Elf32_Ehdr)]);
+    if (!reader.readInto(0, std.mem.asBytes(&header))) return error.InvalidElfHeader;
 
     if (!std.mem.eql(u8, header.e_ident[0..4], "\x7fELF")) return error.InvalidElfMagic;
     if (header.e_ident[std.elf.EI_CLASS] != std.elf.ELFCLASS32) return error.UnsupportedElfClass;
@@ -49,12 +56,12 @@ pub fn inspect(elf_bytes: []const u8) Error!Inspection {
         @as(usize, header.e_phoff),
         program_headers_bytes,
     ) catch return error.InvalidProgramHeaderTable;
-    if (header.e_phoff == 0 or program_headers_end > elf_bytes.len) {
+    if (header.e_phoff == 0 or program_headers_end > file.byte_len) {
         return error.InvalidProgramHeaderTable;
     }
 
     const bootstrap_mailbox_address = try findRequiredMailboxSectionAddress(
-        elf_bytes,
+        reader,
         header,
         userspace_bootstrap_mailbox.SECTION_NAME,
     );
@@ -64,7 +71,7 @@ pub fn inspect(elf_bytes: []const u8) Error!Inspection {
     executable_image.bootstrap_mailbox_address = bootstrap_mailbox_address;
     executable_image.stack_top = task_runtime.DEFAULT_USER_STACK_TOP;
     executable_image.stack_size_bytes = task_runtime.DEFAULT_USER_STACK_SIZE_BYTES;
-    executable_image.file_size_bytes = elf_bytes.len;
+    executable_image.file_size_bytes = file.byte_len;
 
     var loadable_segment_count: usize = 0;
     var offset: usize = header.e_phoff;
@@ -73,8 +80,8 @@ pub fn inspect(elf_bytes: []const u8) Error!Inspection {
         var program_header: std.elf.Elf32_Phdr = undefined;
         const program_end = std.math.add(usize, offset, @sizeOf(std.elf.Elf32_Phdr)) catch
             return error.InvalidProgramHeaderTable;
-        if (program_end > elf_bytes.len) return error.InvalidProgramHeaderTable;
-        @memcpy(std.mem.asBytes(&program_header), elf_bytes[offset..program_end]);
+        if (program_end > file.byte_len) return error.InvalidProgramHeaderTable;
+        if (!reader.readInto(offset, std.mem.asBytes(&program_header))) return error.InvalidProgramHeaderTable;
         if (program_header.p_type == std.elf.PT_LOAD) {
             if (loadable_segment_count >= task_runtime.MAX_EXECUTABLE_SEGMENTS) {
                 return error.TooManyLoadableSegments;
@@ -89,7 +96,7 @@ pub fn inspect(elf_bytes: []const u8) Error!Inspection {
                 @as(usize, program_header.p_offset),
                 @as(usize, program_header.p_filesz),
             ) catch return error.InvalidLoadableSegment;
-            if (segment_end > elf_bytes.len) return error.InvalidLoadableSegment;
+            if (segment_end > file.byte_len) return error.InvalidLoadableSegment;
 
             executable_image.segments[loadable_segment_count] = .{
                 .virtual_address = program_header.p_vaddr,
@@ -113,15 +120,12 @@ pub fn inspect(elf_bytes: []const u8) Error!Inspection {
         return error.InvalidBootstrapMailboxSection;
     }
 
-    var hasher = crypto_hash.init();
-    hasher.update(elf_bytes);
-
-    executable_image.file_sha256 = crypto_hash.finalize(&hasher);
+    executable_image.file_sha256 = reader.sha256();
 
     return .{
         .entry_point = header.e_entry,
         .loadable_segment_count = @intCast(loadable_segment_count),
-        .byte_len = elf_bytes.len,
+        .byte_len = file.byte_len,
         .bootstrap_mailbox_address = bootstrap_mailbox_address,
         .file_sha256 = executable_image.file_sha256,
         .executable_image = executable_image,
@@ -129,7 +133,7 @@ pub fn inspect(elf_bytes: []const u8) Error!Inspection {
 }
 
 fn findRequiredMailboxSectionAddress(
-    elf_bytes: []const u8,
+    reader: embedded_file.Reader,
     header: std.elf.Elf32_Ehdr,
     section_name: []const u8,
 ) Error!u64 {
@@ -148,7 +152,7 @@ fn findRequiredMailboxSectionAddress(
         return error.InvalidSectionHeaderTable;
     const section_headers_end = std.math.add(usize, @as(usize, header.e_shoff), section_headers_bytes) catch
         return error.InvalidSectionHeaderTable;
-    if (section_headers_end > elf_bytes.len) return error.InvalidSectionHeaderTable;
+    if (section_headers_end > reader.file.byte_len) return error.InvalidSectionHeaderTable;
 
     const names_header_delta = std.math.mul(usize, @as(usize, header.e_shstrndx), @sizeOf(std.elf.Elf32_Shdr)) catch
         return error.InvalidSectionHeaderTable;
@@ -156,15 +160,14 @@ fn findRequiredMailboxSectionAddress(
         return error.InvalidSectionHeaderTable;
     const names_header_end = std.math.add(usize, names_header_offset, @sizeOf(std.elf.Elf32_Shdr)) catch
         return error.InvalidSectionHeaderTable;
-    if (names_header_end > elf_bytes.len) return error.InvalidSectionHeaderTable;
+    if (names_header_end > reader.file.byte_len) return error.InvalidSectionHeaderTable;
     var names_header: std.elf.Elf32_Shdr = undefined;
-    @memcpy(std.mem.asBytes(&names_header), elf_bytes[names_header_offset..names_header_end]);
+    if (!reader.readInto(names_header_offset, std.mem.asBytes(&names_header))) return error.InvalidSectionHeaderTable;
 
     const names_start = @as(usize, names_header.sh_offset);
     const names_end = std.math.add(usize, names_start, @as(usize, names_header.sh_size)) catch
         return error.InvalidSectionHeaderTable;
-    if (names_end > elf_bytes.len) return error.InvalidSectionHeaderTable;
-    const section_names = elf_bytes[names_start..names_end];
+    if (names_end > reader.file.byte_len) return error.InvalidSectionHeaderTable;
 
     var index: usize = 0;
     while (index < section_count) : (index += 1) {
@@ -174,11 +177,10 @@ fn findRequiredMailboxSectionAddress(
             return error.InvalidSectionHeaderTable;
         const section_end = std.math.add(usize, section_offset, @sizeOf(std.elf.Elf32_Shdr)) catch
             return error.InvalidSectionHeaderTable;
-        if (section_end > elf_bytes.len) return error.InvalidSectionHeaderTable;
+        if (section_end > reader.file.byte_len) return error.InvalidSectionHeaderTable;
         var section: std.elf.Elf32_Shdr = undefined;
-        @memcpy(std.mem.asBytes(&section), elf_bytes[section_offset..section_end]);
-        const name = readOptionalSectionName(section_names, section.sh_name) orelse continue;
-        if (!std.mem.eql(u8, name, section_name)) continue;
+        if (!reader.readInto(section_offset, std.mem.asBytes(&section))) return error.InvalidSectionHeaderTable;
+        if (!sectionNameEquals(reader, names_start, names_header.sh_size, section.sh_name, section_name)) continue;
 
         const required_flags: u32 = 0x1 | 0x2; // SHF_WRITE | SHF_ALLOC
         if (section.sh_addr == 0 or
@@ -192,7 +194,7 @@ fn findRequiredMailboxSectionAddress(
             @as(usize, section.sh_offset),
             @as(usize, section.sh_size),
         ) catch return error.InvalidBootstrapMailboxSection;
-        if (section_file_end > elf_bytes.len) return error.InvalidBootstrapMailboxSection;
+        if (section_file_end > reader.file.byte_len) return error.InvalidBootstrapMailboxSection;
         return section.sh_addr;
     }
     return error.MissingBootstrapMailbox;
@@ -212,9 +214,19 @@ fn mailboxFitsWritableLoad(image: *const task_runtime.ExecutableImageSpec, mailb
     return false;
 }
 
-fn readOptionalSectionName(section_names: []const u8, offset: u32) ?[]const u8 {
-    if (offset >= section_names.len) return null;
-    var end: usize = offset;
-    while (end < section_names.len and section_names[end] != 0) : (end += 1) {}
-    return section_names[offset..end];
+fn sectionNameEquals(
+    reader: embedded_file.Reader,
+    names_start: usize,
+    names_len_raw: u32,
+    offset_raw: u32,
+    expected: []const u8,
+) bool {
+    const names_len: usize = names_len_raw;
+    const offset: usize = offset_raw;
+    if (offset >= names_len or expected.len >= names_len - offset) return false;
+    for (expected, 0..) |byte, index| {
+        const actual = reader.byteAt(names_start + offset + index) orelse return false;
+        if (actual != byte) return false;
+    }
+    return (reader.byteAt(names_start + offset + expected.len) orelse return false) == 0;
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const embedded_file = @import("../../native/task/embedded_file.zig");
 const spec_support = @import("support.zig");
 const abi = @import("../../native/core/abi.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
@@ -646,7 +647,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .role_tag = 0xC301,
         .heartbeat_increment = 3,
         .contract_flags = 0x11,
-        .elf_bytes = &image_bytes,
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
     });
     try std.testing.expect(catalog.findByBundleId("zigos.system.spec-storage").?.embedsElf());
 
