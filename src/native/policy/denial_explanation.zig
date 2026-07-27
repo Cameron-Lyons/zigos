@@ -40,13 +40,18 @@ pub fn forPermissionDecision(kind: manifest.PermissionKind, reason: abi.DenialRe
 }
 
 pub fn renderToBuffer(buffer: []u8, explanation: Explanation) RenderError![]const u8 {
-    return std.fmt.bufPrint(buffer, "reason={s} policy={s} missing={s} approval={s} retry_safe={s}", .{
-        @tagName(explanation.reason),
-        explanation.policySlice(),
-        explanation.missingCapabilitySlice(),
-        yesNo(explanation.user_approval_can_resolve),
-        yesNo(explanation.retry_safe),
-    }) catch error.NoSpaceLeft;
+    var used: usize = 0;
+    try appendText(buffer, &used, "reason=");
+    try appendText(buffer, &used, @tagName(explanation.reason));
+    try appendText(buffer, &used, " policy=");
+    try appendText(buffer, &used, explanation.policySlice());
+    try appendText(buffer, &used, " missing=");
+    try appendText(buffer, &used, explanation.missingCapabilitySlice());
+    try appendText(buffer, &used, " approval=");
+    try appendText(buffer, &used, yesNo(explanation.user_approval_can_resolve));
+    try appendText(buffer, &used, " retry_safe=");
+    try appendText(buffer, &used, yesNo(explanation.retry_safe));
+    return buffer[0..used];
 }
 
 pub fn renderUserHelpToBuffer(
@@ -205,6 +210,27 @@ test "permission denials explain blocking policy capability approval and retry h
     try std.testing.expectEqualStrings("background-execution-capability", throttled.missingCapabilitySlice());
     try std.testing.expect(!throttled.user_approval_can_resolve);
     try std.testing.expect(throttled.retry_safe);
+}
+
+test "permission denial rendering respects exact buffer bounds" {
+    const denied = forPermissionDecision(.network_egress, .policy_denied);
+    const expected = "reason=policy_denied policy=user-grant-policy missing=network-egress-capability approval=yes retry_safe=no";
+
+    var exact_buffer: [expected.len]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        expected,
+        try renderToBuffer(&exact_buffer, denied),
+    );
+
+    var undersized_backing = [_]u8{0xa5} ** expected.len;
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        renderToBuffer(undersized_backing[0 .. expected.len - 1], denied),
+    );
+    try std.testing.expectEqual(
+        @as(u8, 0xa5),
+        undersized_backing[expected.len - 1],
+    );
 }
 
 test "permission denials render a user readable blocked explanation" {

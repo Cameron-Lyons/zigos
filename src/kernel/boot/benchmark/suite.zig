@@ -1427,6 +1427,7 @@ fn benchmarkDenialExplanationRender(iteration: u32) u64 {
     };
     const explanation = denial_explanation.forPermissionDecision(kind, reason);
     const rendered = denial_explanation.renderToBuffer(&denial_explanation_buffer, explanation) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&denial_explanation_buffer);
     return rendered.len +
         explanation.policySlice().len +
         explanation.missingCapabilitySlice().len +
