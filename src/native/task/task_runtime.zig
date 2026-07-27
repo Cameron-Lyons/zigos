@@ -1502,6 +1502,33 @@ test "audit trail keeps the most recent events" {
     try std.testing.expectEqual(@as(u32, MAX_AUDIT_EVENTS + 1), task.latestAuditEvent().?.detail);
 }
 
+test "provenance trail keeps the most recent events" {
+    var runtime = Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 4 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = TEST_MINIMAL_MEMORY_BYTES,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = TEST_MINIMAL_SHARED_MEMORY_BYTES,
+        },
+    });
+
+    var index: usize = 0;
+    while (index < MAX_TASK_PROVENANCE_EVENTS + 2) : (index += 1) {
+        try runtime.recordProvenance(task.id, debug_contract.capabilityGrantProvenance(
+            task.id,
+            100 + index,
+            index,
+        ));
+    }
+
+    try std.testing.expectEqual(@as(usize, MAX_TASK_PROVENANCE_EVENTS), task.provenance_count);
+    try std.testing.expectEqual(@as(u64, 102), task.provenanceEventAt(0).?.capability_id);
+    try std.testing.expectEqual(@as(u64, 101 + MAX_TASK_PROVENANCE_EVENTS), task.latestProvenanceEvent().?.capability_id);
+}
+
 test "tasks can attach execution components while preserving launch substrate" {
     var runtime = Runtime.init();
     const task = try runtime.createTask(.{

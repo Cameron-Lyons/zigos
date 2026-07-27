@@ -16,6 +16,8 @@ const syscall_surface = @import("native/kernel_api/syscall_surface.zig");
 const userspace_executor = @import("native/task/userspace_executor.zig");
 const timer = @import("kernel/timer/timer.zig");
 
+pub const includes_verification_evidence = config.includesVerificationEvidence();
+
 var published_kernel_port_addr: usize = 0;
 var published_active_task_id: u64 = 0;
 

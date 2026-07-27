@@ -8,6 +8,7 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const runtime_host = @import("task_runtime_host.zig");
+const root = @import("root");
 const std = @import("std");
 const units = @import("../core/units.zig");
 const native_util = @import("../core/util.zig");
@@ -18,7 +19,11 @@ pub const MAX_TASKS: usize = TASK_PAGE_SIZE * TASK_PAGE_COUNT;
 pub const MAX_TASK_CAPABILITIES: usize = 24;
 pub const MAX_TASK_COMPONENTS: usize = 8;
 pub const MAX_AUDIT_EVENTS: usize = 16;
-pub const MAX_TASK_PROVENANCE_EVENTS: usize = 24;
+// Task-local provenance is the hot recovery/debug view, not the durable
+// system event ledger. Keep only the latest lifecycle window so every task
+// and task checkpoint in the production image does not reserve dozens of
+// text-heavy records. The verification image retains the deeper history.
+pub const MAX_TASK_PROVENANCE_EVENTS: usize = if (includesVerificationEvidence()) 24 else 8;
 pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_TASK_SOURCE_IDENTITY_BYTES: usize = 96;
 pub const MAX_COMPONENT_LABEL_BYTES: usize = 48;
@@ -37,6 +42,11 @@ pub const USER_STACK_ADDRESS_MIN: u64 = launch_helpers.USER_STACK_ADDRESS_MIN;
 pub const USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = USER_VIRTUAL_ADDRESS_MIN;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: usize = units.kibibytes(8);
+
+fn includesVerificationEvidence() bool {
+    if (!@hasDecl(root, "includes_verification_evidence")) return false;
+    return root.includes_verification_evidence;
+}
 
 pub const TaskState = enum(u8) {
     staged,
