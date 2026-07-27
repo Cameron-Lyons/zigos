@@ -145,7 +145,7 @@ pub const Kernel = struct {
 
         return .{
             .endpoint = try self.endpoint_table.descriptor(created.id),
-            .capability = capabilityDescriptor(endpoint_capability),
+            .capability = capabilityDescriptor(&endpoint_capability),
             .capability_id = endpoint_capability.id,
         };
     }
@@ -248,7 +248,7 @@ pub const Kernel = struct {
                 }
             }
 
-            result.attached_capability = capabilityDescriptor(passed);
+            result.attached_capability = capabilityDescriptor(&passed);
         }
 
         return result;
@@ -276,7 +276,7 @@ pub const Kernel = struct {
         }
         var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
         const minted = (try self.applyGrantPlan(&plan, &minted_buffer))[0];
-        return capabilityDescriptor(minted);
+        return capabilityDescriptor(&minted);
     }
 
     pub fn applyGrantPlan(
@@ -367,7 +367,7 @@ pub const Kernel = struct {
             try self.validateRuntimeGrant(task_id, 1);
         }
         const derived = try self.capability_table.derive(request);
-        errdefer self.capability_table.rollbackGrant(&.{derived});
+        errdefer self.capability_table.rollbackGrant(&.{derived.*});
         if (request.scope.task_id) |task_id| {
             try self.runtime.grantCapability(task_id, derived.id);
         }
@@ -406,7 +406,7 @@ pub const Kernel = struct {
                 _ = try self.runtime.revokeCapability(source_task_id, original.id);
             }
         }
-        return capabilityDescriptor(passed);
+        return capabilityDescriptor(&passed);
     }
 
     pub fn capabilityRevoke(self: *Kernel, context: KernelCallContext, capability_id: u64, now_ticks: u64) Error!void {
@@ -430,7 +430,7 @@ pub const Kernel = struct {
         _ = try self.authorizeOperation(.capability_query, context, now_ticks, .{
             .target_capability = &queried,
         });
-        return capabilityDescriptor(queried);
+        return capabilityDescriptor(&queried);
     }
 
     pub fn sharedMemoryCreate(
@@ -459,7 +459,7 @@ pub const Kernel = struct {
 
         return .{
             .object = try self.shared_memory_table.descriptor(object.id),
-            .capability = capabilityDescriptor(object_capability),
+            .capability = capabilityDescriptor(&object_capability),
             .capability_id = object_capability.id,
         };
     }
@@ -765,7 +765,7 @@ fn validateTaskCreateRequest(request: task_runtime.TaskCreateRequest) Error!void
     return kernel_access.validateTaskCreateRequest(Error, request);
 }
 
-fn capabilityDescriptor(owned: capability.Capability) abi.CapabilityDescriptor {
+fn capabilityDescriptor(owned: *const capability.Capability) abi.CapabilityDescriptor {
     return kernel_descriptors.capabilityDescriptor(owned);
 }
 

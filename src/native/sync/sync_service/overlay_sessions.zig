@@ -10,44 +10,6 @@ pub const OverlayRelayFrameRequest = overlay_model.OverlayRelayFrameRequest;
 pub const OverlayRelayFrameResult = overlay_model.OverlayRelayFrameResult;
 pub const OverlaySession = overlay_model.OverlaySession;
 
-pub fn sendOverlayRelayFrame(
-    service: anytype,
-    network_capabilities: *const capability.CapabilityTable,
-    relay: *sync_transport.Relay,
-    request: OverlayRelayFrameRequest,
-) (Error || sync_transport.Error)!OverlayRelayFrameResult {
-    const policy = service.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
-    const relay_policy_id = policy.relay_policy_id orelse return error.TransportDenied;
-
-    var broker = service.egressBroker(network_capabilities);
-    var transport = sync_transport.Harness.init();
-    const transport_session = try transport.openRelay(&broker, .{
-        .task_id = service.task_id,
-        .principal_id = service.owner,
-        .capability_id = request.relay_capability_id,
-        .policy_id = relay_policy_id,
-        .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
-        .now_ticks = request.tick,
-    }, request.from_device, request.to_device, policy.relayDomainSlice());
-    const overlay_session = try service.openOverlaySession(
-        request.workspace_id,
-        request.from_device,
-        request.to_device,
-        request.usage,
-        .relay_assisted,
-        request.private_service_label,
-        request.tick,
-    );
-
-    const signed_frame = try transport.encryptSignedFrame(&transport_session, request.payload, request.signer);
-    try relay.submit(signed_frame.packet);
-    var delivered_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
-    const delivered = (try relay.deliverNext(&transport_session, delivered_buffer[0..])) orelse return error.RelayDeliveryMissing;
-    if (!std.mem.eql(u8, delivered, request.payload)) return error.PacketAuthenticationFailed;
-
-    return overlayRelayFrameResult(overlay_session, transport_session, signed_frame, delivered.len);
-}
-
 pub fn sendOverlayRelayFrameViaService(
     service: anytype,
     network_capabilities: *const capability.CapabilityTable,
@@ -58,15 +20,15 @@ pub fn sendOverlayRelayFrameViaService(
     const relay_policy_id = policy.relay_policy_id orelse return error.TransportDenied;
 
     var broker = service.egressBroker(network_capabilities);
-    var transport = sync_transport.Harness.init();
-    const transport_session = try transport.openRelay(&broker, .{
+    var transport = sync_transport.NativeTransportService.init();
+    var connection = try transport.openRelay(&broker, .{
         .task_id = service.task_id,
         .principal_id = service.owner,
         .capability_id = request.relay_capability_id,
         .policy_id = relay_policy_id,
         .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
         .now_ticks = request.tick,
-    }, request.from_device, request.to_device, policy.relayDomainSlice());
+    }, service.task_id, relay_service.task_id, request.from_device, request.to_device, policy.relayDomainSlice());
     const overlay_session = try service.openOverlaySession(
         request.workspace_id,
         request.from_device,
@@ -77,17 +39,19 @@ pub fn sendOverlayRelayFrameViaService(
         request.tick,
     );
 
-    const signed_frame = try transport.encryptSignedFrame(&transport_session, request.payload, request.signer);
-    try relay_service.submitSignedFrame(service.task_id, &transport_session, signed_frame);
+    const delivery = try transport.sendWithRelayFallback(&connection, relay_service, request.payload, request.signer);
     var delivered_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
-    const delivered = (try relay_service.deliverNext(service.task_id, &transport_session, delivered_buffer[0..])) orelse return error.RelayDeliveryMissing;
+    const delivered = if (delivery.relay_fallback)
+        (try relay_service.deliverNext(service.task_id, &connection.session, delivered_buffer[0..])) orelse return error.RelayDeliveryMissing
+    else
+        (try transport.receive(&connection)).payload();
     if (!std.mem.eql(u8, delivered, request.payload)) return error.PacketAuthenticationFailed;
 
-    return overlayRelayFrameResult(overlay_session, transport_session, signed_frame, delivered.len);
+    return overlayRelayFrameResult(overlay_session, connection.session, delivery.signed_frame, delivered.len);
 }
 
 fn overlayRelayFrameResult(
-    overlay_session: OverlaySession,
+    overlay_session: *const OverlaySession,
     transport_session: sync_transport.TransportSession,
     signed_frame: sync_transport.SignedEncryptedFrame,
     delivered_len: usize,

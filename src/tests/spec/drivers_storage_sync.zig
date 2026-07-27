@@ -13,6 +13,7 @@ const storage_service = @import("../../native/storage/storage_service.zig");
 const storage_service_ipc = @import("../../native/storage/storage_service_ipc.zig");
 const storage_volume = @import("../../native/storage/storage_volume.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
+const sync_transport = @import("../../native/sync/sync_transport.zig");
 const workspace = @import("../../native/storage/workspace.zig");
 
 const DMA_PROBE_BYTES: u64 = 4096;
@@ -522,7 +523,7 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expect(view.export_only);
     try std.testing.expect(view.readable);
     try std.testing.expect(!view.writable);
-    try std.testing.expectEqualStrings("documents/report.md", view.pathSlice());
+    try std.testing.expectEqual(draft_v2.object_id.raw(), view.object_id);
     try std.testing.expectEqual(draft_v2.version_id.raw(), view.version_id);
     try std.testing.expectError(file_bridge.Error.PathAuthorityRejected, storage.bridgeResolve(.{
         .workspace_id = workspace_record.id.raw(),
@@ -796,7 +797,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, denied_relay_connection.reason);
 
     var packet_broker = sync.egressBroker(&egress_capabilities);
-    var transport_harness = sync_service.transport_harness.Harness.init();
+    var transport_harness = sync_transport.Harness.init();
     const local_packet_session = try transport_harness.openDeviceToDevice(&packet_broker, .{
         .task_id = 631,
         .principal_id = collaborator,
@@ -826,7 +827,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expectEqualStrings("relay.spec.zigos", relay_packet_session.relayDomainSlice());
     try std.testing.expect(!std.mem.eql(u8, relay_packet.ciphertextSlice(), "relay-sync-frame"));
 
-    try std.testing.expectError(sync_service.transport_harness.Error.EgressDenied, transport_harness.openRelay(&packet_broker, .{
+    try std.testing.expectError(sync_transport.Error.EgressDenied, transport_harness.openRelay(&packet_broker, .{
         .task_id = 631,
         .principal_id = collaborator,
         .capability_id = relay_egress_capability.id,

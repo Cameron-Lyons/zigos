@@ -19,6 +19,24 @@ const DOCUMENT_KNOWLEDGE_BUFFER_BYTES: usize = 512;
 const DETAIL_PAYLOAD_BUFFER_BYTES: usize = 96;
 const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
 
+test "event ledger text export preserves the stable diagnostic wire format" {
+    var ledger = Ledger.init();
+    try ledger.recordProcessCrash(
+        .network_stack,
+        .{ .kind = .service, .serial = 9 },
+        21,
+        5001,
+        "segfault",
+    );
+
+    var buffer: [256]u8 = undefined;
+    const exported = try ledger.exportText(&buffer, .{});
+    try std.testing.expectEqualStrings(
+        "#1 tick=21 kind=process_crash subject=service:9 code=5001 service=network_stack detail=segfault\n",
+        exported,
+    );
+}
+
 test "event ledger exports structured redacted diagnostics and audit history" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 7 };

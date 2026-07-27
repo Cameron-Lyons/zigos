@@ -1,6 +1,5 @@
 const impl = @import("sync_service/service.zig");
 pub const transport = @import("sync_transport.zig");
-pub const transport_harness = @import("sync_transport_harness.zig");
 
 pub const MAX_WORKSPACE_POLICIES = impl.MAX_WORKSPACE_POLICIES;
 pub const MAX_SELECTIVE_PREFIXES = impl.MAX_SELECTIVE_PREFIXES;

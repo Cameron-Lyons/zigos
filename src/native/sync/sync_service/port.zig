@@ -178,6 +178,9 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             return self.service.publishPrivateService(workspace_id, label);
         }
 
+        /// Returns an in-process, read-only borrow from `self.service`. Keep that
+        /// service at a stable address. Closing remains observable as `.closed`;
+        /// after a later open reuses the slot, the pointer must not be dereferenced.
         pub fn openOverlaySession(
             self: *Self,
             authority: AuthorityContext,
@@ -188,7 +191,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             transport: TransportMode,
             private_service_label: ?[]const u8,
             tick: u64,
-        ) (AuthorityError || Error)!OverlaySession {
+        ) (AuthorityError || Error)!*const OverlaySession {
             _ = try self.requireSyncAuthority(authority);
             return self.service.openOverlaySession(workspace_id, from_device, to_device, usage, transport, private_service_label, tick);
         }
@@ -211,17 +214,6 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
         ) (AuthorityError || Error)!bool {
             _ = try self.requireSyncAuthority(authority);
             return self.service.closeOverlaySession(session_id, tick);
-        }
-
-        pub fn sendOverlayRelayFrame(
-            self: *Self,
-            authority: AuthorityContext,
-            network_capabilities: *const capability.CapabilityTable,
-            relay: *sync_transport.Relay,
-            request: OverlayRelayFrameRequest,
-        ) (AuthorityError || Error || sync_transport.Error)!OverlayRelayFrameResult {
-            _ = try self.requireSyncAuthority(authority);
-            return self.service.sendOverlayRelayFrame(network_capabilities, relay, request);
         }
 
         pub fn sendOverlayRelayFrameViaService(
@@ -587,7 +579,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             var offset: usize = 0;
             var delivery_count: usize = 0;
             while (offset < payload.len) {
-                const end = @min(offset + sync_transport.MAX_PACKET_BYTES, payload.len);
+                const end = @min(offset + sync_transport.MAX_NATIVE_PAYLOAD_BYTES, payload.len);
                 delivery_count += try self.relayPayloadChunkToPeer(request, payload[offset..end]);
                 offset = end;
             }

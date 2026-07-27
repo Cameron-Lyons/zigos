@@ -294,7 +294,7 @@ test "storage port derives shared workspace capabilities and blocks unauthorized
         .access = .read,
     });
     try std.testing.expectEqual(object.object_id.raw(), team_view.object_id);
-    try std.testing.expectEqualStrings("documents/shared.md", team_view.pathSlice());
+    try std.testing.expectEqual(object.version_id.raw(), team_view.version_id);
     try std.testing.expectError(error.PermissionDenied, port.resolve(.{
         .task_id = 41,
         .principal = team,

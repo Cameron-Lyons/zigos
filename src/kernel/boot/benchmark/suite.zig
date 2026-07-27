@@ -124,6 +124,7 @@ const SupervisorReadyContext = struct {
 const WorkspaceCommitContext = struct {
     baseline: workspace.Directory = workspace.Directory.init(),
     workspace_id: ids.WorkspaceId = ids.WorkspaceId.zero,
+    current_cover_object_id: ids.ObjectId = ids.ObjectId.zero,
 };
 
 const StorageVolumeContext = struct {
@@ -228,6 +229,7 @@ const cases = benchmark_cases.benchmarkCases(.{
     .background_dispatch = benchmarkBackgroundDispatch,
     .supervisor_ready_lookup = benchmarkSupervisorReadyLookup,
     .task_checkpoint_write_restore = benchmarkTaskCheckpointWriteRestore,
+    .task_checkpoint_write_low_occupancy = benchmarkTaskCheckpointWriteLowOccupancy,
     .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
     .file_bridge_resolve = benchmarkFileBridgeResolve,
     .workspace_commit_overlay = benchmarkWorkspaceCommitOverlay,
@@ -695,6 +697,7 @@ fn prepareWorkspaceCommitFixture() void {
         .label = "benchmark-notes",
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     workspace_commit_context.workspace_id = notes.id;
+    workspace_commit_context.current_cover_object_id = ids.object(902);
 
     workspace_commit_context.baseline.beginTransaction(notes.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     workspace_commit_context.baseline.stagePut(notes.id, "documents/plan.md", ids.object(900), ids.version(901), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
@@ -1097,6 +1100,7 @@ fn benchmarkPermissionReviewRender(iteration: u32) u64 {
         &permission_review_buffer,
         &session,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&permission_review_buffer);
     const grants = permission_review.decisionsToGrants(
         &session,
         50 + iteration,
@@ -1172,6 +1176,29 @@ fn benchmarkTaskCheckpointWriteRestore(iteration: u32) u64 {
         latest_helper.tick;
 }
 
+fn benchmarkTaskCheckpointWriteLowOccupancy(iteration: u32) u64 {
+    _ = iteration;
+    // This two-task fixture isolates the cost of skipping the arena's
+    // unclaimed tail. Cross-page holes and reuse are covered by host tests.
+    task_checkpoint_context.source_runtime.writeSnapshot(&task_checkpoint_context.snapshot);
+    std.mem.doNotOptimizeAway(&task_checkpoint_context.snapshot);
+
+    const primary = &task_checkpoint_context.snapshot.tasks[0].task;
+    const helper = &task_checkpoint_context.snapshot.tasks[1].task;
+    return task_checkpoint_context.snapshot.next_task_id +
+        task_checkpoint_context.snapshot.task_count +
+        task_checkpoint_context.snapshot.address_space_count +
+        primary.id +
+        primary.address_space_id +
+        primary.execution_component_count +
+        primary.capability_count +
+        primary.latestAuditEvent().?.tick +
+        helper.id +
+        helper.address_space_id +
+        helper.capability_count +
+        helper.latestAuditEvent().?.tick;
+}
+
 fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
     var controller = accelerator_scheduler.Controller.init();
     controller.configure(.{
@@ -1198,37 +1225,51 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
         },
         .shared_memory_object_id = object.id,
     }, &shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&controller);
+    std.mem.doNotOptimizeAway(&shared);
     const released = controller.releaseClaim(claim.id, &shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&controller);
+    std.mem.doNotOptimizeAway(&shared);
     return claim.id + object.id.raw() + @intFromBool(released) + @intFromEnum(claim.engine);
 }
 
 fn benchmarkFileBridgeResolve(iteration: u32) u64 {
     var bridge = file_bridge_context.bridge.?;
+    const path = "documents/plan.md";
     const view = bridge.resolve(.{
         .workspace_id = file_bridge_context.expected_workspace_id,
-        .path = "documents/plan.md",
+        .path = path,
         .access = .read,
     }, file_bridge_context.requester, file_bridge_context.authority_capability_id, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return view.object_id + view.version_id + view.path_len + @intFromBool(view.readable);
+    return view.object_id + view.version_id + path.len + @intFromBool(view.readable);
 }
 
 fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
-    prepareWorkspaceCommitFixture();
     const directory = &workspace_commit_context.baseline;
     const workspace_id = workspace_commit_context.workspace_id;
+    var next_cover_object_id = workspace_commit_context.current_cover_object_id;
 
     directory.beginTransaction(workspace_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stagePut(workspace_id, "documents/plan.md", ids.object(900), ids.version(1_100 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stageDelete(workspace_id, "assets/cover.jpg") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stagePut(workspace_id, "documents/draft.md", ids.object(1_200 + iteration), ids.version(1_300 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stagePut(workspace_id, "documents/tmp.md", ids.object(1_400 + iteration), ids.version(1_500 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stageDelete(workspace_id, "documents/tmp.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    if ((iteration & 1) == 0) {
+        directory.stagePut(workspace_id, "documents/plan.md", ids.object(900), ids.version(1_100 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    } else {
+        next_cover_object_id = ids.object(1_200 + iteration);
+        directory.stagePut(workspace_id, "assets/cover.jpg", next_cover_object_id, ids.version(1_300 + iteration), .media_asset) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    }
 
     const generation = directory.commit(workspace_id, 70 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    const entries = directory.entries(workspace_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    workspace_commit_context.current_cover_object_id = next_cover_object_id;
     const plan = directory.resolve(workspace_id, "documents/plan.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    const draft = directory.resolve(workspace_id, "documents/draft.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return generation + entries.len + plan.version_id.raw() + draft.object_id.raw();
+    const cover = directory.resolve(workspace_id, "assets/cover.jpg") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const cover_by_object = directory.resolveObject(workspace_id, workspace_commit_context.current_cover_object_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const root_address = directory.find(workspace_id).?.rootAddress();
+
+    var checksum = generation + plan.version_id.raw() + cover.object_id.raw() + cover_by_object.version_id.raw();
+    var root_word_offset: usize = 0;
+    while (root_word_offset < root_address.len) : (root_word_offset += @sizeOf(u64)) {
+        checksum +%= std.mem.readInt(u64, root_address[root_word_offset..][0..@sizeOf(u64)], .little);
+    }
+    return checksum;
 }
 
 fn benchmarkStorageVolumeReplaySegmentedLog(iteration: u32) u64 {
@@ -1335,6 +1376,7 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
 
     _ = media_context.service.complete(print_job.id, &media_context.scheduler, &media_context.notifications, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = media_context.service.complete(export_job.id, &media_context.scheduler, &media_context.notifications, 31 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&media_context.service);
 
     return export_job.id +
         print_job.id +
@@ -1426,6 +1468,7 @@ fn benchmarkDenialExplanationRender(iteration: u32) u64 {
     };
     const explanation = denial_explanation.forPermissionDecision(kind, reason);
     const rendered = denial_explanation.renderToBuffer(&denial_explanation_buffer, explanation) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&denial_explanation_buffer);
     return rendered.len +
         explanation.policySlice().len +
         explanation.missingCapabilitySlice().len +
@@ -2428,18 +2471,14 @@ fn seedUpdateHealthStorageProbe(
     identity: signing.SignerIdentity,
     tick: u64,
 ) u64 {
-    const record = storage.putVersion(.{
+    const record = storage.putLocallySignedVersion(.{
         .preferred_object_id = ids.object(7_700),
         .object_type = .document,
         .payload = "notes-v1",
-        .metadata = object_store.signMetadata(
-            identity,
-            "notes",
-            "text/plain",
-            .document,
-            "notes-v1",
-            tick,
-        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
+        .signer = identity,
+        .label = "notes",
+        .content_type = "text/plain",
+        .created_at_ticks = tick,
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const workspace_record = storage.createWorkspace(.{
         .owner = owner,

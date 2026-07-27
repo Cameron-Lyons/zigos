@@ -39,7 +39,8 @@ pub fn renderRequestScopeToBuffer(
     request: manifest.PermissionRequest,
 ) RenderError![]const u8 {
     var used: usize = 0;
-    try appendFmt(buffer, &used, "Scope: {s}", .{scopeSummaryLabel(request.kind, request.local_only)});
+    try appendText(buffer, &used, "Scope: ");
+    try appendText(buffer, &used, scopeSummaryLabel(request.kind, request.local_only));
     if (request.kind == .network_egress and request.egress_intent.declared()) {
         try appendText(buffer, &used, "; intent: ");
         try appendDataEgressIntent(buffer, &used, request.egress_intent);
@@ -50,7 +51,8 @@ pub fn renderRequestScopeToBuffer(
     try appendRequestedLease(buffer, &used, request.max_lease_ticks);
     try appendText(buffer, &used, "; data leaves: ");
     try appendDataLeaving(buffer, &used, request);
-    try appendFmt(buffer, &used, "; revoke: {s}", .{revocationHint(request.kind)});
+    try appendText(buffer, &used, "; revoke: ");
+    try appendText(buffer, &used, revocationHint(request.kind));
     return buffer[0..used];
 }
 
@@ -285,7 +287,9 @@ fn appendRequestedLease(buffer: []u8, used: *usize, max_lease_ticks: u64) Render
     if (max_lease_ticks == 0) {
         try appendText(buffer, used, "until revoked");
     } else {
-        try appendFmt(buffer, used, "up to {d} ticks", .{max_lease_ticks});
+        try appendText(buffer, used, "up to ");
+        try appendUnsigned(buffer, used, max_lease_ticks);
+        try appendText(buffer, used, " ticks");
     }
 }
 
@@ -419,7 +423,8 @@ fn appendDataLeaving(buffer: []u8, used: *usize, request: manifest.PermissionReq
         if (request.egress_intent.declared()) {
             try appendDataEgressIntent(buffer, used, request.egress_intent);
         } else {
-            try appendFmt(buffer, used, "network route {s}", .{request.resource});
+            try appendText(buffer, used, "network route ");
+            try appendText(buffer, used, request.resource);
         }
         return;
     }
@@ -469,9 +474,34 @@ fn appendText(buffer: []u8, used: *usize, text: []const u8) RenderError!void {
     used.* += text.len;
 }
 
+fn appendUnsigned(buffer: []u8, used: *usize, value: u64) RenderError!void {
+    var number_buffer: [20]u8 = undefined;
+    const number_len = std.fmt.printInt(&number_buffer, value, 10, .lower, .{});
+    try appendText(buffer, used, number_buffer[0..number_len]);
+}
+
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) RenderError!void {
     const rendered = std.fmt.bufPrint(buffer[used.*..], fmt, args) catch return error.NoSpaceLeft;
     used.* += rendered.len;
+}
+
+test "humane permission rendering handles maximum unsigned values" {
+    const expected = "18446744073709551615";
+    const maximum: u64 = std.math.maxInt(u64);
+    var exact_buffer: [expected.len]u8 = undefined;
+    var used: usize = 0;
+
+    try appendUnsigned(&exact_buffer, &used, maximum);
+    try std.testing.expectEqual(expected.len, used);
+    try std.testing.expectEqualStrings(expected, exact_buffer[0..used]);
+
+    var undersized_backing = [_]u8{0xa5} ** expected.len;
+    used = 0;
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        appendUnsigned(undersized_backing[0 .. expected.len - 1], &used, maximum),
+    );
+    try std.testing.expectEqual(@as(u8, 0xa5), undersized_backing[expected.len - 1]);
 }
 
 test "humane grant scopes explain scope expiry and revocation" {

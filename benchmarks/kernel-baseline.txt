@@ -6,9 +6,10 @@ network_policy.authorize_connection 1068.07 200
 background_dispatch.allowed_sync 10897.73 200
 service_supervisor.ready_lookup 1000.00 200
 task_runtime.checkpoint.write_restore 695483.29 200
-accelerator_scheduler.claim_release 155151.33 200
+task_runtime.checkpoint.write_low_occupancy 13819.75 200
+accelerator_scheduler.claim_release 84944.26 200
 storage.file_bridge.resolve_view 942.06 200
-storage.workspace.commit_overlay 3933056.15 200
+storage.workspace.commit_overlay 71868.46 200
 storage.volume.replay_segmented_log 134239452.75 200
 storage.volume.compact_checkpoint 132924064.00 200
 package_revision.rollforward_rollback 73415.49 200

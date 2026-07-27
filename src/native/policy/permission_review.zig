@@ -93,11 +93,13 @@ pub fn renderToBuffer(
 ) ![]const u8 {
     var used: usize = 0;
 
-    try appendFmt(buffer, &used, "Permission review for {s} [{s}] task={d}\n", .{
-        session.bundle.display_name,
-        session.bundle.bundle_id,
-        session.task_id,
-    });
+    try appendText(buffer, &used, "Permission review for ");
+    try appendText(buffer, &used, session.bundle.display_name);
+    try appendText(buffer, &used, " [");
+    try appendText(buffer, &used, session.bundle.bundle_id);
+    try appendText(buffer, &used, "] task=");
+    try appendUnsigned(buffer, &used, session.task_id);
+    try appendText(buffer, &used, "\n");
 
     for (session.bundle.requested_permissions, 0..) |request, index| {
         try appendRequest(buffer, &used, session, request, index);
@@ -215,26 +217,34 @@ fn appendRequest(
     index: usize,
 ) !void {
     const bundle = session.bundle;
-    try appendFmt(buffer, used, "  [{d}/{d}] {s}: {s}\n", .{
-        index + 1,
-        bundle.requested_permissions.len,
-        manifest.permissionDisplayLabel(request.kind),
-        request.resource,
-    });
+    try appendText(buffer, used, "  [");
+    try appendUnsigned(buffer, used, @intCast(index + 1));
+    try appendText(buffer, used, "/");
+    try appendUnsigned(buffer, used, @intCast(bundle.requested_permissions.len));
+    try appendText(buffer, used, "] ");
+    try appendText(buffer, used, manifest.permissionDisplayLabel(request.kind));
+    try appendText(buffer, used, ": ");
+    try appendText(buffer, used, request.resource);
+    try appendText(buffer, used, "\n");
 
     var rights_buffer: [RIGHTS_SUMMARY_BUFFER_BYTES]u8 = undefined;
-    try appendFmt(buffer, used, "    rights: {s}\n", .{rightsSummary(request.rights, &rights_buffer)});
+    try appendText(buffer, used, "    rights: ");
+    try appendText(buffer, used, rightsSummary(request.rights, &rights_buffer));
+    try appendText(buffer, used, "\n");
     var scope_buffer: [SCOPE_SUMMARY_BUFFER_BYTES]u8 = undefined;
     const scope_summary = humane_permissions.renderRequestScopeToBuffer(&scope_buffer, request) catch "Scope: unavailable";
-    try appendFmt(buffer, used, "    {s}\n", .{scope_summary});
+    try appendText(buffer, used, "    ");
+    try appendText(buffer, used, scope_summary);
+    try appendText(buffer, used, "\n");
     if (request.kind == .network_egress and request.egress_intent.declared()) {
         var intent_buffer: [EGRESS_INTENT_BUFFER_BYTES]u8 = undefined;
         try appendFmt(buffer, used, "    data egress intent: {s}\n", .{dataEgressIntentSummary(request.egress_intent, &intent_buffer)});
     }
-    try appendFmt(buffer, used, "    required: {s} local_only: {s}\n", .{
-        yesNo(request.required),
-        yesNo(request.local_only),
-    });
+    try appendText(buffer, used, "    required: ");
+    try appendText(buffer, used, yesNo(request.required));
+    try appendText(buffer, used, " local_only: ");
+    try appendText(buffer, used, yesNo(request.local_only));
+    try appendText(buffer, used, "\n");
     if (request.kind == .background_execution) {
         if (manifest.findBackgroundTask(bundle.*, request.resource)) |task| {
             try appendFmt(buffer, used, "    trigger: {s}\n", .{backgroundTriggerLabel(task.trigger)});
@@ -251,7 +261,9 @@ fn appendRequest(
         }
     }
     if (request.max_lease_ticks != 0) {
-        try appendFmt(buffer, used, "    requested lease: {d} ticks\n", .{request.max_lease_ticks});
+        try appendText(buffer, used, "    requested lease: ");
+        try appendUnsigned(buffer, used, request.max_lease_ticks);
+        try appendText(buffer, used, " ticks\n");
     }
 
     if (session.decisionAt(index)) |decision| {
@@ -260,11 +272,13 @@ fn appendRequest(
         } else if (decision.lease_ticks) |lease_ticks| {
             var expiry_buffer: [LEASE_SUMMARY_BUFFER_BYTES]u8 = undefined;
             const expiry = humane_permissions.requestedLeaseLabel(&expiry_buffer, lease_ticks) catch "custom lease";
-            try appendFmt(buffer, used, "    decision: allow local_only={s} lease={d} ticks\n", .{
-                yesNo(decision.local_only),
-                lease_ticks,
-            });
-            try appendFmt(buffer, used, "    decision lease summary: {s}\n", .{expiry});
+            try appendText(buffer, used, "    decision: allow local_only=");
+            try appendText(buffer, used, yesNo(decision.local_only));
+            try appendText(buffer, used, " lease=");
+            try appendUnsigned(buffer, used, lease_ticks);
+            try appendText(buffer, used, " ticks\n    decision lease summary: ");
+            try appendText(buffer, used, expiry);
+            try appendText(buffer, used, "\n");
         } else {
             try appendFmt(buffer, used, "    decision: allow local_only={s}\n", .{yesNo(decision.local_only)});
         }
@@ -282,11 +296,16 @@ fn appendCompactReceipt(
     request: manifest.PermissionRequest,
     decision: ReviewCommand,
 ) !void {
-    try appendFmt(buffer, used, "    receipt: granted={s} duration=", .{manifest.permissionDisplayLabel(request.kind)});
+    try appendText(buffer, used, "    receipt: granted=");
+    try appendText(buffer, used, manifest.permissionDisplayLabel(request.kind));
+    try appendText(buffer, used, " duration=");
     if (decision.lease_ticks) |lease_ticks| {
-        try appendFmt(buffer, used, "{d} ticks", .{lease_ticks});
+        try appendUnsigned(buffer, used, lease_ticks);
+        try appendText(buffer, used, " ticks");
     } else if (request.max_lease_ticks != 0) {
-        try appendFmt(buffer, used, "up to {d} ticks", .{request.max_lease_ticks});
+        try appendText(buffer, used, "up to ");
+        try appendUnsigned(buffer, used, request.max_lease_ticks);
+        try appendText(buffer, used, " ticks");
     } else {
         try appendText(buffer, used, "until revoked");
     }
@@ -384,6 +403,12 @@ fn appendText(buffer: []u8, used: *usize, text: []const u8) !void {
     used.* += text.len;
 }
 
+fn appendUnsigned(buffer: []u8, used: *usize, value: u64) !void {
+    var number_buffer: [20]u8 = undefined;
+    const number_len = std.fmt.printInt(&number_buffer, value, 10, .lower, .{});
+    try appendText(buffer, used, number_buffer[0..number_len]);
+}
+
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) !void {
     const rendered = try std.fmt.bufPrint(buffer[used.*..], fmt, args);
     used.* += rendered.len;
@@ -452,7 +477,23 @@ test "decisionsToGrants saturates lease expiry instead of wrapping" {
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), grants[0].expires_at_ticks);
 }
 
-test "renderToBuffer includes bundle name, permission labels, and decisions" {
+test "renderToBuffer preserves the exact permission review text" {
+    const expected =
+        \\Permission review for Notes [app.notes] task=3
+        \\  [1/2] Object access: workspace:notes
+        \\    rights: object_read, object_write
+        \\    Scope: this object on this device; rights: read, write; lease: until revoked; data leaves: none; revoke: remove this app from the object's share sheet
+        \\    required: yes local_only: yes
+        \\    decision: allow local_only=yes lease=400 ticks
+        \\    decision lease summary: up to 400 ticks
+        \\    receipt: granted=Object access duration=400 ticks data_leaves=none revoke=Permission Review
+        \\  [2/2] Clipboard: clipboard
+        \\    rights: clipboard_read
+        \\    Scope: clipboard for this task; rights: read clipboard; lease: until revoked; data leaves: none; revoke: turn off clipboard access in Permission Review
+        \\    required: no local_only: no
+        \\    decision: deny
+        \\
+    ;
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .object_access,
@@ -484,17 +525,34 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
     };
     const session = try initSession(3, &bundle, &decisions);
 
-    var buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
-    const rendered = try renderToBuffer(&buffer, &session);
+    var exact_buffer: [expected.len]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, try renderToBuffer(&exact_buffer, &session));
 
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission review for Notes") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Object access") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: allow") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: deny") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "receipt: granted=Object access") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "data_leaves=none") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Scope: this object on this device") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "revoke: remove this app from the object's share sheet") != null);
+    var undersized_backing = [_]u8{0xa5} ** expected.len;
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        renderToBuffer(undersized_backing[0 .. expected.len - 1], &session),
+    );
+    try std.testing.expectEqual(@as(u8, 0xa5), undersized_backing[expected.len - 1]);
+}
+
+test "permission review renders maximum unsigned values in exact buffers" {
+    const expected = "18446744073709551615";
+    const maximum: u64 = std.math.maxInt(u64);
+    var exact_buffer: [expected.len]u8 = undefined;
+    var used: usize = 0;
+
+    try appendUnsigned(&exact_buffer, &used, maximum);
+    try std.testing.expectEqual(expected.len, used);
+    try std.testing.expectEqualStrings(expected, exact_buffer[0..used]);
+
+    var undersized_backing = [_]u8{0xa5} ** expected.len;
+    used = 0;
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        appendUnsigned(undersized_backing[0 .. expected.len - 1], &used, maximum),
+    );
+    try std.testing.expectEqual(@as(u8, 0xa5), undersized_backing[expected.len - 1]);
 }
 
 test "permission review does not grant hidden device access for the example writer manifest" {

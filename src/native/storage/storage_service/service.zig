@@ -121,6 +121,18 @@ pub const StorageCore = struct {
         return result;
     }
 
+    /// Creates the metadata signature inside the trusted storage service and
+    /// avoids re-verifying that freshly generated signature. Use putVersion for
+    /// metadata or signatures supplied across a trust boundary.
+    pub inline fn putLocallySignedVersion(
+        self: *Service,
+        request: object_store.PutLocallySignedRequest,
+    ) object_store.PutLocallySignedError!object_store.PutResult {
+        const result = try self.store.putLocallySignedVersion(request);
+        self.noteMutation(true);
+        return result;
+    }
+
     pub fn putVersionFromSharedMemory(
         self: *Service,
         request: object_store.PutRequest,
@@ -672,7 +684,7 @@ pub const StoragePort = struct {
         try self.core.shareWorkspace(key, effective_grant);
         return .{
             .grant = effective_grant,
-            .capability = derived,
+            .capability = derived.*,
         };
     }
 

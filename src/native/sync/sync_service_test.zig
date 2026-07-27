@@ -1422,7 +1422,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expectEqual(@as(usize, 1), result.summary.conflict_count);
     try std.testing.expectEqual(@as(usize, 4), result.accepted_frame_count);
     try std.testing.expectEqual(@as(usize, 4), result.persisted_object_count);
-    const expected_relay_deliveries = 3 + (media_payload.len + sync_transport.MAX_PACKET_BYTES - 1) / sync_transport.MAX_PACKET_BYTES;
+    const expected_relay_deliveries = 3 + (media_payload.len + sync_transport.MAX_NATIVE_PAYLOAD_BYTES - 1) / sync_transport.MAX_NATIVE_PAYLOAD_BYTES;
     try std.testing.expectEqual(@as(usize, expected_relay_deliveries), result.relay_delivery_count);
     try std.testing.expect(result.used_booted_relay_service);
     const expected_payload_bytes = "source edit".len + media_payload.len + secret_payload.len + database_payload.len;
@@ -1866,6 +1866,8 @@ test "overlay sessions cover sync remote access private service publishing and e
     try std.testing.expect(remote_session.remote_access);
     try std.testing.expect(remote_session.relay_encrypted);
     try std.testing.expectEqualStrings("relay.zigos.dev", remote_session.relayDomainSlice());
+    const remote_session_id = remote_session.session_id;
+    const remote_session_slot_index = service.overlay_sessions.slotIndexOf(remote_session_id).?;
 
     const private_service = try service_port.openOverlaySession(
         service_authority,
@@ -1893,11 +1895,11 @@ test "overlay sessions cover sync remote access private service publishing and e
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
         .audit = .{},
     });
-    var relay_queue = sync_transport.Relay.init();
-    try std.testing.expectError(error.EgressDenied, service_port.sendOverlayRelayFrame(
+    var relay_service = try sync_transport.BootedOverlayRelayService.init(9_700, 9_701, "relay.zigos.dev");
+    try std.testing.expectError(error.EgressDenied, service_port.sendOverlayRelayFrameViaService(
         service_authority,
         &network_capabilities,
-        &relay_queue,
+        &relay_service,
         .{
             .workspace_id = workspace_id,
             .from_device = tablet,
@@ -1910,13 +1912,13 @@ test "overlay sessions cover sync remote access private service publishing and e
             .tick = 17,
         },
     ));
-    try std.testing.expectEqual(@as(usize, 0), relay_queue.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 0), relay_service.accepted_packets);
     try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
 
-    const relay_exchange = try service_port.sendOverlayRelayFrame(
+    const relay_exchange = try service_port.sendOverlayRelayFrameViaService(
         service_authority,
         &network_capabilities,
-        &relay_queue,
+        &relay_service,
         .{
             .workspace_id = workspace_id,
             .from_device = tablet,
@@ -1939,14 +1941,14 @@ test "overlay sessions cover sync remote access private service publishing and e
     try std.testing.expectEqualStrings("overlay.workspace.sync", relay_exchange.serviceIdentitySlice());
     try std.testing.expectEqualStrings("relay.zigos.dev", relay_exchange.relayDomainSlice());
     try std.testing.expectEqualStrings("notes.remote", relay_exchange.privateServiceSlice());
-    try std.testing.expectEqual(@as(usize, 1), relay_queue.accepted_packets);
-    try std.testing.expectEqual(@as(usize, 1), relay_queue.delivered_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.delivered_packets);
     try std.testing.expectEqual(@as(usize, 4), service.activeOverlaySessionCount());
     try std.testing.expect(try service_port.closeOverlaySession(service_authority, relay_exchange.overlay_session_id, 19));
     try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
 
-    try std.testing.expect(try service_port.closeOverlaySession(service_authority, remote_session.session_id, 17));
-    try std.testing.expectEqual(OverlaySessionState.closed, service.findOverlaySession(remote_session.session_id).?.state);
+    try std.testing.expect(try service_port.closeOverlaySession(service_authority, remote_session_id, 17));
+    try std.testing.expectEqual(OverlaySessionState.closed, remote_session.state);
     try std.testing.expectEqual(@as(usize, 2), service.activeOverlaySessionCount());
 
     try std.testing.expectError(error.PrivateServiceNotPublished, service_port.openOverlaySession(
@@ -1971,6 +1973,51 @@ test "overlay sessions cover sync remote access private service publishing and e
         null,
         19,
     ));
+
+    // Four records already occupy the eight-slot arena: two live and two closed.
+    // Fill the unclaimed slots, then force both closed slots through reuse.
+    const unclaimed_session_count = sync_service.MAX_OVERLAY_SESSIONS - 4;
+    for (0..unclaimed_session_count) |offset| {
+        _ = try service_port.openOverlaySession(
+            service_authority,
+            workspace_id,
+            laptop,
+            tablet,
+            .sync_replication,
+            .device_to_device,
+            null,
+            20 + @as(u64, @intCast(offset)),
+        );
+    }
+
+    const first_replacement = try service_port.openOverlaySession(
+        service_authority,
+        workspace_id,
+        laptop,
+        tablet,
+        .sync_replication,
+        .device_to_device,
+        null,
+        30,
+    );
+    const first_replacement_slot_index = service.overlay_sessions.slotIndexOf(first_replacement.session_id).?;
+    const second_replacement = try service_port.openOverlaySession(
+        service_authority,
+        workspace_id,
+        laptop,
+        tablet,
+        .sync_replication,
+        .device_to_device,
+        null,
+        31,
+    );
+    const second_replacement_slot_index = service.overlay_sessions.slotIndexOf(second_replacement.session_id).?;
+
+    try std.testing.expect(
+        remote_session_slot_index == first_replacement_slot_index or
+            remote_session_slot_index == second_replacement_slot_index,
+    );
+    try std.testing.expect(service.findOverlaySession(remote_session_id) == null);
 }
 
 test "sync service overlay session capacity is configurable" {

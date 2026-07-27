@@ -69,10 +69,11 @@ fn probeArenaKey(_: *const ProbeArenaSlot) u64 {
 const ProbeArena = indexed_arena.IndexedArenaWithKey(u64, ProbeArenaSlot, 1, 2, probeArenaKey);
 
 pub const sync_private_overlay = .{
-    .transport_harness = .{
-        .uses_signed_encrypted_frames = @hasField(sync_transport_harness.SignedEncryptedFrame, "signature"),
-        .verifies_signed_frames = @hasDecl(sync_transport_harness, "verifySignedFrame"),
-        .rejects_foreign_session_task_submitters = @hasDecl(sync_transport_harness.BootedOverlayRelayService, "submitSignedFrame"),
+    .native_transport = .{
+        .uses_signed_encrypted_frames = @hasField(sync_transport.SignedEncryptedFrame, "signature"),
+        .verifies_signed_frames = @hasDecl(sync_transport, "verifySignedFrame"),
+        .opens_endpoint_backed_relays = @hasDecl(sync_transport.NativeTransportService, "openRelay"),
+        .falls_back_through_relay_service = @hasDecl(sync_transport.NativeTransportService, "sendWithRelayFallback"),
     },
     .service_test = .{
         .runs_deterministic_two_device_overlay_replication = @hasDecl(sync_service_test, "deterministicTwoDeviceOverlayReplication"),
@@ -109,7 +110,8 @@ pub const indexed_hot_path_tables = .{
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
     },
     .shared_memory = .{
-        .uses_mmu_object_mapping_index = @hasField(shared_memory.FreestandingMmu, "object_mapping_index"),
+        .uses_compact_mmu_object_mapping_head = @hasField(shared_memory.Object, "mmu_mapping_head"),
+        .tracks_mmu_object_mapping_count = @hasField(shared_memory.Object, "mmu_mapping_count"),
         .uses_object_owner_index = @hasField(shared_memory.Table, "object_owner_index"),
         .uses_object_task_mapping_index = @hasField(shared_memory.Table, "object_task_mapping_index"),
     },

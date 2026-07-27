@@ -1002,7 +1002,7 @@ test "driver set measurements bind signed driver records and restart generation"
             .signer = "zigos-driver-key",
         },
     };
-    _ = try directory.register(.{
+    const driver = try directory.register(.{
         .service_id = 44,
         .owner_task_id = 7,
         .device_id = 100,
@@ -1019,7 +1019,7 @@ test "driver set measurements bind signed driver records and restart generation"
     try first_recorder.addDriverSet("core-driver-set", &directory);
     const first = first_recorder.finalize();
 
-    try std.testing.expect(directory.markRestarted(44));
+    try std.testing.expect(directory.markRestarted(driver));
     var second_recorder = Recorder.init();
     second_recorder.begin(1);
     try second_recorder.addDriverSet("core-driver-set", &directory);

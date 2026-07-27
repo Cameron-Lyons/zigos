@@ -233,10 +233,15 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             };
             const inserted = try self.insert(record, target_generation_index);
             self.advanceNextCapabilityIdFrom(capability_id);
-            return inserted;
+            return inserted.*;
         }
 
-        pub fn derive(self: *Self, request: DeriveRequest) Error!Capability {
+        /// Returns a read-only borrow of the table-owned child in its fixed arena
+        /// slot. The borrow may be used only while this table instance stays in
+        /// place and the child remains stored. Copy the record before revoking or
+        /// otherwise removing the child: removal clears the slot immediately, and
+        /// a later insertion may reuse it.
+        pub fn derive(self: *Self, request: DeriveRequest) Error!*const Capability {
             const parent_slot = self.findConstSlot(request.parent_capability_id) orelse return error.CapabilityNotFound;
             const parent = &parent_slot.capability;
             if (!self.isUsableSlot(parent_slot, request.lease.issued_at_ticks)) return error.CapabilityRevoked;
@@ -293,7 +298,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 self.removeSlot(source_slot_index);
             }
 
-            return passed;
+            return passed.*;
         }
 
         pub fn revokeGrant(self: *Self, capability_id: u64) Error!void {
@@ -351,13 +356,13 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return self.active_capability_count;
         }
 
-        fn insert(self: *Self, capability: Capability, target_generation_index: u8) Error!Capability {
+        fn insert(self: *Self, capability: Capability, target_generation_index: u8) Error!*const Capability {
             const slot_index = self.slots.reserveIndex(capability.id) orelse return error.TableFull;
             self.slots.slots[slot_index].capability = capability;
             self.slots.slots[slot_index].target_generation_index = target_generation_index;
             self.indexSlot(slot_index);
             self.active_capability_count += 1;
-            return capability;
+            return &self.slots.slots[slot_index].capability;
         }
 
         fn findSlot(self: *Self, capability_id: u64) ?*CapabilitySlot {
@@ -747,7 +752,8 @@ test "capabilities derive narrower rights and grant revocation leaves sibling au
     });
 
     _ = try table.requireUsable(parent.id, 10);
-    _ = try table.requireUsable(derived.id, 10);
+    const stored_derived = try table.requireUsable(derived.id, 10);
+    try std.testing.expect(derived == stored_derived);
 
     try table.revokeGrant(parent.id);
     try std.testing.expect(table.query(parent.id) == null);
@@ -1111,7 +1117,7 @@ test "capability ids do not advance when the table is full" {
     try std.testing.expect(table.query(next_before_full) == null);
 }
 
-test "capability table reuses revoked slots through a free list" {
+test "derived capability views are copied before revoked slots are reused" {
     const SmallTable = CapabilityTableWith(.{
         .max_capabilities = 3,
         .capability_index_capacity = 8,
@@ -1119,26 +1125,30 @@ test "capability table reuses revoked slots through a free list" {
     });
     var table = SmallTable.init();
     const holder = principal.PrincipalId{ .kind = .service, .serial = 1 };
+    const derived_holder = principal.PrincipalId{ .kind = .app, .serial = 2 };
 
     const first = try table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
         .target = .{ .kind = .service, .id = 1 },
+        .rights = .{ .service = .{
+            .capability_derive = true,
+            .capability_query = true,
+        } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    });
+    const derived_view = try table.derive(.{
+        .parent_capability_id = first.id,
+        .holder = derived_holder,
         .rights = .{ .service = .{ .capability_query = true } },
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
-    const second = try table.mintBootRoot(.{
-        .holder = holder,
-        .issuer = holder,
-        .target = .{ .kind = .service, .id = 1 },
-        .rights = .{ .service = .{ .capability_query = true } },
-        .scope = .{},
-        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
-    });
-    const first_slot_index = table.slots.slotIndexOf(first.id).?;
+    const derived: Capability = derived_view.*;
+    const derived_slot_index = table.slots.slotIndexOf(derived.id).?;
 
-    try table.revokeGrant(first.id);
+    try table.revokeGrant(derived.id);
     const reused = try table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
@@ -1148,11 +1158,13 @@ test "capability table reuses revoked slots through a free list" {
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
 
-    try std.testing.expect(table.query(second.id) != null);
-    try std.testing.expect(table.query(first.id) == null);
+    try std.testing.expect(table.query(first.id) != null);
+    try std.testing.expect(table.query(derived.id) == null);
     try std.testing.expect(table.query(reused.id) != null);
-    try std.testing.expect(table.slots.slotIndexOf(first.id) == null);
-    try std.testing.expectEqual(first_slot_index, table.slots.slotIndexOf(reused.id).?);
+    try std.testing.expect(table.slots.slotIndexOf(derived.id) == null);
+    try std.testing.expectEqual(derived_slot_index, table.slots.slotIndexOf(reused.id).?);
+    try std.testing.expect(derived.holder.eql(derived_holder));
+    try std.testing.expect(derived.rights.has(.capability_query));
     try std.testing.expectEqual(@as(usize, 2), table.slots.countInUse());
 
     const third = try table.mintBootRoot(.{

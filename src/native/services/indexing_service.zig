@@ -23,11 +23,14 @@ pub const SearchResult = struct {
     body_hits: u16 = 0,
     sensitivity: manifest.DataSensitivity = .internal_data,
     title_fingerprint: u64 = 0,
-    title_len: usize,
-    title: [MAX_TITLE_BYTES]u8,
+    // Borrows the originating Service's fixed document arena. Valid only while
+    // that Service instance remains alive at the same address and continues to
+    // own this record; updating or removing the document invalidates the slice.
+    // Redaction replaces the borrow with an empty slice.
+    title: []const u8,
 
     pub fn titleSlice(self: *const SearchResult) []const u8 {
-        return self.title[0..self.title_len];
+        return self.title;
     }
 };
 
@@ -302,8 +305,7 @@ fn scoreDocument(record: *const DocumentRecord, folded_needle: []const u8, gener
         .body_hits = @intCast(body_hits),
         .sensitivity = record.sensitivity,
         .title_fingerprint = hashTitle(record.titleSlice()),
-        .title_len = record.title_len,
-        .title = record.title,
+        .title = record.titleSlice(),
     };
 }
 
@@ -369,8 +371,7 @@ fn countOccurrencesFolded(haystack: []const u8, folded_needle: []const u8) usize
 
 fn redactResultTitles(results: []SearchResult) void {
     for (results) |*result| {
-        result.title_len = 0;
-        result.title = [_]u8{0} ** MAX_TITLE_BYTES;
+        result.title = "";
     }
 }
 
@@ -448,6 +449,49 @@ test "indexing service rejects overlong document text without partial updates" {
     try std.testing.expectEqualStrings("Original", slot.record.titleSlice());
     try std.testing.expectEqualStrings("body", slot.record.bodySlice());
     try std.testing.expectEqual(@as(u64, 2), service.generation);
+}
+
+test "borrowed result titles follow document lifetime boundaries" {
+    var service = Service.init();
+    try service.upsert(1, 100, 1, "Alpha Notes", "alpha roadmap");
+
+    const workspace_one = [_]u64{1};
+    const source_slot_index = service.documents.slotIndexOf(documentKey(1, 100)).?;
+    var results_buffer: [MAX_RESULTS]SearchResult = undefined;
+
+    {
+        const results = service.query(&workspace_one, "alpha", &results_buffer);
+        const source = &service.documents.slots[source_slot_index].record;
+        try std.testing.expectEqual(@as(usize, 1), results.len);
+        try std.testing.expect(results[0].title.ptr == source.titleSlice().ptr);
+        try std.testing.expectEqualStrings("Alpha Notes", results[0].titleSlice());
+    }
+
+    try service.upsert(2, 200, 1, "Other Notes", "alpha reference");
+    try std.testing.expectEqual(source_slot_index, service.documents.slotIndexOf(documentKey(1, 100)).?);
+    {
+        const results = service.query(&workspace_one, "alpha", &results_buffer);
+        const source = &service.documents.slots[source_slot_index].record;
+        try std.testing.expectEqual(@as(usize, 1), results.len);
+        try std.testing.expect(results[0].title.ptr == source.titleSlice().ptr);
+    }
+
+    const generation_before_update = service.generation;
+    try service.upsert(1, 100, 2, "Updated Notes", "updated alpha roadmap");
+    try std.testing.expect(service.generation > generation_before_update);
+    {
+        const results = service.query(&workspace_one, "alpha", &results_buffer);
+        const source = &service.documents.slots[source_slot_index].record;
+        try std.testing.expectEqual(@as(usize, 1), results.len);
+        try std.testing.expectEqual(@as(u64, 2), results[0].version_id);
+        try std.testing.expect(results[0].title.ptr == source.titleSlice().ptr);
+        try std.testing.expectEqualStrings("Updated Notes", results[0].titleSlice());
+    }
+
+    const generation_before_remove = service.generation;
+    try std.testing.expect(service.remove(1, 100));
+    try std.testing.expect(service.generation > generation_before_remove);
+    try std.testing.expectEqual(@as(usize, 0), service.query(&workspace_one, "alpha", &results_buffer).len);
 }
 
 test "indexing service keeps highest ranked results after buffer fills" {

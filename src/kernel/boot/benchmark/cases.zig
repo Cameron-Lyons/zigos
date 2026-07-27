@@ -9,7 +9,7 @@ pub const QualityGateCase = struct {
     run: *const fn () u64,
 };
 
-pub fn benchmarkCases(handlers: anytype) [23]BenchmarkCase {
+pub fn benchmarkCases(handlers: anytype) [24]BenchmarkCase {
     return .{
         .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = handlers.capability_derive },
         .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = handlers.capability_mint_reuse_free_slot },
@@ -19,9 +19,10 @@ pub fn benchmarkCases(handlers: anytype) [23]BenchmarkCase {
         .{ .name = "background_dispatch.allowed_sync", .iterations = 8_000, .runIteration = handlers.background_dispatch },
         .{ .name = "service_supervisor.ready_lookup", .iterations = 60_000, .runIteration = handlers.supervisor_ready_lookup },
         .{ .name = "task_runtime.checkpoint.write_restore", .iterations = 8_000, .runIteration = handlers.task_checkpoint_write_restore },
+        .{ .name = "task_runtime.checkpoint.write_low_occupancy", .iterations = 8_000, .runIteration = handlers.task_checkpoint_write_low_occupancy },
         .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = handlers.accelerator_claim_release },
         .{ .name = "storage.file_bridge.resolve_view", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },
-        .{ .name = "storage.workspace.commit_overlay", .iterations = 12_000, .runIteration = handlers.workspace_commit_overlay },
+        .{ .name = "storage.workspace.commit_overlay", .iterations = 128, .runIteration = handlers.workspace_commit_overlay },
         .{ .name = "storage.volume.replay_segmented_log", .iterations = 24, .runIteration = handlers.storage_volume_replay_segmented_log },
         .{ .name = "storage.volume.compact_checkpoint", .iterations = 1, .runIteration = handlers.storage_volume_compact_checkpoint },
         .{ .name = "package_revision.rollforward_rollback", .iterations = 20_000, .runIteration = handlers.package_revision },

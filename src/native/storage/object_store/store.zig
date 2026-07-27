@@ -122,6 +122,20 @@ pub const PutRequest = struct {
     parent_version_id: ?ids.VersionId = null,
 };
 
+/// A write whose metadata signature is created inside the trusted local
+/// storage boundary. Externally supplied signatures must use PutRequest so the
+/// store verifies them before insertion.
+pub const PutLocallySignedRequest = struct {
+    preferred_object_id: ?ids.ObjectId = null,
+    object_type: ObjectType,
+    payload: []const u8,
+    signer: signing.SignerIdentity,
+    label: []const u8,
+    content_type: []const u8,
+    created_at_ticks: u64,
+    parent_version_id: ?ids.VersionId = null,
+};
+
 pub const PutResult = struct {
     object_id: ids.ObjectId,
     version_id: ids.VersionId,
@@ -368,6 +382,7 @@ pub const PayloadTransferSummary = struct {
 };
 
 pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong } || anyerror;
+pub const PutLocallySignedError = Error || SignMetadataError;
 
 const ObjectSlot = struct {
     in_use: bool = false,
@@ -614,6 +629,32 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 return error.InvalidSignature;
             }
 
+            return self.insertVersionRef(request);
+        }
+
+        /// Signs metadata locally and inserts it without repeating public-key
+        /// verification of the signature that was just produced. This method
+        /// does not accept caller-supplied metadata or signatures.
+        pub inline fn putLocallySignedVersion(self: *Self, request: PutLocallySignedRequest) PutLocallySignedError!PutResult {
+            if (request.payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
+            const metadata = try signMetadata(
+                request.signer,
+                request.label,
+                request.content_type,
+                request.object_type,
+                request.payload,
+                request.created_at_ticks,
+            );
+            return self.insertVersionRef(&PutRequest{
+                .preferred_object_id = request.preferred_object_id,
+                .object_type = request.object_type,
+                .payload = request.payload,
+                .metadata = metadata,
+                .parent_version_id = request.parent_version_id,
+            });
+        }
+
+        fn insertVersionRef(self: *Self, request: *const PutRequest) Error!PutResult {
             var object_record: ?*ObjectRecord = null;
             var pending_object_id: ?ids.ObjectId = null;
             if (request.parent_version_id) |parent_version_id| {
