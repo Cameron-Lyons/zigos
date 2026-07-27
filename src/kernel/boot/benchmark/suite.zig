@@ -228,6 +228,7 @@ const cases = benchmark_cases.benchmarkCases(.{
     .background_dispatch = benchmarkBackgroundDispatch,
     .supervisor_ready_lookup = benchmarkSupervisorReadyLookup,
     .task_checkpoint_write_restore = benchmarkTaskCheckpointWriteRestore,
+    .task_checkpoint_write_low_occupancy = benchmarkTaskCheckpointWriteLowOccupancy,
     .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
     .file_bridge_resolve = benchmarkFileBridgeResolve,
     .workspace_commit_overlay = benchmarkWorkspaceCommitOverlay,
@@ -1171,6 +1172,29 @@ fn benchmarkTaskCheckpointWriteRestore(iteration: u32) u64 {
         latest_primary.tick +
         restored_helper.capability_count +
         latest_helper.tick;
+}
+
+fn benchmarkTaskCheckpointWriteLowOccupancy(iteration: u32) u64 {
+    _ = iteration;
+    // This two-task fixture isolates the cost of skipping the arena's
+    // unclaimed tail. Cross-page holes and reuse are covered by host tests.
+    task_checkpoint_context.source_runtime.writeSnapshot(&task_checkpoint_context.snapshot);
+    std.mem.doNotOptimizeAway(&task_checkpoint_context.snapshot);
+
+    const primary = &task_checkpoint_context.snapshot.tasks[0].task;
+    const helper = &task_checkpoint_context.snapshot.tasks[1].task;
+    return task_checkpoint_context.snapshot.next_task_id +
+        task_checkpoint_context.snapshot.task_count +
+        task_checkpoint_context.snapshot.address_space_count +
+        primary.id +
+        primary.address_space_id +
+        primary.execution_component_count +
+        primary.capability_count +
+        primary.latestAuditEvent().?.tick +
+        helper.id +
+        helper.address_space_id +
+        helper.capability_count +
+        helper.latestAuditEvent().?.tick;
 }
 
 fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {

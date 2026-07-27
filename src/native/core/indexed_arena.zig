@@ -643,7 +643,8 @@ pub fn IndexedArenaWithKeyOptions(
             return null;
         }
 
-        inline fn claimedCount(self: *const Self) usize {
+        /// Return the allocator-owned prefix, including live slots and reusable holes.
+        pub inline fn claimedCount(self: *const Self) usize {
             if (self.next_unclaimed_index > capacity) {
                 native_util.impossibleByInvariant("indexed arena claimed prefix fits its slots");
             }
@@ -1011,7 +1012,8 @@ pub fn PagedIndexedArenaWithKey(
             return null;
         }
 
-        inline fn claimedCount(self: *const Self) usize {
+        /// Return the allocator-owned prefix, including live slots and reusable holes.
+        pub inline fn claimedCount(self: *const Self) usize {
             if (self.next_unclaimed_index > capacity) {
                 native_util.impossibleByInvariant("paged indexed arena claimed prefix fits its slots");
             }
@@ -1200,7 +1202,7 @@ test "indexed arena can reset membership while retaining unreachable payloads" {
 
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
-    try std.testing.expectEqual(@as(usize, 0), arena.next_unclaimed_index);
+    try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
     try std.testing.expectEqual(@as(?usize, null), arena.free_head);
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
     try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[0]);
@@ -1430,7 +1432,7 @@ test "paged indexed arena can reset membership while retaining unreachable paylo
 
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
-    try std.testing.expectEqual(@as(usize, 0), arena.next_unclaimed_index);
+    try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
     try std.testing.expectEqual(@as(?usize, null), arena.free_head);
     try std.testing.expect(arena.get(51) == null);
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.getByHandle(stale_high_handle));
@@ -1444,7 +1446,7 @@ test "paged indexed arena can reset membership while retaining unreachable paylo
     _ = arena.reserveIndexAt(52, 2).?;
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(parked_high_generation, arena.slot_generations[high_slot_index]);
-    try std.testing.expectEqual(@as(usize, 0), arena.next_unclaimed_index);
+    try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
     try std.testing.expectEqual(@as(?usize, null), arena.free_head);
     try std.testing.expectEqual(@as(usize, 0), arena.reserveIndex(53).?);
 
