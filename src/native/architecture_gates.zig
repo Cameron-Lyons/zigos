@@ -110,7 +110,8 @@ pub const indexed_hot_path_tables = .{
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
     },
     .shared_memory = .{
-        .uses_mmu_object_mapping_index = @hasField(shared_memory.FreestandingMmu, "object_mapping_index"),
+        .uses_compact_mmu_object_mapping_head = @hasField(shared_memory.Object, "mmu_mapping_head"),
+        .tracks_mmu_object_mapping_count = @hasField(shared_memory.Object, "mmu_mapping_count"),
         .uses_object_owner_index = @hasField(shared_memory.Table, "object_owner_index"),
         .uses_object_task_mapping_index = @hasField(shared_memory.Table, "object_task_mapping_index"),
     },
