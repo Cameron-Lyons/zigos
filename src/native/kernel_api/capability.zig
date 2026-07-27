@@ -154,6 +154,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         const TargetGenerationArena = indexed_arena.IndexedArenaWithKey(u64, TargetGeneration, MAX_TABLE_TARGET_GENERATIONS, TABLE_INDEX_CAPACITY, targetGenerationKey);
         const HolderIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
         const TargetIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
+        const ReservedCapabilitySlot = struct {
+            capability_id: u64,
+            slot_index: usize,
+        };
 
         next_capability_id: u64 = 1,
         slots: CapabilityArena = CapabilityArena.init(),
@@ -219,9 +223,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             if (!rightsAreValidForTarget(request.target, request.rights)) return error.InvalidCapabilityRights;
             if (request.audit.delegation_depth > request.audit.max_delegation_depth) return error.DelegationDepthExceeded;
             const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
-            const capability_id = self.nextReservableCapabilityId() orelse return error.TableFull;
             const record = Capability{
-                .id = capability_id,
+                .id = 0,
                 .holder = request.holder,
                 .issuer = request.issuer,
                 .target = request.target,
@@ -231,8 +234,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = self.targetGenerationAt(target_generation_index).generation,
                 .audit = request.audit,
             };
-            const inserted = try self.insert(record, target_generation_index);
-            self.advanceNextCapabilityIdFrom(capability_id);
+            const inserted = try self.insertWithNextCapabilityId(record, target_generation_index);
             return inserted.*;
         }
 
@@ -252,9 +254,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             if (!request.lease.isSubsetOf(parent.lease)) return error.LeaseEscalation;
 
             const audit = try delegatedAudit(parent, request.audit);
-            const capability_id = self.nextReservableCapabilityId() orelse return error.TableFull;
             const record = Capability{
-                .id = capability_id,
+                .id = 0,
                 .holder = request.holder,
                 .issuer = parent.holder,
                 .target = parent.target,
@@ -264,9 +265,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = parent.revocation_generation,
                 .audit = audit,
             };
-            const inserted = try self.insert(record, parent_slot.target_generation_index);
-            self.advanceNextCapabilityIdFrom(capability_id);
-            return inserted;
+            return self.insertWithNextCapabilityId(record, parent_slot.target_generation_index);
         }
 
         pub fn pass(self: *Self, request: PassRequest) Error!Capability {
@@ -278,9 +277,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             if (!scopeIsPassCompatible(next_scope, original.scope, request.allow_task_retarget)) return error.ScopeEscalation;
 
             const audit = try delegatedAudit(original, request.audit);
-            const capability_id = self.nextReservableCapabilityId() orelse return error.TableFull;
             const record = Capability{
-                .id = capability_id,
+                .id = 0,
                 .holder = request.new_holder,
                 .issuer = original.issuer,
                 .target = original.target,
@@ -290,8 +288,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = original.revocation_generation,
                 .audit = audit,
             };
-            const passed = try self.insert(record, original_slot.target_generation_index);
-            self.advanceNextCapabilityIdFrom(capability_id);
+            const passed = try self.insertWithNextCapabilityId(record, original_slot.target_generation_index);
 
             if (request.revoke_source) {
                 const source_slot_index = self.findSlotIndex(request.capability_id) orelse return error.CapabilityNotFound;
@@ -302,14 +299,14 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn revokeGrant(self: *Self, capability_id: u64) Error!void {
-            _ = self.findConstSlot(capability_id) orelse return error.CapabilityNotFound;
-            self.discard(capability_id);
+            const slot_index = self.findSlotIndex(capability_id) orelse return error.CapabilityNotFound;
+            self.removeSlot(slot_index);
         }
 
         pub fn revokeTargetAuthority(self: *Self, capability_id: u64) Error!void {
-            const slot = self.findSlot(capability_id) orelse return error.CapabilityNotFound;
-            const target_generation_index = slot.target_generation_index;
-            self.discard(capability_id);
+            const slot_index = self.findSlotIndex(capability_id) orelse return error.CapabilityNotFound;
+            const target_generation_index = self.slots.slots[slot_index].target_generation_index;
+            self.removeSlot(slot_index);
             const target_generation = self.targetGenerationAtMut(target_generation_index);
             target_generation.generation += 1;
         }
@@ -336,13 +333,22 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return inspected.capability;
         }
 
-        fn nextReservableCapabilityId(self: *const Self) ?u64 {
+        fn reserveNextCapabilitySlot(self: *Self, requested_slot_index: ?usize) ?ReservedCapabilitySlot {
             if (self.activeCapabilityCount() >= self.slots.slots.len) return null;
 
             var capability_id = normalizeCapabilityId(self.next_capability_id);
             var attempts: usize = 0;
             while (attempts <= self.slots.slots.len) : (attempts += 1) {
-                if (self.slots.primary_index.lookup(capability_id) == null) return capability_id;
+                const slot_index = if (requested_slot_index) |explicit_index|
+                    self.slots.reserveIndexAt(capability_id, explicit_index)
+                else
+                    self.slots.reserveIndex(capability_id);
+                if (slot_index) |reserved_slot_index| {
+                    return .{
+                        .capability_id = capability_id,
+                        .slot_index = reserved_slot_index,
+                    };
+                }
                 capability_id = nextCapabilityIdAfter(capability_id);
             }
             return null;
@@ -356,17 +362,21 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return self.active_capability_count;
         }
 
-        fn insert(self: *Self, capability: Capability, target_generation_index: u8) Error!*const Capability {
-            const slot_index = self.slots.reserveIndex(capability.id) orelse return error.TableFull;
+        fn insertWithNextCapabilityId(self: *Self, capability_template: Capability, target_generation_index: u8) Error!*const Capability {
+            const reserved = self.reserveNextCapabilitySlot(null) orelse return error.TableFull;
+            var capability = capability_template;
+            capability.id = reserved.capability_id;
+            const inserted = self.commitReservedSlot(reserved.slot_index, capability, target_generation_index);
+            self.advanceNextCapabilityIdFrom(reserved.capability_id);
+            return inserted;
+        }
+
+        fn commitReservedSlot(self: *Self, slot_index: usize, capability: Capability, target_generation_index: u8) *const Capability {
             self.slots.slots[slot_index].capability = capability;
             self.slots.slots[slot_index].target_generation_index = target_generation_index;
             self.indexSlot(slot_index);
             self.active_capability_count += 1;
             return &self.slots.slots[slot_index].capability;
-        }
-
-        fn findSlot(self: *Self, capability_id: u64) ?*CapabilitySlot {
-            return self.slots.get(capability_id);
         }
 
         fn findConstSlot(self: *const Self, capability_id: u64) ?*const CapabilitySlot {
@@ -423,12 +433,12 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             }
 
             for (plan.slice(), 0..) |entry, index| {
-                const capability_id = self.nextReservableCapabilityId() orelse {
+                const reserved = self.reserveNextCapabilitySlot(reservation.slot_indexes[index]) orelse {
                     native_util.impossibleByInvariant("grant plan slot reservations cover capability id allocation");
                 };
-                if (capability_id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
+                if (reserved.capability_id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
                 const granted_capability = Capability{
-                    .id = capability_id,
+                    .id = reserved.capability_id,
                     .holder = entry.request.holder,
                     .issuer = entry.request.issuer,
                     .target = entry.request.target,
@@ -438,16 +448,9 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                     .revocation_generation = self.targetGenerationAt(reservation.target_generation_indexes[index]).generation,
                     .audit = entry.request.audit,
                 };
-                const slot_index = reservation.slot_indexes[index];
-                const reserved_slot_index = self.slots.reserveIndexAt(capability_id, slot_index) orelse {
-                    native_util.impossibleByInvariant("grant-plan reserved capability slot is still available");
-                };
-                self.slots.slots[reserved_slot_index].capability = granted_capability;
-                self.slots.slots[reserved_slot_index].target_generation_index = reservation.target_generation_indexes[index];
-                self.indexSlot(reserved_slot_index);
-                self.active_capability_count += 1;
-                self.advanceNextCapabilityIdFrom(capability_id);
-                output[index] = granted_capability;
+                const granted = self.commitReservedSlot(reserved.slot_index, granted_capability, reservation.target_generation_indexes[index]);
+                self.advanceNextCapabilityIdFrom(reserved.capability_id);
+                output[index] = granted.*;
             }
         }
 
