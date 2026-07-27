@@ -168,8 +168,10 @@ pub const FreestandingMmu = struct {
     ) Error!FreestandingMappingDescriptor {
         if (object.revoked) return error.Revoked;
         const key = mmuMappingKey(object.id, .task, task_id.raw());
-        if (self.mappings.getConst(key) != null) return error.AlreadyMapped;
-        const slot_index = self.mappings.reserveIndex(key) orelse return error.TableFull;
+        const slot_index = self.mappings.reserveIndex(key) orelse {
+            if (self.mappings.getConst(key) != null) return error.AlreadyMapped;
+            return error.TableFull;
+        };
         if (!self.object_mapping_index.append(object.id.raw(), slot_index)) {
             _ = self.mappings.removeIndex(slot_index);
             return error.TableFull;
@@ -196,8 +198,10 @@ pub const FreestandingMmu = struct {
         if (object.revoked) return error.Revoked;
         const domain_id = acceleratorDomainId(target);
         const key = mmuMappingKey(object.id, .accelerator, domain_id);
-        if (self.mappings.getConst(key) != null) return error.AcceleratorAlreadyAttached;
-        const slot_index = self.mappings.reserveIndex(key) orelse return error.TableFull;
+        const slot_index = self.mappings.reserveIndex(key) orelse {
+            if (self.mappings.getConst(key) != null) return error.AcceleratorAlreadyAttached;
+            return error.TableFull;
+        };
         if (!self.object_mapping_index.append(object.id.raw(), slot_index)) {
             _ = self.mappings.removeIndex(slot_index);
             return error.TableFull;
@@ -236,6 +240,7 @@ pub const FreestandingMmu = struct {
         object_id: ids.SharedMemoryId,
         attachment_generation: u32,
     ) void {
+        if (self.mappings.countInUse() == 0) return;
         var slot_index = self.object_mapping_index.head(object_id.raw());
         while (slot_index != indexed_arena.no_index) : (slot_index = self.object_mapping_index.next(slot_index)) {
             const mapping = self.mappingForObjectIndex(object_id, slot_index) orelse continue;
@@ -1038,6 +1043,32 @@ test "shared memory objects map through freestanding mmu and revoke accelerator 
     try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(other_object.id));
     try std.testing.expectError(error.Revoked, table.freestandingTaskMappingDescriptor(object.id, ids.task(20)));
     try std.testing.expectError(error.Revoked, table.freestandingAcceleratorMappingDescriptor(object.id, .gpu));
+}
+
+test "freestanding mmu preserves duplicate mapping errors when full" {
+    var table = Table.init();
+    const object = try table.create(ids.task(30), PAGE_SIZE);
+    const stored_object = table.find(object.id).?;
+
+    _ = try table.mmu.mapTask(stored_object, ids.task(31));
+    _ = try table.mmu.mapAccelerator(stored_object, .gpu);
+
+    for (0..MMU_MAPPING_CAPACITY * 2) |offset| {
+        if (table.mmu.mappings.countInUse() == MMU_MAPPING_CAPACITY) break;
+        const filler_domain_id = 10_000 + @as(u64, @intCast(offset));
+        const key = mmuMappingKey(object.id, .task, filler_domain_id);
+        const slot_index = table.mmu.mappings.reserveIndex(key) orelse continue;
+        table.mmu.mappings.slots[slot_index] = mappingFromObject(stored_object, .task, filler_domain_id, 0, false);
+        try std.testing.expect(table.mmu.object_mapping_index.append(object.id.raw(), slot_index));
+    }
+
+    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.mappings.countInUse());
+    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.object_mapping_index.count(object.id.raw()));
+    try std.testing.expectError(error.AlreadyMapped, table.mmu.mapTask(stored_object, ids.task(31)));
+    try std.testing.expectError(error.AcceleratorAlreadyAttached, table.mmu.mapAccelerator(stored_object, .gpu));
+    try std.testing.expectError(error.TableFull, table.mmu.mapTask(stored_object, ids.task(32)));
+    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.mappings.countInUse());
+    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.object_mapping_index.count(object.id.raw()));
 }
 
 test "shared memory rejects stale task and accelerator descriptors after generation changes" {
