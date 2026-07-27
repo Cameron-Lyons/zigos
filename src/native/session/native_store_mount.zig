@@ -66,12 +66,7 @@ pub fn adoptRootStorageVolume(checkpoint_store: *storage_service_mod.CheckpointS
     if (!@hasDecl(root, "storage_volume")) return false;
     const root_volume = root.storage_volume.defaultVolume();
     if (!canAdoptProductionRootVolume(root_volume)) return false;
-    checkpoint_store.volume.attachNvmePciBackendFns(
-        root_volume.attached_backend_sector_count,
-        root_volume.attached_backend_read,
-        root_volume.attached_backend_write,
-        root_volume.attached_backend_flush,
-    );
+    checkpoint_store.adoptRootVolume(root_volume);
     return true;
 }
 
