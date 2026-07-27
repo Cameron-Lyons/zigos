@@ -1,6 +1,6 @@
 const std = @import("std");
 const archive_index = @import("userspace_archive_index.zig");
-const crypto_hash = @import("../core/crypto_hash.zig");
+const embedded_file = @import("embedded_file.zig");
 const elf_image_inspector = @import("elf_image_inspector.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
 const task_runtime = @import("task_runtime_model.zig");
@@ -56,14 +56,15 @@ pub fn workspaceStorageImage() Error!task_runtime.ExecutableImageSpec {
 }
 
 pub fn validateArtifact(artifact: anytype) Error!task_runtime.ExecutableImageSpec {
-    if (artifact.data.len == 0) return error.GeneratedImageMissingBytes;
+    const file = embeddedFileFromArtifact(artifact);
+    if (!file.isPresent()) return error.GeneratedImageMissingBytes;
     if (!artifact.signed) return error.GeneratedImageUnsigned;
-    if (artifact.file_size_bytes != artifact.data.len) return error.GeneratedImageLengthMismatch;
+    if (artifact.file_size_bytes != file.byte_len) return error.GeneratedImageLengthMismatch;
 
-    const digest = rawSha256(artifact.data);
+    const digest = file.sha256() orelse return error.GeneratedImageMissingBytes;
     if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return error.GeneratedImageDigestMismatch;
 
-    const inspection = try elf_image_inspector.inspect(artifact.data);
+    const inspection = try elf_image_inspector.inspectFile(file);
     if (!metadataMatchesInspection(artifact, inspection)) return error.GeneratedImageMetadataMismatch;
 
     return launch_helpers.validateUserspaceImage(
@@ -79,9 +80,11 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     try std.testing.expect(production_image.bootstrap_mailbox_address != 0);
 
     var missing_bytes = archive_index.artifacts[0];
-    missing_bytes.data = "";
+    missing_bytes.data.byte_len = 0;
+    missing_bytes.data.chunk_pool = &.{};
+    missing_bytes.data.chunk_indices = &.{};
     missing_bytes.file_size_bytes = 0;
-    missing_bytes.file_sha256 = rawSha256(missing_bytes.data);
+    missing_bytes.file_sha256 = [_]u8{0} ** 32;
     try std.testing.expectError(error.GeneratedImageMissingBytes, validateArtifact(missing_bytes));
 
     var unsigned = archive_index.artifacts[0];
@@ -93,14 +96,23 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     try std.testing.expectError(error.GeneratedImageDigestMismatch, validateArtifact(digest_mismatch));
 
     var truncated = archive_index.artifacts[0];
-    truncated.data = truncated.data[0..@min(truncated.data.len, 8)];
-    truncated.file_size_bytes = truncated.data.len;
-    truncated.file_sha256 = rawSha256(truncated.data);
+    truncated.data.byte_len = @min(truncated.data.byte_len, 8);
+    truncated.data.chunk_indices = truncated.data.chunk_indices[0..1];
+    truncated.file_size_bytes = truncated.data.byte_len;
+    truncated.file_sha256 = embeddedFileFromArtifact(truncated).sha256().?;
     try std.testing.expectError(error.InvalidElfHeader, validateArtifact(truncated));
 
     var stale_metadata = archive_index.artifacts[0];
     stale_metadata.entry_point +%= launch_helpers.SYNTHETIC_SEGMENT_ALIGNMENT;
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(stale_metadata));
+}
+
+fn embeddedFileFromArtifact(artifact: anytype) embedded_file.File {
+    return embedded_file.File.fromChunks(
+        artifact.data.byte_len,
+        artifact.data.chunk_pool,
+        artifact.data.chunk_indices,
+    );
 }
 
 fn metadataMatchesInspection(artifact: anytype, inspection: elf_image_inspector.Inspection) bool {
@@ -171,14 +183,6 @@ fn executableImagesEqual(
     }
 
     return true;
-}
-
-fn rawSha256(bytes: []const u8) crypto_hash.Digest {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(bytes);
-    var digest: crypto_hash.Digest = undefined;
-    hasher.final(&digest);
-    return digest;
 }
 
 test "generated image fixture reader returns archive-backed executable images" {

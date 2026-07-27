@@ -13,6 +13,8 @@ const max_userspace_image_bytes: usize = units.mebibytes(16);
 const max_bootloader_source_bytes: usize = units.mebibytes(1);
 const max_build_artifact_entries: usize = 32;
 const build_artifact_manifest_payload_buffer_bytes: usize = units.kibibytes(4);
+const archive_chunk_bytes: usize = units.kibibytes(4);
+const archive_chunk_pool_name = "userspace_chunks.bin";
 
 const ArchiveRole = enum {
     production,
@@ -21,7 +23,6 @@ const ArchiveRole = enum {
 
 const Artifact = struct {
     source_path: []const u8,
-    embedded_name: []const u8,
     bundle_id: []const u8,
     display_name: []const u8,
     publisher: []const u8,
@@ -33,6 +34,23 @@ const Artifact = struct {
     contract_flags: u32,
     signed: bool,
     embedded_info: EmbeddedInfo,
+};
+
+const StoredChunk = struct {
+    pool_index: u32,
+    byte_len: usize,
+};
+
+const ChunkedArchive = struct {
+    pool: []u8,
+    artifact_chunk_indices: [][]u32,
+
+    fn deinit(self: *ChunkedArchive, allocator: std.mem.Allocator) void {
+        allocator.free(self.pool);
+        for (self.artifact_chunk_indices) |indices| allocator.free(indices);
+        allocator.free(self.artifact_chunk_indices);
+        self.* = undefined;
+    }
 };
 
 const BuildArtifactKind = enum(u8) {
@@ -137,7 +155,6 @@ fn parseArtifact(
 
     return .{
         .source_path = try arena.dupe(u8, path),
-        .embedded_name = try arena.dupe(u8, std.fs.path.basename(path)),
         .bundle_id = try arena.dupe(u8, descriptor.bundleIdSlice()),
         .display_name = try arena.dupe(u8, descriptor.displayNameSlice()),
         .publisher = try arena.dupe(u8, descriptor.publisherSlice()),
@@ -237,6 +254,82 @@ fn findDescriptorSymbolOffset(bytes: []const u8, header: elf.Elf32_Ehdr) !usize 
     return error.DescriptorSymbolNotFound;
 }
 
+fn buildChunkedArchive(
+    cwd: std.Io.Dir,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    artifacts: []const Artifact,
+) !ChunkedArchive {
+    var pool = std.ArrayList(u8).empty;
+    defer pool.deinit(allocator);
+    var artifact_chunk_indices = std.ArrayList([]u32).empty;
+    defer artifact_chunk_indices.deinit(allocator);
+    errdefer {
+        for (artifact_chunk_indices.items) |indices| allocator.free(indices);
+    }
+
+    var chunks_by_digest = std.StringHashMap(StoredChunk).init(allocator);
+    defer {
+        var key_iterator = chunks_by_digest.keyIterator();
+        while (key_iterator.next()) |key| allocator.free(key.*);
+        chunks_by_digest.deinit();
+    }
+
+    const zero_padding = [_]u8{0} ** archive_chunk_bytes;
+    for (artifacts) |artifact| {
+        const bytes = try cwd.readFileAlloc(io, artifact.source_path, allocator, .limited(max_userspace_image_bytes));
+        defer allocator.free(bytes);
+        var indices = std.ArrayList(u32).empty;
+        defer indices.deinit(allocator);
+
+        var offset: usize = 0;
+        while (offset < bytes.len) : (offset += archive_chunk_bytes) {
+            const end = @min(bytes.len, offset + archive_chunk_bytes);
+            const chunk = bytes[offset..end];
+            const digest = rawSha256(chunk);
+            const stored = chunks_by_digest.get(&digest) orelse stored: {
+                const pool_index = std.math.cast(u32, pool.items.len / archive_chunk_bytes) orelse
+                    return error.ArchiveChunkTableFull;
+                try pool.appendSlice(allocator, chunk);
+                try pool.appendSlice(allocator, zero_padding[0 .. archive_chunk_bytes - chunk.len]);
+                const key = try allocator.dupe(u8, &digest);
+                chunks_by_digest.put(key, .{
+                    .pool_index = pool_index,
+                    .byte_len = chunk.len,
+                }) catch |err| {
+                    allocator.free(key);
+                    return err;
+                };
+                break :stored StoredChunk{
+                    .pool_index = pool_index,
+                    .byte_len = chunk.len,
+                };
+            };
+
+            const pool_offset = @as(usize, stored.pool_index) * archive_chunk_bytes;
+            if (stored.byte_len != chunk.len or
+                !std.mem.eql(u8, pool.items[pool_offset..][0..chunk.len], chunk))
+            {
+                return error.ArchiveChunkDigestCollision;
+            }
+            try indices.append(allocator, stored.pool_index);
+        }
+
+        const owned_indices = try indices.toOwnedSlice(allocator);
+        artifact_chunk_indices.append(allocator, owned_indices) catch |err| {
+            allocator.free(owned_indices);
+            return err;
+        };
+    }
+
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
+    return .{
+        .pool = owned_pool,
+        .artifact_chunk_indices = try artifact_chunk_indices.toOwnedSlice(allocator),
+    };
+}
+
 fn writeArchive(
     cwd: std.Io.Dir,
     io: std.Io,
@@ -246,6 +339,19 @@ fn writeArchive(
     artifacts: []const Artifact,
 ) !void {
     try cwd.createDirPath(io, output_dir);
+    var chunked_archive = try buildChunkedArchive(cwd, io, allocator, artifacts);
+    defer chunked_archive.deinit(allocator);
+    if (chunked_archive.artifact_chunk_indices.len != artifacts.len) {
+        return error.InvalidArchiveChunkIndex;
+    }
+
+    const chunk_pool_path = try std.fs.path.join(allocator, &.{ output_dir, archive_chunk_pool_name });
+    defer allocator.free(chunk_pool_path);
+    try cwd.writeFile(io, .{
+        .sub_path = chunk_pool_path,
+        .data = chunked_archive.pool,
+    });
+
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const writer = &aw.writer;
@@ -277,6 +383,12 @@ fn writeArchive(
         \\    access: SegmentAccess = .{},
         \\};
         \\
+        \\pub const EmbeddedFile = struct {
+        \\    byte_len: usize,
+        \\    chunk_pool: []const u8,
+        \\    chunk_indices: []const u32,
+        \\};
+        \\
         \\pub const Artifact = struct {
         \\    bundle_id: []const u8,
         \\    display_name: []const u8,
@@ -296,25 +408,22 @@ fn writeArchive(
         \\    segment_count: usize,
         \\    segments: [8]ExecutableSegmentSpec,
         \\    bootstrap_mailbox_address: u64,
-        \\    data: []const u8,
+        \\    data: EmbeddedFile,
         \\};
         \\
     );
 
-    for (artifacts, 0..) |artifact, index| {
-        const copied_bytes = try cwd.readFileAlloc(io, artifact.source_path, allocator, .limited(max_userspace_image_bytes));
-        defer allocator.free(copied_bytes);
-        const copied_path = try std.fs.path.join(allocator, &.{ output_dir, artifact.embedded_name });
-        defer allocator.free(copied_path);
-        try cwd.writeFile(io, .{
-            .sub_path = copied_path,
-            .data = copied_bytes,
-        });
-
-        try writer.print(
-            "const artifact_data_{d} align(1) linksection(userspace_archive_section) = @embedFile(\"{f}\").*;\n",
-            .{ index, std.zig.fmtString(artifact.embedded_name) },
-        );
+    try writer.print(
+        "const archive_chunk_pool align(1) linksection(userspace_archive_section) = @embedFile(\"{f}\").*;\n",
+        .{std.zig.fmtString(archive_chunk_pool_name)},
+    );
+    for (chunked_archive.artifact_chunk_indices, 0..) |indices, index| {
+        try writer.print("const artifact_chunk_indices_{d} = [_]u32{{", .{index});
+        for (indices, 0..) |chunk_index, chunk_ordinal| {
+            if (chunk_ordinal != 0) try writer.writeAll(", ");
+            try writer.print("{d}", .{chunk_index});
+        }
+        try writer.writeAll("};\n");
     }
 
     try writer.writeAll(
@@ -364,7 +473,11 @@ fn writeArchive(
         }
         try writer.writeAll("        },\n");
         try writer.print("        .bootstrap_mailbox_address = 0x{x},\n", .{artifact.embedded_info.bootstrap_mailbox_address});
-        try writer.print("        .data = &artifact_data_{d},\n", .{index});
+        try writer.writeAll("        .data = .{\n");
+        try writer.print("            .byte_len = {d},\n", .{artifact.embedded_info.byte_len});
+        try writer.writeAll("            .chunk_pool = &archive_chunk_pool,\n");
+        try writer.print("            .chunk_indices = &artifact_chunk_indices_{d},\n", .{index});
+        try writer.writeAll("        },\n");
         try writer.writeAll("    },\n");
     }
 
