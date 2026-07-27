@@ -13,11 +13,18 @@ const MAPPING_EDGE_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MAX_MAPPINGS_PE
 const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
 const MMU_MAPPING_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * (MAX_MAPPINGS_PER_OBJECT + 3);
 const MMU_MAPPING_INDEX_CAPACITY: usize = MMU_MAPPING_CAPACITY * 2;
+const no_mmu_mapping: u16 = std.math.maxInt(u16);
 const FREESTANDING_PHYSICAL_BASE: u64 = 0x0010_0000;
 const TASK_SHARED_VIRTUAL_BASE: u64 = userspace_layout.shared_start;
 const TASK_SHARED_VIRTUAL_END_EXCLUSIVE: u64 = userspace_layout.shared_end_exclusive;
 const ACCELERATOR_APERTURE_BASE: u64 = userspace_layout.accelerator_start;
 const ACCELERATOR_APERTURE_END_EXCLUSIVE: u64 = userspace_layout.accelerator_end_exclusive;
+
+comptime {
+    if (MMU_MAPPING_CAPACITY >= no_mmu_mapping) {
+        @compileError("MMU mapping capacity exceeds compact intrusive index range");
+    }
+}
 
 pub const ComputeTarget = enum(u8) {
     cpu,
@@ -61,6 +68,8 @@ pub const Object = struct {
     attached_compute: ComputeAccess,
     mapped_task_ids: [MAX_MAPPINGS_PER_OBJECT]ids.TaskId,
     mapping_count: usize,
+    mmu_mapping_head: u16 = no_mmu_mapping,
+    mmu_mapping_count: u16 = 0,
 
     pub fn allowsCompute(self: *const Object, target: ComputeTarget) bool {
         return self.compute_access.allows(target);
@@ -124,14 +133,8 @@ const MmuMapping = struct {
     kind: MmuMappingKind = .task,
     domain_id: u64 = 0,
     virtual_base: u64 = 0,
-    physical_base: u64 = 0,
-    page_count: usize = 0,
-    size_bytes: usize = 0,
-    label_hash: u64 = 0,
-    revocation_generation: u32 = 0,
-    attachment_generation: u32 = 0,
-    zero_copy: bool = false,
-    revoked: bool = false,
+    object_next: u16 = no_mmu_mapping,
+    object_prev: u16 = no_mmu_mapping,
 };
 
 fn mmuMappingSlotKey(slot: *const MmuMapping) u64 {
@@ -139,14 +142,12 @@ fn mmuMappingSlotKey(slot: *const MmuMapping) u64 {
 }
 
 const MmuMappingArena = indexed_arena.IndexedArenaWithKey(u64, MmuMapping, MMU_MAPPING_CAPACITY, MMU_MAPPING_INDEX_CAPACITY, mmuMappingSlotKey);
-const MmuObjectMappingIndex = indexed_arena.MultimapIndex(MMU_MAPPING_CAPACITY, MMU_MAPPING_CAPACITY, MMU_MAPPING_INDEX_CAPACITY);
 
 pub const FreestandingMmu = struct {
     next_physical_frame: u64 = 1,
     next_task_virtual_page: u64 = 1,
     next_accelerator_virtual_page: u64 = 1,
     mappings: MmuMappingArena = MmuMappingArena.init(),
-    object_mapping_index: MmuObjectMappingIndex = MmuObjectMappingIndex.init(),
 
     pub fn init() FreestandingMmu {
         return .{};
@@ -161,9 +162,9 @@ pub const FreestandingMmu = struct {
         return std.math.add(u64, FREESTANDING_PHYSICAL_BASE, frame_offset) catch return error.TableFull;
     }
 
-    pub fn mapTask(
+    fn mapTask(
         self: *FreestandingMmu,
-        object: *const Object,
+        object: *Object,
         task_id: ids.TaskId,
     ) Error!FreestandingMappingDescriptor {
         if (object.revoked) return error.Revoked;
@@ -172,27 +173,23 @@ pub const FreestandingMmu = struct {
             if (self.mappings.getConst(key) != null) return error.AlreadyMapped;
             return error.TableFull;
         };
-        if (!self.object_mapping_index.append(object.id.raw(), slot_index)) {
-            _ = self.mappings.removeIndex(slot_index);
-            return error.TableFull;
-        }
         const virtual_base = self.allocateTaskVirtual(object.page_count) catch |err| {
-            _ = self.object_mapping_index.remove(object.id.raw(), slot_index);
             _ = self.mappings.removeIndex(slot_index);
             return err;
         };
         const slot = &self.mappings.slots[slot_index];
-        slot.* = mappingFromObject(object, .task, task_id.raw(), virtual_base, false);
-        return descriptorFromMmuMapping(slot);
+        slot.* = mappingFromObject(object, .task, task_id.raw(), virtual_base);
+        self.linkObjectMapping(object, slot_index);
+        return descriptorFromMmuMapping(object, slot);
     }
 
-    pub fn unmapTask(self: *FreestandingMmu, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!bool {
-        return self.removeMapping(object_id, mmuMappingKey(object_id, .task, task_id.raw()));
+    fn unmapTask(self: *FreestandingMmu, object: *Object, task_id: ids.TaskId) Error!bool {
+        return self.removeMapping(object, mmuMappingKey(object.id, .task, task_id.raw()));
     }
 
-    pub fn mapAccelerator(
+    fn mapAccelerator(
         self: *FreestandingMmu,
-        object: *const Object,
+        object: *Object,
         target: ComputeTarget,
     ) Error!FreestandingMappingDescriptor {
         if (object.revoked) return error.Revoked;
@@ -202,80 +199,53 @@ pub const FreestandingMmu = struct {
             if (self.mappings.getConst(key) != null) return error.AcceleratorAlreadyAttached;
             return error.TableFull;
         };
-        if (!self.object_mapping_index.append(object.id.raw(), slot_index)) {
-            _ = self.mappings.removeIndex(slot_index);
-            return error.TableFull;
-        }
         const virtual_base = self.allocateAcceleratorVirtual(object.page_count) catch |err| {
-            _ = self.object_mapping_index.remove(object.id.raw(), slot_index);
             _ = self.mappings.removeIndex(slot_index);
             return err;
         };
         const slot = &self.mappings.slots[slot_index];
-        slot.* = mappingFromObject(object, .accelerator, domain_id, virtual_base, true);
-        return descriptorFromMmuMapping(slot);
+        slot.* = mappingFromObject(object, .accelerator, domain_id, virtual_base);
+        self.linkObjectMapping(object, slot_index);
+        return descriptorFromMmuMapping(object, slot);
     }
 
-    pub fn unmapAccelerator(self: *FreestandingMmu, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
-        return self.removeMapping(object_id, mmuMappingKey(object_id, .accelerator, acceleratorDomainId(target)));
+    fn unmapAccelerator(self: *FreestandingMmu, object: *Object, target: ComputeTarget) Error!bool {
+        return self.removeMapping(object, mmuMappingKey(object.id, .accelerator, acceleratorDomainId(target)));
     }
 
-    pub fn revokeObject(self: *FreestandingMmu, object_id: ids.SharedMemoryId) void {
-        var slot_index = self.object_mapping_index.head(object_id.raw());
-        while (slot_index != indexed_arena.no_index) {
-            const next_slot_index = self.object_mapping_index.next(slot_index);
-            const mapping = self.mappingForObjectIndex(object_id, slot_index) orelse {
-                slot_index = next_slot_index;
-                continue;
-            };
-            _ = mapping;
-            _ = self.object_mapping_index.remove(object_id.raw(), slot_index);
+    fn revokeObject(self: *FreestandingMmu, object: *Object) void {
+        var compact_index = object.mmu_mapping_head;
+        while (compact_index != no_mmu_mapping) {
+            const slot_index: usize = compact_index;
+            const next_compact_index = self.mappings.slots[slot_index].object_next;
+            self.unlinkObjectMapping(object, slot_index);
             _ = self.mappings.removeIndex(slot_index);
-            slot_index = next_slot_index;
+            compact_index = next_compact_index;
         }
     }
 
-    pub fn updateObjectAttachmentGeneration(
-        self: *FreestandingMmu,
-        object_id: ids.SharedMemoryId,
-        attachment_generation: u32,
-    ) void {
-        if (self.mappings.countInUse() == 0) return;
-        var slot_index = self.object_mapping_index.head(object_id.raw());
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.object_mapping_index.next(slot_index)) {
-            const mapping = self.mappingForObjectIndex(object_id, slot_index) orelse continue;
-            mapping.attachment_generation = attachment_generation;
-        }
-    }
-
-    pub fn taskMappingDescriptor(
+    fn taskMappingDescriptor(
         self: *const FreestandingMmu,
-        object_id: ids.SharedMemoryId,
+        object: *const Object,
         task_id: ids.TaskId,
     ) Error!FreestandingMappingDescriptor {
-        const mapping = self.findAny(object_id, .task, task_id.raw()) orelse return error.MappingNotFound;
-        if (mapping.revoked) return error.Revoked;
-        return descriptorFromMmuMapping(mapping);
+        if (object.revoked) return error.Revoked;
+        const mapping = self.findAny(object.id, .task, task_id.raw()) orelse return error.MappingNotFound;
+        return descriptorFromMmuMapping(object, mapping);
     }
 
-    pub fn acceleratorMappingDescriptor(
+    fn acceleratorMappingDescriptor(
         self: *const FreestandingMmu,
-        object_id: ids.SharedMemoryId,
+        object: *const Object,
         target: ComputeTarget,
     ) Error!FreestandingMappingDescriptor {
-        const mapping = self.findAny(object_id, .accelerator, acceleratorDomainId(target)) orelse return error.AcceleratorNotAttached;
-        if (mapping.revoked) return error.Revoked;
-        return descriptorFromMmuMapping(mapping);
+        if (object.revoked) return error.Revoked;
+        const mapping = self.findAny(object.id, .accelerator, acceleratorDomainId(target)) orelse return error.AcceleratorNotAttached;
+        return descriptorFromMmuMapping(object, mapping);
     }
 
-    pub fn activeMappingsForObject(self: *const FreestandingMmu, object_id: ids.SharedMemoryId) usize {
-        var count: usize = 0;
-        var slot_index = self.object_mapping_index.head(object_id.raw());
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.object_mapping_index.next(slot_index)) {
-            const mapping = self.mappingForObjectIndexConst(object_id, slot_index) orelse continue;
-            if (!mapping.revoked) count += 1;
-        }
-        return count;
+    fn activeMappingsForObject(_: *const FreestandingMmu, object: *const Object) usize {
+        return object.mmu_mapping_count;
     }
 
     fn allocateTaskVirtual(self: *FreestandingMmu, page_count: usize) Error!u64 {
@@ -311,26 +281,43 @@ pub const FreestandingMmu = struct {
         return self.mappings.getConst(mmuMappingKey(object_id, kind, domain_id));
     }
 
-    fn removeMapping(self: *FreestandingMmu, object_id: ids.SharedMemoryId, key: u64) bool {
+    fn removeMapping(self: *FreestandingMmu, object: *Object, key: u64) bool {
         const slot_index = self.mappings.slotIndexOf(key) orelse return false;
-        const mapping = self.mappingForObjectIndex(object_id, slot_index) orelse return false;
-        _ = mapping;
-        _ = self.object_mapping_index.remove(object_id.raw(), slot_index);
+        const mapping = &self.mappings.slots[slot_index];
+        if (!mapping.in_use or !mapping.object_id.eql(object.id)) return false;
+        self.unlinkObjectMapping(object, slot_index);
         return self.mappings.removeIndex(slot_index);
     }
 
-    fn mappingForObjectIndex(self: *FreestandingMmu, object_id: ids.SharedMemoryId, slot_index: usize) ?*MmuMapping {
-        if (slot_index >= self.mappings.slots.len) return null;
+    fn linkObjectMapping(self: *FreestandingMmu, object: *Object, slot_index: usize) void {
+        const compact_index: u16 = @intCast(slot_index);
         const mapping = &self.mappings.slots[slot_index];
-        if (!mapping.in_use or !mapping.object_id.eql(object_id)) return null;
-        return mapping;
+        std.debug.assert(mapping.in_use and mapping.object_id.eql(object.id));
+        mapping.object_prev = no_mmu_mapping;
+        mapping.object_next = object.mmu_mapping_head;
+        if (object.mmu_mapping_head != no_mmu_mapping) {
+            self.mappings.slots[object.mmu_mapping_head].object_prev = compact_index;
+        }
+        object.mmu_mapping_head = compact_index;
+        object.mmu_mapping_count += 1;
     }
 
-    fn mappingForObjectIndexConst(self: *const FreestandingMmu, object_id: ids.SharedMemoryId, slot_index: usize) ?*const MmuMapping {
-        if (slot_index >= self.mappings.slots.len) return null;
+    fn unlinkObjectMapping(self: *FreestandingMmu, object: *Object, slot_index: usize) void {
         const mapping = &self.mappings.slots[slot_index];
-        if (!mapping.in_use or !mapping.object_id.eql(object_id)) return null;
-        return mapping;
+        std.debug.assert(mapping.in_use and mapping.object_id.eql(object.id));
+        if (mapping.object_prev == no_mmu_mapping) {
+            std.debug.assert(object.mmu_mapping_head == slot_index);
+            object.mmu_mapping_head = mapping.object_next;
+        } else {
+            self.mappings.slots[mapping.object_prev].object_next = mapping.object_next;
+        }
+        if (mapping.object_next != no_mmu_mapping) {
+            self.mappings.slots[mapping.object_next].object_prev = mapping.object_prev;
+        }
+        mapping.object_next = no_mmu_mapping;
+        mapping.object_prev = no_mmu_mapping;
+        std.debug.assert(object.mmu_mapping_count > 0);
+        object.mmu_mapping_count -= 1;
     }
 };
 
@@ -402,6 +389,8 @@ pub const Table = struct {
             .attached_compute = ComputeAccess.empty(),
             .mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT,
             .mapping_count = 0,
+            .mmu_mapping_head = no_mmu_mapping,
+            .mmu_mapping_count = 0,
         };
         self.advanceNextObjectIdFrom(object_id);
         return slot.object;
@@ -453,7 +442,7 @@ pub const Table = struct {
         }
         object.mapping_count -= 1;
         object.mapped_task_ids[object.mapping_count] = ids.TaskId.zero;
-        _ = try self.mmu.unmapTask(object_id, task_id);
+        _ = try self.mmu.unmapTask(object, task_id);
         return true;
     }
 
@@ -467,7 +456,7 @@ pub const Table = struct {
             _ = self.mapping_index.remove(task_id.raw(), mappingEdgeIndex(object_slot_index, mapping_index));
             self.object_task_mapping_index.remove(objectTaskMappingKey(object_id, task_id));
         }
-        self.mmu.revokeObject(object_id);
+        self.mmu.revokeObject(object);
         object.revoked = true;
         object.revocation_generation += 1;
         object.attachment_generation += 1;
@@ -485,11 +474,9 @@ pub const Table = struct {
         const previous_generation = object.attachment_generation;
         setComputeAccess(&object.attached_compute, target, true);
         object.attachment_generation += 1;
-        self.mmu.updateObjectAttachmentGeneration(object_id, object.attachment_generation);
         _ = self.mmu.mapAccelerator(object, target) catch |err| {
             setComputeAccess(&object.attached_compute, target, false);
             object.attachment_generation = previous_generation;
-            self.mmu.updateObjectAttachmentGeneration(object_id, previous_generation);
             return err;
         };
     }
@@ -498,10 +485,9 @@ pub const Table = struct {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
         if (!object.attachedTo(target)) return false;
 
-        _ = try self.mmu.unmapAccelerator(object_id, target);
+        _ = try self.mmu.unmapAccelerator(object, target);
         setComputeAccess(&object.attached_compute, target, false);
         object.attachment_generation += 1;
-        self.mmu.updateObjectAttachmentGeneration(object_id, object.attachment_generation);
         return true;
     }
 
@@ -573,7 +559,7 @@ pub const Table = struct {
     ) Error!FreestandingMappingDescriptor {
         const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
         if (object.revoked) return error.Revoked;
-        return self.mmu.taskMappingDescriptor(object_id, task_id);
+        return self.mmu.taskMappingDescriptor(object, task_id);
     }
 
     pub fn validateFreestandingTaskMappingDescriptor(
@@ -582,7 +568,7 @@ pub const Table = struct {
     ) Error!void {
         const object = self.findConst(mapping_descriptor.object_id) orelse return error.SharedMemoryNotFound;
         if (object.revoked) return error.Revoked;
-        const current = try self.mmu.taskMappingDescriptor(mapping_descriptor.object_id, mapping_descriptor.task_id);
+        const current = try self.mmu.taskMappingDescriptor(object, mapping_descriptor.task_id);
         try validateFreestandingDescriptorForObject(object, current, mapping_descriptor, mapping_descriptor.task_id, null, false);
     }
 
@@ -593,7 +579,7 @@ pub const Table = struct {
     ) Error!FreestandingMappingDescriptor {
         const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
         if (object.revoked) return error.Revoked;
-        return self.mmu.acceleratorMappingDescriptor(object_id, target);
+        return self.mmu.acceleratorMappingDescriptor(object, target);
     }
 
     pub fn validateFreestandingAcceleratorMappingDescriptor(
@@ -609,12 +595,13 @@ pub const Table = struct {
         {
             return error.MappingDescriptorMismatch;
         }
-        const current = try self.mmu.acceleratorMappingDescriptor(mapping_descriptor.object_id, target);
+        const current = try self.mmu.acceleratorMappingDescriptor(object, target);
         try validateFreestandingDescriptorForObject(object, current, mapping_descriptor, ids.TaskId.zero, target, true);
     }
 
     pub fn activeFreestandingMappings(self: *const Table, object_id: ids.SharedMemoryId) usize {
-        return self.mmu.activeMappingsForObject(object_id);
+        const object = self.findConst(object_id) orelse return 0;
+        return self.mmu.activeMappingsForObject(object);
     }
 
     pub fn allowsAccelerator(self: *const Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
@@ -736,6 +723,8 @@ fn zeroObject() Object {
         .attached_compute = ComputeAccess.empty(),
         .mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT,
         .mapping_count = 0,
+        .mmu_mapping_head = no_mmu_mapping,
+        .mmu_mapping_count = 0,
     };
 }
 
@@ -814,9 +803,7 @@ fn validateFreestandingDescriptorForObject(
         return error.MappingDescriptorMismatch;
     }
     if (descriptor.revocation_generation != object.revocation_generation or
-        descriptor.revocation_generation != current.revocation_generation or
-        descriptor.attachment_generation != object.attachment_generation or
-        descriptor.attachment_generation != current.attachment_generation)
+        descriptor.attachment_generation != object.attachment_generation)
     {
         return error.StaleMappingDescriptor;
     }
@@ -832,7 +819,6 @@ fn mappingFromObject(
     kind: MmuMappingKind,
     domain_id: u64,
     virtual_base: u64,
-    zero_copy: bool,
 ) MmuMapping {
     return .{
         .in_use = true,
@@ -840,30 +826,22 @@ fn mappingFromObject(
         .kind = kind,
         .domain_id = domain_id,
         .virtual_base = virtual_base,
+    };
+}
+
+fn descriptorFromMmuMapping(object: *const Object, mapping: *const MmuMapping) FreestandingMappingDescriptor {
+    return .{
+        .object_id = mapping.object_id,
+        .task_id = if (mapping.kind == .task) ids.task(mapping.domain_id) else ids.TaskId.zero,
+        .target = if (mapping.kind == .accelerator) computeTargetFromDomainId(mapping.domain_id) else null,
+        .virtual_base = mapping.virtual_base,
         .physical_base = object.page_base,
         .page_count = object.page_count,
         .size_bytes = object.size_bytes,
         .label_hash = object.label_hash,
         .revocation_generation = object.revocation_generation,
         .attachment_generation = object.attachment_generation,
-        .zero_copy = zero_copy,
-        .revoked = false,
-    };
-}
-
-fn descriptorFromMmuMapping(mapping: *const MmuMapping) FreestandingMappingDescriptor {
-    return .{
-        .object_id = mapping.object_id,
-        .task_id = if (mapping.kind == .task) ids.task(mapping.domain_id) else ids.TaskId.zero,
-        .target = if (mapping.kind == .accelerator) computeTargetFromDomainId(mapping.domain_id) else null,
-        .virtual_base = mapping.virtual_base,
-        .physical_base = mapping.physical_base,
-        .page_count = mapping.page_count,
-        .size_bytes = mapping.size_bytes,
-        .label_hash = mapping.label_hash,
-        .revocation_generation = mapping.revocation_generation,
-        .attachment_generation = mapping.attachment_generation,
-        .zero_copy = mapping.zero_copy,
+        .zero_copy = mapping.kind == .accelerator,
     };
 }
 
@@ -1005,7 +983,7 @@ test "shared memory objects map through freestanding mmu and revoke accelerator 
     try table.map(object.id, ids.task(21));
     try std.testing.expectError(error.AlreadyMapped, table.mmu.mapTask(table.find(object.id).?, ids.task(20)));
     try std.testing.expectEqual(@as(usize, 2), table.mmu.mappings.countInUse());
-    try std.testing.expectEqual(@as(usize, 2), table.mmu.object_mapping_index.count(object.id.raw()));
+    try std.testing.expectEqual(@as(usize, 2), table.activeFreestandingMappings(object.id));
     const owner_mapping = try table.freestandingTaskMappingDescriptor(object.id, ids.task(20));
     const peer_mapping = try table.freestandingTaskMappingDescriptor(object.id, ids.task(21));
     try std.testing.expect(owner_mapping.physical_base != 0);
@@ -1023,7 +1001,7 @@ test "shared memory objects map through freestanding mmu and revoke accelerator 
     try table.attachAccelerator(object.id, .gpu);
     try std.testing.expectError(error.AcceleratorAlreadyAttached, table.mmu.mapAccelerator(table.find(object.id).?, .gpu));
     try std.testing.expectEqual(@as(usize, 3), table.mmu.mappings.countInUse());
-    try std.testing.expectEqual(@as(usize, 3), table.mmu.object_mapping_index.count(object.id.raw()));
+    try std.testing.expectEqual(@as(usize, 3), table.activeFreestandingMappings(object.id));
     const gpu_mapping = try table.freestandingAcceleratorMappingDescriptor(object.id, .gpu);
     try std.testing.expect(gpu_mapping.zero_copy);
     try std.testing.expectEqual(ComputeTarget.gpu, gpu_mapping.target.?);
@@ -1038,11 +1016,68 @@ test "shared memory objects map through freestanding mmu and revoke accelerator 
     try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(other_object.id));
     try table.revoke(object.id);
     try std.testing.expectEqual(@as(usize, 1), table.mmu.mappings.countInUse());
-    try std.testing.expectEqual(@as(usize, 0), table.mmu.object_mapping_index.count(object.id.raw()));
     try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
     try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(other_object.id));
     try std.testing.expectError(error.Revoked, table.freestandingTaskMappingDescriptor(object.id, ids.task(20)));
     try std.testing.expectError(error.Revoked, table.freestandingAcceleratorMappingDescriptor(object.id, .gpu));
+}
+
+test "compact mmu object lists unlink head middle and tail independently" {
+    var table = Table.init();
+    const object = try table.createLabeledWithAccess(ids.task(40), PAGE_SIZE, "compact-mmu-list", .{
+        .gpu = true,
+        .media = true,
+    });
+    const peer_object = try table.create(ids.task(50), PAGE_SIZE);
+
+    try table.map(object.id, ids.task(40));
+    try table.map(object.id, ids.task(41));
+    try table.attachAccelerator(object.id, .gpu);
+    try table.attachAccelerator(object.id, .media);
+    try table.map(peer_object.id, ids.task(50));
+    try std.testing.expectEqual(@as(usize, 4), table.activeFreestandingMappings(object.id));
+    try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(peer_object.id));
+
+    try std.testing.expect(try table.detachAccelerator(object.id, .gpu));
+    try std.testing.expect(try table.unmap(object.id, ids.task(40)));
+    try std.testing.expectEqual(@as(usize, 2), table.activeFreestandingMappings(object.id));
+    _ = try table.freestandingTaskMappingDescriptor(object.id, ids.task(41));
+    _ = try table.freestandingAcceleratorMappingDescriptor(object.id, .media);
+    _ = try table.freestandingTaskMappingDescriptor(peer_object.id, ids.task(50));
+
+    try std.testing.expect(try table.detachAccelerator(object.id, .media));
+    try std.testing.expect(try table.unmap(object.id, ids.task(41)));
+    try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
+    try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(peer_object.id));
+    try std.testing.expectEqual(@as(usize, 1), table.mmu.mappings.countInUse());
+}
+
+test "compact mmu revoke preserves a peer that reused a freed mapping slot" {
+    var table = Table.init();
+    const object = try table.create(ids.task(60), PAGE_SIZE);
+    const peer_object = try table.create(ids.task(70), PAGE_SIZE);
+
+    try table.map(object.id, ids.task(61));
+    try table.map(object.id, ids.task(62));
+    const released_slot = table.mmu.mappings.slotIndexOf(
+        mmuMappingKey(object.id, .task, ids.task(61).raw()),
+    ).?;
+    try std.testing.expect(try table.unmap(object.id, ids.task(61)));
+
+    try table.map(peer_object.id, ids.task(71));
+    const reused_slot = table.mmu.mappings.slotIndexOf(
+        mmuMappingKey(peer_object.id, .task, ids.task(71).raw()),
+    ).?;
+    try std.testing.expectEqual(released_slot, reused_slot);
+    try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(object.id));
+    try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(peer_object.id));
+
+    try table.revoke(object.id);
+    try std.testing.expectEqual(@as(usize, 1), table.mmu.mappings.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
+    try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(peer_object.id));
+    const peer_mapping = try table.freestandingTaskMappingDescriptor(peer_object.id, ids.task(71));
+    try std.testing.expectEqual(peer_object.id, peer_mapping.object_id);
 }
 
 test "freestanding mmu preserves duplicate mapping errors when full" {
@@ -1058,17 +1093,22 @@ test "freestanding mmu preserves duplicate mapping errors when full" {
         const filler_domain_id = 10_000 + @as(u64, @intCast(offset));
         const key = mmuMappingKey(object.id, .task, filler_domain_id);
         const slot_index = table.mmu.mappings.reserveIndex(key) orelse continue;
-        table.mmu.mappings.slots[slot_index] = mappingFromObject(stored_object, .task, filler_domain_id, 0, false);
-        try std.testing.expect(table.mmu.object_mapping_index.append(object.id.raw(), slot_index));
+        table.mmu.mappings.slots[slot_index] = mappingFromObject(stored_object, .task, filler_domain_id, 0);
+        table.mmu.linkObjectMapping(stored_object, slot_index);
     }
 
     try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.mappings.countInUse());
-    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.object_mapping_index.count(object.id.raw()));
+    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.activeFreestandingMappings(object.id));
     try std.testing.expectError(error.AlreadyMapped, table.mmu.mapTask(stored_object, ids.task(31)));
     try std.testing.expectError(error.AcceleratorAlreadyAttached, table.mmu.mapAccelerator(stored_object, .gpu));
     try std.testing.expectError(error.TableFull, table.mmu.mapTask(stored_object, ids.task(32)));
     try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.mappings.countInUse());
-    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.object_mapping_index.count(object.id.raw()));
+    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.activeFreestandingMappings(object.id));
+
+    try table.revoke(object.id);
+    try std.testing.expectEqual(@as(usize, 0), table.mmu.mappings.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
+    try std.testing.expectEqual(no_mmu_mapping, stored_object.mmu_mapping_head);
 }
 
 test "shared memory rejects stale task and accelerator descriptors after generation changes" {
@@ -1102,7 +1142,7 @@ test "shared memory rejects stale task and accelerator descriptors after generat
     const refreshed_task_descriptor = try table.taskMappingDescriptor(object.id, ids.task(30));
     const refreshed_task_mmu_descriptor = try table.freestandingTaskMappingDescriptor(object.id, ids.task(30));
     try std.testing.expect(try table.detachAccelerator(object.id, .gpu));
-    try std.testing.expectEqual(@as(usize, 1), table.mmu.object_mapping_index.count(object.id.raw()));
+    try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(object.id));
     try std.testing.expectError(error.AcceleratorNotAttached, table.validateAcceleratorMappingDescriptor(gpu_descriptor, .gpu));
     try std.testing.expectError(error.AcceleratorNotAttached, table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_descriptor, .gpu));
     try std.testing.expectError(error.StaleMappingDescriptor, table.validateTaskMappingDescriptor(refreshed_task_descriptor));
