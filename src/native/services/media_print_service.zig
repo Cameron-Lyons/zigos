@@ -148,10 +148,9 @@ pub const Service = struct {
                 native_util.impossibleByInvariant("completed print job disappeared before reuse");
             }
         }
-        const slot_index = self.jobs.reserveIndex(job_id) orelse
-            native_util.impossibleByInvariant("prechecked print job slot reservation must succeed");
+        const slot_index = self.jobs.insertIndex(job_id, .{ .job = job }) orelse
+            native_util.impossibleByInvariant("prechecked print job insertion must succeed");
         const slot = &self.jobs.slots[slot_index];
-        slot.job = job;
         self.next_job_id +%= 1;
         return &slot.job;
     }
