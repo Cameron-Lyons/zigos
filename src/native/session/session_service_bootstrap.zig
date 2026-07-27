@@ -58,7 +58,7 @@ const BootedNetworkDataPlane = struct {
 // Bridge to the kernel's real NVMe data plane (src/kernel/drivers/nvme_hw.zig).
 // When a real NVMe controller is brought up (QEMU `-device nvme` or the first
 // target), the booted storage backend uses it for genuine persistence across
-// reboots instead of the RAM-backed image. Host builds get inert stubs.
+// reboots. Host builds get inert stubs.
 const nvme_bridge = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn zigosStorageBootstrapNvmeAttached() callconv(.c) bool;
@@ -92,7 +92,7 @@ else
         }
     };
 
-const BootedStorageDataPlane = struct {
+const HostedStorageDataPlane = struct {
     var image = [_]u8{0} ** booted_storage_image_bytes;
 
     fn reset() void {
@@ -120,11 +120,17 @@ const BootedStorageDataPlane = struct {
     fn flush() callconv(.c) bool {
         return true;
     }
+};
+
+const BootedStorageDataPlane = struct {
+    fn reset() void {
+        if (comptime builtin.target.os.tag != .freestanding) {
+            HostedStorageDataPlane.reset();
+        }
+    }
 
     fn activate(device_id: u64) ?storage_volume_mod.Backend {
         if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
-        // Prefer the real NVMe data plane when present so storage persists across
-        // reboots; otherwise fall back to the RAM-backed image for model boots.
         if (nvme_bridge.attached()) {
             const nvme_sectors = nvme_bridge.sectorCount();
             // Real persistence: report the device's true capacity and never floor
@@ -141,12 +147,18 @@ const BootedStorageDataPlane = struct {
                 .flush = nvme_bridge.zigosStorageBootstrapNvmeFlush,
             };
         }
-        return .{
-            .sector_count = booted_storage_sector_count,
-            .read = read,
-            .write = write,
-            .flush = flush,
-        };
+        if (comptime builtin.target.os.tag == .freestanding) {
+            // Freestanding boots must use a brokered device publication or the
+            // real NVMe bridge. Never turn missing hardware into ephemeral disk.
+            return null;
+        } else {
+            return .{
+                .sector_count = booted_storage_sector_count,
+                .read = HostedStorageDataPlane.read,
+                .write = HostedStorageDataPlane.write,
+                .flush = HostedStorageDataPlane.flush,
+            };
+        }
     }
 };
 
