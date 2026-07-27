@@ -332,10 +332,8 @@ pub const Service = struct {
         const active_revision = bundle.activeRevision();
         try self.validateRevisionTrusted(active_revision);
         return .{
-            .component_count = active_revision.component_count,
-            .components = active_revision.components,
-            .asset_count = active_revision.asset_count,
-            .assets = active_revision.assets,
+            .components = active_revision.components[0..active_revision.component_count],
+            .assets = active_revision.assets[0..active_revision.asset_count],
             .provenance = launchProvenance(bundle, active_revision),
         };
     }
@@ -1068,8 +1066,8 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqualStrings("application/zigos-object-archive", resolved_v2.data_rights.export_format);
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
-    try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);
-    try std.testing.expectEqual(@as(usize, 2), launch_plan.asset_count);
+    try std.testing.expectEqual(@as(usize, 2), launch_plan.components.len);
+    try std.testing.expectEqual(@as(usize, 2), launch_plan.assets.len);
     try std.testing.expectEqualStrings("notes-ui", launch_plan.components[0].idSlice());
     try std.testing.expectEqualStrings("assets/editor.css", launch_plan.assets[1].pathSlice());
     try std.testing.expectEqualStrings("app.notes", launch_plan.provenance.bundle_id);
@@ -2091,7 +2089,7 @@ test "package service indexes rebuild after persisted slots are loaded" {
     service.rebuildIndexes();
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
-    try std.testing.expectEqual(@as(usize, 1), launch_plan.component_count);
+    try std.testing.expectEqual(@as(usize, 1), launch_plan.components.len);
     try std.testing.expectEqualStrings("notes.main", launch_plan.components[0].entrySlice());
 }
 

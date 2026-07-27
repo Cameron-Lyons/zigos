@@ -278,7 +278,7 @@ pub const Simulator = struct {
     pub fn launchNativeApp(self: *Simulator, bundle_id: []const u8) !LaunchResult {
         try self.bootstrap();
         const launch_plan = try self.packages.buildLaunchPlan(bundle_id);
-        if (launch_plan.component_count == 0) return error.MissingExecutableComponent;
+        if (launch_plan.components.len == 0) return error.MissingExecutableComponent;
 
         var resolved = emptyResolvedManifest();
         const bundle = try self.packages.resolveCurrentManifest(bundle_id, &resolved);
@@ -304,7 +304,7 @@ pub const Simulator = struct {
         });
 
         var component_index: usize = 1;
-        while (component_index < launch_plan.component_count) : (component_index += 1) {
+        while (component_index < launch_plan.components.len) : (component_index += 1) {
             _ = try self.runtime.attachComponent(
                 task.id,
                 componentSpec(launch_plan.components[component_index]),
@@ -321,8 +321,8 @@ pub const Simulator = struct {
         );
         return .{
             .task_id = task.id,
-            .component_count = launch_plan.component_count,
-            .asset_count = launch_plan.asset_count,
+            .component_count = launch_plan.components.len,
+            .asset_count = launch_plan.assets.len,
             .permission_count = bundle.requested_permissions.len,
             .signed_provenance = task.launch.signed,
             .background_allowed = task.background_allowed,

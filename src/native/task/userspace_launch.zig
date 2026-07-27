@@ -114,7 +114,7 @@ pub fn launchInstalledDirect(
     var resolved: package_service.ResolvedManifest = undefined;
     const bundle = try packages.resolveCurrentManifest(bundle_id, &resolved);
     const launch_plan = try packages.buildLaunchPlan(bundle_id);
-    if (launch_plan.component_count == 0) return error.MissingBundleComponent;
+    if (launch_plan.components.len == 0) return error.MissingBundleComponent;
     var launch_request = request;
     launch_request.source_identity = launch_plan.provenance.source_identity;
     launch_request.release_transparency_sequence = launch_plan.provenance.release_transparency.sequence;
