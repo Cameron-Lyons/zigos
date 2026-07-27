@@ -103,10 +103,8 @@ pub const StoredAsset = struct {
 };
 
 pub const LaunchPlan = struct {
-    component_count: usize,
-    components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent,
-    asset_count: usize,
-    assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset,
+    components: []const StoredComponent,
+    assets: []const StoredAsset,
     provenance: PackageLaunchProvenance = .{},
 };
 
