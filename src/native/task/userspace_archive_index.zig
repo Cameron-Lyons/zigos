@@ -62,7 +62,20 @@ test "userspace archive index resolves every generated artifact bundle" {
         const indexed = artifactFor(artifact.bundle_id) orelse return error.MissingGeneratedArtifact;
         try std.testing.expectEqualStrings(artifact.bundle_id, indexed.bundle_id);
         try std.testing.expectEqualStrings(artifact.display_name, indexed.display_name);
-        try std.testing.expectEqual(artifact.data.len, indexed.data.len);
+        try std.testing.expectEqual(artifact.data.byte_len, indexed.data.byte_len);
+        try std.testing.expectEqualSlices(u32, artifact.data.chunk_indices, indexed.data.chunk_indices);
     }
     try std.testing.expect(artifactFor("zigos.system.missing-artifact") == null);
+}
+
+test "userspace archive shares identical image chunks" {
+    try std.testing.expect(archive.artifacts.len > 1);
+    const shared_pool = archive.artifacts[0].data.chunk_pool;
+    var logical_bytes: usize = 0;
+    for (archive.artifacts) |artifact| {
+        try std.testing.expectEqual(shared_pool.ptr, artifact.data.chunk_pool.ptr);
+        try std.testing.expectEqual(shared_pool.len, artifact.data.chunk_pool.len);
+        logical_bytes += artifact.data.byte_len;
+    }
+    try std.testing.expect(shared_pool.len < logical_bytes);
 }

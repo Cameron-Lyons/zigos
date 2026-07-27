@@ -3,6 +3,7 @@ const crypto_hash = @import("../core/crypto_hash.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const component_port = @import("../kernel_api/component_port.zig");
+const embedded_file = @import("embedded_file.zig");
 const elf_image_inspector = @import("elf_image_inspector.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
@@ -81,7 +82,7 @@ pub const EmbeddedImageRegisterRequest = struct {
     role_tag: u32 = 0,
     heartbeat_increment: u32 = 0,
     contract_flags: u32 = 0,
-    elf_bytes: []const u8,
+    elf_file: embedded_file.File,
 };
 
 pub const ArtifactSource = enum(u8) {
@@ -126,7 +127,7 @@ pub const ImageRecord = struct {
     bootstrap_mailbox_address: u64,
     file_sha256: crypto_hash.Digest,
     executable_image: task_runtime.ExecutableImageSpec,
-    elf_bytes: []const u8,
+    elf_file: embedded_file.File,
     bundle_id_len: usize,
     bundle_id: [MAX_BUNDLE_ID_BYTES]u8,
     display_name_len: usize,
@@ -185,14 +186,14 @@ pub const Catalog = struct {
     }
 
     pub fn register(self: *Catalog, request: ImageRegisterRequest) Error!*const ImageRecord {
-        return self.registerWithEmbeddedElf(request, null, &.{});
+        return self.registerWithEmbeddedElf(request, null, .{});
     }
 
     pub fn registerEmbeddedArtifact(
         self: *Catalog,
         request: EmbeddedImageRegisterRequest,
     ) Error!*const ImageRecord {
-        return self.registerEmbeddedArtifactWithInfo(request, try elf_image_inspector.inspect(request.elf_bytes));
+        return self.registerEmbeddedArtifactWithInfo(request, try elf_image_inspector.inspectFile(request.elf_file));
     }
 
     pub fn registerEmbeddedArtifactWithInfo(
@@ -200,7 +201,7 @@ pub const Catalog = struct {
         request: EmbeddedImageRegisterRequest,
         embedded_info: EmbeddedElfInfo,
     ) Error!*const ImageRecord {
-        try validateEmbeddedElfInfo(request.elf_bytes, embedded_info);
+        try validateEmbeddedElfInfo(request.elf_file, embedded_info);
         return self.registerWithEmbeddedElf(.{
             .bundle = request.bundle,
             .component_class = request.component_class,
@@ -208,7 +209,7 @@ pub const Catalog = struct {
             .role_tag = request.role_tag,
             .heartbeat_increment = request.heartbeat_increment,
             .contract_flags = request.contract_flags,
-        }, embedded_info, request.elf_bytes);
+        }, embedded_info, request.elf_file);
     }
 
     pub fn findByBundleId(self: *Catalog, bundle_id: []const u8) ?*const ImageRecord {
@@ -264,7 +265,7 @@ pub const Catalog = struct {
         self: *Catalog,
         request: ImageRegisterRequest,
         embedded: ?EmbeddedElfInfo,
-        elf_bytes: []const u8,
+        elf_file: embedded_file.File,
     ) Error!*const ImageRecord {
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
@@ -297,7 +298,7 @@ pub const Catalog = struct {
         image.bootstrap_mailbox_address = embedded_info.bootstrap_mailbox_address;
         image.file_sha256 = executable_image.file_sha256;
         image.executable_image = executable_image;
-        image.elf_bytes = elf_bytes;
+        image.elf_file = elf_file;
         image.bundle_id_len = copyTextExact(image.bundle_id[0..], request.bundle.bundle_id) catch return error.BundleIdTooLong;
         image.display_name_len = copyTextExact(image.display_name[0..], request.bundle.display_name) catch return error.DisplayNameTooLong;
         image.publisher_len = copyTextExact(image.publisher[0..], request.bundle.publisher) catch return error.PublisherTooLong;
@@ -437,7 +438,7 @@ fn zeroImage() ImageRecord {
         .bootstrap_mailbox_address = 0,
         .file_sha256 = crypto_hash.zero_digest,
         .executable_image = .{},
-        .elf_bytes = &.{},
+        .elf_file = .{},
         .bundle_id_len = 0,
         .bundle_id = [_]u8{0} ** MAX_BUNDLE_ID_BYTES,
         .display_name_len = 0,
@@ -485,10 +486,10 @@ fn imageMatchesRequest(
 }
 
 fn validateEmbeddedElfInfo(
-    elf_bytes: []const u8,
+    elf_file: embedded_file.File,
     embedded_info: EmbeddedElfInfo,
 ) Error!void {
-    const inspected = try elf_image_inspector.inspect(elf_bytes);
+    const inspected = try elf_image_inspector.inspectFile(elf_file);
     if (inspected.entry_point != embedded_info.entry_point) return error.EmbeddedArtifactMetadataMismatch;
     if (inspected.loadable_segment_count != embedded_info.loadable_segment_count) return error.EmbeddedArtifactMetadataMismatch;
     if (inspected.byte_len != embedded_info.byte_len) return error.EmbeddedArtifactMetadataMismatch;
@@ -712,7 +713,7 @@ test "userspace image launch records bundle provenance and isolated process stat
         .role_tag = 0xA107,
         .heartbeat_increment = 7,
         .contract_flags = 0x2,
-        .elf_bytes = &image_bytes,
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
     });
 
     var runtime = task_runtime.Runtime.init();
@@ -758,7 +759,7 @@ test "kernel-launched userspace images surface a userspace task flag" {
         .role_tag = 0xA10C,
         .heartbeat_increment = 12,
         .contract_flags = 0x11,
-        .elf_bytes = &image_bytes,
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
     });
 
     var runtime = task_runtime.Runtime.init();
@@ -877,7 +878,7 @@ test "catalog stores embedded elf metadata for registered userspace artifacts" {
         .role_tag = 0xA10F,
         .heartbeat_increment = 15,
         .contract_flags = 0x3,
-        .elf_bytes = &bytes,
+        .elf_file = embedded_file.File.fromBytes(&bytes),
     });
 
     try std.testing.expect(image.embedsElf());
@@ -904,7 +905,7 @@ test "catalog image ids wrap without zero and skip active images" {
             .label = "main",
             .entry = "app.main",
         },
-        .elf_bytes = &bytes,
+        .elf_file = embedded_file.File.fromBytes(&bytes),
     });
     try std.testing.expectEqual(std.math.maxInt(u64), max_image.id);
     try std.testing.expectEqual(@as(u64, 1), catalog.next_image_id);
@@ -917,7 +918,7 @@ test "catalog image ids wrap without zero and skip active images" {
             .label = "main",
             .entry = "app.main",
         },
-        .elf_bytes = &bytes,
+        .elf_file = embedded_file.File.fromBytes(&bytes),
     });
     try std.testing.expectEqual(@as(u64, 1), wrapped_image.id);
     try std.testing.expectEqual(@as(u64, 2), catalog.next_image_id);
@@ -931,7 +932,7 @@ test "catalog image ids wrap without zero and skip active images" {
             .label = "main",
             .entry = "app.main",
         },
-        .elf_bytes = &bytes,
+        .elf_file = embedded_file.File.fromBytes(&bytes),
     });
     try std.testing.expectEqual(@as(u64, 2), skipped_image.id);
     try std.testing.expectEqual(@as(u64, 3), catalog.next_image_id);
@@ -950,7 +951,7 @@ test "catalog image ids wrap without zero and skip active images" {
                 .label = "main",
                 .entry = "app.main",
             },
-            .elf_bytes = &bytes,
+            .elf_file = embedded_file.File.fromBytes(&bytes),
         });
     }
     const next_before_full = full_catalog.next_image_id;
@@ -961,7 +962,7 @@ test "catalog image ids wrap without zero and skip active images" {
             .label = "main",
             .entry = "app.main",
         },
-        .elf_bytes = &bytes,
+        .elf_file = embedded_file.File.fromBytes(&bytes),
     }));
     try std.testing.expectEqual(next_before_full, full_catalog.next_image_id);
     try std.testing.expectEqual(MAX_IMAGES, full_catalog.imageCount());
@@ -989,7 +990,7 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
         .role_tag = 0xA120,
         .heartbeat_increment = 32,
         .contract_flags = 0x11,
-        .elf_bytes = &bytes,
+        .elf_file = embedded_file.File.fromBytes(&bytes),
     };
     const valid_info = try elf_image_inspector.inspect(&bytes);
 
@@ -1021,7 +1022,7 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
     );
 
     var missing_bytes_request = request;
-    missing_bytes_request.elf_bytes = "";
+    missing_bytes_request.elf_file = .{};
     var missing_catalog = Catalog.init();
     try std.testing.expectError(
         error.InvalidElfHeader,
@@ -1031,7 +1032,7 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
     var malformed_bytes = bytes;
     malformed_bytes[0] = 0;
     var malformed_request = request;
-    malformed_request.elf_bytes = &malformed_bytes;
+    malformed_request.elf_file = embedded_file.File.fromBytes(&malformed_bytes);
     var malformed_catalog = Catalog.init();
     try std.testing.expectError(
         error.InvalidElfMagic,
@@ -1074,7 +1075,7 @@ test "catalog preserves exact-limit identity and component labels without trunca
             .label = label[0..],
             .entry = entry[0..],
         },
-        .elf_bytes = &image_bytes,
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
     });
 
     try std.testing.expectEqualStrings(bundle_id[0..], image.bundleIdSlice());

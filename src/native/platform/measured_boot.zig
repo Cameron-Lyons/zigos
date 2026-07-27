@@ -11,6 +11,7 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
 const units = @import("../core/units.zig");
+const embedded_file = @import("../task/embedded_file.zig");
 const elf_image_inspector = @import("../task/elf_image_inspector.zig");
 const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
@@ -455,19 +456,28 @@ pub fn generatedUserspaceArchiveMatchesManifest(manifest: *const BuildArtifactMa
 fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, artifact: anytype) bool {
     const spec = userspace_boot_registry.find(artifact.bundle_id) orelse return false;
     userspace_boot_registry.validateGeneratedArtifactMatchesSpec(spec, artifact) catch return false;
-    if (artifact.data.len == 0) return false;
+    const file = embeddedFileFromArtifact(artifact);
+    if (!file.isPresent()) return false;
     if (!artifact.signed) return false;
-    if (artifact.file_size_bytes != artifact.data.len) return false;
+    if (artifact.file_size_bytes != file.byte_len) return false;
 
-    const digest = rawSha256(artifact.data);
+    const digest = file.sha256() orelse return false;
     if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
     if (!buildArtifactDigestMatches(manifest, .userspace_image, artifact.bundle_id, &digest)) return false;
 
-    const inspection = elf_image_inspector.inspect(artifact.data) catch return false;
+    const inspection = elf_image_inspector.inspectFile(file) catch return false;
     if (artifact.entry_point != inspection.entry_point) return false;
     if (artifact.bootstrap_mailbox_address != inspection.bootstrap_mailbox_address) return false;
     if (artifact.segment_count != inspection.executable_image.segment_count) return false;
     return true;
+}
+
+fn embeddedFileFromArtifact(artifact: anytype) embedded_file.File {
+    return embedded_file.File.fromChunks(
+        artifact.data.byte_len,
+        artifact.data.chunk_pool,
+        artifact.data.chunk_indices,
+    );
 }
 
 pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
@@ -716,14 +726,6 @@ fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8
     return crypto_hash.finalize(&hasher);
 }
 
-fn rawSha256(bytes: []const u8) crypto_hash.Digest {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(bytes);
-    var digest: crypto_hash.Digest = undefined;
-    hasher.final(&digest);
-    return digest;
-}
-
 fn firstBuildArtifactIndex(manifest: *const BuildArtifactManifest, kind: BuildArtifactKind) ?usize {
     for (manifest.entries[0..manifest.entry_count], 0..) |entry, index| {
         if (entry.kind == kind) return index;
@@ -949,7 +951,7 @@ test "critical service measurements bind launched userspace image artifacts" {
         .role_tag = 0xA10C,
         .heartbeat_increment = 12,
         .contract_flags = 0x11,
-        .elf_bytes = &image_bytes,
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
     });
 
     var supervisor = supervisor_mod.Supervisor.init();

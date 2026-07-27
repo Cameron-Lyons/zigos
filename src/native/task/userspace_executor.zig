@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
+const embedded_file = @import("embedded_file.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
@@ -377,7 +378,7 @@ pub const Executor = struct {
 
         const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
         const image = catalog.findById(task.launch.image_id) orelse return false;
-        if (image.elf_bytes.len == 0) return false;
+        if (!image.elf_file.isPresent()) return false;
 
         const mapping = self.ensureMaterialized(address_space, image) catch return false;
         self.initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
@@ -447,7 +448,7 @@ pub const Executor = struct {
         if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return false;
         const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
         const image = catalog.findById(task.launch.image_id) orelse return false;
-        if (image.elf_bytes.len == 0) return false;
+        if (!image.elf_file.isPresent()) return false;
         _ = self.ensureMaterialized(address_space, image) catch return false;
         return true;
     }
@@ -558,7 +559,7 @@ pub const Executor = struct {
 
         for (address_space.regions[0..address_space.region_count]) |region| {
             switch (region.kind) {
-                .load_segment => try mapLoadRegion(&entry.address_space.?, region, image.elf_bytes),
+                .load_segment => try mapLoadRegion(&entry.address_space.?, region, image.elf_file),
                 .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, region.size_bytes, region.access),
             }
         }
@@ -718,18 +719,29 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
 fn mapLoadRegion(
     space: *freestanding.paging.UserAddressSpace,
     region: task_runtime.AddressSpaceRegionRecord,
-    elf_bytes: []const u8,
+    elf_file: embedded_file.File,
 ) MaterializationError!void {
     const virtual_address = std.math.cast(u32, region.virtual_address) orelse return error.InvalidRange;
     const size_bytes = std.math.cast(u32, region.size_bytes) orelse return error.InvalidRange;
     const start: usize = region.file_offset;
     const file_size: usize = region.file_size;
     const end = std.math.add(usize, start, file_size) catch return error.ImageExtentInvalid;
-    if (end > elf_bytes.len) return error.ImageExtentInvalid;
+    if (end > elf_file.byte_len) return error.ImageExtentInvalid;
+    const reader = elf_file.reader() orelse return error.ImageExtentInvalid;
     try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
         .writable = region.access.write,
     });
-    try freestanding.paging.writeOwnedUserRange(space, virtual_address, elf_bytes[start..end]);
+
+    var source_offset = start;
+    var target_offset: u32 = 0;
+    while (source_offset < end) {
+        const bytes = reader.logicalSliceAt(source_offset) orelse return error.ImageExtentInvalid;
+        const copy_len = @min(bytes.len, end - source_offset);
+        const target_address = std.math.add(u32, virtual_address, target_offset) catch return error.InvalidRange;
+        try freestanding.paging.writeOwnedUserRange(space, target_address, bytes[0..copy_len]);
+        source_offset += copy_len;
+        target_offset += @intCast(copy_len);
+    }
 }
 
 fn mapZeroedRegion(
