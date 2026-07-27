@@ -83,7 +83,6 @@ pub const Backend = volume_backend.Backend;
 pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 
 pub const Volume = struct {
-    io_payload_buffer: [max_payload_bytes]u8 = undefined,
     io_log_buffer: [data_capacity_bytes]u8 = undefined,
     sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size,
     attached_backend_present: bool = false,
@@ -320,7 +319,7 @@ fn saveIncremental(
     }
     const delta = if (current) |loaded|
         if (can_append)
-        try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
+            try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
         else
             BuiltLog{}
     else
@@ -363,13 +362,13 @@ fn saveIncremental(
         return .{ .generation = next_generation };
     }
 
-    const checkpoint_payload_len = try serializeState(store, workspaces, self.io_payload_buffer[0..]);
-    var log_writer = CursorWriter{ .buffer = self.io_log_buffer[0..] };
-    try volume_log.appendRecordPayload(&log_writer, .checkpoint, self.io_payload_buffer[0..checkpoint_payload_len]);
-    // The compacted checkpoint must fit in a single region so it can be written
-    // to the region the live root does not reference. Fail closed rather than
-    // overflow into the live root's region.
-    if (log_writer.offset > data_region_bytes) return error.NoSpaceLeft;
+    // Build directly in the inactive ping-pong region's staging slice. The
+    // bounded writer fails before a checkpoint can cross into the live region.
+    const checkpoint_log_len = try serializeCheckpointRecord(
+        store,
+        workspaces,
+        self.io_log_buffer[0..data_region_bytes],
+    );
 
     const next_generation = current_generation + 1;
     // Ping-pong to the region the current root does not occupy so its backing
@@ -378,13 +377,13 @@ fn saveIncremental(
         (if (loaded.root.data_offset == 0) alternate_data_region_offset else 0)
     else
         0;
-    var next_root = try buildRootState(next_generation, @intCast(log_writer.offset), store, workspaces, state_hashes);
+    var next_root = try buildRootState(next_generation, @intCast(checkpoint_log_len), store, workspaces, state_hashes);
     next_root.data_offset = next_data_offset;
     next_root.log_record_count = 1;
     next_root.log_segment_count = 0;
     next_root.compacted_generation = next_generation;
     const next_root_sector = volume_root_slot.nextRootSector(current);
-    try writeBytes(writer, data_start_byte + next_data_offset, self.io_log_buffer[0..log_writer.offset]);
+    try writeBytes(writer, data_start_byte + next_data_offset, self.io_log_buffer[0..checkpoint_log_len]);
     try flushWrites(writer);
     try writeRoot(writer, next_root_sector, next_root);
     try flushWrites(writer);
@@ -1162,6 +1161,18 @@ fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload:
     if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
 }
 
+fn serializeCheckpointRecord(
+    store: *const object_store.Store,
+    workspaces: *const workspace.Directory,
+    buffer: []u8,
+) Error!usize {
+    var writer = CursorWriter{ .buffer = buffer };
+    const header_offset = try volume_log.beginRecord(&writer, .checkpoint);
+    writer.offset += try serializeState(store, workspaces, buffer[writer.offset..]);
+    try volume_log.finishRecord(&writer, header_offset);
+    return writer.offset;
+}
+
 fn serializeState(store: *const object_store.Store, workspaces: *const workspace.Directory, buffer: []u8) Error!usize {
     var writer = CursorWriter{ .buffer = buffer };
     try writer.writeBytes(payload_magic);
@@ -1562,6 +1573,49 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
 
 fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.BlobAddress) ?usize {
     return store.blobSlotIndex(address);
+}
+
+test "storage volume keeps only the final log io workspace" {
+    try std.testing.expect(@hasField(Volume, "io_log_buffer"));
+    try std.testing.expect(!@hasField(Volume, "io_payload_buffer"));
+}
+
+test "checkpoint records accept exact capacity and reject one byte less" {
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    store.* = object_store.Store.init();
+    const workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(workspaces);
+    workspaces.* = workspace.Directory.init();
+
+    var payload_probe: [128]u8 = undefined;
+    const payload_len = try serializeState(store, workspaces, payload_probe[0..]);
+    const exact_record_len = volume_log.recordHeaderLen() + payload_len;
+    const record_storage = try allocator.alloc(u8, exact_record_len + 1);
+    defer allocator.free(record_storage);
+    @memset(record_storage, 0);
+
+    record_storage[exact_record_len] = 0xA5;
+    const written = try serializeCheckpointRecord(store, workspaces, record_storage[0..exact_record_len]);
+    try std.testing.expectEqual(exact_record_len, written);
+    try std.testing.expectEqual(@as(u8, 0xA5), record_storage[exact_record_len]);
+
+    var reader = CursorReader{ .buffer = record_storage[0..written] };
+    const header = try volume_log.readRecordHeader(&reader);
+    try std.testing.expectEqual(volume_log.RecordKind.checkpoint, header.kind);
+    try std.testing.expectEqual(@as(u32, @intCast(payload_len)), header.payload_len);
+    try std.testing.expectEqual(
+        volume_hashing.checksumBytes(record_storage[volume_log.recordHeaderLen()..written]),
+        header.checksum,
+    );
+
+    record_storage[exact_record_len - 1] = 0x5A;
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        serializeCheckpointRecord(store, workspaces, record_storage[0 .. exact_record_len - 1]),
+    );
+    try std.testing.expectEqual(@as(u8, 0x5A), record_storage[exact_record_len - 1]);
 }
 
 test "storage replay requires exactly one leading checkpoint" {
