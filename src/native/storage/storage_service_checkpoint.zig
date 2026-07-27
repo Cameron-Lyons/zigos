@@ -15,6 +15,10 @@ else
 const workspace = @import("workspace.zig");
 
 const MAX_CHECKPOINT_ATTEMPTS: u8 = 2;
+// A freestanding kernel has one hardware-backed root volume. Checkpoint stores
+// borrow it instead of embedding a second 1.2 MiB I/O and signature workspace.
+const shares_root_volume = builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume");
+const CheckpointVolume = if (shares_root_volume) void else storage_volume.Volume;
 
 pub const CheckpointStore = struct {
     store: object_store.Store = object_store.Store.init(),
@@ -24,7 +28,22 @@ pub const CheckpointStore = struct {
     last_checkpoint_generation: u64 = 0,
     last_checkpoint_error: ?storage_volume.Error = null,
     checkpoint_retry_count: u64 = 0,
-    volume: storage_volume.Volume = storage_volume.Volume.init(),
+    checkpoint_volume: CheckpointVolume = if (shares_root_volume) {} else storage_volume.Volume.init(),
+
+    fn volumePtr(self: *CheckpointStore) *storage_volume.Volume {
+        if (comptime shares_root_volume) {
+            return storage_volume.defaultVolume();
+        }
+        return &self.checkpoint_volume;
+    }
+
+    pub fn adoptRootVolume(self: *CheckpointStore, root_volume: *storage_volume.Volume) void {
+        if (comptime shares_root_volume) {
+            std.debug.assert(root_volume == storage_volume.defaultVolume());
+        } else {
+            self.checkpoint_volume.adoptAttachedBackendFrom(root_volume);
+        }
+    }
 
     pub fn hasCachedPersistentState(self: *const CheckpointStore) bool {
         return self.has_persisted_state;
@@ -45,11 +64,14 @@ pub const CheckpointStore = struct {
     }
 
     pub fn loadPreparedStateFromAttachedVolume(self: *CheckpointStore) bool {
-        if (storage_volume.hasAttachedDevice()) {
-            self.volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+        const volume = self.volumePtr();
+        if (comptime !shares_root_volume) {
+            if (storage_volume.hasAttachedDevice()) {
+                volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+            }
         }
-        if (!self.volume.hasAttachedDevice()) return false;
-        if (self.volume.loadFromVolume(&self.store, &self.workspaces)) {
+        if (!volume.hasAttachedDevice()) return false;
+        if (volume.loadFromVolume(&self.store, &self.workspaces)) {
             self.has_persisted_state = true;
             self.dirty = false;
             return true;
@@ -59,8 +81,10 @@ pub const CheckpointStore = struct {
 
     pub fn resetPersistent(self: *CheckpointStore) void {
         self.resetPreparedState();
-        self.volume.clearAttachedVolume();
-        self.volume.clearAttachedBackend();
+        if (comptime !shares_root_volume) {
+            self.checkpoint_volume.clearAttachedVolume();
+            self.checkpoint_volume.clearAttachedBackend();
+        }
     }
 
     pub fn preparePersistentState(self: *CheckpointStore) bool {
@@ -105,13 +129,16 @@ pub fn noteMutation(service: anytype, durable_boundary: bool) void {
 pub fn flushCheckpoint(service: anytype) void {
     service.checkpoint_store.has_persisted_state = true;
     if (!service.checkpoint_store.dirty) return;
-    if (storage_volume.hasAttachedDevice()) {
-        service.checkpoint_store.volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+    const volume = service.checkpoint_store.volumePtr();
+    if (comptime !shares_root_volume) {
+        if (storage_volume.hasAttachedDevice()) {
+            volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+        }
     }
-    if (!service.checkpoint_store.volume.hasAttachedDevice()) return;
+    if (!volume.hasAttachedDevice()) return;
     var attempt: u8 = 1;
     const result = while (true) {
-        break service.checkpoint_store.volume.saveToVolume(service.store, service.workspaces) catch |err| {
+        break volume.saveToVolume(service.store, service.workspaces) catch |err| {
             if (attempt >= MAX_CHECKPOINT_ATTEMPTS or !retryableCheckpointError(err)) {
                 service.checkpoint_store.last_checkpoint_error = err;
                 reportFlushError(err);

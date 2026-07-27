@@ -1606,7 +1606,7 @@ fn validateStorageModernOnlyTrack(
         "pub fn canAdoptProductionRootVolume(root_volume: anytype) bool",
         "return root_volume.hasProductionStorageBackend()",
         "if (!canAdoptProductionRootVolume(root_volume)) return false",
-        "checkpoint_store.volume.attachNvmePciBackendFns(",
+        "checkpoint_store.adoptRootVolume(root_volume)",
         "native store root adoption only accepts production NVMe PCI volumes",
     };
     for (native_store_mount_snippets) |snippet| {
@@ -1622,6 +1622,20 @@ fn validateStorageModernOnlyTrack(
     for (retired_native_store_mount_snippets) |snippet| {
         if (std.mem.indexOf(u8, native_store_mount_source, snippet) != null) {
             try common.addError(errors, allocator, "Storage production track must not adopt non-NVMe root storage into the native store: {s}", .{snippet});
+        }
+    }
+
+    const checkpoint_source_path = "src/native/storage/storage_service_checkpoint.zig";
+    const checkpoint_source = try readRequiredSource(allocator, io, errors, checkpoint_source_path) orelse return;
+    const shared_root_volume_snippets = [_][]const u8{
+        "const shares_root_volume = builtin.target.os.tag == .freestanding and @hasDecl(root, \"storage_volume\")",
+        "const CheckpointVolume = if (shares_root_volume) void else storage_volume.Volume",
+        "return storage_volume.defaultVolume()",
+        "if (comptime !shares_root_volume)",
+    };
+    for (shared_root_volume_snippets) |snippet| {
+        if (std.mem.indexOf(u8, checkpoint_source, snippet) == null) {
+            try common.addError(errors, allocator, "Storage production track must keep the freestanding checkpoint store on the shared root volume: {s}", .{snippet});
         }
     }
 
