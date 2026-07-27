@@ -327,20 +327,16 @@ fn putRecord(
         const existing_payload = try storage.versionPayload(existing_version);
         if (std.mem.eql(u8, existing_payload, payload)) return;
     }
-    const result = try storage.putVersion(.{
+    const result = storage.putLocallySignedVersion(.{
         .preferred_object_id = object_store.ids.object(recordObjectId(workspace_id, path)),
         .object_type = .blob,
         .payload = payload,
-        .metadata = object_store.signMetadata(
-            state_support.state_signer,
-            record_metadata_label,
-            record_content_type,
-            .blob,
-            payload,
-            tick,
-        ) catch return error.StateSigningFailed,
+        .signer = state_support.state_signer,
+        .label = record_metadata_label,
+        .content_type = record_content_type,
+        .created_at_ticks = tick,
         .parent_version_id = if (existing_entry) |entry| entry.version_id else null,
-    });
+    }) catch return error.StateSigningFailed;
     try storage.stagePut(workspace_id, path, result.object_id, result.version_id, .blob);
 }
 

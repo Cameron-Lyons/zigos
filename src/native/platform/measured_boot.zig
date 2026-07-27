@@ -673,18 +673,14 @@ pub const MeasurementJournal = struct {
             error.EntryNotFound => null,
             else => return err,
         };
-        const result = try self.storage.putVersion(.{
+        const result = try self.storage.putLocallySignedVersion(.{
             .preferred_object_id = object_store.ids.object(stateObjectId()),
             .object_type = .document,
             .payload = payload,
-            .metadata = try object_store.signMetadata(
-                self.state_signer,
-                "measured-boot-state",
-                "application/zigos-measured-boot",
-                .document,
-                payload,
-                tick,
-            ),
+            .signer = self.state_signer,
+            .label = "measured-boot-state",
+            .content_type = "application/zigos-measured-boot",
+            .created_at_ticks = tick,
             .parent_version_id = if (existing_entry) |entry| entry.version_id else null,
         });
         try self.storage.beginTransaction(self.workspace_id);

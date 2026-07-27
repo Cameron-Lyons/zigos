@@ -221,7 +221,6 @@ pub const Graph = struct {
         var message_buffer: [ROOT_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = rootMessage(&message_buffer, user_principal, label) catch return error.InvalidRootSignature;
         root.root_signature = signing.sign(identity, message) catch return error.InvalidRootSignature;
-        if (!signing.verify(root.root_signature, message)) return error.InvalidRootSignature;
 
         const slot_index = self.installUserRootRecord(root) orelse return error.UserRootTableFull;
         return &self.user_roots.slots[slot_index].root;
@@ -287,7 +286,6 @@ pub const Graph = struct {
             1,
         ) catch return error.InvalidDeviceSignature;
         device.device_signature = signing.sign(device_identity, device_message) catch return error.InvalidDeviceSignature;
-        if (!signing.verify(device.device_signature, device_message)) return error.InvalidDeviceSignature;
         if (platform_key) |binding_request| {
             applyPlatformKeyBinding(&device, try buildPlatformKeyBinding(device_principal, device_identity, device.device_signature, binding_request));
         }
@@ -303,7 +301,6 @@ pub const Graph = struct {
             device.device_signature.publicKeySlice(),
         ) catch return error.InvalidEnrollmentSignature;
         device.enrollment_signature = signing.sign(authorizer, enrollment_message) catch return error.InvalidEnrollmentSignature;
-        if (!signing.verify(device.enrollment_signature, enrollment_message)) return error.InvalidEnrollmentSignature;
 
         device.last_rotated_at_ticks = tick;
         const slot_index = self.installDeviceRecord(device) orelse return error.DeviceTableFull;
@@ -358,7 +355,6 @@ pub const Graph = struct {
             next_generation,
         ) catch return error.InvalidDeviceSignature;
         const device_signature = signing.sign(next_device_identity, device_message) catch return error.InvalidDeviceSignature;
-        if (!signing.verify(device_signature, device_message)) return error.InvalidDeviceSignature;
         const next_platform_key = if (platform_key) |binding_request|
             try buildPlatformKeyBinding(device_principal, next_device_identity, device_signature, binding_request)
         else
@@ -374,7 +370,6 @@ pub const Graph = struct {
             device_signature.publicKeySlice(),
         ) catch return error.InvalidRotationSignature;
         const rotation_signature = signing.sign(authorizer, rotation_message) catch return error.InvalidRotationSignature;
-        if (!signing.verify(rotation_signature, rotation_message)) return error.InvalidRotationSignature;
 
         record.device_signature = device_signature;
         record.rotation_signature = rotation_signature;
@@ -409,7 +404,6 @@ pub const Graph = struct {
             tick,
         ) catch return error.InvalidEnrollmentSignature;
         record.revocation_signature = signing.sign(authorizer, message) catch return error.InvalidEnrollmentSignature;
-        if (!signing.verify(record.revocation_signature, message)) return error.InvalidEnrollmentSignature;
 
         record.status = .revoked;
         record.trust_generation += 1;
