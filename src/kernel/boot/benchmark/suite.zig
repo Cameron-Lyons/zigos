@@ -1199,7 +1199,11 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
         },
         .shared_memory_object_id = object.id,
     }, &shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&controller);
+    std.mem.doNotOptimizeAway(&shared);
     const released = controller.releaseClaim(claim.id, &shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(&controller);
+    std.mem.doNotOptimizeAway(&shared);
     return claim.id + object.id.raw() + @intFromBool(released) + @intFromEnum(claim.engine);
 }
 

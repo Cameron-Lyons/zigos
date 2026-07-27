@@ -921,6 +921,7 @@
       ],
       "current_evidence": [
         "Scheduler decisions account for resource class, engine availability, thermal pressure, battery saver, privacy mode, CPU budget, memory bandwidth, and zero-copy shared memory.",
+        "Freestanding MMU mapping insertion now lets the indexed arena enforce uniqueness with one optimistic probe, re-probes only to distinguish duplicate mappings from capacity exhaustion, and skips attachment-generation index traversal when no mappings exist; a saturated-arena regression preserves duplicate-versus-full errors and index counts, while barrier-matched current-main pairs reduce accelerator claim/release cost by 3.4%-3.6% (14,255.72-14,291.72 to 13,741.52-13,803.08 cycles/op) with the checksum unchanged at 100,000.",
         "Booted provider tests derive hardware-source telemetry from live runtime counters instead of purely synthetic state.",
         "Telemetry now flows through an explicit provider boundary with test-only host fakes and production freestanding provider descriptors.",
     "Negative tests require complete hardware telemetry before waking hardware queues.",
