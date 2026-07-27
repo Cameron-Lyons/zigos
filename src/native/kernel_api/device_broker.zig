@@ -219,13 +219,32 @@ pub const Error = error{
     UnsupportedWidth,
 };
 
-const ControllerSlot = struct {
-    const TransferKind = enum(u8) {
-        none,
-        read,
-        write,
+const HostTransferKind = enum(u8) {
+    none,
+    read,
+    write,
+};
+
+const HostedAtaControllerState = if (builtin.target.os.tag == .freestanding)
+    struct {}
+else
+    struct {
+        registers: [ata_host_register_count]u32 = [_]u32{0} ** ata_host_register_count,
+        storage: [host_storage_bytes]u8 = [_]u8{0} ** host_storage_bytes,
+        transfer_kind: HostTransferKind = .none,
+        transfer_lba: u64 = 0,
+        transfer_sector_count: u16 = 0,
+        transfer_byte_offset: usize = 0,
+        write_staging: [host_write_staging_bytes]u8 = [_]u8{0} ** host_write_staging_bytes,
     };
 
+comptime {
+    if (builtin.target.os.tag == .freestanding and @sizeOf(HostedAtaControllerState) != 0) {
+        @compileError("hosted ATA state must not consume freestanding kernel memory");
+    }
+}
+
+const ControllerSlot = struct {
     in_use: bool = false,
     published: bool = false,
     device_id: u64 = 0,
@@ -236,14 +255,8 @@ const ControllerSlot = struct {
         .irq_line = 0,
         .sector_count = 0,
     },
-    host_registers: [ata_host_register_count]u32 = [_]u32{0} ** ata_host_register_count,
-    host_storage: [host_storage_bytes]u8 = [_]u8{0} ** host_storage_bytes,
-    transfer_kind: TransferKind = .none,
-    transfer_lba: u64 = 0,
-    transfer_sector_count: u16 = 0,
-    transfer_byte_offset: usize = 0,
+    hosted: HostedAtaControllerState = .{},
     broker_generation: u64 = 0,
-    host_write_staging: [host_write_staging_bytes]u8 = [_]u8{0} ** host_write_staging_bytes,
 };
 
 const DmaProgramSlot = struct {
@@ -472,6 +485,14 @@ const ControllerArena = struct {
         self.unpublished_count -= 1;
     }
 };
+
+const freestanding_controller_arena_budget_bytes: usize = 512;
+comptime {
+    if (builtin.target.os.tag == .freestanding and @sizeOf(ControllerArena) > freestanding_controller_arena_budget_bytes) {
+        @compileError("freestanding controller arena exceeds its static memory budget");
+    }
+}
+
 const DmaProgramArena = indexed_arena.IndexedArenaWithKey(u64, DmaProgramSlot, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2, dmaProgramSlotId);
 const DmaProgramDeviceIndex = indexed_arena.MultimapIndex(MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2);
 
@@ -515,8 +536,7 @@ pub fn publishAtaControllerChecked(device_id: u64, grant: storage_driver_protoco
         controllers.markPublished(slot_index);
         slot.published = true;
         slot.grant = grant;
-        slot.host_registers = [_]u32{0} ** slot.host_registers.len;
-        finishHostTransfer(slot);
+        resetHostIoState(slot);
         slot.broker_generation = generation;
         next_broker_generation = nextMonotonicId(generation);
         return;
@@ -526,8 +546,7 @@ pub fn publishAtaControllerChecked(device_id: u64, grant: storage_driver_protoco
     slot.device_id = device_id;
     slot.grant = grant;
     slot.broker_generation = generation;
-    slot.host_registers = [_]u32{0} ** slot.host_registers.len;
-    finishHostTransfer(slot);
+    resetHostIoState(slot);
     next_broker_generation = nextMonotonicId(generation);
 }
 
@@ -535,9 +554,8 @@ pub fn revokeAtaController(device_id: u64) bool {
     const slot_index = findControllerSlotIndex(device_id) orelse return false;
     const slot = &controllers.slots[slot_index];
     if (!slot.published) return false;
-    finishHostTransfer(slot);
+    resetHostIoState(slot);
     slot.published = false;
-    slot.host_registers = [_]u32{0} ** slot.host_registers.len;
     controllers.markUnpublished(slot_index);
     invalidateDmaForDevice(device_id);
     return true;
@@ -900,14 +918,27 @@ fn resetControllerSlot(slot: *ControllerSlot) void {
         .irq_line = 0,
         .sector_count = 0,
     };
-    @memset(slot.host_registers[0..], 0);
-    @memset(slot.host_storage[0..], 0);
-    slot.transfer_kind = .none;
-    slot.transfer_lba = 0;
-    slot.transfer_sector_count = 0;
-    slot.transfer_byte_offset = 0;
+    resetHostedState(slot);
     slot.broker_generation = 0;
-    @memset(slot.host_write_staging[0..], 0);
+}
+
+fn resetHostedState(slot: *ControllerSlot) void {
+    if (comptime builtin.target.os.tag != .freestanding) {
+        @memset(slot.hosted.registers[0..], 0);
+        @memset(slot.hosted.storage[0..], 0);
+        slot.hosted.transfer_kind = .none;
+        slot.hosted.transfer_lba = 0;
+        slot.hosted.transfer_sector_count = 0;
+        slot.hosted.transfer_byte_offset = 0;
+        @memset(slot.hosted.write_staging[0..], 0);
+    }
+}
+
+fn resetHostIoState(slot: *ControllerSlot) void {
+    if (comptime builtin.target.os.tag != .freestanding) {
+        @memset(slot.hosted.registers[0..], 0);
+        finishHostTransfer(slot);
+    }
 }
 
 fn controllerSlotId(slot: *const ControllerSlot) u64 {
@@ -1040,23 +1071,23 @@ fn registerIndex(slot: *const ControllerSlot, port: u16) Error!usize {
 }
 
 fn readHostRegister(slot: *ControllerSlot, register_index: usize, width: PortWidth) u32 {
-    if (register_index == ata_reg_data and slot.transfer_kind == .read) {
+    if (register_index == ata_reg_data and slot.hosted.transfer_kind == .read) {
         return readHostTransferData(slot, width);
     }
     if (register_index == ata_control_register_index) {
-        return truncateRegisterValue(slot.host_registers[ata_reg_status], width);
+        return truncateRegisterValue(slot.hosted.registers[ata_reg_status], width);
     }
-    return truncateRegisterValue(slot.host_registers[register_index], width);
+    return truncateRegisterValue(slot.hosted.registers[register_index], width);
 }
 
 fn writeHostRegister(slot: *ControllerSlot, register_index: usize, width: PortWidth, value: u32) void {
-    if (register_index == ata_reg_data and slot.transfer_kind == .write) {
+    if (register_index == ata_reg_data and slot.hosted.transfer_kind == .write) {
         writeHostTransferData(slot, width, value);
         return;
     }
 
     const stored_value = truncateRegisterValue(value, width);
-    slot.host_registers[register_index] = stored_value;
+    slot.hosted.registers[register_index] = stored_value;
     if (register_index != ata_reg_command) return;
 
     switch (stored_value) {
@@ -1067,22 +1098,22 @@ fn writeHostRegister(slot: *ControllerSlot, register_index: usize, width: PortWi
     }
 }
 
-fn startHostTransfer(slot: *ControllerSlot, transfer_kind: ControllerSlot.TransferKind) void {
-    const count_register = @as(u16, @truncate(slot.host_registers[ata_reg_seccount]));
+fn startHostTransfer(slot: *ControllerSlot, transfer_kind: HostTransferKind) void {
+    const count_register = @as(u16, @truncate(slot.hosted.registers[ata_reg_seccount]));
     const sector_count = normalizeAtaSectorCount(count_register);
     const lba = lba28FromRegisters(slot);
 
     if (!hostTransferInRange(slot, lba, sector_count)) {
-        slot.transfer_kind = .none;
-        slot.host_registers[ata_reg_status] = ata_sr_drdy | ata_sr_err;
+        slot.hosted.transfer_kind = .none;
+        slot.hosted.registers[ata_reg_status] = ata_sr_drdy | ata_sr_err;
         return;
     }
 
-    slot.transfer_kind = transfer_kind;
-    slot.transfer_lba = lba;
-    slot.transfer_sector_count = sector_count;
-    slot.transfer_byte_offset = 0;
-    slot.host_registers[ata_reg_status] = ata_sr_drdy | ata_sr_drq;
+    slot.hosted.transfer_kind = transfer_kind;
+    slot.hosted.transfer_lba = lba;
+    slot.hosted.transfer_sector_count = sector_count;
+    slot.hosted.transfer_byte_offset = 0;
+    slot.hosted.registers[ata_reg_status] = ata_sr_drdy | ata_sr_drq;
 }
 
 fn truncateRegisterValue(value: u32, width: PortWidth) u32 {
@@ -1098,75 +1129,75 @@ fn normalizeAtaSectorCount(count_register: u16) u16 {
 }
 
 fn lba28FromRegisters(slot: *const ControllerSlot) u64 {
-    return (@as(u64, slot.host_registers[ata_reg_lba0] & ata_lba_byte_mask)) |
-        (@as(u64, slot.host_registers[ata_reg_lba1] & ata_lba_byte_mask) << ata_lba1_shift) |
-        (@as(u64, slot.host_registers[ata_reg_lba2] & ata_lba_byte_mask) << ata_lba2_shift) |
-        (@as(u64, slot.host_registers[ata_reg_drive] & ata_lba_drive_head_mask) << ata_lba3_shift);
+    return (@as(u64, slot.hosted.registers[ata_reg_lba0] & ata_lba_byte_mask)) |
+        (@as(u64, slot.hosted.registers[ata_reg_lba1] & ata_lba_byte_mask) << ata_lba1_shift) |
+        (@as(u64, slot.hosted.registers[ata_reg_lba2] & ata_lba_byte_mask) << ata_lba2_shift) |
+        (@as(u64, slot.hosted.registers[ata_reg_drive] & ata_lba_drive_head_mask) << ata_lba3_shift);
 }
 
 fn finishHostTransfer(slot: *ControllerSlot) void {
-    slot.transfer_kind = .none;
-    slot.transfer_lba = 0;
-    slot.transfer_sector_count = 0;
-    slot.transfer_byte_offset = 0;
-    slot.host_registers[ata_reg_status] = ata_sr_drdy;
+    slot.hosted.transfer_kind = .none;
+    slot.hosted.transfer_lba = 0;
+    slot.hosted.transfer_sector_count = 0;
+    slot.hosted.transfer_byte_offset = 0;
+    slot.hosted.registers[ata_reg_status] = ata_sr_drdy;
 }
 
 fn readHostTransferData(slot: *ControllerSlot, width: PortWidth) u32 {
     const offset = hostTransferOffset(slot);
-    if (offset + widthByteCount(width) > slot.host_storage.len) {
+    if (offset + widthByteCount(width) > slot.hosted.storage.len) {
         // Defense in depth: hostTransferInRange already bounds the transfer, but
         // never index past the backing store even if state were set directly.
         finishHostTransfer(slot);
         return 0;
     }
     const value = switch (width) {
-        .u8 => @as(u32, slot.host_storage[offset]),
-        .u16 => @as(u32, std.mem.readInt(u16, slot.host_storage[offset..][0..2], .little)),
-        .u32 => std.mem.readInt(u32, slot.host_storage[offset..][0..4], .little),
+        .u8 => @as(u32, slot.hosted.storage[offset]),
+        .u16 => @as(u32, std.mem.readInt(u16, slot.hosted.storage[offset..][0..2], .little)),
+        .u32 => std.mem.readInt(u32, slot.hosted.storage[offset..][0..4], .little),
     };
     advanceHostTransfer(slot, widthByteCount(width));
     return value;
 }
 
 fn writeHostTransferData(slot: *ControllerSlot, width: PortWidth, value: u32) void {
-    const offset = slot.transfer_byte_offset;
-    if (offset + widthByteCount(width) > slot.host_write_staging.len) {
+    const offset = slot.hosted.transfer_byte_offset;
+    if (offset + widthByteCount(width) > slot.hosted.write_staging.len) {
         // Defense in depth: fail closed rather than overrun the staging buffer.
-        slot.host_registers[ata_reg_status] = ata_sr_drdy | ata_sr_err;
+        slot.hosted.registers[ata_reg_status] = ata_sr_drdy | ata_sr_err;
         finishHostTransfer(slot);
         return;
     }
     switch (width) {
-        .u8 => slot.host_write_staging[offset] = @truncate(value),
-        .u16 => std.mem.writeInt(u16, slot.host_write_staging[offset..][0..2], @truncate(value), .little),
-        .u32 => std.mem.writeInt(u32, slot.host_write_staging[offset..][0..4], value, .little),
+        .u8 => slot.hosted.write_staging[offset] = @truncate(value),
+        .u16 => std.mem.writeInt(u16, slot.hosted.write_staging[offset..][0..2], @truncate(value), .little),
+        .u32 => std.mem.writeInt(u32, slot.hosted.write_staging[offset..][0..4], value, .little),
     }
     advanceHostTransfer(slot, widthByteCount(width));
 }
 
 fn advanceHostTransfer(slot: *ControllerSlot, byte_count: usize) void {
-    slot.transfer_byte_offset += byte_count;
-    if (slot.transfer_byte_offset >= @as(usize, slot.transfer_sector_count) * ata_sector_size) {
+    slot.hosted.transfer_byte_offset += byte_count;
+    if (slot.hosted.transfer_byte_offset >= @as(usize, slot.hosted.transfer_sector_count) * ata_sector_size) {
         completeHostTransfer(slot);
     }
 }
 
 fn completeHostTransfer(slot: *ControllerSlot) void {
-    if (slot.transfer_kind == .write) {
+    if (slot.hosted.transfer_kind == .write) {
         const offset = hostTransferBaseOffset(slot);
-        const len = @as(usize, slot.transfer_sector_count) * ata_sector_size;
-        @memcpy(slot.host_storage[offset..][0..len], slot.host_write_staging[0..len]);
+        const len = @as(usize, slot.hosted.transfer_sector_count) * ata_sector_size;
+        @memcpy(slot.hosted.storage[offset..][0..len], slot.hosted.write_staging[0..len]);
     }
     finishHostTransfer(slot);
 }
 
 fn hostTransferOffset(slot: *const ControllerSlot) usize {
-    return hostTransferBaseOffset(slot) + slot.transfer_byte_offset;
+    return hostTransferBaseOffset(slot) + slot.hosted.transfer_byte_offset;
 }
 
 fn hostTransferBaseOffset(slot: *const ControllerSlot) usize {
-    return @as(usize, @intCast(slot.transfer_lba)) * ata_sector_size;
+    return @as(usize, @intCast(slot.hosted.transfer_lba)) * ata_sector_size;
 }
 
 fn hostTransferInRange(slot: *const ControllerSlot, lba: u64, sector_count: u16) bool {
