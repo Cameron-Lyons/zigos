@@ -354,11 +354,13 @@ pub const Error = error{
     ContentTypeTooLong,
     InvalidSignature,
     LabelTooLong,
+    NoSpaceLeft,
     ObjectIdExhausted,
     ObjectNotFound,
     ObjectTableFull,
     ParentMismatch,
     PayloadTooLarge,
+    SigningFailed,
     TypeMismatch,
     UnsignedMetadata,
     VersionIdExhausted,
@@ -381,7 +383,7 @@ pub const PayloadTransferSummary = struct {
     chunks_transferred: usize = 0,
 };
 
-pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong } || anyerror;
+pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong, NoSpaceLeft, SigningFailed };
 pub const PutLocallySignedError = Error || SignMetadataError;
 
 const ObjectSlot = struct {
@@ -1223,7 +1225,7 @@ pub fn signMetadata(
     var metadata = try SignedMetadata.init(label, content_type, .{}, created_at_ticks);
     var message_buffer: [MAX_METADATA_MESSAGE_BYTES]u8 = undefined;
     const message = try metadataMessage(&message_buffer, object_type, payload, metadata);
-    metadata.signature = try signing.sign(identity, message);
+    metadata.signature = signing.sign(identity, message) catch return error.SigningFailed;
     return metadata;
 }
 
