@@ -1116,7 +1116,10 @@ fn clearEntries(entries: *[MAX_WORKSPACE_ENTRIES]Entry) void {
 }
 
 fn signSnapshotRecord(snapshot: *SnapshotRecord, entries: []const Entry, identity: signing.SignerIdentity) !void {
-    snapshot.root_address = workspaceRootAddress(entries);
+    const canonical_root_address = workspaceRootAddress(entries);
+    if (!std.mem.eql(u8, &snapshot.root_address, &canonical_root_address)) {
+        return error.InvalidSignature;
+    }
     var message_buffer: [snapshot_message_buffer_bytes]u8 = undefined;
     const message = try snapshotMessage(
         &message_buffer,
@@ -1280,6 +1283,7 @@ fn debugAssertShareGrantIndexMissAbsent(workspace: *const WorkspaceRecord, princ
 }
 
 fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
+    debugAssertEntriesSorted(workspace.path_index.entries[0..workspace.path_index.entry_count]);
     workspace_index.rebuildPathSlots(
         ENTRY_INDEX_CAPACITY,
         &workspace.path_index.path_slots,
@@ -1290,7 +1294,7 @@ fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
         &workspace.path_index.object_slots,
         workspace.path_index.entries[0..workspace.path_index.entry_count],
     );
-    workspace_merkle.rebuildPathMerkle(&workspace.path_index, MAX_WORKSPACE_ENTRIES);
+    workspace_merkle.rebuildPathMerkle(&workspace.path_index);
 }
 
 fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
@@ -1559,26 +1563,48 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
 }
 
 fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
+    debugAssertEntriesSorted(workspace.path_index.entries[0..workspace.path_index.entry_count]);
     if (workspace.mutation_log.entry_mutation_count + workspace.staging.staged_entry_count > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
     const next_generation = workspace.generation + 1;
+    var structural_change = false;
+    var object_index_dirty = false;
     for (workspace.staging.staged_entries[0..workspace.staging.staged_entry_count]) |staged_entry| {
         if (isDeleteTombstone(staged_entry)) {
             const existing_index = findEntryIndex(workspace.path_index.entries[0..workspace.path_index.entry_count], staged_entry.pathSlice()) orelse return error.EntryNotFound;
             appendDeleted(workspace, workspace.path_index.entries[existing_index]);
             removeEntry(&workspace.path_index.entries, &workspace.path_index.entry_count, existing_index);
+            structural_change = true;
             try appendEntryMutation(workspace, next_generation, staged_entry);
             continue;
         }
 
         if (findEntryIndex(workspace.path_index.entries[0..workspace.path_index.entry_count], staged_entry.pathSlice())) |existing_index| {
+            object_index_dirty = object_index_dirty or
+                !workspace.path_index.entries[existing_index].object_id.eql(staged_entry.object_id);
             workspace.path_index.entries[existing_index] = staged_entry;
+            workspace_merkle.updatePathLeaf(&workspace.path_index, existing_index);
         } else {
             try insertSortedEntry(&workspace.path_index.entries, &workspace.path_index.entry_count, staged_entry);
+            structural_change = true;
         }
         try appendEntryMutation(workspace, next_generation, staged_entry);
     }
     workspace.generation = next_generation;
-    rebuildWorkspaceEntryIndex(workspace);
+    if (structural_change) {
+        rebuildWorkspaceEntryIndex(workspace);
+    } else if (workspace.staging.staged_entry_count != 0) {
+        // Replacement-only transactions preserve sorted path positions. Keep
+        // the path index, refresh the object index only when identity changed,
+        // and rehash just the leaves written above before folding the root.
+        if (object_index_dirty) {
+            workspace_index.rebuildObjectSlots(
+                ENTRY_OBJECT_INDEX_CAPACITY,
+                &workspace.path_index.object_slots,
+                workspace.path_index.entries[0..workspace.path_index.entry_count],
+            );
+        }
+        workspace_merkle.refreshPathRoot(&workspace.path_index);
+    }
 }
 
 fn clearTransactionState(workspace: *WorkspaceRecord) void {
@@ -1617,14 +1643,59 @@ test "workspace commits preserve path order and index rebuilds normalize loaded 
     try std.testing.expectEqualStrings("z-last", entries[2].pathSlice());
 
     std.mem.swap(Entry, &workspace.path_index.entries[0], &workspace.path_index.entries[2]);
+    workspace.path_index.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
+    workspace.path_index.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
+    const zero_root = workspace_merkle.zeroRootAddress();
+    for (workspace.path_index.leaf_hashes[0..workspace.path_index.entry_count]) |*leaf_hash| {
+        leaf_hash.* = zero_root;
+    }
+    workspace.path_index.root_address = zero_root;
     directory.rebuildDerivedIndexes();
 
     entries = try directory.entries(workspace.id);
     try std.testing.expectEqualStrings("a-first", entries[0].pathSlice());
     try std.testing.expectEqualStrings("m-middle", entries[1].pathSlice());
     try std.testing.expectEqualStrings("z-last", entries[2].pathSlice());
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, "a-first"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, "m-middle"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, "z-last"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, ids.object(2)),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, ids.object(3)),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, ids.object(1)),
+    );
     try std.testing.expectEqual(ids.object(2), (try directory.resolve(workspace.id, "a-first")).object_id);
     try std.testing.expectEqual(ids.object(1), (try directory.resolve(workspace.id, "z-last")).object_id);
+    try std.testing.expectEqualStrings("a-first", (try directory.resolveObject(workspace.id, ids.object(2))).pathSlice());
+    try std.testing.expectEqualStrings("m-middle", (try directory.resolveObject(workspace.id, ids.object(3))).pathSlice());
+    try std.testing.expectEqualStrings("z-last", (try directory.resolveObject(workspace.id, ids.object(1))).pathSlice());
+    try std.testing.expectEqual(workspaceRootAddress(entries), workspace.rootAddress());
+    try std.testing.expect(!std.mem.eql(u8, &workspace.path_index.root_address, &zero_root));
+}
+
+fn debugAssertEntriesSorted(entries: []const Entry) void {
+    if (!debugIndexChecksEnabled() or entries.len < 2) return;
+    for (entries[1..], entries[0 .. entries.len - 1]) |entry, previous| {
+        if (compareEntryPath(previous.pathSlice(), entry.pathSlice()) != .lt) {
+            native_util.impossibleByInvariant("workspace entries remain strictly path-sorted");
+        }
+    }
 }
 
 test "directory reset scrubs live workspace and snapshot records" {

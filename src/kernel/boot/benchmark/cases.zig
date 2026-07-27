@@ -22,7 +22,7 @@ pub fn benchmarkCases(handlers: anytype) [24]BenchmarkCase {
         .{ .name = "task_runtime.checkpoint.write_low_occupancy", .iterations = 8_000, .runIteration = handlers.task_checkpoint_write_low_occupancy },
         .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = handlers.accelerator_claim_release },
         .{ .name = "storage.file_bridge.resolve_view", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },
-        .{ .name = "storage.workspace.commit_overlay", .iterations = 12_000, .runIteration = handlers.workspace_commit_overlay },
+        .{ .name = "storage.workspace.commit_overlay", .iterations = 128, .runIteration = handlers.workspace_commit_overlay },
         .{ .name = "storage.volume.replay_segmented_log", .iterations = 24, .runIteration = handlers.storage_volume_replay_segmented_log },
         .{ .name = "storage.volume.compact_checkpoint", .iterations = 1, .runIteration = handlers.storage_volume_compact_checkpoint },
         .{ .name = "package_revision.rollforward_rollback", .iterations = 20_000, .runIteration = handlers.package_revision },

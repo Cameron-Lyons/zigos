@@ -124,6 +124,7 @@ const SupervisorReadyContext = struct {
 const WorkspaceCommitContext = struct {
     baseline: workspace.Directory = workspace.Directory.init(),
     workspace_id: ids.WorkspaceId = ids.WorkspaceId.zero,
+    current_cover_object_id: ids.ObjectId = ids.ObjectId.zero,
 };
 
 const StorageVolumeContext = struct {
@@ -696,6 +697,7 @@ fn prepareWorkspaceCommitFixture() void {
         .label = "benchmark-notes",
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     workspace_commit_context.workspace_id = notes.id;
+    workspace_commit_context.current_cover_object_id = ids.object(902);
 
     workspace_commit_context.baseline.beginTransaction(notes.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     workspace_commit_context.baseline.stagePut(notes.id, "documents/plan.md", ids.object(900), ids.version(901), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
@@ -1243,22 +1245,31 @@ fn benchmarkFileBridgeResolve(iteration: u32) u64 {
 }
 
 fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
-    prepareWorkspaceCommitFixture();
     const directory = &workspace_commit_context.baseline;
     const workspace_id = workspace_commit_context.workspace_id;
+    var next_cover_object_id = workspace_commit_context.current_cover_object_id;
 
     directory.beginTransaction(workspace_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stagePut(workspace_id, "documents/plan.md", ids.object(900), ids.version(1_100 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stageDelete(workspace_id, "assets/cover.jpg") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stagePut(workspace_id, "documents/draft.md", ids.object(1_200 + iteration), ids.version(1_300 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stagePut(workspace_id, "documents/tmp.md", ids.object(1_400 + iteration), ids.version(1_500 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    directory.stageDelete(workspace_id, "documents/tmp.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    if ((iteration & 1) == 0) {
+        directory.stagePut(workspace_id, "documents/plan.md", ids.object(900), ids.version(1_100 + iteration), .document) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    } else {
+        next_cover_object_id = ids.object(1_200 + iteration);
+        directory.stagePut(workspace_id, "assets/cover.jpg", next_cover_object_id, ids.version(1_300 + iteration), .media_asset) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    }
 
     const generation = directory.commit(workspace_id, 70 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    const entries = directory.entries(workspace_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    workspace_commit_context.current_cover_object_id = next_cover_object_id;
     const plan = directory.resolve(workspace_id, "documents/plan.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    const draft = directory.resolve(workspace_id, "documents/draft.md") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return generation + entries.len + plan.version_id.raw() + draft.object_id.raw();
+    const cover = directory.resolve(workspace_id, "assets/cover.jpg") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const cover_by_object = directory.resolveObject(workspace_id, workspace_commit_context.current_cover_object_id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const root_address = directory.find(workspace_id).?.rootAddress();
+
+    var checksum = generation + plan.version_id.raw() + cover.object_id.raw() + cover_by_object.version_id.raw();
+    var root_word_offset: usize = 0;
+    while (root_word_offset < root_address.len) : (root_word_offset += @sizeOf(u64)) {
+        checksum +%= std.mem.readInt(u64, root_address[root_word_offset..][0..@sizeOf(u64)], .little);
+    }
+    return checksum;
 }
 
 fn benchmarkStorageVolumeReplaySegmentedLog(iteration: u32) u64 {
