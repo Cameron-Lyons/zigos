@@ -7,7 +7,7 @@ const acpi_poweroff_value: u16 = 0x2000;
 
 const IdtPtr = packed struct {
     limit: u16 = 0,
-    base: u32 = 0,
+    base: usize = 0,
 };
 
 pub const success_status: u32 = 0x10;
@@ -27,10 +27,7 @@ fn exitWithStatus(status: u32) noreturn {
 fn forceTripleFault() noreturn {
     const idt = IdtPtr{};
     x86.cli();
-    asm volatile ("lidt %[idt]"
-        :
-        : [idt] "m" (idt),
-    );
+    x86.loadIdt(&idt);
     asm volatile ("ud2");
 
     while (true) {

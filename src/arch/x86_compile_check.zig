@@ -5,6 +5,10 @@ const x86 = @import("x86.zig");
 const cpu_features = @import("cpu_features.zig");
 
 pub export fn zigos_x86_arch_compile_check(port: u16, value: u32) u64 {
+    const empty_idt = packed struct {
+        limit: u16 = 0,
+        base: usize = 0,
+    }{};
     x86.cli();
     x86.sti();
     if (value == 0xFFFF_FFFF) x86.hlt();
@@ -20,6 +24,8 @@ pub export fn zigos_x86_arch_compile_check(port: u16, value: u32) u64 {
     if (cpu_features.baseline.isSupported(features)) {
         cpu_features.enableSupervisorProtections(features);
     }
+    x86.invalidatePage(x86.readCr2());
+    x86.loadIdt(&empty_idt);
     x86.enableSse();
-    return x86.rdtsc() ^ input;
+    return x86.rdtsc() ^ input ^ x86.stackPointer();
 }

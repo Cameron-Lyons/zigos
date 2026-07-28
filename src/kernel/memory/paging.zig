@@ -1,4 +1,5 @@
 const std = @import("std");
+const x86 = @import("../../arch/x86.zig");
 const handoff = @import("../boot/handoff.zig");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
@@ -14,8 +15,7 @@ const PAGE_DIRECTORY_SHIFT = 22;
 const PAGE_TABLE_INDEX_MASK: u32 = PAGES_PER_TABLE - 1;
 const PAGE_OFFSET_MASK: u32 = PAGE_SIZE - 1;
 const HEX_NIBBLE_BITS = 4;
-const HEX_HIGH_NIBBLE_SHIFT: u32 = 28;
-const HEX_NIBBLE_MASK: u32 = 0xF;
+const HEX_NIBBLE_MASK = 0xF;
 const MAX_U32: u32 = ~@as(u32, 0);
 
 pub const PAGE_PRESENT: u32 = 0x1;
@@ -588,11 +588,7 @@ fn enable_paging(page_dir_addr: u32) void {
 }
 
 pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Registers) void {
-    // SAFETY: populated by the subsequent inline assembly reading CR2
-    var faulting_address: u32 = undefined;
-    asm volatile ("mov %%cr2, %[addr]"
-        : [addr] "=r" (faulting_address),
-    );
+    const faulting_address = x86.readCr2();
 
     const not_present = (regs.err_code & 0x1) == 0;
     const write = (regs.err_code & 0x2) != 0;
@@ -619,16 +615,16 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
     // forever; panic instead so the backtrace identifies the culprit and the
     // machine halts for good.
     const panic_utils = @import("../utils/panic.zig");
-    panic_utils.panic("unrecoverable page fault at 0x{x:0>8} (eip=0x{x:0>8})", .{ faulting_address, regs.eip });
+    panic_utils.panic("unrecoverable page fault at 0x{x} (instruction=0x{x})", .{ faulting_address, regs.eip });
 }
 
-fn print_hex_console(value: u32, console: anytype) void {
+fn print_hex_console(value: anytype, console: anytype) void {
     const hex_chars = "0123456789ABCDEF";
-    var i: u32 = HEX_HIGH_NIBBLE_SHIFT;
-    while (i >= 0) : (i -= HEX_NIBBLE_BITS) {
-        const nibble = (value >> @truncate(i)) & HEX_NIBBLE_MASK;
+    var shift: usize = @bitSizeOf(@TypeOf(value)) - HEX_NIBBLE_BITS;
+    while (true) : (shift -= HEX_NIBBLE_BITS) {
+        const nibble: usize = @intCast((value >> @intCast(shift)) & HEX_NIBBLE_MASK);
         console.printChar(hex_chars[nibble]);
-        if (i == 0) break;
+        if (shift == 0) break;
     }
 }
 
@@ -650,8 +646,5 @@ pub fn switchPageDirectory(pd: *PageDirectory) void {
 }
 
 fn invalidate_page(virt_addr: u32) void {
-    asm volatile ("invlpg (%[addr])"
-        :
-        : [addr] "r" (virt_addr),
-    );
+    x86.invalidatePage(@as(usize, virt_addr));
 }

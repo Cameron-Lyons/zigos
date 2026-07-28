@@ -1,4 +1,5 @@
 const std = @import("std");
+const x86 = @import("../../arch/x86.zig");
 const console = @import("console.zig");
 
 // Symbols from boot64.S bounding the BSP boot stack. The page at
@@ -13,12 +14,6 @@ const PAINT_PATTERN: u32 = 0x57ACC0DE;
 // Keep well clear of the frames live while paint() itself runs.
 const PAINT_MARGIN_BYTES: usize = 512;
 
-fn currentStackPointer() usize {
-    return asm volatile ("mov %%esp, %[out]"
-        : [out] "=r" (-> usize),
-    );
-}
-
 fn paintableBase() usize {
     return @intFromPtr(&stack_bottom) + GUARD_PAGE_BYTES;
 }
@@ -27,11 +22,11 @@ fn paintableBase() usize {
 /// Call once, early in boot, while the call chain is still shallow.
 pub fn paint() void {
     const base = paintableBase();
-    const esp = currentStackPointer();
-    if (esp <= base + PAINT_MARGIN_BYTES) return;
+    const stack_pointer = x86.stackPointer();
+    if (stack_pointer <= base + PAINT_MARGIN_BYTES) return;
 
     const words: [*]u32 = @ptrFromInt(base);
-    const count = (esp - PAINT_MARGIN_BYTES - base) / @sizeOf(u32);
+    const count = (stack_pointer - PAINT_MARGIN_BYTES - base) / @sizeOf(u32);
     var index: usize = 0;
     while (index < count) : (index += 1) {
         words[index] = PAINT_PATTERN;
