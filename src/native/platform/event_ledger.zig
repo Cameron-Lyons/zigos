@@ -1286,12 +1286,9 @@ pub const Ledger = struct {
         });
     }
 
-    pub fn latestKind(self: *const Ledger, kind: EventKind) ?Event {
-        const event = self.latestKindPtr(kind) orelse return null;
-        return event.*;
-    }
-
-    pub fn latestKindPtr(self: *const Ledger, kind: EventKind) ?*const Event {
+    /// Borrow the latest event of a kind for immediate read-only inspection.
+    /// The pointer remains valid only until the ledger is mutated.
+    pub fn latestKind(self: *const Ledger, kind: EventKind) ?*const Event {
         const tail = self.kind_index.tail(kindKey(kind));
         if (tail == indexed_arena.no_index) return null;
         return &self.events.slots[tail].event;
