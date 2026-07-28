@@ -54,7 +54,7 @@ pub fn bootloaderSourceDigest() [32]u8 {
     return crypto_hash.finalize(&hasher);
 }
 
-fn bootloaderSourcePath() []const u8 {
+pub fn bootloaderSourcePath() []const u8 {
     return if (comptime builtin.cpu.arch == .x86_64)
         "src/boot/boot_x86_64.S"
     else

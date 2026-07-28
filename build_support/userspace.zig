@@ -54,7 +54,8 @@ pub fn addUserspaceArtifacts(
     const production_manifest_source = production_archive_dir.path(b, "production_artifact_manifest.zig");
     production_archive_run.addArg("zigos_native");
     production_archive_run.addArg("production");
-    production_archive_run.addFileArg(b.path("src/boot/boot64.S"));
+    production_archive_run.addArg(bootloaderSourcePath(target.result.cpu.arch));
+    production_archive_run.addFileArg(b.path(bootloaderSourcePath(target.result.cpu.arch)));
 
     const verification_archive_run = b.addRunArtifact(archive_generator);
     const verification_archive_dir = verification_archive_run.addOutputDirectoryArg("userspace-verification-archive");
@@ -62,7 +63,8 @@ pub fn addUserspaceArtifacts(
     const verification_manifest_source = verification_archive_dir.path(b, "verification_artifact_manifest.zig");
     verification_archive_run.addArg("zigos_native");
     verification_archive_run.addArg("verification");
-    verification_archive_run.addFileArg(b.path("src/boot/boot64.S"));
+    verification_archive_run.addArg(bootloaderSourcePath(target.result.cpu.arch));
+    verification_archive_run.addFileArg(b.path(bootloaderSourcePath(target.result.cpu.arch)));
 
     var production_compile_steps: [production_artifact_count]*std.Build.Step.Compile = undefined;
     var verification_only_compile_steps: [verification_only_artifact_count]*std.Build.Step.Compile = undefined;
@@ -135,6 +137,7 @@ pub fn addX86_64Artifacts(
     const manifest_source = archive_dir.path(b, "production_artifact_manifest.zig");
     archive_run.addArg("zigos_native");
     archive_run.addArg("production");
+    archive_run.addArg("src/boot/boot_x86_64.S");
     archive_run.addFileArg(b.path("src/boot/boot_x86_64.S"));
 
     var production_compile_steps: [production_artifact_count]*std.Build.Step.Compile = undefined;
@@ -162,6 +165,14 @@ pub fn addX86_64Artifacts(
         .production_manifest_module = b.createModule(.{
             .root_source_file = manifest_source,
         }),
+    };
+}
+
+fn bootloaderSourcePath(cpu_arch: std.Target.Cpu.Arch) []const u8 {
+    return switch (cpu_arch) {
+        .x86 => "src/boot/boot64.S",
+        .x86_64 => "src/boot/boot_x86_64.S",
+        else => @panic("userspace target must use the x86 architecture family"),
     };
 }
 

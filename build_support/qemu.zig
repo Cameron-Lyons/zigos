@@ -113,6 +113,7 @@ pub fn addNativeSmokeCommand(
     });
     command.addArg(mode.arg() orelse "full");
     command.addArg(b.getInstallPath(.bin, ""));
+    command.addArg(kernel.bootloader_source_path);
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
