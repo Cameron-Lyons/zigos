@@ -1,7 +1,6 @@
-const builtin = @import("builtin");
 const console = @import("../../utils/console.zig");
 const isr = @import("../../interrupts/isr.zig");
-const paging = @import("../../memory/paging_select.zig");
+const paging = @import("../../memory/paging64.zig");
 const memory = @import("../../memory/memory.zig");
 
 pub fn init() void {
@@ -11,7 +10,7 @@ pub fn init() void {
     stack_watermark.paint();
 
     console.print("Initializing GDT...\n");
-    const gdt = @import("../../interrupts/gdt_select.zig");
+    const gdt = @import("../../interrupts/gdt64.zig");
     gdt.init();
     console.print("GDT initialized!\n");
 
@@ -21,9 +20,7 @@ pub fn init() void {
 
     console.print("Initializing paging...\n");
     paging.init();
-    if (comptime builtin.cpu.arch == .x86_64) {
-        @import("../common.zig").printBootMarker(@import("../markers.zig").x86_64_paging_ready);
-    }
+    @import("../common.zig").printBootMarker(@import("../markers.zig").x86_64_paging_ready);
 
     console.print("Enabling kernel memory protection...\n");
     const protection = @import("../../memory/protection.zig");

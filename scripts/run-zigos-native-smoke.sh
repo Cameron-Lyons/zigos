@@ -15,7 +15,7 @@ LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
 MODE="${4:-full}"
 USERSPACE_BIN_DIR="${5:-$ROOT_DIR/zig-out/bin}"
-BOOTLOADER_SOURCE_PATH="${6:-src/boot/boot64.S}"
+BOOTLOADER_SOURCE_PATH="${6:-src/boot/boot_x86_64.S}"
 # Per-boot cap on waiting for the validation marker. The harness stops QEMU as
 # soon as the marker appears, so this only bounds the failure path; keep it
 # generous enough that a slow shared runner does not fail an otherwise healthy

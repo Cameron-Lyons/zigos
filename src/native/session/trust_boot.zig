@@ -809,7 +809,7 @@ fn buildBootloaderSourceLabel() []const u8 {
         const root = @import("root");
         if (@hasDecl(root, "bootloaderSourcePath")) return root.bootloaderSourcePath();
     }
-    return "src/boot/boot64.S";
+    return "src/boot/boot_x86_64.S";
 }
 
 fn emulatorProvidedKernelImageDigest() crypto_hash.Digest {

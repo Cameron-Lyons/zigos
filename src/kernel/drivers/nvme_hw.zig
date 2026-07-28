@@ -3,14 +3,14 @@
 // `bootstrap_nvme_inventory_shim` data plane with actual register access,
 // admin-queue setup, and polled command completion.
 //
-// Memory model assumptions (see src/kernel/memory/paging_select.zig): the kernel
+// Memory model assumptions (see src/kernel/memory/paging64.zig): the kernel
 // identity-maps the first 128 MiB, so frames returned by alloc_frames have
 // phys == virt and are usable directly as DMA/PRP targets. The controller BAR
 // lives above the identity-mapped window, so we identity-map its pages
 // (virt == phys) with caching disabled before touching registers.
 
 const console = @import("../utils/console.zig");
-const paging = @import("../memory/paging_select.zig");
+const paging = @import("../memory/paging64.zig");
 const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
@@ -134,7 +134,7 @@ pub const Controller = struct {
 
 fn barPhysicalAddress(dev: pci.PCIDevice) usize {
     // BAR0 is a 64-bit MMIO BAR: low dword (type bits masked) + high dword.
-    // A 32-bit kernel requires the high dword to be zero.
+    // The current managed physical aperture requires the high dword to be zero.
     return @as(usize, dev.bar0 & 0xFFFF_FFF0);
 }
 

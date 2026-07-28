@@ -1,5 +1,5 @@
-//! Compile-only coverage for the privileged x86 helpers on every supported
-//! word size. This object is never linked into a boot image or executed.
+//! Compile-only coverage for the privileged x86-64 helpers. This object is
+//! never linked into a boot image or executed.
 
 const x86 = @import("x86.zig");
 const cpu_features = @import("cpu_features.zig");

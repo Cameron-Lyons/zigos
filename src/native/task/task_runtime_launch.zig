@@ -119,8 +119,8 @@ pub fn validateUserspaceImage(
         const segment = image.segments[index];
         if (segment.memory_size == 0) return error.InvalidUserspaceImage;
         if (segment.file_size > segment.memory_size) return error.InvalidUserspaceImage;
-        // Admission policy forbids ambiguous W+X declarations. Hardware NX
-        // remains a separate paging capability on the current i386 target.
+        // Admission policy forbids ambiguous W+X declarations. Hardware
+        // execute-disable remains a separate paging capability.
         if (segment.access.write and segment.access.execute) return error.InvalidUserspaceImage;
 
         const alignment: u64 = segment.alignment;
