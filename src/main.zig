@@ -15,6 +15,7 @@ const embedded_userspace_archive = @import("userspace_archive");
 const syscall_surface = @import("native/kernel_api/syscall_surface.zig");
 const userspace_executor = @import("native/task/userspace_executor.zig");
 const timer = @import("kernel/timer/timer.zig");
+const builtin = @import("builtin");
 
 pub const includes_verification_evidence = config.includesVerificationEvidence();
 
@@ -40,14 +41,24 @@ pub fn bootloaderMeasurementDigest() [32]u8 {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "bootloader", "multiboot");
     crypto_hash.updateBytes(&hasher, "boot-profile", config.name());
-    crypto_hash.updateBytes(&hasher, "entry-assembly", "src/boot/boot64.S");
+    crypto_hash.updateBytes(&hasher, "entry-assembly", bootloaderSourcePath());
     return crypto_hash.finalize(&hasher);
 }
 
 pub fn bootloaderSourceDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    hasher.update(@embedFile("boot/boot64.S"));
+    hasher.update(if (comptime builtin.cpu.arch == .x86_64)
+        @embedFile("boot/boot_x86_64.S")
+    else
+        @embedFile("boot/boot64.S"));
     return crypto_hash.finalize(&hasher);
+}
+
+fn bootloaderSourcePath() []const u8 {
+    return if (comptime builtin.cpu.arch == .x86_64)
+        "src/boot/boot_x86_64.S"
+    else
+        "src/boot/boot64.S";
 }
 
 pub fn kernelImageDigest() [32]u8 {

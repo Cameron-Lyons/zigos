@@ -5,6 +5,7 @@ pub const boot_profile_benchmark = "BOOT:PROFILE:benchmark";
 pub const kernel_role_production = "BOOT:ROLE:production";
 pub const kernel_role_verification = "BOOT:ROLE:verification";
 pub const boot_core_ready = "BOOT:CORE_READY";
+pub const x86_64_paging_ready = "ZIGOS:ARCH:X86_64:PAGING:READY";
 
 pub const cpu_baseline_ready = "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY";
 pub const cpu_baseline_rejected = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";

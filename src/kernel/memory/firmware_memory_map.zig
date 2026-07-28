@@ -16,7 +16,7 @@ pub fn initializeAllocator(
     comptime memory_bytes: u32,
     comptime page_size: u32,
     allocator: *frame_allocator.Fixed(memory_bytes, page_size),
-    bytes: []const u8,
+    memory_map: handoff.MemoryMap,
 ) Error!void {
     allocator.reset();
     try allocator.reserve(.{
@@ -26,14 +26,14 @@ pub fn initializeAllocator(
 
     // Validate the whole byte stream before opening a single frame. A bad
     // trailing entry therefore leaves the allocator completely closed.
-    var validator = handoff.memoryMapIterator(bytes);
+    var validator = memory_map.iterator();
     var entry_count: usize = 0;
     while (try validator.next()) |_| {
         entry_count += 1;
     }
     if (entry_count == 0) return error.InvalidMemoryMap;
 
-    var usable = handoff.memoryMapIterator(bytes);
+    var usable = memory_map.iterator();
     while (try usable.next()) |entry| {
         if (!entry.isUsable()) continue;
         if (fullPageRun(memory_bytes, page_size, entry)) |run| {
@@ -41,7 +41,7 @@ pub fn initializeAllocator(
         }
     }
 
-    var unavailable = handoff.memoryMapIterator(bytes);
+    var unavailable = memory_map.iterator();
     while (try unavailable.next()) |entry| {
         if (entry.isUsable()) continue;
         if (touchedPageRun(memory_bytes, page_size, entry.base, entry.length, entry.end)) |run| {
@@ -68,7 +68,7 @@ pub fn reserveLiveHandoffRanges(
         memory_bytes,
         page_size,
         info_address,
-        handoff.CAPTURED_INFO_BYTES,
+        std.math.cast(usize, info.info_bytes) orelse return error.InvalidHandoffRange,
     );
     run_count += 1;
 
@@ -86,7 +86,7 @@ pub fn reserveLiveHandoffRanges(
             memory_bytes,
             page_size,
             info.cmdline_addr,
-            handoff.COMMAND_LINE_SCAN_BYTES,
+            std.math.cast(usize, info.cmdline_length) orelse return error.InvalidHandoffRange,
         );
         run_count += 1;
     }
@@ -209,7 +209,7 @@ test "firmware map opens only complete usable pages" {
     var bytes = [_]u8{0} ** 24;
     _ = appendEntry(&bytes, 0, TEST_PAGE_SIZE / 2, 3 * TEST_PAGE_SIZE, 1);
 
-    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, &bytes);
+    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot1MemoryMap(&bytes));
 
     try std.testing.expect(allocator.isReserved(0));
     try std.testing.expect(!allocator.isReserved(1 * TEST_PAGE_SIZE));
@@ -230,8 +230,8 @@ test "non-usable pages win over usable pages in either descriptor order" {
 
     var first = Allocator.init();
     var second = Allocator.init();
-    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &first, &usable_first);
-    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &second, &reserved_first);
+    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &first, handoff.multiboot1MemoryMap(&usable_first));
+    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &second, handoff.multiboot1MemoryMap(&reserved_first));
 
     try std.testing.expect(first.isReserved(2 * TEST_PAGE_SIZE));
     try std.testing.expect(second.isReserved(2 * TEST_PAGE_SIZE));
@@ -247,7 +247,7 @@ test "non-usable page ceilings and aperture clipping are conservative" {
     _ = appendEntry(&bytes, offset, 8 * TEST_PAGE_SIZE - 1, 2, 4);
 
     var allocator = Allocator.init();
-    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, &bytes);
+    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot1MemoryMap(&bytes));
 
     try std.testing.expect(allocator.isReserved(0));
     try std.testing.expect(allocator.isReserved(TEST_PAGE_SIZE));
@@ -264,13 +264,13 @@ test "malformed or overflowing firmware maps leave the aperture closed" {
 
     try std.testing.expectError(
         error.InvalidMemoryMap,
-        initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, &bytes),
+        initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot1MemoryMap(&bytes)),
     );
     try std.testing.expectEqual(@as(u32, 0), allocator.stats().free);
 
     try std.testing.expectError(
         error.InvalidMemoryMap,
-        initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, &[_]u8{}),
+        initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot1MemoryMap(&[_]u8{})),
     );
     try std.testing.expectEqual(@as(u32, 0), allocator.stats().free);
 }
