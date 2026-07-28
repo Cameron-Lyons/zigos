@@ -1,3 +1,4 @@
+const std = @import("std");
 const paging = @import("paging.zig");
 const vga = @import("../drivers/vga.zig");
 
@@ -22,11 +23,15 @@ extern const __kernel_measure_start: u8;
 extern const __kernel_archive_end: u8;
 
 pub fn protectKernelMemory() void {
-    const image_start: u32 = @intFromPtr(&__kernel_measure_start);
-    const image_end: u32 = @intFromPtr(&__kernel_archive_end);
+    const image_start = std.math.cast(u32, @intFromPtr(&__kernel_measure_start)) orelse
+        @panic("kernel image starts outside the 32-bit pager");
+    const image_end = std.math.cast(u32, @intFromPtr(&__kernel_archive_end)) orelse
+        @panic("kernel image ends outside the 32-bit pager");
 
     var addr = image_start & ~(PAGE_SIZE_U32 - 1);
-    const end = (image_end + PAGE_SIZE_U32 - 1) & ~(PAGE_SIZE_U32 - 1);
+    const rounded_image_end = std.math.add(u32, image_end, PAGE_SIZE_U32 - 1) catch
+        @panic("kernel image protection extent overflows the 32-bit pager");
+    const end = rounded_image_end & ~(PAGE_SIZE_U32 - 1);
     while (addr < end) : (addr += PAGE_SIZE_U32) {
         paging.setPageReadOnly(addr);
     }
