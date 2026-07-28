@@ -38,6 +38,10 @@ pub fn UniqueIndex(comptime capacity: usize) type {
             id_index.insert(capacity, &self.slots, key, slot_index, "indexed arena unique indexes never store zero keys");
         }
 
+        pub fn insertAbsent(self: *Self, key: u64, slot_index: usize) void {
+            id_index.insertAbsent(capacity, &self.slots, key, slot_index, "indexed arena unique indexes never store zero keys");
+        }
+
         pub fn remove(self: *Self, key: u64) void {
             id_index.remove(capacity, &self.slots, key);
         }
@@ -217,7 +221,7 @@ pub fn MultimapIndex(
                 .key = key,
                 .in_use = true,
             };
-            self.bucket_index.insert(key, @intCast(bucket_slot_index));
+            self.bucket_index.insertAbsent(key, @intCast(bucket_slot_index));
             return bucket_slot_index;
         }
 
@@ -406,6 +410,22 @@ pub fn IndexedArenaWithKeyOptions(
             return slot_index;
         }
 
+        /// Insert a complete slot value at a specific free index without first
+        /// writing the slot's default payload. The arena owns the membership
+        /// flag and preserves the same exact-index reservation semantics as
+        /// reserveIndexAt.
+        pub fn insertIndexAt(self: *Self, key: Key, slot_index: usize, value: Slot) ?usize {
+            const raw_key = ids.raw(key);
+            if (raw_key == 0 or slot_index >= capacity) return null;
+            if (self.primary_index.lookup(raw_key) != null) return null;
+            if (self.slots[slot_index].in_use) return null;
+            if (!self.claimFreeIndex(slot_index)) return null;
+
+            self.slots[slot_index] = value;
+            self.claimSlotMetadata(key, raw_key, slot_index, true);
+            return slot_index;
+        }
+
         fn claimSlot(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
             self.slots[slot_index] = Slot{};
             self.claimSlotMetadata(key, raw_key, slot_index, mark_dirty);
@@ -414,7 +434,7 @@ pub fn IndexedArenaWithKeyOptions(
         fn claimSlotMetadata(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
             self.slots[slot_index].in_use = true;
             self.slot_keys[slot_index] = key;
-            self.primary_index.insert(raw_key, slot_index);
+            self.primary_index.insertAbsent(raw_key, slot_index);
             self.used_count += 1;
             if (mark_dirty) self.noteDirty(key);
         }
@@ -493,7 +513,7 @@ pub fn IndexedArenaWithKeyOptions(
                     const raw_key = ids.raw(key);
                     if (raw_key != 0) {
                         self.slot_keys[slot_index] = key;
-                        self.primary_index.insert(raw_key, slot_index);
+                        self.primary_index.insertAbsent(raw_key, slot_index);
                     }
                     self.used_count += 1;
                 }
@@ -943,7 +963,7 @@ pub fn PagedIndexedArenaWithKey(
                     const raw_key = ids.raw(key);
                     if (raw_key != 0) {
                         self.slot_keys[slot_index] = key;
-                        self.primary_index.insert(raw_key, slot_index);
+                        self.primary_index.insertAbsent(raw_key, slot_index);
                     }
                     if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
                     self.used_count += 1;
@@ -977,7 +997,7 @@ pub fn PagedIndexedArenaWithKey(
             slot.in_use = true;
             if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
             self.slot_keys[slot_index] = key;
-            self.primary_index.insert(raw_key, slot_index);
+            self.primary_index.insertAbsent(raw_key, slot_index);
             self.used_count += 1;
             return slot_index;
         }
@@ -1176,6 +1196,21 @@ test "indexed arena reuses tombstoned primary index slots" {
     try std.testing.expectEqualStrings("final", arena.get(99).?.record.label);
 }
 
+test "indexed arena claims the first tombstone for proven absent keys" {
+    const Arena = IndexedArena(TestSlot, 3, 4, testSlotId);
+    var arena = Arena.init();
+
+    _ = arena.insertIndex(1, .{ .record = .{ .id = 1, .label = "first" } }).?;
+    _ = arena.insertIndex(5, .{ .record = .{ .id = 5, .label = "second" } }).?;
+    try std.testing.expect(arena.remove(1));
+    _ = arena.insertIndex(9, .{ .record = .{ .id = 9, .label = "replacement" } }).?;
+
+    const shared_bucket = id_index.hash(1, 4);
+    try std.testing.expectEqual(@as(u64, 9), arena.primary_index.slots[shared_bucket].id);
+    try std.testing.expectEqualStrings("replacement", arena.get(9).?.record.label);
+    try std.testing.expectEqualStrings("second", arena.get(5).?.record.label);
+}
+
 test "indexed arena reserves explicit free indexes" {
     const Arena = IndexedArena(TestSlot, 4, 8, testSlotId);
     var arena = Arena.init();
@@ -1187,6 +1222,28 @@ test "indexed arena reserves explicit free indexes" {
 
     _ = arena.reserveAtIndex(42, 0).?;
     try std.testing.expectEqual(@as(usize, 1), arena.availableIndexExcluding(@as(usize, 3), testIndexExcluded).?);
+}
+
+test "indexed arena inserts complete values at explicit free indexes" {
+    const Arena = IndexedArena(TestSlot, 4, 8, testSlotId);
+    var arena = Arena.init();
+
+    const inserted_index = arena.insertIndexAt(41, 2, .{
+        .record = .{ .id = 41, .owner = 7, .label = "explicit-insert" },
+    }).?;
+    try std.testing.expectEqual(@as(usize, 2), inserted_index);
+    try std.testing.expect(arena.slots[inserted_index].in_use);
+    try std.testing.expectEqualStrings("explicit-insert", arena.get(41).?.record.label);
+    try std.testing.expectEqual(@as(?usize, null), arena.insertIndexAt(41, 1, .{
+        .record = .{ .id = 41, .owner = 8, .label = "duplicate" },
+    }));
+
+    try std.testing.expect(arena.remove(41));
+    const reused_index = arena.insertIndexAt(42, 2, .{
+        .record = .{ .id = 42, .owner = 9, .label = "reused" },
+    }).?;
+    try std.testing.expectEqual(inserted_index, reused_index);
+    try std.testing.expectEqualStrings("reused", arena.get(42).?.record.label);
 }
 
 test "indexed arena can reset membership while retaining unreachable payloads" {

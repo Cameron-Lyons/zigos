@@ -154,7 +154,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         const TargetGenerationArena = indexed_arena.IndexedArenaWithKey(u64, TargetGeneration, MAX_TABLE_TARGET_GENERATIONS, TABLE_INDEX_CAPACITY, targetGenerationKey);
         const HolderIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
         const TargetIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
-        const ReservedCapabilitySlot = struct {
+        const InsertedCapabilitySlot = struct {
             capability_id: u64,
             slot_index: usize,
         };
@@ -333,20 +333,31 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return inspected.capability;
         }
 
-        fn reserveNextCapabilitySlot(self: *Self, requested_slot_index: ?usize) ?ReservedCapabilitySlot {
+        fn insertNextCapabilitySlot(
+            self: *Self,
+            capability_template: Capability,
+            target_generation_index: u8,
+            requested_slot_index: ?usize,
+        ) ?InsertedCapabilitySlot {
             if (self.activeCapabilityCount() >= self.slots.slots.len) return null;
 
             var capability_id = normalizeCapabilityId(self.next_capability_id);
             var attempts: usize = 0;
             while (attempts <= self.slots.slots.len) : (attempts += 1) {
+                var capability = capability_template;
+                capability.id = capability_id;
+                const slot = CapabilitySlot{
+                    .capability = capability,
+                    .target_generation_index = target_generation_index,
+                };
                 const slot_index = if (requested_slot_index) |explicit_index|
-                    self.slots.reserveIndexAt(capability_id, explicit_index)
+                    self.slots.insertIndexAt(capability_id, explicit_index, slot)
                 else
-                    self.slots.reserveIndex(capability_id);
-                if (slot_index) |reserved_slot_index| {
+                    self.slots.insertIndex(capability_id, slot);
+                if (slot_index) |inserted_slot_index| {
                     return .{
                         .capability_id = capability_id,
-                        .slot_index = reserved_slot_index,
+                        .slot_index = inserted_slot_index,
                     };
                 }
                 capability_id = nextCapabilityIdAfter(capability_id);
@@ -363,17 +374,13 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn insertWithNextCapabilityId(self: *Self, capability_template: Capability, target_generation_index: u8) Error!*const Capability {
-            const reserved = self.reserveNextCapabilitySlot(null) orelse return error.TableFull;
-            var capability = capability_template;
-            capability.id = reserved.capability_id;
-            const inserted = self.commitReservedSlot(reserved.slot_index, capability, target_generation_index);
-            self.advanceNextCapabilityIdFrom(reserved.capability_id);
+            const inserted_slot = self.insertNextCapabilitySlot(capability_template, target_generation_index, null) orelse return error.TableFull;
+            const inserted = self.commitInsertedSlot(inserted_slot.slot_index);
+            self.advanceNextCapabilityIdFrom(inserted_slot.capability_id);
             return inserted;
         }
 
-        fn commitReservedSlot(self: *Self, slot_index: usize, capability: Capability, target_generation_index: u8) *const Capability {
-            self.slots.slots[slot_index].capability = capability;
-            self.slots.slots[slot_index].target_generation_index = target_generation_index;
+        fn commitInsertedSlot(self: *Self, slot_index: usize) *const Capability {
             self.indexSlot(slot_index);
             self.active_capability_count += 1;
             return &self.slots.slots[slot_index].capability;
@@ -391,9 +398,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         fn ensureTargetGenerationIndex(self: *Self, target: CapabilityTarget) Error!u8 {
             if (self.findTargetGenerationIndex(target)) |index| return index;
 
-            const index = self.target_generations.reserveIndex(targetKey(target)) orelse return error.TargetTableFull;
-            self.target_generations.slots[index].target = target;
-            self.target_generations.slots[index].generation = 1;
+            const index = self.target_generations.insertIndex(targetKey(target), .{
+                .target = target,
+                .generation = 1,
+            }) orelse return error.TargetTableFull;
             return @intCast(index);
         }
 
@@ -425,20 +433,17 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             while (new_target_index < reservation.new_target_count) : (new_target_index += 1) {
                 const table_index: usize = reservation.new_target_indexes[new_target_index];
                 const target = reservation.new_targets[new_target_index];
-                const reserved_index = self.target_generations.reserveIndexAt(targetKey(target), table_index) orelse {
+                _ = self.target_generations.insertIndexAt(targetKey(target), table_index, .{
+                    .target = target,
+                    .generation = 1,
+                }) orelse {
                     native_util.impossibleByInvariant("grant-plan reserved target-generation slot is still available");
                 };
-                self.target_generations.slots[reserved_index].target = target;
-                self.target_generations.slots[reserved_index].generation = 1;
             }
 
             for (plan.slice(), 0..) |entry, index| {
-                const reserved = self.reserveNextCapabilitySlot(reservation.slot_indexes[index]) orelse {
-                    native_util.impossibleByInvariant("grant plan slot reservations cover capability id allocation");
-                };
-                if (reserved.capability_id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
                 const granted_capability = Capability{
-                    .id = reserved.capability_id,
+                    .id = 0,
                     .holder = entry.request.holder,
                     .issuer = entry.request.issuer,
                     .target = entry.request.target,
@@ -448,8 +453,16 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                     .revocation_generation = self.targetGenerationAt(reservation.target_generation_indexes[index]).generation,
                     .audit = entry.request.audit,
                 };
-                const granted = self.commitReservedSlot(reserved.slot_index, granted_capability, reservation.target_generation_indexes[index]);
-                self.advanceNextCapabilityIdFrom(reserved.capability_id);
+                const inserted_slot = self.insertNextCapabilitySlot(
+                    granted_capability,
+                    reservation.target_generation_indexes[index],
+                    reservation.slot_indexes[index],
+                ) orelse {
+                    native_util.impossibleByInvariant("grant plan slot reservations cover capability id allocation");
+                };
+                if (inserted_slot.capability_id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
+                const granted = self.commitInsertedSlot(inserted_slot.slot_index);
+                self.advanceNextCapabilityIdFrom(inserted_slot.capability_id);
                 output[index] = granted.*;
             }
         }

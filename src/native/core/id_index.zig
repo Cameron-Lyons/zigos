@@ -71,6 +71,41 @@ pub inline fn insert(comptime capacity: usize, table: *[capacity]Slot, id: u64, 
     native_util.impossibleByInvariant("id index capacity covers all live slots");
 }
 
+/// Insert a key that the caller has already proved absent. Unlike insert(),
+/// this can claim the first tombstone immediately instead of probing onward
+/// for a possible duplicate, which keeps high-churn arena indexes bounded by
+/// the nearest reusable bucket.
+pub inline fn insertAbsent(
+    comptime capacity: usize,
+    table: *[capacity]Slot,
+    id: u64,
+    slot_index: usize,
+    comptime invariant_message: []const u8,
+) void {
+    if (id == 0) native_util.impossibleByInvariant(invariant_message);
+
+    var index = hash(id, capacity);
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty, .tombstone => {
+                table[index] = .{
+                    .state = .filled,
+                    .id = id,
+                    .slot_index = slot_index,
+                };
+                return;
+            },
+            .filled => if (table[index].id == id) {
+                native_util.impossibleByInvariant("absent id index insertion received a duplicate key");
+            },
+        }
+        index = (index + 1) % capacity;
+    }
+
+    native_util.impossibleByInvariant("id index capacity covers all live slots");
+}
+
 pub inline fn remove(comptime capacity: usize, table: *[capacity]Slot, id: u64) void {
     if (id == 0) return;
 
