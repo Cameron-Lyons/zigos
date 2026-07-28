@@ -27,7 +27,7 @@
     {
       "id": "elf-image-metadata",
       "target_anchor": "src/native/task/elf_image_inspector.zig",
-      "scope": "Freestanding ELF32 userspace image header, program-header table, and loadable segment metadata.",
+      "scope": "Freestanding little-endian ELF32 and ELF64 userspace image headers, program-header tables, and loadable segment metadata.",
       "seeds": [
         "7f454c46010101000000000000000000020003000100000000100000340000000000000000000000340020000100000000000000",
         "7f454c4602010100",
