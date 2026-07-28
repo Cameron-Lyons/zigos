@@ -49,6 +49,46 @@ pub fn addX86ArchitectureCompileCheck(
     return step;
 }
 
+pub fn addX86_64KernelCompileCheck(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+    userspace_images: userspace_build.ArtifactSet,
+) *std.Build.Step {
+    const target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const options = b.addOptions();
+    options.addOption(shared.BootProfile, "boot_profile", .zigos_native);
+    options.addOption(shared.KernelRole, "kernel_role", .production);
+    options.addOption(shared.SmokeFaultMode, "smoke_fault_mode", .none);
+
+    const kernel_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = false,
+    });
+    kernel_module.addImport("binary_cursor", b.createModule(.{
+        .root_source_file = b.path("src/native/core/binary_cursor.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    kernel_module.addImport("userspace_archive", userspace_images.production_archive_module);
+    kernel_module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
+    kernel_module.addOptions("build_options", options);
+    addKernelAssemblyFiles(b, kernel_module, .x86_64);
+
+    const object = b.addObject(.{
+        .name = "kernel-x86_64-compile-check",
+        .root_module = kernel_module,
+    });
+    const step = b.step("kernel-x86_64-compile-check", "Compile the kernel, descriptor tables, interrupts, and userspace transition for x86-64");
+    step.dependOn(&object.step);
+    return step;
+}
+
 pub fn addKernelProfiles(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -304,11 +344,7 @@ pub fn addKernelArtifact(
     }
 
     kernel_module.addOptions("build_options", options);
-    kernel_module.addAssemblyFile(b.path("src/boot/boot64.S"));
-    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
-    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
-    kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
-    kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry.S"));
+    addKernelAssemblyFiles(b, kernel_module, target.result.cpu.arch);
 
     const kernel = b.addExecutable(.{
         .name = name,
@@ -323,4 +359,26 @@ pub fn addKernelArtifact(
         .output_path = b.getInstallPath(.bin, name),
         .kernel_role = kernel_role,
     };
+}
+
+fn addKernelAssemblyFiles(
+    b: *std.Build,
+    kernel_module: *std.Build.Module,
+    cpu_arch: std.Target.Cpu.Arch,
+) void {
+    kernel_module.addAssemblyFile(b.path("src/boot/boot64.S"));
+    kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
+    switch (cpu_arch) {
+        .x86 => {
+            kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
+            kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
+            kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry.S"));
+        },
+        .x86_64 => {
+            kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt64.S"));
+            kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
+            kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry64.S"));
+        },
+        else => @panic("kernel target must use the x86 architecture family"),
+    }
 }

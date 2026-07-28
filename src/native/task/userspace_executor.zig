@@ -28,14 +28,14 @@ else
 
 const freestanding = if (builtin.target.os.tag == .freestanding)
     struct {
-        pub const gdt = @import("../../kernel/interrupts/gdt.zig");
+        pub const gdt = @import("../../kernel/interrupts/gdt_select.zig");
         pub const isr = @import("../../kernel/interrupts/isr.zig");
         pub const paging = @import("../../kernel/memory/paging.zig");
     }
 else
     struct {
         pub const gdt = struct {
-            pub fn setKernelStack(_: u32) void {}
+            pub fn setKernelStack(_: usize) void {}
         };
 
         pub const isr = struct {
@@ -171,8 +171,8 @@ pub fn reportTrapStackPeak() void {
 }
 
 pub export var zigos_userspace_resume_requested: u32 = 0;
-pub export var zigos_userspace_resume_esp: u32 = 0;
-pub export var zigos_userspace_resume_eip: u32 = 0;
+pub export var zigos_userspace_resume_esp: usize = 0;
+pub export var zigos_userspace_resume_eip: usize = 0;
 
 extern fn zigos_enter_userspace(entry: u32, stack_top: u32) callconv(.c) u32;
 
@@ -395,7 +395,7 @@ pub const Executor = struct {
         self.initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
         self.kernel_page_directory_ptr = @intFromPtr(kernel_page_directory);
-        freestanding.gdt.setKernelStack(@truncate(self.trapStackTop()));
+        freestanding.gdt.setKernelStack(self.trapStackTop());
         const instruction_pointer = if (mapping.resume_valid)
             mapping.resume_instruction_pointer
         else
@@ -673,11 +673,17 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     if (executor.active_task_id == 0) return;
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
+    const instruction_pointer = std.math.cast(u32, frame.eip) orelse
+        native_util.impossibleByInvariant("userspace instruction pointer exceeds the 32-bit sandbox");
+    const stack_pointer = std.math.cast(u32, frame.useresp) orelse
+        native_util.impossibleByInvariant("userspace stack pointer exceeds the 32-bit sandbox");
+    const counter = std.math.cast(u32, frame.eax) orelse
+        native_util.impossibleByInvariant("userspace trap counter exceeds its ABI width");
     @call(.never_inline, recordTrapState, .{
         executor,
-        frame.eip,
-        frame.useresp,
-        frame.eax,
+        instruction_pointer,
+        stack_pointer,
+        counter,
     });
 
     mapping.resume_valid = true;
@@ -710,17 +716,19 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
         freestanding.paging.page_fault_handler(frame);
         return;
     };
+    const error_code = std.math.cast(u32, frame.err_code) orelse
+        native_util.impossibleByInvariant("userspace page-fault code exceeds its ABI width");
     @call(.never_inline, recordUserPageFault, .{
         executor,
         executor.active_task_id,
         mapping.address_space_id,
         faulting_address,
-        frame.err_code,
+        error_code,
     });
 
     mapping.page_fault_count += 1;
     mapping.last_fault_address = faulting_address;
-    mapping.last_fault_error_code = frame.err_code;
+    mapping.last_fault_error_code = error_code;
 
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
