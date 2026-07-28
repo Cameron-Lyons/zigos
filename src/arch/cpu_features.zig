@@ -1,18 +1,10 @@
-//! CPUID-based detection of supervisor-mode hardening features and the
-//! CR4 writes that enable them. Detection is dynamic so the same kernel
-//! image hardens itself on capable hardware and still boots on CPUs that
-//! predate these features.
+//! Hardware CPUID collection and supervisor-protection enablement for the
+//! mandatory modern CPU baseline.
 
 const x86 = @import("x86.zig");
-
-pub const Features = struct {
-    smep: bool = false,
-    umip: bool = false,
-};
+pub const baseline = @import("cpu_baseline.zig");
 
 const eflags_id: u32 = 1 << 21;
-const leaf7_ebx_smep: u32 = 1 << 7;
-const leaf7_ecx_umip: u32 = 1 << 2;
 
 const CpuidResult = struct {
     eax: u32,
@@ -56,22 +48,35 @@ fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
     return .{ .eax = eax, .ebx = ebx, .ecx = ecx, .edx = edx };
 }
 
-pub fn detect() Features {
+pub fn detect() baseline.Features {
     if (!cpuidSupported()) return .{};
-    if (cpuid(0, 0).eax < 7) return .{};
-    const leaf7 = cpuid(7, 0);
-    return .{
-        .smep = (leaf7.ebx & leaf7_ebx_smep) != 0,
-        .umip = (leaf7.ecx & leaf7_ecx_umip) != 0,
-    };
+
+    var registers = baseline.Registers{ .cpuid_available = true };
+    registers.max_basic_leaf = cpuid(0, 0).eax;
+    if (registers.max_basic_leaf >= 1) {
+        registers.leaf1_edx = cpuid(1, 0).edx;
+    }
+    if (registers.max_basic_leaf >= 7) {
+        const leaf7 = cpuid(7, 0);
+        registers.leaf7_ebx = leaf7.ebx;
+        registers.leaf7_ecx = leaf7.ecx;
+    }
+
+    registers.max_extended_leaf = cpuid(0x8000_0000, 0).eax;
+    if (registers.max_extended_leaf >= 0x8000_0001) {
+        registers.extended1_edx = cpuid(0x8000_0001, 0).edx;
+    }
+    return baseline.decode(registers);
 }
 
-/// Turn on every supported supervisor protection. SMEP makes the CPU fault
-/// on any ring-0 instruction fetch from a user-accessible page; UMIP stops
-/// ring 3 from reading descriptor-table addresses via sgdt/sidt/sldt/str/smsw.
-pub fn enable(features: Features) void {
+/// Turn on the supervisor protections that are safe with the current memory
+/// access model. SMEP blocks ring-0 execution from user pages; UMIP hides
+/// descriptor-table state from ring 3. SMAP is required by the baseline but is
+/// enabled with the controlled user-copy primitives in the paging migration.
+pub fn enableSupervisorProtections(features: baseline.Features) void {
+    if (!baseline.isSupported(features)) unreachable;
     var cr4 = x86.readCr4();
-    if (features.smep) cr4 |= x86.CR4_SMEP;
-    if (features.umip) cr4 |= x86.CR4_UMIP;
+    cr4 |= x86.CR4_SMEP;
+    cr4 |= x86.CR4_UMIP;
     x86.writeCr4(cr4);
 }
