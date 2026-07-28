@@ -15,7 +15,7 @@ storage.volume.compact_checkpoint 132924064.00 200
 package_revision.rollforward_rollback 73415.49 200
 indexing_service.query_ranked 12322.83 200
 media_print.submit_complete 56581.70 200
-event_ledger.export_redacted 231815.96 200
+event_ledger.export_redacted 76659.00 200
 secret_store.import_handle_export 28378.44 200
 denial_explanation.render_policy_hint 3339.58 200
 sync_service.overlay_session_flow 14666.79 200

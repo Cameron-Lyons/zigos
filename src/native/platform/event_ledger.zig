@@ -222,6 +222,26 @@ pub const Event = struct {
     }
 };
 
+const EventInput = struct {
+    kind: EventKind,
+    tick: u64,
+    subject: principal.PrincipalId,
+    task_id: u64 = 0,
+    workspace_id: u64 = 0,
+    related_id: u64 = 0,
+    detail_code: u32 = 0,
+    service_class: contract.ServiceClass = .task_runtime,
+    permission_kind: ?manifest.PermissionKind = null,
+    allowed: bool = false,
+    denial_reason: abi.DenialReason = .none,
+    user_approval_can_resolve: bool = false,
+    retry_safe: bool = false,
+    policy_label: []const u8 = "",
+    missing_capability: []const u8 = "",
+    detail_protected: bool = false,
+    detail: []const u8 = "",
+};
+
 pub const Error = object_store.Error || workspace.Error || error{
     ConsentRequired,
     CorruptState,
@@ -348,13 +368,10 @@ pub const Ledger = struct {
             .denial_reason = denial_reason,
             .user_approval_can_resolve = explanation.user_approval_can_resolve,
             .retry_safe = explanation.retry_safe,
-            .policy_label_len = clampedExplanationLen(explanation.policySlice()),
-            .policy_label = copyExplanationTextInto(explanation.policySlice()),
-            .missing_capability_len = clampedExplanationLen(explanation.missingCapabilitySlice()),
-            .missing_capability = copyExplanationTextInto(explanation.missingCapabilitySlice()),
+            .policy_label = explanation.policySlice(),
+            .missing_capability = explanation.missingCapabilitySlice(),
             .detail_protected = protected,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -376,8 +393,7 @@ pub const Ledger = struct {
             .permission_kind = permission_kind,
             .allowed = approved,
             .detail_protected = protected,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -398,8 +414,7 @@ pub const Ledger = struct {
             .related_id = capability_id,
             .permission_kind = permission_kind,
             .allowed = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -420,8 +435,7 @@ pub const Ledger = struct {
             .related_id = capability_id,
             .permission_kind = permission_kind,
             .allowed = false,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -438,8 +452,7 @@ pub const Ledger = struct {
             .related_id = notification.id,
             .detail_code = @intFromEnum(notification.reason),
             .allowed = !notification.suppressed,
-            .detail_len = clampedDetailLen(notification.detailSlice()),
-            .detail = copyTextInto(notification.detailSlice()),
+            .detail = notification.detailSlice(),
         });
     }
 
@@ -458,8 +471,7 @@ pub const Ledger = struct {
             .detail_code = @intFromEnum(flow.kind),
             .permission_kind = if (flow.kind == .review_permission_request) flow.permission_kind else null,
             .allowed = flow.approved,
-            .detail_len = clampedDetailLen(flow.detailSlice()),
-            .detail = copyTextInto(flow.detailSlice()),
+            .detail = flow.detailSlice(),
         });
     }
 
@@ -483,8 +495,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -504,8 +515,7 @@ pub const Ledger = struct {
             .task_id = task_id,
             .detail_code = code,
             .detail_protected = protected,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -534,8 +544,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -547,14 +556,14 @@ pub const Ledger = struct {
         code: u32,
         detail: []const u8,
     ) Error!void {
-        var event = zeroEvent();
-        event.kind = .process_crash;
-        event.tick = tick;
-        event.subject = service_subject;
-        event.service_class = service_class;
-        event.detail_code = code;
-        event.detail_len = copyText(&event.detail, detail);
-        try self.appendEvent(&event);
+        try self.append(.{
+            .kind = .process_crash,
+            .tick = tick,
+            .subject = service_subject,
+            .service_class = service_class,
+            .detail_code = code,
+            .detail = detail,
+        });
     }
 
     pub fn recordDriverRestart(
@@ -565,14 +574,14 @@ pub const Ledger = struct {
         tick: u64,
         detail: []const u8,
     ) Error!void {
-        var event = zeroEvent();
-        event.kind = .driver_restart;
-        event.tick = tick;
-        event.subject = service_subject;
-        event.service_class = service_class;
-        event.related_id = device_capability_id;
-        event.detail_len = copyText(&event.detail, detail);
-        try self.appendEvent(&event);
+        try self.append(.{
+            .kind = .driver_restart,
+            .tick = tick,
+            .subject = service_subject,
+            .service_class = service_class,
+            .related_id = device_capability_id,
+            .detail = detail,
+        });
     }
 
     pub fn recordUpdateTransition(
@@ -591,8 +600,7 @@ pub const Ledger = struct {
             .related_id = slot_index,
             .detail_code = @intFromEnum(failure),
             .allowed = !rolled_back,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -610,8 +618,7 @@ pub const Ledger = struct {
             .subject = subject,
             .workspace_id = workspace_id,
             .detail_protected = protected,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -629,8 +636,7 @@ pub const Ledger = struct {
             .subject = subject,
             .related_id = device_id.serial,
             .allowed = trusted,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -649,8 +655,7 @@ pub const Ledger = struct {
             .related_id = policy_id,
             .detail_code = @intFromEnum(action),
             .allowed = action != .revoked,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -675,8 +680,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -701,8 +705,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -725,8 +728,7 @@ pub const Ledger = struct {
             .detail_code = @intFromEnum(sensitivity),
             .allowed = allowed,
             .detail_protected = manifest.isSensitive(sensitivity),
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -745,8 +747,7 @@ pub const Ledger = struct {
             .task_id = task_id,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -769,8 +770,7 @@ pub const Ledger = struct {
             .detail_code = @intFromEnum(sensitivity),
             .allowed = allowed,
             .detail_protected = manifest.isSensitive(sensitivity),
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -792,8 +792,7 @@ pub const Ledger = struct {
             .related_id = receipt_id,
             .allowed = allowed,
             .detail_protected = protected,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -815,8 +814,7 @@ pub const Ledger = struct {
             .detail_code = retention_days,
             .allowed = allowed,
             .detail_protected = protected,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -841,8 +839,7 @@ pub const Ledger = struct {
             .permission_kind = permission_kind,
             .allowed = action != .expired,
             .detail_protected = protected,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -864,8 +861,7 @@ pub const Ledger = struct {
             .detail_code = @intFromEnum(action),
             .allowed = action != .revoked,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -893,8 +889,7 @@ pub const Ledger = struct {
             .detail_code = (@as(u32, autonomous_actions) << 16) | code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -922,8 +917,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -950,8 +944,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -980,8 +973,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1007,8 +999,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1038,8 +1029,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = !delayed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1071,8 +1061,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1101,8 +1090,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1131,8 +1119,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1162,8 +1149,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1194,8 +1180,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1230,8 +1215,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1266,8 +1250,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1299,8 +1282,7 @@ pub const Ledger = struct {
             .detail_code = code,
             .allowed = allowed,
             .detail_protected = true,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
+            .detail = detail,
         });
     }
 
@@ -1718,20 +1700,36 @@ pub const Ledger = struct {
             if (!slot.in_use) continue;
             var event = slot.event;
             event.sequence = 0;
-            try self.append(event);
+            try self.appendEvent(&event);
         }
     }
 
-    fn append(self: *Ledger, event: Event) Error!void {
+    fn append(self: *Ledger, input: EventInput) Error!void {
+        var event = Event{
+            .kind = input.kind,
+            .tick = input.tick,
+            .subject = input.subject,
+            .task_id = input.task_id,
+            .workspace_id = input.workspace_id,
+            .related_id = input.related_id,
+            .detail_code = input.detail_code,
+            .service_class = input.service_class,
+            .permission_kind = input.permission_kind,
+            .allowed = input.allowed,
+            .denial_reason = input.denial_reason,
+            .user_approval_can_resolve = input.user_approval_can_resolve,
+            .retry_safe = input.retry_safe,
+            .detail_protected = input.detail_protected,
+        };
+        event.policy_label_len = copyText(&event.policy_label, input.policy_label);
+        event.missing_capability_len = copyText(&event.missing_capability, input.missing_capability);
+        event.detail_len = copyText(&event.detail, input.detail);
         try self.appendEvent(&event);
     }
 
     fn appendEvent(self: *Ledger, event: *const Event) Error!void {
         const sequence = self.next_sequence;
-        var stored_event = event.*;
-        stored_event.sequence = sequence;
-        const event_slot = EventSlot{ .event = stored_event };
-        const event_index = self.events.insertIndex(sequence, event_slot) orelse reserve: {
+        const event_index = self.events.insertIndex(sequence, .{ .event = event.* }) orelse reserve: {
             // The live arena is a bounded most-recent-N ring: the persistence layer
             // already stages deletion of events older than MAX_PERSISTED_EVENTS
             // (see persistRange), so when the in-memory arena fills we evict the
@@ -1739,9 +1737,10 @@ pub const Ledger = struct {
             // tamper-evident audit ledger would permanently stop accepting capability,
             // crash, and sensitive-capture records after MAX_EVENTS lifetime events.
             if (!self.evictOldestEvent()) return error.EventTableFull;
-            break :reserve self.events.insertIndex(sequence, event_slot) orelse return error.EventTableFull;
+            break :reserve self.events.insertIndex(sequence, .{ .event = event.* }) orelse return error.EventTableFull;
         };
         const slot = &self.events.slots[event_index];
+        slot.event.sequence = sequence;
         self.next_sequence += 1;
         self.indexEvent(event_index) catch |err| {
             _ = self.events.removeIndex(event_index);
@@ -2171,26 +2170,6 @@ fn zeroEvent() Event {
 
 fn zeroPersistentEvent() PersistentEvent {
     return .{};
-}
-
-fn clampedDetailLen(src: []const u8) usize {
-    return @min(src.len, MAX_DETAIL_BYTES);
-}
-
-fn clampedExplanationLen(src: []const u8) usize {
-    return @min(src.len, denial_explanation.MAX_LABEL_BYTES);
-}
-
-fn copyTextInto(src: []const u8) [MAX_DETAIL_BYTES]u8 {
-    var out = [_]u8{0} ** MAX_DETAIL_BYTES;
-    _ = copyText(&out, src);
-    return out;
-}
-
-fn copyExplanationTextInto(src: []const u8) [denial_explanation.MAX_LABEL_BYTES]u8 {
-    var out = [_]u8{0} ** denial_explanation.MAX_LABEL_BYTES;
-    _ = copyText(&out, src);
-    return out;
 }
 
 fn updateFailureLabel(code: u32) []const u8 {
