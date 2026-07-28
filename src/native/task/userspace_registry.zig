@@ -17,6 +17,7 @@ pub const FLAG_NETWORK_BOUNDARY = userspace_flags.FLAG_NETWORK_BOUNDARY;
 pub const FLAG_POLICY_BOUNDARY = userspace_flags.FLAG_POLICY_BOUNDARY;
 pub const FLAG_DRIVER_BOUNDARY = userspace_flags.FLAG_DRIVER_BOUNDARY;
 pub const FLAG_MMU_PROOF_PROBE = userspace_flags.FLAG_MMU_PROOF_PROBE;
+pub const FLAG_NX_PROOF_PROBE = userspace_flags.FLAG_NX_PROOF_PROBE;
 
 pub const ComponentClass = enum(u8) {
     session_manager,
@@ -223,8 +224,8 @@ comptime {
         @compileError("production userspace catalog must contain exactly 24 images");
     }
     for (production_boot_image_specs) |spec| {
-        if ((spec.contract_flags & FLAG_MMU_PROOF_PROBE) != 0) {
-            @compileError("production userspace catalog cannot enable the MMU isolation probe");
+        if ((spec.contract_flags & (FLAG_MMU_PROOF_PROBE | FLAG_NX_PROOF_PROBE)) != 0) {
+            @compileError("production userspace catalog cannot enable MMU verification probes");
         }
     }
 }

@@ -176,6 +176,10 @@ pin. Run Zig through `./scripts/zig.sh` so the repo can resolve `ZIG_BIN`, the
 active Zig, `mise`, or local fallback binaries in the right order.
 The build accepts only the `x86_64-freestanding-none` target; 32-bit kernels and
 userspace images are not compatibility outputs.
+After validating the required CPU baseline, the kernel enables EFER.NXE and
+maps user code read-only/executable while data, mailboxes, and stacks are NX.
+The verification image proves the boundary with a real user-mode instruction-
+fetch protection fault before continuing its separate unmapped-memory proof.
 
 ## Setup
 

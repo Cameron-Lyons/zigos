@@ -31,7 +31,7 @@ if [ ! -s "$LOG_PATH" ]; then
   exit 1
 fi
 
-for marker in "BOOT:START" "BOOT:ROLE:${EXPECTED_ROLE}" "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY" "Welcome to Zigos" "Initializing GDT" "BOOT:CORE_READY"; do
+for marker in "BOOT:START" "BOOT:ROLE:${EXPECTED_ROLE}" "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY" "ZIGOS:CPU:NX:ENABLED" "Welcome to Zigos" "Initializing GDT" "BOOT:CORE_READY"; do
   if ! grep -Fq "$marker" "$LOG_PATH"; then
     echo "UEFI boot test failed: missing marker '$marker'" >&2
     cat "$LOG_PATH" >&2

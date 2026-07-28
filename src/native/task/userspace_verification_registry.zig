@@ -60,7 +60,7 @@ pub const verification_only_boot_image_specs = [_]ImageSpec{
         .entry = "zigos.proof.mmu-isolation",
         .role_tag = userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG,
         .heartbeat_increment = 22,
-        .contract_flags = production_registry.FLAG_MMU_PROOF_PROBE,
+        .contract_flags = production_registry.FLAG_MMU_PROOF_PROBE | production_registry.FLAG_NX_PROOF_PROBE,
     }),
 };
 
@@ -140,6 +140,7 @@ test "verification registry keeps the freestanding MMU isolation proof" {
 
     try std.testing.expectEqual(userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG, proof.role_tag);
     try std.testing.expect((proof.contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
+    try std.testing.expect((proof.contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
     try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.component_class);
     try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", proof.artifact_name);
     try std.testing.expectEqualStrings("zigos.proof.mmu-isolation", proof.entry);

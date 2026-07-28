@@ -176,6 +176,7 @@ fn addUserspaceCompile(
     options.addOption(u32, "heartbeat_increment", spec.heartbeat_increment);
     options.addOption(u32, "contract_flags", spec.contract_flags);
     options.addOption(bool, "run_mmu_isolation_probe", (spec.contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
+    options.addOption(bool, "run_nx_isolation_probe", (spec.contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
     options.addOption(u8, "service_kind", @intFromEnum(spec.service_kind));
 
     const module = b.createModule(.{

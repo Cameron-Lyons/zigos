@@ -50,6 +50,7 @@ const verification_orchestration_symbol_prefixes = [_][]const u8{
 };
 const verification_only_signatures = [_][]const u8{
     "ZIGOS:RUNTIME_PROOF:PROCESS_ISOLATION:PASS",
+    "ZIGOS:RUNTIME_PROOF:USER_NX_FAULT:PASS",
     "ZIGOS:SERVICE_BOOT:SUPERVISOR:CRASH_RECORDED",
     "ZIGOS:PLATFORM:HEALTH_CHECKS:BOOT_ROLLBACK",
     "ZIGOS:NOTES_DAILY:COMPLETE",

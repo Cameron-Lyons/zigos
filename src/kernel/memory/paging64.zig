@@ -50,6 +50,7 @@ pub const UserAddressSpace = struct {
 
 pub const UserPermissions = struct {
     writable: bool,
+    executable: bool = false,
     write_through: bool = false,
     cache_disabled: bool = false,
 };
@@ -60,6 +61,7 @@ pub const UserMapError = error{
     AddressOverflow,
     KernelMappingCollision,
     AlreadyMapped,
+    WritableExecutable,
 };
 
 pub const UserWriteError = error{
@@ -222,6 +224,7 @@ fn mapFailure(error_value: UserMapError) noreturn {
         error.InvalidRange => haltWithMessage("Attempted to map an unaligned page!\n"),
         error.KernelMappingCollision => haltWithMessage("User mapping collided with inherited kernel memory!\n"),
         error.AlreadyMapped => haltWithMessage("Attempted to replace an owned user page!\n"),
+        error.WritableExecutable => haltWithMessage("Attempted to create a writable executable user page!\n"),
         error.AddressOverflow => haltWithMessage("Page mapping address overflow!\n"),
     }
 }
@@ -326,6 +329,7 @@ pub fn mapOwnedUserRange(
     permissions: UserPermissions,
 ) UserMapError!void {
     if (pageOffset(virtual_start) != 0 or size_bytes == 0) return error.InvalidRange;
+    if (permissions.writable and permissions.executable) return error.WritableExecutable;
     if (size_bytes > MAX_U32 - (PAGE_SIZE - 1)) return error.AddressOverflow;
 
     const mapped_size = (size_bytes + PAGE_SIZE - 1) & ~PAGE_OFFSET_MASK;
@@ -349,8 +353,16 @@ pub fn mapOwnedUserRange(
         if (permissions.writable) flags |= PAGE_WRITABLE;
         if (permissions.write_through) flags |= PAGE_WRITE_THROUGH;
         if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
-        page_entry.* = tableEntry(page_phys, leafFlags(flags), PAGE_OWNER_USER_PRIVATE);
+        const entry_flags = table64.withExecutePermission(leafFlags(flags), permissions.executable);
+        page_entry.* = tableEntry(page_phys, entry_flags, PAGE_OWNER_USER_PRIVATE);
     }
+}
+
+pub fn ownedUserPageIsExecutable(space: *const UserAddressSpace, virtual_address: u32) ?bool {
+    const entry = lookupLeaf(space.directory, virtual_address) orelse return null;
+    if (!entryPresent(entry.*) or entryOwner(entry.*) != PAGE_OWNER_USER_PRIVATE) return null;
+    if ((entry.* & ENTRY_USER) == 0) return null;
+    return table64.isExecutable(entry.*);
 }
 
 pub fn writeOwnedUserRange(
