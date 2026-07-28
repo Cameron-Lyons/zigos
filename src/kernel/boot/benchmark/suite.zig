@@ -1586,7 +1586,7 @@ fn benchmarkUpdateHealthValidation(iteration: u32) u64 {
         &update_health_context.ledger,
         15 + iteration,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    const event = update_health_context.ledger.latestKindPtr(.update_transition) orelse unreachable;
+    const event = update_health_context.ledger.latestKind(.update_transition) orelse unreachable;
     return result.evaluation.core_services_started +
         @as(u64, @intFromBool(result.evaluation.report.isHealthy())) +
         @as(u64, @intFromBool(result.evaluation.network_service_ok)) +
@@ -1649,7 +1649,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         compositor.restart_count +
         @as(u64, @intFromBool(recovery.visible_impact)) +
         @as(u64, @intFromBool(recovery.notification_id != null)) +
-        ledger.latestKindPtr(.driver_restart).?.sequence;
+        ledger.latestKind(.driver_restart).?.sequence;
 }
 
 fn qualityBatterySaverBatchDelay() u64 {
