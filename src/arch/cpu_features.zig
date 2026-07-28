@@ -4,33 +4,12 @@
 const x86 = @import("x86.zig");
 pub const baseline = @import("cpu_baseline.zig");
 
-const eflags_id: u32 = 1 << 21;
-
 const CpuidResult = struct {
     eax: u32,
     ebx: u32,
     ecx: u32,
     edx: u32,
 };
-
-fn cpuidSupported() bool {
-    const toggled = asm volatile (
-        \\pushfl
-        \\popl %[flags]
-        \\movl %[flags], %%ecx
-        \\xorl $0x200000, %[flags]
-        \\pushl %[flags]
-        \\popfl
-        \\pushfl
-        \\popl %[flags]
-        \\xorl %%ecx, %[flags]
-        \\pushl %%ecx
-        \\popfl
-        : [flags] "=&r" (-> u32),
-        :
-        : .{ .ecx = true, .cc = true });
-    return (toggled & eflags_id) != 0;
-}
 
 fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
     var eax: u32 = undefined;
@@ -49,8 +28,8 @@ fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
 }
 
 pub fn detect() baseline.Features {
-    if (!cpuidSupported()) return .{};
-
+    // CPUID predates the mandatory x86-64 baseline by a decade. Unsupported
+    // pre-Pentium processors are deliberately outside the platform contract.
     var registers = baseline.Registers{ .cpuid_available = true };
     registers.max_basic_leaf = cpuid(0, 0).eax;
     if (registers.max_basic_leaf >= 1) {

@@ -25,6 +25,30 @@ pub const KernelSteps = struct {
     recovery: *std.Build.Step,
 };
 
+pub fn addX86ArchitectureCompileCheck(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step {
+    const step = b.step("x86-architecture-compile-check", "Compile privileged x86 helpers for 32-bit and 64-bit targets");
+    for ([_]std.Target.Cpu.Arch{ .x86, .x86_64 }) |cpu_arch| {
+        const target = b.resolveTargetQuery(.{
+            .cpu_arch = cpu_arch,
+            .os_tag = .freestanding,
+            .abi = .none,
+        });
+        const object = b.addObject(.{
+            .name = b.fmt("x86-architecture-{s}-compile-check", .{@tagName(cpu_arch)}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/arch/x86_compile_check.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        step.dependOn(&object.step);
+    }
+    return step;
+}
+
 pub fn addKernelProfiles(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
