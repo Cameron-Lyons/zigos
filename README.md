@@ -5,10 +5,10 @@
 Zigos is a native-only operating system prototype written in Zig, currently
 focused on proving one narrow daily-driver slice for notes and documents before
 trying to become a general desktop OS. The current tree builds a freestanding
-x86 kernel, embeds a catalog of native userspace service and component images,
-boots under QEMU with a dedicated native storage image, and verifies capability,
-service, storage, recovery, and production readiness behavior through Zig tests
-plus QEMU proof runs.
+x86-64 kernel, embeds a catalog of ELF64 native userspace service and component
+images, boots under QEMU with a dedicated native storage image, and verifies
+capability, service, storage, recovery, and production readiness behavior
+through Zig tests plus QEMU proof runs.
 
 The project is not organized around a POSIX shell, POSIX syscall ABI, or
 VFS-rooted userland. The platform model is capability-first, task-scoped,
@@ -155,9 +155,9 @@ Use the pinned toolchain and repo entrypoints:
 - `nasm`
 - `qemu-system-x86_64`
 - A CPU with CPUID, SSE2, long mode, NX, SMEP, SMAP, and UMIP. Zigos rejects
-  older x86 CPUs instead of weakening its security contract. The current
-  bootstrap still enters through 32-bit Multiboot while the kernel migrates to
-  long-mode paging.
+  older x86 CPUs instead of weakening its security contract. GRUB Multiboot2
+  enters the bootstrap in 32-bit protected mode; the bootstrap immediately
+  installs four-level paging and enters the x86-64 Zig kernel.
 - OVMF or edk2-ovmf firmware for the production and verification UEFI tests
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
@@ -174,6 +174,8 @@ For ISO and full disk-image workflows, install the tools verified by
 `build.zig` and `./scripts/zig.sh` reject any Zig version other than the repo
 pin. Run Zig through `./scripts/zig.sh` so the repo can resolve `ZIG_BIN`, the
 active Zig, `mise`, or local fallback binaries in the right order.
+The build accepts only the `x86_64-freestanding-none` target; 32-bit kernels and
+userspace images are not compatibility outputs.
 
 ## Setup
 

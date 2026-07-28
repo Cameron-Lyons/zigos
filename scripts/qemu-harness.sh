@@ -109,6 +109,17 @@ qemu_harness_build_kernel_command() {
   qemu_harness_require_binary
   qemu_harness_load_extra_args
 
+  if [ -n "${QEMU_BOOT_ISO:-}" ]; then
+    qemu_harness_build_bios_cdrom_command \
+      "$QEMU_BOOT_ISO" \
+      "$memory_size" \
+      "$serial_target" \
+      "$include_debug_exit" \
+      "$include_no_shutdown"
+    QEMU_HARNESS_COMMAND+=("$@")
+    return
+  fi
+
   QEMU_HARNESS_COMMAND=(
     "$(qemu_harness_binary)"
     -kernel "$kernel_path"
@@ -140,6 +151,8 @@ qemu_harness_build_bios_cdrom_command() {
   local iso_path="${1:?ISO path required}"
   local memory_size="${2:?QEMU memory size required}"
   local serial_target="${3:?serial target required}"
+  local include_debug_exit="${4:-yes}"
+  local include_no_shutdown="${5:-no}"
 
   qemu_harness_require_binary
   qemu_harness_load_extra_args
@@ -154,8 +167,13 @@ qemu_harness_build_bios_cdrom_command() {
     -serial "$serial_target"
     -monitor none
     -no-reboot
-    -device "$qemu_harness_debug_exit_device"
   )
+  if [ "$include_no_shutdown" = "yes" ]; then
+    QEMU_HARNESS_COMMAND+=(-no-shutdown)
+  fi
+  if [ "$include_debug_exit" = "yes" ]; then
+    QEMU_HARNESS_COMMAND+=(-device "$qemu_harness_debug_exit_device")
+  fi
   if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
     QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
   fi

@@ -3,6 +3,7 @@ const native_modules = @import("native_modules.zig");
 const production_registry = @import("../src/native/task/userspace_registry.zig");
 const verification_registry = @import("../src/native/task/userspace_verification_registry.zig");
 const userspace_layout = @import("../src/native/core/userspace_layout.zig");
+const bootloader_source_path = "src/boot/boot_x86_64.S";
 
 pub const production_artifact_count = production_registry.production_boot_image_specs.len;
 pub const verification_only_artifact_count = verification_registry.verification_only_boot_image_specs.len;
@@ -23,13 +24,6 @@ pub const ArtifactSet = struct {
     verification_manifest_module: *std.Build.Module,
 };
 
-pub const X86_64ArtifactSet = struct {
-    step: *std.Build.Step,
-    production_compile_steps: [production_artifact_count]*std.Build.Step.Compile,
-    production_archive_module: *std.Build.Module,
-    production_manifest_module: *std.Build.Module,
-};
-
 const BuiltArtifact = struct {
     compile_step: *std.Build.Step.Compile,
     install_step: *std.Build.Step,
@@ -40,6 +34,7 @@ pub fn addUserspaceArtifacts(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) ArtifactSet {
+    std.debug.assert(target.result.cpu.arch == .x86_64);
     const step = b.step("userspace-images", "Build userspace image artifacts");
     const production_step = b.step("userspace-production-images", "Build production userspace image artifacts");
     const verification_step = b.step("userspace-verification-images", "Build production and verification userspace image artifacts");
@@ -54,8 +49,8 @@ pub fn addUserspaceArtifacts(
     const production_manifest_source = production_archive_dir.path(b, "production_artifact_manifest.zig");
     production_archive_run.addArg("zigos_native");
     production_archive_run.addArg("production");
-    production_archive_run.addArg(bootloaderSourcePath(target.result.cpu.arch));
-    production_archive_run.addFileArg(b.path(bootloaderSourcePath(target.result.cpu.arch)));
+    production_archive_run.addArg(bootloader_source_path);
+    production_archive_run.addFileArg(b.path(bootloader_source_path));
 
     const verification_archive_run = b.addRunArtifact(archive_generator);
     const verification_archive_dir = verification_archive_run.addOutputDirectoryArg("userspace-verification-archive");
@@ -63,8 +58,8 @@ pub fn addUserspaceArtifacts(
     const verification_manifest_source = verification_archive_dir.path(b, "verification_artifact_manifest.zig");
     verification_archive_run.addArg("zigos_native");
     verification_archive_run.addArg("verification");
-    verification_archive_run.addArg(bootloaderSourcePath(target.result.cpu.arch));
-    verification_archive_run.addFileArg(b.path(bootloaderSourcePath(target.result.cpu.arch)));
+    verification_archive_run.addArg(bootloader_source_path);
+    verification_archive_run.addFileArg(b.path(bootloader_source_path));
 
     var production_compile_steps: [production_artifact_count]*std.Build.Step.Compile = undefined;
     var verification_only_compile_steps: [verification_only_artifact_count]*std.Build.Step.Compile = undefined;
@@ -91,6 +86,8 @@ pub fn addUserspaceArtifacts(
     verification_step.dependOn(&verification_archive_run.step);
     step.dependOn(production_step);
     step.dependOn(verification_step);
+    const x86_64_compile_check = b.step("userspace-x86_64-compile-check", "Compile and inspect the complete production userspace catalog for the long-mode target");
+    x86_64_compile_check.dependOn(production_step);
 
     return .{
         .step = step,
@@ -114,65 +111,6 @@ pub fn addUserspaceArtifacts(
         .verification_manifest_module = b.createModule(.{
             .root_source_file = verification_manifest_source,
         }),
-    };
-}
-
-pub fn addX86_64Artifacts(
-    b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
-) X86_64ArtifactSet {
-    const target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
-        .os_tag = .freestanding,
-        .abi = .none,
-    });
-    const userspace_modules = native_modules.addUserspaceRuntimeModules(b, target, optimize);
-    const native_archive_deps_module = b.createModule(.{
-        .root_source_file = b.path("src/native/archive_generator_deps.zig"),
-    });
-    const archive_generator = addArchiveGenerator(b, userspace_modules.descriptor, native_archive_deps_module);
-    const archive_run = b.addRunArtifact(archive_generator);
-    const archive_dir = archive_run.addOutputDirectoryArg("userspace-x86_64-production-archive");
-    const archive_source = archive_dir.path(b, "userspace_archive.zig");
-    const manifest_source = archive_dir.path(b, "production_artifact_manifest.zig");
-    archive_run.addArg("zigos_native");
-    archive_run.addArg("production");
-    archive_run.addArg("src/boot/boot_x86_64.S");
-    archive_run.addFileArg(b.path("src/boot/boot_x86_64.S"));
-
-    var production_compile_steps: [production_artifact_count]*std.Build.Step.Compile = undefined;
-    for (production_registry.production_boot_image_specs, 0..) |spec, artifact_index| {
-        const artifact = addUserspaceCompile(
-            b,
-            target,
-            optimize,
-            userspace_modules,
-            spec,
-            b.fmt("x86_64-{s}", .{spec.artifact_name}),
-        );
-        production_compile_steps[artifact_index] = artifact;
-        archive_run.addArtifactArg(artifact);
-    }
-
-    const step = b.step("userspace-x86_64-compile-check", "Compile and inspect the complete production userspace catalog for the long-mode target");
-    step.dependOn(&archive_run.step);
-    return .{
-        .step = step,
-        .production_compile_steps = production_compile_steps,
-        .production_archive_module = b.createModule(.{
-            .root_source_file = archive_source,
-        }),
-        .production_manifest_module = b.createModule(.{
-            .root_source_file = manifest_source,
-        }),
-    };
-}
-
-fn bootloaderSourcePath(cpu_arch: std.Target.Cpu.Arch) []const u8 {
-    return switch (cpu_arch) {
-        .x86 => "src/boot/boot64.S",
-        .x86_64 => "src/boot/boot_x86_64.S",
-        else => @panic("userspace target must use the x86 architecture family"),
     };
 }
 
