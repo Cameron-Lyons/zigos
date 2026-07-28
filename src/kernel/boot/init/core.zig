@@ -10,7 +10,7 @@ pub fn init() void {
     stack_watermark.paint();
 
     console.print("Initializing GDT...\n");
-    const gdt = @import("../../interrupts/gdt.zig");
+    const gdt = @import("../../interrupts/gdt_select.zig");
     gdt.init();
     console.print("GDT initialized!\n");
 
