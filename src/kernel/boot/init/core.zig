@@ -1,6 +1,6 @@
 const console = @import("../../utils/console.zig");
 const isr = @import("../../interrupts/isr.zig");
-const paging = @import("../../memory/paging.zig");
+const paging = @import("../../memory/paging_select.zig");
 const memory = @import("../../memory/memory.zig");
 
 pub fn init() void {

@@ -237,7 +237,7 @@ pub export fn isrHandler(regs: *Registers) void {
     }
 
     if (vector == PAGE_FAULT_VECTOR) {
-        const paging = @import("../memory/paging.zig");
+        const paging = @import("../memory/paging_select.zig");
         paging.page_fault_handler(regs);
         return;
     }
