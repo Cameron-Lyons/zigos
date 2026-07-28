@@ -259,6 +259,9 @@ const ControllerSlot = struct {
     broker_generation: u64 = 0,
 };
 
+const ControllerIndex = std.math.IntFittingRange(0, MAX_DEVICES - 1);
+const ControllerCount = std.math.IntFittingRange(0, MAX_DEVICES);
+
 const DmaProgramSlot = struct {
     in_use: bool = false,
     program_id: u64 = 0,
@@ -278,16 +281,16 @@ const ControllerArena = struct {
     slots: [MAX_DEVICES]ControllerSlot = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES,
     primary_index: indexed_arena.UniqueIndex(MAX_DEVICES * 2) = indexed_arena.UniqueIndex(MAX_DEVICES * 2).init(),
     slot_keys: [MAX_DEVICES]u64 = [_]u64{0} ** MAX_DEVICES,
-    free_next: [MAX_DEVICES]?usize = [_]?usize{null} ** MAX_DEVICES,
-    free_head: ?usize = null,
-    next_unclaimed_index: usize = 0,
-    used_count: usize = 0,
-    unpublished_next: [MAX_DEVICES]?usize = [_]?usize{null} ** MAX_DEVICES,
-    unpublished_prev: [MAX_DEVICES]?usize = [_]?usize{null} ** MAX_DEVICES,
+    free_next: [MAX_DEVICES]?ControllerIndex = [_]?ControllerIndex{null} ** MAX_DEVICES,
+    free_head: ?ControllerIndex = null,
+    next_unclaimed_index: ControllerCount = 0,
+    used_count: ControllerCount = 0,
+    unpublished_next: [MAX_DEVICES]?ControllerIndex = [_]?ControllerIndex{null} ** MAX_DEVICES,
+    unpublished_prev: [MAX_DEVICES]?ControllerIndex = [_]?ControllerIndex{null} ** MAX_DEVICES,
     unpublished_queued: [MAX_DEVICES]bool = [_]bool{false} ** MAX_DEVICES,
-    unpublished_head: ?usize = null,
-    unpublished_tail: ?usize = null,
-    unpublished_count: usize = 0,
+    unpublished_head: ?ControllerIndex = null,
+    unpublished_tail: ?ControllerIndex = null,
+    unpublished_count: ControllerCount = 0,
 
     pub fn init() ControllerArena {
         return .{};
@@ -299,12 +302,12 @@ const ControllerArena = struct {
         }
         self.primary_index.reset();
         self.slot_keys = [_]u64{0} ** MAX_DEVICES;
-        self.free_next = [_]?usize{null} ** MAX_DEVICES;
+        self.free_next = [_]?ControllerIndex{null} ** MAX_DEVICES;
         self.free_head = null;
         self.next_unclaimed_index = 0;
         self.used_count = 0;
-        self.unpublished_next = [_]?usize{null} ** MAX_DEVICES;
-        self.unpublished_prev = [_]?usize{null} ** MAX_DEVICES;
+        self.unpublished_next = [_]?ControllerIndex{null} ** MAX_DEVICES;
+        self.unpublished_prev = [_]?ControllerIndex{null} ** MAX_DEVICES;
         self.unpublished_queued = [_]bool{false} ** MAX_DEVICES;
         self.unpublished_head = null;
         self.unpublished_tail = null;
@@ -371,14 +374,15 @@ const ControllerArena = struct {
         if (slot.published) native_util.impossibleByInvariant("controller unpublished queue points at a published slot");
         if (self.unpublished_queued[slot_index]) return;
 
+        const compact_slot_index: ControllerIndex = @intCast(slot_index);
         self.unpublished_prev[slot_index] = self.unpublished_tail;
         self.unpublished_next[slot_index] = null;
         if (self.unpublished_tail) |tail_index| {
-            self.unpublished_next[tail_index] = slot_index;
+            self.unpublished_next[tail_index] = compact_slot_index;
         } else {
-            self.unpublished_head = slot_index;
+            self.unpublished_head = compact_slot_index;
         }
-        self.unpublished_tail = slot_index;
+        self.unpublished_tail = compact_slot_index;
         self.unpublished_queued[slot_index] = true;
         self.unpublished_count += 1;
     }
@@ -390,9 +394,8 @@ const ControllerArena = struct {
     pub fn reclaimUnpublishedIndex(self: *ControllerArena) ?usize {
         while (self.unpublished_head) |slot_index| {
             self.detachUnpublishedIndex(slot_index);
-            if (slot_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller unpublished queue points outside slots");
             const slot = &self.slots[slot_index];
-            if (slot.in_use and !slot.published) return slot_index;
+            if (slot.in_use and !slot.published) return @intCast(slot_index);
         }
         return null;
     }
@@ -415,21 +418,20 @@ const ControllerArena = struct {
 
     fn popFreeIndex(self: *ControllerArena) ?usize {
         if (self.free_head) |slot_index| {
-            if (slot_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller free list points outside slots");
             self.free_head = self.free_next[slot_index];
             self.free_next[slot_index] = null;
-            return slot_index;
+            return @intCast(slot_index);
         }
 
         if (self.next_unclaimed_index >= MAX_DEVICES) return null;
-        const slot_index = self.next_unclaimed_index;
+        const slot_index: usize = self.next_unclaimed_index;
         self.next_unclaimed_index += 1;
         return slot_index;
     }
 
     fn pushFreeIndex(self: *ControllerArena, slot_index: usize) void {
         self.free_next[slot_index] = self.free_head;
-        self.free_head = slot_index;
+        self.free_head = @intCast(slot_index);
     }
 
     fn claimFreeIndex(self: *ControllerArena, slot_index: usize) bool {
@@ -438,17 +440,16 @@ const ControllerArena = struct {
             while (self.next_unclaimed_index < slot_index) : (self.next_unclaimed_index += 1) {
                 self.pushFreeIndex(self.next_unclaimed_index);
             }
-            self.next_unclaimed_index = slot_index + 1;
+            self.next_unclaimed_index = @intCast(slot_index + 1);
             return true;
         }
         return self.unlinkFreeIndex(slot_index);
     }
 
     fn unlinkFreeIndex(self: *ControllerArena, slot_index: usize) bool {
-        var previous: ?usize = null;
+        var previous: ?ControllerIndex = null;
         var current = self.free_head;
         while (current) |current_index| {
-            if (current_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller free list points outside slots");
             const next = self.free_next[current_index];
             if (current_index == slot_index) {
                 if (previous) |previous_index| {
