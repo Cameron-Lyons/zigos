@@ -303,12 +303,12 @@ pub const Controller = struct {
         reason: DecisionReason,
         tick: u64,
     ) Error!DispatchDecision {
-        const record = try self.appendRecord(task_id, background_task_id, trigger, background_task, reason, tick);
+        const record_id = try self.appendRecordId(task_id, background_task_id, trigger, background_task, reason, tick);
         return .{
             .allowed = reason == .allowed,
             .delayed = reason == .throttled,
             .reason = reason,
-            .record_id = record.id,
+            .record_id = record_id,
             .expected_duration_seconds = if (background_task) |task| task.expected_duration_seconds else 0,
             .budget = if (background_task) |task| task.budget else .{},
             .network = if (background_task) |task| task.network else .none,
@@ -325,12 +325,12 @@ pub const Controller = struct {
         policy_decision: policy_object.PolicyDecision,
         tick: u64,
     ) Error!DispatchDecision {
-        const record = try self.appendRecord(task_id, background_task_id, trigger, background_task, .policy_denied, tick);
+        const record_id = try self.appendRecordId(task_id, background_task_id, trigger, background_task, .policy_denied, tick);
         return .{
             .allowed = false,
             .delayed = false,
             .reason = .policy_denied,
-            .record_id = record.id,
+            .record_id = record_id,
             .expected_duration_seconds = background_task.expected_duration_seconds,
             .budget = background_task.budget,
             .network = background_task.network,
@@ -356,7 +356,7 @@ pub const Controller = struct {
         });
     }
 
-    fn appendRecord(
+    fn appendRecordId(
         self: *Controller,
         task_id: u64,
         background_task_id: []const u8,
@@ -364,7 +364,7 @@ pub const Controller = struct {
         background_task: ?manifest.BackgroundTaskDecl,
         reason: DecisionReason,
         tick: u64,
-    ) Error!DispatchRecord {
+    ) Error!u64 {
         const record_id = self.nextReservableRecordId() orelse return error.DispatchTableFull;
         const record = try makeRecord(record_id, task_id, background_task_id, trigger, background_task, reason, tick);
         const slot_index = self.reserveRecordSlot(record_id) orelse return error.DispatchTableFull;
@@ -377,7 +377,7 @@ pub const Controller = struct {
         }
         self.latest_record_id = record_id;
         self.advanceNextRecordIdFrom(record_id);
-        return slot.record;
+        return record_id;
     }
 
     fn findRecordSlot(self: *Controller, record_id: u64) ?*RecordSlot {
