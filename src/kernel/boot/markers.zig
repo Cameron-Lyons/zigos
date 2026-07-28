@@ -9,6 +9,7 @@ pub const x86_64_paging_ready = "ZIGOS:ARCH:X86_64:PAGING:READY";
 
 pub const cpu_baseline_ready = "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY";
 pub const cpu_baseline_rejected = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";
+pub const cpu_nx_enabled = "ZIGOS:CPU:NX:ENABLED";
 pub const cpu_smep_enabled = "ZIGOS:CPU:SMEP:ENABLED";
 pub const cpu_umip_enabled = "ZIGOS:CPU:UMIP:ENABLED";
 
@@ -65,6 +66,7 @@ pub const transport_cap_pass_ok = "ZIGOS:TRANSPORT:CAP_PASS:OK";
 pub const runtime_proof_process_isolation = "ZIGOS:RUNTIME_PROOF:PROCESS_ISOLATION:PASS";
 pub const runtime_proof_syscall_pointer_isolation = "ZIGOS:RUNTIME_PROOF:SYSCALL_POINTER_ISOLATION:PASS";
 pub const runtime_proof_mmu_user_fault = "ZIGOS:RUNTIME_PROOF:MMU_USER_FAULT:PASS";
+pub const runtime_proof_user_nx_fault = "ZIGOS:RUNTIME_PROOF:USER_NX_FAULT:PASS";
 pub const runtime_proof_address_space_reclamation = "ZIGOS:RUNTIME_PROOF:ADDRESS_SPACE_RECLAMATION:PASS";
 pub const runtime_proof_syscall_subject_spoof = "ZIGOS:RUNTIME_PROOF:SYSCALL_SUBJECT_SPOOF:PASS";
 pub const runtime_proof_raw_network_bypass = "ZIGOS:RUNTIME_PROOF:RAW_NETWORK_BYPASS:PASS";

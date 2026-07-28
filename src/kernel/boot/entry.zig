@@ -30,6 +30,7 @@ pub fn kernelMain() void {
     }
     common.printBootMarker(boot_markers.cpu_baseline_ready);
     cpu_features.enableSupervisorProtections(features);
+    common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);
     common.printBootMarker(boot_markers.cpu_umip_enabled);
     console.print("Welcome to Zigos!\n");
