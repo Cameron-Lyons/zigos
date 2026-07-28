@@ -136,6 +136,31 @@ qemu_harness_build_kernel_command() {
   QEMU_HARNESS_COMMAND+=("$@")
 }
 
+qemu_harness_build_bios_cdrom_command() {
+  local iso_path="${1:?ISO path required}"
+  local memory_size="${2:?QEMU memory size required}"
+  local serial_target="${3:?serial target required}"
+
+  qemu_harness_require_binary
+  qemu_harness_load_extra_args
+
+  QEMU_HARNESS_COMMAND=(
+    "$(qemu_harness_binary)"
+    -cdrom "$iso_path"
+    -boot d
+    -cpu "$(qemu_harness_cpu_model)"
+    -m "$memory_size"
+    -display none
+    -serial "$serial_target"
+    -monitor none
+    -no-reboot
+    -device "$qemu_harness_debug_exit_device"
+  )
+  if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
+    QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
+  fi
+}
+
 qemu_harness_find_ovmf_code() {
   local path
 
