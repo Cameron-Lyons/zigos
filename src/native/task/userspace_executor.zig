@@ -173,7 +173,42 @@ pub export var zigos_userspace_resume_requested: u32 = 0;
 pub export var zigos_userspace_resume_esp: usize = 0;
 pub export var zigos_userspace_resume_eip: usize = 0;
 
-extern fn zigos_enter_userspace(entry: u32, stack_top: u32) callconv(.c) u32;
+const UserContext64 = extern struct {
+    rax: u64 = 0,
+    rbx: u64 = 0,
+    rcx: u64 = 0,
+    rdx: u64 = 0,
+    rbp: u64 = 0,
+    rsi: u64 = 0,
+    rdi: u64 = 0,
+    r8: u64 = 0,
+    r9: u64 = 0,
+    r10: u64 = 0,
+    r11: u64 = 0,
+    r12: u64 = 0,
+    r13: u64 = 0,
+    r14: u64 = 0,
+    r15: u64 = 0,
+    instruction_pointer: u64 = 0,
+    flags: u64 = 0x202,
+    stack_pointer: u64 = 0,
+};
+
+comptime {
+    if (builtin.cpu.arch == .x86_64) {
+        if (@offsetOf(UserContext64, "instruction_pointer") != 120 or
+            @offsetOf(UserContext64, "flags") != 128 or
+            @offsetOf(UserContext64, "stack_pointer") != 136 or
+            @sizeOf(UserContext64) != 144)
+        {
+            @compileError("x86-64 userspace context layout diverged from userspace_entry64.S");
+        }
+    }
+}
+
+// x86 passes entry/stack directly. x86-64 passes a UserContext64 pointer in
+// the first argument and ignores the second argument.
+extern fn zigos_enter_userspace(entry_or_context: usize, stack_top: u32) callconv(.c) u32;
 
 const MappingState = enum(u8) {
     free,
@@ -189,6 +224,7 @@ const MappingEntry = struct {
     resume_valid: bool = false,
     resume_instruction_pointer: u32 = 0,
     resume_stack_pointer: u32 = 0,
+    user_context64: UserContext64 = .{},
     yield_count: u64 = 0,
     last_user_counter: u32 = 0,
     page_fault_count: u64 = 0,
@@ -220,6 +256,7 @@ pub const Executor = struct {
     handoff_completed: bool = false,
     pending_instruction_pointer: u32 = 0,
     pending_stack_pointer: u32 = 0,
+    pending_user_context64: UserContext64 = .{},
     last_trap_instruction_pointer: u32 = 0,
     last_trap_stack_pointer: u32 = 0,
     last_trap_counter: u32 = 0,
@@ -314,6 +351,7 @@ pub const Executor = struct {
         self.handoff_completed = false;
         self.pending_instruction_pointer = 0;
         self.pending_stack_pointer = 0;
+        self.pending_user_context64 = .{};
         self.last_trap_instruction_pointer = 0;
         self.last_trap_stack_pointer = 0;
         self.last_trap_counter = 0;
@@ -408,6 +446,15 @@ pub const Executor = struct {
             instruction_pointer,
             stack_pointer,
         });
+        if (comptime builtin.cpu.arch == .x86_64) {
+            self.pending_user_context64 = if (mapping.resume_valid)
+                mapping.user_context64
+            else
+                .{
+                    .instruction_pointer = instruction_pointer,
+                    .stack_pointer = stack_pointer,
+                };
+        }
 
         self.active_mapping = mapping;
         self.active_task_id = task_id;
@@ -688,6 +735,7 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     mapping.resume_valid = true;
     mapping.resume_instruction_pointer = executor.last_trap_instruction_pointer;
     mapping.resume_stack_pointer = executor.last_trap_stack_pointer;
+    captureUserContext64(mapping, frame);
     mapping.yield_count += 1;
     mapping.last_user_counter = executor.last_trap_counter;
 
@@ -779,10 +827,38 @@ fn mapZeroedRegion(
 }
 
 fn enterUserspace(executor: *const Executor) u32 {
+    if (comptime builtin.cpu.arch == .x86_64) {
+        return zigos_enter_userspace(@intFromPtr(&executor.pending_user_context64), 0);
+    }
     return zigos_enter_userspace(
         executor.pending_instruction_pointer,
         executor.pending_stack_pointer,
     );
+}
+
+fn captureUserContext64(mapping: *MappingEntry, frame: *freestanding.isr.InterruptFrame) void {
+    if (comptime builtin.cpu.arch == .x86_64) {
+        mapping.user_context64 = .{
+            .rax = frame.eax,
+            .rbx = frame.ebx,
+            .rcx = frame.ecx,
+            .rdx = frame.edx,
+            .rbp = frame.ebp,
+            .rsi = frame.esi,
+            .rdi = frame.edi,
+            .r8 = frame.r8,
+            .r9 = frame.r9,
+            .r10 = frame.r10,
+            .r11 = frame.r11,
+            .r12 = frame.r12,
+            .r13 = frame.r13,
+            .r14 = frame.r14,
+            .r15 = frame.r15,
+            .instruction_pointer = frame.eip,
+            .flags = frame.eflags,
+            .stack_pointer = frame.useresp,
+        };
+    }
 }
 
 fn recordPendingHandoff(self: *Executor, instruction_pointer: u32, stack_pointer: u32) void {

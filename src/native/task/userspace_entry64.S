@@ -19,13 +19,27 @@ zigos_enter_userspace:
     movq %rax, zigos_userspace_resume_eip(%rip)
 
     pushq $0x23
-    pushq %rsi
-    pushfq
-    popq %rcx
-    orq $0x200, %rcx
-    pushq %rcx
+    pushq 136(%rdi)
+    pushq 128(%rdi)
+    orq $0x200, (%rsp)
     pushq $0x1b
-    pushq %rdi
+    pushq 120(%rdi)
+
+    movq 8(%rdi), %rbx
+    movq 16(%rdi), %rcx
+    movq 24(%rdi), %rdx
+    movq 32(%rdi), %rbp
+    movq 40(%rdi), %rsi
+    movq 56(%rdi), %r8
+    movq 64(%rdi), %r9
+    movq 72(%rdi), %r10
+    movq 80(%rdi), %r11
+    movq 88(%rdi), %r12
+    movq 96(%rdi), %r13
+    movq 104(%rdi), %r14
+    movq 112(%rdi), %r15
+    movq 0(%rdi), %rax
+    movq 48(%rdi), %rdi
     iretq
 
 .resume_from_userspace:
