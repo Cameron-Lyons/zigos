@@ -71,15 +71,13 @@ pub fn addNativeRunSteps(
     userspace_images: userspace_build.ArtifactSet,
     native_store: NativeStoreImage,
 ) NativeRunSteps {
-    const command = b.addSystemCommand(&.{
-        "bash",
+    const command = addKernelBootCommand(b, kernel, &.{
         "scripts/qemu-harness.sh",
         "native-store",
         kernel.output_path,
         shared.native_store_image_path,
         "stdio",
     });
-    command.step.dependOn(kernel.install_step);
     command.step.dependOn(&native_store.command.step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
 
@@ -104,8 +102,7 @@ pub fn addNativeSmokeCommand(
     store_path: []const u8,
     mode: NativeSmokeMode,
 ) *std.Build.Step.Run {
-    const command = b.addSystemCommand(&.{
-        "bash",
+    const command = addKernelBootCommand(b, kernel, &.{
         "scripts/run-zigos-native-smoke.sh",
         kernel.output_path,
         log_path,
@@ -114,7 +111,6 @@ pub fn addNativeSmokeCommand(
     command.addArg(mode.arg() orelse "full");
     command.addArg(b.getInstallPath(.bin, ""));
     command.addArg(kernel.bootloader_source_path);
-    command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -142,13 +138,11 @@ pub fn addRecoveryQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = b.addSystemCommand(&.{
-        "bash",
+    const command = addKernelBootCommand(b, kernel, &.{
         "scripts/run-kernel-recovery.sh",
         kernel.output_path,
         "build/kernel-recovery.log",
     });
-    command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -158,14 +152,12 @@ pub fn addStorageDurabilityQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = b.addSystemCommand(&.{
-        "bash",
+    const command = addKernelBootCommand(b, kernel, &.{
         "scripts/run-storage-durability-qemu.sh",
         kernel.output_path,
         "build/storage-durability-qemu.log",
         "build/native-store-storage-durability.img",
     });
-    command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -175,15 +167,13 @@ pub fn addSyncTwoNodeQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = b.addSystemCommand(&.{
-        "bash",
+    const command = addKernelBootCommand(b, kernel, &.{
         "scripts/run-sync-two-node-qemu.sh",
         kernel.output_path,
         "build/sync-two-node-qemu.log",
         "build/native-store-sync-node-a.img",
         "build/native-store-sync-node-b.img",
     });
-    command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -193,15 +183,28 @@ pub fn addBenchmarkCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = b.addSystemCommand(&.{
-        "bash",
+    const command = addKernelBootCommand(b, kernel, &.{
         "scripts/capture-kernel-benchmark.sh",
         kernel.output_path,
         "build/kernel-benchmark.log",
         "build/kernel-benchmark-summary.md",
     });
-    command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
+    return command;
+}
+
+fn addKernelBootCommand(
+    b: *std.Build,
+    kernel: shared.KernelArtifact,
+    args: []const []const u8,
+) *std.Build.Step.Run {
+    const command = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-with-qemu-boot-iso.sh",
+    });
+    command.addFileArg(kernel.qemu_boot_iso_path);
+    command.addArgs(args);
+    command.step.dependOn(kernel.install_step);
     return command;
 }
 
@@ -219,6 +222,7 @@ pub fn addIsoCommand(
         output_path,
         staging_path,
     });
+    command.addFileArg(b.path("src/boot/grub-x86_64-kernel.cfg"));
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;

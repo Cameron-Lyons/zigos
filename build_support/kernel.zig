@@ -25,34 +25,32 @@ pub const KernelSteps = struct {
     recovery: *std.Build.Step,
 };
 
-pub fn addX86ArchitectureCompileCheck(
+pub fn addX86_64ArchitectureCompileCheck(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Step {
-    const step = b.step("x86-architecture-compile-check", "Compile privileged x86 helpers for 32-bit and 64-bit targets");
-    for ([_]std.Target.Cpu.Arch{ .x86, .x86_64 }) |cpu_arch| {
-        const target = b.resolveTargetQuery(.{
-            .cpu_arch = cpu_arch,
-            .os_tag = .freestanding,
-            .abi = .none,
-        });
-        const object = b.addObject(.{
-            .name = b.fmt("x86-architecture-{s}-compile-check", .{@tagName(cpu_arch)}),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/arch/x86_compile_check.zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        step.dependOn(&object.step);
-    }
+    const target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const object = b.addObject(.{
+        .name = "x86_64-architecture-compile-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/arch/x86_compile_check.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const step = b.step("x86_64-architecture-compile-check", "Compile privileged helpers for the x86-64 target");
+    step.dependOn(&object.step);
     return step;
 }
 
 pub fn addX86_64KernelCompileCheck(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    userspace_images: userspace_build.X86_64ArtifactSet,
+    userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step {
     const kernel_module = createX86_64KernelModule(b, optimize, userspace_images);
     const object = b.addObject(.{
@@ -67,7 +65,7 @@ pub fn addX86_64KernelCompileCheck(
 pub fn addX86_64KernelBootCheck(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    userspace_images: userspace_build.X86_64ArtifactSet,
+    userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step {
     const kernel_module = createX86_64KernelModule(b, optimize, userspace_images);
     const kernel_object = b.addObject(.{
@@ -126,7 +124,7 @@ pub fn addX86_64KernelBootCheck(
 fn createX86_64KernelModule(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    userspace_images: userspace_build.X86_64ArtifactSet,
+    userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Module {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
@@ -155,7 +153,7 @@ fn createX86_64KernelModule(
     kernel_module.addImport("userspace_archive", userspace_images.production_archive_module);
     kernel_module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
     kernel_module.addOptions("build_options", options);
-    addKernelAssemblyFiles(b, kernel_module, .x86_64);
+    addKernelAssemblyFiles(b, kernel_module);
     return kernel_module;
 }
 
@@ -488,7 +486,7 @@ pub fn addKernelArtifact(
     }
 
     kernel_module.addOptions("build_options", options);
-    addKernelAssemblyFiles(b, kernel_module, target.result.cpu.arch);
+    addKernelAssemblyFiles(b, kernel_module);
 
     const kernel = b.addExecutable(.{
         .name = name,
@@ -496,40 +494,40 @@ pub fn addKernelArtifact(
     });
     kernel.setLinkerScript(b.path("src/arch/x86_64/linker.ld"));
 
+    const validate_qemu_image = b.addSystemCommand(&.{
+        "bash",
+        "scripts/check-multiboot2-image.sh",
+    });
+    validate_qemu_image.addFileArg(kernel.getEmittedBin());
+
+    const qemu_iso = b.addSystemCommand(&.{
+        "bash",
+        "scripts/build-grub-iso.sh",
+    });
+    qemu_iso.addFileArg(kernel.getEmittedBin());
+    const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
+    _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
+    qemu_iso.addFileArg(b.path("src/boot/grub-x86_64-qemu.cfg"));
+    qemu_iso.step.dependOn(&validate_qemu_image.step);
+
     const install = b.addInstallArtifact(kernel, .{});
     return .{
         .compile_step = kernel,
         .install_step = &install.step,
         .output_path = b.getInstallPath(.bin, name),
         .kernel_role = kernel_role,
-        .bootloader_source_path = if (target.result.cpu.arch == .x86_64)
-            "src/boot/boot_x86_64.S"
-        else
-            "src/boot/boot64.S",
+        .bootloader_source_path = "src/boot/boot_x86_64.S",
+        .qemu_boot_iso_path = qemu_iso_path,
     };
 }
 
 fn addKernelAssemblyFiles(
     b: *std.Build,
     kernel_module: *std.Build.Module,
-    cpu_arch: std.Target.Cpu.Arch,
 ) void {
-    kernel_module.addAssemblyFile(b.path(if (cpu_arch == .x86_64)
-        "src/boot/boot_x86_64.S"
-    else
-        "src/boot/boot64.S"));
+    kernel_module.addAssemblyFile(b.path("src/boot/boot_x86_64.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
-    switch (cpu_arch) {
-        .x86 => {
-            kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
-            kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
-            kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry.S"));
-        },
-        .x86_64 => {
-            kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt64.S"));
-            kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
-            kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry64.S"));
-        },
-        else => @panic("kernel target must use the x86 architecture family"),
-    }
+    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt64.S"));
+    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
+    kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry64.S"));
 }
