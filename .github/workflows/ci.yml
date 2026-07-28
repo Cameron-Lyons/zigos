@@ -89,6 +89,14 @@ jobs:
       command: ./scripts/zig.sh build -Doptimize=ReleaseFast zigos-native-smoke-test
       timeout-minutes: 30
 
+  long-mode-entry:
+    needs: zig-toolchain
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: x86-64 Long-Mode Entry
+      command: ./scripts/zig.sh build -Doptimize=ReleaseFast x86_64-long-mode-entry-check
+      timeout-minutes: 10
+
   benchmark:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-summary-command.yml
