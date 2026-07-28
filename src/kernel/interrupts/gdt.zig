@@ -1,3 +1,6 @@
+const std = @import("std");
+const x86 = @import("../../arch/x86.zig");
+
 pub const GdtEntry = packed struct {
     limit_low: u16,
     base_low: u16,
@@ -189,9 +192,8 @@ pub fn configureDoubleFaultTask(handler_address: u32) void {
 /// The task switch loads CR3 from the target TSS, so this must be re-run
 /// after paging comes up (and any later page-directory change).
 pub fn refreshDoubleFaultCr3() void {
-    double_fault_tss.cr3 = asm volatile ("mov %%cr3, %[out]"
-        : [out] "=r" (-> u32),
-    );
+    double_fault_tss.cr3 = std.math.cast(u32, x86.readCr3()) orelse
+        @panic("double-fault TSS page directory exceeds the 32-bit pager");
 }
 
 pub const InterruptedContext = struct {

@@ -279,11 +279,7 @@ pub fn setPageReadOnly(virt_addr: u32) void {
 /// Set CR0.WP so read-only pages bind CPL0 writes as well; without it the
 /// writable bit only constrains user mode and kernel W^X is theater.
 pub fn enableWriteProtect() void {
-    asm volatile (
-        \\mov %%cr0, %%eax
-        \\or $0x10000, %%eax
-        \\mov %%eax, %%cr0
-        ::: .{ .eax = true });
+    x86.writeCr0(x86.readCr0() | x86.CR0_WP);
 }
 
 /// Removes a borrowed current-space PTE without releasing its physical frame.
@@ -537,7 +533,10 @@ pub fn init() void {
     }
 
     const kernel_end = memory.getReservedMemoryEnd();
-    const reserved_frame_count = (kernel_end + PAGE_SIZE - 1) / PAGE_SIZE;
+    const reserved_end = std.math.add(usize, kernel_end, PAGE_SIZE - 1) catch
+        haltWithMessage("Kernel reserved-memory extent overflow!\n");
+    const reserved_frame_count = std.math.cast(u32, reserved_end / PAGE_SIZE) orelse
+        haltWithMessage("Kernel reserved-memory extent exceeds the 32-bit pager!\n");
     physical_frames.reserve(.{
         .base = 0,
         .count = reserved_frame_count,
@@ -546,7 +545,9 @@ pub fn init() void {
         haltWithMessage("No usable physical frames remain after kernel reservation!\n");
     }
 
-    enable_paging(@intFromPtr(&kernel_page_directory));
+    const page_directory_address = std.math.cast(u32, @intFromPtr(&kernel_page_directory)) orelse
+        haltWithMessage("Kernel page directory lies outside the 32-bit pager!\n");
+    enable_paging(page_directory_address);
     unmapBootStackGuardPage();
     // The double-fault task switch loads CR3 from its TSS; point it at the
     // kernel page directory now that paging is live.
@@ -568,7 +569,8 @@ pub fn init() void {
 // page as an unmapped guard so an overflow page-faults at the boundary. Page
 // faults fail closed, so the guard stays unmapped for the kernel's lifetime.
 fn unmapBootStackGuardPage() void {
-    const guard_address: u32 = @intFromPtr(&stack_bottom);
+    const guard_address = std.math.cast(u32, @intFromPtr(&stack_bottom)) orelse
+        haltWithMessage("Boot stack lies outside the 32-bit pager!\n");
     if (guard_address % PAGE_SIZE != 0) {
         vga.print("Boot stack guard skipped: stack_bottom is not page-aligned\n");
         return;
@@ -577,14 +579,8 @@ fn unmapBootStackGuardPage() void {
 }
 
 fn enable_paging(page_dir_addr: u32) void {
-    asm volatile (
-        \\mov %[addr], %%cr3
-        \\mov %%cr0, %%eax
-        \\or $0x80000000, %%eax
-        \\mov %%eax, %%cr0
-        :
-        : [addr] "r" (page_dir_addr),
-        : .{ .eax = true });
+    x86.writeCr3(@as(usize, page_dir_addr));
+    x86.writeCr0(x86.readCr0() | x86.CR0_PG);
 }
 
 pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Registers) void {
