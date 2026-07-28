@@ -42,9 +42,11 @@ pub fn build(b: *std.Build) void {
     });
     const optimize = b.standardOptimizeOption(.{});
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
+    const userspace_x86_64_compile_check = userspace_build.addX86_64CompileCheck(b, optimize);
     const test_artifacts = tests_build.addTestArtifacts(b, optimize, userspace_images);
     const kernels = kernel_build.addKernelProfiles(b, target, optimize, userspace_images);
     const kernel_steps = kernel_build.addKernelProfileSteps(b, kernels, userspace_images);
+    kernel_steps.kernel.dependOn(userspace_x86_64_compile_check);
 
     const kernel_role_check_tool = b.addExecutable(.{
         .name = "check-kernel-roles",

@@ -1244,7 +1244,10 @@ fn benchmarkFileBridgeResolve(iteration: u32) u64 {
     return view.object_id + view.version_id + path.len + @intFromBool(view.readable);
 }
 
-fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
+// This large case is sensitive to TCG translation-block placement. Keep its
+// entry address stable when unrelated kernel text shrinks or grows so the gate
+// continues to measure workspace commits instead of linker layout.
+fn benchmarkWorkspaceCommitOverlay(iteration: u32) align(4096) u64 {
     const directory = &workspace_commit_context.baseline;
     const workspace_id = workspace_commit_context.workspace_id;
     var next_cover_object_id = workspace_commit_context.current_cover_object_id;

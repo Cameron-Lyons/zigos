@@ -142,19 +142,6 @@ pub fn zigos_userspace_service_main(comptime service_kind: ServiceKind) noreturn
     runSteadyState(detail, descriptor.heartbeat_increment);
 }
 
-pub fn startAsm(comptime _: u32) []const u8 {
-    const assembly =
-        \\mov $0x23, %ax
-        \\mov %ax, %ds
-        \\mov %ax, %es
-        \\mov %ax, %fs
-        \\mov %ax, %gs
-        \\call zigos_userspace_contract_main
-        \\ud2
-    ;
-    return assembly;
-}
-
 fn runStartupQueries(detail: mailbox.Detail) void {
     var resource_mask = mailbox.ResourceMask{};
     const authority_capability_id = zigos_userspace_bootstrap.authority_capability_id;
