@@ -14,14 +14,14 @@ pub inline fn outb(port: u16, value: u8) void {
     asm volatile ("outb %[value], %[port]"
         :
         : [value] "{al}" (value),
-          [port] "N{dx}" (port),
+          [port] "{dx}" (port),
     );
 }
 
 pub inline fn inb(port: u16) u8 {
     return asm volatile ("inb %[port], %[result]"
         : [result] "={al}" (-> u8),
-        : [port] "N{dx}" (port),
+        : [port] "{dx}" (port),
     );
 }
 
@@ -29,14 +29,14 @@ pub inline fn outw(port: u16, value: u16) void {
     asm volatile ("outw %[value], %[port]"
         :
         : [value] "{ax}" (value),
-          [port] "N{dx}" (port),
+          [port] "{dx}" (port),
     );
 }
 
 pub inline fn inw(port: u16) u16 {
     return asm volatile ("inw %[port], %[result]"
         : [result] "={ax}" (-> u16),
-        : [port] "N{dx}" (port),
+        : [port] "{dx}" (port),
     );
 }
 
@@ -44,14 +44,14 @@ pub inline fn outl(port: u16, value: u32) void {
     asm volatile ("outl %[value], %[port]"
         :
         : [value] "{eax}" (value),
-          [port] "N{dx}" (port),
+          [port] "{dx}" (port),
     );
 }
 
 pub inline fn inl(port: u16) u32 {
     return asm volatile ("inl %[port], %[result]"
         : [result] "={eax}" (-> u32),
-        : [port] "N{dx}" (port),
+        : [port] "{dx}" (port),
     );
 }
 
@@ -65,21 +65,21 @@ pub inline fn rdtsc() u64 {
     return (@as(u64, high) << 32) | low;
 }
 
-pub const CR0_EM: u32 = 1 << 2;
-pub const CR0_MP: u32 = 1 << 1;
+pub const CR0_EM: usize = 1 << 2;
+pub const CR0_MP: usize = 1 << 1;
 
-pub const CR4_OSFXSR: u32 = 1 << 9;
-pub const CR4_OSXMMEXCPT: u32 = 1 << 10;
-pub const CR4_UMIP: u32 = 1 << 11;
-pub const CR4_SMEP: u32 = 1 << 20;
+pub const CR4_OSFXSR: usize = 1 << 9;
+pub const CR4_OSXMMEXCPT: usize = 1 << 10;
+pub const CR4_UMIP: usize = 1 << 11;
+pub const CR4_SMEP: usize = 1 << 20;
 
-pub inline fn readCr4() u32 {
+pub inline fn readCr4() usize {
     return asm volatile ("mov %%cr4, %[value]"
-        : [value] "=r" (-> u32),
+        : [value] "=r" (-> usize),
     );
 }
 
-pub inline fn writeCr4(value: u32) void {
+pub inline fn writeCr4(value: usize) void {
     asm volatile ("mov %[value], %%cr4"
         :
         : [value] "r" (value),
@@ -87,8 +87,8 @@ pub inline fn writeCr4(value: u32) void {
 }
 
 pub fn enableSse() void {
-    var cr0: u32 = asm volatile ("mov %%cr0, %[value]"
-        : [value] "=r" (-> u32),
+    var cr0: usize = asm volatile ("mov %%cr0, %[value]"
+        : [value] "=r" (-> usize),
     );
     cr0 &= ~CR0_EM;
     cr0 |= CR0_MP;
