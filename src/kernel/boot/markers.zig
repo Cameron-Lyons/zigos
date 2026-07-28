@@ -6,10 +6,10 @@ pub const kernel_role_production = "BOOT:ROLE:production";
 pub const kernel_role_verification = "BOOT:ROLE:verification";
 pub const boot_core_ready = "BOOT:CORE_READY";
 
+pub const cpu_baseline_ready = "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY";
+pub const cpu_baseline_rejected = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";
 pub const cpu_smep_enabled = "ZIGOS:CPU:SMEP:ENABLED";
-pub const cpu_smep_absent = "ZIGOS:CPU:SMEP:ABSENT";
 pub const cpu_umip_enabled = "ZIGOS:CPU:UMIP:ENABLED";
-pub const cpu_umip_absent = "ZIGOS:CPU:UMIP:ABSENT";
 
 pub const bench_start = "BENCH:START";
 pub const bench_summary_prefix = "BENCH:SUMMARY";

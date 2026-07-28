@@ -154,6 +154,10 @@ Use the pinned toolchain and repo entrypoints:
 - Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
+- A CPU with CPUID, SSE2, long mode, NX, SMEP, SMAP, and UMIP. Zigos rejects
+  older x86 CPUs instead of weakening its security contract. The current
+  bootstrap still enters through 32-bit Multiboot while the kernel migrates to
+  long-mode paging.
 - OVMF or edk2-ovmf firmware for the production and verification UEFI tests
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses

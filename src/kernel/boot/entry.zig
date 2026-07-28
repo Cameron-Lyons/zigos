@@ -11,6 +11,9 @@ const init_runtime = @import("init/runtime.zig");
 const hardware_proof = @import("../platform/hardware_proof.zig");
 
 pub fn kernelMain() void {
+    // The Zig-generated 32-bit entry path may use SSE registers before CPUID
+    // decoding. SSE2 is therefore both an entry precondition and an explicitly
+    // verified member of the supported CPU contract.
     x86.enableSse();
     vga.init();
     vga.clear();
@@ -18,10 +21,17 @@ pub fn kernelMain() void {
     common.printBootMarker(boot_markers.boot_start);
     common.printBootProfile();
     common.printKernelRole();
-    const hardening = cpu_features.detect();
-    cpu_features.enable(hardening);
-    common.printBootMarker(if (hardening.smep) boot_markers.cpu_smep_enabled else boot_markers.cpu_smep_absent);
-    common.printBootMarker(if (hardening.umip) boot_markers.cpu_umip_enabled else boot_markers.cpu_umip_absent);
+    const features = cpu_features.detect();
+    if (!cpu_features.baseline.isSupported(features)) {
+        common.printBootMarker(boot_markers.cpu_baseline_rejected);
+        console.print("Unsupported CPU: modern x86-64 feature baseline required\n");
+        x86.cli();
+        while (true) x86.hlt();
+    }
+    common.printBootMarker(boot_markers.cpu_baseline_ready);
+    cpu_features.enableSupervisorProtections(features);
+    common.printBootMarker(boot_markers.cpu_smep_enabled);
+    common.printBootMarker(boot_markers.cpu_umip_enabled);
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();
