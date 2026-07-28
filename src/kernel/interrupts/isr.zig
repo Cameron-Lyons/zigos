@@ -1,5 +1,7 @@
-const gdt = @import("gdt.zig");
-const idt = @import("idt.zig");
+const builtin = @import("builtin");
+const std = @import("std");
+const gdt = @import("gdt_select.zig");
+const idt = if (builtin.cpu.arch == .x86_64) @import("idt64.zig") else @import("idt.zig");
 const keyboard = @import("../drivers/keyboard.zig");
 const io = @import("../utils/io.zig");
 
@@ -144,24 +146,52 @@ const irq_stubs = [_]GateHandler{
     &irq15,
 };
 
-pub const Registers = struct {
-    ds: u32,
-    edi: u32,
-    esi: u32,
-    ebp: u32,
-    esp: u32,
-    ebx: u32,
-    edx: u32,
-    ecx: u32,
-    eax: u32,
-    int_no: u32,
-    err_code: u32,
-    eip: u32,
-    cs: u32,
-    eflags: u32,
-    useresp: u32,
-    ss: u32,
-};
+pub const Registers = if (builtin.cpu.arch == .x86_64)
+    extern struct {
+        ds: usize,
+        r15: usize,
+        r14: usize,
+        r13: usize,
+        r12: usize,
+        r11: usize,
+        r10: usize,
+        r9: usize,
+        r8: usize,
+        edi: usize,
+        esi: usize,
+        ebp: usize,
+        esp: usize,
+        ebx: usize,
+        edx: usize,
+        ecx: usize,
+        eax: usize,
+        int_no: usize,
+        err_code: usize,
+        eip: usize,
+        cs: usize,
+        eflags: usize,
+        useresp: usize,
+        ss: usize,
+    }
+else
+    extern struct {
+        ds: u32,
+        edi: u32,
+        esi: u32,
+        ebp: u32,
+        esp: u32,
+        ebx: u32,
+        edx: u32,
+        ecx: u32,
+        eax: u32,
+        int_no: u32,
+        err_code: u32,
+        eip: u32,
+        cs: u32,
+        eflags: u32,
+        useresp: u32,
+        ss: u32,
+    };
 
 const exception_messages = [_][]const u8{
     "Division By Zero",
@@ -199,13 +229,14 @@ const exception_messages = [_][]const u8{
 };
 
 pub export fn isrHandler(regs: *Registers) void {
-    if (custom_handlers[regs.int_no]) |handler| {
+    const vector = interruptVector(regs);
+    if (custom_handlers[vector]) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
         return;
     }
 
-    if (regs.int_no == PAGE_FAULT_VECTOR) {
+    if (vector == PAGE_FAULT_VECTOR) {
         const paging = @import("../memory/paging.zig");
         paging.page_fault_handler(regs);
         return;
@@ -213,8 +244,8 @@ pub export fn isrHandler(regs: *Registers) void {
 
     const console = @import("../utils/console.zig");
     console.print("Received interrupt: ");
-    if (regs.int_no < EXCEPTION_VECTOR_COUNT) {
-        console.print(exception_messages[regs.int_no]);
+    if (vector < EXCEPTION_VECTOR_COUNT) {
+        console.print(exception_messages[vector]);
         console.print("\n");
         console.print("System Halted!\n");
         while (true) {
@@ -232,18 +263,19 @@ pub fn registerHandler(vector: u8, handler: InterruptHandler) void {
 }
 
 pub export fn irqHandler(regs: *Registers) void {
-    if (regs.int_no >= IRQ_SLAVE_BASE_VECTOR) {
+    const vector = interruptVector(regs);
+    if (vector >= IRQ_SLAVE_BASE_VECTOR) {
         io.outb(PIC_SLAVE_COMMAND_PORT, PIC_EOI);
     }
     io.outb(PIC_MASTER_COMMAND_PORT, PIC_EOI);
 
-    if (custom_handlers[regs.int_no]) |handler| {
+    if (custom_handlers[vector]) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
-    } else if (regs.int_no == TIMER_IRQ_VECTOR) {
+    } else if (vector == TIMER_IRQ_VECTOR) {
         const timer = @import("../timer/timer.zig");
         timer.handleInterrupt();
-    } else if (regs.int_no == KEYBOARD_IRQ_VECTOR) {
+    } else if (vector == KEYBOARD_IRQ_VECTOR) {
         keyboard.handleInterrupt();
     }
 }
@@ -253,11 +285,23 @@ pub fn init() void {
         setKernelGate(@as(u8, @intCast(vector)), stub);
     }
 
-    // A double fault after a stack overflow cannot push an exception frame on
-    // the broken stack; without a task gate it silently escalates to a triple
-    // fault and the machine resets with no output at all.
-    gdt.configureDoubleFaultTask(@intFromPtr(&doubleFaultTask));
-    idt.setTaskGate(DOUBLE_FAULT_VECTOR, gdt.DOUBLE_FAULT_TSS_SEG);
+    if (comptime builtin.cpu.arch == .x86_64) {
+        gdt.configureDoubleFaultIst();
+        idt.setIstGate(
+            DOUBLE_FAULT_VECTOR,
+            &isr8,
+            gdt.KERNEL_CODE_SEG,
+            IDT_INTERRUPT_GATE,
+            gdt.DOUBLE_FAULT_IST_INDEX,
+        );
+        registerHandler(DOUBLE_FAULT_VECTOR, doubleFaultInterrupt);
+    } else {
+        // A double fault after a stack overflow cannot push an exception frame
+        // on the broken stack; the 32-bit task gate supplies a known-good TSS.
+        const handler_address = std.math.cast(u32, @intFromPtr(&doubleFaultTask)) orelse unreachable;
+        gdt.configureDoubleFaultTask(handler_address);
+        idt.setTaskGate(DOUBLE_FAULT_VECTOR, gdt.DOUBLE_FAULT_TSS_SEG);
+    }
 
     remapPIC();
 
@@ -283,6 +327,20 @@ fn doubleFaultTask() callconv(.c) noreturn {
     );
 }
 
+fn doubleFaultInterrupt(frame: *InterruptFrame) void {
+    const panic_utils = @import("../utils/panic.zig");
+    panic_utils.panic(
+        "DOUBLE FAULT: instruction=0x{x} stack=0x{x} frame=0x{x}",
+        .{ frame.eip, frame.useresp, frame.ebp },
+    );
+}
+
+fn interruptVector(regs: *const Registers) usize {
+    const vector = std.math.cast(usize, regs.int_no) orelse unreachable;
+    if (vector >= idt.IDT_ENTRIES) unreachable;
+    return vector;
+}
+
 fn setKernelGate(vector: u8, handler: GateHandler) void {
     idt.setGate(vector, handler, gdt.KERNEL_CODE_SEG, IDT_INTERRUPT_GATE);
 }
@@ -302,4 +360,13 @@ fn remapPIC() void {
     io.outb(PIC_SLAVE_DATA_PORT, PIC_ICW4_8086);
     io.outb(PIC_MASTER_DATA_PORT, PIC_MASTER_MASK);
     io.outb(PIC_SLAVE_DATA_PORT, PIC_SLAVE_MASK_ALL);
+}
+
+comptime {
+    if (builtin.cpu.arch == .x86_64 and @offsetOf(Registers, "int_no") != 136) {
+        @compileError("x86-64 interrupt frame layout diverged from interrupt64.S");
+    }
+    if (builtin.cpu.arch == .x86_64 and @sizeOf(Registers) != 192) {
+        @compileError("x86-64 interrupt frame size diverged from interrupt64.S");
+    }
 }
