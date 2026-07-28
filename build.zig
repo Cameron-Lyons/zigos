@@ -46,6 +46,7 @@ pub fn build(b: *std.Build) void {
     const test_artifacts = tests_build.addTestArtifacts(b, optimize, userspace_images);
     const x86_architecture_compile_check = kernel_build.addX86ArchitectureCompileCheck(b, optimize);
     const x86_64_kernel_compile_check = kernel_build.addX86_64KernelCompileCheck(b, optimize, userspace_images);
+    const x86_64_long_mode_entry_check = kernel_build.addX86_64LongModeEntryCheck(b, optimize);
     const kernels = kernel_build.addKernelProfiles(b, target, optimize, userspace_images);
     const kernel_steps = kernel_build.addKernelProfileSteps(b, kernels, userspace_images);
     kernel_steps.kernel.dependOn(userspace_x86_64_compile_check);
@@ -234,6 +235,7 @@ pub fn build(b: *std.Build) void {
         verify_benchmark,
     );
     verify_step.dependOn(kernel_role_check_step);
+    verify_step.dependOn(x86_64_long_mode_entry_check);
 
     const iso_cmd = qemu_build.addIsoCommand(
         b,

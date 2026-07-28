@@ -89,6 +89,77 @@ pub fn addX86_64KernelCompileCheck(
     return step;
 }
 
+pub fn addX86_64LongModeEntryCheck(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step {
+    const target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/arch/x86_64/long_mode_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = true,
+    });
+    module.addImport("x86", b.createModule(.{
+        .root_source_file = b.path("src/arch/x86.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    module.addAssemblyFile(b.path("src/arch/x86_64/long_mode_entry.S"));
+    const probe = b.addObject(.{
+        .name = "x86_64-long-mode-entry-probe",
+        .root_module = module,
+    });
+
+    const link = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "ld.lld",
+        "-m",
+        "elf_x86_64",
+        "--gc-sections",
+        "-z",
+        "common-page-size=4096",
+        "-z",
+        "max-page-size=4096",
+        "-T",
+    });
+    link.addFileArg(b.path("src/arch/x86_64/long_mode_linker.ld"));
+    link.addArg("-o");
+    const linked_probe = link.addOutputFileArg("x86_64-long-mode-entry-probe.elf");
+    link.addFileArg(probe.getEmittedBin());
+
+    const validate_image = b.addSystemCommand(&.{
+        "bash",
+        "scripts/check-multiboot2-image.sh",
+    });
+    validate_image.addFileArg(linked_probe);
+
+    const iso = b.addSystemCommand(&.{
+        "bash",
+        "scripts/build-grub-iso.sh",
+    });
+    iso.addFileArg(linked_probe);
+    const iso_path = iso.addOutputFileArg("x86_64-long-mode-entry.iso");
+    _ = iso.addOutputDirectoryArg("x86_64-long-mode-entry-staging");
+    iso.addFileArg(b.path("src/boot/grub-long-mode.cfg"));
+    iso.step.dependOn(&validate_image.step);
+
+    const run = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-long-mode-entry-smoke.sh",
+    });
+    run.addFileArg(iso_path);
+    run.addArg("build/x86_64-long-mode-entry.log");
+
+    const step = b.step("x86_64-long-mode-entry-check", "Boot through PAE page tables and enter 64-bit Zig code in QEMU");
+    step.dependOn(&run.step);
+    return step;
+}
+
 pub fn addKernelProfiles(
     b: *std.Build,
     target: std.Build.ResolvedTarget,

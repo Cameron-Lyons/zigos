@@ -4,7 +4,13 @@ set -eu
 KERNEL_PATH="${1:?kernel path required}"
 OUTPUT_ISO="${2:?output iso path required}"
 STAGING_DIR="${3:?staging directory required}"
+GRUB_CONFIG_PATH="${4:-src/boot/grub.cfg}"
 GRUB_MKRESCUE="${GRUB_MKRESCUE:-}"
+
+if [ ! -f "$GRUB_CONFIG_PATH" ]; then
+  echo "GRUB configuration not found: $GRUB_CONFIG_PATH" >&2
+  exit 1
+fi
 
 if [ -z "$GRUB_MKRESCUE" ]; then
   for cmd in grub-mkrescue i686-elf-grub-mkrescue x86_64-elf-grub-mkrescue; do
@@ -33,5 +39,5 @@ fi
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR/boot/grub" "$(dirname "$OUTPUT_ISO")"
 cp "$KERNEL_PATH" "$STAGING_DIR/boot/kernel.elf"
-cp src/boot/grub.cfg "$STAGING_DIR/boot/grub/"
+cp "$GRUB_CONFIG_PATH" "$STAGING_DIR/boot/grub/grub.cfg"
 "$GRUB_MKRESCUE" -o "$OUTPUT_ISO" "$STAGING_DIR"
