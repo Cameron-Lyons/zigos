@@ -2,6 +2,7 @@ const std = @import("std");
 const native_modules = @import("native_modules.zig");
 const production_registry = @import("../src/native/task/userspace_registry.zig");
 const verification_registry = @import("../src/native/task/userspace_verification_registry.zig");
+const userspace_layout = @import("../src/native/core/userspace_layout.zig");
 
 pub const production_artifact_count = production_registry.production_boot_image_specs.len;
 pub const verification_only_artifact_count = verification_registry.verification_only_boot_image_specs.len;
@@ -39,16 +40,7 @@ pub fn addUserspaceArtifacts(
     const native_archive_deps_module = b.createModule(.{
         .root_source_file = b.path("src/native/archive_generator_deps.zig"),
     });
-    const archive_generator = b.addExecutable(.{
-        .name = "userspace-archive-generator",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/generate_userspace_archive.zig"),
-            .target = b.graph.host,
-            .optimize = .ReleaseSafe,
-        }),
-    });
-    archive_generator.root_module.addImport("userspace_descriptor", userspace_modules.descriptor);
-    archive_generator.root_module.addImport("native_archive_deps", native_archive_deps_module);
+    const archive_generator = addArchiveGenerator(b, userspace_modules.descriptor, native_archive_deps_module);
     const production_archive_run = b.addRunArtifact(archive_generator);
     const production_archive_dir = production_archive_run.addOutputDirectoryArg("userspace-production-archive");
     const production_archive_source = production_archive_dir.path(b, "userspace_archive.zig");
@@ -134,9 +126,38 @@ pub fn addX86_64CompileCheck(
         production_registry.production_boot_image_specs[0],
         "userspace-x86_64-contract-check.elf",
     );
-    const step = b.step("userspace-x86_64-compile-check", "Compile the userspace entry and syscall ABI for the long-mode target");
-    step.dependOn(&artifact.step);
+    const native_archive_deps_module = b.createModule(.{
+        .root_source_file = b.path("src/native/archive_generator_deps.zig"),
+    });
+    const archive_generator = addArchiveGenerator(b, userspace_modules.descriptor, native_archive_deps_module);
+    const archive_run = b.addRunArtifact(archive_generator);
+    _ = archive_run.addOutputDirectoryArg("userspace-x86_64-archive-check");
+    archive_run.addArg("x86_64-check");
+    archive_run.addArg("production");
+    archive_run.addFileArg(b.path("src/boot/boot64.S"));
+    archive_run.addArtifactArg(artifact);
+
+    const step = b.step("userspace-x86_64-compile-check", "Compile and inspect the userspace ABI for the long-mode target");
+    step.dependOn(&archive_run.step);
     return step;
+}
+
+fn addArchiveGenerator(
+    b: *std.Build,
+    descriptor_module: *std.Build.Module,
+    native_archive_deps_module: *std.Build.Module,
+) *std.Build.Step.Compile {
+    const archive_generator = b.addExecutable(.{
+        .name = "userspace-archive-generator",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/generate_userspace_archive.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    archive_generator.root_module.addImport("userspace_descriptor", descriptor_module);
+    archive_generator.root_module.addImport("native_archive_deps", native_archive_deps_module);
+    return archive_generator;
 }
 
 pub fn gateArtifactInstalls(artifacts: ArtifactSet, validation_step: *std.Build.Step) void {
@@ -201,6 +222,7 @@ fn addUserspaceCompile(
         .name = artifact_name,
         .root_module = module,
     });
+    artifact.image_base = userspace_layout.image_start;
     artifact.setLinkerScript(b.path("src/userspace/linker.ld"));
     return artifact;
 }

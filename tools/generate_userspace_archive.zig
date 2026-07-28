@@ -146,10 +146,21 @@ fn parseArtifact(
     const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_userspace_image_bytes));
     defer allocator.free(bytes);
 
-    const header = try readStruct(elf.Elf32_Ehdr, bytes, 0);
-    try validateHeader(header, bytes.len);
-
-    const descriptor_offset = try findDescriptorOffset(bytes, header);
+    if (bytes.len < elf.EI_NIDENT) return error.UnexpectedEof;
+    if (!std.mem.eql(u8, bytes[0..4], "\x7fELF")) return error.InvalidElfMagic;
+    const descriptor_offset = switch (bytes[elf.EI_CLASS]) {
+        elf.ELFCLASS32 => descriptor: {
+            const header = try readStruct(elf.Elf32_Ehdr, bytes, 0);
+            try validateHeader(elf.Elf32_Shdr, header, bytes.len, elf.ELFCLASS32, .@"386");
+            break :descriptor try findDescriptorOffset(elf.Elf32_Shdr, elf.Elf32_Sym, bytes, header);
+        },
+        elf.ELFCLASS64 => descriptor: {
+            const header = try readStruct(elf.Elf64_Ehdr, bytes, 0);
+            try validateHeader(elf.Elf64_Shdr, header, bytes.len, elf.ELFCLASS64, .X86_64);
+            break :descriptor try findDescriptorOffset(elf.Elf64_Shdr, elf.Elf64_Sym, bytes, header);
+        },
+        else => return error.UnsupportedElfClass,
+    };
     var descriptor = try readStruct(userspace_descriptor.Descriptor, bytes, descriptor_offset);
     try userspace_descriptor.validate(&descriptor);
 
@@ -169,41 +180,52 @@ fn parseArtifact(
     };
 }
 
-fn validateHeader(header: elf.Elf32_Ehdr, byte_len: usize) !void {
+fn validateHeader(
+    comptime SectionHeader: type,
+    header: anytype,
+    byte_len: usize,
+    expected_class: u8,
+    expected_machine: elf.EM,
+) !void {
     if (!std.mem.eql(u8, header.e_ident[0..4], "\x7fELF")) return error.InvalidElfMagic;
-    if (header.e_ident[elf.EI_CLASS] != elf.ELFCLASS32) return error.UnsupportedElfClass;
+    if (header.e_ident[elf.EI_CLASS] != expected_class) return error.UnsupportedElfClass;
     if (header.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) return error.UnsupportedElfEndian;
-    if (header.e_machine != .@"386") return error.UnsupportedElfMachine;
-    if (header.e_shentsize != @sizeOf(elf.Elf32_Shdr)) return error.InvalidSectionHeaderSize;
+    if (header.e_machine != expected_machine) return error.UnsupportedElfMachine;
+    if (header.e_shentsize != @sizeOf(SectionHeader)) return error.InvalidSectionHeaderSize;
 
-    const sh_end = @as(usize, header.e_shoff) + @as(usize, header.e_shentsize) * @as(usize, header.e_shnum);
-    if (header.e_shoff == 0 or sh_end > byte_len) return error.InvalidSectionHeaderTable;
+    const sh_offset = std.math.cast(usize, header.e_shoff) orelse return error.InvalidSectionHeaderTable;
+    const sh_bytes = std.math.mul(usize, @as(usize, header.e_shentsize), @as(usize, header.e_shnum)) catch
+        return error.InvalidSectionHeaderTable;
+    const sh_end = std.math.add(usize, sh_offset, sh_bytes) catch return error.InvalidSectionHeaderTable;
+    if (sh_offset == 0 or sh_end > byte_len) return error.InvalidSectionHeaderTable;
 }
 
-fn findDescriptorOffset(bytes: []const u8, header: elf.Elf32_Ehdr) !usize {
-    return findDescriptorSectionOffset(bytes, header) catch |err| switch (err) {
-        error.DescriptorSectionNotFound => findDescriptorSymbolOffset(bytes, header),
+fn findDescriptorOffset(comptime SectionHeader: type, comptime Symbol: type, bytes: []const u8, header: anytype) !usize {
+    return findDescriptorSectionOffset(SectionHeader, bytes, header) catch |err| switch (err) {
+        error.DescriptorSectionNotFound => findDescriptorSymbolOffset(SectionHeader, Symbol, bytes, header),
         else => return err,
     };
 }
 
-fn findDescriptorSectionOffset(bytes: []const u8, header: elf.Elf32_Ehdr) !usize {
+fn findDescriptorSectionOffset(comptime SectionHeader: type, bytes: []const u8, header: anytype) !usize {
     const section_count: usize = header.e_shnum;
     if (header.e_shstrndx == 0 or header.e_shstrndx >= section_count) return error.InvalidSectionNameTable;
 
-    const section_names = try sliceSection(bytes, try sectionHeader(bytes, header, header.e_shstrndx));
+    const section_names = try sliceSection(bytes, try sectionHeader(SectionHeader, bytes, header, header.e_shstrndx));
 
     var index: usize = 0;
     while (index < section_count) : (index += 1) {
-        const section = try sectionHeader(bytes, header, index);
+        const section = try sectionHeader(SectionHeader, bytes, header, index);
         const name = readString(section_names, section.sh_name) orelse continue;
         if (!std.mem.eql(u8, name, userspace_descriptor.ELF_SECTION_NAME)) continue;
 
         if (section.sh_size < @sizeOf(userspace_descriptor.Descriptor)) {
             return error.DescriptorSectionTooSmall;
         }
-        const file_offset = @as(usize, section.sh_offset);
-        if (file_offset + @sizeOf(userspace_descriptor.Descriptor) > bytes.len) {
+        const file_offset = std.math.cast(usize, section.sh_offset) orelse return error.DescriptorOutOfBounds;
+        const descriptor_end = std.math.add(usize, file_offset, @sizeOf(userspace_descriptor.Descriptor)) catch
+            return error.DescriptorOutOfBounds;
+        if (descriptor_end > bytes.len) {
             return error.DescriptorOutOfBounds;
         }
         return file_offset;
@@ -212,40 +234,49 @@ fn findDescriptorSectionOffset(bytes: []const u8, header: elf.Elf32_Ehdr) !usize
     return error.DescriptorSectionNotFound;
 }
 
-fn findDescriptorSymbolOffset(bytes: []const u8, header: elf.Elf32_Ehdr) !usize {
+fn findDescriptorSymbolOffset(
+    comptime SectionHeader: type,
+    comptime Symbol: type,
+    bytes: []const u8,
+    header: anytype,
+) !usize {
     const section_count: usize = header.e_shnum;
-    var symtab: ?elf.Elf32_Shdr = null;
+    var symtab: ?SectionHeader = null;
 
     var index: usize = 0;
     while (index < section_count) : (index += 1) {
-        const section = try sectionHeader(bytes, header, index);
+        const section = try sectionHeader(SectionHeader, bytes, header, index);
         if (section.sh_type == elf.SHT_SYMTAB) {
             symtab = section;
             break;
         }
     }
     const symbol_table = symtab orelse return error.SymbolTableNotFound;
-    if (symbol_table.sh_entsize != @sizeOf(elf.Elf32_Sym)) return error.InvalidSymbolTable;
+    if (symbol_table.sh_entsize != @sizeOf(Symbol)) return error.InvalidSymbolTable;
     if (symbol_table.sh_link >= section_count) return error.InvalidStringTableReference;
 
-    const strings_section = try sectionHeader(bytes, header, symbol_table.sh_link);
+    const strings_section = try sectionHeader(SectionHeader, bytes, header, symbol_table.sh_link);
     const strings = try sliceSection(bytes, strings_section);
     const symbol_bytes = try sliceSection(bytes, symbol_table);
-    const symbol_count = symbol_bytes.len / @sizeOf(elf.Elf32_Sym);
+    const symbol_count = symbol_bytes.len / @sizeOf(Symbol);
 
     index = 0;
     while (index < symbol_count) : (index += 1) {
-        const offset = index * @sizeOf(elf.Elf32_Sym);
-        const symbol = try readStruct(elf.Elf32_Sym, symbol_bytes, offset);
+        const offset = index * @sizeOf(Symbol);
+        const symbol = try readStruct(Symbol, symbol_bytes, offset);
         const name = readString(strings, symbol.st_name) orelse continue;
         if (!std.mem.eql(u8, name, "zigos_userspace_descriptor")) continue;
         if (symbol.st_shndx == 0 or symbol.st_shndx >= section_count) return error.InvalidDescriptorSection;
 
-        const section = try sectionHeader(bytes, header, symbol.st_shndx);
+        const section = try sectionHeader(SectionHeader, bytes, header, symbol.st_shndx);
         if (symbol.st_value < section.sh_addr) return error.InvalidDescriptorAddress;
         const relative = symbol.st_value - section.sh_addr;
-        const file_offset = @as(usize, section.sh_offset) + @as(usize, relative);
-        if (file_offset + @sizeOf(userspace_descriptor.Descriptor) > bytes.len) {
+        const section_offset = std.math.cast(usize, section.sh_offset) orelse return error.DescriptorOutOfBounds;
+        const relative_offset = std.math.cast(usize, relative) orelse return error.DescriptorOutOfBounds;
+        const file_offset = std.math.add(usize, section_offset, relative_offset) catch return error.DescriptorOutOfBounds;
+        const descriptor_end = std.math.add(usize, file_offset, @sizeOf(userspace_descriptor.Descriptor)) catch
+            return error.DescriptorOutOfBounds;
+        if (descriptor_end > bytes.len) {
             return error.DescriptorOutOfBounds;
         }
         return file_offset;
@@ -626,14 +657,18 @@ fn writeByteArray(writer: anytype, bytes: []const u8) !void {
     }
 }
 
-fn sectionHeader(bytes: []const u8, header: elf.Elf32_Ehdr, index: usize) !elf.Elf32_Shdr {
-    const offset = @as(usize, header.e_shoff) + index * @as(usize, header.e_shentsize);
-    return readStruct(elf.Elf32_Shdr, bytes, offset);
+fn sectionHeader(comptime SectionHeader: type, bytes: []const u8, header: anytype, index: usize) !SectionHeader {
+    const table_offset = std.math.cast(usize, header.e_shoff) orelse return error.InvalidSectionHeaderTable;
+    const section_delta = std.math.mul(usize, index, @as(usize, header.e_shentsize)) catch
+        return error.InvalidSectionHeaderTable;
+    const offset = std.math.add(usize, table_offset, section_delta) catch return error.InvalidSectionHeaderTable;
+    return readStruct(SectionHeader, bytes, offset);
 }
 
-fn sliceSection(bytes: []const u8, section: elf.Elf32_Shdr) ![]const u8 {
-    const start = @as(usize, section.sh_offset);
-    const end = start + @as(usize, section.sh_size);
+fn sliceSection(bytes: []const u8, section: anytype) ![]const u8 {
+    const start = std.math.cast(usize, section.sh_offset) orelse return error.SectionOutOfBounds;
+    const size = std.math.cast(usize, section.sh_size) orelse return error.SectionOutOfBounds;
+    const end = std.math.add(usize, start, size) catch return error.SectionOutOfBounds;
     if (end > bytes.len) return error.SectionOutOfBounds;
     return bytes[start..end];
 }
