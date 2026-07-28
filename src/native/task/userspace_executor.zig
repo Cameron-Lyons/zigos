@@ -10,6 +10,15 @@ const units = @import("../core/units.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("userspace_loader.zig");
 
+const x86 = if (builtin.target.os.tag == .freestanding)
+    @import("../../arch/x86.zig")
+else
+    struct {
+        pub fn readCr2() usize {
+            return 0;
+        }
+    };
+
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
 else
@@ -695,7 +704,10 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
 
-    const faulting_address = readFaultAddress();
+    const faulting_address = std.math.cast(u32, x86.readCr2()) orelse {
+        freestanding.paging.page_fault_handler(frame);
+        return;
+    };
     @call(.never_inline, recordUserPageFault, .{
         executor,
         executor.active_task_id,
@@ -789,12 +801,6 @@ fn publishRootActiveTaskId(task_id: u64) void {
     if (@hasDecl(root, "publishUserspaceActiveTaskId")) {
         root.publishUserspaceActiveTaskId(task_id);
     }
-}
-
-fn readFaultAddress() u32 {
-    return asm volatile ("mov %%cr2, %[addr]"
-        : [addr] "=r" (-> u32),
-    );
 }
 
 test "executor matches userspace counters by stage and pulse" {
