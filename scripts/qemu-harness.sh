@@ -17,9 +17,8 @@ qemu_harness_default_memory() {
 }
 
 qemu_harness_cpu_model() {
-  # 'max' exposes every TCG-supported feature (SMEP, SMAP, UMIP, ...) so the
-  # kernel's dynamic CPU hardening actually engages under emulation; the
-  # default qemu64 model advertises none of them.
+  # 'max' satisfies the mandatory long-mode, NX, SMEP, SMAP, and UMIP contract;
+  # the legacy qemu64 model does not advertise the complete baseline.
   printf '%s\n' "${QEMU_CPU_MODEL:-max}"
 }
 

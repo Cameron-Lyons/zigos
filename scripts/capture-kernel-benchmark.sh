@@ -26,6 +26,7 @@ for marker in \
   "BOOT:START" \
   "BOOT:PROFILE:benchmark" \
   "BOOT:ROLE:verification" \
+  "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY" \
   "BOOT:CORE_READY" \
   "BENCH:START" \
   "BENCH:QUALITY_SUMMARY" \
