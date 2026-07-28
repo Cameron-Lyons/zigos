@@ -186,7 +186,7 @@
         ],
         "current_evidence": [
           "Spec conformance and adversarial tests already encode revoked capability, expired lease, malformed manifest, corrupted log, rollback, bypass, hidden observability, and unsupported continuous process-observation threats.",
-          "The kernel capability table now stores live capabilities and target revocation generations in indexed arenas with holder and target multimap indexes, so authority lookup, grant rollback, pass/revoke, holder/target queries, and target-generation reservation no longer depend on bespoke fixed-slot free-list scans.",
+          "The kernel capability table now stores live capabilities and target revocation generations in indexed arenas with holder and target multimap indexes, so authority lookup, grant rollback, pass/revoke, holder/target queries, and target-generation reservation no longer depend on bespoke fixed-slot free-list scans. Arena owners that already proved a key absent reuse the first tombstone without a redundant duplicate probe, and capability plus target-generation commits insert complete records without default-payload writes. Two checksum-matched QEMU samples measure capability mint/revoke churn at 681,647.50-686,534.00 cycles per operation versus 726,711.75 on paired main, a 5.5-6.2 percent reduction.",
           "spec/release_security/threat_model.json publishes a reviewer-facing matrix with threat IDs, abuse cases, mitigations, negative tests, residual-risk owners, and release decisions for every required security domain."
         ],
         "open_gaps": [],

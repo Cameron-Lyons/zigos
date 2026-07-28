@@ -89,6 +89,7 @@ pub const sync_private_overlay = .{
 pub const indexed_hot_path_tables = .{
     .indexed_arena = .{
         .tracks_used_count = @hasField(ProbeArena, "used_count"),
+        .inserts_complete_values_at_exact_indexes = @hasDecl(ProbeArena, "insertIndexAt"),
     },
     .service_registry = .{
         .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),
@@ -106,6 +107,7 @@ pub const indexed_hot_path_tables = .{
     .capability_table = .{
         .uses_capability_arena = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveIndex"),
         .uses_target_generation_arena = @hasDecl(@FieldType(capability.CapabilityTable, "target_generations"), "reserveIndex"),
+        .supports_direct_capability_slot_insertion = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "insertIndexAt"),
         .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
     },
