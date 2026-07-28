@@ -116,6 +116,29 @@ pub fn addUserspaceArtifacts(
     };
 }
 
+pub fn addX86_64CompileCheck(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step {
+    const target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const userspace_modules = native_modules.addUserspaceRuntimeModules(b, target, optimize);
+    const artifact = addUserspaceCompile(
+        b,
+        target,
+        optimize,
+        userspace_modules,
+        production_registry.production_boot_image_specs[0],
+        "userspace-x86_64-contract-check.elf",
+    );
+    const step = b.step("userspace-x86_64-compile-check", "Compile the userspace entry and syscall ABI for the long-mode target");
+    step.dependOn(&artifact.step);
+    return step;
+}
+
 pub fn gateArtifactInstalls(artifacts: ArtifactSet, validation_step: *std.Build.Step) void {
     for (artifacts.production_install_steps) |install_step| {
         install_step.dependOn(validation_step);
@@ -132,6 +155,22 @@ fn addUserspaceArtifact(
     userspace_modules: native_modules.UserspaceRuntimeModules,
     spec: production_registry.ImageSpec,
 ) BuiltArtifact {
+    const artifact = addUserspaceCompile(b, target, optimize, userspace_modules, spec, spec.artifact_name);
+    const install = b.addInstallArtifact(artifact, .{});
+    return .{
+        .compile_step = artifact,
+        .install_step = &install.step,
+    };
+}
+
+fn addUserspaceCompile(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    userspace_modules: native_modules.UserspaceRuntimeModules,
+    spec: production_registry.ImageSpec,
+    artifact_name: []const u8,
+) *std.Build.Step.Compile {
     const options = b.addOptions();
     options.addOption([]const u8, "bundle_id", spec.bundle_id);
     options.addOption([]const u8, "display_name", spec.display_name);
@@ -153,18 +192,15 @@ fn addUserspaceArtifact(
         .strip = true,
     });
     module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/userspace_start.S"));
     module.addOptions("build_options", options);
     module.addImport("userspace_descriptor", userspace_modules.descriptor);
     module.addImport("userspace_runtime", userspace_modules.runtime);
 
     const artifact = b.addExecutable(.{
-        .name = spec.artifact_name,
+        .name = artifact_name,
         .root_module = module,
     });
     artifact.setLinkerScript(b.path("src/userspace/linker.ld"));
-    const install = b.addInstallArtifact(artifact, .{});
-    return .{
-        .compile_step = artifact,
-        .install_step = &install.step,
-    };
+    return artifact;
 }

@@ -17,10 +17,6 @@ pub fn Main(comptime mode: EntryMode) type {
             runtime.panic(msg, trace, addr);
         }
 
-        pub fn startAsm() []const u8 {
-            return runtime.startAsm(build_options.heartbeat_increment);
-        }
-
         pub fn main() callconv(.c) noreturn {
             switch (mode) {
                 .contract => runtime.zigos_userspace_contract_main(build_options.run_mmu_isolation_probe),
