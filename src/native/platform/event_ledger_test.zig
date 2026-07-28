@@ -37,6 +37,24 @@ test "event ledger text export preserves the stable diagnostic wire format" {
     );
 }
 
+test "event ledger compact inputs preserve truncation and zeroed tails" {
+    var ledger = Ledger.init();
+    const subject = principal.PrincipalId{ .kind = .service, .serial = 12 };
+    try ledger.recordUpdateTransition(subject, 1, .boot, false, 22, "short detail");
+
+    var events: [1]Event = undefined;
+    const matched = ledger.queryEvents(.{ .kind = .update_transition }, &events);
+    try std.testing.expectEqual(@as(usize, 1), matched.len);
+    try std.testing.expectEqualStrings("short detail", matched[0].detailSlice());
+    try std.testing.expect(std.mem.allEqual(u8, matched[0].detail[matched[0].detail_len..], 0));
+
+    var oversized = [_]u8{'x'} ** (event_ledger.MAX_DETAIL_BYTES + 8);
+    try ledger.recordProcessCrash(.network_stack, subject, 23, 5002, &oversized);
+    const crash = ledger.latestKind(.process_crash).?;
+    try std.testing.expectEqual(event_ledger.MAX_DETAIL_BYTES, crash.detail_len);
+    try std.testing.expect(std.mem.allEqual(u8, crash.detailSlice(), 'x'));
+}
+
 test "event ledger exports structured redacted diagnostics and audit history" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 7 };
