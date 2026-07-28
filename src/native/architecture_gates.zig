@@ -339,6 +339,7 @@ pub const indexed_hot_path_tables = .{
         .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
         .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),
         .supports_indexed_path_lookup = @hasField(workspace.WorkspacePathIndex, "path_slots"),
+        .supports_borrowed_path_lookup = @hasDecl(workspace.Directory, "resolveBorrowed"),
         .supports_indexed_object_lookup = @hasField(workspace.WorkspacePathIndex, "object_slots"),
         .supports_indexed_snapshot_lookup = @hasDecl(workspace.Directory, "findSnapshotConst"),
         .tracks_workspace_count = @hasDecl(workspace.Directory, "workspaceCount"),

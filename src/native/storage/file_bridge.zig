@@ -50,7 +50,7 @@ pub const ResolveEntryFn = *const fn (
     context: *const anyopaque,
     workspace_id: u64,
     path: []const u8,
-) workspace.Error!workspace.Entry;
+) workspace.Error!*const workspace.Entry;
 
 pub const HasVersionFn = *const fn (context: *const anyopaque, version_id: u64) bool;
 
@@ -194,9 +194,9 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     };
 
     const resolve_entry = struct {
-        fn call(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
+        fn call(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!*const workspace.Entry {
             const bridge_context: *const TestContext = @ptrCast(@alignCast(context));
-            return bridge_context.workspaces.resolve(ids.workspace(workspace_id), path);
+            return bridge_context.workspaces.resolveBorrowed(ids.workspace(workspace_id), path);
         }
     }.call;
     const has_version = struct {

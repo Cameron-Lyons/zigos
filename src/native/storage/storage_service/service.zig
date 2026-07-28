@@ -290,6 +290,10 @@ pub const StorageCore = struct {
         return self.workspaces.resolve(workspaceId(workspace_id), path);
     }
 
+    pub fn resolveBorrowed(self: *const Service, workspace_id: anytype, path: []const u8) workspace.Error!*const workspace.Entry {
+        return self.workspaces.resolveBorrowed(workspaceId(workspace_id), path);
+    }
+
     pub fn entries(self: *const Service, workspace_id: anytype) workspace.Error![]const workspace.Entry {
         return self.workspaces.entries(workspaceId(workspace_id));
     }
@@ -1062,9 +1066,9 @@ fn writeStorageTrace(
     }
 }
 
-fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
+fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!*const workspace.Entry {
     const service: *const StorageCore = @ptrCast(@alignCast(context));
-    return service.resolve(ids.workspace(workspace_id), path);
+    return service.resolveBorrowed(ids.workspace(workspace_id), path);
 }
 
 fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
