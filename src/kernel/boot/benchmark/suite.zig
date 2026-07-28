@@ -2580,11 +2580,11 @@ fn resolveBridgeEntry(
     context: *const anyopaque,
     workspace_id: u64,
     path: []const u8,
-) workspace.Error!workspace.Entry {
+) workspace.Error!*const workspace.Entry {
     const bridge_context: *const FileBridgeContext = @ptrCast(@alignCast(context));
     if (workspace_id != bridge_context.expected_workspace_id) return error.EntryNotFound;
     if (!std.mem.eql(u8, path, bridge_context.expected_path)) return error.EntryNotFound;
-    return bridge_context.entry;
+    return &bridge_context.entry;
 }
 
 fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
