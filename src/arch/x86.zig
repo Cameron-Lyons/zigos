@@ -1,5 +1,3 @@
-const builtin = @import("builtin");
-
 pub inline fn hlt() void {
     asm volatile ("hlt");
 }
@@ -68,15 +66,9 @@ pub inline fn rdtsc() u64 {
 }
 
 pub inline fn stackPointer() usize {
-    return switch (builtin.cpu.arch) {
-        .x86 => asm volatile ("mov %%esp, %[value]"
-            : [value] "=r" (-> usize),
-        ),
-        .x86_64 => asm volatile ("mov %%rsp, %[value]"
-            : [value] "=r" (-> usize),
-        ),
-        else => @compileError("x86 stack pointer helper requires an x86 target"),
-    };
+    return asm volatile ("mov %%rsp, %[value]"
+        : [value] "=r" (-> usize),
+    );
 }
 
 pub inline fn readCr2() usize {
@@ -86,31 +78,17 @@ pub inline fn readCr2() usize {
 }
 
 pub inline fn invalidatePage(address: usize) void {
-    switch (builtin.cpu.arch) {
-        .x86 => asm volatile ("invlpg (%%eax)"
-            :
-            : [address] "{eax}" (address),
-            : .{ .memory = true }),
-        .x86_64 => asm volatile ("invlpg (%%rax)"
-            :
-            : [address] "{rax}" (address),
-            : .{ .memory = true }),
-        else => @compileError("page invalidation requires an x86 target"),
-    }
+    asm volatile ("invlpg (%%rax)"
+        :
+        : [address] "{rax}" (address),
+        : .{ .memory = true });
 }
 
 pub inline fn loadIdt(descriptor: *const anyopaque) void {
-    switch (builtin.cpu.arch) {
-        .x86 => asm volatile ("lidtl (%%eax)"
-            :
-            : [descriptor] "{eax}" (descriptor),
-            : .{ .memory = true }),
-        .x86_64 => asm volatile ("lidtq (%%rax)"
-            :
-            : [descriptor] "{rax}" (descriptor),
-            : .{ .memory = true }),
-        else => @compileError("IDT loading requires an x86 target"),
-    }
+    asm volatile ("lidtq (%%rax)"
+        :
+        : [descriptor] "{rax}" (descriptor),
+        : .{ .memory = true });
 }
 
 pub const CR0_EM: usize = 1 << 2;

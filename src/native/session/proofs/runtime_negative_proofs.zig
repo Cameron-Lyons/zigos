@@ -24,7 +24,7 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 const paging = if (builtin.target.os.tag == .freestanding)
-    @import("../../../kernel/memory/paging_select.zig")
+    @import("../../../kernel/memory/paging64.zig")
 else
     struct {
         pub const FrameStats = struct {

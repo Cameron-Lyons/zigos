@@ -28,9 +28,9 @@ else
 
 const freestanding = if (builtin.target.os.tag == .freestanding)
     struct {
-        pub const gdt = @import("../../kernel/interrupts/gdt_select.zig");
+        pub const gdt = @import("../../kernel/interrupts/gdt64.zig");
         pub const isr = @import("../../kernel/interrupts/isr.zig");
-        pub const paging = @import("../../kernel/memory/paging_select.zig");
+        pub const paging = @import("../../kernel/memory/paging64.zig");
     }
 else
     struct {
@@ -195,20 +195,18 @@ const UserContext64 = extern struct {
 };
 
 comptime {
-    if (builtin.cpu.arch == .x86_64) {
-        if (@offsetOf(UserContext64, "instruction_pointer") != 120 or
-            @offsetOf(UserContext64, "flags") != 128 or
-            @offsetOf(UserContext64, "stack_pointer") != 136 or
-            @sizeOf(UserContext64) != 144)
-        {
-            @compileError("x86-64 userspace context layout diverged from userspace_entry64.S");
-        }
+    if (@offsetOf(UserContext64, "instruction_pointer") != 120 or
+        @offsetOf(UserContext64, "flags") != 128 or
+        @offsetOf(UserContext64, "stack_pointer") != 136 or
+        @sizeOf(UserContext64) != 144)
+    {
+        @compileError("x86-64 userspace context layout diverged from userspace_entry64.S");
     }
 }
 
-// x86 passes entry/stack directly. x86-64 passes a UserContext64 pointer in
-// the first argument and ignores the second argument.
-extern fn zigos_enter_userspace(entry_or_context: usize, stack_top: u32) callconv(.c) u32;
+// The entry assembly receives a UserContext64 pointer in the first argument
+// and reserves the second argument for the C ABI boundary.
+extern fn zigos_enter_userspace(context: usize, reserved: usize) callconv(.c) u32;
 
 const MappingState = enum(u8) {
     free,
@@ -254,8 +252,6 @@ pub const Executor = struct {
     active_mapping: ?*MappingEntry = null,
     kernel_page_directory_ptr: usize = 0,
     handoff_completed: bool = false,
-    pending_instruction_pointer: u32 = 0,
-    pending_stack_pointer: u32 = 0,
     pending_user_context64: UserContext64 = .{},
     last_trap_instruction_pointer: u32 = 0,
     last_trap_stack_pointer: u32 = 0,
@@ -349,8 +345,6 @@ pub const Executor = struct {
         self.active_mapping = null;
         self.kernel_page_directory_ptr = 0;
         self.handoff_completed = false;
-        self.pending_instruction_pointer = 0;
-        self.pending_stack_pointer = 0;
         self.pending_user_context64 = .{};
         self.last_trap_instruction_pointer = 0;
         self.last_trap_stack_pointer = 0;
@@ -441,20 +435,13 @@ pub const Executor = struct {
             mapping.resume_stack_pointer
         else
             @as(u32, @intCast(address_space.stack_pointer - 16));
-        @call(.never_inline, recordPendingHandoff, .{
-            self,
-            instruction_pointer,
-            stack_pointer,
-        });
-        if (comptime builtin.cpu.arch == .x86_64) {
-            self.pending_user_context64 = if (mapping.resume_valid)
-                mapping.user_context64
-            else
-                .{
-                    .instruction_pointer = instruction_pointer,
-                    .stack_pointer = stack_pointer,
-                };
-        }
+        self.pending_user_context64 = if (mapping.resume_valid)
+            mapping.user_context64
+        else
+            .{
+                .instruction_pointer = instruction_pointer,
+                .stack_pointer = stack_pointer,
+            };
 
         self.active_mapping = mapping;
         self.active_task_id = task_id;
@@ -720,9 +707,9 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
     const instruction_pointer = std.math.cast(u32, frame.eip) orelse
-        native_util.impossibleByInvariant("userspace instruction pointer exceeds the 32-bit sandbox");
+        native_util.impossibleByInvariant("userspace instruction pointer exceeds the low-address sandbox");
     const stack_pointer = std.math.cast(u32, frame.useresp) orelse
-        native_util.impossibleByInvariant("userspace stack pointer exceeds the 32-bit sandbox");
+        native_util.impossibleByInvariant("userspace stack pointer exceeds the low-address sandbox");
     const counter = std.math.cast(u32, frame.eax) orelse
         native_util.impossibleByInvariant("userspace trap counter exceeds its ABI width");
     @call(.never_inline, recordTrapState, .{
@@ -827,43 +814,30 @@ fn mapZeroedRegion(
 }
 
 fn enterUserspace(executor: *const Executor) u32 {
-    if (comptime builtin.cpu.arch == .x86_64) {
-        return zigos_enter_userspace(@intFromPtr(&executor.pending_user_context64), 0);
-    }
-    return zigos_enter_userspace(
-        executor.pending_instruction_pointer,
-        executor.pending_stack_pointer,
-    );
+    return zigos_enter_userspace(@intFromPtr(&executor.pending_user_context64), 0);
 }
 
 fn captureUserContext64(mapping: *MappingEntry, frame: *freestanding.isr.InterruptFrame) void {
-    if (comptime builtin.cpu.arch == .x86_64) {
-        mapping.user_context64 = .{
-            .rax = frame.eax,
-            .rbx = frame.ebx,
-            .rcx = frame.ecx,
-            .rdx = frame.edx,
-            .rbp = frame.ebp,
-            .rsi = frame.esi,
-            .rdi = frame.edi,
-            .r8 = frame.r8,
-            .r9 = frame.r9,
-            .r10 = frame.r10,
-            .r11 = frame.r11,
-            .r12 = frame.r12,
-            .r13 = frame.r13,
-            .r14 = frame.r14,
-            .r15 = frame.r15,
-            .instruction_pointer = frame.eip,
-            .flags = frame.eflags,
-            .stack_pointer = frame.useresp,
-        };
-    }
-}
-
-fn recordPendingHandoff(self: *Executor, instruction_pointer: u32, stack_pointer: u32) void {
-    self.pending_instruction_pointer = instruction_pointer;
-    self.pending_stack_pointer = stack_pointer;
+    mapping.user_context64 = .{
+        .rax = frame.eax,
+        .rbx = frame.ebx,
+        .rcx = frame.ecx,
+        .rdx = frame.edx,
+        .rbp = frame.ebp,
+        .rsi = frame.esi,
+        .rdi = frame.edi,
+        .r8 = frame.r8,
+        .r9 = frame.r9,
+        .r10 = frame.r10,
+        .r11 = frame.r11,
+        .r12 = frame.r12,
+        .r13 = frame.r13,
+        .r14 = frame.r14,
+        .r15 = frame.r15,
+        .instruction_pointer = frame.eip,
+        .flags = frame.eflags,
+        .stack_pointer = frame.useresp,
+    };
 }
 
 fn recordTrapState(self: *Executor, instruction_pointer: u32, stack_pointer: u32, counter: u32) void {

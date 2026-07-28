@@ -15,7 +15,6 @@ const embedded_userspace_archive = @import("userspace_archive");
 const syscall_surface = @import("native/kernel_api/syscall_surface.zig");
 const userspace_executor = @import("native/task/userspace_executor.zig");
 const timer = @import("kernel/timer/timer.zig");
-const builtin = @import("builtin");
 
 pub const includes_verification_evidence = config.includesVerificationEvidence();
 
@@ -47,18 +46,12 @@ pub fn bootloaderMeasurementDigest() [32]u8 {
 
 pub fn bootloaderSourceDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    hasher.update(if (comptime builtin.cpu.arch == .x86_64)
-        @embedFile("boot/boot_x86_64.S")
-    else
-        @embedFile("boot/boot64.S"));
+    hasher.update(@embedFile("boot/boot_x86_64.S"));
     return crypto_hash.finalize(&hasher);
 }
 
 pub fn bootloaderSourcePath() []const u8 {
-    return if (comptime builtin.cpu.arch == .x86_64)
-        "src/boot/boot_x86_64.S"
-    else
-        "src/boot/boot64.S";
+    return "src/boot/boot_x86_64.S";
 }
 
 pub fn kernelImageDigest() [32]u8 {

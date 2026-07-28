@@ -1,6 +1,6 @@
-/// Deliberate 32-bit userspace layout. Keep executable images, shared memory,
-/// accelerator apertures, and stacks in disjoint regions so each mapper can
-/// reject cross-domain aliases before touching page tables.
+/// Deliberate low-address userspace layout. Keep executable images, shared
+/// memory, accelerator apertures, and stacks in disjoint regions so each mapper
+/// can reject cross-domain aliases before touching page tables.
 pub const page_size: u64 = 0x1000;
 
 pub const image_start: u64 = 0x4000_0000;

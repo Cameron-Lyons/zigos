@@ -11,9 +11,9 @@ const init_runtime = @import("init/runtime.zig");
 const hardware_proof = @import("../platform/hardware_proof.zig");
 
 pub fn kernelMain() void {
-    // The Zig-generated 32-bit entry path may use SSE registers before CPUID
-    // decoding. SSE2 is therefore both an entry precondition and an explicitly
-    // verified member of the supported CPU contract.
+    // The long-mode Zig entry may use SSE registers before CPUID decoding.
+    // SSE2 is therefore both an entry precondition and an explicitly verified
+    // member of the supported CPU contract.
     x86.enableSse();
     vga.init();
     vga.clear();
