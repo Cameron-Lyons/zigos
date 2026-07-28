@@ -132,7 +132,9 @@ fn trapStackPaintableBase() usize {
 fn armTrapStackGuard() void {
     if (builtin.target.os.tag != .freestanding) return;
     if (trap_stack_guard_armed) return;
-    _ = freestanding.paging.unmapBorrowedCurrentPage(@intFromPtr(&trap_stack));
+    const guard_address = std.math.cast(u32, @intFromPtr(&trap_stack)) orelse
+        native_util.impossibleByInvariant("userspace trap stack lies outside the 32-bit pager");
+    _ = freestanding.paging.unmapBorrowedCurrentPage(guard_address);
     const base = trapStackPaintableBase();
     const words: [*]u32 = @ptrFromInt(base);
     const count = (TRAP_STACK_BYTES - TRAP_STACK_GUARD_BYTES) / @sizeOf(u32);

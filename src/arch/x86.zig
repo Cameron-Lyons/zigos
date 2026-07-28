@@ -115,11 +115,39 @@ pub inline fn loadIdt(descriptor: *const anyopaque) void {
 
 pub const CR0_EM: usize = 1 << 2;
 pub const CR0_MP: usize = 1 << 1;
+pub const CR0_WP: usize = 1 << 16;
+pub const CR0_PG: usize = 1 << 31;
 
 pub const CR4_OSFXSR: usize = 1 << 9;
 pub const CR4_OSXMMEXCPT: usize = 1 << 10;
 pub const CR4_UMIP: usize = 1 << 11;
 pub const CR4_SMEP: usize = 1 << 20;
+
+pub inline fn readCr0() usize {
+    return asm volatile ("mov %%cr0, %[value]"
+        : [value] "=r" (-> usize),
+    );
+}
+
+pub inline fn writeCr0(value: usize) void {
+    asm volatile ("mov %[value], %%cr0"
+        :
+        : [value] "r" (value),
+        : .{ .memory = true });
+}
+
+pub inline fn readCr3() usize {
+    return asm volatile ("mov %%cr3, %[value]"
+        : [value] "=r" (-> usize),
+    );
+}
+
+pub inline fn writeCr3(value: usize) void {
+    asm volatile ("mov %[value], %%cr3"
+        :
+        : [value] "r" (value),
+        : .{ .memory = true });
+}
 
 pub inline fn readCr4() usize {
     return asm volatile ("mov %%cr4, %[value]"
@@ -135,15 +163,10 @@ pub inline fn writeCr4(value: usize) void {
 }
 
 pub fn enableSse() void {
-    var cr0: usize = asm volatile ("mov %%cr0, %[value]"
-        : [value] "=r" (-> usize),
-    );
+    var cr0 = readCr0();
     cr0 &= ~CR0_EM;
     cr0 |= CR0_MP;
-    asm volatile ("mov %[value], %%cr0"
-        :
-        : [value] "r" (cr0),
-    );
+    writeCr0(cr0);
 
     writeCr4(readCr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
 
