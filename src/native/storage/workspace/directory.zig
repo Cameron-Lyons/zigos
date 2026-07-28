@@ -735,9 +735,15 @@ pub const Directory = struct {
     }
 
     pub fn resolve(self: *const Directory, workspace_id: ids.WorkspaceId, path: []const u8) Error!Entry {
+        return (try self.resolveBorrowed(workspace_id, path)).*;
+    }
+
+    /// Borrow a directory-owned entry for immediate read-only inspection. The
+    /// pointer remains valid only until the directory is mutated.
+    pub fn resolveBorrowed(self: *const Directory, workspace_id: ids.WorkspaceId, path: []const u8) Error!*const Entry {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
         const index = findWorkspaceEntryIndex(workspace, path) orelse return error.EntryNotFound;
-        return workspace.path_index.entries[index];
+        return &workspace.path_index.entries[index];
     }
 
     pub fn resolveObject(self: *const Directory, workspace_id: ids.WorkspaceId, object_id: ids.ObjectId) Error!Entry {
@@ -1622,6 +1628,24 @@ fn clearEntryPrefix(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: usize) void {
 
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
+}
+
+test "workspace borrowed resolution returns the directory owned entry" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .app, .serial = 1 },
+        .label = "borrowed-resolution",
+    });
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "documents/note.md", ids.object(7), ids.version(11), .document);
+    _ = try directory.commit(workspace.id, 1);
+
+    const borrowed = try directory.resolveBorrowed(workspace.id, "documents/note.md");
+    const stored_workspace = directory.findConst(workspace.id).?;
+    try std.testing.expect(borrowed == &stored_workspace.path_index.entries[0]);
+    try std.testing.expectEqual(ids.object(7), borrowed.object_id);
+    try std.testing.expectEqual(ids.version(11), borrowed.version_id);
+    try std.testing.expectEqual(borrowed.*, try directory.resolve(workspace.id, "documents/note.md"));
 }
 
 test "workspace commits preserve path order and index rebuilds normalize loaded entries" {
