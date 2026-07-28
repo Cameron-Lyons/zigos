@@ -3,7 +3,7 @@ capability.mint_reuse_free_slot 3300000
 capability.target_generation_lookup 4000
 permission.review.render_grants 90000
 network_policy.authorize_connection 4000
-background_dispatch.allowed_sync 40000
+background_dispatch.allowed_sync 13500
 service_supervisor.ready_lookup 4000
 task_runtime.checkpoint.write_restore 2100000
 task_runtime.checkpoint.write_low_occupancy 42000
