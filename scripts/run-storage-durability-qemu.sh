@@ -22,7 +22,6 @@ NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
 # driver provides genuine persistence across the forced reboots in this proof.
 # Keep both the block backend and controller cache write-back capable so the
 # proof exercises the storage stack's explicit durability barriers.
-export ZIGOS_NATIVE_STORE_BUS=nvme
 export ZIGOS_NATIVE_STORE_CACHE=writeback
 export ZIGOS_NVME_WRITE_CACHE=on
 

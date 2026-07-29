@@ -158,7 +158,7 @@ Use the pinned toolchain and repo entrypoints:
   older x86 CPUs instead of weakening its security contract. GRUB Multiboot2
   enters the bootstrap in 32-bit protected mode; the bootstrap immediately
   installs four-level paging and enters the x86-64 Zig kernel.
-- OVMF or edk2-ovmf firmware for the production and verification UEFI tests
+- OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
   them when available
@@ -166,7 +166,7 @@ Use the pinned toolchain and repo entrypoints:
 For ISO and full disk-image workflows, install the tools verified by
 `scripts/setup-deps.sh`:
 
-- GRUB `mkrescue`
+- x86-64 EFI-capable GRUB `mkrescue` and modules
 - `xorriso`
 - `mtools`
 - `dosfstools`
@@ -176,6 +176,12 @@ pin. Run Zig through `./scripts/zig.sh` so the repo can resolve `ZIG_BIN`, the
 active Zig, `mise`, or local fallback binaries in the right order.
 The build accepts only the `x86_64-freestanding-none` target; 32-bit kernels and
 userspace images are not compatibility outputs.
+All generated optical media are UEFI-only and are rejected unless they contain a
+bootable x86-64 EFI El Torito image. The QEMU harness uses OVMF pflash firmware
+and exposes boot media through virtio-SCSI instead of a legacy disk controller;
+legacy BIOS boot is not a supported execution path.
+Native storage boots attach the store through NVMe rather than an emulated
+legacy IDE controller, matching the first hardware target and production policy.
 After validating the required CPU baseline, the kernel enables EFER.NXE and
 maps only its linker-bounded text executable; kernel rodata, embedded images,
 mutable state, stacks, heap, physical aliases, and MMIO are NX. Kernel text is
@@ -472,7 +478,8 @@ digest. The
 UEFI preflight entrypoints are `./scripts/zig.sh build uefi-qemu-test` for the
 production ISO and `./scripts/zig.sh build uefi-verification-qemu-test` for the
 proof image; set `OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not
-installed in a standard path.
+installed in a standard path. Each QEMU process copies an available variables
+template beside its serial log so concurrent boots do not share firmware state.
 
 QEMU proof runs are script-backed:
 
