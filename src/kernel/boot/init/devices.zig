@@ -12,8 +12,6 @@ const data_plane_boundary = @import("data_plane_boundary.zig");
 const hardware_proof = @import("../../platform/hardware_proof.zig");
 const handoff = @import("../handoff.zig");
 
-const PCI_CLASS_STORAGE_CONTROLLER: u8 = 0x01;
-const PCI_CLASS_NETWORK_ADAPTER: u8 = 0x02;
 const PCI_CLASS_GRAPHICS_ADAPTER: u8 = 0x03;
 const PCI_CLASS_MULTIMEDIA_CONTROLLER: u8 = 0x04;
 const PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER: u8 = 0x07;

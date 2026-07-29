@@ -32,7 +32,7 @@ pub fn none() Explanation {
 pub fn forPermissionDecision(kind: manifest.PermissionKind, reason: abi.DenialReason) Explanation {
     return .{
         .reason = reason,
-        .policy = policyLabel(reason, kind),
+        .policy = policyLabel(reason),
         .missing_capability = capabilityLabel(kind),
         .user_approval_can_resolve = approvalCanResolve(reason),
         .retry_safe = retrySafe(reason),
@@ -119,8 +119,7 @@ fn humanCapabilityLabel(kind: manifest.PermissionKind) []const u8 {
     };
 }
 
-fn policyLabel(reason: abi.DenialReason, kind: manifest.PermissionKind) []const u8 {
-    _ = kind;
+pub fn policyLabel(reason: abi.DenialReason) []const u8 {
     return switch (reason) {
         .none => "none",
         .invalid_target => "target-routing-policy",
@@ -168,7 +167,7 @@ fn plainReason(reason: abi.DenialReason) []const u8 {
     };
 }
 
-fn approvalCanResolve(reason: abi.DenialReason) bool {
+pub fn approvalCanResolve(reason: abi.DenialReason) bool {
     return switch (reason) {
         .capability_missing,
         .capability_revoked,
@@ -180,7 +179,7 @@ fn approvalCanResolve(reason: abi.DenialReason) bool {
     };
 }
 
-fn retrySafe(reason: abi.DenialReason) bool {
+pub fn retrySafe(reason: abi.DenialReason) bool {
     return switch (reason) {
         .budget_exhausted, .interface_not_found => true,
         else => false,

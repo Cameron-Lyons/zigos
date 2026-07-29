@@ -56,7 +56,7 @@ pub fn workspaceStorageImage() Error!task_runtime.ExecutableImageSpec {
 }
 
 pub fn validateArtifact(artifact: anytype) Error!task_runtime.ExecutableImageSpec {
-    const file = embeddedFileFromArtifact(artifact);
+    const file = embedded_file.File.fromChunkedArtifact(artifact);
     if (!file.isPresent()) return error.GeneratedImageMissingBytes;
     if (!artifact.signed) return error.GeneratedImageUnsigned;
     if (artifact.file_size_bytes != file.byte_len) return error.GeneratedImageLengthMismatch;
@@ -99,20 +99,12 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     truncated.data.byte_len = @min(truncated.data.byte_len, 8);
     truncated.data.chunk_indices = truncated.data.chunk_indices[0..1];
     truncated.file_size_bytes = truncated.data.byte_len;
-    truncated.file_sha256 = embeddedFileFromArtifact(truncated).sha256().?;
+    truncated.file_sha256 = embedded_file.File.fromChunkedArtifact(truncated).sha256().?;
     try std.testing.expectError(error.InvalidElfHeader, validateArtifact(truncated));
 
     var stale_metadata = archive_index.artifacts[0];
     stale_metadata.entry_point +%= launch_helpers.SYNTHETIC_SEGMENT_ALIGNMENT;
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(stale_metadata));
-}
-
-fn embeddedFileFromArtifact(artifact: anytype) embedded_file.File {
-    return embedded_file.File.fromChunks(
-        artifact.data.byte_len,
-        artifact.data.chunk_pool,
-        artifact.data.chunk_indices,
-    );
 }
 
 fn metadataMatchesInspection(artifact: anytype, inspection: elf_image_inspector.Inspection) bool {
@@ -122,7 +114,7 @@ fn metadataMatchesInspection(artifact: anytype, inspection: elf_image_inspector.
     if (!std.mem.eql(u8, &artifact.file_sha256, &inspection.file_sha256)) return false;
 
     const expected = executableImageFromArtifact(artifact);
-    return executableImagesEqual(expected, inspection.executable_image);
+    return expected.eql(&inspection.executable_image);
 }
 
 fn executableImageFromArtifact(artifact: anytype) task_runtime.ExecutableImageSpec {
@@ -154,35 +146,6 @@ fn executableImageFromArtifact(artifact: anytype) task_runtime.ExecutableImageSp
     }
 
     return image;
-}
-
-fn executableImagesEqual(
-    lhs: task_runtime.ExecutableImageSpec,
-    rhs: task_runtime.ExecutableImageSpec,
-) bool {
-    if (lhs.entry_point != rhs.entry_point) return false;
-    if (lhs.bootstrap_mailbox_address != rhs.bootstrap_mailbox_address) return false;
-    if (lhs.stack_top != rhs.stack_top) return false;
-    if (lhs.stack_size_bytes != rhs.stack_size_bytes) return false;
-    if (lhs.file_size_bytes != rhs.file_size_bytes) return false;
-    if (!std.mem.eql(u8, &lhs.file_sha256, &rhs.file_sha256)) return false;
-    if (lhs.segment_count != rhs.segment_count) return false;
-
-    var index: usize = 0;
-    while (index < lhs.segment_count) : (index += 1) {
-        const left = lhs.segments[index];
-        const right = rhs.segments[index];
-        if (left.virtual_address != right.virtual_address) return false;
-        if (left.file_offset != right.file_offset) return false;
-        if (left.file_size != right.file_size) return false;
-        if (left.memory_size != right.memory_size) return false;
-        if (left.alignment != right.alignment) return false;
-        if (left.access.read != right.access.read) return false;
-        if (left.access.write != right.access.write) return false;
-        if (left.access.execute != right.access.execute) return false;
-    }
-
-    return true;
 }
 
 test "generated image fixture reader returns archive-backed executable images" {

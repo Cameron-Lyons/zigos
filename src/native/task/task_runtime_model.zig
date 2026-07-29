@@ -112,6 +112,30 @@ pub const ExecutableImageSpec = struct {
     pub fn isPresent(self: *const ExecutableImageSpec) bool {
         return self.entry_point != 0 and self.segment_count != 0;
     }
+
+    pub fn eql(self: *const ExecutableImageSpec, other: *const ExecutableImageSpec) bool {
+        if (self.entry_point != other.entry_point) return false;
+        if (self.bootstrap_mailbox_address != other.bootstrap_mailbox_address) return false;
+        if (self.stack_top != other.stack_top) return false;
+        if (self.stack_size_bytes != other.stack_size_bytes) return false;
+        if (self.file_size_bytes != other.file_size_bytes) return false;
+        if (!std.mem.eql(u8, &self.file_sha256, &other.file_sha256)) return false;
+        if (self.segment_count != other.segment_count) return false;
+        if (self.segment_count > self.segments.len) return false;
+
+        for (self.segments[0..self.segment_count], other.segments[0..other.segment_count]) |left, right| {
+            if (left.virtual_address != right.virtual_address) return false;
+            if (left.file_offset != right.file_offset) return false;
+            if (left.file_size != right.file_size) return false;
+            if (left.memory_size != right.memory_size) return false;
+            if (left.alignment != right.alignment) return false;
+            if (left.access.read != right.access.read) return false;
+            if (left.access.write != right.access.write) return false;
+            if (left.access.execute != right.access.execute) return false;
+        }
+
+        return true;
+    }
 };
 
 pub const AddressSpaceLoadState = enum(u8) {
@@ -729,6 +753,22 @@ test "userspace image validation accepts a bounded executable layout" {
         DEFAULT_SYNTHETIC_ENTRY_POINT + launch_helpers.SYNTHETIC_SEGMENT_ALIGNMENT,
         validated.bootstrap_mailbox_address,
     );
+}
+
+test "executable image equality compares metadata and active segments" {
+    const image = syntheticUserspaceImage("equality-test", "equality-test.entry");
+    var other = image;
+    try std.testing.expect(image.eql(&other));
+
+    other.segments[0].file_size += 1;
+    try std.testing.expect(!image.eql(&other));
+
+    other = image;
+    other.segments[image.segment_count].file_size = 1;
+    try std.testing.expect(image.eql(&other));
+
+    other.segment_count = other.segments.len + 1;
+    try std.testing.expect(!image.eql(&other));
 }
 
 test "userspace image validation rejects addresses outside the user interval" {

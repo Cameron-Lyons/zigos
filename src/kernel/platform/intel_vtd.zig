@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const pci = @import("../drivers/pci.zig");
+const spin = @import("../utils/spin.zig");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("dmar.zig");
 
@@ -658,7 +659,7 @@ fn globallyInvalidateInterruptEntries(unit: UnitRegisters, queue_base: u64) Erro
         {
             break;
         }
-        spinHint();
+        spin.hint();
     } else return error.CommandTimeout;
 
     writeGlobalCommand(unit.base, 0, GLOBAL_QUEUED_INVALIDATION_ENABLE);
@@ -689,7 +690,7 @@ pub fn waitForBlockedWrite(expected_address: u32) Error!FaultRecord {
             blocked_dma_proof = fault;
             return fault;
         }
-        spinHint();
+        spin.hint();
     }
     return error.DmaFaultMissing;
 }
@@ -747,7 +748,7 @@ fn waitForStatus(base: usize, mask: u32, expected_set: bool) Error!void {
     while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
         const set = (read32(base + REG_GLOBAL_STATUS) & mask) != 0;
         if (set == expected_set) return;
-        spinHint();
+        spin.hint();
     }
     return error.CommandTimeout;
 }
@@ -756,7 +757,7 @@ fn waitForCommand(address: usize, pending_mask: u64) Error!void {
     var spins: u64 = 0;
     while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
         if ((read64(address) & pending_mask) == 0) return;
-        spinHint();
+        spin.hint();
     }
     return error.CommandTimeout;
 }
@@ -802,14 +803,6 @@ fn tablePagePhysical(table_base: u32, page: u32) u64 {
 fn publishTables() void {
     if (comptime builtin.cpu.arch == .x86_64) {
         asm volatile ("mfence" ::: .{ .memory = true });
-    } else {
-        asm volatile ("" ::: .{ .memory = true });
-    }
-}
-
-fn spinHint() void {
-    if (comptime builtin.cpu.arch == .x86_64) {
-        asm volatile ("pause");
     } else {
         asm volatile ("" ::: .{ .memory = true });
     }

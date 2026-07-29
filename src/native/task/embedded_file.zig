@@ -40,6 +40,14 @@ pub const File = struct {
         };
     }
 
+    pub fn fromChunkedArtifact(artifact: anytype) File {
+        return fromChunks(
+            artifact.data.byte_len,
+            artifact.data.chunk_pool,
+            artifact.data.chunk_indices,
+        );
+    }
+
     pub fn isPresent(self: File) bool {
         return self.byte_len != 0 and self.isValid();
     }

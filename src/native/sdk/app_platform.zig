@@ -67,20 +67,7 @@ pub fn signedBundle(
     return bundle;
 }
 
-pub fn bundleDeclaresInterface(bundle: manifest.BundleManifest, interface: manifest.InterfaceDecl) bool {
-    return interfaceListDeclares(bundle.provided_interfaces, interface) or
-        interfaceListDeclares(bundle.consumed_interfaces, interface);
-}
-
-fn interfaceListDeclares(interfaces: []const manifest.InterfaceDecl, expected: manifest.InterfaceDecl) bool {
-    for (interfaces) |candidate| {
-        if (!std.mem.eql(u8, candidate.name, expected.name)) continue;
-        if (candidate.version_major != expected.version_major) continue;
-        if (candidate.version_minor != expected.version_minor) continue;
-        return true;
-    }
-    return false;
-}
+pub const bundleDeclaresInterface = manifest.bundleDeclaresInterface;
 
 test "app platform compiles IDL validates manifest declarations and signs packages" {
     const package = example_apps.firstPartyWriter();

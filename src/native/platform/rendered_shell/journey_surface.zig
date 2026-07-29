@@ -1,7 +1,6 @@
 const std = @import("std");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
-const ids = @import("../../core/ids.zig");
 const manifest = @import("../../policy/manifest.zig");
 const native_util = @import("../../core/util.zig");
 const native_ux = @import("../native_ux.zig");
@@ -154,12 +153,7 @@ pub const JourneySurface = struct {
 
     fn openWorkspace(self: *JourneySurface, tick: u64) !void {
         const task = try self.requireTask();
-        _ = try self.ux.openWorkspace(
-            self.storage,
-            ids.workspace(self.config.workspace_id),
-            self.config.document_path,
-            self.config.user,
-        );
+        _ = try task_launch.openConfiguredWorkspace(self.ux, self.storage, self.config);
         _ = try self.compositor.openWorkspaceView(task, self.config.workspace_id, self.config.workspace_label);
         self.workspace_opened = true;
         try self.recordPendingTaskFlows(tick);
@@ -168,13 +162,7 @@ pub const JourneySurface = struct {
     fn openDocument(self: *JourneySurface, tick: u64) !void {
         const task = try self.requireTask();
         if (!self.workspace_opened) return error.WorkspaceRequired;
-        _ = try self.ux.openDocument(
-            self.storage,
-            ids.workspace(self.config.workspace_id),
-            self.config.document_path,
-            task.id,
-            self.config.user,
-        );
+        _ = try task_launch.openConfiguredDocument(self.ux, self.storage, self.config, task.id);
         _ = try self.compositor.openDocumentView(task, self.config.workspace_id, self.config.document_path);
         self.document_opened = true;
         try self.recordPendingTaskFlows(tick);
@@ -306,15 +294,11 @@ pub const JourneySurface = struct {
         try self.recordPendingTaskFlows(tick);
     }
 
-    fn requireTask(self: *JourneySurface) !*task_runtime.TaskRecord {
-        if (self.task_id == 0) return error.TaskRequired;
-        return self.runtime.find(self.task_id) orelse error.TaskRequired;
+    inline fn requireTask(self: *JourneySurface) !*task_runtime.TaskRecord {
+        return task_launch.requireTask(self.runtime, self.task_id);
     }
 
-    fn recordPendingTaskFlows(self: *JourneySurface, tick: u64) !void {
-        while (self.next_ledger_flow_order < self.ux.flow_count) : (self.next_ledger_flow_order += 1) {
-            const flow = self.ux.flowAtOrder(self.next_ledger_flow_order) orelse return error.MissingTaskFlow;
-            try self.ledger.recordTaskFlow(flow.*, tick);
-        }
+    inline fn recordPendingTaskFlows(self: *JourneySurface, tick: u64) !void {
+        return task_launch.recordPendingTaskFlows(self.ux, self.ledger, &self.next_ledger_flow_order, tick);
     }
 };

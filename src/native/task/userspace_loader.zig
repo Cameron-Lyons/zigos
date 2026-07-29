@@ -495,38 +495,9 @@ fn validateEmbeddedElfInfo(
     if (inspected.byte_len != embedded_info.byte_len) return error.EmbeddedArtifactMetadataMismatch;
     if (inspected.bootstrap_mailbox_address != embedded_info.bootstrap_mailbox_address) return error.EmbeddedArtifactMetadataMismatch;
     if (!std.mem.eql(u8, &inspected.file_sha256, &embedded_info.file_sha256)) return error.EmbeddedArtifactMetadataMismatch;
-    if (!executableImagesEqual(inspected.executable_image, embedded_info.executable_image)) {
+    if (!inspected.executable_image.eql(&embedded_info.executable_image)) {
         return error.EmbeddedArtifactMetadataMismatch;
     }
-}
-
-fn executableImagesEqual(
-    lhs: task_runtime.ExecutableImageSpec,
-    rhs: task_runtime.ExecutableImageSpec,
-) bool {
-    if (lhs.entry_point != rhs.entry_point) return false;
-    if (lhs.bootstrap_mailbox_address != rhs.bootstrap_mailbox_address) return false;
-    if (lhs.stack_top != rhs.stack_top) return false;
-    if (lhs.stack_size_bytes != rhs.stack_size_bytes) return false;
-    if (lhs.file_size_bytes != rhs.file_size_bytes) return false;
-    if (!std.mem.eql(u8, &lhs.file_sha256, &rhs.file_sha256)) return false;
-    if (lhs.segment_count != rhs.segment_count) return false;
-
-    var index: usize = 0;
-    while (index < lhs.segment_count) : (index += 1) {
-        const left = lhs.segments[index];
-        const right = rhs.segments[index];
-        if (left.virtual_address != right.virtual_address) return false;
-        if (left.file_offset != right.file_offset) return false;
-        if (left.file_size != right.file_size) return false;
-        if (left.memory_size != right.memory_size) return false;
-        if (left.alignment != right.alignment) return false;
-        if (left.access.read != right.access.read) return false;
-        if (left.access.write != right.access.write) return false;
-        if (left.access.execute != right.access.execute) return false;
-    }
-
-    return true;
 }
 
 fn componentAbiVersion(substrate: task_runtime.ExecutionSubstrate) u16 {

@@ -483,7 +483,7 @@ pub const Scheduler = struct {
             slot.dispatch_count += 1;
             slot.last_dispatch_tick = now_ticks;
             slot.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
-            slot.cpu_budget_remaining_ticks = saturatingSubTicks(slot.cpu_budget_remaining_ticks, DISPATCH_CPU_TICK_COST);
+            slot.cpu_budget_remaining_ticks -|= DISPATCH_CPU_TICK_COST;
             slot.memory_bandwidth_consumed_units = std.math.add(
                 usize,
                 slot.memory_bandwidth_consumed_units,
@@ -745,11 +745,8 @@ pub const Scheduler = struct {
         decision: accelerator_scheduler.Decision,
     ) void {
         self.engine_dispatch_counts[engineIndex(decision.engine)] += 1;
-        self.resource_state.cpu_budget_ticks = saturatingSubTicks(self.resource_state.cpu_budget_ticks, DISPATCH_CPU_TICK_COST);
-        self.resource_state.memory_bandwidth_units = saturatingSubUsize(
-            self.resource_state.memory_bandwidth_units,
-            memoryBandwidthUnitsFor(task),
-        );
+        self.resource_state.cpu_budget_ticks -|= DISPATCH_CPU_TICK_COST;
+        self.resource_state.memory_bandwidth_units -|= memoryBandwidthUnitsFor(task);
     }
 
     fn queuePendingAcceleratorWake(self: *Scheduler, slot: *Slot, now_ticks: u64) void {
@@ -1094,16 +1091,6 @@ fn acceleratorClaimTaskKey(task_id: u64) u64 {
 fn hasDispatchBudget(slot: *const Slot, task: *const task_runtime.TaskRecord) bool {
     _ = task;
     return slot.cpu_budget_remaining_ticks >= DISPATCH_CPU_TICK_COST;
-}
-
-fn saturatingSubTicks(value: u64, amount: u64) u64 {
-    if (amount >= value) return 0;
-    return value - amount;
-}
-
-fn saturatingSubUsize(value: usize, amount: usize) usize {
-    if (amount >= value) return 0;
-    return value - amount;
 }
 
 fn deriveDispatchRequest(task: *const task_runtime.TaskRecord) accelerator_scheduler.Request {

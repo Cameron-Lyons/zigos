@@ -334,6 +334,21 @@ pub const BundleManifest = struct {
     signature: Signature = .{},
 };
 
+pub fn bundleDeclaresInterface(bundle: BundleManifest, expected: InterfaceDecl) bool {
+    return interfaceListDeclares(bundle.provided_interfaces, expected) or
+        interfaceListDeclares(bundle.consumed_interfaces, expected);
+}
+
+fn interfaceListDeclares(interfaces: []const InterfaceDecl, expected: InterfaceDecl) bool {
+    for (interfaces) |candidate| {
+        if (!std.mem.eql(u8, candidate.name, expected.name)) continue;
+        if (candidate.version_major != expected.version_major) continue;
+        if (candidate.version_minor != expected.version_minor) continue;
+        return true;
+    }
+    return false;
+}
+
 pub const ValidationError = error{
     EmptyBundleId,
     EmptyDisplayName,
