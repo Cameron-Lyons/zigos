@@ -187,7 +187,7 @@ pub const nuc11tnki5_proof_metadata_markers = [_][]const u8{
 pub const nuc11tnki5_hardware_fact_markers = [_][]const u8{
     nuc11tnki5_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":MULTIBOOT_MEMORY_MAP:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":ACPI_RSDP:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":ACPI_XSDT:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":ACPI_MADT:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":ACPI_FADT:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":APIC_TIMER_INTERRUPT:OBSERVED",

@@ -1162,7 +1162,7 @@ fn testHardwareProofFacts(reader_generation: u32) hardware_proof.ProbeFacts {
         .multiboot_handoff = true,
         .memory_map = true,
         .memory_capacity_bytes = units.mebibytes(16),
-        .acpi_rsdp = true,
+        .acpi_xsdt = true,
         .acpi_madt = true,
         .acpi_fadt = true,
         .acpi_mcfg = true,
