@@ -1,7 +1,7 @@
 const std = @import("std");
 const x86 = @import("../../arch/x86.zig");
 const handoff = @import("../boot/handoff.zig");
-const vga = @import("../drivers/vga.zig");
+const early_console = @import("../utils/console.zig");
 const memory = @import("memory.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const frame_allocator = @import("frame_allocator.zig");
@@ -177,7 +177,7 @@ fn releaseFrameLock() void {
 }
 
 fn haltWithMessage(message: []const u8) noreturn {
-    vga.print(message);
+    early_console.print(message);
     while (true) x86.hlt();
 }
 
@@ -530,7 +530,7 @@ fn initializeKernelHierarchy() void {
 }
 
 pub fn init() void {
-    vga.print("Initializing four-level paging...\n");
+    early_console.print("Initializing four-level paging...\n");
 
     const boot_info = handoff.capturedInfo() orelse
         haltWithMessage("Missing Multiboot memory-map handoff!\n");
@@ -567,21 +567,21 @@ pub fn init() void {
     current_page_directory = &kernel_pml4;
     x86.writeCr3(@intFromPtr(&kernel_pml4));
     unmapBootStackGuardPage();
-    vga.print("Four-level paging enabled!\n");
+    early_console.print("Four-level paging enabled!\n");
     const stats = frameStats();
-    vga.print("Total frames: ");
+    early_console.print("Total frames: ");
     numfmt.printDec(stats.total);
-    vga.print(" Reserved frames: ");
+    early_console.print(" Reserved frames: ");
     numfmt.printDec(stats.reserved);
-    vga.print(" Allocated frames: ");
+    early_console.print(" Allocated frames: ");
     numfmt.printDec(stats.allocated);
-    vga.print("\n");
+    early_console.print("\n");
 }
 
 fn unmapBootStackGuardPage() void {
     const guard_address = @intFromPtr(&stack_bottom);
     if (guard_address % PAGE_SIZE != 0) {
-        vga.print("Boot stack guard skipped: stack_bottom is not page-aligned\n");
+        early_console.print("Boot stack guard skipped: stack_bottom is not page-aligned\n");
         return;
     }
     _ = unmapBorrowedCurrentPage(guard_address);

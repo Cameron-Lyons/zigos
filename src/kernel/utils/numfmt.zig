@@ -1,4 +1,4 @@
-const vga = @import("../drivers/vga.zig");
+const console = @import("console.zig");
 
 const DECIMAL_U64_BUFFER_BYTES: usize = 20;
 const HEX_U64_BUFFER_BYTES: usize = 16;
@@ -6,7 +6,7 @@ const HEX_U64_BUFFER_BYTES: usize = 16;
 pub fn printDec(value: anytype) void {
     var v: u64 = @as(u64, @intCast(value));
     if (v == 0) {
-        vga.printChar('0');
+        console.printChar('0');
         return;
     }
 
@@ -20,14 +20,14 @@ pub fn printDec(value: anytype) void {
 
     while (count > 0) {
         count -= 1;
-        vga.printChar(digits[count]);
+        console.printChar(digits[count]);
     }
 }
 
 pub fn printHex(value: anytype) void {
     var v: u64 = @as(u64, @intCast(value));
     if (v == 0) {
-        vga.printChar('0');
+        console.printChar('0');
         return;
     }
 
@@ -42,6 +42,6 @@ pub fn printHex(value: anytype) void {
 
     while (count > 0) {
         count -= 1;
-        vga.printChar(digits[count]);
+        console.printChar(digits[count]);
     }
 }
