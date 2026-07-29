@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const pci = @import("../drivers/pci.zig");
 const spin = @import("../utils/spin.zig");
+const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("dmar.zig");
 
@@ -27,11 +28,16 @@ const PRESENT: u64 = 1;
 const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const FIRST_DOMAIN_ID: u16 = 1;
 
-const KERNEL_VTD_MMIO_VIRTUAL_BASE: usize = 0xFFFF_8000_3000_0000;
 const UNIT_MMIO_STRIDE: usize = 0x4000;
 const UNIT_IOTLB_PAGE_OFFSET: usize = 0x1000;
 const UNIT_FAULT_PAGE_OFFSET: usize = 0x2000;
 const MAX_FAULT_RECORD_PAGES: usize = 2;
+
+comptime {
+    if (dmar.MAX_REMAPPING_UNITS * UNIT_MMIO_STRIDE > mmio_windows.intel_vtd.bytes) {
+        @compileError("VT-d unit mappings exceed their reserved MMIO window");
+    }
+}
 
 const REG_VERSION: usize = 0x000;
 const REG_CAPABILITY: usize = 0x008;
@@ -342,7 +348,7 @@ fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8) Err
     if (unit.segment != 0) return error.FirmwarePolicyUnsupported;
     const register_base = std.math.cast(usize, unit.register_base_address) orelse
         return error.InvalidRegisterRange;
-    const virtual_base = KERNEL_VTD_MMIO_VIRTUAL_BASE + index * UNIT_MMIO_STRIDE;
+    const virtual_base = mmio_windows.intel_vtd.base + index * UNIT_MMIO_STRIDE;
     paging.mapKernelBorrowedPage(
         virtual_base,
         register_base,

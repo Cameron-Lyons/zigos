@@ -1,6 +1,7 @@
 const std = @import("std");
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
+const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const mcfg = @import("../platform/mcfg.zig");
 
@@ -10,7 +11,6 @@ const ECAM_FUNCTION_SHIFT: u6 = 12;
 const ECAM_FUNCTION_BYTES: usize = 1 << ECAM_FUNCTION_SHIFT;
 const ECAM_CONFIG_OFFSET_MASK: u16 = ECAM_FUNCTION_BYTES - 1;
 const CONFIG_DWORD_ALIGNMENT_MASK: u16 = 0x0FFC;
-const KERNEL_ECAM_WINDOW_VIRTUAL_BASE: usize = 0xFFFF_8000_1000_0000;
 
 const PCI_MAX_BUS_COUNT: u16 = 256;
 const PCI_MAX_DEVICE_COUNT: u8 = 32;
@@ -60,6 +60,12 @@ const STABLE_VENDOR_ID_SHIFT = 32;
 const STABLE_DEVICE_ID_SHIFT = 16;
 const STABLE_BUS_SHIFT = 8;
 const STABLE_DEVICE_SHIFT = 3;
+
+comptime {
+    if (ECAM_FUNCTION_BYTES > mmio_windows.pci_ecam.bytes) {
+        @compileError("PCI ECAM window is smaller than one configuration function");
+    }
+}
 
 pub const PCIDevice = struct {
     bus: u8,
@@ -166,13 +172,13 @@ fn mappedRegister(bus: u8, device: u8, function: u8, offset: u16) ?*volatile u32
     const physical_page = physical_address & ~(ECAM_FUNCTION_BYTES - 1);
     if (mapped_configuration_page == null or mapped_configuration_page.? != physical_page) {
         paging.mapKernelBorrowedPage(
-            KERNEL_ECAM_WINDOW_VIRTUAL_BASE,
+            mmio_windows.pci_ecam.base,
             physical_page,
             paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
         );
         mapped_configuration_page = physical_page;
     }
-    return @ptrFromInt(KERNEL_ECAM_WINDOW_VIRTUAL_BASE + (physical_address & (ECAM_FUNCTION_BYTES - 1)));
+    return @ptrFromInt(mmio_windows.pci_ecam.base + (physical_address & (ECAM_FUNCTION_BYTES - 1)));
 }
 
 fn readConfigUnlocked(bus: u8, device: u8, function: u8, offset: u16) u32 {

@@ -171,7 +171,10 @@ Use the pinned toolchain and repo entrypoints:
   TX/RX queues only after its requester is confined. Native payloads are carried
   in padded Ethernet frames under the local experimental EtherType; receive
   polling accepts only directed or broadcast frames for that EtherType. Hardware
-  interrupt delivery and peer-addressed transport remain gated work. Before
+  interrupt delivery and peer-addressed transport remain gated work. NVMe, PCIe
+  ECAM, I225-LM, ACPI, and VT-d cache-disabled mappings are assigned by one
+  page-aligned, capacity-checked kernel MMIO layout whose pairwise non-overlap is
+  enforced at compile time. Before
   normal storage attach, the controller must trigger a primary VT-d
   record by attempting
   a write to a reserved but unmapped guard page; the requester, address, direction,

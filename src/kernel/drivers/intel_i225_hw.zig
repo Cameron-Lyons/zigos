@@ -6,6 +6,7 @@
 
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
+const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const i225_frame = @import("intel_i225_frame.zig");
@@ -28,7 +29,6 @@ const BAR_IO_SPACE: u32 = 1 << 0;
 const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
 const BAR_MEMORY_TYPE_32: u32 = 0;
 const BAR_MEMORY_TYPE_64: u32 = 0x4;
-const KERNEL_I225_MMIO_VIRTUAL_BASE: usize = 0xFFFF_8000_1000_0000;
 const QUEUE_SPIN_LIMIT: u64 = 5_000_000;
 const TRANSMIT_SPIN_LIMIT: u64 = 50_000_000;
 
@@ -89,6 +89,12 @@ const ADVTXD_REPORT_STATUS: u32 = 0x0800_0000;
 const ADVTXD_EXTENDED: u32 = 0x2000_0000;
 const ADVTXD_PAYLOAD_LENGTH_SHIFT: u5 = 14;
 const TXD_STATUS_DONE: u32 = 1;
+
+comptime {
+    if (@as(usize, BAR_MAP_BYTES) > mmio_windows.intel_i225.bytes) {
+        @compileError("I225 BAR mapping exceeds its reserved MMIO window");
+    }
+}
 
 pub const MAX_PAYLOAD_BYTES = i225_frame.MAX_PAYLOAD_BYTES;
 
@@ -487,12 +493,12 @@ fn mapBar(physical: usize) usize {
     var offset: u32 = 0;
     while (offset < BAR_MAP_BYTES) : (offset += PAGE_SIZE) {
         paging.mapKernelBorrowedPage(
-            KERNEL_I225_MMIO_VIRTUAL_BASE + offset,
+            mmio_windows.intel_i225.base + offset,
             physical + offset,
             paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
         );
     }
-    return KERNEL_I225_MMIO_VIRTUAL_BASE;
+    return mmio_windows.intel_i225.base;
 }
 
 fn readPermanentMac(bar: usize) ?[6]u8 {

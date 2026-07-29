@@ -6,11 +6,12 @@
 // Memory model assumptions (see src/kernel/memory/paging64.zig): the kernel
 // identity-maps the first 128 MiB, so frames returned by alloc_frames have
 // phys == virt and are usable directly as DMA/PRP targets. The controller BAR
-// lives above the identity-mapped window, so we identity-map its pages
-// (virt == phys) with caching disabled before touching registers.
+// lives above the identity-mapped window, so we map it cache-disabled into its
+// dedicated higher-half MMIO region before touching registers.
 
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
+const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("../platform/dmar.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
@@ -49,8 +50,13 @@ const BAR_MAP_BYTES: u32 = 0x2000; // registers + first doorbell page
 const BAR_IO_SPACE: u32 = 1 << 0;
 const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
 const BAR_MEMORY_TYPE_64: u32 = 0x4;
-const KERNEL_MMIO_VIRTUAL_BASE: usize = 0xFFFF_8000_0000_0000;
 const READY_SPIN_LIMIT: u64 = 50_000_000;
+
+comptime {
+    if (@as(usize, BAR_MAP_BYTES) > mmio_windows.nvme.bytes) {
+        @compileError("NVMe BAR mapping exceeds its reserved MMIO window");
+    }
+}
 
 pub const Error = error{
     BarUnmappable,
@@ -172,12 +178,12 @@ fn mapBar(phys: usize) usize {
     while (offset < BAR_MAP_BYTES) : (offset += PAGE_SIZE) {
         const page_offset: usize = offset;
         paging.mapKernelBorrowedPage(
-            KERNEL_MMIO_VIRTUAL_BASE + page_offset,
+            mmio_windows.nvme.base + page_offset,
             phys + page_offset,
             paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
         );
     }
-    return KERNEL_MMIO_VIRTUAL_BASE;
+    return mmio_windows.nvme.base;
 }
 
 fn doorbellStride(cap: u64) usize {
