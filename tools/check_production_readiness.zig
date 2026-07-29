@@ -665,6 +665,7 @@ fn validateNuc11tnki5KernelProofSources(
     const service_bootstrap_path = "src/native/session/service_bootstrap.zig";
     const session_service_bootstrap_path = "src/native/session/session_service_bootstrap.zig";
     const isr_path = "src/kernel/interrupts/isr.zig";
+    const interrupt_stubs_path = "src/kernel/interrupts/interrupt64.S";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
     const console_path = "src/kernel/utils/console.zig";
@@ -728,6 +729,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 interrupt source is missing: {s}", .{isr_path});
         return;
     }
+    if (!common.pathExists(io, interrupt_stubs_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 interrupt stubs are missing: {s}", .{interrupt_stubs_path});
+        return;
+    }
     if (!common.pathExists(io, runtime_init_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 runtime initialization source is missing: {s}", .{runtime_init_path});
         return;
@@ -769,6 +774,7 @@ fn validateNuc11tnki5KernelProofSources(
     const service_bootstrap_source = try common.readFileAlloc(allocator, io, service_bootstrap_path, common.source_file_max_bytes);
     const session_service_bootstrap_source = try common.readFileAlloc(allocator, io, session_service_bootstrap_path, common.source_file_max_bytes);
     const isr_source = try common.readFileAlloc(allocator, io, isr_path, common.source_file_max_bytes);
+    const interrupt_stubs_source = try common.readFileAlloc(allocator, io, interrupt_stubs_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
@@ -898,6 +904,32 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (std.mem.indexOf(u8, isr_source, "const PIC_MASTER_MASK: u8 = ~PIC_TIMER_IRQ_BIT") == null) {
         try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must keep all legacy PIC lines except the timer masked", .{});
+    }
+    const required_timer_only_pic_snippets = [_][]const u8{
+        "const PIC_MASTER_NO_SLAVE: u8 = 0",
+        "setKernelGate(TIMER_IRQ_VECTOR, &irq0)",
+        "if (vector != TIMER_IRQ_VECTOR) unreachable",
+    };
+    for (required_timer_only_pic_snippets) |snippet| {
+        if (std.mem.indexOf(u8, isr_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 legacy PIC fallback must remain timer-only: {s}", .{snippet});
+        }
+    }
+    const retired_pic_surface_snippets = [_][]const u8{
+        "PIC_SLAVE_",
+        "IRQ_SLAVE_BASE_VECTOR",
+        "irq_stubs",
+        "extern fn irq1()",
+    };
+    for (retired_pic_surface_snippets) |snippet| {
+        if (std.mem.indexOf(u8, isr_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must not restore unused slave PIC or IRQ stub surface: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, interrupt_stubs_source, "IRQ 0, 32") == null or
+        std.mem.indexOf(u8, interrupt_stubs_source, "IRQ 1, 33") != null)
+    {
+        try common.addError(errors, allocator, "NUC11TNKi5 interrupt assembly must expose only the legacy timer IRQ stub", .{});
     }
     if (std.mem.indexOf(u8, permission_review_source, "const xhci = @import") == null) {
         try common.addError(errors, allocator, "NUC11TNKi5 permission review must retain the xHCI HID input source", .{});
