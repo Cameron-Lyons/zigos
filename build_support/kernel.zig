@@ -488,31 +488,49 @@ pub fn addKernelArtifact(
     kernel_module.addOptions("build_options", options);
     addKernelAssemblyFiles(b, kernel_module);
 
-    const kernel = b.addExecutable(.{
+    const kernel_object = b.addObject(.{
         .name = name,
         .root_module = kernel_module,
     });
-    kernel.setLinkerScript(b.path("src/arch/x86_64/linker.ld"));
+    kernel_object.bundle_compiler_rt = true;
+
+    const link = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "ld.lld",
+        "-m",
+        "elf_x86_64",
+        "--gc-sections",
+        "-z",
+        "common-page-size=4096",
+        "-z",
+        "max-page-size=4096",
+        "-T",
+    });
+    link.addFileArg(b.path("src/arch/x86_64/linker.ld"));
+    link.addArg("-o");
+    const linked_kernel = link.addOutputFileArg(name);
+    link.addFileArg(kernel_object.getEmittedBin());
 
     const validate_qemu_image = b.addSystemCommand(&.{
         "bash",
         "scripts/check-multiboot2-image.sh",
     });
-    validate_qemu_image.addFileArg(kernel.getEmittedBin());
+    validate_qemu_image.addFileArg(linked_kernel);
 
     const qemu_iso = b.addSystemCommand(&.{
         "bash",
         "scripts/build-grub-iso.sh",
     });
-    qemu_iso.addFileArg(kernel.getEmittedBin());
+    qemu_iso.addFileArg(linked_kernel);
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
     qemu_iso.addFileArg(b.path("src/boot/grub-x86_64-qemu.cfg"));
     qemu_iso.step.dependOn(&validate_qemu_image.step);
 
-    const install = b.addInstallArtifact(kernel, .{});
+    const install = b.addInstallBinFile(linked_kernel, name);
     return .{
-        .compile_step = kernel,
+        .compile_step = kernel_object,
+        .output_file = linked_kernel,
         .install_step = &install.step,
         .output_path = b.getInstallPath(.bin, name),
         .kernel_role = kernel_role,

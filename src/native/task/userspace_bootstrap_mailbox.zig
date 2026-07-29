@@ -89,15 +89,15 @@ pub const Mailbox = extern struct {
     last_counter: u32 = 0,
 };
 
-/// Stable i386 wire layout. Host-side artifact tools may have a wider extern
-/// struct tail alignment, so serialized extent checks must not use host
+/// Stable bootstrap wire layout. Host-side artifact tools may have a wider
+/// extern struct tail alignment, so serialized extent checks must not use host
 /// `@sizeOf(Mailbox)`.
 pub const ABI_SIZE_BYTES: usize = 76;
 pub const ABI_ALIGNMENT: usize = 4;
 
 comptime {
     if (@offsetOf(Mailbox, "last_counter") + @sizeOf(u32) != ABI_SIZE_BYTES) {
-        @compileError("userspace bootstrap mailbox fields no longer match the i386 wire ABI");
+        @compileError("userspace bootstrap mailbox fields no longer match the wire ABI");
     }
 }
 

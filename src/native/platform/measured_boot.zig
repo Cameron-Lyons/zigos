@@ -1193,7 +1193,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     const bootloader_measurement_digest = crypto_hash.digestFromByte(0x11);
     const unexpected_bootloader_digest = crypto_hash.digestFromByte(0x12);
 
-    try manifest.addDigest(.bootloader_source, "src/boot/boot64.S", bootloader_source_digest);
+    try manifest.addDigest(.bootloader_source, "src/boot/boot_x86_64.S", bootloader_source_digest);
     try manifest.addDigest(.bootloader_measurement, "multiboot:zigos_native", bootloader_measurement_digest);
     inline for (0..10) |index| {
         const digest = crypto_hash.digestFromByte(@intCast(0x20 + index));
@@ -1211,7 +1211,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
         .bootloader_source,
-        "src/boot/boot64.S",
+        "src/boot/boot_x86_64.S",
         &bootloader_source_digest,
     ));
     try std.testing.expect(buildArtifactDigestMatches(
@@ -1223,7 +1223,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     try std.testing.expect(!buildArtifactDigestMatches(
         &manifest,
         .bootloader_source,
-        "src/boot/boot64.S",
+        "src/boot/boot_x86_64.S",
         &unexpected_bootloader_digest,
     ));
     try std.testing.expect(!buildArtifactDigestMatches(

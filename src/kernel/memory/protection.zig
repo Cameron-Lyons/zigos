@@ -1,5 +1,5 @@
 const std = @import("std");
-const paging = @import("paging_select.zig");
+const paging = @import("paging64.zig");
 const vga = @import("../drivers/vga.zig");
 
 // User-memory validation and user/kernel copies are owned by the native syscall

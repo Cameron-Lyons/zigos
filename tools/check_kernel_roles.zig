@@ -1,8 +1,9 @@
 const std = @import("std");
 const elf = std.elf;
+const kernel_role_options = @import("kernel_role_options");
 
 const max_elf_bytes: usize = 256 * 1024 * 1024;
-const maximum_production_writable_load_size: u64 = 16 * 1024 * 1024;
+const maximum_production_writable_load_size = kernel_role_options.maximum_production_writable_load_size;
 const minimum_verification_writable_load_delta: u64 = 7 * 1024 * 1024;
 
 const elf_header_size: usize = @sizeOf(elf.Elf32_Ehdr);
@@ -94,6 +95,7 @@ const mmu_probe_role_tag_machine_code = [_]u8{ 0x16, 0xa1, 0x00, 0x00 };
 const mmu_probe_foreign_address_machine_code = [_]u8{ 0x00, 0x00, 0x00, 0x70 };
 const mmu_probe_fault_code_imm32_machine_code = [_]u8{ 0x72, 0x00, 0x00, 0x00 };
 const mmu_probe_fault_code_push_imm8_machine_code = [_]u8{ 0x6a, 0x72 };
+const mmu_probe_fault_code_mov_dl_imm8_machine_code = [_]u8{ 0xb2, 0x72 };
 const mmu_probe_fault_code_max_distance: usize = 24;
 const mmu_probe_machine_code_sentinel_count: usize = 2;
 
@@ -637,6 +639,13 @@ fn countMmuProbeMachineCodeSentinels(bytes: []const u8, programs: ProgramTable) 
         pf_execute,
         &mmu_probe_foreign_address_machine_code,
         &mmu_probe_fault_code_push_imm8_machine_code,
+        mmu_probe_fault_code_max_distance,
+    ) or programsContainOrderedSignatures(
+        bytes,
+        programs,
+        pf_execute,
+        &mmu_probe_foreign_address_machine_code,
+        &mmu_probe_fault_code_mov_dl_imm8_machine_code,
         mmu_probe_fault_code_max_distance,
     )) {
         count += 1;
@@ -1471,6 +1480,20 @@ test "userspace ELF analysis scans loaded identities and executable probe sentin
     try std.testing.expectEqual(
         mmu_probe_machine_code_sentinel_count,
         compact_fault_code.mmu_probe_machine_code_sentinels,
+    );
+
+    @memset(
+        storage[fault_code_offset..][0..mmu_probe_fault_code_push_imm8_machine_code.len],
+        0,
+    );
+    @memcpy(
+        storage[fault_code_offset..][0..mmu_probe_fault_code_mov_dl_imm8_machine_code.len],
+        &mmu_probe_fault_code_mov_dl_imm8_machine_code,
+    );
+    const debug_fault_code = try analyzeUserspaceElf(bytes);
+    try std.testing.expectEqual(
+        mmu_probe_machine_code_sentinel_count,
+        debug_fault_code.mmu_probe_machine_code_sentinels,
     );
 
     writeU32(&storage, elf_header_size + 24, 4);
