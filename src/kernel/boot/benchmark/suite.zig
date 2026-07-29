@@ -2,6 +2,9 @@ const std = @import("std");
 const x86 = @import("../../../arch/x86.zig");
 const abi = @import("../../../native/core/abi.zig");
 const console = @import("../../utils/console.zig");
+const gdt = @import("../../interrupts/gdt64.zig");
+const isr = @import("../../interrupts/isr.zig");
+const syscall64 = @import("../../interrupts/syscall64.zig");
 const paging = @import("../../memory/paging64.zig");
 const qemu_exit = @import("../../utils/qemu_exit.zig");
 const benchmark_cases = @import("cases.zig");
@@ -226,6 +229,26 @@ const AddressSpaceBenchmarkContext = struct {
     space: ?paging.UserAddressSpace = null,
 };
 
+const SyscallBenchmarkContext = struct {
+    prepared: bool = false,
+    handler_registered: bool = false,
+    space: ?paging.UserAddressSpace = null,
+    last_counter: u64 = 0,
+};
+
+const SYSCALL_BENCHMARK_CODE_ADDRESS: u32 = 0x4000_0000;
+const SYSCALL_BENCHMARK_STACK_ADDRESS: u32 = 0xB000_0000;
+const SYSCALL_BENCHMARK_PAGE_BYTES: u32 = 4096;
+const SYSCALL_BENCHMARK_BATCH_SIZE: u64 = 64;
+// Keep asynchronous timer work outside the isolated syscall microbenchmark;
+// interrupt-enabled userspace remains covered by the native smoke suites.
+const SYSCALL_BENCHMARK_USER_FLAGS: u64 = userspace_executor.USER_RFLAGS_RESERVED;
+const GENERAL_PROTECTION_FAULT_VECTOR: u8 = 13;
+const USERSPACE_YIELD_VECTOR: u8 = 129;
+
+extern const zigos_syscall_benchmark_user_start: u8;
+extern const zigos_syscall_benchmark_user_end: u8;
+
 const cases = benchmark_cases.benchmarkCases(.{
     .capability_derive = benchmarkCapabilityDerive,
     .capability_mint_reuse_free_slot = benchmarkCapabilityMintReuseFreeSlot,
@@ -237,6 +260,7 @@ const cases = benchmark_cases.benchmarkCases(.{
     .task_checkpoint_write_restore = benchmarkTaskCheckpointWriteRestore,
     .task_checkpoint_write_low_occupancy = benchmarkTaskCheckpointWriteLowOccupancy,
     .address_space_roundtrip = benchmarkAddressSpaceRoundtrip,
+    .syscall_fast_entry_roundtrip = benchmarkSyscallFastEntryRoundtrip,
     .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
     .file_bridge_resolve = benchmarkFileBridgeResolve,
     .workspace_commit_overlay = benchmarkWorkspaceCommitOverlay,
@@ -449,6 +473,7 @@ var recovery_context = RecoveryContext{};
 var update_health_context = UpdateHealthContext{};
 var benchmark_image_context = BenchmarkImageContext{};
 var address_space_benchmark_context = AddressSpaceBenchmarkContext{};
+var syscall_benchmark_context = SyscallBenchmarkContext{};
 
 // task_runtime.Runtime is >2 MiB, and a Runtime local (plus the temporary a
 // Debug build materializes for its initializer) put multi-megabyte frames on
@@ -478,6 +503,7 @@ pub fn run() noreturn {
 fn prepareFixtures() void {
     prepareBenchmarkUserspaceImages();
     prepareAddressSpaceBenchmarkFixture();
+    prepareSyscallBenchmarkFixture();
     prepareCapabilityLookupFixture();
     prepareFileBridgeFixture();
     preparePermissionReviewFixture();
@@ -497,6 +523,39 @@ fn prepareAddressSpaceBenchmarkFixture() void {
     address_space_benchmark_context.space = paging.createUserAddressSpace() catch |err|
         benchmark_reporting.benchStepFailure("address-space benchmark fixture", err);
     address_space_benchmark_context.prepared = true;
+}
+
+fn prepareSyscallBenchmarkFixture() void {
+    if (syscall_benchmark_context.prepared) return;
+    var space = paging.createUserAddressSpace() catch |err|
+        benchmark_reporting.benchStepFailure("syscall benchmark address space", err);
+    paging.mapOwnedUserRange(&space, SYSCALL_BENCHMARK_CODE_ADDRESS, SYSCALL_BENCHMARK_PAGE_BYTES, .{
+        .writable = false,
+        .executable = true,
+    }) catch |err| benchmark_reporting.benchStepFailure("syscall benchmark code mapping", err);
+    paging.mapOwnedUserRange(&space, SYSCALL_BENCHMARK_STACK_ADDRESS, SYSCALL_BENCHMARK_PAGE_BYTES, .{
+        .writable = true,
+    }) catch |err| benchmark_reporting.benchStepFailure("syscall benchmark stack mapping", err);
+
+    const code_start = @intFromPtr(&zigos_syscall_benchmark_user_start);
+    const code_end = @intFromPtr(&zigos_syscall_benchmark_user_end);
+    if (code_end <= code_start or code_end - code_start > SYSCALL_BENCHMARK_PAGE_BYTES) {
+        benchmark_reporting.benchStepFailure("syscall benchmark code extent", error.InvalidRange);
+    }
+    const code: [*]const u8 = @ptrFromInt(code_start);
+    paging.writeOwnedUserRange(
+        &space,
+        SYSCALL_BENCHMARK_CODE_ADDRESS,
+        code[0 .. code_end - code_start],
+    ) catch |err| benchmark_reporting.benchStepFailure("syscall benchmark code copy", err);
+
+    syscall_benchmark_context.space = space;
+    if (!syscall_benchmark_context.handler_registered) {
+        isr.registerHandler(GENERAL_PROTECTION_FAULT_VECTOR, syscallBenchmarkGeneralProtectionFault);
+        isr.registerHandler(USERSPACE_YIELD_VECTOR, syscallBenchmarkYield);
+        syscall_benchmark_context.handler_registered = true;
+    }
+    syscall_benchmark_context.prepared = true;
 }
 
 fn prepareCapabilityLookupFixture() void {
@@ -953,6 +1012,10 @@ fn prepareOverlaySessionFixture() void {
 const BENCH_MEASUREMENT_PASSES: u32 = 3;
 
 fn runCase(case: BenchmarkCase) u64 {
+    if (case.operations_per_iteration == 0 or case.iterations % case.operations_per_iteration != 0) {
+        benchmark_reporting.benchStepFailure("benchmark operation batching", error.InvalidRange);
+    }
+    const measurement_iterations = case.iterations / case.operations_per_iteration;
     var best_cycles: u64 = std.math.maxInt(u64);
     var best_checksum: u64 = 0;
     var pass: u32 = 0;
@@ -962,7 +1025,7 @@ fn runCase(case: BenchmarkCase) u64 {
         var checksum: u64 = 0;
         const start = x86.rdtsc();
         var iteration: u32 = 0;
-        while (iteration < case.iterations) : (iteration += 1) {
+        while (iteration < measurement_iterations) : (iteration += 1) {
             checksum +%= case.runIteration(iteration);
         }
         const cycles = x86.rdtsc() - start;
@@ -1220,6 +1283,47 @@ fn benchmarkAddressSpaceRoundtrip(iteration: u32) u64 {
     paging.switchToUserAddressSpace(space);
     paging.switchToKernelAddressSpace();
     return @as(u64, iteration) ^ @as(u64, @intFromPtr(paging.getCurrentPageDirectory()));
+}
+
+fn benchmarkSyscallFastEntryRoundtrip(iteration: u32) u64 {
+    const space = &syscall_benchmark_context.space.?;
+    const kernel_stack_top = userspace_executor.prepareKernelStack();
+    gdt.setKernelStack(kernel_stack_top);
+    syscall64.setKernelStack(kernel_stack_top);
+    userspace_executor.zigos_userspace_resume_requested = 0;
+    syscall_benchmark_context.last_counter = 0;
+
+    var context = userspace_executor.UserContext64{
+        .r12 = SYSCALL_BENCHMARK_BATCH_SIZE,
+        .r13 = iteration + 1,
+        .instruction_pointer = SYSCALL_BENCHMARK_CODE_ADDRESS,
+        .flags = SYSCALL_BENCHMARK_USER_FLAGS,
+        .stack_pointer = SYSCALL_BENCHMARK_STACK_ADDRESS + SYSCALL_BENCHMARK_PAGE_BYTES - 16,
+    };
+    paging.switchToUserAddressSpace(space);
+    _ = userspace_executor.enterPreparedUserContext(&context);
+    if (paging.getCurrentPageDirectory() == space.directory) {
+        paging.switchToKernelAddressSpace();
+    }
+    userspace_executor.zigos_userspace_resume_requested = 0;
+    return syscall_benchmark_context.last_counter;
+}
+
+fn syscallBenchmarkYield(frame: *isr.InterruptFrame) void {
+    syscall_benchmark_context.last_counter = frame.eax;
+    userspace_executor.zigos_userspace_resume_requested = 1;
+    paging.switchToKernelAddressSpace();
+}
+
+fn syscallBenchmarkGeneralProtectionFault(frame: *isr.InterruptFrame) void {
+    var line_buffer: [192]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &line_buffer,
+        "BENCH:FAIL:syscall.fast_entry_roundtrip:general-protection:eip=0x{x}:cs=0x{x}:error=0x{x}\n",
+        .{ frame.eip, frame.cs, frame.err_code },
+    ) catch "BENCH:FAIL:syscall.fast_entry_roundtrip:general-protection:format-error\n";
+    console.print(line);
+    qemu_exit.failure();
 }
 
 fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {

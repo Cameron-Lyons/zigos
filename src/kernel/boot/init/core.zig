@@ -14,6 +14,11 @@ pub fn init() void {
     gdt.init();
     console.print("GDT initialized!\n");
 
+    console.print("Initializing native syscall entry...\n");
+    const syscall64 = @import("../../interrupts/syscall64.zig");
+    syscall64.init();
+    console.print("Native syscall entry initialized!\n");
+
     console.print("Initializing interrupts...\n");
     isr.init();
     console.print("Interrupts enabled!\n");
