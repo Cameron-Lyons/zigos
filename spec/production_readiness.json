@@ -861,7 +861,6 @@
         "src/native/drivers/bootstrap_driver_port.zig",
         "src/native/drivers/accelerator_driver_task.zig",
         "src/native/drivers/network_driver_task.zig",
-        "src/native/drivers/storage_driver_task.zig",
         "src/native/kernel_api/device_broker.zig",
         "src/native/session/service_path_proofs.zig",
         "src/kernel/boot/init/data_plane_boundary.zig"
@@ -869,7 +868,7 @@
       "current_evidence": [
         "Driver registration checks signed bundles, device-class authority, DMA range metadata, restart generations, and a PCI/NVMe-only storage target whose bus mastering is confined to brokered staging, queue, and bounce-buffer windows.",
         "The device broker now indexes controller slots and programmed DMA domains by device using arena/index-backed tables; unconfined bus mastering is rejected, and bus mastering is accepted only as a brokered-buffer program whose declared windows enumerate the exact queue or bounce frames the real NVMe engine may touch.",
-        "Hosted ATA registers, backing storage, transfer cursors, and write staging are compiled out of freestanding kernels; the complete four-slot freestanding controller arena is capped at 512 bytes and measures 440 bytes, while hosted model builds retain ATA emulation. Paired default `verify` builds reduce production writable load by 526,528 bytes (15,194,112 to 14,667,584), increase headroom from 1,583,104 to 2,109,632 bytes, and leave `.data` unchanged at 10,202,800 bytes.",
+        "The device broker is PCI-only: hosted ATA registers, backing storage, transfer cursors, write staging, and the legacy bootstrap driver modules are absent from every build. The four-slot controller arena retains its 512-byte freestanding budget while DMA programs remain generation-scoped and IOMMU-window confined.",
         "Storage driver tasks attach through a generation-scoped PCI controller session, validate their device authority at activation time, program the NVMe DMA envelope, and attach only capacity-checked NVMe publications to the freestanding volume.",
         "The storage controller boundary gates authorize brokered DMA buffers and reject out-of-window DMA, stale task generations, stale DMA buffers, stale broker generations, expired leases, explicit PCI controller revocation, and post-restart target-generation mismatches.",
         "The storage data-plane gate covers active-I/O restart, DMA fault containment, partial-transfer rejection, controller revocation, and explicit republish/rebind before post-restart I/O.",
