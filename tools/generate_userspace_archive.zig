@@ -113,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
     const arena = arena_state.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 5) return error.MissingOutputPath;
+    if (args.len < 6) return error.MissingOutputPath;
     const output_dir = args[1];
     const boot_profile = args[2];
     const archive_role: ArchiveRole = if (std.mem.eql(u8, args[3], "production"))
@@ -122,18 +122,19 @@ pub fn main(init: std.process.Init) !void {
         .verification
     else
         return error.InvalidArchiveRole;
-    const bootloader_path = args[4];
+    const bootloader_label = args[4];
+    const bootloader_path = args[5];
 
     var artifacts = std.ArrayList(Artifact).empty;
     defer artifacts.deinit(allocator);
 
-    for (args[5..]) |path| {
+    for (args[6..]) |path| {
         try artifacts.append(allocator, try parseArtifact(arena, allocator, cwd, io, path));
     }
 
     if (artifacts.items.len == 0) return error.MissingArtifactInput;
     try writeArchive(cwd, io, allocator, output_dir, archive_role, artifacts.items);
-    try writeBuildArtifactManifest(cwd, io, allocator, output_dir, boot_profile, archive_role, bootloader_path, artifacts.items);
+    try writeBuildArtifactManifest(cwd, io, allocator, output_dir, boot_profile, archive_role, bootloader_label, bootloader_path, artifacts.items);
 }
 
 fn parseArtifact(
@@ -528,6 +529,7 @@ fn writeBuildArtifactManifest(
     output_dir: []const u8,
     boot_profile: []const u8,
     archive_role: ArchiveRole,
+    bootloader_label: []const u8,
     bootloader_path: []const u8,
     artifacts: []const Artifact,
 ) !void {
@@ -535,8 +537,8 @@ fn writeBuildArtifactManifest(
     const bootloader_bytes = try cwd.readFileAlloc(io, bootloader_path, allocator, .limited(max_bootloader_source_bytes));
     defer allocator.free(bootloader_bytes);
 
-    try build_manifest.addDigest(.bootloader_source, "src/boot/boot64.S", rawSha256(bootloader_bytes));
-    try build_manifest.addDigest(.bootloader_measurement, bootloaderMeasurementLabel(boot_profile), bootloaderMeasurementDigest(boot_profile));
+    try build_manifest.addDigest(.bootloader_source, bootloader_label, rawSha256(bootloader_bytes));
+    try build_manifest.addDigest(.bootloader_measurement, bootloaderMeasurementLabel(boot_profile), bootloaderMeasurementDigest(boot_profile, bootloader_label));
     for (artifacts) |artifact| {
         try build_manifest.addDigest(.userspace_image, artifact.bundle_id, artifact.embedded_info.file_sha256);
     }
@@ -595,11 +597,11 @@ fn bootloaderMeasurementLabel(boot_profile: []const u8) []const u8 {
     return "multiboot:zigos_native";
 }
 
-fn bootloaderMeasurementDigest(boot_profile: []const u8) crypto_hash.Digest {
+fn bootloaderMeasurementDigest(boot_profile: []const u8, bootloader_label: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "bootloader", "multiboot");
     crypto_hash.updateBytes(&hasher, "boot-profile", boot_profile);
-    crypto_hash.updateBytes(&hasher, "entry-assembly", "src/boot/boot64.S");
+    crypto_hash.updateBytes(&hasher, "entry-assembly", bootloader_label);
     return crypto_hash.finalize(&hasher);
 }
 

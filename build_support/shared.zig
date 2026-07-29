@@ -28,6 +28,7 @@ pub const KernelArtifact = struct {
     install_step: *std.Build.Step,
     output_path: []const u8,
     kernel_role: KernelRole,
+    bootloader_source_path: []const u8,
 };
 
 pub const native_store_image_path = "build/native-store.img";

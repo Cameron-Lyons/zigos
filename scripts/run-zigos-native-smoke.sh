@@ -15,6 +15,7 @@ LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
 MODE="${4:-full}"
 USERSPACE_BIN_DIR="${5:-$ROOT_DIR/zig-out/bin}"
+BOOTLOADER_SOURCE_PATH="${6:-src/boot/boot64.S}"
 # Per-boot cap on waiting for the validation marker. The harness stops QEMU as
 # soon as the marker appears, so this only bounds the failure path; keep it
 # generous enough that a slow shared runner does not fail an otherwise healthy
@@ -244,7 +245,7 @@ append_build_artifact_measurements() {
   fi
   kernel_digest="$(sha256_file "$KERNEL_PATH")"
   printf '\n=== BUILD ARTIFACT MEASUREMENTS ===\n'
-  printf 'MEASURED_BOOT:BUILD_ARTIFACT bootloader source=src/boot/boot64.S sha256=%s\n' "$(sha256_file "$ROOT_DIR/src/boot/boot64.S")"
+  printf 'MEASURED_BOOT:BUILD_ARTIFACT bootloader source=%s sha256=%s\n' "$BOOTLOADER_SOURCE_PATH" "$(sha256_file "$ROOT_DIR/$BOOTLOADER_SOURCE_PATH")"
   printf 'MEASURED_BOOT:BUILD_ARTIFACT kernel path=%s sha256=%s\n' "$KERNEL_PATH" "$kernel_digest"
   find "$USERSPACE_BIN_DIR" -maxdepth 1 -type f -name 'userspace-*.elf' | LC_ALL=C sort |
     while IFS= read -r artifact; do
