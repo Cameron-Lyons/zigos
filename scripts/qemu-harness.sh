@@ -16,10 +16,30 @@ qemu_harness_default_memory() {
   printf '%s\n' "${QEMU_MEMORY:-256M}"
 }
 
+qemu_harness_accelerator() {
+  if [ -n "${QEMU_ACCELERATOR:-}" ]; then
+    printf '%s\n' "$QEMU_ACCELERATOR"
+  elif [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+    printf '%s\n' "kvm"
+  fi
+}
+
 qemu_harness_cpu_model() {
-  # 'max' satisfies the mandatory long-mode, NX, SMEP, SMAP, and UMIP contract;
-  # the legacy qemu64 model does not advertise the complete baseline.
-  printf '%s\n' "${QEMU_CPU_MODEL:-max}"
+  local accelerator
+  if [ -n "${QEMU_CPU_MODEL:-}" ]; then
+    printf '%s\n' "$QEMU_CPU_MODEL"
+    return
+  fi
+
+  accelerator="$(qemu_harness_accelerator)"
+  if [[ "$accelerator" == kvm* ]]; then
+    printf '%s\n' "host"
+    return
+  fi
+
+  # Current software emulators expose the mandatory x2APIC contract through
+  # 'max'. Pinning the TSC rate matches the QEMU boot profile calibration.
+  printf '%s\n' "max,+x2apic,tsc-frequency=2400000000"
 }
 
 qemu_harness_profile_memory() {
@@ -172,15 +192,16 @@ qemu_harness_build_uefi_cdrom_command() {
   local ovmf_code
   local ovmf_vars=""
   local ovmf_vars_copy
+  local accelerator
 
   qemu_harness_require_binary
   qemu_harness_load_extra_args
   ovmf_code="$(qemu_harness_find_ovmf_code)"
+  accelerator="$(qemu_harness_accelerator)"
 
   QEMU_HARNESS_COMMAND=(
     "$(qemu_harness_binary)"
     -machine "q35,sata=off"
-    -cpu "$(qemu_harness_cpu_model)"
     -m "$memory_size"
     -display none
     -serial "$serial_target"
@@ -188,6 +209,10 @@ qemu_harness_build_uefi_cdrom_command() {
     -no-reboot
     -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code"
   )
+  if [ -n "$accelerator" ]; then
+    QEMU_HARNESS_COMMAND+=(-accel "$accelerator")
+  fi
+  QEMU_HARNESS_COMMAND+=(-cpu "$(qemu_harness_cpu_model)")
 
   if [ -n "${OVMF_VARS:-}" ]; then
     if ! ovmf_vars="$(qemu_harness_find_ovmf_vars)"; then
