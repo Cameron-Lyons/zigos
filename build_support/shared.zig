@@ -29,6 +29,7 @@ pub const KernelArtifact = struct {
     output_path: []const u8,
     kernel_role: KernelRole,
     bootloader_source_path: []const u8,
+    qemu_boot_iso_path: std.Build.LazyPath,
 };
 
 pub const native_store_image_path = "build/native-store.img";
