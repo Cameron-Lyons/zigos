@@ -422,10 +422,7 @@ fn establishStorageControllerSession(
         if (!controller_was_published) _ = device_broker.revokePciController(publication.device_id);
         return false;
     };
-    if (descriptor.device_id != publication.device_id or
-        descriptor.base_port != 0 or
-        descriptor.io_port_count != 0 or
-        descriptor.ctrl_port != 0) return false;
+    if (descriptor.device_id != publication.device_id) return false;
     if (!programStorageDmaIsolation(publication.device_id, dma_domain_id)) return false;
 
     const task = kernel_port.kernel.runtime.find(owner_task_id) orelse return false;

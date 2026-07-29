@@ -571,29 +571,6 @@ pub const Kernel = struct {
         return mmioWindowDescriptor(try device_broker.mmioWindow(device_capability.target.id, window_index));
     }
 
-    pub fn devicePortRead(
-        self: *Kernel,
-        context: KernelCallContext,
-        port: u16,
-        width: abi.DevicePortWidth,
-        now_ticks: u64,
-    ) Error!u32 {
-        const device_capability = try self.authorizeOperation(.device_port_read, context, now_ticks, .{});
-        return device_broker.readPort(device_capability.target.id, port, width);
-    }
-
-    pub fn devicePortWrite(
-        self: *Kernel,
-        context: KernelCallContext,
-        port: u16,
-        width: abi.DevicePortWidth,
-        value: u32,
-        now_ticks: u64,
-    ) Error!void {
-        const device_capability = try self.authorizeOperation(.device_port_write, context, now_ticks, .{});
-        return device_broker.writePort(device_capability.target.id, port, width, value);
-    }
-
     pub fn requireTaskCapability(
         self: *Kernel,
         task_id: u64,
@@ -1383,10 +1360,6 @@ test "native kernel brokers device metadata and port io through device capabilit
 
     const descriptor = try kernel.deviceDescribe(testContext(.device_describe, device_capability.id, .none), 12);
     try std.testing.expectEqual(@as(u64, 0x1F001), descriptor.device_id);
-    try std.testing.expectEqual(@as(u16, 0), descriptor.base_port);
-    try std.testing.expectEqual(@as(u16, 0), descriptor.flags);
-
-    try std.testing.expectError(error.WrongControllerKind, kernel.devicePortWrite(testContext(.device_port_write, device_capability.id, .none), 0x1F0 + 7, .u8, 0xA5, 12));
-    try std.testing.expectError(error.WrongControllerKind, kernel.devicePortRead(testContext(.device_port_read, device_capability.id, .none), 0x1F0 + 7, .u8, 12));
+    try std.testing.expectEqual(@as(u8, 0), descriptor.mmio_window_count);
     try std.testing.expectError(error.UnsupportedMmioWindow, kernel.deviceMmioWindow(testContext(.device_mmio_window, device_capability.id, .none), 0, 12));
 }

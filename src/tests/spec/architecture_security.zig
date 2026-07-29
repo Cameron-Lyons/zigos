@@ -266,7 +266,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 1), abi.ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 2), abi.ABI_VERSION);
     const storage_interface = typed_component_abi.interfaceForService(.storage_object);
     try registry.register(55, 7, 101, 201, storage_interface, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
     const connection = try registry.connect(storage_interface);
@@ -777,11 +777,11 @@ fn componentAbiDeclarationsCoverEveryTypedOperation() !void {
     try std.testing.expectEqual(syscall_abi.Domain.endpoint, syscall_abi.declarationFor(.endpoint_send).domain);
     try std.testing.expectEqual(syscall_abi.Domain.capability, syscall_abi.declarationFor(.capability_derive).domain);
     try std.testing.expectEqual(syscall_abi.Domain.shared_memory, syscall_abi.declarationFor(.shared_memory_map).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.device, syscall_abi.declarationFor(.device_port_write).domain);
+    try std.testing.expectEqual(syscall_abi.Domain.device, syscall_abi.declarationFor(.device_describe).domain);
     try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.task_create).request_copy);
     try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.endpoint_send).request_copy);
     try std.testing.expectEqual(capability.CapabilityRight.task_create, syscall_abi.declarationFor(.task_create).required_right);
-    try std.testing.expectEqual(capability.CapabilityRight.device_use, syscall_abi.declarationFor(.device_port_read).required_right);
+    try std.testing.expectEqual(capability.CapabilityRight.device_use, syscall_abi.declarationFor(.device_describe).required_right);
     try std.testing.expect(switch (syscall_abi.declarationFor(.shared_memory_map).target_kind) {
         .fixed => |kind| kind == .shared_memory,
         else => false,
