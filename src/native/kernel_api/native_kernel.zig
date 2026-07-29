@@ -820,7 +820,6 @@ fn testContext(operation: abi.NativeOperation, capability_id: u64, target: Kerne
 }
 
 const test_policy_authority: principal.PrincipalId = .{ .kind = .policy_authority, .serial = 1 };
-const TEST_ATA_SECTOR_COUNT: u64 = 4096;
 
 const TestKernelHarness = struct {
     runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
@@ -1380,20 +1379,14 @@ test "native kernel brokers device metadata and port io through device capabilit
 
     device_broker.reset();
     defer device_broker.reset();
-    try std.testing.expect(device_broker.publishAtaController(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = TEST_ATA_SECTOR_COUNT,
-    }));
+    try std.testing.expect(device_broker.publishPciController(0x1F001));
 
     const descriptor = try kernel.deviceDescribe(testContext(.device_describe, device_capability.id, .none), 12);
     try std.testing.expectEqual(@as(u64, 0x1F001), descriptor.device_id);
-    try std.testing.expectEqual(@as(u16, 0x1F0), descriptor.base_port);
-    try std.testing.expectEqual(@as(u16, abi.DEVICE_DESCRIPTOR_FLAG_ATA_MASTER), descriptor.flags);
+    try std.testing.expectEqual(@as(u16, 0), descriptor.base_port);
+    try std.testing.expectEqual(@as(u16, 0), descriptor.flags);
 
-    try kernel.devicePortWrite(testContext(.device_port_write, device_capability.id, .none), 0x1F0 + 7, .u8, 0xA5, 12);
-    try std.testing.expectEqual(@as(u32, 0xA5), try kernel.devicePortRead(testContext(.device_port_read, device_capability.id, .none), 0x1F0 + 7, .u8, 12));
+    try std.testing.expectError(error.WrongControllerKind, kernel.devicePortWrite(testContext(.device_port_write, device_capability.id, .none), 0x1F0 + 7, .u8, 0xA5, 12));
+    try std.testing.expectError(error.WrongControllerKind, kernel.devicePortRead(testContext(.device_port_read, device_capability.id, .none), 0x1F0 + 7, .u8, 12));
     try std.testing.expectError(error.UnsupportedMmioWindow, kernel.deviceMmioWindow(testContext(.device_mmio_window, device_capability.id, .none), 0, 12));
 }

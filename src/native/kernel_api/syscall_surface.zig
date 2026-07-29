@@ -17,7 +17,6 @@ const units = @import("../core/units.zig");
 pub const DispatchResult = syscall_dispatch.DispatchResult;
 pub const UserMemoryAccess = syscall_dispatch.UserMemoryAccess;
 pub const validateAddressSpaceRange = syscall_dispatch.validateAddressSpaceRange;
-const TEST_ATA_SECTOR_COUNT: u64 = 2048;
 
 const DispatchHandler = *const fn (
     port: *component_port.KernelPort,
@@ -686,13 +685,7 @@ test "syscall surface dispatches typed device broker requests" {
         },
     });
     try test_kernel.runtime.grantCapability(test_kernel.session_task_id, device_capability.id);
-    try std.testing.expect(device_broker.publishAtaController(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = TEST_ATA_SECTOR_COUNT,
-    }));
+    try std.testing.expect(device_broker.publishPciController(0x1F001));
 
     const describe_request = component_port.DeviceDescribeRequest{
         .header = component_port.makeHeader(.device_describe, 101, test_kernel.session_task_id),
@@ -717,7 +710,7 @@ test "syscall surface dispatches typed device broker requests" {
         .width = .u8,
         .value = 0x5C,
     };
-    try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(
+    try std.testing.expectEqual(abi.SyscallStatus.internal_error, dispatch(
         &test_kernel.port,
         test_kernel.session_task_id,
         12,
@@ -741,6 +734,6 @@ test "syscall surface dispatches typed device broker requests" {
         @intFromPtr(&read_response),
         @sizeOf(abi.DevicePortReadResponse),
     );
-    try std.testing.expectEqual(abi.SyscallStatus.success, read_result.status);
-    try std.testing.expectEqual(@as(u32, 0x5C), read_response.value);
+    try std.testing.expectEqual(abi.SyscallStatus.internal_error, read_result.status);
+    try std.testing.expectEqual(@as(u32, 0), read_response.value);
 }

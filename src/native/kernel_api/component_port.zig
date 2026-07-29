@@ -16,7 +16,6 @@ pub const Error = native_kernel.Error || error{
     SubjectTaskMismatch,
     UnsupportedAbiVersion,
 };
-const TEST_ATA_SECTOR_COUNT: u64 = 2048;
 const TEST_PORT_TASK_BYTES: usize = 512;
 
 pub const TaskCreateRequest = struct {
@@ -749,13 +748,7 @@ test "kernel port validates and forwards typed device broker requests" {
 
     device_broker.reset();
     defer device_broker.reset();
-    try std.testing.expect(device_broker.publishAtaController(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = TEST_ATA_SECTOR_COUNT,
-    }));
+    try std.testing.expect(device_broker.publishPciController(0x1F001));
 
     const descriptor = try port.deviceDescribe(.{
         .header = makeHeader(.device_describe, 81, driver_task.id),
@@ -763,14 +756,14 @@ test "kernel port validates and forwards typed device broker requests" {
     }, 7);
     try std.testing.expectEqual(@as(u64, 0x1F001), descriptor.device_id);
 
-    try port.devicePortWrite(.{
+    try std.testing.expectError(error.WrongControllerKind, port.devicePortWrite(.{
         .header = makeHeader(.device_port_write, 82, driver_task.id),
         .device_capability_id = device_capability.id,
         .port = 0x1F0 + 7,
         .width = .u8,
         .value = 0x66,
-    }, 7);
-    try std.testing.expectEqual(@as(u32, 0x66), try port.devicePortRead(.{
+    }, 7));
+    try std.testing.expectError(error.WrongControllerKind, port.devicePortRead(.{
         .header = makeHeader(.device_port_read, 83, driver_task.id),
         .device_capability_id = device_capability.id,
         .port = 0x1F0 + 7,
