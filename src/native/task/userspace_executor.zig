@@ -43,10 +43,15 @@ const freestanding = if (builtin.target.os.tag == .freestanding)
         pub const gdt = @import("../../kernel/interrupts/gdt64.zig");
         pub const isr = @import("../../kernel/interrupts/isr.zig");
         pub const paging = @import("../../kernel/memory/paging64.zig");
+        pub const syscall64 = @import("../../kernel/interrupts/syscall64.zig");
     }
 else
     struct {
         pub const gdt = struct {
+            pub fn setKernelStack(_: usize) void {}
+        };
+
+        pub const syscall64 = struct {
             pub fn setKernelStack(_: usize) void {}
         };
 
@@ -122,9 +127,11 @@ else
     };
 
 const PAGE_SIZE: usize = 4096;
+pub const USER_RFLAGS_RESERVED: u64 = 1 << 1;
+pub const DEFAULT_USER_RFLAGS: u64 = USER_RFLAGS_RESERVED | (1 << 9);
 const USERSPACE_TRAP_VECTOR: u8 = 129;
 const PAGE_FAULT_VECTOR: u8 = 14;
-const TRAP_STACK_BYTES: usize = units.kibibytes(64);
+const TRAP_STACK_BYTES: usize = units.kibibytes(48);
 const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
 // Same word the boot-stack watermark uses; unlikely as live stack data.
 const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
@@ -163,6 +170,12 @@ fn armTrapStackGuard() void {
     trap_stack_guard_armed = true;
 }
 
+pub fn prepareKernelStack() usize {
+    if (builtin.target.os.tag != .freestanding) return 0;
+    armTrapStackGuard();
+    return @intFromPtr(&trap_stack) + trap_stack.len;
+}
+
 /// Emit the trap-stack high-water mark; creep toward capacity shows up in
 /// QEMU logs long before the guard page would trip mid-syscall.
 pub fn reportTrapStackPeak() void {
@@ -192,7 +205,7 @@ pub export var zigos_userspace_resume_requested: u32 = 0;
 pub export var zigos_userspace_resume_esp: usize = 0;
 pub export var zigos_userspace_resume_eip: usize = 0;
 
-const UserContext64 = extern struct {
+pub const UserContext64 = extern struct {
     rax: u64 = 0,
     rbx: u64 = 0,
     rcx: u64 = 0,
@@ -209,11 +222,14 @@ const UserContext64 = extern struct {
     r14: u64 = 0,
     r15: u64 = 0,
     instruction_pointer: u64 = 0,
-    flags: u64 = 0x202,
+    flags: u64 = DEFAULT_USER_RFLAGS,
     stack_pointer: u64 = 0,
 };
 
 comptime {
+    if (TRAP_STACK_BYTES % PAGE_SIZE != 0 or TRAP_STACK_BYTES <= TRAP_STACK_GUARD_BYTES) {
+        @compileError("userspace trap stack must retain a page-aligned guarded capacity");
+    }
     if (@offsetOf(UserContext64, "instruction_pointer") != 120 or
         @offsetOf(UserContext64, "flags") != 128 or
         @offsetOf(UserContext64, "stack_pointer") != 136 or
@@ -226,6 +242,11 @@ comptime {
 // The entry assembly receives a UserContext64 pointer in the first argument
 // and reserves the second argument for the C ABI boundary.
 extern fn zigos_enter_userspace(context: usize, reserved: usize) callconv(.c) u32;
+
+pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
+    if (builtin.target.os.tag != .freestanding) return 0;
+    return zigos_enter_userspace(@intFromPtr(context), 0);
+}
 
 const MappingState = enum(u8) {
     free,
@@ -291,7 +312,7 @@ pub const Executor = struct {
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
             trap_handler_registered = true;
         }
-        armTrapStackGuard();
+        _ = prepareKernelStack();
         self.initialized = true;
     }
 
@@ -461,7 +482,9 @@ pub const Executor = struct {
         const mapping = self.ensureMaterialized(address_space, image) catch return false;
         self.initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
-        freestanding.gdt.setKernelStack(self.trapStackTop());
+        const trap_stack_top = prepareKernelStack();
+        freestanding.gdt.setKernelStack(trap_stack_top);
+        freestanding.syscall64.setKernelStack(trap_stack_top);
         const instruction_pointer = if (mapping.resume_valid)
             mapping.resume_instruction_pointer
         else
@@ -720,9 +743,6 @@ pub const Executor = struct {
         self.last_fault_error_code = 0;
     }
 
-    fn trapStackTop(_: *Executor) usize {
-        return @intFromPtr(&trap_stack) + trap_stack.len;
-    }
 };
 
 fn debugIndexChecksEnabled() bool {
@@ -898,7 +918,7 @@ fn mapZeroedRegion(
 }
 
 fn enterUserspace(executor: *const Executor) u32 {
-    return zigos_enter_userspace(@intFromPtr(&executor.pending_user_context64), 0);
+    return enterPreparedUserContext(&executor.pending_user_context64);
 }
 
 fn captureUserContext64(mapping: *MappingEntry, frame: *freestanding.isr.InterruptFrame) void {

@@ -31,6 +31,7 @@ pub export fn zigos_x86_arch_compile_check(port: u16, value: u32) u64 {
     x86.writeCr3WithPcid(0x1000, 1, true);
     x86.invalidatePcid(1);
     _ = x86.globalPagesEnabled();
+    _ = x86.syscallExtensionEnabled();
     x86.enableSse();
     return x86.rdtsc() ^ input ^ x86.stackPointer();
 }

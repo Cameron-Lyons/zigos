@@ -224,8 +224,8 @@ pub fn withSyscallContract(
             0,
         );
     }
-    // Successful syscalls return only status/bytes_written/denial_reason to the
-    // register ABI (see main.zig syscall_handler), so synthesizing and FNV-hashing
+    // Successful syscalls return only status/bytes_written/denial_reason in
+    // RAX/RDX/R10, so synthesizing and FNV-hashing
     // a full provenance record on every successful call is pure waste on the
     // hottest path in the system. Build provenance only for the denial path, where
     // it feeds audit and diagnostics.

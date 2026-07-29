@@ -1,7 +1,6 @@
 .section .text
 
 .extern isrHandler
-.extern syscall_handler
 .extern zigos_userspace_resume_requested
 .extern zigos_resume_from_userspace_interrupt
 
@@ -98,8 +97,6 @@ ISR_ERRCODE   29
 ISR_ERRCODE   30
 ISR_NOERRCODE 31
 ISR_NOERRCODE 64
-ISR_NOERRCODE 128
-ISR_NOERRCODE 129
 ISR_NOERRCODE 255
 
 isr_common_stub:
@@ -111,13 +108,7 @@ isr_common_stub:
     fxsave64 (%rsp)
     cld
 
-    cmpq $128, 136(%r12)
-    je .handle_syscall
     call isrHandler
-    jmp .isr_dispatch_complete
-
-.handle_syscall:
-    call syscall_handler
 
 .isr_dispatch_complete:
     fxrstor64 (%rsp)

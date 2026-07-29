@@ -135,7 +135,13 @@ const InvpcidDescriptor = extern struct {
 extern fn x86_invalidate_pcid(descriptor: *const InvpcidDescriptor) callconv(.c) void;
 
 pub const EFER_MSR: u32 = 0xC000_0080;
+pub const EFER_SCE: u64 = 1 << 0;
 pub const EFER_NXE: u64 = 1 << 11;
+pub const IA32_STAR_MSR: u32 = 0xC000_0081;
+pub const IA32_LSTAR_MSR: u32 = 0xC000_0082;
+pub const IA32_FMASK_MSR: u32 = 0xC000_0084;
+pub const IA32_GS_BASE_MSR: u32 = 0xC000_0101;
+pub const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
 
 pub inline fn enableNoExecute() void {
     writeMsr(EFER_MSR, readMsr(EFER_MSR) | EFER_NXE);
@@ -143,6 +149,10 @@ pub inline fn enableNoExecute() void {
 
 pub inline fn noExecuteEnabled() bool {
     return (readMsr(EFER_MSR) & EFER_NXE) != 0;
+}
+
+pub inline fn syscallExtensionEnabled() bool {
+    return (readMsr(EFER_MSR) & EFER_SCE) != 0;
 }
 
 pub inline fn readCr0() usize {

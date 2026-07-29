@@ -7,12 +7,9 @@ const timer = @import("../timer/timer.zig");
 const GateHandler = *const fn () callconv(.c) void;
 
 const IDT_INTERRUPT_GATE: u8 = 0x8E;
-const IDT_USER_DPL: u8 = 0x60;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
 const DOUBLE_FAULT_VECTOR: u8 = 8;
 const PAGE_FAULT_VECTOR: u32 = 14;
-const SYSCALL_VECTOR: u8 = 128;
-const NATIVE_SYSCALL_VECTOR: u8 = 129;
 
 const PIC_MASTER_DATA_PORT: u16 = 0x21;
 const PIC_SLAVE_DATA_PORT: u16 = 0xA1;
@@ -51,8 +48,6 @@ extern fn isr29() void;
 extern fn isr30() void;
 extern fn isr31() void;
 extern fn isr64() void;
-extern fn isr128() void;
-extern fn isr129() void;
 extern fn isr255() void;
 
 const exception_stubs = [_]GateHandler{
@@ -207,9 +202,6 @@ pub fn init() void {
     setKernelGate(timer.SPURIOUS_VECTOR, &isr255);
     registerHandler(timer.SPURIOUS_VECTOR, spuriousInterrupt);
 
-    setUserGate(SYSCALL_VECTOR, &isr128);
-    setUserGate(NATIVE_SYSCALL_VECTOR, &isr129);
-
     idt.init();
 }
 
@@ -237,10 +229,6 @@ fn interruptVector(regs: *const Registers) usize {
 
 fn setKernelGate(vector: u8, handler: GateHandler) void {
     idt.setGate(vector, handler, gdt.KERNEL_CODE_SEG, IDT_INTERRUPT_GATE);
-}
-
-fn setUserGate(vector: u8, handler: GateHandler) void {
-    idt.setGate(vector, handler, gdt.KERNEL_CODE_SEG, IDT_INTERRUPT_GATE | IDT_USER_DPL);
 }
 
 fn disableLegacyPic() void {

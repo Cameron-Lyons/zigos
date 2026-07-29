@@ -180,6 +180,9 @@ All generated optical media are UEFI-only and are rejected unless they contain a
 bootable x86-64 EFI El Torito image. The QEMU harness uses OVMF pflash firmware
 and exposes boot media through virtio-SCSI instead of a legacy disk controller;
 legacy BIOS boot is not a supported execution path.
+The installed benchmark ELF retains symbols for diagnostics, while its boot
+media contains a separately linked debug-stripped derivative so firmware never
+parses the suite's large non-loadable debug sections.
 Native storage boots attach the store through NVMe rather than an emulated
 legacy IDE controller, matching the first hardware target and production policy.
 After validating the required CPU baseline, the kernel enables EFER.NXE and
@@ -495,8 +498,8 @@ Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 
 ## Repository Map
 
-- `src/main.zig`: kernel entry/export surface and typed syscall trap dispatch.
-- `src/arch/`: architecture-specific assembly, syscall trap glue, and linker
+- `src/main.zig`: kernel entry/export surface and typed native syscall dispatch.
+- `src/arch/`: architecture-specific assembly, syscall entry glue, and linker
   scripts.
 - `src/boot/`: boot assembly and GRUB config used by kernel and ISO builds.
 - `src/kernel/`: low-level boot, interrupt, timer, memory, driver, network, and
