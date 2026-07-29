@@ -80,6 +80,7 @@ export var zigos_userspace_bootstrap: mailbox.Mailbox align(mailbox.ABI_ALIGNMEN
 const freestanding_trap = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn syscall3_asm(request_addr: usize, response_addr: usize, response_len: usize) callconv(.c) usize;
+        extern fn zigos_probe_nx(target: usize) callconv(.c) void;
 
         fn call(request_addr: usize, response_addr: usize, response_len: usize) abi.SyscallStatus {
             return @enumFromInt(syscall3_asm(request_addr, response_addr, response_len));
@@ -104,7 +105,10 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     signalFault(detail, faultCode(msg));
 }
 
-pub fn zigos_userspace_contract_main(comptime run_mmu_isolation_probe: bool) noreturn {
+pub fn zigos_userspace_contract_main(
+    comptime run_mmu_isolation_probe: bool,
+    comptime run_nx_isolation_probe: bool,
+) noreturn {
     const descriptor = &contract_bindings.zigos_userspace_descriptor;
     userspace_descriptor.validate(descriptor) catch signalFault(.unknown, 1);
 
@@ -116,10 +120,15 @@ pub fn zigos_userspace_contract_main(comptime run_mmu_isolation_probe: bool) nor
         runStartupQueries(detail);
     }
 
-    if (comptime run_mmu_isolation_probe) {
+    if (comptime run_mmu_isolation_probe or run_nx_isolation_probe) {
         if (descriptor.role_tag != mailbox.MMU_ISOLATION_PROOF_ROLE_TAG) {
             signalFault(detail, mailbox.PROOF_FOREIGN_MEMORY_ACCESS_FAULT_CODE);
         }
+    }
+    if (comptime run_nx_isolation_probe) {
+        runNxIsolationProbe();
+    }
+    if (comptime run_mmu_isolation_probe) {
         runMmuIsolationProbe(detail);
     }
 
@@ -270,6 +279,11 @@ fn runMmuIsolationProbe(detail: mailbox.Detail) noreturn {
     const foreign_shared_memory: *volatile u8 = @ptrFromInt(@as(usize, mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR));
     _ = foreign_shared_memory.*;
     signalFault(detail, mailbox.PROOF_FOREIGN_MEMORY_ACCESS_FAULT_CODE);
+}
+
+fn runNxIsolationProbe() void {
+    if (builtin.target.os.tag != .freestanding) return;
+    freestanding_trap.zigos_probe_nx(@intFromPtr(&zigos_userspace_bootstrap));
 }
 
 fn invalidSyscallPointerStatus() abi.SyscallStatus {

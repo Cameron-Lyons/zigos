@@ -65,6 +65,26 @@ pub inline fn rdtsc() u64 {
     return (@as(u64, high) << 32) | low;
 }
 
+pub inline fn readMsr(msr: u32) u64 {
+    var low: u32 = undefined;
+    var high: u32 = undefined;
+    asm volatile ("rdmsr"
+        : [low] "={eax}" (low),
+          [high] "={edx}" (high),
+        : [msr] "{ecx}" (msr),
+    );
+    return (@as(u64, high) << 32) | low;
+}
+
+pub inline fn writeMsr(msr: u32, value: u64) void {
+    asm volatile ("wrmsr"
+        :
+        : [msr] "{ecx}" (msr),
+          [low] "{eax}" (@as(u32, @truncate(value))),
+          [high] "{edx}" (@as(u32, @truncate(value >> 32))),
+        : .{ .memory = true });
+}
+
 pub inline fn stackPointer() usize {
     return asm volatile ("mov %%rsp, %[value]"
         : [value] "=r" (-> usize),
@@ -100,6 +120,17 @@ pub const CR4_OSFXSR: usize = 1 << 9;
 pub const CR4_OSXMMEXCPT: usize = 1 << 10;
 pub const CR4_UMIP: usize = 1 << 11;
 pub const CR4_SMEP: usize = 1 << 20;
+
+pub const EFER_MSR: u32 = 0xC000_0080;
+pub const EFER_NXE: u64 = 1 << 11;
+
+pub inline fn enableNoExecute() void {
+    writeMsr(EFER_MSR, readMsr(EFER_MSR) | EFER_NXE);
+}
+
+pub inline fn noExecuteEnabled() bool {
+    return (readMsr(EFER_MSR) & EFER_NXE) != 0;
+}
 
 pub inline fn readCr0() usize {
     return asm volatile ("mov %%cr0, %[value]"

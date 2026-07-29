@@ -7,3 +7,4 @@ pub const FLAG_NETWORK_BOUNDARY: u32 = 1 << 5;
 pub const FLAG_POLICY_BOUNDARY: u32 = 1 << 6;
 pub const FLAG_DRIVER_BOUNDARY: u32 = 1 << 7;
 pub const FLAG_MMU_PROOF_PROBE: u32 = 1 << 9;
+pub const FLAG_NX_PROOF_PROBE: u32 = 1 << 10;
