@@ -11,7 +11,6 @@ pub const AttachedBackendKind = enum(u8) {
     none,
     generic,
     nvme_pci,
-    ata_bootstrap_broker,
 };
 
 pub fn unattachedRead(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
@@ -99,14 +98,14 @@ pub fn readAttachedBytes(volume: anytype, offset: usize, buffer: []u8) bool {
 pub fn readAttachedRange(volume: anytype, start_lba: u64, buffer: []u8) bool {
     return switch (volume.attached_backend_kind) {
         .none => false,
-        .generic, .nvme_pci, .ata_bootstrap_broker => volume.attached_backend_read(start_lba, buffer.ptr, buffer.len),
+        .generic, .nvme_pci => volume.attached_backend_read(start_lba, buffer.ptr, buffer.len),
     };
 }
 
 pub fn writeAttachedRange(volume: anytype, start_lba: u64, buffer: []const u8) bool {
     return switch (volume.attached_backend_kind) {
         .none => false,
-        .generic, .nvme_pci, .ata_bootstrap_broker => volume.attached_backend_write(start_lba, buffer.ptr, buffer.len),
+        .generic, .nvme_pci => volume.attached_backend_write(start_lba, buffer.ptr, buffer.len),
     };
 }
 
@@ -118,6 +117,6 @@ pub fn writeAttachedDurableRange(volume: anytype, start_lba: u64, buffer: []cons
 pub fn flushAttached(volume: anytype) bool {
     return switch (volume.attached_backend_kind) {
         .none => false,
-        .generic, .nvme_pci, .ata_bootstrap_broker => volume.attached_backend_flush(),
+        .generic, .nvme_pci => volume.attached_backend_flush(),
     };
 }
