@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const denial_explanation = @import("../policy/denial_explanation.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 
@@ -202,12 +203,12 @@ pub fn explainDenied(
         .capability_id = capability_id,
         .target_id = target_id,
         .target_kind = target_kind,
-        .user_action_available = userActionCanResolve(reason),
-        .retry_safe = retrySafe(reason),
+        .user_action_available = denial_explanation.approvalCanResolve(reason),
+        .retry_safe = denial_explanation.retrySafe(reason),
     };
     explanation.operation_len = native_util.copyTextWithReserve(&explanation.operation, operation, 1);
     explanation.required_authority_len = native_util.copyTextWithReserve(&explanation.required_authority, required_authority, 1);
-    explanation.blocking_policy_len = native_util.copyTextWithReserve(&explanation.blocking_policy, policyLabel(reason), 1);
+    explanation.blocking_policy_len = native_util.copyTextWithReserve(&explanation.blocking_policy, denial_explanation.policyLabel(reason), 1);
     explanation.fingerprint = denialFingerprint(explanation);
     return explanation;
 }
@@ -483,40 +484,6 @@ pub fn provenanceFingerprint(record: ProvenanceRecord) u64 {
 fn digestFingerprint(digest: crypto_hash.Digest) u64 {
     if (std.mem.eql(u8, &digest, &crypto_hash.zero_digest)) return 0;
     return native_util.fnv1a64(&digest);
-}
-
-fn policyLabel(reason: abi.DenialReason) []const u8 {
-    return switch (reason) {
-        .none => "none",
-        .invalid_target => "target-routing-policy",
-        .capability_missing => "capability-broker-policy",
-        .capability_revoked => "capability-revocation-policy",
-        .capability_expired => "capability-lease-policy",
-        .scope_violation => "task-scope-policy",
-        .policy_denied => "user-grant-policy",
-        .budget_exhausted => "resource-budget-policy",
-        .interface_not_found => "service-registry-policy",
-        .unsupported_operation => "abi-surface-policy",
-    };
-}
-
-fn userActionCanResolve(reason: abi.DenialReason) bool {
-    return switch (reason) {
-        .capability_missing,
-        .capability_revoked,
-        .capability_expired,
-        .scope_violation,
-        .policy_denied,
-        => true,
-        else => false,
-    };
-}
-
-fn retrySafe(reason: abi.DenialReason) bool {
-    return switch (reason) {
-        .budget_exhausted, .interface_not_found => true,
-        else => false,
-    };
 }
 
 test "denial explanations render deterministic why-denied metadata" {

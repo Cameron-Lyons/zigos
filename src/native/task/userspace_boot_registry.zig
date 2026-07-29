@@ -73,7 +73,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
             .role_tag = spec.role_tag,
             .heartbeat_increment = spec.heartbeat_increment,
             .contract_flags = spec.contract_flags,
-            .elf_file = embeddedFileFromArtifact(artifact),
+            .elf_file = embedded_file.File.fromChunkedArtifact(artifact),
         }, embedded_info) catch |err| {
             console.print("ZIGOS:USERSPACE:ARTIFACT:FAIL ");
             console.print(artifact.bundle_id);
@@ -81,14 +81,6 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
             return err;
         };
     }
-}
-
-fn embeddedFileFromArtifact(artifact: anytype) embedded_file.File {
-    return embedded_file.File.fromChunks(
-        artifact.data.byte_len,
-        artifact.data.chunk_pool,
-        artifact.data.chunk_indices,
-    );
 }
 
 fn validateGeneratedArchiveHasOnlyRegisteredSpecs() Error!void {

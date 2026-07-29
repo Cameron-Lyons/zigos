@@ -10,7 +10,6 @@ const pcid_allocator = @import("pcid_allocator.zig");
 const table64 = @import("page_table64.zig");
 
 const PAGE_SIZE: u32 = 4096;
-const PAGE_SHIFT = 12;
 const TABLE_ENTRIES = table64.TABLE_ENTRIES;
 const PML4_SHIFT = table64.PML4_SHIFT;
 const PDPT_SHIFT = table64.PDPT_SHIFT;

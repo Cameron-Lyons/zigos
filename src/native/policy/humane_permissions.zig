@@ -4,7 +4,6 @@ const background_dispatch = @import("../task/background_dispatch.zig");
 const capability = @import("../kernel_api/capability.zig");
 const denial_explanation = @import("denial_explanation.zig");
 const manifest = @import("manifest.zig");
-const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const units = @import("../core/units.zig");
 const workspace = @import("../storage/workspace.zig");

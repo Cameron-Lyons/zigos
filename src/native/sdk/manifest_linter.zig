@@ -163,7 +163,7 @@ pub fn lintWithIdl(bundle: manifest.BundleManifest, idl_source: []const u8) Repo
     }
 
     for (document.interfaces[0..document.interface_count]) |*interface| {
-        if (!bundleDeclaresInterface(bundle, interface.manifestDecl())) {
+        if (!manifest.bundleDeclaresInterface(bundle, interface.manifestDecl())) {
             report.add(.err, .idl_interface_missing_manifest, interface.nameSlice());
         }
     }
@@ -188,21 +188,6 @@ pub fn lintWithIdl(bundle: manifest.BundleManifest, idl_source: []const u8) Repo
     }
 
     return report;
-}
-
-fn bundleDeclaresInterface(bundle: manifest.BundleManifest, expected: manifest.InterfaceDecl) bool {
-    return interfaceListDeclares(bundle.provided_interfaces, expected) or
-        interfaceListDeclares(bundle.consumed_interfaces, expected);
-}
-
-fn interfaceListDeclares(interfaces: []const manifest.InterfaceDecl, expected: manifest.InterfaceDecl) bool {
-    for (interfaces) |candidate| {
-        if (!std.mem.eql(u8, candidate.name, expected.name)) continue;
-        if (candidate.version_major != expected.version_major) continue;
-        if (candidate.version_minor != expected.version_minor) continue;
-        return true;
-    }
-    return false;
 }
 
 fn bundleRequestsPermission(bundle: manifest.BundleManifest, kind: manifest.PermissionKind) bool {

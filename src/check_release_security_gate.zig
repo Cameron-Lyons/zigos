@@ -1542,26 +1542,6 @@ fn expectPositiveIntegerField(
     };
 }
 
-fn expectBoolField(
-    allocator: std.mem.Allocator,
-    errors: *std.ArrayList([]const u8),
-    object: std.json.Value,
-    context: []const u8,
-    name: []const u8,
-) !?bool {
-    const value = common.field(object, name) orelse {
-        try common.addError(errors, allocator, "{s} must include {s}", .{ context, name });
-        return null;
-    };
-    return switch (value) {
-        .bool => |flag| flag,
-        else => {
-            try common.addError(errors, allocator, "{s} {s} must be a bool", .{ context, name });
-            return null;
-        },
-    };
-}
-
 fn expectTrueBoolField(
     allocator: std.mem.Allocator,
     errors: *std.ArrayList([]const u8),

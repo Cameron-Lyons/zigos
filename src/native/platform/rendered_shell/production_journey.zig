@@ -423,12 +423,7 @@ pub const ProductionJourneyService = struct {
 
     fn openWorkspace(self: *ProductionJourneyService, tick: u64) !void {
         const task = try self.requireTask();
-        _ = try self.ux.openWorkspace(
-            self.storage,
-            ids.workspace(self.config.workspace_id),
-            self.config.document_path,
-            self.config.user,
-        );
+        _ = try task_launch.openConfiguredWorkspace(self.ux, self.storage, self.config);
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,
             .view_type = .workspace_view,
@@ -443,13 +438,7 @@ pub const ProductionJourneyService = struct {
     fn openDocument(self: *ProductionJourneyService, tick: u64) !void {
         const task = try self.requireTask();
         if (!self.workspace_opened) return error.WorkspaceRequired;
-        const entry = try self.ux.openDocument(
-            self.storage,
-            ids.workspace(self.config.workspace_id),
-            self.config.document_path,
-            task.id,
-            self.config.user,
-        );
+        const entry = try task_launch.openConfiguredDocument(self.ux, self.storage, self.config, task.id);
         self.document_object_id = entry.object_id.raw();
         self.document_version_id = entry.version_id.raw();
         self.document_payload_bytes = if (self.storage.latestVersion(entry.object_id)) |version| version.payload_len else 0;
@@ -686,11 +675,7 @@ pub const ProductionJourneyService = struct {
     }
 
     fn recoverSystem(self: *ProductionJourneyService, tick: u64) !void {
-        if (!self.runtime_service.restartFromCheckpoint(tick)) return error.RecoveryStateMissing;
-        const recovered_response = self.compositor_service.dispatch(.{ .operation = .recover_state });
-        if (recovered_response.status != .ok or !recovered_response.recovered) {
-            return error.RecoveryStateMissing;
-        }
+        try task_launch.recoverRuntimeAndCompositor(self.runtime_service, self.compositor_service, tick);
         try self.ux.recoverSystem(self.task_id, self.config.user, "restored previous app and shell state");
         self.recovered = true;
         try self.recordPendingTaskFlows(tick);
@@ -753,9 +738,8 @@ pub const ProductionJourneyService = struct {
         self.marker_authority_revoked = self.device_revoked and self.policy_revoked;
     }
 
-    fn requireTask(self: *ProductionJourneyService) !*task_runtime.TaskRecord {
-        if (self.task_id == 0) return error.TaskRequired;
-        return self.runtime_service.runtimePtr().find(self.task_id) orelse error.TaskRequired;
+    inline fn requireTask(self: *ProductionJourneyService) !*task_runtime.TaskRecord {
+        return task_launch.requireTask(self.runtime_service.runtimePtr(), self.task_id);
     }
 
     fn requireActivePolicy(self: *ProductionJourneyService) !*const policy_object.PolicyObject {
@@ -829,11 +813,8 @@ pub const ProductionJourneyService = struct {
         self.sync_configured = true;
     }
 
-    fn recordPendingTaskFlows(self: *ProductionJourneyService, tick: u64) !void {
-        while (self.next_ledger_flow_order < self.ux.flow_count) : (self.next_ledger_flow_order += 1) {
-            const flow = self.ux.flowAtOrder(self.next_ledger_flow_order) orelse return error.MissingTaskFlow;
-            try self.ledger.recordTaskFlow(flow.*, tick);
-        }
+    inline fn recordPendingTaskFlows(self: *ProductionJourneyService, tick: u64) !void {
+        return task_launch.recordPendingTaskFlows(self.ux, self.ledger, &self.next_ledger_flow_order, tick);
     }
 
     fn refreshResponse(self: *const ProductionJourneyService, response: *ProductionJourneyResponse) void {
