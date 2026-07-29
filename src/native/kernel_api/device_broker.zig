@@ -217,6 +217,7 @@ pub const Error = error{
     UnsupportedMmioWindow,
     UnsupportedBusMasterDma,
     UnsupportedWidth,
+    WrongControllerKind,
 };
 
 const HostTransferKind = enum(u8) {
@@ -238,6 +239,12 @@ else
         write_staging: [host_write_staging_bytes]u8 = [_]u8{0} ** host_write_staging_bytes,
     };
 
+const ControllerKind = enum(u8) {
+    none,
+    ata,
+    pci,
+};
+
 comptime {
     if (builtin.target.os.tag == .freestanding and @sizeOf(HostedAtaControllerState) != 0) {
         @compileError("hosted ATA state must not consume freestanding kernel memory");
@@ -247,6 +254,7 @@ comptime {
 const ControllerSlot = struct {
     in_use: bool = false,
     published: bool = false,
+    kind: ControllerKind = .none,
     device_id: u64 = 0,
     grant: storage_driver_protocol.AtaBrokerGrant = .{
         .base_port = 0,
@@ -530,12 +538,37 @@ pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBr
 }
 
 pub fn publishAtaControllerChecked(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) Error!void {
+    return publishControllerChecked(device_id, .ata, grant);
+}
+
+pub fn publishPciController(device_id: u64) bool {
+    publishPciControllerChecked(device_id) catch return false;
+    return true;
+}
+
+pub fn publishPciControllerChecked(device_id: u64) Error!void {
+    return publishControllerChecked(device_id, .pci, .{
+        .base_port = 0,
+        .ctrl_port = 0,
+        .is_master = false,
+        .irq_line = 0,
+        .sector_count = 0,
+    });
+}
+
+fn publishControllerChecked(
+    device_id: u64,
+    kind: ControllerKind,
+    grant: storage_driver_protocol.AtaBrokerGrant,
+) Error!void {
     if (device_id == 0) return error.InvalidDevice;
+    if (kind == .none) return error.WrongControllerKind;
     const generation = try pendingBrokerGeneration();
     if (findControllerSlotIndex(device_id)) |slot_index| {
         const slot = &controllers.slots[slot_index];
         controllers.markPublished(slot_index);
         slot.published = true;
+        slot.kind = kind;
         slot.grant = grant;
         resetHostIoState(slot);
         slot.broker_generation = generation;
@@ -544,6 +577,7 @@ pub fn publishAtaControllerChecked(device_id: u64, grant: storage_driver_protoco
     }
     const slot = reserveControllerSlot(device_id) orelse return error.ControllerTableFull;
     slot.published = true;
+    slot.kind = kind;
     slot.device_id = device_id;
     slot.grant = grant;
     slot.broker_generation = generation;
@@ -552,9 +586,17 @@ pub fn publishAtaControllerChecked(device_id: u64, grant: storage_driver_protoco
 }
 
 pub fn revokeAtaController(device_id: u64) bool {
+    return revokeController(device_id, .ata);
+}
+
+pub fn revokePciController(device_id: u64) bool {
+    return revokeController(device_id, .pci);
+}
+
+fn revokeController(device_id: u64, kind: ControllerKind) bool {
     const slot_index = findControllerSlotIndex(device_id) orelse return false;
     const slot = &controllers.slots[slot_index];
-    if (!slot.published) return false;
+    if (!slot.published or slot.kind != kind) return false;
     resetHostIoState(slot);
     slot.published = false;
     controllers.markUnpublished(slot_index);
@@ -744,6 +786,7 @@ pub fn invalidateDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
 
 pub fn describe(device_id: u64) Error!ControllerDescriptor {
     const slot = findController(device_id) orelse return error.DeviceNotFound;
+    if (slot.kind != .ata) return error.WrongControllerKind;
     return .{
         .device_id = device_id,
         .base_port = slot.grant.base_port,
@@ -768,6 +811,7 @@ pub fn mmioWindow(device_id: u64, window_index: u8) Error!MmioWindow {
 
 pub fn readPort(device_id: u64, port: u16, width: PortWidth) Error!u32 {
     const slot = findController(device_id) orelse return error.DeviceNotFound;
+    if (slot.kind != .ata) return error.WrongControllerKind;
     const register_index = try registerIndex(slot, port);
     if (builtin.target.os.tag == .freestanding) {
         return switch (width) {
@@ -781,6 +825,7 @@ pub fn readPort(device_id: u64, port: u16, width: PortWidth) Error!u32 {
 
 pub fn writePort(device_id: u64, port: u16, width: PortWidth, value: u32) Error!void {
     const slot = findController(device_id) orelse return error.DeviceNotFound;
+    if (slot.kind != .ata) return error.WrongControllerKind;
     const register_index = try registerIndex(slot, port);
     if (builtin.target.os.tag == .freestanding) {
         switch (width) {
@@ -911,6 +956,7 @@ fn nextMonotonicId(id: u64) u64 {
 fn resetControllerSlot(slot: *ControllerSlot) void {
     slot.in_use = false;
     slot.published = false;
+    slot.kind = .none;
     slot.device_id = 0;
     slot.grant = .{
         .base_port = 0,
@@ -1245,6 +1291,23 @@ test "device broker publishes ATA controllers and exposes typed port and irq met
     try std.testing.expectEqual(@as(u8, 14), try irqLine(0x1F001));
     try std.testing.expectError(error.UnsupportedMmioWindow, mmioWindow(0x1F001, 0));
     try std.testing.expectError(error.InvalidPort, readPort(0x1F001, 0x2F8, .u8));
+}
+
+test "PCI controller publication cannot expose ATA port authority" {
+    reset();
+
+    const device_id: u64 = 0x0000_8086_5845_0001;
+    try std.testing.expect(publishPciController(device_id));
+    try std.testing.expect(brokerGeneration(device_id) != null);
+    try std.testing.expectError(error.WrongControllerKind, describe(device_id));
+    try std.testing.expectError(error.WrongControllerKind, readPort(device_id, 0, .u8));
+    try std.testing.expectError(error.WrongControllerKind, writePort(device_id, 0, .u8, 0));
+    try std.testing.expect(!revokeAtaController(device_id));
+
+    const status = try programBrokeredDmaIsolation(device_id, 0xD171);
+    try std.testing.expectEqual(DmaIsolationMode.brokered_dma_buffers, status.mode);
+    try std.testing.expect(revokePciController(device_id));
+    try std.testing.expect(brokerGeneration(device_id) == null);
 }
 
 test "device broker rejects a host write wider than the staging buffer" {

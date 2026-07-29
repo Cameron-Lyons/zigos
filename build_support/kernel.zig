@@ -91,26 +91,20 @@ pub fn addX86_64KernelBootCheck(
     const linked_kernel = link.addOutputFileArg("kernel-x86_64-core-boot.elf");
     link.addFileArg(kernel_object.getEmittedBin());
 
-    const validate_image = b.addSystemCommand(&.{
-        "bash",
-        "scripts/check-multiboot2-image.sh",
-    });
+    const validate_image = b.addSystemCommand(&.{"bash"});
+    validate_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
     validate_image.addFileArg(linked_kernel);
 
-    const iso = b.addSystemCommand(&.{
-        "bash",
-        "scripts/build-grub-iso.sh",
-    });
+    const iso = b.addSystemCommand(&.{"bash"});
+    iso.addFileArg(b.path("scripts/build-grub-iso.sh"));
     iso.addFileArg(linked_kernel);
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
     iso.addFileArg(b.path("src/boot/grub-x86_64-kernel.cfg"));
     iso.step.dependOn(&validate_image.step);
 
-    const run = b.addSystemCommand(&.{
-        "bash",
-        "scripts/run-x86-64-kernel-smoke.sh",
-    });
+    const run = b.addSystemCommand(&.{"bash"});
+    run.addFileArg(b.path("scripts/run-x86-64-kernel-smoke.sh"));
     run.addFileArg(iso_path);
     run.addArg("build/x86_64-kernel-core-boot.log");
 
@@ -200,26 +194,20 @@ pub fn addX86_64LongModeEntryCheck(
     const linked_probe = link.addOutputFileArg("x86_64-long-mode-entry-probe.elf");
     link.addFileArg(probe.getEmittedBin());
 
-    const validate_image = b.addSystemCommand(&.{
-        "bash",
-        "scripts/check-multiboot2-image.sh",
-    });
+    const validate_image = b.addSystemCommand(&.{"bash"});
+    validate_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
     validate_image.addFileArg(linked_probe);
 
-    const iso = b.addSystemCommand(&.{
-        "bash",
-        "scripts/build-grub-iso.sh",
-    });
+    const iso = b.addSystemCommand(&.{"bash"});
+    iso.addFileArg(b.path("scripts/build-grub-iso.sh"));
     iso.addFileArg(linked_probe);
     const iso_path = iso.addOutputFileArg("x86_64-long-mode-entry.iso");
     _ = iso.addOutputDirectoryArg("x86_64-long-mode-entry-staging");
     iso.addFileArg(b.path("src/boot/grub-long-mode.cfg"));
     iso.step.dependOn(&validate_image.step);
 
-    const run = b.addSystemCommand(&.{
-        "bash",
-        "scripts/run-long-mode-entry-smoke.sh",
-    });
+    const run = b.addSystemCommand(&.{"bash"});
+    run.addFileArg(b.path("scripts/run-long-mode-entry-smoke.sh"));
     run.addFileArg(iso_path);
     run.addArg("build/x86_64-long-mode-entry.log");
 
@@ -511,16 +499,12 @@ pub fn addKernelArtifact(
     const linked_kernel = link.addOutputFileArg(name);
     link.addFileArg(kernel_object.getEmittedBin());
 
-    const validate_qemu_image = b.addSystemCommand(&.{
-        "bash",
-        "scripts/check-multiboot2-image.sh",
-    });
+    const validate_qemu_image = b.addSystemCommand(&.{"bash"});
+    validate_qemu_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
     validate_qemu_image.addFileArg(linked_kernel);
 
-    const qemu_iso = b.addSystemCommand(&.{
-        "bash",
-        "scripts/build-grub-iso.sh",
-    });
+    const qemu_iso = b.addSystemCommand(&.{"bash"});
+    qemu_iso.addFileArg(b.path("scripts/build-grub-iso.sh"));
     qemu_iso.addFileArg(linked_kernel);
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));

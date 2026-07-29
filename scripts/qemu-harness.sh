@@ -27,9 +27,9 @@ qemu_harness_profile_memory() {
 }
 
 qemu_harness_native_smoke_memory() {
-  local profile_memory
-  profile_memory="$(qemu_harness_profile_memory)"
-  printf '%s\n' "${QEMU_NATIVE_SMOKE_MEMORY:-$profile_memory}"
+  local machine_memory
+  machine_memory="$(qemu_harness_default_memory)"
+  printf '%s\n' "${QEMU_NATIVE_SMOKE_MEMORY:-$machine_memory}"
 }
 
 qemu_harness_require_binary() {
@@ -48,16 +48,10 @@ qemu_harness_load_extra_args() {
   fi
 }
 
-qemu_harness_drive_arg() {
-  local image_path="${1:?drive image path required}"
-  printf 'file=%s,if=ide,format=raw,index=0,id=disk0,cache=writethrough\n' "$image_path"
-}
-
 qemu_harness_append_native_store_drive() {
   local image_path="${1:?drive image path required}"
-  local default_bus="${2:-ide}"
-  local native_store_bus="${ZIGOS_NATIVE_STORE_BUS:-$default_bus}"
   local native_store_cache="${ZIGOS_NATIVE_STORE_CACHE:-writethrough}"
+  local nvme_write_cache="${ZIGOS_NVME_WRITE_CACHE:-auto}"
 
   case "$native_store_cache" in
     writeback|writethrough)
@@ -68,38 +62,23 @@ qemu_harness_append_native_store_drive() {
       ;;
   esac
 
-  QEMU_HARNESS_COMMAND+=(
-    -drive "file=$image_path,if=none,format=raw,id=disk0,cache=$native_store_cache"
-  )
-  case "$native_store_bus" in
-    nvme)
-      local nvme_write_cache="${ZIGOS_NVME_WRITE_CACHE:-auto}"
-      case "$nvme_write_cache" in
-        on|off|auto)
-          ;;
-        *)
-          echo "Unsupported ZIGOS_NVME_WRITE_CACHE '$nvme_write_cache'; expected 'on', 'off', or 'auto'." >&2
-          return 2
-          ;;
-      esac
-      QEMU_HARNESS_COMMAND+=(
-        -device "nvme,drive=disk0,serial=zigosnvme0,write-cache=$nvme_write_cache"
-      )
-      ;;
-    ide)
-      QEMU_HARNESS_COMMAND+=(
-        -device "ide-hd,drive=disk0,bus=ide.0,unit=0"
-      )
+  case "$nvme_write_cache" in
+    on|off|auto)
       ;;
     *)
-      echo "Unsupported ZIGOS_NATIVE_STORE_BUS '$native_store_bus'; expected 'nvme' or 'ide'." >&2
+      echo "Unsupported ZIGOS_NVME_WRITE_CACHE '$nvme_write_cache'; expected 'on', 'off', or 'auto'." >&2
       return 2
       ;;
   esac
+
+  QEMU_HARNESS_COMMAND+=(
+    -drive "file=$image_path,if=none,format=raw,id=disk0,cache=$native_store_cache"
+    -device "nvme,drive=disk0,serial=zigosnvme0,write-cache=$nvme_write_cache"
+  )
 }
 
 qemu_harness_build_kernel_command() {
-  local kernel_path="${1:?kernel path required}"
+  : "${1:?kernel path required}"
   local memory_size="${2:?QEMU memory size required}"
   local serial_target="${3:?serial target required}"
   local include_debug_exit="${4:?debug-exit flag required}"
@@ -109,74 +88,18 @@ qemu_harness_build_kernel_command() {
   qemu_harness_require_binary
   qemu_harness_load_extra_args
 
-  if [ -n "${QEMU_BOOT_ISO:-}" ]; then
-    qemu_harness_build_bios_cdrom_command \
-      "$QEMU_BOOT_ISO" \
-      "$memory_size" \
-      "$serial_target" \
-      "$include_debug_exit" \
-      "$include_no_shutdown"
-    QEMU_HARNESS_COMMAND+=("$@")
-    return
+  if [ -z "${QEMU_BOOT_ISO:-}" ]; then
+    echo "QEMU_BOOT_ISO is required; direct kernel loading is not supported." >&2
+    return 2
   fi
 
-  QEMU_HARNESS_COMMAND=(
-    "$(qemu_harness_binary)"
-    -kernel "$kernel_path"
-    -cpu "$(qemu_harness_cpu_model)"
-    -m "$memory_size"
-    -display none
-    -serial "$serial_target"
-    -monitor none
-    -no-reboot
-  )
-
-  if [ "$include_no_shutdown" = "yes" ]; then
-    QEMU_HARNESS_COMMAND+=(-no-shutdown)
-  fi
-  if [ "$include_debug_exit" = "yes" ]; then
-    QEMU_HARNESS_COMMAND+=(-device "$qemu_harness_debug_exit_device")
-  fi
-  if [ -n "${QEMU_KERNEL_APPEND:-}" ]; then
-    QEMU_HARNESS_COMMAND+=(-append "$QEMU_KERNEL_APPEND")
-  fi
-
-  if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
-    QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
-  fi
+  qemu_harness_build_uefi_cdrom_command \
+    "$QEMU_BOOT_ISO" \
+    "$memory_size" \
+    "$serial_target" \
+    "$include_debug_exit" \
+    "$include_no_shutdown"
   QEMU_HARNESS_COMMAND+=("$@")
-}
-
-qemu_harness_build_bios_cdrom_command() {
-  local iso_path="${1:?ISO path required}"
-  local memory_size="${2:?QEMU memory size required}"
-  local serial_target="${3:?serial target required}"
-  local include_debug_exit="${4:-yes}"
-  local include_no_shutdown="${5:-no}"
-
-  qemu_harness_require_binary
-  qemu_harness_load_extra_args
-
-  QEMU_HARNESS_COMMAND=(
-    "$(qemu_harness_binary)"
-    -cdrom "$iso_path"
-    -boot d
-    -cpu "$(qemu_harness_cpu_model)"
-    -m "$memory_size"
-    -display none
-    -serial "$serial_target"
-    -monitor none
-    -no-reboot
-  )
-  if [ "$include_no_shutdown" = "yes" ]; then
-    QEMU_HARNESS_COMMAND+=(-no-shutdown)
-  fi
-  if [ "$include_debug_exit" = "yes" ]; then
-    QEMU_HARNESS_COMMAND+=(-device "$qemu_harness_debug_exit_device")
-  fi
-  if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
-    QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
-  fi
 }
 
 qemu_harness_find_ovmf_code() {
@@ -244,8 +167,10 @@ qemu_harness_build_uefi_cdrom_command() {
   local iso_path="${1:?ISO path required}"
   local memory_size="${2:?QEMU memory size required}"
   local serial_target="${3:?serial target required}"
+  local include_debug_exit="${4:-yes}"
+  local include_no_shutdown="${5:-no}"
   local ovmf_code
-  local ovmf_vars
+  local ovmf_vars=""
   local ovmf_vars_copy
 
   qemu_harness_require_binary
@@ -254,29 +179,51 @@ qemu_harness_build_uefi_cdrom_command() {
 
   QEMU_HARNESS_COMMAND=(
     "$(qemu_harness_binary)"
-    -machine q35
+    -machine "q35,sata=off"
     -cpu "$(qemu_harness_cpu_model)"
     -m "$memory_size"
     -display none
     -serial "$serial_target"
     -monitor none
     -no-reboot
-    -no-shutdown
+    -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code"
   )
 
-  if ovmf_vars="$(qemu_harness_find_ovmf_vars)"; then
-    ovmf_vars_copy="${QEMU_OVMF_VARS_COPY:-build/ovmf-vars.fd}"
+  if [ -n "${OVMF_VARS:-}" ]; then
+    if ! ovmf_vars="$(qemu_harness_find_ovmf_vars)"; then
+      return 1
+    fi
+  else
+    ovmf_vars="$(qemu_harness_find_ovmf_vars || true)"
+  fi
+
+  if [ -n "$ovmf_vars" ]; then
+    if [ -n "${QEMU_OVMF_VARS_COPY:-}" ]; then
+      ovmf_vars_copy="$QEMU_OVMF_VARS_COPY"
+    elif [[ "$serial_target" == file:* ]]; then
+      ovmf_vars_copy="${serial_target#file:}.ovmf-vars.fd"
+    else
+      ovmf_vars_copy="build/ovmf-vars-$$.fd"
+    fi
     mkdir -p "$(dirname "$ovmf_vars_copy")"
     cp "$ovmf_vars" "$ovmf_vars_copy"
     QEMU_HARNESS_COMMAND+=(
-      -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code"
       -drive "if=pflash,format=raw,file=$ovmf_vars_copy"
     )
-  else
-    QEMU_HARNESS_COMMAND+=(-bios "$ovmf_code")
   fi
 
-  QEMU_HARNESS_COMMAND+=(-cdrom "$iso_path" -boot d)
+  QEMU_HARNESS_COMMAND+=(
+    -drive "if=none,file=$iso_path,format=raw,readonly=on,media=cdrom,id=zigos_boot_media"
+    -device "virtio-scsi-pci,id=zigos_boot_scsi"
+    -device "scsi-cd,drive=zigos_boot_media,bus=zigos_boot_scsi.0,bootindex=1"
+    -boot "order=c,strict=on"
+  )
+  if [ "$include_no_shutdown" = "yes" ]; then
+    QEMU_HARNESS_COMMAND+=(-no-shutdown)
+  fi
+  if [ "$include_debug_exit" = "yes" ]; then
+    QEMU_HARNESS_COMMAND+=(-device "$qemu_harness_debug_exit_device")
+  fi
   if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
     QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
   fi
@@ -326,10 +273,6 @@ qemu_harness_run_kernel() {
 }
 
 qemu_harness_run_native_store() {
-  # Modeled device inventory for QEMU smoke/sync boots that use the production
-  # .none kernel on emulators without first-target PCI hardware.
-  QEMU_KERNEL_APPEND="${QEMU_KERNEL_APPEND:-model_inventory}"
-
   local kernel_path="${1:?kernel path required}"
   local store_image="${2:?native store image required}"
   local serial_target="${3:-stdio}"
@@ -374,10 +317,6 @@ qemu_harness_stop_qemu() {
 }
 
 qemu_harness_run_native_store_until_marker() {
-  # Marker-driven QEMU boots need modeled inventory for production driver
-  # binding unless a caller supplied a stricter kernel command line.
-  QEMU_KERNEL_APPEND="${QEMU_KERNEL_APPEND:-model_inventory}"
-
   local kernel_path="${1:?kernel path required}"
   local store_image="${2:?native store image required}"
   local serial_log_path="${3:?serial log path required}"
