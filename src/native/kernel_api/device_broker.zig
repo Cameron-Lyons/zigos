@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const abi = @import("../core/abi.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 
@@ -23,8 +22,6 @@ const brokered_dma_window_device_mask: u64 = 0x0000_FFFF_FFFF;
 const brokered_dma_window_shift: u6 = 12;
 const test_dma_window_offset: u64 = 0x40000;
 const test_dma_buffer_bytes: u64 = 512;
-
-pub const PortWidth = abi.DevicePortWidth;
 
 pub const DmaIsolationMode = enum(u8) {
     programmed_io_only,
@@ -139,13 +136,7 @@ pub const MmioWindow = struct {
 
 pub const ControllerDescriptor = struct {
     device_id: u64,
-    base_port: u16,
-    io_port_count: u16,
-    ctrl_port: u16,
-    is_master: bool,
-    irq_line: u8,
     mmio_window_count: u8,
-    sector_count: u64,
 };
 
 pub const Error = error{
@@ -157,15 +148,12 @@ pub const Error = error{
     DmaProgramIdExhausted,
     DmaTableFull,
     DmaWindowDenied,
-    InvalidPort,
     InvalidDmaDomain,
     InvalidDmaWindow,
     InvalidDevice,
     InvalidIommuProgram,
     UnsupportedMmioWindow,
     UnsupportedBusMasterDma,
-    UnsupportedWidth,
-    WrongControllerKind,
 };
 
 const ControllerSlot = struct {
@@ -657,18 +645,8 @@ pub fn describe(device_id: u64) Error!ControllerDescriptor {
     _ = findController(device_id) orelse return error.DeviceNotFound;
     return .{
         .device_id = device_id,
-        .base_port = 0,
-        .io_port_count = 0,
-        .ctrl_port = 0,
-        .is_master = false,
-        .irq_line = 0,
         .mmio_window_count = 0,
-        .sector_count = 0,
     };
-}
-
-pub fn irqLine(device_id: u64) Error!u8 {
-    return (try describe(device_id)).irq_line;
 }
 
 pub fn mmioWindow(device_id: u64, window_index: u8) Error!MmioWindow {
@@ -677,20 +655,6 @@ pub fn mmioWindow(device_id: u64, window_index: u8) Error!MmioWindow {
     return error.UnsupportedMmioWindow;
 }
 
-pub fn readPort(device_id: u64, port: u16, width: PortWidth) Error!u32 {
-    _ = findController(device_id) orelse return error.DeviceNotFound;
-    _ = port;
-    _ = width;
-    return error.WrongControllerKind;
-}
-
-pub fn writePort(device_id: u64, port: u16, width: PortWidth, value: u32) Error!void {
-    _ = findController(device_id) orelse return error.DeviceNotFound;
-    _ = port;
-    _ = width;
-    _ = value;
-    return error.WrongControllerKind;
-}
 
 fn findController(device_id: u64) ?*ControllerSlot {
     const slot = findControllerSlot(device_id) orelse return null;
@@ -934,7 +898,7 @@ fn alignDown(address: u64, alignment: u64) u64 {
     return address - (address % alignment);
 }
 
-test "device broker publishes only PCI controllers and rejects port access" {
+test "device broker publishes only PCI controllers" {
     reset();
 
     const device_id: u64 = 0x0000_8086_5845_0001;
@@ -944,15 +908,7 @@ test "device broker publishes only PCI controllers and rejects port access" {
 
     const descriptor = try describe(device_id);
     try std.testing.expectEqual(device_id, descriptor.device_id);
-    try std.testing.expectEqual(@as(u16, 0), descriptor.base_port);
-    try std.testing.expectEqual(@as(u16, 0), descriptor.io_port_count);
-    try std.testing.expectEqual(@as(u16, 0), descriptor.ctrl_port);
-    try std.testing.expect(!descriptor.is_master);
-    try std.testing.expectEqual(@as(u8, 0), descriptor.irq_line);
     try std.testing.expectEqual(@as(u8, 0), descriptor.mmio_window_count);
-    try std.testing.expectEqual(@as(u64, 0), descriptor.sector_count);
-    try std.testing.expectError(error.WrongControllerKind, readPort(device_id, 0, .u8));
-    try std.testing.expectError(error.WrongControllerKind, writePort(device_id, 0, .u8, 0));
     try std.testing.expectError(error.UnsupportedMmioWindow, mmioWindow(device_id, 0));
 
     try publishPciControllerChecked(device_id);
@@ -1217,7 +1173,6 @@ test "PCI hotplug revokes stale DMA programs" {
 
     try std.testing.expect(revokePciController(device_id));
     try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
-    try std.testing.expectError(error.DeviceNotFound, readPort(device_id, 0, .u8));
     try std.testing.expectError(error.DeviceNotFound, dmaIsolationStatus(device_id, status.dma_domain_id));
 
     try std.testing.expect(publishPciController(device_id));
@@ -1261,7 +1216,7 @@ test "device broker indexes PCI controller slots across full table and inactive 
         try std.testing.expect(publishPciController(device_id));
         try std.testing.expectEqual(index + 1, controllers.countInUse());
         try std.testing.expectEqual(device_id, (try describe(device_id)).device_id);
-        try std.testing.expectEqual(@as(u8, 0), (try describe(device_id)).irq_line);
+        try std.testing.expectEqual(@as(u8, 0), (try describe(device_id)).mmio_window_count);
     }
     try std.testing.expect(!publishPciController(0x0000_8086_5845_01FF));
 

@@ -56,13 +56,8 @@ pub fn capabilityDescriptor(owned: *const capability.Capability) abi.CapabilityD
 pub fn deviceDescriptor(descriptor: device_broker.ControllerDescriptor) abi.DeviceDescriptor {
     return .{
         .device_id = descriptor.device_id,
-        .base_port = descriptor.base_port,
-        .io_port_count = descriptor.io_port_count,
-        .ctrl_port = descriptor.ctrl_port,
-        .irq_line = descriptor.irq_line,
         .mmio_window_count = descriptor.mmio_window_count,
-        .flags = if (descriptor.is_master) abi.DEVICE_DESCRIPTOR_FLAG_ATA_MASTER else 0,
-        .sector_count = descriptor.sector_count,
+        ._reserved = [_]u8{0} ** abi.DEVICE_DESCRIPTOR_RESERVED_BYTES,
     };
 }
 

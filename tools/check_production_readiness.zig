@@ -1880,11 +1880,21 @@ fn validateUserspaceDriverDataPathTrack(
     errors: *std.ArrayList([]const u8),
 ) !void {
     const broker_path = "src/native/kernel_api/device_broker.zig";
+    const native_abi_path = "src/native/core/abi.zig";
+    const component_port_path = "src/native/kernel_api/component_port.zig";
+    const native_kernel_path = "src/native/kernel_api/native_kernel.zig";
+    const device_syscalls_path = "src/native/kernel_api/device_syscalls.zig";
+    const syscall_surface_path = "src/native/kernel_api/syscall_surface.zig";
     const bootstrap_driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
     const driver_runtime_path = "src/native/drivers/driver_runtime.zig";
     const driver_spec_path = "src/tests/spec/drivers_storage_sync.zig";
     const backlog_gate_path = "src/tests/spec/backlog_gates.zig";
     const broker_source = try readRequiredSource(allocator, io, errors, broker_path) orelse return;
+    const native_abi_source = try readRequiredSource(allocator, io, errors, native_abi_path) orelse return;
+    const component_port_source = try readRequiredSource(allocator, io, errors, component_port_path) orelse return;
+    const native_kernel_source = try readRequiredSource(allocator, io, errors, native_kernel_path) orelse return;
+    const device_syscalls_source = try readRequiredSource(allocator, io, errors, device_syscalls_path) orelse return;
+    const syscall_surface_source = try readRequiredSource(allocator, io, errors, syscall_surface_path) orelse return;
     const bootstrap_driver_port_source = try readRequiredSource(allocator, io, errors, bootstrap_driver_port_path) orelse return;
     const driver_runtime_source = try readRequiredSource(allocator, io, errors, driver_runtime_path) orelse return;
     const driver_spec_source = try readRequiredSource(allocator, io, errors, driver_spec_path) orelse return;
@@ -1898,7 +1908,7 @@ fn validateUserspaceDriverDataPathTrack(
         "try std.testing.expect(!status.bus_master_dma_enabled)",
         "pub fn programBusMasterStorageDmaIsolation",
         "pub fn publishPciController",
-        "device broker publishes only PCI controllers and rejects port access",
+        "device broker publishes only PCI controllers",
     };
     for (broker_snippets) |snippet| {
         if (std.mem.indexOf(u8, broker_source, snippet) == null) {
@@ -1915,6 +1925,44 @@ fn validateUserspaceDriverDataPathTrack(
     for (retired_broker_snippets) |snippet| {
         if (std.mem.indexOf(u8, broker_source, snippet) != null) {
             try common.addError(errors, allocator, "Userspace driver data path must not reintroduce the retired ATA broker surface: {s}", .{snippet});
+        }
+    }
+    const device_abi_snippets = [_][]const u8{
+        "pub const ABI_VERSION: u16 = 2",
+        "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
+        "pub const DeviceDescriptor = ex" ++ "tern struct",
+        "mmio_window_count: u8",
+    };
+    for (device_abi_snippets) |snippet| {
+        if (std.mem.indexOf(u8, native_abi_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace driver data path must keep the compact PCI/MMIO native ABI snippet: {s}", .{snippet});
+        }
+    }
+    const port_abi_sources = [_]struct {
+        path: []const u8,
+        source: []const u8,
+    }{
+        .{ .path = native_abi_path, .source = native_abi_source },
+        .{ .path = broker_path, .source = broker_source },
+        .{ .path = component_port_path, .source = component_port_source },
+        .{ .path = native_kernel_path, .source = native_kernel_source },
+        .{ .path = device_syscalls_path, .source = device_syscalls_source },
+        .{ .path = syscall_surface_path, .source = syscall_surface_source },
+    };
+    const retired_port_abi_snippets = [_][]const u8{
+        "device_port_read",
+        "device_port_write",
+        "DevicePortRead",
+        "DevicePortWrite",
+        "DevicePortWidth",
+        "devicePortRead",
+        "devicePortWrite",
+    };
+    for (port_abi_sources) |source| {
+        for (retired_port_abi_snippets) |snippet| {
+            if (std.mem.indexOf(u8, source.source, snippet) != null) {
+                try common.addError(errors, allocator, "Userspace driver data path must not reintroduce port-I/O ABI snippet in {s}: {s}", .{ source.path, snippet });
+            }
         }
     }
 

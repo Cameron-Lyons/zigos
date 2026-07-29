@@ -60,27 +60,6 @@ pub const Client = struct {
         }, self.now_ticks);
     }
 
-    pub fn readPort(self: *Client, port: u16, width: abi.DevicePortWidth) Error!u32 {
-        try self.requireCurrentGeneration();
-        return self.kernel_port.devicePortRead(.{
-            .header = component_port.makeHeader(.device_port_read, self.nextCorrelationId(), self.task_id),
-            .device_capability_id = self.authority_capability_id,
-            .port = port,
-            .width = width,
-        }, self.now_ticks);
-    }
-
-    pub fn writePort(self: *Client, port: u16, width: abi.DevicePortWidth, value: u32) Error!void {
-        try self.requireCurrentGeneration();
-        return self.kernel_port.devicePortWrite(.{
-            .header = component_port.makeHeader(.device_port_write, self.nextCorrelationId(), self.task_id),
-            .device_capability_id = self.authority_capability_id,
-            .port = port,
-            .width = width,
-            .value = value,
-        }, self.now_ticks);
-    }
-
     fn nextCorrelationId(self: *Client) u64 {
         defer self.next_correlation_id += 1;
         return self.next_correlation_id;

@@ -140,21 +140,6 @@ pub const DeviceMmioWindowRequest = struct {
     window_index: u8,
 };
 
-pub const DevicePortReadRequest = struct {
-    header: abi.RequestHeader,
-    device_capability_id: u64,
-    port: u16,
-    width: abi.DevicePortWidth,
-};
-
-pub const DevicePortWriteRequest = struct {
-    header: abi.RequestHeader,
-    device_capability_id: u64,
-    port: u16,
-    width: abi.DevicePortWidth,
-    value: u32,
-};
-
 pub const KernelPort = struct {
     kernel: *native_kernel.Kernel,
 
@@ -391,34 +376,6 @@ pub const KernelPort = struct {
         );
     }
 
-    pub fn devicePortRead(
-        self: *KernelPort,
-        request: DevicePortReadRequest,
-        now_ticks: u64,
-    ) Error!u32 {
-        try validateHeader(request.header, .device_port_read);
-        return self.kernel.devicePortRead(
-            callContext(request.header, request.device_capability_id, .none),
-            request.port,
-            request.width,
-            now_ticks,
-        );
-    }
-
-    pub fn devicePortWrite(
-        self: *KernelPort,
-        request: DevicePortWriteRequest,
-        now_ticks: u64,
-    ) Error!void {
-        try validateHeader(request.header, .device_port_write);
-        return self.kernel.devicePortWrite(
-            callContext(request.header, request.device_capability_id, .none),
-            request.port,
-            request.width,
-            request.value,
-            now_ticks,
-        );
-    }
 };
 
 pub const GeneratedWrapper = struct {
@@ -755,20 +712,6 @@ test "kernel port validates and forwards typed device broker requests" {
         .device_capability_id = device_capability.id,
     }, 7);
     try std.testing.expectEqual(@as(u64, 0x1F001), descriptor.device_id);
-
-    try std.testing.expectError(error.WrongControllerKind, port.devicePortWrite(.{
-        .header = makeHeader(.device_port_write, 82, driver_task.id),
-        .device_capability_id = device_capability.id,
-        .port = 0x1F0 + 7,
-        .width = .u8,
-        .value = 0x66,
-    }, 7));
-    try std.testing.expectError(error.WrongControllerKind, port.devicePortRead(.{
-        .header = makeHeader(.device_port_read, 83, driver_task.id),
-        .device_capability_id = device_capability.id,
-        .port = 0x1F0 + 7,
-        .width = .u8,
-    }, 7));
 
     try std.testing.expectError(error.UnexpectedOperation, port.deviceDescribe(.{
         .header = makeHeader(.task_create, 84, driver_task.id),

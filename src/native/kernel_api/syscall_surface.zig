@@ -183,8 +183,6 @@ test "syscall descriptor table covers every native operation with ABI metadata" 
     try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.task_create).?.request_copy);
     try std.testing.expectEqual(@as(usize, 0), syscallDescriptorFor(.endpoint_send).?.response_size);
     try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.endpoint_send).?.request_copy);
-    try std.testing.expectEqual(@sizeOf(abi.DevicePortReadResponse), syscallDescriptorFor(.device_port_read).?.response_size);
-    try std.testing.expectEqual(@as(usize, 0), syscallDescriptorFor(.device_port_write).?.response_size);
     try std.testing.expectEqual(capability.CapabilityRight.endpoint_send, syscallDescriptorFor(.endpoint_send).?.required_right);
     try std.testing.expect(syscallDescriptorFor(.endpoint_create).?.scope_rule.task_scope_matches_request_task);
     try std.testing.expectEqual(@as(usize, 1), syscallDescriptorFor(.shared_memory_create).?.auto_grant_count);
@@ -660,7 +658,7 @@ test "address-space range validation requires full mapped coverage and permissio
     try std.testing.expect(!validateAddressSpaceRange(&address_space, 0x20FF0, 0x22010, .read));
 }
 
-test "syscall surface dispatches typed device broker requests" {
+test "syscall surface dispatches typed PCI device broker requests" {
     const device_broker = @import("device_broker.zig");
 
     var test_kernel = TestKernel{};
@@ -703,37 +701,4 @@ test "syscall surface dispatches typed device broker requests" {
     try std.testing.expectEqual(abi.SyscallStatus.success, describe_result.status);
     try std.testing.expectEqual(@as(u64, 0x1F001), describe_response.device_id);
 
-    const write_request = component_port.DevicePortWriteRequest{
-        .header = component_port.makeHeader(.device_port_write, 102, test_kernel.session_task_id),
-        .device_capability_id = device_capability.id,
-        .port = 0x1F0 + 7,
-        .width = .u8,
-        .value = 0x5C,
-    };
-    try std.testing.expectEqual(abi.SyscallStatus.internal_error, dispatch(
-        &test_kernel.port,
-        test_kernel.session_task_id,
-        12,
-        @intFromPtr(&write_request),
-        0,
-        0,
-    ).status);
-
-    const read_request = component_port.DevicePortReadRequest{
-        .header = component_port.makeHeader(.device_port_read, 103, test_kernel.session_task_id),
-        .device_capability_id = device_capability.id,
-        .port = 0x1F0 + 7,
-        .width = .u8,
-    };
-    var read_response = abi.DevicePortReadResponse{ .value = 0 };
-    const read_result = dispatch(
-        &test_kernel.port,
-        test_kernel.session_task_id,
-        12,
-        @intFromPtr(&read_request),
-        @intFromPtr(&read_response),
-        @sizeOf(abi.DevicePortReadResponse),
-    );
-    try std.testing.expectEqual(abi.SyscallStatus.internal_error, read_result.status);
-    try std.testing.expectEqual(@as(u32, 0), read_response.value);
 }
