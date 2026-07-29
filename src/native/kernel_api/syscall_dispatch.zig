@@ -315,10 +315,6 @@ pub fn mapError(err: anyerror) DispatchResult {
         .status = .not_found,
         .denial_reason = .invalid_target,
     };
-    if (err == error.InvalidPort or err == error.UnsupportedWidth) return .{
-        .status = .denied,
-        .denial_reason = .invalid_target,
-    };
     if (err == error.TableFull or
         err == error.TargetTableFull or
         err == error.BindingTableFull or

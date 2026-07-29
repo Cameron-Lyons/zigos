@@ -26,7 +26,7 @@ test "kernel operation descriptors are projected from shared native operation me
     }
 
     try std.testing.expectEqual(capability.CapabilityRight.task_create, declarationFor(.task_create).required_right);
-    try std.testing.expectEqual(capability.CapabilityRight.device_use, declarationFor(.device_port_write).required_right);
+    try std.testing.expectEqual(capability.CapabilityRight.device_use, declarationFor(.device_describe).required_right);
     try std.testing.expect(switch (declarationFor(.endpoint_send).target_kind) {
         .fixed => |kind| kind == .endpoint,
         else => false,

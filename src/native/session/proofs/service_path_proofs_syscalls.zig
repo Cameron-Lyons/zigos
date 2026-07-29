@@ -240,7 +240,7 @@ pub fn proveBootedDriverPermissions(
     runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
     const descriptor = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 90);
     try std.testing.expectEqual(storage_driver.device_id, descriptor.device_id);
-    try std.testing.expectEqual(@as(u16, 0), descriptor.base_port);
+    try std.testing.expectEqual(@as(u8, 0), descriptor.mmio_window_count);
 
     runtime.allowHostPointerSyscallsForTask(network_service_task.id);
     const cross_task = deviceDescribeResult(kernel_port, network_service_task.id, storage_driver.authority_capability_id, 91);
