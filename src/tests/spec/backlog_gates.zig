@@ -22,6 +22,7 @@ const kernel_fadt = @import("../../kernel/platform/fadt.zig");
 const kernel_framebuffer = @import("../../kernel/platform/framebuffer.zig");
 const kernel_handoff = @import("../../kernel/boot/handoff.zig");
 const kernel_hardware_proof = @import("../../kernel/platform/hardware_proof.zig");
+const kernel_intel_vtd = @import("../../kernel/platform/intel_vtd.zig");
 const kernel_ethernet = @import("../../kernel/net/ethernet.zig");
 const kernel_link_port = @import("../../kernel/net/link_port.zig");
 const kernel_nvme = @import("../../kernel/drivers/nvme.zig");
@@ -38,6 +39,10 @@ const runtime_negative_proofs = @import("../../native/session/runtime_negative_p
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const spec_support = @import("support.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
+
+comptime {
+    _ = kernel_intel_vtd;
+}
 const sync_adapters = @import("../../native/sync/sync_adapters.zig");
 const sync_service_test = @import("../../native/sync/sync_service_test.zig");
 const sync_transport = @import("../../native/sync/sync_transport.zig");
@@ -788,6 +793,7 @@ pub fn firstHardwareTargetGate() !void {
         .acpi_mcfg = true,
         .acpi_dmar = true,
         .dmar_summary = production_dmar,
+        .vtd_storage_isolation = true,
         .apic_timer = hardware_apic_timer_proof.productionHardwareVerified(),
         .xhci_controller = true,
         .xhci_keyboard_input = hardware_xhci_input_proof.productionHardwareVerified(),
@@ -809,6 +815,9 @@ pub fn firstHardwareTargetGate() !void {
         .update_rollback_cycles = hardware_update_rollback_proof.cycles,
     };
     try std.testing.expect(kernel_hardware_proof.allSubsystemMarkersReady(composed_complete));
+    var composed_missing_vtd_enforcement = composed_complete;
+    composed_missing_vtd_enforcement.vtd_storage_isolation = false;
+    try std.testing.expect(!kernel_hardware_proof.allSubsystemMarkersReady(composed_missing_vtd_enforcement));
     var composed_missing_framebuffer_scanout = composed_complete;
     composed_missing_framebuffer_scanout.framebuffer_gop = framebuffer_missing_pixel.productionHardwareVerified();
     try std.testing.expect(!kernel_hardware_proof.allSubsystemMarkersReady(composed_missing_framebuffer_scanout));

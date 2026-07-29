@@ -37,6 +37,7 @@ pub const ProbeFacts = struct {
     fadt_firmware: ?fadt.FixedAcpiDescription = null,
     mcfg_allocation: ?mcfg.Allocation = null,
     dmar_summary: ?dmar.Summary = null,
+    vtd_storage_isolation: bool = false,
     apic_timer: bool = false,
     framebuffer_gop: bool = false,
     xhci_controller: bool = false,
@@ -97,6 +98,10 @@ pub const ProbeFacts = struct {
         if (!self.real_target_sku or !self.acpi_dmar) return false;
         const summary = self.dmar_summary orelse return false;
         return summary.productionDiscoveryReady();
+    }
+
+    pub fn vtdStorageIsolationReady(self: ProbeFacts) bool {
+        return self.vtdDiscoveryReady() and self.vtd_storage_isolation;
     }
 
     pub fn nvmeBlockReady(self: ProbeFacts) bool {
@@ -380,6 +385,7 @@ const PrintedMarkers = struct {
     uefi: bool = false,
     acpi_tables: bool = false,
     vtd_discovery: bool = false,
+    vtd_storage_isolation: bool = false,
     apic_timer: bool = false,
     framebuffer_gop: bool = false,
     xhci_input: bool = false,
@@ -423,6 +429,10 @@ pub fn vtdSummary() ?dmar.Summary {
     return facts.dmar_summary;
 }
 
+pub fn realTargetDetected() bool {
+    return facts.real_target_sku;
+}
+
 pub fn telemetryRecordingReady() bool {
     return facts.real_target_sku and
         facts.acpi_fadt and
@@ -450,6 +460,7 @@ pub fn allSubsystemMarkersReady(probe: ProbeFacts) bool {
     return probe.uefiBootReady() and
         probe.acpiTablesReady() and
         probe.vtdDiscoveryReady() and
+        probe.vtdStorageIsolationReady() and
         probe.apic_timer and
         probe.framebuffer_gop and
         probe.xhci_keyboard_input and
@@ -501,6 +512,13 @@ pub fn capturePciEvidence() void {
     facts.nvme_controller = pci.firstNvmeController() != null;
     facts.i225_lm_controller = pci.firstIntelI225Lm() != null;
     facts.xhci_controller = pci.firstXhciController() != null;
+    printNewMarkers();
+}
+
+pub fn recordVtdStorageIsolation() void {
+    if (facts.real_target_sku and facts.vtdDiscoveryReady()) {
+        facts.vtd_storage_isolation = true;
+    }
     printNewMarkers();
 }
 
@@ -786,6 +804,10 @@ fn printNewMarkers() void {
         printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_DISCOVERY:PASS");
         printed.vtd_discovery = true;
     }
+    if (facts.vtdStorageIsolationReady() and !printed.vtd_storage_isolation) {
+        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_STORAGE_ISOLATION:ENFORCED");
+        printed.vtd_storage_isolation = true;
+    }
     if (facts.real_target_sku and facts.apic_timer and !printed.apic_timer) {
         if (!printed.apic_timer_interrupt) {
             printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":APIC_TIMER_INTERRUPT:OBSERVED");
@@ -1005,6 +1027,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .acpi_mcfg = true,
         .acpi_dmar = true,
         .dmar_summary = testDmarSummary(),
+        .vtd_storage_isolation = true,
         .apic_timer = true,
         .xhci_controller = true,
         .xhci_keyboard_input = true,

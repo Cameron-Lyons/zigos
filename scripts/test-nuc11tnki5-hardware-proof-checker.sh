@@ -374,7 +374,7 @@ write_verification_log() {
     printf '%s:POWER_CYCLE_NOTES:RECORDED\n' "$TARGET_PREFIX"
     printf '%s:ARTIFACT_DIGESTS:RECORDED\n' "$TARGET_PREFIX"
     grep -Ev '^[[:space:]]*(#|$)' "$VERIFICATION_MARKERS" | grep -F "$TARGET_PREFIX:" | grep -F ':OBSERVED'
-    grep -Ev '^[[:space:]]*(#|$)' "$VERIFICATION_MARKERS" | grep -F "$TARGET_PREFIX:" | grep -F ':PASS'
+    grep -Ev '^[[:space:]]*(#|$)' "$VERIFICATION_MARKERS" | grep -F "$TARGET_PREFIX:" | grep -E ':(PASS|ENFORCED)$'
     grep -Ev '^[[:space:]]*(#|$)' "$VERIFICATION_MARKERS" | grep -Fv "$TARGET_PREFIX:"
     printf '%s:COLD_BOOTS:10\n' "$TARGET_PREFIX"
     printf '%s:WARM_REBOOTS:10\n' "$TARGET_PREFIX"

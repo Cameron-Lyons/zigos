@@ -41,6 +41,10 @@ pub fn init() void {
     const ecam_allocation = hardware_proof.pciEcamAllocation() orelse
         @panic("ACPI MCFG is required for PCIe discovery");
     pci.init(ecam_allocation) catch @panic("ACPI MCFG exposed an invalid PCIe ECAM allocation");
+    _ = pci.revokeBootBusMasters();
+    if (pci.bootBusMasterCount() != 0) {
+        @panic("PCI bus-master revocation failed before device ownership transfer");
+    }
     // QEMU "modeled" test boots cannot expose the exact first-target Intel
     // devices, so explicit test profiles request a modeled inventory seed.
     // Native QEMU paths that cannot pass `-append` reliably also fall back to
@@ -103,7 +107,21 @@ fn capturePciInventory() void {
     }
     if (pci.firstNvmeController()) |dev| {
         device_inventory.registerDetected(.storage_controller, pciDeviceId(dev), .nvme_pci_inventory, false);
-        nvme_hw.probeAndReport(dev);
+        var vtd_summary = if (hardware_proof.realTargetDetected())
+            hardware_proof.vtdSummary() orelse @panic("validated VT-d firmware is required on the production target")
+        else
+            null;
+        const vtd_summary_ptr = if (vtd_summary) |*summary| summary else null;
+        const isolated = nvme_hw.probeAndReport(dev, vtd_summary_ptr) catch |err| {
+            console.print("ZIGOS:NVME:HW:BRINGUP_FAIL ");
+            console.print(@errorName(err));
+            console.print("\n");
+            if (hardware_proof.realTargetDetected()) {
+                @panic("production NVMe bring-up failed closed");
+            }
+            return;
+        };
+        if (isolated) hardware_proof.recordVtdStorageIsolation();
     }
 }
 

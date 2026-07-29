@@ -24,6 +24,9 @@ const PCI_BAR2_OFFSET: u16 = 0x18;
 const PCI_BAR3_OFFSET: u16 = 0x1C;
 const PCI_BAR4_OFFSET: u16 = 0x20;
 const PCI_BAR5_OFFSET: u16 = 0x24;
+const PCI_COMMAND_OFFSET: u16 = 0x04;
+const PCI_COMMAND_MEMORY_SPACE: u16 = 1 << 1;
+const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
 
 const PCI_ABSENT_VENDOR_ID: u16 = 0xFFFF;
 const PCI_MULTI_FUNCTION_FLAG: u8 = 0x80;
@@ -322,6 +325,65 @@ fn bootDevices() []const PCIDevice {
     buildBootInventory();
     if (!boot_inventory_valid) return &.{};
     return boot_inventory[0..boot_inventory_count];
+}
+
+pub fn disableBusMastering(device_info: PCIDevice) void {
+    const command = readConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        PCI_COMMAND_OFFSET,
+    );
+    writeConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        PCI_COMMAND_OFFSET,
+        command & ~PCI_COMMAND_BUS_MASTER,
+    );
+}
+
+pub fn enableMemoryBusMastering(device_info: PCIDevice) void {
+    const command = readConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        PCI_COMMAND_OFFSET,
+    );
+    writeConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        PCI_COMMAND_OFFSET,
+        command | PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER,
+    );
+}
+
+pub fn busMasteringEnabled(device_info: PCIDevice) bool {
+    return (readConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        PCI_COMMAND_OFFSET,
+    ) & PCI_COMMAND_BUS_MASTER) != 0;
+}
+
+pub fn revokeBootBusMasters() usize {
+    var revoked: usize = 0;
+    for (bootDevices()) |device_info| {
+        if (!busMasteringEnabled(device_info)) continue;
+        disableBusMastering(device_info);
+        if (!busMasteringEnabled(device_info)) revoked += 1;
+    }
+    return revoked;
+}
+
+pub fn bootBusMasterCount() usize {
+    var count: usize = 0;
+    for (bootDevices()) |device_info| {
+        if (busMasteringEnabled(device_info)) count += 1;
+    }
+    return count;
 }
 
 fn firstMatchingIn(
