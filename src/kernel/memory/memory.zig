@@ -1,4 +1,4 @@
-const vga = @import("../drivers/vga.zig");
+const console = @import("../utils/console.zig");
 const numfmt = @import("../utils/numfmt.zig");
 
 const BYTES_PER_MIB: usize = 1024 * 1024;
@@ -64,12 +64,12 @@ pub fn init() void {
     free_list = initial_block;
     is_initialized = true;
 
-    vga.print("Memory allocator initialized!\n");
-    vga.print("Heap start: 0x");
+    console.print("Memory allocator initialized!\n");
+    console.print("Heap start: 0x");
     numfmt.printHex(@intFromPtr(heap_start));
-    vga.print("\nHeap size: ");
+    console.print("\nHeap size: ");
     numfmt.printDec(HEAP_SIZE / BYTES_PER_MIB);
-    vga.print(" MB\n");
+    console.print(" MB\n");
 }
 
 pub fn getReservedMemoryEnd() usize {

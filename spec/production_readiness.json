@@ -552,6 +552,7 @@
       "current_evidence": [
         "The first supported hardware target is pinned to Intel NUC 11 Pro Kit NUC11TNKi5 instead of a generic PC-compatible bucket.",
         "The target contract enumerates UEFI boot, ACPI tables, APIC timer, GOP framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM network, compositor framebuffer presentation, suspend/resume, crash recovery, crash-record persistence, and update rollback power cycling as required hardware proof.",
+        "Early kernel diagnostics are serial-only, while graphical output is owned by the validated UEFI GOP framebuffer and native compositor; the fixed VGA text buffer driver is absent and production readiness rejects its restoration.",
         "The build exposes OVMF-backed uefi-qemu-test and uefi-verification-qemu-test preflights for the production and verification ISO paths before attempting both images on the NUC firmware.",
         "The Multiboot entry path now preserves bootloader magic and info pointers, asks GRUB to keep a 32-bit framebuffer payload, and exposes tested memory-map and framebuffer handoff parsers for runtime proof capture.",
         "The kernel tree now has a tested SMBIOS scanner/parser that can match the NUC11TNKi5 SKU from real firmware tables before emitting real-hardware source or board markers.",

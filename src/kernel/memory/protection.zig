@@ -1,5 +1,5 @@
 const paging = @import("paging64.zig");
-const vga = @import("../drivers/vga.zig");
+const console = @import("../utils/console.zig");
 
 // User-memory validation and user/kernel copies are owned by the native syscall
 // surface (native/kernel_api/syscall_dispatch.validateUserRange), which checks
@@ -99,5 +99,5 @@ pub fn protectKernelMemory() void {
     verifyRange(data, true, false, null);
     verifyRange(bss, true, false, @intFromPtr(&stack_bottom));
 
-    vga.print("Kernel W^X enforced: text RX, immutable data R/NX, mutable memory RW/NX\n");
+    console.print("Kernel W^X enforced: text RX, immutable data R/NX, mutable memory RW/NX\n");
 }
