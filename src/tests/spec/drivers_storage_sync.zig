@@ -24,7 +24,9 @@ pub fn publishedDriversActivateScopedTransports() !void {
     const FakeNetworkDevice = struct {
         var activation_count: usize = 0;
 
-        fn send(_: []const u8) void {}
+        fn send(_: []const u8) bool {
+            return true;
+        }
 
         fn getMacAddress() [6]u8 {
             return .{ 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 };
@@ -886,8 +888,9 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
         var principal_id = spec_support.app(0);
         var live_policy_id: u64 = 0;
 
-        fn send(_: []const u8) void {
+        fn send(_: []const u8) bool {
             send_count += 1;
+            return true;
         }
 
         fn mac() [6]u8 {

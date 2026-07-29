@@ -12,6 +12,7 @@ const event_ledger = @import("../../native/platform/event_ledger.zig");
 const hardware_target = @import("../../native/platform/hardware_target.zig");
 const ids = @import("../../native/core/ids.zig");
 const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
+const intel_i225_tx = @import("../../kernel/drivers/intel_i225_tx.zig");
 const immutable_base = @import("../../native/platform/immutable_base.zig");
 const kernel_crash_record = @import("../../kernel/platform/crash_record.zig");
 const kernel_acpi = @import("../../kernel/platform/acpi.zig");
@@ -68,10 +69,11 @@ pub fn networkTransportHardeningGate() !void {
         var expected_egress_capability_id: u64 = 0;
         var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
 
-        fn send(frame: []const u8) void {
+        fn send(frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
             @memcpy(last_frame[0..frame.len], frame);
+            return true;
         }
 
         fn mac() [6]u8 {
@@ -936,8 +938,9 @@ fn networkDriverBrokerRevocationGate() !void {
     const Harness = struct {
         var send_count: usize = 0;
 
-        fn send(_: []const u8) void {
+        fn send(_: []const u8) bool {
             send_count += 1;
+            return true;
         }
 
         fn mac() [6]u8 {
@@ -1030,6 +1033,7 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expectEqualStrings("bootstrap_i225_lm_inventory_shim", intel_i225.kernel_boundary_role);
     try std.testing.expect(!intel_i225.publishes_full_network_service);
     try std.testing.expect(intel_i225.network_data_plane_exports_fail_closed);
+    try std.testing.expectEqual(@as(usize, 1500), intel_i225_tx.MAX_PAYLOAD_BYTES);
     try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, intel_i225.rejectKernelTransmit(.{
         .device_id = 0x8086_15F2_0000,
         .frame_len = 64,

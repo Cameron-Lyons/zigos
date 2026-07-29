@@ -541,8 +541,9 @@ test "driver-backed network tx fails closed without capability-backed egress dec
         var saw_policy_id: u64 = 0;
         var saw_capability_id: u64 = 0;
 
-        fn send(_: []const u8) void {
+        fn send(_: []const u8) bool {
             send_count += 1;
+            return true;
         }
 
         fn mac() [6]u8 {
@@ -596,8 +597,9 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
     const Harness = struct {
         var send_count: usize = 0;
 
-        fn send(_: []const u8) void {
+        fn send(_: []const u8) bool {
             send_count += 1;
+            return true;
         }
 
         fn mac() [6]u8 {

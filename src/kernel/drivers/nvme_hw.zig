@@ -454,7 +454,11 @@ fn guardPatternIntact(bytes: []const u8) bool {
 // Bring the controller online and register it as the active storage backend.
 // Real hardware supplies a validated DMAR summary; test machines deliberately
 // pass null because their emulated chipset has no VT-d unit.
-pub fn attachAsBackend(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !?intel_vtd.FaultRecord {
+pub fn attachAsBackend(
+    dev: pci.PCIDevice,
+    vtd_summary: ?*const dmar.Summary,
+    additional_domain: ?intel_vtd.DmaDomain,
+) !?intel_vtd.FaultRecord {
     if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
     const dma_base = paging.alloc_frames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
     const frames = DmaFrames{ .base = dma_base };
@@ -470,7 +474,18 @@ pub fn attachAsBackend(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !?
         _ = spinUntilReady(&controller, false);
     };
     const windows = frames.windows();
-    if (vtd_summary) |summary| try intel_vtd.enforceNvme(summary, dev, &windows);
+    if (vtd_summary) |summary| {
+        var domains = [_]intel_vtd.DmaDomain{
+            .{ .device = dev, .windows = &windows },
+            undefined,
+        };
+        var domain_count: usize = 1;
+        if (additional_domain) |domain| {
+            domains[domain_count] = domain;
+            domain_count += 1;
+        }
+        try intel_vtd.enforceDevices(summary, domains[0..domain_count]);
+    }
     pci.enableMemoryBusMastering(dev);
     bus_master_enabled = true;
     try enable(&controller);
@@ -624,8 +639,12 @@ export fn zigosStorageBootstrapNvmeDmaWindow(
 // Diagnostic probe used to validate the MMIO foundation in QEMU. Brings the
 // controller and I/O queues online (non-destructive) and prints the capability
 // and version registers. Safe to call only when a real NVMe controller exists.
-pub fn probeAndReport(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !?intel_vtd.FaultRecord {
-    const fault_proof = try attachAsBackend(dev, vtd_summary);
+pub fn probeAndReport(
+    dev: pci.PCIDevice,
+    vtd_summary: ?*const dmar.Summary,
+    additional_domain: ?intel_vtd.DmaDomain,
+) !?intel_vtd.FaultRecord {
+    const fault_proof = try attachAsBackend(dev, vtd_summary, additional_domain);
     console.print("ZIGOS:NVME:HW:CAP=");
     printHex64(active_controller.capabilities());
     console.print(" VS=");
@@ -651,7 +670,7 @@ const TEST_PATTERN: u8 = 0xA5;
 // pattern to a scratch LBA through backendWrite, read it back through
 // backendRead, and verify. NOT run on a production boot.
 fn roundtripSelfTest(dev: pci.PCIDevice) void {
-    _ = attachAsBackend(dev, null) catch |err| {
+    _ = attachAsBackend(dev, null, null) catch |err| {
         console.print("ZIGOS:NVME:HW:IOQ_FAIL ");
         console.print(@errorName(err));
         console.print("\n");

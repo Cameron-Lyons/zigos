@@ -910,10 +910,11 @@ test "native sync transport captures encrypted driver packets and handles replay
         var last_frame_len: usize = 0;
         var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
 
-        fn send(frame: []const u8) void {
+        fn send(frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
             @memcpy(last_frame[0..frame.len], frame);
+            return true;
         }
 
         fn mac() [6]u8 {
@@ -1307,8 +1308,9 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         var allowed_capability_id: u64 = 0;
         var allowed_policy_id: u64 = 0;
 
-        fn send(_: []const u8) void {
+        fn send(_: []const u8) bool {
             send_count += 1;
+            return true;
         }
 
         fn mac() [6]u8 {

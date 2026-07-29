@@ -277,7 +277,9 @@ fn zeroActivation() ActivationRecord {
 
 test "kernel bootstrap cannot publish network data-plane transports" {
     const FakeNetworkDevice = struct {
-        fn send(_: []const u8) void {}
+        fn send(_: []const u8) bool {
+            return true;
+        }
 
         fn getMacAddress() [6]u8 {
             return .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
