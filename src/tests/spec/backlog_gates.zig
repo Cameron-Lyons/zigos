@@ -794,6 +794,8 @@ pub fn firstHardwareTargetGate() !void {
         .acpi_dmar = true,
         .dmar_summary = production_dmar,
         .vtd_storage_isolation = true,
+        .vtd_interrupt_isolation = true,
+        .vtd_blocked_dma_fault = true,
         .apic_timer = hardware_apic_timer_proof.productionHardwareVerified(),
         .xhci_controller = true,
         .xhci_keyboard_input = hardware_xhci_input_proof.productionHardwareVerified(),
@@ -818,6 +820,12 @@ pub fn firstHardwareTargetGate() !void {
     var composed_missing_vtd_enforcement = composed_complete;
     composed_missing_vtd_enforcement.vtd_storage_isolation = false;
     try std.testing.expect(!kernel_hardware_proof.allSubsystemMarkersReady(composed_missing_vtd_enforcement));
+    var composed_missing_interrupt_isolation = composed_complete;
+    composed_missing_interrupt_isolation.vtd_interrupt_isolation = false;
+    try std.testing.expect(!kernel_hardware_proof.allSubsystemMarkersReady(composed_missing_interrupt_isolation));
+    var composed_missing_blocked_dma_fault = composed_complete;
+    composed_missing_blocked_dma_fault.vtd_blocked_dma_fault = false;
+    try std.testing.expect(!kernel_hardware_proof.allSubsystemMarkersReady(composed_missing_blocked_dma_fault));
     var composed_missing_framebuffer_scanout = composed_complete;
     composed_missing_framebuffer_scanout.framebuffer_gop = framebuffer_missing_pixel.productionHardwareVerified();
     try std.testing.expect(!kernel_hardware_proof.allSubsystemMarkersReady(composed_missing_framebuffer_scanout));

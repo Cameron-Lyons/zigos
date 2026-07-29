@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const console = @import("../utils/console.zig");
 const paging = @import("../memory/paging64.zig");
 const mcfg = @import("../platform/mcfg.zig");
@@ -25,8 +26,22 @@ const PCI_BAR3_OFFSET: u16 = 0x1C;
 const PCI_BAR4_OFFSET: u16 = 0x20;
 const PCI_BAR5_OFFSET: u16 = 0x24;
 const PCI_COMMAND_OFFSET: u16 = 0x04;
+const PCI_STATUS_OFFSET: u16 = 0x06;
 const PCI_COMMAND_MEMORY_SPACE: u16 = 1 << 1;
 const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
+const PCI_COMMAND_INTERRUPT_DISABLE: u16 = 1 << 10;
+const PCI_STATUS_CAPABILITIES_LIST: u16 = 1 << 4;
+const PCI_CAPABILITY_POINTER_OFFSET: u16 = 0x34;
+const PCI_CARDBUS_CAPABILITY_POINTER_OFFSET: u16 = 0x14;
+const PCI_HEADER_TYPE_MASK: u8 = 0x7F;
+const PCI_HEADER_TYPE_CARDBUS: u8 = 0x02;
+const PCI_CAPABILITY_MIN_OFFSET: u8 = 0x40;
+const PCI_CAPABILITY_MAX_OFFSET: u8 = 0xFC;
+const PCI_CAPABILITY_MSI: u8 = 0x05;
+const PCI_CAPABILITY_MSIX: u8 = 0x11;
+const PCI_MSI_ENABLE: u16 = 1 << 0;
+const PCI_MSIX_FUNCTION_MASK: u16 = 1 << 14;
+const PCI_MSIX_ENABLE: u16 = 1 << 15;
 
 const PCI_ABSENT_VENDOR_ID: u16 = 0xFFFF;
 const PCI_MULTI_FUNCTION_FLAG: u8 = 0x80;
@@ -82,6 +97,10 @@ var mapped_configuration_page: ?usize = null;
 var configuration_lock: bool = false;
 
 pub const InitError = error{InvalidEcamAllocation};
+pub const QuiesceError = error{
+    MalformedCapabilityList,
+    InterruptDisableFailed,
+};
 
 pub fn init(allocation: mcfg.Allocation) InitError!void {
     if (allocation.segment_group != 0 or allocation.start_bus != 0 or
@@ -132,12 +151,20 @@ pub fn ecamPhysicalAddress(
 
 fn acquireConfigurationLock() void {
     while (@atomicRmw(bool, &configuration_lock, .Xchg, true, .seq_cst)) {
-        asm volatile ("pause");
+        spinHint();
     }
 }
 
 fn releaseConfigurationLock() void {
     @atomicStore(bool, &configuration_lock, false, .seq_cst);
+}
+
+fn spinHint() void {
+    if (comptime builtin.cpu.arch == .x86_64) {
+        asm volatile ("pause");
+    } else {
+        asm volatile ("" ::: .{ .memory = true });
+    }
 }
 
 fn mappedRegister(bus: u8, device: u8, function: u8, offset: u16) ?*volatile u32 {
@@ -339,7 +366,7 @@ pub fn disableBusMastering(device_info: PCIDevice) void {
         device_info.device,
         device_info.function,
         PCI_COMMAND_OFFSET,
-        command & ~PCI_COMMAND_BUS_MASTER,
+        (command & ~PCI_COMMAND_BUS_MASTER) | PCI_COMMAND_INTERRUPT_DISABLE,
     );
 }
 
@@ -371,11 +398,138 @@ pub fn busMasteringEnabled(device_info: PCIDevice) bool {
 pub fn revokeBootBusMasters() usize {
     var revoked: usize = 0;
     for (bootDevices()) |device_info| {
-        if (!busMasteringEnabled(device_info)) continue;
+        const was_enabled = busMasteringEnabled(device_info);
         disableBusMastering(device_info);
-        if (!busMasteringEnabled(device_info)) revoked += 1;
+        if (was_enabled and !busMasteringEnabled(device_info)) revoked += 1;
     }
     return revoked;
+}
+
+fn messageInterruptControl(capability_id: u8, control: u16) ?struct { enabled: bool, disabled: u16 } {
+    return switch (capability_id) {
+        PCI_CAPABILITY_MSI => .{
+            .enabled = (control & PCI_MSI_ENABLE) != 0,
+            .disabled = control & ~PCI_MSI_ENABLE,
+        },
+        PCI_CAPABILITY_MSIX => .{
+            .enabled = (control & PCI_MSIX_ENABLE) != 0,
+            .disabled = (control | PCI_MSIX_FUNCTION_MASK) & ~PCI_MSIX_ENABLE,
+        },
+        else => null,
+    };
+}
+
+fn inspectMessageSignaledInterrupts(device_info: PCIDevice, disable: bool) QuiesceError!usize {
+    if ((readConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        PCI_STATUS_OFFSET,
+    ) & PCI_STATUS_CAPABILITIES_LIST) == 0) return 0;
+
+    const header_type = readConfigByte(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        PCI_HEADER_TYPE_OFFSET,
+    ) & PCI_HEADER_TYPE_MASK;
+    const pointer_offset: u16 = if (header_type == PCI_HEADER_TYPE_CARDBUS)
+        PCI_CARDBUS_CAPABILITY_POINTER_OFFSET
+    else
+        PCI_CAPABILITY_POINTER_OFFSET;
+    var offset = readConfigByte(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        pointer_offset,
+    );
+    var visited: u64 = 0;
+    var enabled_count: usize = 0;
+    while (offset != 0) {
+        if (offset < PCI_CAPABILITY_MIN_OFFSET or offset > PCI_CAPABILITY_MAX_OFFSET or offset & 3 != 0) {
+            return error.MalformedCapabilityList;
+        }
+        const slot: u6 = @intCast(offset >> 2);
+        const slot_bit = @as(u64, 1) << slot;
+        if ((visited & slot_bit) != 0) return error.MalformedCapabilityList;
+        visited |= slot_bit;
+
+        const capability_id = readConfigByte(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            offset,
+        );
+        const next = readConfigByte(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            @as(u16, offset) + 1,
+        );
+        if (messageInterruptControl(
+            capability_id,
+            readConfigWord(
+                device_info.bus,
+                device_info.device,
+                device_info.function,
+                @as(u16, offset) + 2,
+            ),
+        )) |message_control| {
+            if (message_control.enabled) enabled_count += 1;
+            if (disable) {
+                writeConfigWord(
+                    device_info.bus,
+                    device_info.device,
+                    device_info.function,
+                    @as(u16, offset) + 2,
+                    message_control.disabled,
+                );
+                const verified = readConfigWord(
+                    device_info.bus,
+                    device_info.device,
+                    device_info.function,
+                    @as(u16, offset) + 2,
+                );
+                if (messageInterruptControl(capability_id, verified).?.enabled or
+                    (capability_id == PCI_CAPABILITY_MSIX and
+                        (verified & PCI_MSIX_FUNCTION_MASK) == 0))
+                {
+                    return error.InterruptDisableFailed;
+                }
+            }
+        }
+        offset = next;
+    }
+    return enabled_count;
+}
+
+pub fn disableBootMessageSignaledInterrupts() QuiesceError!usize {
+    var disabled: usize = 0;
+    for (bootDevices()) |device_info| {
+        disabled += try inspectMessageSignaledInterrupts(device_info, true);
+    }
+    return disabled;
+}
+
+pub fn bootMessageSignaledInterruptCount() QuiesceError!usize {
+    var enabled_count: usize = 0;
+    for (bootDevices()) |device_info| {
+        enabled_count += try inspectMessageSignaledInterrupts(device_info, false);
+    }
+    return enabled_count;
+}
+
+pub fn bootLegacyInterruptCount() usize {
+    var enabled_count: usize = 0;
+    for (bootDevices()) |device_info| {
+        if ((readConfigWord(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            PCI_COMMAND_OFFSET,
+        ) & PCI_COMMAND_INTERRUPT_DISABLE) == 0) enabled_count += 1;
+    }
+    return enabled_count;
 }
 
 pub fn bootBusMasterCount() usize {
@@ -651,6 +805,17 @@ test "PCI inventory queries reuse one discovered device set" {
         matchesClassSubclassProgIfQuery,
     ) orelse return error.MissingDevice;
     try std.testing.expectEqual(@as(u16, 0xA80A), nvme.device_id);
+}
+
+test "PCI interrupt quiesce disables MSI and masks MSI-X" {
+    const msi = messageInterruptControl(PCI_CAPABILITY_MSI, PCI_MSI_ENABLE | 0x0180).?;
+    try std.testing.expect(msi.enabled);
+    try std.testing.expectEqual(@as(u16, 0x0180), msi.disabled);
+
+    const msix = messageInterruptControl(PCI_CAPABILITY_MSIX, PCI_MSIX_ENABLE | 0x0007).?;
+    try std.testing.expect(msix.enabled);
+    try std.testing.expectEqual(@as(u16, PCI_MSIX_FUNCTION_MASK | 0x0007), msix.disabled);
+    try std.testing.expect(messageInterruptControl(0x10, 0xFFFF) == null);
 }
 
 pub fn writeConfigDword(bus: u8, device: u8, function: u8, offset: u16, value: u32) void {

@@ -12,6 +12,7 @@ const handoff = @import("../boot/handoff.zig");
 const console = @import("../utils/console.zig");
 const paging = @import("../memory/paging64.zig");
 const intel_i225 = @import("../drivers/intel_i225.zig");
+const intel_vtd = @import("intel_vtd.zig");
 const nvme = @import("../drivers/nvme.zig");
 const pci = @import("../drivers/pci.zig");
 const xhci = @import("../drivers/xhci.zig");
@@ -38,6 +39,8 @@ pub const ProbeFacts = struct {
     mcfg_allocation: ?mcfg.Allocation = null,
     dmar_summary: ?dmar.Summary = null,
     vtd_storage_isolation: bool = false,
+    vtd_interrupt_isolation: bool = false,
+    vtd_blocked_dma_fault: bool = false,
     apic_timer: bool = false,
     framebuffer_gop: bool = false,
     xhci_controller: bool = false,
@@ -102,6 +105,14 @@ pub const ProbeFacts = struct {
 
     pub fn vtdStorageIsolationReady(self: ProbeFacts) bool {
         return self.vtdDiscoveryReady() and self.vtd_storage_isolation;
+    }
+
+    pub fn vtdInterruptIsolationReady(self: ProbeFacts) bool {
+        return self.vtdStorageIsolationReady() and self.vtd_interrupt_isolation;
+    }
+
+    pub fn vtdFaultProofReady(self: ProbeFacts) bool {
+        return self.vtdInterruptIsolationReady() and self.vtd_blocked_dma_fault;
     }
 
     pub fn nvmeBlockReady(self: ProbeFacts) bool {
@@ -386,6 +397,8 @@ const PrintedMarkers = struct {
     acpi_tables: bool = false,
     vtd_discovery: bool = false,
     vtd_storage_isolation: bool = false,
+    vtd_interrupt_isolation: bool = false,
+    vtd_blocked_dma_fault: bool = false,
     apic_timer: bool = false,
     framebuffer_gop: bool = false,
     xhci_input: bool = false,
@@ -461,6 +474,8 @@ pub fn allSubsystemMarkersReady(probe: ProbeFacts) bool {
         probe.acpiTablesReady() and
         probe.vtdDiscoveryReady() and
         probe.vtdStorageIsolationReady() and
+        probe.vtdInterruptIsolationReady() and
+        probe.vtdFaultProofReady() and
         probe.apic_timer and
         probe.framebuffer_gop and
         probe.xhci_keyboard_input and
@@ -515,9 +530,18 @@ pub fn capturePciEvidence() void {
     printNewMarkers();
 }
 
-pub fn recordVtdStorageIsolation() void {
-    if (facts.real_target_sku and facts.vtdDiscoveryReady()) {
+pub fn recordVtdIsolationProof(proof: intel_vtd.FaultRecord) void {
+    if (facts.real_target_sku and facts.vtdDiscoveryReady() and
+        intel_vtd.storageIsolationEnabled() and
+        intel_vtd.interruptIsolationEnabled() and
+        intel_vtd.faultMonitoringEnabled())
+    {
         facts.vtd_storage_isolation = true;
+        facts.vtd_interrupt_isolation = true;
+        facts.vtd_blocked_dma_fault = if (intel_vtd.blockedDmaProof()) |captured|
+            std.meta.eql(captured, proof) and proof.reason < 0x20 and proof.request_type == .write
+        else
+            false;
     }
     printNewMarkers();
 }
@@ -808,6 +832,14 @@ fn printNewMarkers() void {
         printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_STORAGE_ISOLATION:ENFORCED");
         printed.vtd_storage_isolation = true;
     }
+    if (facts.vtdInterruptIsolationReady() and !printed.vtd_interrupt_isolation) {
+        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_INTERRUPT_ISOLATION:ENFORCED");
+        printed.vtd_interrupt_isolation = true;
+    }
+    if (facts.vtdFaultProofReady() and !printed.vtd_blocked_dma_fault) {
+        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_BLOCKED_DMA_FAULT:OBSERVED");
+        printed.vtd_blocked_dma_fault = true;
+    }
     if (facts.real_target_sku and facts.apic_timer and !printed.apic_timer) {
         if (!printed.apic_timer_interrupt) {
             printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":APIC_TIMER_INTERRUPT:OBSERVED");
@@ -1028,6 +1060,8 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .acpi_dmar = true,
         .dmar_summary = testDmarSummary(),
         .vtd_storage_isolation = true,
+        .vtd_interrupt_isolation = true,
+        .vtd_blocked_dma_fault = true,
         .apic_timer = true,
         .xhci_controller = true,
         .xhci_keyboard_input = true,
