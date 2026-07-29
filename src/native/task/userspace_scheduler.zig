@@ -332,6 +332,10 @@ pub const Scheduler = struct {
         return self.ready_counts[resourceClassIndex(class)];
     }
 
+    pub fn hasReadyTasks(self: *const Scheduler) bool {
+        return self.ready_task_count != 0;
+    }
+
     pub fn taskDispatchStats(self: *const Scheduler, task_id: u64) ?TaskDispatchStats {
         const slot = self.slots.getConst(task_id) orelse return null;
         return .{
@@ -1344,14 +1348,17 @@ test "userspace scheduler registers tasks through indexed arena slots" {
     });
 
     try std.testing.expect(scheduler.registerTask(first_task.id));
+    try std.testing.expect(scheduler.hasReadyTasks());
     try std.testing.expect(!scheduler.registerTask(first_task.id));
     try std.testing.expectEqual(@as(usize, 1), scheduler.slots.countInUse());
 
     const first_index = scheduler.slots.slotIndexOf(first_task.id).?;
     try std.testing.expect(scheduler.unregisterTask(first_task.id));
+    try std.testing.expect(!scheduler.hasReadyTasks());
     try std.testing.expectEqual(@as(usize, 0), scheduler.slots.countInUse());
 
     try std.testing.expect(scheduler.registerTask(second_task.id));
+    try std.testing.expect(scheduler.hasReadyTasks());
     try std.testing.expectEqual(first_index, scheduler.slots.slotIndexOf(second_task.id).?);
 }
 

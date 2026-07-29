@@ -680,6 +680,7 @@ fn validateNuc11tnki5KernelProofSources(
     const userspace_syscall_path = "src/arch/x86/syscall_trap.S";
     const gdt_path = "src/kernel/interrupts/gdt64.zig";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
+    const native_profile_path = "src/kernel/boot/profiles/zigos_native.zig";
     const timer_path = "src/kernel/timer/timer.zig";
     const qemu_harness_path = "scripts/qemu-harness.sh";
     const kernel_build_path = "build_support/kernel.zig";
@@ -775,6 +776,10 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (!common.pathExists(io, runtime_init_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 runtime initialization source is missing: {s}", .{runtime_init_path});
+        return;
+    }
+    if (!common.pathExists(io, native_profile_path)) {
+        try common.addError(errors, allocator, "native scheduler loop source is missing: {s}", .{native_profile_path});
         return;
     }
     if (!common.pathExists(io, timer_path)) {
@@ -883,6 +888,7 @@ fn validateNuc11tnki5KernelProofSources(
     const userspace_syscall_source = try common.readFileAlloc(allocator, io, userspace_syscall_path, common.source_file_max_bytes);
     const gdt_source = try common.readFileAlloc(allocator, io, gdt_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
+    const native_profile_source = try common.readFileAlloc(allocator, io, native_profile_path, common.source_file_max_bytes);
     const timer_source = try common.readFileAlloc(allocator, io, timer_path, common.source_file_max_bytes);
     const qemu_harness_source = try common.readFileAlloc(allocator, io, qemu_harness_path, common.source_file_max_bytes);
     const kernel_build_source = try common.readFileAlloc(allocator, io, kernel_build_path, common.source_file_max_bytes);
@@ -1124,10 +1130,31 @@ fn validateNuc11tnki5KernelProofSources(
         "X2APIC_TIMER_MODE_TSC_DEADLINE",
         "x86.writeMsr(X2APIC_EOI_MSR, 0)",
         "x86.writeMsr(IA32_TSC_DEADLINE_MSR, deadline)",
+        "elapsedTicks",
+        "nextTickDeadline",
+        "synchronizeTicks",
+        "scheduleNextTick",
+        "scheduler_tick_enabled",
+        "armSchedulerTick",
+        "disarmSchedulerTick",
     };
     for (required_tsc_deadline_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, timer_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 timer must use invariant TSC-deadline delivery: {s}", .{snippet});
+        }
+    }
+    const required_one_shot_scheduler_snippets = [_][]const u8{
+        "timer.synchronize()",
+        "userspaceSchedulerHasReadyTasks",
+        "timer.armSchedulerTick()",
+        "timer.disarmSchedulerTick()",
+        "x86.cli()",
+        "x86.sti()",
+        "x86.hlt()",
+    };
+    for (required_one_shot_scheduler_snippets) |snippet| {
+        if (std.mem.indexOf(u8, native_profile_source, snippet) == null) {
+            try common.addError(errors, allocator, "native scheduler loop must retain one-shot idle deadline control: {s}", .{snippet});
         }
     }
     const required_emulator_countdown_timer_snippets = [_][]const u8{

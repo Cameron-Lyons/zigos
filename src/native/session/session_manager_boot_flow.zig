@@ -206,6 +206,10 @@ pub const SessionManager = struct {
         return self.runtime_context.runScheduler(now_ticks);
     }
 
+    pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
+        return self.runtime_context.schedulerHasReadyTasks();
+    }
+
     pub fn boot(self: *SessionManager) void {
         if (smokeFaultModeIs("storage_durability")) {
             self.bootStorageDurabilityProof();

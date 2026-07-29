@@ -101,6 +101,10 @@ pub const RuntimeContext = struct {
     pub fn runScheduler(self: *RuntimeContext, now_ticks: u64) bool {
         return self.userspace_scheduler.runNext(now_ticks);
     }
+
+    pub fn schedulerHasReadyTasks(self: *const RuntimeContext) bool {
+        return self.userspace_scheduler.hasReadyTasks();
+    }
 };
 
 pub const RecoveryContext = struct {
