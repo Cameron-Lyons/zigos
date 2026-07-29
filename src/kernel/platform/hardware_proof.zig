@@ -16,8 +16,6 @@ const pci = @import("../drivers/pci.zig");
 const xhci = @import("../drivers/xhci.zig");
 const hardware_target = @import("../../native/platform/hardware_target.zig");
 
-const BIOS_RSDP_SCAN_BASE: usize = 0xE0000;
-const BIOS_RSDP_SCAN_LENGTH: usize = 0x20000;
 const MAX_ACPI_TABLE_BYTES: usize = 1024 * 1024;
 const PAGE_SIZE: usize = 4096;
 const PAGE_MASK: usize = PAGE_SIZE - 1;
@@ -30,7 +28,7 @@ pub const ProbeFacts = struct {
     multiboot_handoff: bool = false,
     memory_map: bool = false,
     memory_capacity_bytes: usize = 0,
-    acpi_rsdp: bool = false,
+    acpi_xsdt: bool = false,
     acpi_madt: bool = false,
     acpi_fadt: bool = false,
     acpi_mcfg: bool = false,
@@ -89,7 +87,7 @@ pub const ProbeFacts = struct {
     }
 
     pub fn acpiTablesReady(self: ProbeFacts) bool {
-        return self.acpi_rsdp and self.acpi_madt and self.acpi_fadt and self.acpi_mcfg;
+        return self.acpi_xsdt and self.acpi_madt and self.acpi_fadt and self.acpi_mcfg;
     }
 
     pub fn nvmeBlockReady(self: ProbeFacts) bool {
@@ -356,7 +354,7 @@ const PrintedMarkers = struct {
     board: bool = false,
     smbios_sku: bool = false,
     multiboot_memory_map: bool = false,
-    acpi_rsdp: bool = false,
+    acpi_xsdt: bool = false,
     acpi_madt: bool = false,
     acpi_fadt: bool = false,
     apic_timer_interrupt: bool = false,
@@ -618,22 +616,16 @@ pub fn recordGridCarbonIntensitySample(sample: GridCarbonIntensitySample) void {
 }
 
 fn captureAcpiEvidence() void {
-    const rsdp = findRsdp() orelse return;
-    facts.acpi_rsdp = true;
-
-    const root_address: u64 = if (rsdp.xsdt_address != 0)
-        rsdp.xsdt_address
-    else
-        rsdp.rsdt_address;
-    const root_table = mappedPhysicalTableBytes(root_address, KERNEL_ACPI_ROOT_VIRTUAL_BASE) orelse return;
-
-    const count = acpi.rootTableEntryCount(root_table) catch return;
+    const rsdp = capturedRsdp() orelse return;
+    const xsdt = mappedPhysicalTableBytes(rsdp.xsdt_address, KERNEL_ACPI_ROOT_VIRTUAL_BASE) orelse return;
+    const count = acpi.xsdtEntryCount(xsdt) catch return;
+    facts.acpi_xsdt = true;
     var found_madt = false;
     var found_fadt = false;
     var found_mcfg: ?mcfg.Allocation = null;
     var index: u32 = 0;
     while (index < count) : (index += 1) {
-        const table_address = acpi.rootTableEntryAddress(root_table, index) catch continue;
+        const table_address = acpi.xsdtEntryAddress(xsdt, index) catch continue;
         const table = mappedPhysicalTableBytes(table_address, KERNEL_ACPI_ENTRY_VIRTUAL_BASE) orelse continue;
         const header = acpi.parseSdtHeader(table) catch continue;
         if (std.mem.eql(u8, header.signature[0..], apic.MADT_SIGNATURE)) {
@@ -677,15 +669,10 @@ fn firmwareSupportsTelemetry(firmware: fadt.FixedAcpiDescription) bool {
         firmware.pm_timer_length != 0;
 }
 
-fn findRsdp() ?acpi.Rsdp {
-    if (handoff.capturedInfo()) |info| {
-        if (handoff.capturedAcpiRsdp(info)) |bytes| {
-            if (acpi.parseRsdp(bytes)) |descriptor| return descriptor else |_| {}
-        }
-    }
-    const bios = @as([*]const u8, @ptrFromInt(BIOS_RSDP_SCAN_BASE))[0..BIOS_RSDP_SCAN_LENGTH];
-    const location = acpi.findRsdp(bios, BIOS_RSDP_SCAN_BASE) orelse return null;
-    return location.descriptor;
+fn capturedRsdp() ?acpi.Rsdp {
+    const info = handoff.capturedInfo() orelse return null;
+    const bytes = handoff.capturedAcpi2Rsdp(info) orelse return null;
+    return acpi.parseRsdp(bytes) catch null;
 }
 
 fn mappedPhysicalTableBytes(physical_address: u64, virtual_base: usize) ?[]const u8 {
@@ -738,9 +725,9 @@ fn printNewMarkers() void {
         printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":MULTIBOOT_MEMORY_MAP:OBSERVED");
         printed.multiboot_memory_map = true;
     }
-    if (facts.real_target_sku and facts.acpi_rsdp and !printed.acpi_rsdp) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_RSDP:OBSERVED");
-        printed.acpi_rsdp = true;
+    if (facts.real_target_sku and facts.acpi_xsdt and !printed.acpi_xsdt) {
+        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_XSDT:OBSERVED");
+        printed.acpi_xsdt = true;
     }
     if (facts.real_target_sku and facts.acpi_madt and !printed.acpi_madt) {
         printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_MADT:OBSERVED");
@@ -921,7 +908,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .multiboot_handoff = true,
         .memory_map = true,
         .framebuffer_gop = true,
-        .acpi_rsdp = true,
+        .acpi_xsdt = true,
         .acpi_madt = true,
         .acpi_fadt = true,
         .acpi_mcfg = true,
@@ -943,7 +930,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .multiboot_handoff = true,
         .memory_map = true,
         .framebuffer_gop = true,
-        .acpi_rsdp = true,
+        .acpi_xsdt = true,
         .acpi_madt = true,
         .acpi_fadt = true,
         .acpi_mcfg = true,
