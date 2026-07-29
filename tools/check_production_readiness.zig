@@ -1122,14 +1122,25 @@ fn validateNuc11tnki5KernelProofSources(
         "IA32_TSC_DEADLINE_MSR",
         "X2APIC_LVT_TIMER_MSR",
         "X2APIC_TIMER_MODE_TSC_DEADLINE",
-        "X2APIC_TIMER_MODE_PERIODIC",
-        "initCalibratedPeriodicTimer",
         "x86.writeMsr(X2APIC_EOI_MSR, 0)",
         "x86.writeMsr(IA32_TSC_DEADLINE_MSR, deadline)",
     };
     for (required_tsc_deadline_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, timer_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 timer must prefer TSC-deadline mode and retain an x2APIC-only virtualization path: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 timer must use invariant TSC-deadline delivery: {s}", .{snippet});
+        }
+    }
+    const required_emulator_countdown_timer_snippets = [_][]const u8{
+        "X2APIC_TIMER_INITIAL_COUNT_MSR",
+        "X2APIC_TIMER_CURRENT_COUNT_MSR",
+        "X2APIC_TIMER_DIVIDE_CONFIG_MSR",
+        "X2APIC_TIMER_MODE_PERIODIC",
+        "initCalibratedCountdownTimer",
+        "calibrated_countdown",
+    };
+    for (required_emulator_countdown_timer_snippets) |snippet| {
+        if (std.mem.indexOf(u8, timer_source, snippet) == null) {
+            try common.addError(errors, allocator, "QEMU software emulation must retain its isolated x2APIC countdown path: {s}", .{snippet});
         }
     }
     const required_accelerated_qemu_snippets = [_][]const u8{
@@ -1154,11 +1165,11 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "benchmark boot media must use the debug-stripped diagnostic-ELF derivative: {s}", .{snippet});
         }
     }
-    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_tlb_fallback") == null) {
-        try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator TLB fallback", .{});
+    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
+        try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});
     }
-    if (std.mem.indexOf(u8, production_grub_source, "qemu_software_tlb_fallback") != null) {
-        try common.addError(errors, allocator, "production boot configuration must not permit the software-emulator TLB fallback", .{});
+    if (std.mem.indexOf(u8, production_grub_source, "qemu_software_cpu_fallback") != null) {
+        try common.addError(errors, allocator, "production boot configuration must not permit the software-emulator CPU fallback", .{});
     }
     const required_ci_kvm_snippets = [_][]const u8{
         "Enable KVM acceleration when available",
@@ -1245,9 +1256,9 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_process_context_snippets = [_][]const u8{
-        "softwareProcessContextFallbackRequested",
+        "softwareCpuFallbackRequested",
         "model_inventory",
-        "qemu_software_tlb_fallback",
+        "qemu_software_cpu_fallback",
         "qemu_tsc_frequency_hz",
         "hardware_process_contexts",
         "cpu_pcid_enabled",
@@ -1259,6 +1270,21 @@ fn validateNuc11tnki5KernelProofSources(
     for (required_boot_process_context_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
             try common.addError(errors, allocator, "CPU boot process-context gate must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_boot_timer_snippets = [_][]const u8{
+        "softwareCpuFallbackRequested",
+        "qemu_software_cpu_fallback",
+        "software_cpu_fallback",
+        "hardware_tsc_timer",
+        "software_timer_fallback",
+        "required_features.tsc_deadline = true",
+        "required_features.invariant_tsc = true",
+        ".tsc_deadline else .calibrated_countdown",
+    };
+    for (required_boot_timer_snippets) |snippet| {
+        if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "CPU boot timer gate must retain snippet: {s}", .{snippet});
         }
     }
     const required_pcid_allocator_snippets = [_][]const u8{
