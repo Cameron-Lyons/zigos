@@ -3,6 +3,7 @@ const std = @import("std");
 pub const Subsystem = enum {
     uefi_boot,
     acpi_tables,
+    vtd_discovery,
     apic_timer,
     framebuffer_gop,
     usb_input_xhci,
@@ -149,6 +150,7 @@ pub const Target = struct {
 pub const required_subsystems = [_]Subsystem{
     .uefi_boot,
     .acpi_tables,
+    .vtd_discovery,
     .apic_timer,
     .framebuffer_gop,
     .usb_input_xhci,
@@ -166,6 +168,7 @@ pub const nuc11tnki5_marker_prefix = "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5";
 pub const nuc11tnki5_markers = [_][]const u8{
     nuc11tnki5_marker_prefix ++ ":UEFI_BOOT:PASS",
     nuc11tnki5_marker_prefix ++ ":ACPI_TABLES:PASS",
+    nuc11tnki5_marker_prefix ++ ":VT_D_DISCOVERY:PASS",
     nuc11tnki5_marker_prefix ++ ":APIC_TIMER:PASS",
     nuc11tnki5_marker_prefix ++ ":FRAMEBUFFER_GOP:PASS",
     nuc11tnki5_marker_prefix ++ ":USB_INPUT_XHCI:PASS",
@@ -190,6 +193,8 @@ pub const nuc11tnki5_hardware_fact_markers = [_][]const u8{
     nuc11tnki5_marker_prefix ++ ":ACPI_XSDT:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":ACPI_MADT:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":ACPI_FADT:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":ACPI_DMAR:OBSERVED",
+    nuc11tnki5_marker_prefix ++ ":VT_D_SEGMENT_ZERO:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":APIC_TIMER_INTERRUPT:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
     nuc11tnki5_marker_prefix ++ ":XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",

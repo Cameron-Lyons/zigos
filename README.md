@@ -158,6 +158,11 @@ Use the pinned toolchain and repo entrypoints:
   older x86 CPUs instead of weakening its security contract. GRUB Multiboot2
   enters the bootstrap in 32-bit protected mode; the bootstrap immediately
   installs four-level paging and enters the x86-64 Zig kernel.
+- Production hardware must expose a checksum-valid ACPI DMAR table with at
+  least 39 DMA address bits, interrupt remapping, no x2APIC or DMA-remapping
+  firmware opt-out, and a segment-zero VT-d unit covering all remaining PCI
+  devices. Discovery is proof-gated; enabling translation and interrupt
+  remapping remains separate hardware work.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
