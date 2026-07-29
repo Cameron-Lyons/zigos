@@ -1804,7 +1804,6 @@
         "src/native/session/service_path_proofs.zig",
         "src/native/drivers/bootstrap_driver_port.zig",
         "src/native/drivers/network_driver_task.zig",
-        "src/native/drivers/storage_driver_task.zig",
         "src/kernel/drivers/keyboard.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
@@ -1855,7 +1854,6 @@
         "src/native/drivers/driver_service.zig",
         "src/native/drivers/driver_runtime.zig",
         "src/native/drivers/bootstrap_driver_port.zig",
-        "src/native/drivers/storage_driver_task.zig",
         "src/native/kernel_api/device_broker.zig",
         "src/native/session/service_graph_builder.zig",
         "src/native/session/session_service_bootstrap.zig",
@@ -1879,10 +1877,6 @@
         {
           "file": "src/native/drivers/driver_runtime.zig",
           "name": "runtime uses the activation tick when claiming storage authority"
-        },
-        {
-          "file": "src/native/drivers/storage_driver_task.zig",
-          "name": "storage driver task establishes ATA sessions only through the kernel device broker"
         }
       ]
     },
