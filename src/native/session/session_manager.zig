@@ -111,3 +111,7 @@ pub fn kernelPort() ?*component_port.KernelPort {
 pub fn runUserspaceScheduler(now_ticks: u64) bool {
     return default_manager.runUserspaceScheduler(now_ticks);
 }
+
+pub fn userspaceSchedulerHasReadyTasks() bool {
+    return default_manager.userspaceSchedulerHasReadyTasks();
+}

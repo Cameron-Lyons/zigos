@@ -34,7 +34,8 @@ pub const Mode = enum {
 var ticks: u64 = 0;
 var active_mode: Mode = .tsc_deadline;
 var tsc_ticks_per_tick: u64 = 0;
-var next_deadline: u64 = 0;
+var tsc_epoch: u64 = 0;
+var scheduler_tick_enabled = false;
 
 pub fn init(features: cpu_baseline.Features, mode: Mode) void {
     if (mode == .tsc_deadline and (!features.tsc_deadline or !features.invariant_tsc)) unreachable;
@@ -42,7 +43,8 @@ pub fn init(features: cpu_baseline.Features, mode: Mode) void {
     console.print("Initializing x2APIC timer...\n");
 
     ticks = 0;
-    next_deadline = 0;
+    tsc_epoch = 0;
+    scheduler_tick_enabled = false;
     active_mode = mode;
     tsc_ticks_per_tick = features.tsc_frequency_hz / TICKS_PER_SECOND;
     if (tsc_ticks_per_tick == 0) @panic("invalid TSC frequency for timer");
@@ -62,7 +64,8 @@ pub fn init(features: cpu_baseline.Features, mode: Mode) void {
                 X2APIC_LVT_TIMER_MSR,
                 X2APIC_TIMER_MODE_TSC_DEADLINE | INTERRUPT_VECTOR,
             );
-            scheduleNextDeadline(x86.rdtsc());
+            tsc_epoch = x86.rdtsc();
+            armSchedulerTick();
         },
         .calibrated_countdown => initCalibratedCountdownTimer(),
     }
@@ -89,16 +92,52 @@ fn initCalibratedCountdownTimer() void {
     x86.writeMsr(X2APIC_TIMER_INITIAL_COUNT_MSR, initial_count);
 }
 
-fn scheduleNextDeadline(now: u64) void {
-    var deadline = next_deadline +% tsc_ticks_per_tick;
-    if (deadline <= now) deadline = now +% tsc_ticks_per_tick;
-    next_deadline = deadline;
+fn elapsedTicks(epoch: u64, now: u64, tsc_per_tick: u64) u64 {
+    return (now -% epoch) / tsc_per_tick;
+}
+
+fn nextTickDeadline(epoch: u64, now: u64, tsc_per_tick: u64) u64 {
+    const ticks_into_period = (now -% epoch) % tsc_per_tick;
+    return now +% (tsc_per_tick - ticks_into_period);
+}
+
+fn synchronizeTicks(now: u64) void {
+    ticks = elapsedTicks(tsc_epoch, now, tsc_ticks_per_tick);
+}
+
+fn scheduleNextTick(now: u64) void {
+    const deadline = nextTickDeadline(tsc_epoch, now, tsc_ticks_per_tick);
     x86.writeMsr(IA32_TSC_DEADLINE_MSR, deadline);
 }
 
+pub fn synchronize() void {
+    if (active_mode == .tsc_deadline) synchronizeTicks(x86.rdtsc());
+}
+
+pub fn armSchedulerTick() void {
+    if (active_mode != .tsc_deadline) return;
+    const now = x86.rdtsc();
+    synchronizeTicks(now);
+    scheduler_tick_enabled = true;
+    scheduleNextTick(now);
+}
+
+pub fn disarmSchedulerTick() void {
+    if (active_mode != .tsc_deadline) return;
+    synchronizeTicks(x86.rdtsc());
+    scheduler_tick_enabled = false;
+    x86.writeMsr(IA32_TSC_DEADLINE_MSR, 0);
+}
+
 pub fn handleInterrupt() void {
-    ticks +%= 1;
-    if (active_mode == .tsc_deadline) scheduleNextDeadline(x86.rdtsc());
+    switch (active_mode) {
+        .tsc_deadline => {
+            const now = x86.rdtsc();
+            synchronizeTicks(now);
+            if (scheduler_tick_enabled) scheduleNextTick(now);
+        },
+        .calibrated_countdown => ticks +%= 1,
+    }
     x86.writeMsr(X2APIC_EOI_MSR, 0);
 }
 
@@ -125,8 +164,12 @@ pub fn ticksToMilliseconds(tick_count: u64) u64 {
 
 pub fn sleepCurrentTicks(ticks_to_wait: u64) void {
     if (ticks_to_wait == 0) return;
-    const start_ticks = ticks;
-    while (ticks -% start_ticks < ticks_to_wait) {
+    synchronize();
+    const start_ticks = getTicks();
+    while (true) {
+        synchronize();
+        if (getTicks() -% start_ticks >= ticks_to_wait) return;
+        armSchedulerTick();
         x86.hlt();
     }
 }
@@ -136,4 +179,24 @@ pub fn sleep(milliseconds: u32) void {
 
     const ticks_to_wait = millisecondsToTicksCeil(milliseconds);
     sleepCurrentTicks(ticks_to_wait);
+}
+
+test "invariant TSC ticks catch up and deadlines stay phase aligned" {
+    const epoch: u64 = 1_000;
+    const tsc_per_tick: u64 = 100;
+
+    try std.testing.expectEqual(@as(u64, 0), elapsedTicks(epoch, epoch, tsc_per_tick));
+    try std.testing.expectEqual(@as(u64, 0), elapsedTicks(epoch, 1_099, tsc_per_tick));
+    try std.testing.expectEqual(@as(u64, 1), elapsedTicks(epoch, 1_100, tsc_per_tick));
+    try std.testing.expectEqual(@as(u64, 3), elapsedTicks(epoch, 1_351, tsc_per_tick));
+    try std.testing.expectEqual(@as(u64, 1_100), nextTickDeadline(epoch, epoch, tsc_per_tick));
+    try std.testing.expectEqual(@as(u64, 1_100), nextTickDeadline(epoch, 1_099, tsc_per_tick));
+    try std.testing.expectEqual(@as(u64, 1_200), nextTickDeadline(epoch, 1_100, tsc_per_tick));
+    try std.testing.expectEqual(@as(u64, 1_400), nextTickDeadline(epoch, 1_351, tsc_per_tick));
+}
+
+test "invariant TSC tick math tolerates counter wrap" {
+    const epoch = std.math.maxInt(u64) - 49;
+    try std.testing.expectEqual(@as(u64, 4), elapsedTicks(epoch, 50, 25));
+    try std.testing.expectEqual(@as(u64, 75), nextTickDeadline(epoch, 50, 25));
 }
