@@ -3,11 +3,14 @@ const cpu_features = @import("../../arch/cpu_features.zig");
 const console = @import("../utils/console.zig");
 const config = @import("../config.zig");
 const common = @import("common.zig");
+const handoff = @import("handoff.zig");
 const boot_markers = @import("markers.zig");
 const init_core = @import("init/core.zig");
 const init_devices = @import("init/devices.zig");
 const init_runtime = @import("init/runtime.zig");
 const hardware_proof = @import("../platform/hardware_proof.zig");
+
+const QEMU_TSC_FREQUENCY_HZ: u64 = 2_400_000_000;
 
 pub fn kernelMain() void {
     // The long-mode Zig entry may use SSE registers before CPUID decoding.
@@ -18,10 +21,21 @@ pub fn kernelMain() void {
     common.printBootMarker(boot_markers.boot_start);
     common.printBootProfile();
     common.printKernelRole();
-    const features = cpu_features.detect();
-    if (!cpu_features.baseline.isSupported(features)) {
+    var features = cpu_features.detect();
+    if (features.tsc_frequency_hz == 0) {
+        if (handoff.capturedInfo()) |info| {
+            if (handoff.commandLineHasFlag(info, "model_inventory") and
+                handoff.commandLineU64(info, "qemu_tsc_frequency_hz") == QEMU_TSC_FREQUENCY_HZ)
+            {
+                features.tsc_frequency_hz = QEMU_TSC_FREQUENCY_HZ;
+            }
+        }
+    }
+    if (cpu_features.baseline.firstMissing(features)) |missing_feature| {
         common.printBootMarker(boot_markers.cpu_baseline_rejected);
-        console.print("Unsupported CPU: modern x86-64 feature baseline required\n");
+        console.print("Unsupported CPU: missing ");
+        console.print(@tagName(missing_feature));
+        console.print("\n");
         x86.cli();
         while (true) x86.hlt();
     }
@@ -38,7 +52,7 @@ pub fn kernelMain() void {
     init_devices.init();
     console.print("Delegating network ownership to native service contracts.\n");
     common.printBootMarker(boot_markers.kernel_network_deferred);
-    init_runtime.init();
+    init_runtime.init(features);
 
     common.printBootMarker(boot_markers.boot_core_ready);
     switch (comptime config.bootProfile()) {

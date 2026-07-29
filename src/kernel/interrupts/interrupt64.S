@@ -1,7 +1,6 @@
 .section .text
 
 .extern isrHandler
-.extern irqHandler
 .extern syscall_handler
 .extern zigos_userspace_resume_requested
 .extern zigos_resume_from_userspace_interrupt
@@ -24,15 +23,6 @@ isr\num:
 isr\num:
     pushq $\num
     jmp isr_common_stub
-.endm
-
-.macro IRQ num, int_num
-.global irq\num
-.type irq\num, @function
-irq\num:
-    pushq $0
-    pushq $\int_num
-    jmp irq_common_stub
 .endm
 
 .macro SAVE_REGISTERS
@@ -107,10 +97,10 @@ ISR_NOERRCODE 28
 ISR_ERRCODE   29
 ISR_ERRCODE   30
 ISR_NOERRCODE 31
+ISR_NOERRCODE 64
 ISR_NOERRCODE 128
 ISR_NOERRCODE 129
-
-IRQ 0, 32
+ISR_NOERRCODE 255
 
 isr_common_stub:
     SAVE_REGISTERS
@@ -141,21 +131,5 @@ isr_common_stub:
 
 .userspace_resume:
     jmp zigos_resume_from_userspace_interrupt
-
-irq_common_stub:
-    SAVE_REGISTERS
-    movq %rsp, %r12
-    movq %r12, %rdi
-    subq $(FXSAVE_BYTES + FXSAVE_ALIGN_SLACK), %rsp
-    andq $-16, %rsp
-    fxsave64 (%rsp)
-    cld
-    call irqHandler
-    fxrstor64 (%rsp)
-    movq %r12, %rsp
-
-    RESTORE_REGISTERS
-    addq $16, %rsp
-    iretq
 
 .section .note.GNU-stack,"",@progbits
