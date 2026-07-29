@@ -9,6 +9,7 @@ const leaf7_ebx_smep: u32 = 1 << 7;
 const leaf7_ebx_invpcid: u32 = 1 << 10;
 const leaf7_ebx_smap: u32 = 1 << 20;
 const leaf7_ecx_umip: u32 = 1 << 2;
+const extended1_edx_syscall: u32 = 1 << 11;
 const extended1_edx_nx: u32 = 1 << 20;
 const extended1_edx_long_mode: u32 = 1 << 29;
 const extended7_edx_invariant_tsc: u32 = 1 << 8;
@@ -34,6 +35,7 @@ pub const Features = struct {
     cpuid: bool = false,
     sse2: bool = false,
     long_mode: bool = false,
+    syscall: bool = false,
     nx: bool = false,
     smep: bool = false,
     smap: bool = false,
@@ -51,6 +53,7 @@ pub const MissingFeature = enum {
     cpuid,
     sse2,
     long_mode,
+    syscall,
     nx,
     smep,
     smap,
@@ -80,6 +83,7 @@ pub fn decode(registers: Registers) Features {
         features.umip = (registers.leaf7_ecx & leaf7_ecx_umip) != 0;
     }
     if (registers.max_extended_leaf >= 0x8000_0001) {
+        features.syscall = (registers.extended1_edx & extended1_edx_syscall) != 0;
         features.nx = (registers.extended1_edx & extended1_edx_nx) != 0;
         features.long_mode = (registers.extended1_edx & extended1_edx_long_mode) != 0;
     }
@@ -109,6 +113,7 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.cpuid) return .cpuid;
     if (!features.sse2) return .sse2;
     if (!features.long_mode) return .long_mode;
+    if (!features.syscall) return .syscall;
     if (!features.nx) return .nx;
     if (!features.smep) return .smep;
     if (!features.smap) return .smap;
@@ -137,7 +142,7 @@ test "decode recognizes the modern x86-64-capable baseline" {
         .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_invpcid | leaf7_ebx_smap,
         .leaf7_ecx = leaf7_ecx_umip,
         .max_extended_leaf = 0x8000_0007,
-        .extended1_edx = extended1_edx_nx | extended1_edx_long_mode,
+        .extended1_edx = extended1_edx_syscall | extended1_edx_nx | extended1_edx_long_mode,
         .extended7_edx = extended7_edx_invariant_tsc,
     });
 
@@ -145,6 +150,7 @@ test "decode recognizes the modern x86-64-capable baseline" {
     try std.testing.expect(features.pcid);
     try std.testing.expect(features.invpcid);
     try std.testing.expect(features.pge);
+    try std.testing.expect(features.syscall);
     try std.testing.expectEqual(@as(?MissingFeature, null), firstMissing(features));
 }
 
@@ -160,6 +166,7 @@ test "decode ignores registers outside advertised CPUID ranges" {
     try std.testing.expect(features.cpuid);
     try std.testing.expect(!features.sse2);
     try std.testing.expect(!features.long_mode);
+    try std.testing.expect(!features.syscall);
     try std.testing.expect(!features.nx);
     try std.testing.expect(!features.smep);
     try std.testing.expect(!features.smap);
@@ -178,6 +185,7 @@ test "baseline rejects every missing required feature" {
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
+        .syscall = true,
         .nx = true,
         .smep = true,
         .smap = true,
@@ -202,17 +210,23 @@ test "baseline rejects every missing required feature" {
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
+        .syscall = true,
     }).?);
+    var missing_syscall = complete;
+    missing_syscall.syscall = false;
+    try std.testing.expectEqual(MissingFeature.syscall, firstMissing(missing_syscall).?);
     try std.testing.expectEqual(MissingFeature.smep, firstMissing(.{
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
+        .syscall = true,
         .nx = true,
     }).?);
     try std.testing.expectEqual(MissingFeature.smap, firstMissing(.{
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
+        .syscall = true,
         .nx = true,
         .smep = true,
     }).?);
@@ -220,6 +234,7 @@ test "baseline rejects every missing required feature" {
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
+        .syscall = true,
         .nx = true,
         .smep = true,
         .smap = true,
@@ -237,6 +252,7 @@ test "baseline rejects every missing required feature" {
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
+        .syscall = true,
         .nx = true,
         .smep = true,
         .smap = true,
@@ -249,6 +265,7 @@ test "baseline rejects every missing required feature" {
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
+        .syscall = true,
         .nx = true,
         .smep = true,
         .smap = true,
@@ -263,6 +280,7 @@ test "baseline rejects every missing required feature" {
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
+        .syscall = true,
         .nx = true,
         .smep = true,
         .smap = true,

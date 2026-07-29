@@ -71,7 +71,7 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
     const port = currentKernelPort() orelse {
         frame.eax = @intFromEnum(abi.SyscallStatus.unavailable);
         frame.edx = 0;
-        frame.ecx = @intFromEnum(abi.DenialReason.none);
+        frame.r10 = @intFromEnum(abi.DenialReason.none);
         return;
     };
     const caller_task_id = if (published_active_task_id != 0)
@@ -83,13 +83,13 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
         port,
         caller_task_id,
         timer.getTicks(),
-        frame.eax,
-        frame.ebx,
-        frame.ecx,
+        frame.edi,
+        frame.esi,
+        frame.edx,
     );
     frame.eax = @intFromEnum(result.status);
     frame.edx = result.bytes_written;
-    frame.ecx = @intFromEnum(result.denial_reason);
+    frame.r10 = @intFromEnum(result.denial_reason);
 }
 
 fn currentKernelPort() ?*component_port.KernelPort {

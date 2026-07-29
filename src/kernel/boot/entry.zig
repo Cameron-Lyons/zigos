@@ -73,6 +73,7 @@ pub fn kernelMain() void {
     hardware_proof.captureEarlyBootEvidence();
 
     init_core.init();
+    common.printBootMarker(boot_markers.cpu_syscall_enabled);
     init_devices.init();
     console.print("Delegating network ownership to native service contracts.\n");
     common.printBootMarker(boot_markers.kernel_network_deferred);

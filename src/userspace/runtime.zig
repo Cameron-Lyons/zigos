@@ -77,9 +77,10 @@ const mailbox_section = if (builtin.target.ofmt == .macho) "__DATA,__zigos_boot"
 
 export var zigos_userspace_bootstrap: mailbox.Mailbox align(mailbox.ABI_ALIGNMENT) linksection(mailbox_section) = .{};
 
-const freestanding_trap = if (builtin.target.os.tag == .freestanding)
+const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn syscall3_asm(request_addr: usize, response_addr: usize, response_len: usize) callconv(.c) usize;
+        extern fn syscall_yield_asm(counter: u32) callconv(.c) u32;
         extern fn zigos_probe_nx(target: usize) callconv(.c) void;
 
         fn call(request_addr: usize, response_addr: usize, response_len: usize) abi.SyscallStatus {
@@ -283,12 +284,12 @@ fn runMmuIsolationProbe(detail: mailbox.Detail) noreturn {
 
 fn runNxIsolationProbe() void {
     if (builtin.target.os.tag != .freestanding) return;
-    freestanding_trap.zigos_probe_nx(@intFromPtr(&zigos_userspace_bootstrap));
+    freestanding_syscall.zigos_probe_nx(@intFromPtr(&zigos_userspace_bootstrap));
 }
 
 fn invalidSyscallPointerStatus() abi.SyscallStatus {
     var response = abi.TimeQueryResponse{ .now_ticks = 0 };
-    return freestanding_trap.call(
+    return freestanding_syscall.call(
         mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR,
         @intFromPtr(&response),
         @sizeOf(abi.TimeQueryResponse),
@@ -413,14 +414,11 @@ fn signalFault(detail: mailbox.Detail, code: u8) noreturn {
 
 fn yieldCounter(value: u32) u32 {
     if (builtin.target.os.tag != .freestanding) return value;
-    return asm volatile ("int $129"
-        : [result] "={eax}" (-> u32),
-        : [value] "{eax}" (value),
-    );
+    return freestanding_syscall.syscall_yield_asm(value);
 }
 
 fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
-    return freestanding_trap.call(
+    return freestanding_syscall.call(
         @intFromPtr(request),
         @intFromPtr(response),
         @sizeOf(@TypeOf(response.*)),
@@ -428,7 +426,7 @@ fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
 }
 
 fn trapCallNoResponse(request: anytype) abi.SyscallStatus {
-    return freestanding_trap.call(@intFromPtr(request), 0, 0);
+    return freestanding_syscall.call(@intFromPtr(request), 0, 0);
 }
 
 fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {

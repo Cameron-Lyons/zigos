@@ -4,7 +4,7 @@
 .type _start, @function
 .extern zigos_userspace_contract_main
 _start:
-    mov $0x23, %eax
+    mov $0x1b, %eax
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %fs

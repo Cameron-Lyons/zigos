@@ -18,11 +18,10 @@ zigos_enter_userspace:
     leaq .resume_from_userspace(%rip), %rax
     movq %rax, zigos_userspace_resume_eip(%rip)
 
-    pushq $0x23
+    pushq $0x1b
     pushq 136(%rdi)
     pushq 128(%rdi)
-    orq $0x200, (%rsp)
-    pushq $0x1b
+    pushq $0x23
     pushq 120(%rdi)
 
     movq 8(%rdi), %rbx

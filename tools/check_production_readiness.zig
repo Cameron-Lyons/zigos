@@ -72,6 +72,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS = [_][]const u8{
 const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "BOOT:ROLE:verification",
     "ZIGOS:CPU:PGE:ENABLED",
+    "ZIGOS:CPU:SYSCALL:ENABLED",
     "ZIGOS:CPU:PCID:ENABLED",
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
@@ -108,6 +109,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "BOOT:PROFILE:zigos_native",
     "BOOT:ROLE:production",
     "ZIGOS:CPU:PGE:ENABLED",
+    "ZIGOS:CPU:SYSCALL:ENABLED",
     "ZIGOS:CPU:PCID:ENABLED",
     "BOOT:CORE_READY",
     "ZIGOS:KERNEL_NETWORK:DEFERRED",
@@ -673,9 +675,14 @@ fn validateNuc11tnki5KernelProofSources(
     const session_service_bootstrap_path = "src/native/session/session_service_bootstrap.zig";
     const isr_path = "src/kernel/interrupts/isr.zig";
     const interrupt_stubs_path = "src/kernel/interrupts/interrupt64.S";
+    const syscall_path = "src/kernel/interrupts/syscall64.zig";
+    const syscall_entry_path = "src/kernel/interrupts/syscall64.S";
+    const userspace_syscall_path = "src/arch/x86/syscall_trap.S";
+    const gdt_path = "src/kernel/interrupts/gdt64.zig";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
     const timer_path = "src/kernel/timer/timer.zig";
     const qemu_harness_path = "scripts/qemu-harness.sh";
+    const kernel_build_path = "build_support/kernel.zig";
     const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
     const production_grub_path = "src/boot/grub-x86_64-kernel.cfg";
     const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
@@ -778,6 +785,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 QEMU harness is missing: {s}", .{qemu_harness_path});
         return;
     }
+    if (!common.pathExists(io, kernel_build_path)) {
+        try common.addError(errors, allocator, "kernel build support is missing: {s}", .{kernel_build_path});
+        return;
+    }
     if (!common.pathExists(io, qemu_grub_path)) {
         try common.addError(errors, allocator, "QEMU boot configuration is missing: {s}", .{qemu_grub_path});
         return;
@@ -867,9 +878,14 @@ fn validateNuc11tnki5KernelProofSources(
     const session_service_bootstrap_source = try common.readFileAlloc(allocator, io, session_service_bootstrap_path, common.source_file_max_bytes);
     const isr_source = try common.readFileAlloc(allocator, io, isr_path, common.source_file_max_bytes);
     const interrupt_stubs_source = try common.readFileAlloc(allocator, io, interrupt_stubs_path, common.source_file_max_bytes);
+    const syscall_source = try common.readFileAlloc(allocator, io, syscall_path, common.source_file_max_bytes);
+    const syscall_entry_source = try common.readFileAlloc(allocator, io, syscall_entry_path, common.source_file_max_bytes);
+    const userspace_syscall_source = try common.readFileAlloc(allocator, io, userspace_syscall_path, common.source_file_max_bytes);
+    const gdt_source = try common.readFileAlloc(allocator, io, gdt_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
     const timer_source = try common.readFileAlloc(allocator, io, timer_path, common.source_file_max_bytes);
     const qemu_harness_source = try common.readFileAlloc(allocator, io, qemu_harness_path, common.source_file_max_bytes);
+    const kernel_build_source = try common.readFileAlloc(allocator, io, kernel_build_path, common.source_file_max_bytes);
     const qemu_grub_source = try common.readFileAlloc(allocator, io, qemu_grub_path, common.source_file_max_bytes);
     const production_grub_source = try common.readFileAlloc(allocator, io, production_grub_path, common.source_file_max_bytes);
     const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
@@ -1128,6 +1144,16 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "NUC11TNKi5 QEMU validation must use hardware-backed x2APIC when KVM is available: {s}", .{snippet});
         }
     }
+    const required_compact_benchmark_boot_snippets = [_][]const u8{
+        "boot_profile == .benchmark",
+        "--strip-debug",
+        "qemu_iso.addFileArg(boot_kernel)",
+    };
+    for (required_compact_benchmark_boot_snippets) |snippet| {
+        if (std.mem.indexOf(u8, kernel_build_source, snippet) == null) {
+            try common.addError(errors, allocator, "benchmark boot media must use the debug-stripped diagnostic-ELF derivative: {s}", .{snippet});
+        }
+    }
     if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_tlb_fallback") == null) {
         try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator TLB fallback", .{});
     }
@@ -1164,6 +1190,7 @@ fn validateNuc11tnki5KernelProofSources(
         "pcid",
         "invpcid",
         "pge",
+        "syscall",
     };
     for (required_modern_cpu_baseline_snippets) |snippet| {
         if (std.mem.indexOf(u8, cpu_baseline_source, snippet) == null) {
@@ -1180,6 +1207,12 @@ fn validateNuc11tnki5KernelProofSources(
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
         "globalPagesEnabled",
+        "EFER_SCE",
+        "IA32_STAR_MSR",
+        "IA32_LSTAR_MSR",
+        "IA32_FMASK_MSR",
+        "IA32_KERNEL_GS_BASE_MSR",
+        "syscallExtensionEnabled",
     };
     for (required_x86_pcid_snippets) |snippet| {
         if (std.mem.indexOf(u8, x86_source, snippet) == null) {
@@ -1221,6 +1254,7 @@ fn validateNuc11tnki5KernelProofSources(
         "cpu_pcid_software_fallback",
         "cpu_pcid_ready",
         "cpu_pge_enabled",
+        "cpu_syscall_enabled",
     };
     for (required_boot_process_context_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
@@ -1301,6 +1335,95 @@ fn validateNuc11tnki5KernelProofSources(
                 std.mem.indexOf(u8, benchmark_suite_source, snippet) == null)
             {
                 try common.addError(errors, allocator, "address-space benchmark must retain snippet: {s}", .{snippet});
+            }
+        }
+        const required_syscall_benchmark_snippets = [_][]const u8{
+            "syscall.fast_entry_roundtrip",
+            "operations_per_iteration",
+            "benchmarkSyscallFastEntryRoundtrip",
+            "SYSCALL_BENCHMARK_BATCH_SIZE",
+        };
+        for (required_syscall_benchmark_snippets) |snippet| {
+            if (std.mem.indexOf(u8, benchmark_cases_source, snippet) == null and
+                std.mem.indexOf(u8, benchmark_suite_source, snippet) == null)
+            {
+                try common.addError(errors, allocator, "native syscall benchmark must retain snippet: {s}", .{snippet});
+            }
+        }
+    }
+    const required_syscall_configuration_snippets = [_][]const u8{
+        "USER_STAR_BASE_SELECTOR",
+        "SYSCALL_RFLAGS_MASK",
+        "IA32_GS_BASE_MSR",
+        "IA32_KERNEL_GS_BASE_MSR",
+        "IA32_STAR_MSR",
+        "IA32_LSTAR_MSR",
+        "IA32_FMASK_MSR",
+        "EFER_SCE",
+        "setKernelStack",
+        "syscallExtensionEnabled",
+    };
+    for (required_syscall_configuration_snippets) |snippet| {
+        if (std.mem.indexOf(u8, syscall_source, snippet) == null) {
+            try common.addError(errors, allocator, "native x86-64 syscall configuration must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_syscall_entry_snippets = [_][]const u8{
+        "zigos_syscall_entry",
+        "swapgs",
+        "CPU_KERNEL_STACK_TOP",
+        "CPU_USER_STACK_POINTER",
+        "fxsave64",
+        "sysretq",
+        "call syscall_handler",
+        "call isrHandler",
+    };
+    for (required_syscall_entry_snippets) |snippet| {
+        if (std.mem.indexOf(u8, syscall_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "native x86-64 syscall entry must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_sysret_gdt_snippets = [_][]const u8{
+        "USER_DATA_SEG: u16 = 0x18",
+        "USER_CODE_SEG: u16 = 0x20",
+        "USER_DATA_DESCRIPTOR_INDEX = 3",
+        "USER_CODE_DESCRIPTOR_INDEX = 4",
+    };
+    for (required_sysret_gdt_snippets) |snippet| {
+        if (std.mem.indexOf(u8, gdt_source, snippet) == null) {
+            try common.addError(errors, allocator, "SYSRET-compatible GDT ordering must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_userspace_syscall_snippets = [_][]const u8{
+        "syscall3_asm",
+        "syscall_yield_asm",
+        "syscall",
+    };
+    for (required_userspace_syscall_snippets) |snippet| {
+        if (std.mem.indexOf(u8, userspace_syscall_source, snippet) == null) {
+            try common.addError(errors, allocator, "userspace syscall ABI must retain snippet: {s}", .{snippet});
+        }
+    }
+    const retired_software_interrupt_snippets = [_][]const u8{
+        "setUserGate",
+        "ISR_NOERRCODE 128",
+        "ISR_NOERRCODE 129",
+        "int $0x80",
+        "int $129",
+    };
+    const syscall_transition_sources = [_]struct {
+        label: []const u8,
+        source: []const u8,
+    }{
+        .{ .label = isr_path, .source = isr_source },
+        .{ .label = interrupt_stubs_path, .source = interrupt_stubs_source },
+        .{ .label = userspace_syscall_path, .source = userspace_syscall_source },
+        .{ .label = userspace_executor_path, .source = userspace_executor_source },
+    };
+    for (syscall_transition_sources) |source_check| {
+        for (retired_software_interrupt_snippets) |snippet| {
+            if (std.mem.indexOf(u8, source_check.source, snippet) != null) {
+                try common.addError(errors, allocator, "userspace entry must not restore the software-interrupt ABI in {s}: {s}", .{ source_check.label, snippet });
             }
         }
     }
