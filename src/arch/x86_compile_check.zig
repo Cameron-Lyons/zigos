@@ -22,12 +22,14 @@ pub export fn zigos_x86_arch_compile_check(port: u16, value: u32) u64 {
 
     const features = cpu_features.detect();
     if (cpu_features.baseline.isSupported(features)) {
-        cpu_features.enableSupervisorProtections(features);
+        cpu_features.enableModernFeatures(features, .hardware_pcid);
     }
     x86.invalidatePage(x86.readCr2());
     x86.loadIdt(&empty_idt);
     x86.writeCr0(x86.readCr0());
     x86.writeCr3(x86.readCr3());
+    x86.writeCr3WithPcid(0x1000, 1, true);
+    x86.invalidatePcid(1);
     x86.enableSse();
     return x86.rdtsc() ^ input ^ x86.stackPointer();
 }

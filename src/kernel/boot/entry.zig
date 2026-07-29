@@ -12,6 +12,13 @@ const hardware_proof = @import("../platform/hardware_proof.zig");
 
 const QEMU_TSC_FREQUENCY_HZ: u64 = 2_400_000_000;
 
+fn softwareProcessContextFallbackRequested() bool {
+    const info = handoff.capturedInfo() orelse return false;
+    return handoff.commandLineHasFlag(info, "model_inventory") and
+        handoff.commandLineHasFlag(info, "qemu_software_tlb_fallback") and
+        handoff.commandLineU64(info, "qemu_tsc_frequency_hz") == QEMU_TSC_FREQUENCY_HZ;
+}
+
 pub fn kernelMain() void {
     // The long-mode Zig entry may use SSE registers before CPUID decoding.
     // SSE2 is therefore both an entry precondition and an explicitly verified
@@ -31,7 +38,14 @@ pub fn kernelMain() void {
             }
         }
     }
-    if (cpu_features.baseline.firstMissing(features)) |missing_feature| {
+    const hardware_process_contexts = features.pcid and features.invpcid;
+    const software_process_context_fallback = !hardware_process_contexts and softwareProcessContextFallbackRequested();
+    var required_features = features;
+    if (software_process_context_fallback) {
+        required_features.pcid = true;
+        required_features.invpcid = true;
+    }
+    if (cpu_features.baseline.firstMissing(required_features)) |missing_feature| {
         common.printBootMarker(boot_markers.cpu_baseline_rejected);
         console.print("Unsupported CPU: missing ");
         console.print(@tagName(missing_feature));
@@ -40,10 +54,19 @@ pub fn kernelMain() void {
         while (true) x86.hlt();
     }
     common.printBootMarker(boot_markers.cpu_baseline_ready);
-    cpu_features.enableSupervisorProtections(features);
+    cpu_features.enableModernFeatures(
+        features,
+        if (hardware_process_contexts) .hardware_pcid else .software_flush,
+    );
     common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);
     common.printBootMarker(boot_markers.cpu_umip_enabled);
+    if (hardware_process_contexts) {
+        common.printBootMarker(boot_markers.cpu_pcid_enabled);
+    } else {
+        common.printBootMarker(boot_markers.cpu_pcid_software_fallback);
+    }
+    common.printBootMarker(boot_markers.cpu_pcid_ready);
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();

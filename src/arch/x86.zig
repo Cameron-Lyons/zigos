@@ -119,7 +119,19 @@ pub const CR0_PG: usize = 1 << 31;
 pub const CR4_OSFXSR: usize = 1 << 9;
 pub const CR4_OSXMMEXCPT: usize = 1 << 10;
 pub const CR4_UMIP: usize = 1 << 11;
+pub const CR4_PCIDE: usize = 1 << 17;
 pub const CR4_SMEP: usize = 1 << 20;
+
+pub const CR3_PCID_MASK: usize = 0x0FFF;
+pub const CR3_ADDRESS_MASK: usize = 0x000F_FFFF_FFFF_F000;
+pub const CR3_NO_FLUSH: usize = 1 << 63;
+
+const InvpcidDescriptor = extern struct {
+    pcid: u64,
+    linear_address: u64,
+};
+
+extern fn x86_invalidate_pcid(descriptor: *const InvpcidDescriptor) callconv(.c) void;
 
 pub const EFER_MSR: u32 = 0xC000_0080;
 pub const EFER_NXE: u64 = 1 << 11;
@@ -158,6 +170,26 @@ pub inline fn writeCr3(value: usize) void {
         : .{ .memory = true });
 }
 
+pub fn pcidCr3Value(page_table_root: usize, pcid: u16, preserve_translations: bool) ?usize {
+    if ((page_table_root & ~CR3_ADDRESS_MASK) != 0) return null;
+    if (@as(usize, pcid) > CR3_PCID_MASK) return null;
+    return page_table_root |
+        @as(usize, pcid) |
+        (if (preserve_translations) CR3_NO_FLUSH else 0);
+}
+
+pub inline fn writeCr3WithPcid(page_table_root: usize, pcid: u16, preserve_translations: bool) void {
+    writeCr3(pcidCr3Value(page_table_root, pcid, preserve_translations) orelse unreachable);
+}
+
+pub inline fn invalidatePcid(pcid: u16) void {
+    const descriptor = InvpcidDescriptor{
+        .pcid = pcid,
+        .linear_address = 0,
+    };
+    x86_invalidate_pcid(&descriptor);
+}
+
 pub inline fn readCr4() usize {
     return asm volatile ("mov %%cr4, %[value]"
         : [value] "=r" (-> usize),
@@ -171,6 +203,15 @@ pub inline fn writeCr4(value: usize) void {
     );
 }
 
+pub inline fn enableProcessContextIdentifiers() void {
+    if ((readCr3() & CR3_PCID_MASK) != 0) unreachable;
+    writeCr4(readCr4() | CR4_PCIDE);
+}
+
+pub inline fn processContextIdentifiersEnabled() bool {
+    return (readCr4() & CR4_PCIDE) != 0;
+}
+
 pub fn enableSse() void {
     var cr0 = readCr0();
     cr0 &= ~CR0_EM;
@@ -180,4 +221,17 @@ pub fn enableSse() void {
     writeCr4(readCr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
 
     asm volatile ("fninit");
+}
+
+test "PCID CR3 composition preserves an aligned page-table root" {
+    try @import("std").testing.expectEqual(
+        @as(?usize, 0x0000_0000_1234_5007),
+        pcidCr3Value(0x0000_0000_1234_5000, 7, false),
+    );
+    try @import("std").testing.expectEqual(
+        @as(?usize, 0x8000_0000_1234_5007),
+        pcidCr3Value(0x0000_0000_1234_5000, 7, true),
+    );
+    try @import("std").testing.expectEqual(@as(?usize, null), pcidCr3Value(0x1234_5001, 7, true));
+    try @import("std").testing.expectEqual(@as(?usize, null), pcidCr3Value(0x1234_5000, 0x1000, true));
 }

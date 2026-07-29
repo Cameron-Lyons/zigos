@@ -67,7 +67,9 @@ else
             };
             pub const UserAddressSpace = struct {
                 directory: *PageDirectory,
+                pcid: u16,
             };
+            pub const UserAddressSpaceCreateError = error{ OutOfMemory, ProcessContextExhausted };
             pub const UserMapError = error{
                 OutOfMemory,
                 InvalidRange,
@@ -89,7 +91,7 @@ else
                 free: u32 = 0,
             };
 
-            pub fn createUserAddressSpace() error{OutOfMemory}!UserAddressSpace {
+            pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
                 return error.OutOfMemory;
             }
 
@@ -97,8 +99,8 @@ else
                 native_util.impossibleByInvariant("host tests never request a live userspace page directory");
             }
 
-            pub fn switchPageDirectory(_: *PageDirectory) void {}
             pub fn switchToUserAddressSpace(_: *const UserAddressSpace) void {}
+            pub fn switchToKernelAddressSpace() void {}
             pub fn mapOwnedUserRange(_: *UserAddressSpace, _: u32, _: u32, _: UserPermissions) UserMapError!void {
                 return error.OutOfMemory;
             }
@@ -128,7 +130,7 @@ const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
 const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
 const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
-const MaterializationError = freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
+const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
     ImageExtentInvalid,
 };
@@ -267,7 +269,6 @@ pub const Executor = struct {
     resume_marker_printed: bool = false,
     active_task_id: u64 = 0,
     active_mapping: ?*MappingEntry = null,
-    kernel_page_directory_ptr: usize = 0,
     handoff_completed: bool = false,
     pending_user_context64: UserContext64 = .{},
     last_trap_instruction_pointer: u32 = 0,
@@ -361,7 +362,6 @@ pub const Executor = struct {
         self.resume_marker_printed = false;
         self.active_task_id = 0;
         self.active_mapping = null;
-        self.kernel_page_directory_ptr = 0;
         self.handoff_completed = false;
         self.pending_user_context64 = .{};
         self.last_trap_instruction_pointer = 0;
@@ -461,7 +461,6 @@ pub const Executor = struct {
         const mapping = self.ensureMaterialized(address_space, image) catch return false;
         self.initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
-        self.kernel_page_directory_ptr = @intFromPtr(kernel_page_directory);
         freestanding.gdt.setKernelStack(self.trapStackTop());
         const instruction_pointer = if (mapping.resume_valid)
             mapping.resume_instruction_pointer
@@ -498,7 +497,7 @@ pub const Executor = struct {
         });
 
         if (freestanding.paging.getCurrentPageDirectory() != kernel_page_directory) {
-            freestanding.paging.switchPageDirectory(kernel_page_directory);
+            freestanding.paging.switchToKernelAddressSpace();
         }
 
         self.active_task_id = 0;
@@ -575,7 +574,7 @@ pub const Executor = struct {
             zigos_userspace_resume_requested == 1 and
             freestanding.paging.frameStats().allocated == frames_before;
 
-        freestanding.paging.switchPageDirectory(kernel_page_directory);
+        freestanding.paging.switchToKernelAddressSpace();
         self.active_task_id = 0;
         self.active_mapping = null;
         publishRootActiveTaskId(0);
@@ -596,9 +595,8 @@ pub const Executor = struct {
         if (image.bootstrap_mailbox_address == 0) return;
 
         const bootstrap = selectBootstrapCapability(task, capability_table, now_ticks);
-        const previous_directory = freestanding.paging.getCurrentPageDirectory();
-        freestanding.paging.switchPageDirectory(mapping.pageDirectory());
-        defer freestanding.paging.switchPageDirectory(previous_directory);
+        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+        defer freestanding.paging.switchToKernelAddressSpace();
 
         const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
         mailbox_ptr.* = .{
@@ -773,9 +771,7 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
 
-    if (executor.kernel_page_directory_ptr != 0) {
-        freestanding.paging.switchPageDirectory(@ptrFromInt(executor.kernel_page_directory_ptr));
-    }
+    freestanding.paging.switchToKernelAddressSpace();
 }
 
 fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
@@ -818,9 +814,7 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
 
-    if (executor.kernel_page_directory_ptr != 0) {
-        freestanding.paging.switchPageDirectory(@ptrFromInt(executor.kernel_page_directory_ptr));
-    }
+    freestanding.paging.switchToKernelAddressSpace();
 }
 
 fn nxProbeRecoveryContext(

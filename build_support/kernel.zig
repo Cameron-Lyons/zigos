@@ -100,7 +100,7 @@ pub fn addX86_64KernelBootCheck(
     iso.addFileArg(linked_kernel);
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
-    iso.addFileArg(b.path("src/boot/grub-x86_64-kernel.cfg"));
+    iso.addFileArg(b.path("src/boot/grub-x86_64-qemu.cfg"));
     iso.step.dependOn(&validate_image.step);
 
     const run = b.addSystemCommand(&.{"bash"});
@@ -528,6 +528,7 @@ fn addKernelAssemblyFiles(
     kernel_module: *std.Build.Module,
 ) void {
     kernel_module.addAssemblyFile(b.path("src/boot/boot_x86_64.S"));
+    kernel_module.addAssemblyFile(b.path("src/arch/x86/invpcid.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));

@@ -6,6 +6,7 @@ const memory = @import("memory.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const frame_allocator = @import("frame_allocator.zig");
 const firmware_memory_map = @import("firmware_memory_map.zig");
+const pcid_allocator = @import("pcid_allocator.zig");
 const table64 = @import("page_table64.zig");
 
 const PAGE_SIZE: u32 = 4096;
@@ -48,6 +49,7 @@ pub const FrameReleaseError = frame_allocator.Error;
 
 pub const UserAddressSpace = struct {
     directory: *PageDirectory,
+    pcid: pcid_allocator.Identifier,
 };
 
 pub const UserPermissions = struct {
@@ -76,6 +78,11 @@ pub const UserAddressSpaceDestroyError = error{
     AddressSpaceActive,
 };
 
+pub const UserAddressSpaceCreateError = error{
+    OutOfMemory,
+    ProcessContextExhausted,
+};
+
 const MEMORY_SIZE: u32 = 128 * 1024 * 1024;
 const IDENTITY_PAGE_TABLES = MEMORY_SIZE / (PAGE_SIZE * TABLE_ENTRIES);
 
@@ -98,6 +105,8 @@ var kernel_page_tables: [IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undef
 const PhysicalFrameAllocator = frame_allocator.Fixed(MEMORY_SIZE, PAGE_SIZE);
 var physical_frames = PhysicalFrameAllocator.init();
 var frame_lock: bool = false;
+var process_contexts = pcid_allocator.Allocator.init();
+var process_context_lock: bool = false;
 
 const tableIndex = table64.index;
 
@@ -174,6 +183,30 @@ fn acquireFrameLock() void {
 
 fn releaseFrameLock() void {
     @atomicStore(bool, &frame_lock, false, .seq_cst);
+}
+
+fn acquireProcessContextLock() void {
+    while (@atomicRmw(bool, &process_context_lock, .Xchg, true, .seq_cst)) {
+        asm volatile ("pause");
+    }
+}
+
+fn releaseProcessContextLock() void {
+    @atomicStore(bool, &process_context_lock, false, .seq_cst);
+}
+
+fn tryAllocProcessContext() ?pcid_allocator.Identifier {
+    acquireProcessContextLock();
+    defer releaseProcessContextLock();
+    return process_contexts.allocate();
+}
+
+fn releaseProcessContext(identifier: pcid_allocator.Identifier) void {
+    acquireProcessContextLock();
+    defer releaseProcessContextLock();
+    if (x86.processContextIdentifiersEnabled()) x86.invalidatePcid(identifier);
+    process_contexts.release(identifier) catch
+        haltWithMessage("Corrupt process-context identifier accounting!\n");
 }
 
 fn haltWithMessage(message: []const u8) noreturn {
@@ -333,7 +366,7 @@ pub fn unmapBorrowedCurrentPage(virt_addr: usize) bool {
     return true;
 }
 
-pub fn createUserAddressSpace() error{OutOfMemory}!UserAddressSpace {
+pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
     const pml4_phys = tryAllocFrame() orelse return error.OutOfMemory;
     const pml4: *PageDirectory = @ptrFromInt(pml4_phys);
     zeroTable(pml4);
@@ -353,7 +386,12 @@ pub fn createUserAddressSpace() error{OutOfMemory}!UserAddressSpace {
     }
 
     pml4[0] = tableEntry(pdpt_phys, ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER, TABLE_OWNER_USER_PRIVATE);
-    return .{ .directory = pml4 };
+    const pcid = tryAllocProcessContext() orelse {
+        release_frames(pdpt_phys, 1) catch haltWithMessage("Corrupt user PDPT allocation accounting!\n");
+        release_frames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
+        return error.ProcessContextExhausted;
+    };
+    return .{ .directory = pml4, .pcid = pcid };
 }
 
 fn ensureOwnedLeaf(space: *UserAddressSpace, virtual_address: u32) UserMapError!*PageTableEntry {
@@ -490,15 +528,20 @@ pub fn destroyUserAddressSpace(space: *UserAddressSpace) UserAddressSpaceDestroy
     if (space.directory == getCurrentPageDirectory()) return error.AddressSpaceActive;
 
     acquireFrameLock();
-    defer releaseFrameLock();
     releaseOwnedHierarchy(space.directory);
     physical_frames.release(.{ .base = @intCast(@intFromPtr(space.directory)), .count = 1 }) catch
         haltWithMessage("Corrupt user PML4 accounting!\n");
+    releaseFrameLock();
+    releaseProcessContext(space.pcid);
     space.* = undefined;
 }
 
 pub fn switchToUserAddressSpace(space: *const UserAddressSpace) void {
-    switchPageDirectory(space.directory);
+    switchAddressSpace(space.directory, space.pcid);
+}
+
+pub fn switchToKernelAddressSpace() void {
+    switchAddressSpace(&kernel_pml4, pcid_allocator.KERNEL_IDENTIFIER);
 }
 
 fn initializeKernelHierarchy() void {
@@ -565,6 +608,7 @@ pub fn init() void {
     // switch; there is no transient writable-text window in the active table.
     enableWriteProtect();
     current_page_directory = &kernel_pml4;
+    current_process_context = pcid_allocator.KERNEL_IDENTIFIER;
     x86.writeCr3(@intFromPtr(&kernel_pml4));
     unmapBootStackGuardPage();
     early_console.print("Four-level paging enabled!\n");
@@ -623,14 +667,21 @@ fn printHex(value: anytype, console: anytype) void {
 }
 
 var current_page_directory: *PageDirectory = &kernel_pml4;
+var current_process_context: pcid_allocator.Identifier = pcid_allocator.KERNEL_IDENTIFIER;
 
 pub fn getCurrentPageDirectory() *PageDirectory {
     return current_page_directory;
 }
 
-pub fn switchPageDirectory(directory: *PageDirectory) void {
+fn switchAddressSpace(directory: *PageDirectory, pcid: pcid_allocator.Identifier) void {
+    if (directory == current_page_directory and pcid == current_process_context) return;
+    if (x86.processContextIdentifiersEnabled()) {
+        x86.writeCr3WithPcid(@intFromPtr(directory), pcid, true);
+    } else {
+        x86.writeCr3(@intFromPtr(directory));
+    }
     current_page_directory = directory;
-    x86.writeCr3(@intFromPtr(directory));
+    current_process_context = pcid;
 }
 
 fn invalidate_page(virt_addr: usize) void {
