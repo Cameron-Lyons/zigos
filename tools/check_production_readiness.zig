@@ -1882,27 +1882,39 @@ fn validateUserspaceDriverDataPathTrack(
     const broker_path = "src/native/kernel_api/device_broker.zig";
     const bootstrap_driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
     const driver_runtime_path = "src/native/drivers/driver_runtime.zig";
-    const storage_driver_path = "src/native/drivers/storage_driver_task.zig";
     const driver_spec_path = "src/tests/spec/drivers_storage_sync.zig";
     const backlog_gate_path = "src/tests/spec/backlog_gates.zig";
     const broker_source = try readRequiredSource(allocator, io, errors, broker_path) orelse return;
     const bootstrap_driver_port_source = try readRequiredSource(allocator, io, errors, bootstrap_driver_port_path) orelse return;
     const driver_runtime_source = try readRequiredSource(allocator, io, errors, driver_runtime_path) orelse return;
-    const storage_driver_source = try readRequiredSource(allocator, io, errors, storage_driver_path) orelse return;
     const driver_spec_source = try readRequiredSource(allocator, io, errors, driver_spec_path) orelse return;
     const backlog_gate_source = try readRequiredSource(allocator, io, errors, backlog_gate_path) orelse return;
 
     const broker_snippets = [_][]const u8{
         "UnsupportedBusMasterDma",
         "if (request.bus_master_dma_enabled and request.mode != .brokered_dma_buffers)",
-        "device broker records AMD-Vi programming evidence and confines bus-master DMA",
+        "device broker records AMD-Vi evidence and confines bus-master DMA",
         "try std.testing.expectError(error.UnsupportedBusMasterDma, programDmaIsolation",
         "try std.testing.expect(!status.bus_master_dma_enabled)",
         "pub fn programBusMasterStorageDmaIsolation",
+        "pub fn publishPciController",
+        "device broker publishes only PCI controllers and rejects port access",
     };
     for (broker_snippets) |snippet| {
         if (std.mem.indexOf(u8, broker_source, snippet) == null) {
             try common.addError(errors, allocator, "Userspace driver data path must keep bus-master DMA confinement snippet: {s}", .{snippet});
+        }
+    }
+    const retired_broker_snippets = [_][]const u8{
+        "publishAtaController",
+        "HostedAtaControllerState",
+        "storage_driver_protocol",
+        "x86.inb",
+        "x86.outb",
+    };
+    for (retired_broker_snippets) |snippet| {
+        if (std.mem.indexOf(u8, broker_source, snippet) != null) {
+            try common.addError(errors, allocator, "Userspace driver data path must not reintroduce the retired ATA broker surface: {s}", .{snippet});
         }
     }
 
@@ -1942,17 +1954,6 @@ fn validateUserspaceDriverDataPathTrack(
         try common.addError(errors, allocator, "Userspace driver data path spec must not use e1000 as a production network fixture", .{});
     }
 
-    const storage_driver_snippets = [_][]const u8{
-        "!session.dma_isolation.bus_master_dma_enabled",
-        "session.dma_isolation.hardware_iommu_programmed",
-        "session.dma_isolation.mode == .brokered_dma_buffers",
-    };
-    for (storage_driver_snippets) |snippet| {
-        if (std.mem.indexOf(u8, storage_driver_source, snippet) == null) {
-            try common.addError(errors, allocator, "Userspace storage driver must keep brokered-DMA-only readiness snippet: {s}", .{snippet});
-        }
-    }
-
     const generated_driver_fixture_sources = [_]struct {
         path: []const u8,
         source: []const u8,
@@ -1966,11 +1967,6 @@ fn validateUserspaceDriverDataPathTrack(
         .{
             .path = driver_runtime_path,
             .source = driver_runtime_source,
-            .snippets = &.{"try generated_image_fixtures.storageDriverImage()"},
-        },
-        .{
-            .path = storage_driver_path,
-            .source = storage_driver_source,
             .snippets = &.{"try generated_image_fixtures.storageDriverImage()"},
         },
         .{

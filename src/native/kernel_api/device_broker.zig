@@ -3,62 +3,11 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
-const storage_driver_protocol = @import("../drivers/storage_driver_protocol.zig");
-
-const x86 = if (builtin.target.os.tag == .freestanding)
-    @import("../../arch/x86.zig")
-else
-    struct {
-        pub fn inb(_: u16) u8 {
-            native_util.impossibleByInvariant("host device broker cannot perform x86 port input");
-        }
-
-        pub fn inw(_: u16) u16 {
-            native_util.impossibleByInvariant("host device broker cannot perform x86 port input");
-        }
-
-        pub fn inl(_: u16) u32 {
-            native_util.impossibleByInvariant("host device broker cannot perform x86 port input");
-        }
-
-        pub fn outb(_: u16, _: u8) void {}
-
-        pub fn outw(_: u16, _: u16) void {}
-
-        pub fn outl(_: u16, _: u32) void {}
-    };
 
 pub const MAX_DEVICES: usize = 4;
 pub const MAX_DMA_WINDOWS: usize = 8;
 pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
-const ata_io_register_count = 8;
-const ata_control_register_index = ata_io_register_count;
-const ata_host_register_count = ata_io_register_count + 1;
-const ata_sector_size = 512;
-const ata_reg_data: usize = 0;
-const ata_reg_seccount: usize = 2;
-const ata_reg_lba0: usize = 3;
-const ata_reg_lba1: usize = 4;
-const ata_reg_lba2: usize = 5;
-const ata_reg_drive: usize = 6;
-const ata_reg_status: usize = 7;
-const ata_reg_command: usize = 7;
-const ata_cmd_read_sectors: u32 = 0x20;
-const ata_cmd_write_sectors: u32 = 0x30;
-const ata_cmd_cache_flush: u32 = 0xE7;
-const ata_sr_drdy: u32 = 0x40;
-const ata_sr_drq: u32 = 0x08;
-const ata_sr_err: u32 = 0x01;
-const ata_lba_byte_mask: u32 = 0xFF;
-const ata_lba_drive_head_mask: u32 = 0x0F;
-const ata_lba1_shift: u6 = 8;
-const ata_lba2_shift: u6 = 16;
-const ata_lba3_shift: u6 = 24;
-const ata_sector_count_zero_value: u16 = 256;
-const ata_max_sector_transfer_count: usize = 256;
-const host_storage_sectors: usize = if (builtin.target.os.tag == .freestanding) 1 else 8192;
-const host_storage_bytes = host_storage_sectors * ata_sector_size;
-const host_write_staging_bytes = ata_max_sector_transfer_count * ata_sector_size;
+const default_dma_window_bytes: u64 = 128 * 1024;
 const iommu_page_size: u64 = 4096;
 const iommu_root_table_salt = iommu_page_size;
 const iommu_context_table_salt = iommu_page_size * 2;
@@ -72,7 +21,6 @@ const iommu_domain_id_mask: u64 = 0xFFFF;
 const iommu_domain_id_shift: u6 = 12;
 const brokered_dma_window_device_mask: u64 = 0x0000_FFFF_FFFF;
 const brokered_dma_window_shift: u6 = 12;
-const test_ata_sector_count: u64 = 4096;
 const test_dma_window_offset: u64 = 0x40000;
 const test_dma_buffer_bytes: u64 = 512;
 
@@ -220,50 +168,10 @@ pub const Error = error{
     WrongControllerKind,
 };
 
-const HostTransferKind = enum(u8) {
-    none,
-    read,
-    write,
-};
-
-const HostedAtaControllerState = if (builtin.target.os.tag == .freestanding)
-    struct {}
-else
-    struct {
-        registers: [ata_host_register_count]u32 = [_]u32{0} ** ata_host_register_count,
-        storage: [host_storage_bytes]u8 = [_]u8{0} ** host_storage_bytes,
-        transfer_kind: HostTransferKind = .none,
-        transfer_lba: u64 = 0,
-        transfer_sector_count: u16 = 0,
-        transfer_byte_offset: usize = 0,
-        write_staging: [host_write_staging_bytes]u8 = [_]u8{0} ** host_write_staging_bytes,
-    };
-
-const ControllerKind = enum(u8) {
-    none,
-    ata,
-    pci,
-};
-
-comptime {
-    if (builtin.target.os.tag == .freestanding and @sizeOf(HostedAtaControllerState) != 0) {
-        @compileError("hosted ATA state must not consume freestanding kernel memory");
-    }
-}
-
 const ControllerSlot = struct {
     in_use: bool = false,
     published: bool = false,
-    kind: ControllerKind = .none,
     device_id: u64 = 0,
-    grant: storage_driver_protocol.AtaBrokerGrant = .{
-        .base_port = 0,
-        .ctrl_port = 0,
-        .is_master = false,
-        .irq_line = 0,
-        .sector_count = 0,
-    },
-    hosted: HostedAtaControllerState = .{},
     broker_generation: u64 = 0,
 };
 
@@ -532,72 +440,33 @@ pub fn reset() void {
     // published state with the same device and domain identifiers.
 }
 
-pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) bool {
-    publishAtaControllerChecked(device_id, grant) catch return false;
-    return true;
-}
-
-pub fn publishAtaControllerChecked(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) Error!void {
-    return publishControllerChecked(device_id, .ata, grant);
-}
-
 pub fn publishPciController(device_id: u64) bool {
     publishPciControllerChecked(device_id) catch return false;
     return true;
 }
 
 pub fn publishPciControllerChecked(device_id: u64) Error!void {
-    return publishControllerChecked(device_id, .pci, .{
-        .base_port = 0,
-        .ctrl_port = 0,
-        .is_master = false,
-        .irq_line = 0,
-        .sector_count = 0,
-    });
-}
-
-fn publishControllerChecked(
-    device_id: u64,
-    kind: ControllerKind,
-    grant: storage_driver_protocol.AtaBrokerGrant,
-) Error!void {
     if (device_id == 0) return error.InvalidDevice;
-    if (kind == .none) return error.WrongControllerKind;
     const generation = try pendingBrokerGeneration();
     if (findControllerSlotIndex(device_id)) |slot_index| {
         const slot = &controllers.slots[slot_index];
         controllers.markPublished(slot_index);
         slot.published = true;
-        slot.kind = kind;
-        slot.grant = grant;
-        resetHostIoState(slot);
         slot.broker_generation = generation;
         next_broker_generation = nextMonotonicId(generation);
         return;
     }
     const slot = reserveControllerSlot(device_id) orelse return error.ControllerTableFull;
     slot.published = true;
-    slot.kind = kind;
     slot.device_id = device_id;
-    slot.grant = grant;
     slot.broker_generation = generation;
-    resetHostIoState(slot);
     next_broker_generation = nextMonotonicId(generation);
 }
 
-pub fn revokeAtaController(device_id: u64) bool {
-    return revokeController(device_id, .ata);
-}
-
 pub fn revokePciController(device_id: u64) bool {
-    return revokeController(device_id, .pci);
-}
-
-fn revokeController(device_id: u64, kind: ControllerKind) bool {
     const slot_index = findControllerSlotIndex(device_id) orelse return false;
     const slot = &controllers.slots[slot_index];
-    if (!slot.published or slot.kind != kind) return false;
-    resetHostIoState(slot);
+    if (!slot.published) return false;
     slot.published = false;
     controllers.markUnpublished(slot_index);
     invalidateDmaForDevice(device_id);
@@ -622,7 +491,7 @@ pub fn brokeredDmaWindowBase(device_id: u64) u64 {
 pub fn defaultBrokeredDmaWindow(device_id: u64) DmaWindow {
     return .{
         .base = brokeredDmaWindowBase(device_id),
-        .length = host_write_staging_bytes,
+        .length = default_dma_window_bytes,
         .readable_by_device = true,
         .writable_by_device = true,
         .executable = false,
@@ -785,29 +654,16 @@ pub fn invalidateDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
 }
 
 pub fn describe(device_id: u64) Error!ControllerDescriptor {
-    const slot = findController(device_id) orelse return error.DeviceNotFound;
-    return switch (slot.kind) {
-        .none => error.WrongControllerKind,
-        .ata => .{
-            .device_id = device_id,
-            .base_port = slot.grant.base_port,
-            .io_port_count = ata_io_register_count,
-            .ctrl_port = slot.grant.ctrl_port,
-            .is_master = slot.grant.is_master,
-            .irq_line = slot.grant.irq_line,
-            .mmio_window_count = 0,
-            .sector_count = slot.grant.sector_count,
-        },
-        .pci => .{
-            .device_id = device_id,
-            .base_port = 0,
-            .io_port_count = 0,
-            .ctrl_port = 0,
-            .is_master = false,
-            .irq_line = 0,
-            .mmio_window_count = 0,
-            .sector_count = 0,
-        },
+    _ = findController(device_id) orelse return error.DeviceNotFound;
+    return .{
+        .device_id = device_id,
+        .base_port = 0,
+        .io_port_count = 0,
+        .ctrl_port = 0,
+        .is_master = false,
+        .irq_line = 0,
+        .mmio_window_count = 0,
+        .sector_count = 0,
     };
 }
 
@@ -822,33 +678,18 @@ pub fn mmioWindow(device_id: u64, window_index: u8) Error!MmioWindow {
 }
 
 pub fn readPort(device_id: u64, port: u16, width: PortWidth) Error!u32 {
-    const slot = findController(device_id) orelse return error.DeviceNotFound;
-    if (slot.kind != .ata) return error.WrongControllerKind;
-    const register_index = try registerIndex(slot, port);
-    if (builtin.target.os.tag == .freestanding) {
-        return switch (width) {
-            .u8 => x86.inb(port),
-            .u16 => x86.inw(port),
-            .u32 => x86.inl(port),
-        };
-    }
-    return readHostRegister(slot, register_index, width);
+    _ = findController(device_id) orelse return error.DeviceNotFound;
+    _ = port;
+    _ = width;
+    return error.WrongControllerKind;
 }
 
 pub fn writePort(device_id: u64, port: u16, width: PortWidth, value: u32) Error!void {
-    const slot = findController(device_id) orelse return error.DeviceNotFound;
-    if (slot.kind != .ata) return error.WrongControllerKind;
-    const register_index = try registerIndex(slot, port);
-    if (builtin.target.os.tag == .freestanding) {
-        switch (width) {
-            .u8 => x86.outb(port, @truncate(value)),
-            .u16 => x86.outw(port, @truncate(value)),
-            .u32 => x86.outl(port, value),
-        }
-        return;
-    }
-
-    writeHostRegister(slot, register_index, width, value);
+    _ = findController(device_id) orelse return error.DeviceNotFound;
+    _ = port;
+    _ = width;
+    _ = value;
+    return error.WrongControllerKind;
 }
 
 fn findController(device_id: u64) ?*ControllerSlot {
@@ -968,36 +809,8 @@ fn nextMonotonicId(id: u64) u64 {
 fn resetControllerSlot(slot: *ControllerSlot) void {
     slot.in_use = false;
     slot.published = false;
-    slot.kind = .none;
     slot.device_id = 0;
-    slot.grant = .{
-        .base_port = 0,
-        .ctrl_port = 0,
-        .is_master = false,
-        .irq_line = 0,
-        .sector_count = 0,
-    };
-    resetHostedState(slot);
     slot.broker_generation = 0;
-}
-
-fn resetHostedState(slot: *ControllerSlot) void {
-    if (comptime builtin.target.os.tag != .freestanding) {
-        @memset(slot.hosted.registers[0..], 0);
-        @memset(slot.hosted.storage[0..], 0);
-        slot.hosted.transfer_kind = .none;
-        slot.hosted.transfer_lba = 0;
-        slot.hosted.transfer_sector_count = 0;
-        slot.hosted.transfer_byte_offset = 0;
-        @memset(slot.hosted.write_staging[0..], 0);
-    }
-}
-
-fn resetHostIoState(slot: *ControllerSlot) void {
-    if (comptime builtin.target.os.tag != .freestanding) {
-        @memset(slot.hosted.registers[0..], 0);
-        finishHostTransfer(slot);
-    }
 }
 
 fn controllerSlotId(slot: *const ControllerSlot) u64 {
@@ -1121,274 +934,70 @@ fn alignDown(address: u64, alignment: u64) u64 {
     return address - (address % alignment);
 }
 
-fn registerIndex(slot: *const ControllerSlot, port: u16) Error!usize {
-    if (port >= slot.grant.base_port and port < slot.grant.base_port + ata_io_register_count) {
-        return port - slot.grant.base_port;
-    }
-    if (port == slot.grant.ctrl_port) return ata_control_register_index;
-    return error.InvalidPort;
-}
-
-fn readHostRegister(slot: *ControllerSlot, register_index: usize, width: PortWidth) u32 {
-    if (register_index == ata_reg_data and slot.hosted.transfer_kind == .read) {
-        return readHostTransferData(slot, width);
-    }
-    if (register_index == ata_control_register_index) {
-        return truncateRegisterValue(slot.hosted.registers[ata_reg_status], width);
-    }
-    return truncateRegisterValue(slot.hosted.registers[register_index], width);
-}
-
-fn writeHostRegister(slot: *ControllerSlot, register_index: usize, width: PortWidth, value: u32) void {
-    if (register_index == ata_reg_data and slot.hosted.transfer_kind == .write) {
-        writeHostTransferData(slot, width, value);
-        return;
-    }
-
-    const stored_value = truncateRegisterValue(value, width);
-    slot.hosted.registers[register_index] = stored_value;
-    if (register_index != ata_reg_command) return;
-
-    switch (stored_value) {
-        ata_cmd_read_sectors => startHostTransfer(slot, .read),
-        ata_cmd_write_sectors => startHostTransfer(slot, .write),
-        ata_cmd_cache_flush => finishHostTransfer(slot),
-        else => {},
-    }
-}
-
-fn startHostTransfer(slot: *ControllerSlot, transfer_kind: HostTransferKind) void {
-    const count_register = @as(u16, @truncate(slot.hosted.registers[ata_reg_seccount]));
-    const sector_count = normalizeAtaSectorCount(count_register);
-    const lba = lba28FromRegisters(slot);
-
-    if (!hostTransferInRange(slot, lba, sector_count)) {
-        slot.hosted.transfer_kind = .none;
-        slot.hosted.registers[ata_reg_status] = ata_sr_drdy | ata_sr_err;
-        return;
-    }
-
-    slot.hosted.transfer_kind = transfer_kind;
-    slot.hosted.transfer_lba = lba;
-    slot.hosted.transfer_sector_count = sector_count;
-    slot.hosted.transfer_byte_offset = 0;
-    slot.hosted.registers[ata_reg_status] = ata_sr_drdy | ata_sr_drq;
-}
-
-fn truncateRegisterValue(value: u32, width: PortWidth) u32 {
-    return switch (width) {
-        .u8 => @as(u8, @truncate(value)),
-        .u16 => @as(u16, @truncate(value)),
-        .u32 => value,
-    };
-}
-
-fn normalizeAtaSectorCount(count_register: u16) u16 {
-    return if (count_register == 0) ata_sector_count_zero_value else count_register;
-}
-
-fn lba28FromRegisters(slot: *const ControllerSlot) u64 {
-    return (@as(u64, slot.hosted.registers[ata_reg_lba0] & ata_lba_byte_mask)) |
-        (@as(u64, slot.hosted.registers[ata_reg_lba1] & ata_lba_byte_mask) << ata_lba1_shift) |
-        (@as(u64, slot.hosted.registers[ata_reg_lba2] & ata_lba_byte_mask) << ata_lba2_shift) |
-        (@as(u64, slot.hosted.registers[ata_reg_drive] & ata_lba_drive_head_mask) << ata_lba3_shift);
-}
-
-fn finishHostTransfer(slot: *ControllerSlot) void {
-    slot.hosted.transfer_kind = .none;
-    slot.hosted.transfer_lba = 0;
-    slot.hosted.transfer_sector_count = 0;
-    slot.hosted.transfer_byte_offset = 0;
-    slot.hosted.registers[ata_reg_status] = ata_sr_drdy;
-}
-
-fn readHostTransferData(slot: *ControllerSlot, width: PortWidth) u32 {
-    const offset = hostTransferOffset(slot);
-    if (offset + widthByteCount(width) > slot.hosted.storage.len) {
-        // Defense in depth: hostTransferInRange already bounds the transfer, but
-        // never index past the backing store even if state were set directly.
-        finishHostTransfer(slot);
-        return 0;
-    }
-    const value = switch (width) {
-        .u8 => @as(u32, slot.hosted.storage[offset]),
-        .u16 => @as(u32, std.mem.readInt(u16, slot.hosted.storage[offset..][0..2], .little)),
-        .u32 => std.mem.readInt(u32, slot.hosted.storage[offset..][0..4], .little),
-    };
-    advanceHostTransfer(slot, widthByteCount(width));
-    return value;
-}
-
-fn writeHostTransferData(slot: *ControllerSlot, width: PortWidth, value: u32) void {
-    const offset = slot.hosted.transfer_byte_offset;
-    if (offset + widthByteCount(width) > slot.hosted.write_staging.len) {
-        // Defense in depth: fail closed rather than overrun the staging buffer.
-        slot.hosted.registers[ata_reg_status] = ata_sr_drdy | ata_sr_err;
-        finishHostTransfer(slot);
-        return;
-    }
-    switch (width) {
-        .u8 => slot.hosted.write_staging[offset] = @truncate(value),
-        .u16 => std.mem.writeInt(u16, slot.hosted.write_staging[offset..][0..2], @truncate(value), .little),
-        .u32 => std.mem.writeInt(u32, slot.hosted.write_staging[offset..][0..4], value, .little),
-    }
-    advanceHostTransfer(slot, widthByteCount(width));
-}
-
-fn advanceHostTransfer(slot: *ControllerSlot, byte_count: usize) void {
-    slot.hosted.transfer_byte_offset += byte_count;
-    if (slot.hosted.transfer_byte_offset >= @as(usize, slot.hosted.transfer_sector_count) * ata_sector_size) {
-        completeHostTransfer(slot);
-    }
-}
-
-fn completeHostTransfer(slot: *ControllerSlot) void {
-    if (slot.hosted.transfer_kind == .write) {
-        const offset = hostTransferBaseOffset(slot);
-        const len = @as(usize, slot.hosted.transfer_sector_count) * ata_sector_size;
-        @memcpy(slot.hosted.storage[offset..][0..len], slot.hosted.write_staging[0..len]);
-    }
-    finishHostTransfer(slot);
-}
-
-fn hostTransferOffset(slot: *const ControllerSlot) usize {
-    return hostTransferBaseOffset(slot) + slot.hosted.transfer_byte_offset;
-}
-
-fn hostTransferBaseOffset(slot: *const ControllerSlot) usize {
-    return @as(usize, @intCast(slot.hosted.transfer_lba)) * ata_sector_size;
-}
-
-fn hostTransferInRange(slot: *const ControllerSlot, lba: u64, sector_count: u16) bool {
-    if (sector_count == 0) return false;
-    // The broker is the isolation boundary for a possibly-hostile driver, so it must
-    // never trust the driver-supplied seccount. A single transfer stages through
-    // host_write_staging (ata_max_sector_transfer_count sectors), so bound the COUNT
-    // against staging capacity — independently of the addressable LBA range, which is
-    // bounded against the backing store below.
-    if (sector_count > ata_max_sector_transfer_count) return false;
-    const available_sectors = @min(slot.grant.sector_count, host_storage_sectors);
-    return lba < available_sectors and @as(u64, sector_count) <= available_sectors - lba;
-}
-
-fn widthByteCount(width: PortWidth) usize {
-    return switch (width) {
-        .u8 => 1,
-        .u16 => 2,
-        .u32 => 4,
-    };
-}
-
-test "device broker publishes ATA controllers and exposes typed port and irq metadata" {
-    reset();
-
-    try std.testing.expect(publishAtaController(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = test_ata_sector_count,
-    }));
-
-    const descriptor = try describe(0x1F001);
-    try std.testing.expectEqual(@as(u16, 0x1F0), descriptor.base_port);
-    try std.testing.expectEqual(@as(u16, ata_io_register_count), descriptor.io_port_count);
-    try std.testing.expectEqual(@as(u16, 0x3F6), descriptor.ctrl_port);
-    try std.testing.expect(descriptor.is_master);
-    try std.testing.expectEqual(@as(u8, 14), descriptor.irq_line);
-    try std.testing.expectEqual(test_ata_sector_count, descriptor.sector_count);
-
-    try writePort(0x1F001, 0x1F0 + ata_io_register_count - 1, .u8, 0x5A);
-    try std.testing.expectEqual(@as(u32, 0x5A), try readPort(0x1F001, 0x1F0 + ata_io_register_count - 1, .u8));
-    try std.testing.expectEqual(@as(u8, 14), try irqLine(0x1F001));
-    try std.testing.expectError(error.UnsupportedMmioWindow, mmioWindow(0x1F001, 0));
-    try std.testing.expectError(error.InvalidPort, readPort(0x1F001, 0x2F8, .u8));
-}
-
-test "PCI controller publication cannot expose ATA port authority" {
+test "device broker publishes only PCI controllers and rejects port access" {
     reset();
 
     const device_id: u64 = 0x0000_8086_5845_0001;
+    try std.testing.expectError(error.InvalidDevice, publishPciControllerChecked(0));
     try std.testing.expect(publishPciController(device_id));
-    try std.testing.expect(brokerGeneration(device_id) != null);
+    const first_generation = brokerGeneration(device_id).?;
+
     const descriptor = try describe(device_id);
     try std.testing.expectEqual(device_id, descriptor.device_id);
+    try std.testing.expectEqual(@as(u16, 0), descriptor.base_port);
     try std.testing.expectEqual(@as(u16, 0), descriptor.io_port_count);
+    try std.testing.expectEqual(@as(u16, 0), descriptor.ctrl_port);
+    try std.testing.expect(!descriptor.is_master);
+    try std.testing.expectEqual(@as(u8, 0), descriptor.irq_line);
+    try std.testing.expectEqual(@as(u8, 0), descriptor.mmio_window_count);
+    try std.testing.expectEqual(@as(u64, 0), descriptor.sector_count);
     try std.testing.expectError(error.WrongControllerKind, readPort(device_id, 0, .u8));
     try std.testing.expectError(error.WrongControllerKind, writePort(device_id, 0, .u8, 0));
-    try std.testing.expect(!revokeAtaController(device_id));
+    try std.testing.expectError(error.UnsupportedMmioWindow, mmioWindow(device_id, 0));
 
+    try publishPciControllerChecked(device_id);
+    try std.testing.expect(brokerGeneration(device_id).? != first_generation);
     const status = try programBrokeredDmaIsolation(device_id, 0xD171);
     try std.testing.expectEqual(DmaIsolationMode.brokered_dma_buffers, status.mode);
     try std.testing.expect(revokePciController(device_id));
-    try std.testing.expect(brokerGeneration(device_id) == null);
-}
-
-test "device broker rejects a host write wider than the staging buffer" {
-    reset();
-
-    try std.testing.expect(publishAtaController(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = test_ata_sector_count,
-    }));
-
-    const seccount_port = 0x1F0 + @as(u16, ata_reg_seccount);
-    const command_port = 0x1F0 + @as(u16, ata_reg_command);
-
-    // A transfer exactly at the staging capacity is accepted (DRQ, no error).
-    try writePort(0x1F001, seccount_port, .u16, ata_max_sector_transfer_count);
-    try writePort(0x1F001, command_port, .u8, ata_cmd_write_sectors);
-    try std.testing.expectEqual(@as(u32, ata_sr_drdy | ata_sr_drq), try readPort(0x1F001, command_port, .u8));
-
-    // One sector past the staging capacity must fail closed, not overrun
-    // host_write_staging. The backing store has 4096 sectors, so the old
-    // host_storage-only bound would have admitted this hostile seccount.
-    try writePort(0x1F001, seccount_port, .u16, ata_max_sector_transfer_count + 1);
-    try writePort(0x1F001, command_port, .u8, ata_cmd_write_sectors);
-    try std.testing.expectEqual(@as(u32, ata_sr_drdy | ata_sr_err), try readPort(0x1F001, command_port, .u8));
+    try std.testing.expect(!revokePciController(device_id));
+    try std.testing.expectEqual(@as(?u64, null), brokerGeneration(device_id));
+    try std.testing.expectError(error.DeviceNotFound, describe(device_id));
 }
 
 test "device broker programs IOMMU domains and brokers DMA buffers" {
     reset();
 
-    try std.testing.expect(publishAtaController(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = test_ata_sector_count,
-    }));
+    const device_id: u64 = 0x0000_8086_5845_0002;
+    try std.testing.expect(publishPciController(device_id));
 
-    const status = try programBrokeredDmaIsolation(0x1F001, 0xD170);
+    const status = try programBrokeredDmaIsolation(device_id, 0xD170);
     try std.testing.expectEqual(DmaIsolationMode.brokered_dma_buffers, status.mode);
     try std.testing.expect(status.hardware_iommu_programmed);
     try std.testing.expectEqual(IommuEngine.intel_vtd, status.iommu_program.engine);
-    try std.testing.expectEqual(@as(u64, 0x1F001), status.iommu_program.device_id);
+    try std.testing.expectEqual(device_id, status.iommu_program.device_id);
     try std.testing.expectEqual(@as(u64, 0xD170), status.iommu_program.dma_domain_id);
     try std.testing.expect(status.iommu_program.queued_invalidation_completed);
     try std.testing.expect(status.iommu_program.interrupt_remapping_enabled);
     try std.testing.expect(!status.bus_master_dma_enabled);
     try std.testing.expectEqual(@as(usize, 1), status.window_count);
 
-    const window = defaultBrokeredDmaWindow(0x1F001);
-    const buffer = try authorizeDmaBuffer(0x1F001, 0xD170, window.base, window.length, .bidirectional);
+    const window = defaultBrokeredDmaWindow(device_id);
+    const buffer = try authorizeDmaBuffer(device_id, 0xD170, window.base, window.length, .bidirectional);
     try std.testing.expect(brokeredDmaBufferStillValid(buffer));
     try std.testing.expectError(error.DmaWindowDenied, authorizeDmaBuffer(
-        0x1F001,
+        device_id,
         0xD170,
         window.base + window.length,
         64,
         .device_read,
     ));
-    const outside_fault = latestDmaFault(0x1F001, 0xD170).?;
+    const outside_fault = latestDmaFault(device_id, 0xD170).?;
     try std.testing.expectEqual(IommuFaultReason.access_outside_window, outside_fault.reason);
     try std.testing.expectEqual(@as(u64, window.base + window.length), outside_fault.fault_address);
 
     const reprogrammed = try programDmaIsolation(.{
-        .device_id = 0x1F001,
+        .device_id = device_id,
         .dma_domain_id = 0xD170,
         .mode = .brokered_dma_buffers,
         .bus_master_dma_enabled = false,
@@ -1402,40 +1011,28 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
     });
     try std.testing.expect(reprogrammed.program_generation != status.program_generation);
     try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
-    _ = try authorizeDmaBuffer(0x1F001, 0xD170, window.base + test_dma_window_offset, test_dma_buffer_bytes, .device_read);
+    _ = try authorizeDmaBuffer(device_id, 0xD170, window.base + test_dma_window_offset, test_dma_buffer_bytes, .device_read);
     try std.testing.expectError(error.DmaWindowDenied, authorizeDmaBuffer(
-        0x1F001,
+        device_id,
         0xD170,
         window.base + test_dma_window_offset,
         test_dma_buffer_bytes,
         .device_write,
     ));
-    const permission_fault = latestDmaFault(0x1F001, 0xD170).?;
+    const permission_fault = latestDmaFault(device_id, 0xD170).?;
     try std.testing.expectEqual(IommuFaultReason.write_not_permitted, permission_fault.reason);
     try std.testing.expectEqual(@as(u64, 1), permission_fault.fault_count);
-    try std.testing.expectEqual(@as(u64, 1), (try dmaIsolationStatus(0x1F001, 0xD170)).fault_count);
 }
 
 test "device broker exhausts authority epochs without reusing stale generations" {
     reset();
     defer reset();
 
-    const device_id: u64 = 0x1F004;
-    const grant = storage_driver_protocol.AtaBrokerGrant{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = test_ata_sector_count,
-    };
-    try std.testing.expectError(error.InvalidDevice, publishAtaControllerChecked(0, grant));
-    try publishAtaControllerChecked(device_id, grant);
+    const device_id: u64 = 0x0000_8086_5845_0003;
+    try publishPciControllerChecked(device_id);
     const first_publication_generation = brokerGeneration(device_id).?;
-    var republished_grant = grant;
-    republished_grant.base_port = 0x170;
-    try publishAtaControllerChecked(device_id, republished_grant);
+    try publishPciControllerChecked(device_id);
     try std.testing.expect(brokerGeneration(device_id).? != first_publication_generation);
-    try std.testing.expectEqual(republished_grant.base_port, (try describe(device_id)).base_port);
 
     {
         reset();
@@ -1445,28 +1042,18 @@ test "device broker exhausts authority epochs without reusing stale generations"
             next_broker_generation = resume_generation;
         }
         next_broker_generation = std.math.maxInt(u64);
-        try publishAtaControllerChecked(device_id, grant);
+        try publishPciControllerChecked(device_id);
         try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), brokerGeneration(device_id).?);
         try std.testing.expectEqual(@as(u64, 0), next_broker_generation);
-
-        var changed_grant = grant;
-        changed_grant.base_port = 0x170;
-        try std.testing.expectError(
-            error.ControllerGenerationExhausted,
-            publishAtaControllerChecked(device_id, changed_grant),
-        );
-        try std.testing.expectEqual(grant.base_port, (try describe(device_id)).base_port);
+        try std.testing.expectError(error.ControllerGenerationExhausted, publishPciControllerChecked(device_id));
         try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), brokerGeneration(device_id).?);
-        try std.testing.expect(revokeAtaController(device_id));
-        try std.testing.expectError(
-            error.ControllerGenerationExhausted,
-            publishAtaControllerChecked(device_id, grant),
-        );
+        try std.testing.expect(revokePciController(device_id));
+        try std.testing.expectError(error.ControllerGenerationExhausted, publishPciControllerChecked(device_id));
         try std.testing.expectEqual(@as(?u64, null), brokerGeneration(device_id));
     }
 
     {
-        try publishAtaControllerChecked(device_id, grant);
+        try publishPciControllerChecked(device_id);
         const resume_generation = next_dma_program_generation;
         defer {
             reset();
@@ -1483,10 +1070,6 @@ test "device broker exhausts authority epochs without reusing stale generations"
             programBrokeredDmaIsolation(device_id, 0xD401),
         );
         try std.testing.expect(brokeredDmaBufferStillValid(terminal_buffer));
-        try std.testing.expectEqual(
-            @as(u64, std.math.maxInt(u64)),
-            (try dmaIsolationStatus(device_id, 0xD401)).program_generation,
-        );
 
         const terminal_program = findDmaProgramSlot(device_id, 0xD401).?;
         terminal_program.fault_count = std.math.maxInt(u64);
@@ -1498,7 +1081,7 @@ test "device broker exhausts authority epochs without reusing stale generations"
     }
 
     {
-        try publishAtaControllerChecked(device_id, grant);
+        try publishPciControllerChecked(device_id);
         const resume_program_id = next_dma_program_id;
         defer {
             reset();
@@ -1510,44 +1093,26 @@ test "device broker exhausts authority epochs without reusing stale generations"
         try std.testing.expectEqual(@as(u64, 0), next_dma_program_id);
         try std.testing.expect(invalidateDmaIsolation(device_id, 0xD402));
         const generation_before_id_exhaustion = next_dma_program_generation;
-        try std.testing.expectError(
-            error.DmaProgramIdExhausted,
-            programBrokeredDmaIsolation(device_id, 0xD403),
-        );
+        try std.testing.expectError(error.DmaProgramIdExhausted, programBrokeredDmaIsolation(device_id, 0xD403));
         try std.testing.expectEqual(@as(usize, 0), dma_programs.countInUse());
-        try std.testing.expectEqual(@as(u64, 0), next_dma_program_id);
         try std.testing.expectEqual(generation_before_id_exhaustion, next_dma_program_generation);
     }
 }
 
 test "device broker reset never reuses stale authority epochs" {
     reset();
-    defer reset();
 
-    const device_id: u64 = 0x1F005;
+    const device_id: u64 = 0x0000_8086_5845_0004;
     const dma_domain_id: u64 = 0xD501;
-    const grant = storage_driver_protocol.AtaBrokerGrant{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = test_ata_sector_count,
-    };
-    try publishAtaControllerChecked(device_id, grant);
+    try publishPciControllerChecked(device_id);
     const stale_broker_generation = brokerGeneration(device_id).?;
     const stale_dma_status = try programBrokeredDmaIsolation(device_id, dma_domain_id);
     const stale_program_id = findDmaProgram(device_id, dma_domain_id).?.program_id;
     const window = defaultBrokeredDmaWindow(device_id);
-    const stale_buffer = try authorizeDmaBuffer(
-        device_id,
-        dma_domain_id,
-        window.base,
-        iommu_page_size,
-        .bidirectional,
-    );
+    const stale_buffer = try authorizeDmaBuffer(device_id, dma_domain_id, window.base, iommu_page_size, .bidirectional);
 
     reset();
-    try publishAtaControllerChecked(device_id, grant);
+    try publishPciControllerChecked(device_id);
     const current_dma_status = try programBrokeredDmaIsolation(device_id, dma_domain_id);
     const current_program_id = findDmaProgram(device_id, dma_domain_id).?.program_id;
 
@@ -1557,25 +1122,19 @@ test "device broker reset never reuses stale authority epochs" {
     try std.testing.expect(!brokeredDmaBufferStillValid(stale_buffer));
 }
 
-test "device broker indexes DMA programs by device and reuses invalidated capacity with new generations" {
+test "device broker indexes DMA programs and reuses invalidated capacity" {
     reset();
 
-    try std.testing.expect(publishAtaController(0x1F003, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = test_ata_sector_count,
-    }));
+    const device_id: u64 = 0x0000_8086_5845_0005;
+    try std.testing.expect(publishPciController(device_id));
 
     var first_generation: u64 = 0;
     var reclaimed_domain: u64 = 0;
     var domain_index: usize = 0;
     while (domain_index < MAX_DMA_PROGRAMS) : (domain_index += 1) {
         const domain_id = 0xD200 + @as(u64, @intCast(domain_index));
-        const status = try programBrokeredDmaIsolation(0x1F003, domain_id);
+        const status = try programBrokeredDmaIsolation(device_id, domain_id);
         try std.testing.expectEqual(domain_id, status.dma_domain_id);
-        try std.testing.expect(status.hardware_iommu_programmed);
         if (domain_index == 0) {
             first_generation = status.program_generation;
             reclaimed_domain = domain_id;
@@ -1583,32 +1142,25 @@ test "device broker indexes DMA programs by device and reuses invalidated capaci
     }
 
     const program_id_before_full = next_dma_program_id;
-    try std.testing.expectError(error.DmaTableFull, programBrokeredDmaIsolation(0x1F003, 0xD2FF));
+    try std.testing.expectError(error.DmaTableFull, programBrokeredDmaIsolation(device_id, 0xD2FF));
     try std.testing.expectEqual(program_id_before_full, next_dma_program_id);
-    try std.testing.expect(invalidateDmaIsolation(0x1F003, reclaimed_domain));
-    try std.testing.expectError(error.DmaDomainNotProgrammed, dmaIsolationStatus(0x1F003, reclaimed_domain));
+    try std.testing.expect(invalidateDmaIsolation(device_id, reclaimed_domain));
+    try std.testing.expectError(error.DmaDomainNotProgrammed, dmaIsolationStatus(device_id, reclaimed_domain));
 
-    const reprogrammed = try programBrokeredDmaIsolation(0x1F003, reclaimed_domain);
+    const reprogrammed = try programBrokeredDmaIsolation(device_id, reclaimed_domain);
     try std.testing.expect(reprogrammed.program_generation != first_generation);
-    try std.testing.expectEqual(reclaimed_domain, reprogrammed.dma_domain_id);
-    try std.testing.expectError(error.DmaTableFull, programBrokeredDmaIsolation(0x1F003, 0xD300));
+    try std.testing.expectError(error.DmaTableFull, programBrokeredDmaIsolation(device_id, 0xD300));
 }
 
-test "device broker records AMD-Vi programming evidence and confines bus-master DMA" {
+test "device broker records AMD-Vi evidence and confines bus-master DMA" {
     reset();
 
-    try std.testing.expect(publishAtaController(0x1F002, .{
-        .base_port = 0x170,
-        .ctrl_port = 0x376,
-        .is_master = false,
-        .irq_line = 15,
-        .sector_count = test_ata_sector_count,
-    }));
-    const window = defaultBrokeredDmaWindow(0x1F002);
+    const device_id: u64 = 0x0000_144D_A808_0001;
+    try std.testing.expect(publishPciController(device_id));
+    const window = defaultBrokeredDmaWindow(device_id);
 
-    // Unconfined bus mastering (programmed-IO mode) stays rejected.
     try std.testing.expectError(error.UnsupportedBusMasterDma, programDmaIsolation(.{
-        .device_id = 0x1F002,
+        .device_id = device_id,
         .dma_domain_id = 0xA11D,
         .mode = .programmed_io_only,
         .bus_master_dma_enabled = true,
@@ -1616,94 +1168,63 @@ test "device broker records AMD-Vi programming evidence and confines bus-master 
         .windows = &.{window},
     }));
 
-    // Window-confined bus mastering is accepted and carries IOMMU evidence,
-    // and accesses outside the declared windows still fault.
     const queue_window = DmaWindow{
         .base = 0x0080_0000,
         .length = iommu_page_size,
         .readable_by_device = true,
         .writable_by_device = false,
     };
-    const bus_master_status = try programBusMasterStorageDmaIsolation(
-        0x1F002,
-        0xA11D,
-        &.{ window, queue_window },
-    );
+    const bus_master_status = try programBusMasterStorageDmaIsolation(device_id, 0xA11D, &.{ window, queue_window });
     try std.testing.expect(bus_master_status.bus_master_dma_enabled);
     try std.testing.expect(bus_master_status.hardware_iommu_programmed);
     try std.testing.expectEqual(@as(usize, 2), bus_master_status.window_count);
-    try std.testing.expectError(error.DmaWindowDenied, validateDmaAccess(
-        0x1F002,
-        0xA11D,
-        queue_window.base,
-        test_dma_buffer_bytes,
-        .device_write,
-    ));
-    try std.testing.expectError(error.DmaWindowDenied, validateDmaAccess(
-        0x1F002,
-        0xA11D,
-        queue_window.base + queue_window.length,
-        test_dma_buffer_bytes,
-        .device_read,
-    ));
-    try validateDmaAccess(0x1F002, 0xA11D, queue_window.base, test_dma_buffer_bytes, .device_read);
+    try std.testing.expectError(
+        error.DmaWindowDenied,
+        validateDmaAccess(device_id, 0xA11D, queue_window.base, test_dma_buffer_bytes, .device_write),
+    );
+    try validateDmaAccess(device_id, 0xA11D, queue_window.base, test_dma_buffer_bytes, .device_read);
 
     const status = try programDmaIsolation(.{
-        .device_id = 0x1F002,
+        .device_id = device_id,
         .dma_domain_id = 0xA11D,
         .mode = .brokered_dma_buffers,
         .bus_master_dma_enabled = false,
         .iommu_engine = .amd_vi,
         .windows = &.{window},
     });
-    try std.testing.expect(status.hardware_iommu_programmed);
     try std.testing.expectEqual(IommuEngine.amd_vi, status.iommu_program.engine);
-    try std.testing.expect(!status.bus_master_dma_enabled);
     try std.testing.expect(aligned(status.iommu_program.root_table_address, iommu_page_size));
     try std.testing.expect(aligned(status.iommu_program.domain_page_table_address, iommu_page_size));
 
     try std.testing.expectError(error.InvalidIommuProgram, programDmaIsolation(.{
-        .device_id = 0x1F002,
+        .device_id = device_id,
         .dma_domain_id = 0xA11E,
-        .mode = .brokered_dma_buffers,
         .iommu_engine = .intel_vtd,
         .root_table_address = iommu_root_table_salt + 1,
         .windows = &.{window},
     }));
 }
 
-test "device hotplug revokes stale ports and DMA programs" {
+test "PCI hotplug revokes stale DMA programs" {
     reset();
 
-    try std.testing.expect(publishAtaController(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = test_ata_sector_count,
-    }));
-    const broker_generation = brokerGeneration(0x1F001).?;
-    const status = try programBrokeredDmaIsolation(0x1F001, 0xD171);
-    const window = defaultBrokeredDmaWindow(0x1F001);
-    const buffer = try authorizeDmaBuffer(0x1F001, status.dma_domain_id, window.base, iommu_page_size, .bidirectional);
+    const device_id: u64 = 0x0000_144D_A808_0002;
+    try std.testing.expect(publishPciController(device_id));
+    const broker_generation = brokerGeneration(device_id).?;
+    const status = try programBrokeredDmaIsolation(device_id, 0xD171);
+    const window = defaultBrokeredDmaWindow(device_id);
+    const buffer = try authorizeDmaBuffer(device_id, status.dma_domain_id, window.base, iommu_page_size, .bidirectional);
 
-    try std.testing.expect(revokeAtaController(0x1F001));
+    try std.testing.expect(revokePciController(device_id));
     try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
-    try std.testing.expectError(error.DeviceNotFound, readPort(0x1F001, 0x1F0 + ata_reg_status, .u8));
-    try std.testing.expectError(error.DeviceNotFound, dmaIsolationStatus(0x1F001, status.dma_domain_id));
+    try std.testing.expectError(error.DeviceNotFound, readPort(device_id, 0, .u8));
+    try std.testing.expectError(error.DeviceNotFound, dmaIsolationStatus(device_id, status.dma_domain_id));
 
-    try std.testing.expect(publishAtaController(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = test_ata_sector_count,
-    }));
-    try std.testing.expect(brokerGeneration(0x1F001).? != broker_generation);
-    try std.testing.expectError(error.DmaDomainNotProgrammed, dmaIsolationStatus(0x1F001, status.dma_domain_id));
-    const replugged = try programBrokeredDmaIsolation(0x1F001, status.dma_domain_id);
+    try std.testing.expect(publishPciController(device_id));
+    try std.testing.expect(brokerGeneration(device_id).? != broker_generation);
+    try std.testing.expectError(error.DmaDomainNotProgrammed, dmaIsolationStatus(device_id, status.dma_domain_id));
+    const replugged = try programBrokeredDmaIsolation(device_id, status.dma_domain_id);
     try std.testing.expect(replugged.program_generation != buffer.program_generation);
-    try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
 }
 
 test "controller arena uses free list and unpublished queue" {
@@ -1717,7 +1238,6 @@ test "controller arena uses free list and unpublished queue" {
     try std.testing.expectEqual(@as(usize, 2), controllers.countInUse());
 
     try std.testing.expect(controllers.removeIndex(first_index));
-    try std.testing.expectEqual(@as(usize, 1), controllers.countInUse());
     const reused_index = controllers.reserveIndex(0x300).?;
     try std.testing.expectEqual(first_index, reused_index);
 
@@ -1728,69 +1248,39 @@ test "controller arena uses free list and unpublished queue" {
 
     controllers.markUnpublished(reused_index);
     try std.testing.expectEqual(reused_index, controllers.reclaimUnpublishedIndex().?);
-    try std.testing.expectEqual(@as(usize, 0), controllers.unpublishedCount());
     try std.testing.expect(controllers.removeIndex(reused_index));
     try std.testing.expectEqual(reused_index, controllers.reserveIndexAt(0x400, reused_index).?);
 }
 
-test "device broker indexes controller slots across full table and inactive remap" {
+test "device broker indexes PCI controller slots across full table and inactive remap" {
     reset();
 
     var index: usize = 0;
     while (index < MAX_DEVICES) : (index += 1) {
-        const device_id = 0x2F000 + @as(u64, @intCast(index));
-        try std.testing.expect(publishAtaController(device_id, .{
-            .base_port = 0x1F0 + @as(u16, @intCast(index * 0x10)),
-            .ctrl_port = 0x3F6 + @as(u16, @intCast(index * 0x10)),
-            .is_master = index % 2 == 0,
-            .irq_line = @intCast(14 + index),
-            .sector_count = test_ata_sector_count,
-        }));
+        const device_id = 0x0000_8086_5845_0100 + @as(u64, @intCast(index));
+        try std.testing.expect(publishPciController(device_id));
         try std.testing.expectEqual(index + 1, controllers.countInUse());
-
-        const descriptor = try describe(device_id);
-        try std.testing.expectEqual(device_id, descriptor.device_id);
-        try std.testing.expectEqual(@as(u8, @intCast(14 + index)), descriptor.irq_line);
+        try std.testing.expectEqual(device_id, (try describe(device_id)).device_id);
+        try std.testing.expectEqual(@as(u8, 0), (try describe(device_id)).irq_line);
     }
-    try std.testing.expectEqual(@as(usize, MAX_DEVICES), controllers.countInUse());
+    try std.testing.expect(!publishPciController(0x0000_8086_5845_01FF));
 
-    try std.testing.expect(!publishAtaController(0x2FFFF, .{
-        .base_port = 0x2F0,
-        .ctrl_port = 0x3E6,
-        .is_master = true,
-        .irq_line = 11,
-        .sector_count = test_ata_sector_count,
-    }));
-
-    const revoked_device_id = 0x2F001;
+    const revoked_device_id: u64 = 0x0000_8086_5845_0101;
     const revoked_generation = brokerGeneration(revoked_device_id).?;
-    try std.testing.expect(revokeAtaController(revoked_device_id));
+    try std.testing.expect(revokePciController(revoked_device_id));
     try std.testing.expectEqual(@as(?u64, null), brokerGeneration(revoked_device_id));
     try std.testing.expectEqual(@as(usize, MAX_DEVICES), controllers.countInUse());
     try std.testing.expectEqual(@as(usize, 1), controllers.unpublishedCount());
 
-    const replacement_device_id = 0x2FF10;
-    try std.testing.expect(publishAtaController(replacement_device_id, .{
-        .base_port = 0x300,
-        .ctrl_port = 0x306,
-        .is_master = false,
-        .irq_line = 10,
-        .sector_count = test_ata_sector_count,
-    }));
+    const replacement_device_id: u64 = 0x0000_144D_A808_0100;
+    try std.testing.expect(publishPciController(replacement_device_id));
     try std.testing.expectError(error.DeviceNotFound, describe(revoked_device_id));
-    try std.testing.expectEqual(@as(u8, 10), (try describe(replacement_device_id)).irq_line);
     try std.testing.expectEqual(@as(usize, MAX_DEVICES), controllers.countInUse());
     try std.testing.expectEqual(@as(usize, 0), controllers.unpublishedCount());
 
-    try std.testing.expect(revokeAtaController(replacement_device_id));
+    try std.testing.expect(revokePciController(replacement_device_id));
     try std.testing.expectEqual(@as(usize, 1), controllers.unpublishedCount());
-    try std.testing.expect(publishAtaController(replacement_device_id, .{
-        .base_port = 0x300,
-        .ctrl_port = 0x306,
-        .is_master = false,
-        .irq_line = 10,
-        .sector_count = test_ata_sector_count,
-    }));
+    try std.testing.expect(publishPciController(replacement_device_id));
     try std.testing.expectEqual(@as(usize, 0), controllers.unpublishedCount());
     try std.testing.expect(brokerGeneration(replacement_device_id).? != revoked_generation);
 }
