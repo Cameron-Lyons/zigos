@@ -741,6 +741,7 @@ pub fn firstHardwareTargetGate() !void {
         .acpi_rsdp = true,
         .acpi_madt = true,
         .acpi_fadt = true,
+        .acpi_mcfg = true,
         .apic_timer = true,
         .xhci_controller = true,
         .nvme_controller = true,
@@ -759,6 +760,7 @@ pub fn firstHardwareTargetGate() !void {
         .acpi_rsdp = true,
         .acpi_madt = true,
         .acpi_fadt = true,
+        .acpi_mcfg = true,
         .apic_timer = hardware_apic_timer_proof.productionHardwareVerified(),
         .xhci_controller = true,
         .xhci_keyboard_input = hardware_xhci_input_proof.productionHardwareVerified(),
@@ -885,7 +887,6 @@ pub fn driverBoundaryAuditGate() !void {
 
     try networkDriverBrokerRevocationGate();
 }
-
 
 fn networkDriverBrokerRevocationGate() !void {
     const Harness = struct {
