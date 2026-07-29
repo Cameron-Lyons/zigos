@@ -2,7 +2,6 @@ const std = @import("std");
 const console = @import("../utils/console.zig");
 const x86 = @import("../../arch/x86.zig");
 const cpu_baseline = @import("../../arch/cpu_baseline.zig");
-const numfmt = @import("../utils/numfmt.zig");
 
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
 const IA32_TSC_DEADLINE_MSR: u32 = 0x6E0;
@@ -27,17 +26,24 @@ pub const NANOSECONDS_PER_TICK: u64 = 1_000_000_000 / TICKS_PER_SECOND;
 pub const INTERRUPT_VECTOR: u8 = 0x40;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
+pub const Mode = enum {
+    tsc_deadline,
+    calibrated_countdown,
+};
+
 var ticks: u64 = 0;
-var deadline_mode = false;
+var active_mode: Mode = .tsc_deadline;
 var tsc_ticks_per_tick: u64 = 0;
 var next_deadline: u64 = 0;
 
-pub fn init(features: cpu_baseline.Features) void {
-    console.print("Initializing x2APIC timer at ");
-    numfmt.printDec(TICKS_PER_SECOND);
-    console.print(" Hz...\n");
+pub fn init(features: cpu_baseline.Features, mode: Mode) void {
+    if (mode == .tsc_deadline and (!features.tsc_deadline or !features.invariant_tsc)) unreachable;
+
+    console.print("Initializing x2APIC timer...\n");
 
     ticks = 0;
+    next_deadline = 0;
+    active_mode = mode;
     tsc_ticks_per_tick = features.tsc_frequency_hz / TICKS_PER_SECOND;
     if (tsc_ticks_per_tick == 0) @panic("invalid TSC frequency for timer");
 
@@ -50,22 +56,19 @@ pub fn init(features: cpu_baseline.Features) void {
         X2APIC_SPURIOUS_VECTOR_MSR,
         (spurious & ~X2APIC_VECTOR_MASK) | X2APIC_SOFTWARE_ENABLE | SPURIOUS_VECTOR,
     );
-    deadline_mode = features.tsc_deadline and features.invariant_tsc;
-    if (deadline_mode) {
-        x86.writeMsr(
-            X2APIC_LVT_TIMER_MSR,
-            X2APIC_TIMER_MODE_TSC_DEADLINE | INTERRUPT_VECTOR,
-        );
-        scheduleNextDeadline(x86.rdtsc());
-        console.print("x2APIC TSC-deadline mode enabled.\n");
-    } else {
-        initCalibratedPeriodicTimer();
-        console.print("x2APIC calibrated periodic mode enabled.\n");
+    switch (mode) {
+        .tsc_deadline => {
+            x86.writeMsr(
+                X2APIC_LVT_TIMER_MSR,
+                X2APIC_TIMER_MODE_TSC_DEADLINE | INTERRUPT_VECTOR,
+            );
+            scheduleNextDeadline(x86.rdtsc());
+        },
+        .calibrated_countdown => initCalibratedCountdownTimer(),
     }
-    console.print("x2APIC timer initialized!\n");
 }
 
-fn initCalibratedPeriodicTimer() void {
+fn initCalibratedCountdownTimer() void {
     x86.writeMsr(
         X2APIC_LVT_TIMER_MSR,
         X2APIC_TIMER_MASKED | INTERRUPT_VECTOR,
@@ -95,7 +98,7 @@ fn scheduleNextDeadline(now: u64) void {
 
 pub fn handleInterrupt() void {
     ticks +%= 1;
-    if (deadline_mode) scheduleNextDeadline(x86.rdtsc());
+    if (active_mode == .tsc_deadline) scheduleNextDeadline(x86.rdtsc());
     x86.writeMsr(X2APIC_EOI_MSR, 0);
 }
 
