@@ -667,6 +667,10 @@ fn validateNuc11tnki5KernelProofSources(
     const isr_path = "src/kernel/interrupts/isr.zig";
     const interrupt_stubs_path = "src/kernel/interrupts/interrupt64.S";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
+    const timer_path = "src/kernel/timer/timer.zig";
+    const qemu_harness_path = "scripts/qemu-harness.sh";
+    const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
+    const cpu_baseline_path = "src/arch/cpu_baseline.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
     const console_path = "src/kernel/utils/console.zig";
     const legacy_vga_path = "src/kernel/drivers/vga.zig";
@@ -737,6 +741,22 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 runtime initialization source is missing: {s}", .{runtime_init_path});
         return;
     }
+    if (!common.pathExists(io, timer_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 timer source is missing: {s}", .{timer_path});
+        return;
+    }
+    if (!common.pathExists(io, qemu_harness_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 QEMU harness is missing: {s}", .{qemu_harness_path});
+        return;
+    }
+    if (!common.pathExists(io, ci_setup_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 CI setup action is missing: {s}", .{ci_setup_path});
+        return;
+    }
+    if (!common.pathExists(io, cpu_baseline_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 CPU baseline source is missing: {s}", .{cpu_baseline_path});
+        return;
+    }
     if (!common.pathExists(io, permission_review_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 permission review source is missing: {s}", .{permission_review_path});
         return;
@@ -776,6 +796,10 @@ fn validateNuc11tnki5KernelProofSources(
     const isr_source = try common.readFileAlloc(allocator, io, isr_path, common.source_file_max_bytes);
     const interrupt_stubs_source = try common.readFileAlloc(allocator, io, interrupt_stubs_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
+    const timer_source = try common.readFileAlloc(allocator, io, timer_path, common.source_file_max_bytes);
+    const qemu_harness_source = try common.readFileAlloc(allocator, io, qemu_harness_path, common.source_file_max_bytes);
+    const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
+    const cpu_baseline_source = try common.readFileAlloc(allocator, io, cpu_baseline_path, common.source_file_max_bytes);
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
@@ -902,34 +926,112 @@ fn validateNuc11tnki5KernelProofSources(
             }
         }
     }
-    if (std.mem.indexOf(u8, isr_source, "const PIC_MASTER_MASK: u8 = ~PIC_TIMER_IRQ_BIT") == null) {
-        try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must keep all legacy PIC lines except the timer masked", .{});
-    }
-    const required_timer_only_pic_snippets = [_][]const u8{
-        "const PIC_MASTER_NO_SLAVE: u8 = 0",
-        "setKernelGate(TIMER_IRQ_VECTOR, &irq0)",
-        "if (vector != TIMER_IRQ_VECTOR) unreachable",
+    const required_x2apic_interrupt_snippets = [_][]const u8{
+        "const PIC_MASK_ALL: u8 = 0xFF",
+        "io.outb(PIC_MASTER_DATA_PORT, PIC_MASK_ALL)",
+        "io.outb(PIC_SLAVE_DATA_PORT, PIC_MASK_ALL)",
+        "setKernelGate(timer.INTERRUPT_VECTOR, &isr64)",
+        "setKernelGate(timer.SPURIOUS_VECTOR, &isr255)",
     };
-    for (required_timer_only_pic_snippets) |snippet| {
+    for (required_x2apic_interrupt_snippets) |snippet| {
         if (std.mem.indexOf(u8, isr_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 legacy PIC fallback must remain timer-only: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must use x2APIC timer vectors with both legacy PICs masked: {s}", .{snippet});
         }
     }
     const retired_pic_surface_snippets = [_][]const u8{
-        "PIC_SLAVE_",
+        "PIC_EOI",
+        "PIC_ICW",
+        "PIC_TIMER_IRQ_BIT",
+        "PIC_MASTER_NO_SLAVE",
         "IRQ_SLAVE_BASE_VECTOR",
         "irq_stubs",
+        "remapPIC",
+        "irqHandler",
+        "extern fn irq0",
         "extern fn irq1()",
     };
     for (retired_pic_surface_snippets) |snippet| {
         if (std.mem.indexOf(u8, isr_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must not restore unused slave PIC or IRQ stub surface: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must not restore legacy PIC dispatch or IRQ stub surface: {s}", .{snippet});
         }
     }
-    if (std.mem.indexOf(u8, interrupt_stubs_source, "IRQ 0, 32") == null or
-        std.mem.indexOf(u8, interrupt_stubs_source, "IRQ 1, 33") != null)
-    {
-        try common.addError(errors, allocator, "NUC11TNKi5 interrupt assembly must expose only the legacy timer IRQ stub", .{});
+    const required_x2apic_stubs = [_][]const u8{
+        "ISR_NOERRCODE 64",
+        "ISR_NOERRCODE 255",
+    };
+    for (required_x2apic_stubs) |snippet| {
+        if (std.mem.indexOf(u8, interrupt_stubs_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 interrupt assembly must expose the x2APIC timer surface: {s}", .{snippet});
+        }
+    }
+    const retired_irq_assembly_snippets = [_][]const u8{
+        ".macro IRQ",
+        "irq_common_stub",
+        ".extern irqHandler",
+        "IRQ 0, 32",
+    };
+    for (retired_irq_assembly_snippets) |snippet| {
+        if (std.mem.indexOf(u8, interrupt_stubs_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 interrupt assembly must not restore legacy PIC IRQ dispatch: {s}", .{snippet});
+        }
+    }
+    const required_tsc_deadline_timer_snippets = [_][]const u8{
+        "IA32_TSC_DEADLINE_MSR",
+        "X2APIC_LVT_TIMER_MSR",
+        "X2APIC_TIMER_MODE_TSC_DEADLINE",
+        "X2APIC_TIMER_MODE_PERIODIC",
+        "initCalibratedPeriodicTimer",
+        "x86.writeMsr(X2APIC_EOI_MSR, 0)",
+        "x86.writeMsr(IA32_TSC_DEADLINE_MSR, deadline)",
+    };
+    for (required_tsc_deadline_timer_snippets) |snippet| {
+        if (std.mem.indexOf(u8, timer_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 timer must prefer TSC-deadline mode and retain an x2APIC-only virtualization path: {s}", .{snippet});
+        }
+    }
+    const required_accelerated_qemu_snippets = [_][]const u8{
+        "qemu_harness_accelerator",
+        "-c /dev/kvm",
+        "QEMU_HARNESS_COMMAND+=(-accel",
+        "printf '%s\\n' \"host\"",
+    };
+    for (required_accelerated_qemu_snippets) |snippet| {
+        if (std.mem.indexOf(u8, qemu_harness_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 QEMU validation must use hardware-backed x2APIC when KVM is available: {s}", .{snippet});
+        }
+    }
+    const required_ci_kvm_snippets = [_][]const u8{
+        "Enable KVM acceleration when available",
+        "sudo chmod 0666 /dev/kvm",
+        "test -w /dev/kvm",
+    };
+    for (required_ci_kvm_snippets) |snippet| {
+        if (std.mem.indexOf(u8, ci_setup_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 CI setup must expose KVM to QEMU jobs when the runner supports it: {s}", .{snippet});
+        }
+    }
+    const retired_pit_timer_snippets = [_][]const u8{
+        "PIT_CHANNEL0",
+        "PIT_COMMAND",
+        "PIT_FREQUENCY",
+        "io.outb",
+    };
+    for (retired_pit_timer_snippets) |snippet| {
+        if (std.mem.indexOf(u8, timer_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 timer must not restore PIT programming: {s}", .{snippet});
+        }
+    }
+    const required_timer_cpu_baseline_snippets = [_][]const u8{
+        "x2apic",
+        "tsc_deadline",
+        "invariant_tsc",
+        "tsc_frequency_hz",
+        "decodeTscFrequency",
+    };
+    for (required_timer_cpu_baseline_snippets) |snippet| {
+        if (std.mem.indexOf(u8, cpu_baseline_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 CPU baseline must expose the x2APIC timer selection contract: {s}", .{snippet});
+        }
     }
     if (std.mem.indexOf(u8, permission_review_source, "const xhci = @import") == null) {
         try common.addError(errors, allocator, "NUC11TNKi5 permission review must retain the xHCI HID input source", .{});

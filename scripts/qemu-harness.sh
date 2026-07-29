@@ -19,6 +19,8 @@ qemu_harness_default_memory() {
 qemu_harness_accelerator() {
   if [ -n "${QEMU_ACCELERATOR:-}" ]; then
     printf '%s\n' "$QEMU_ACCELERATOR"
+  elif [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+    printf '%s\n' "kvm"
   fi
 }
 
@@ -35,9 +37,9 @@ qemu_harness_cpu_model() {
     return
   fi
 
-  # 'max' satisfies the mandatory long-mode, NX, SMEP, SMAP, and UMIP contract;
-  # the legacy qemu64 model does not advertise the complete baseline.
-  printf '%s\n' "max"
+  # Current software emulators expose the mandatory x2APIC contract through
+  # 'max'. Pinning the TSC rate matches the QEMU boot profile calibration.
+  printf '%s\n' "max,+x2apic,tsc-frequency=2400000000"
 }
 
 qemu_harness_profile_memory() {

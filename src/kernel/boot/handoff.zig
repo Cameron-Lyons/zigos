@@ -247,14 +247,50 @@ pub fn framebufferInfo(info: Info) Error!framebuffer.Info {
     }) catch error.InvalidFramebuffer;
 }
 
-pub fn commandLineContains(info: Info, needle: []const u8) bool {
-    if (!info.hasCommandLine() or needle.len == 0) return false;
+pub fn commandLineHasFlag(info: Info, flag: []const u8) bool {
+    const command_line = commandLineBytes(info) orelse return false;
+    return commandLineHasFlagBytes(command_line, flag);
+}
 
-    const scan_length = std.math.cast(usize, info.cmdline_length) orelse return false;
-    const bytes = checkedPhysicalBytes(info.cmdline_addr, scan_length) orelse return false;
+fn commandLineHasFlagBytes(command_line: []const u8, flag: []const u8) bool {
+    if (flag.len == 0) return false;
+    var arguments = std.mem.tokenizeAny(u8, command_line, " \t");
+    while (arguments.next()) |argument| {
+        if (std.mem.eql(u8, argument, flag)) return true;
+    }
+    return false;
+}
+
+pub fn commandLineU64(info: Info, key: []const u8) ?u64 {
+    const command_line = commandLineBytes(info) orelse return null;
+    return commandLineU64Bytes(command_line, key);
+}
+
+fn commandLineBytes(info: Info) ?[]const u8 {
+    if (!info.hasCommandLine()) return null;
+
+    const scan_length = std.math.cast(usize, info.cmdline_length) orelse return null;
+    const bytes = checkedPhysicalBytes(info.cmdline_addr, scan_length) orelse return null;
     var len: usize = 0;
     while (len < bytes.len and bytes[len] != 0) : (len += 1) {}
-    return std.mem.indexOf(u8, bytes[0..len], needle) != null;
+    return bytes[0..len];
+}
+
+fn commandLineU64Bytes(command_line: []const u8, key: []const u8) ?u64 {
+    if (key.len == 0) return null;
+    var value: ?u64 = null;
+    var arguments = std.mem.tokenizeAny(u8, command_line, " \t");
+    while (arguments.next()) |argument| {
+        if (argument.len <= key.len + 1 or
+            !std.mem.eql(u8, argument[0..key.len], key) or
+            argument[key.len] != '=')
+        {
+            continue;
+        }
+        if (value != null) return null;
+        value = std.fmt.parseInt(u64, argument[key.len + 1 ..], 10) catch return null;
+    }
+    return value;
 }
 
 const PhysicalExtent = struct {
@@ -367,6 +403,27 @@ test "Multiboot2 physical extents reject target-usize and 4 GiB wrap" {
     try std.testing.expect(checkedPhysicalExtent(0, MULTIBOOT2_INFO_HEADER_BYTES) == null);
 }
 
+test "command line parsing requires exact flags and unique integer keys" {
+    try std.testing.expect(commandLineHasFlagBytes("model_inventory qemu_tsc_frequency_hz=2400000000", "model_inventory"));
+    try std.testing.expect(!commandLineHasFlagBytes("not_model_inventory", "model_inventory"));
+    try std.testing.expectEqual(
+        @as(?u64, 2_400_000_000),
+        commandLineU64Bytes("model_inventory qemu_tsc_frequency_hz=2400000000", "qemu_tsc_frequency_hz"),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        commandLineU64Bytes("not_qemu_tsc_frequency_hz=1", "qemu_tsc_frequency_hz"),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        commandLineU64Bytes("qemu_tsc_frequency_hz=1 qemu_tsc_frequency_hz=2", "qemu_tsc_frequency_hz"),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        commandLineU64Bytes("qemu_tsc_frequency_hz=invalid", "qemu_tsc_frequency_hz"),
+    );
+}
+
 test "captured Multiboot APIs reject wrapping outer extents before dereference" {
     const prior_magic = zigos_multiboot_magic;
     const prior_info_address = zigos_multiboot_info_addr;
@@ -399,7 +456,7 @@ test "captured Multiboot APIs reject wrapping outer extents before dereference" 
     };
     try std.testing.expect(capturedMemoryMap(info) == null);
     try std.testing.expect(capturedMemoryMapSummary(info) == null);
-    try std.testing.expect(!commandLineContains(info, "model_inventory"));
+    try std.testing.expect(!commandLineHasFlag(info, "model_inventory"));
 }
 
 test "Multiboot2 handoff validates rgb framebuffer descriptors" {
