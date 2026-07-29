@@ -243,6 +243,7 @@ pub fn main(init: std.process.Init) !void {
     try validateSecureByDesignReleaseGate(allocator, io, &errors, parsed_prod.value);
     try validateFirstHardwareTarget(allocator, io, &errors, parsed_prod.value);
     try validateProdReadinessManifest(allocator, io, &errors, parsed_prod.value, parsed_coverage.value);
+    try validateBenchmarkEnvironmentGate(allocator, io, &errors);
     try validateSyntheticUserspaceImageMarkers(allocator, io, &errors);
 
     if (errors.items.len > 0) {
@@ -262,6 +263,91 @@ pub fn main(init: std.process.Init) !void {
         "Production readiness OK: {d} tracks, {d} requirement references\n",
         .{ tracks.len, requirement_refs },
     );
+}
+
+fn validateBenchmarkEnvironmentGate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const capture_path = "scripts/capture-kernel-benchmark.sh";
+    const capture_source = try readRequiredSource(allocator, io, errors, capture_path) orelse return;
+    const capture_snippets = [_][]const u8{
+        "qemu_harness_accelerator",
+        "guest output must not declare its host accelerator",
+        "BENCH:ENV:accelerator=%s",
+    };
+    for (capture_snippets) |snippet| {
+        if (std.mem.indexOf(u8, capture_source, snippet) == null) {
+            try common.addError(errors, allocator, "Benchmark capture must retain host-owned accelerator evidence: {s}", .{snippet});
+        }
+    }
+
+    const checker_path = "tools/check_kernel_benchmarks.zig";
+    const checker_source = try readRequiredSource(allocator, io, errors, checker_path) orelse return;
+    const checker_snippets = [_][]const u8{
+        "BENCH:ENV:",
+        "performanceGatesEnforced",
+        "software-emulation functional run",
+        "Duplicate benchmark accelerator record",
+    };
+    for (checker_snippets) |snippet| {
+        if (std.mem.indexOf(u8, checker_source, snippet) == null) {
+            try common.addError(errors, allocator, "Typed benchmark gate must retain accelerator-scoped validation: {s}", .{snippet});
+        }
+    }
+
+    const workflow_path = ".github/workflows/ci.yml";
+    const workflow_source = try readRequiredSource(allocator, io, errors, workflow_path) orelse return;
+    if (std.mem.indexOf(u8, workflow_source, "command: QEMU_ACCELERATOR=kvm ./scripts/zig.sh build -Doptimize=ReleaseFast benchmark") == null) {
+        try common.addError(errors, allocator, "Hosted benchmark CI must require KVM for cycle-regression enforcement", .{});
+    }
+
+    const baseline_path = "benchmarks/kernel-baseline.txt";
+    const baseline_source = try readRequiredSource(allocator, io, errors, baseline_path) orelse return;
+    if (std.mem.indexOf(u8, baseline_source, "# KVM baselines") == null) {
+        try common.addError(errors, allocator, "Kernel benchmark baselines must remain KVM-calibrated instead of software-emulator-derived", .{});
+    }
+    try validateKvmBaselineAllowances(allocator, errors, baseline_source);
+}
+
+fn validateKvmBaselineAllowances(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    source: []const u8,
+) !void {
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var line_number: usize = 0;
+    while (lines.next()) |raw_line| {
+        line_number += 1;
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+
+        var tokens = std.mem.tokenizeAny(u8, line, " \t");
+        _ = tokens.next() orelse {
+            try common.addError(errors, allocator, "KVM baseline line {d} is malformed", .{line_number});
+            continue;
+        };
+        _ = tokens.next() orelse {
+            try common.addError(errors, allocator, "KVM baseline line {d} is malformed", .{line_number});
+            continue;
+        };
+        const allowance_text = tokens.next() orelse {
+            try common.addError(errors, allocator, "KVM baseline line {d} is malformed", .{line_number});
+            continue;
+        };
+        if (tokens.next() != null) {
+            try common.addError(errors, allocator, "KVM baseline line {d} is malformed", .{line_number});
+            continue;
+        }
+        const allowance = std.fmt.parseInt(u64, allowance_text, 10) catch {
+            try common.addError(errors, allocator, "KVM baseline line {d} has an invalid regression allowance", .{line_number});
+            continue;
+        };
+        if (allowance > 50) {
+            try common.addError(errors, allocator, "KVM baseline line {d} exceeds the 50 percent regression allowance", .{line_number});
+        }
+    }
 }
 
 fn validateSecureByDesignReleaseGate(
@@ -3059,6 +3145,20 @@ test "synthetic userspace marker gate rejects unmarked fixture" {
         "const image = task_runtime.syntheticUserspaceImage(\"label\", \"entry\");\n",
     );
     try std.testing.expect(errors.items.len > 0);
+}
+
+test "KVM baseline policy rejects loose regression allowances" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var errors = std.ArrayList([]const u8).empty;
+    try validateKvmBaselineAllowances(
+        arena_state.allocator(),
+        &errors,
+        "bench.tight 10.00 50\nbench.loose 10.00 51\n",
+    );
+    try std.testing.expectEqual(@as(usize, 1), errors.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, errors.items[0], "exceeds the 50 percent") != null);
 }
 
 test "synthetic userspace marker gate accepts model-only marker" {

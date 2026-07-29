@@ -183,6 +183,11 @@ legacy BIOS boot is not a supported execution path.
 The installed benchmark ELF retains symbols for diagnostics, while its boot
 media contains a separately linked debug-stripped derivative so firmware never
 parses the suite's large non-loadable debug sections.
+Benchmark captures append a host-derived accelerator record after the guest
+exits. Hosted performance CI pins QEMU to KVM and enforces the checked-in cycle
+baselines and hard ceilings; local software-emulation runs still validate the
+complete report, checksums, summaries, and quality gates, but report cycle
+ceilings as not enforced because those measurements are not hardware-comparable.
 Native storage boots attach the store through NVMe rather than an emulated
 legacy IDE controller, matching the first hardware target and production policy.
 After validating the required CPU baseline, the kernel enables EFER.NXE and
