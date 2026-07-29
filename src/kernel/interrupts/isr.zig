@@ -1,7 +1,6 @@
 const std = @import("std");
 const gdt = @import("gdt64.zig");
 const idt = @import("idt64.zig");
-const keyboard = @import("../drivers/keyboard.zig");
 const io = @import("../utils/io.zig");
 
 const GateHandler = *const fn () callconv(.c) void;
@@ -14,7 +13,6 @@ const PAGE_FAULT_VECTOR: u32 = 14;
 const IRQ_BASE_VECTOR: u8 = 32;
 const IRQ_SLAVE_BASE_VECTOR: u32 = 40;
 const TIMER_IRQ_VECTOR: u32 = 32;
-const KEYBOARD_IRQ_VECTOR: u32 = 33;
 const SYSCALL_VECTOR: u8 = 128;
 const NATIVE_SYSCALL_VECTOR: u8 = 129;
 
@@ -31,12 +29,10 @@ const PIC_SLAVE_OFFSET: u8 = 0x28;
 const PIC_MASTER_HAS_SLAVE_ON_IRQ2: u8 = 0x04;
 const PIC_SLAVE_CASCADE_ID: u8 = 0x02;
 const PIC_TIMER_IRQ_BIT: u8 = 1 << 0;
-const PIC_KEYBOARD_IRQ_BIT: u8 = 1 << 1;
-// Only the PIT and the PS/2 keyboard have handlers; every other line stays
-// masked (including the slave cascade - no slave device is serviced) so an
-// unowned device cannot inject interrupts the dispatch table would drop on
-// the floor after a blind EOI.
-const PIC_MASTER_MASK: u8 = ~(PIC_TIMER_IRQ_BIT | PIC_KEYBOARD_IRQ_BIT);
+// Only the PIT has a legacy PIC handler. Every other line stays masked
+// (including the slave cascade) so an unowned device cannot inject interrupts
+// the dispatch table would drop on the floor after a blind EOI.
+const PIC_MASTER_MASK: u8 = ~PIC_TIMER_IRQ_BIT;
 const PIC_SLAVE_MASK_ALL: u8 = 0xFF;
 
 extern fn isr0() void;
@@ -254,8 +250,6 @@ pub export fn irqHandler(regs: *Registers) void {
     } else if (vector == TIMER_IRQ_VECTOR) {
         const timer = @import("../timer/timer.zig");
         timer.handleInterrupt();
-    } else if (vector == KEYBOARD_IRQ_VECTOR) {
-        keyboard.handleInterrupt();
     }
 }
 

@@ -663,7 +663,9 @@ fn validateNuc11tnki5KernelProofSources(
     const device_inventory_path = "src/native/drivers/device_inventory.zig";
     const service_bootstrap_path = "src/native/session/service_bootstrap.zig";
     const session_service_bootstrap_path = "src/native/session/session_service_bootstrap.zig";
-    const keyboard_path = "src/kernel/drivers/keyboard.zig";
+    const isr_path = "src/kernel/interrupts/isr.zig";
+    const runtime_init_path = "src/kernel/boot/init/runtime.zig";
+    const permission_review_path = "src/native/policy/permission_review_service.zig";
     const xhci_path = "src/kernel/drivers/xhci.zig";
     const nvme_path = "src/kernel/drivers/nvme.zig";
     const i225_path = "src/kernel/drivers/intel_i225.zig";
@@ -715,8 +717,16 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 session service bootstrap source is missing: {s}", .{session_service_bootstrap_path});
         return;
     }
-    if (!common.pathExists(io, keyboard_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 keyboard bootstrap source is missing: {s}", .{keyboard_path});
+    if (!common.pathExists(io, isr_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 interrupt source is missing: {s}", .{isr_path});
+        return;
+    }
+    if (!common.pathExists(io, runtime_init_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 runtime initialization source is missing: {s}", .{runtime_init_path});
+        return;
+    }
+    if (!common.pathExists(io, permission_review_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 permission review source is missing: {s}", .{permission_review_path});
         return;
     }
     if (!common.pathExists(io, nvme_path)) {
@@ -743,7 +753,9 @@ fn validateNuc11tnki5KernelProofSources(
     const device_inventory_source = try common.readFileAlloc(allocator, io, device_inventory_path, common.source_file_max_bytes);
     const service_bootstrap_source = try common.readFileAlloc(allocator, io, service_bootstrap_path, common.source_file_max_bytes);
     const session_service_bootstrap_source = try common.readFileAlloc(allocator, io, session_service_bootstrap_path, common.source_file_max_bytes);
-    const keyboard_source = try common.readFileAlloc(allocator, io, keyboard_path, common.source_file_max_bytes);
+    const isr_source = try common.readFileAlloc(allocator, io, isr_path, common.source_file_max_bytes);
+    const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
+    const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
@@ -780,7 +792,7 @@ fn validateNuc11tnki5KernelProofSources(
         ".platform_policy",
         "device inventory refuses synthetic records for production driver binding",
         "device inventory requires target-grade NVMe for production storage binding",
-        "device inventory refuses PS/2 bootstrap for production input binding",
+        "device inventory accepts only target xHCI input hardware",
     };
     for (required_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) == null) {
@@ -799,7 +811,7 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const retired_device_inventory_binding_snippets = [_][]const u8{
-        ".input_device => source == .ps2_bootstrap",
+        "ps2_bootstrap",
         ".ata_bootstrap",
         "AtaBrokerGrant",
     };
@@ -846,24 +858,33 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "NUC11TNKi5 hosted service bootstrap source must keep explicit modeled inventory snippet: {s}", .{snippet});
         }
     }
-    const Ps2SeedSource = struct {
+    const retired_legacy_input_snippets = [_][]const u8{
+        "keyboard.zig",
+        "KEYBOARD_IRQ_VECTOR",
+        "PIC_KEYBOARD_IRQ_BIT",
+        "deferInputDataPlaneToUserspace",
+        "keyboard.has_char()",
+    };
+    const modern_input_sources = [_]struct {
         label: []const u8,
         source: []const u8,
+    }{
+        .{ .label = isr_path, .source = isr_source },
+        .{ .label = runtime_init_path, .source = runtime_init_source },
+        .{ .label = permission_review_path, .source = permission_review_source },
     };
-    const retired_ps2_input_seed_snippets = [_][]const u8{
-        "device_inventory.registerDetected(.input_device, 0x8042_0001, .ps2_bootstrap, false)",
-    };
-    const ps2_seed_sources = [_]Ps2SeedSource{
-        .{ .label = devices_path, .source = devices_source },
-        .{ .label = session_service_bootstrap_path, .source = session_service_bootstrap_source },
-        .{ .label = keyboard_path, .source = keyboard_source },
-    };
-    for (ps2_seed_sources) |source_check| {
-        for (retired_ps2_input_seed_snippets) |snippet| {
+    for (modern_input_sources) |source_check| {
+        for (retired_legacy_input_snippets) |snippet| {
             if (std.mem.indexOf(u8, source_check.source, snippet) != null) {
-                try common.addError(errors, allocator, "NUC11TNKi5 source {s} must not seed production input through PS/2 bootstrap: {s}", .{ source_check.label, snippet });
+                try common.addError(errors, allocator, "NUC11TNKi5 input path must not reintroduce legacy kernel keyboard snippet in {s}: {s}", .{ source_check.label, snippet });
             }
         }
+    }
+    if (std.mem.indexOf(u8, isr_source, "const PIC_MASTER_MASK: u8 = ~PIC_TIMER_IRQ_BIT") == null) {
+        try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must keep all legacy PIC lines except the timer masked", .{});
+    }
+    if (std.mem.indexOf(u8, permission_review_source, "const xhci = @import") == null) {
+        try common.addError(errors, allocator, "NUC11TNKi5 permission review must retain the xHCI HID input source", .{});
     }
     const required_apic_snippets = [_][]const u8{
         "TimerEvidenceSource",
