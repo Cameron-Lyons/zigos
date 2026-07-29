@@ -3,6 +3,7 @@ const std = @import("std");
 const cpu_baseline = @import("../../arch/cpu_baseline.zig");
 const firmware_memory_map = @import("../../kernel/memory/firmware_memory_map.zig");
 const frame_allocator = @import("../../kernel/memory/frame_allocator.zig");
+const page_table64 = @import("../../kernel/memory/page_table64.zig");
 const abi = @import("../../native/core/abi.zig");
 const crypto_hash = @import("../../native/core/crypto_hash.zig");
 const ids = @import("../../native/core/ids.zig");
@@ -17,6 +18,7 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(cpu_baseline);
     std.testing.refAllDecls(firmware_memory_map);
     std.testing.refAllDecls(frame_allocator);
+    std.testing.refAllDecls(page_table64);
     std.testing.refAllDecls(abi);
     std.testing.refAllDecls(crypto_hash);
     std.testing.refAllDecls(ids);

@@ -1,5 +1,5 @@
 const std = @import("std");
-const paging = @import("paging.zig");
+const paging = @import("paging_select.zig");
 const vga = @import("../drivers/vga.zig");
 
 // User-memory validation and user/kernel copies are owned by the native syscall
@@ -10,7 +10,7 @@ const vga = @import("../drivers/vga.zig");
 // this kernel identity-maps the low 128 MiB, so that range held no mappings
 // and nothing was ever protected.
 
-const PAGE_SIZE_U32: u32 = 0x1000;
+const PAGE_SIZE: usize = 0x1000;
 
 // Linker-script symbols bounding the region to write-protect: .multiboot,
 // .text and .rodata (the measured region), then the embedded userspace ELF
@@ -23,16 +23,14 @@ extern const __kernel_measure_start: u8;
 extern const __kernel_archive_end: u8;
 
 pub fn protectKernelMemory() void {
-    const image_start = std.math.cast(u32, @intFromPtr(&__kernel_measure_start)) orelse
-        @panic("kernel image starts outside the 32-bit pager");
-    const image_end = std.math.cast(u32, @intFromPtr(&__kernel_archive_end)) orelse
-        @panic("kernel image ends outside the 32-bit pager");
+    const image_start = @intFromPtr(&__kernel_measure_start);
+    const image_end = @intFromPtr(&__kernel_archive_end);
 
-    var addr = image_start & ~(PAGE_SIZE_U32 - 1);
-    const rounded_image_end = std.math.add(u32, image_end, PAGE_SIZE_U32 - 1) catch
-        @panic("kernel image protection extent overflows the 32-bit pager");
-    const end = rounded_image_end & ~(PAGE_SIZE_U32 - 1);
-    while (addr < end) : (addr += PAGE_SIZE_U32) {
+    var addr = image_start & ~(PAGE_SIZE - 1);
+    const rounded_image_end = std.math.add(usize, image_end, PAGE_SIZE - 1) catch
+        @panic("kernel image protection extent overflows the native pager");
+    const end = rounded_image_end & ~(PAGE_SIZE - 1);
+    while (addr < end) : (addr += PAGE_SIZE) {
         paging.setPageReadOnly(addr);
     }
     // Without CR0.WP the read-only bits do not bind supervisor-mode writes

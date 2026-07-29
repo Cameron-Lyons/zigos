@@ -3,14 +3,14 @@
 // `bootstrap_nvme_inventory_shim` data plane with actual register access,
 // admin-queue setup, and polled command completion.
 //
-// Memory model assumptions (see src/kernel/memory/paging.zig): the kernel
+// Memory model assumptions (see src/kernel/memory/paging_select.zig): the kernel
 // identity-maps the first 128 MiB, so frames returned by alloc_frames have
 // phys == virt and are usable directly as DMA/PRP targets. The controller BAR
 // lives above the identity-mapped window, so we identity-map its pages
 // (virt == phys) with caching disabled before touching registers.
 
 const console = @import("../utils/console.zig");
-const paging = @import("../memory/paging.zig");
+const paging = @import("../memory/paging_select.zig");
 const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
