@@ -456,7 +456,7 @@ pub fn generatedUserspaceArchiveMatchesManifest(manifest: *const BuildArtifactMa
 fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, artifact: anytype) bool {
     const spec = userspace_boot_registry.find(artifact.bundle_id) orelse return false;
     userspace_boot_registry.validateGeneratedArtifactMatchesSpec(spec, artifact) catch return false;
-    const file = embeddedFileFromArtifact(artifact);
+    const file = embedded_file.File.fromChunkedArtifact(artifact);
     if (!file.isPresent()) return false;
     if (!artifact.signed) return false;
     if (artifact.file_size_bytes != file.byte_len) return false;
@@ -470,14 +470,6 @@ fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, arti
     if (artifact.bootstrap_mailbox_address != inspection.bootstrap_mailbox_address) return false;
     if (artifact.segment_count != inspection.executable_image.segment_count) return false;
     return true;
-}
-
-fn embeddedFileFromArtifact(artifact: anytype) embedded_file.File {
-    return embedded_file.File.fromChunks(
-        artifact.data.byte_len,
-        artifact.data.chunk_pool,
-        artifact.data.chunk_indices,
-    );
 }
 
 pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {

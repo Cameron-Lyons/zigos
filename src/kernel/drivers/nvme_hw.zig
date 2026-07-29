@@ -10,7 +10,7 @@
 // (virt == phys) with caching disabled before touching registers.
 
 const console = @import("../utils/console.zig");
-const builtin = @import("builtin");
+const spin = @import("../utils/spin.zig");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("../platform/dmar.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
@@ -190,7 +190,7 @@ fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
     while (spins < READY_SPIN_LIMIT) : (spins += 1) {
         if (controller.fatal()) return false;
         if (controller.ready() == want_ready) return true;
-        spinHint();
+        spin.hint();
     }
     return false;
 }
@@ -283,7 +283,7 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
             if (((status_dword >> 17) & 0x7FFF) != 0) return error.CommandFailed;
             return;
         }
-        spinHint();
+        spin.hint();
     }
     return error.CommandTimeout;
 }
@@ -354,14 +354,6 @@ fn zeroFrame(phys: u32) void {
     // bulk non-volatile @memset is safe and far cheaper than a byte loop.
     const bytes: [*]u8 = @ptrFromInt(phys);
     @memset(bytes[0..PAGE_SIZE], 0);
-}
-
-fn spinHint() void {
-    if (comptime builtin.cpu.arch == .x86_64) {
-        asm volatile ("pause");
-    } else {
-        asm volatile ("" ::: .{ .memory = true });
-    }
 }
 
 // ---- Storage backend integration ----------------------------------------

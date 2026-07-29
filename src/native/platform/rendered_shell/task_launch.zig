@@ -1,14 +1,91 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../../core/abi.zig");
+const event_ledger = @import("../event_ledger.zig");
 const generated_image_fixtures = @import("../../task/generated_image_fixtures.zig");
+const ids = @import("../../core/ids.zig");
 const native_ux = @import("../native_ux.zig");
 const shared_memory = @import("../../kernel_api/shared_memory.zig");
 const package_service = @import("../../services/package_service.zig");
+const storage_service = @import("../../storage/storage_service.zig");
+const workspace = @import("../../storage/workspace.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const units = @import("../../core/units.zig");
 
 pub const Error = native_ux.Error || generated_image_fixtures.Error;
+pub const FlowError = event_ledger.Error || error{MissingTaskFlow};
+pub const RecoveryError = error{RecoveryStateMissing};
+pub const TaskLookupError = error{TaskRequired};
+
+pub inline fn requireTask(runtime: *task_runtime.Runtime, task_id: u64) TaskLookupError!*task_runtime.TaskRecord {
+    if (task_id == 0) return error.TaskRequired;
+    return runtime.find(task_id) orelse error.TaskRequired;
+}
+
+pub inline fn openConfiguredWorkspace(
+    ux: *native_ux.Controller,
+    storage: *storage_service.Service,
+    config: anytype,
+) native_ux.Error!workspace.Entry {
+    return ux.openWorkspace(
+        storage,
+        ids.workspace(config.workspace_id),
+        config.document_path,
+        config.user,
+    );
+}
+
+pub inline fn openConfiguredDocument(
+    ux: *native_ux.Controller,
+    storage: *storage_service.Service,
+    config: anytype,
+    task_id: u64,
+) native_ux.Error!workspace.Entry {
+    return ux.openDocument(
+        storage,
+        ids.workspace(config.workspace_id),
+        config.document_path,
+        task_id,
+        config.user,
+    );
+}
+
+pub inline fn recordPendingTaskFlows(
+    ux: *const native_ux.Controller,
+    ledger: *event_ledger.Ledger,
+    next_flow_order: *usize,
+    tick: u64,
+) FlowError!void {
+    while (next_flow_order.* < ux.flow_count) : (next_flow_order.* += 1) {
+        const flow = ux.flowAtOrder(next_flow_order.*) orelse return error.MissingTaskFlow;
+        try ledger.recordTaskFlow(flow.*, tick);
+    }
+}
+
+pub inline fn recoverRuntimeAndCompositor(
+    runtime_service: anytype,
+    compositor_service: anytype,
+    tick: u64,
+) RecoveryError!void {
+    if (!runtime_service.restartFromCheckpoint(tick)) return error.RecoveryStateMissing;
+    const response = compositor_service.dispatch(.{ .operation = .recover_state });
+    if (response.status != .ok or !response.recovered) return error.RecoveryStateMissing;
+}
+
+pub inline fn recoverCheckpointedTaskState(
+    runtime_service: anytype,
+    compositor_service: anytype,
+    checkpoint_store: anytype,
+    state: anytype,
+    tick: u64,
+) RecoveryError!void {
+    if (!checkpoint_store.valid) return error.RecoveryStateMissing;
+    try recoverRuntimeAndCompositor(runtime_service, compositor_service, tick);
+    state.* = checkpoint_store.state;
+    if (state.task_id != 0 and runtime_service.runtimePtr().find(state.task_id) == null) {
+        return error.RecoveryStateMissing;
+    }
+}
 
 pub fn startConfiguredTask(
     ux: *native_ux.Controller,

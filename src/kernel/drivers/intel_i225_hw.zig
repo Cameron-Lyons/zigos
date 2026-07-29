@@ -5,6 +5,7 @@
 // requester in its own domain.
 
 const console = @import("../utils/console.zig");
+const spin = @import("../utils/spin.zig");
 const paging = @import("../memory/paging64.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const i225_tx = @import("intel_i225_tx.zig");
@@ -243,7 +244,7 @@ pub fn sendPayload(payload: []const u8) bool {
             return true;
         }
         if ((spins & 0x3FF) == 0 and pollDmaFault()) return false;
-        spinHint();
+        spin.hint();
     }
     containFailure("ZIGOS:I225:HW:TX_TIMEOUT_CONTAINED\n");
     return false;
@@ -305,7 +306,7 @@ fn spinQueueState(pending: *const Controller, want_enabled: bool) bool {
     var spins: u64 = 0;
     while (spins < QUEUE_SPIN_LIMIT) : (spins += 1) {
         if (((pending.reg32(REG_TXDCTL0) & TXDCTL_QUEUE_ENABLE) != 0) == want_enabled) return true;
-        spinHint();
+        spin.hint();
     }
     return false;
 }
@@ -316,10 +317,6 @@ fn zeroFrames(base: u32, count: u32) void {
 
 fn publishDescriptor() void {
     asm volatile ("mfence" ::: .{ .memory = true });
-}
-
-fn spinHint() void {
-    asm volatile ("pause");
 }
 
 export fn zigosNetworkBootstrapI225Attached() callconv(.c) bool {

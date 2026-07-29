@@ -1,6 +1,5 @@
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
-const ids = @import("../../core/ids.zig");
 const native_ux = @import("../native_ux.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
@@ -146,12 +145,7 @@ pub const TaskShellService = struct {
 
     fn openWorkspace(self: *TaskShellService, tick: u64) !void {
         const task = try self.requireTask();
-        _ = try self.ux.openWorkspace(
-            self.storage,
-            ids.workspace(self.config.workspace_id),
-            self.config.document_path,
-            self.config.user,
-        );
+        _ = try task_launch.openConfiguredWorkspace(self.ux, self.storage, self.config);
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,
             .view_type = .workspace_view,
@@ -166,13 +160,7 @@ pub const TaskShellService = struct {
     fn openDocument(self: *TaskShellService, tick: u64) !void {
         const task = try self.requireTask();
         if (!self.state.workspace_opened) return error.WorkspaceRequired;
-        _ = try self.ux.openDocument(
-            self.storage,
-            ids.workspace(self.config.workspace_id),
-            self.config.document_path,
-            task.id,
-            self.config.user,
-        );
+        _ = try task_launch.openConfiguredDocument(self.ux, self.storage, self.config, task.id);
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,
             .view_type = .document_view,
@@ -226,9 +214,8 @@ pub const TaskShellService = struct {
         try self.recordPendingTaskFlows(tick);
     }
 
-    fn requireTask(self: *TaskShellService) !*task_runtime.TaskRecord {
-        if (self.state.task_id == 0) return error.TaskRequired;
-        return self.runtime_service.runtimePtr().find(self.state.task_id) orelse error.TaskRequired;
+    inline fn requireTask(self: *TaskShellService) !*task_runtime.TaskRecord {
+        return task_launch.requireTask(self.runtime_service.runtimePtr(), self.state.task_id);
     }
 
     fn dispatchCompositor(
@@ -240,22 +227,18 @@ pub const TaskShellService = struct {
         return response;
     }
 
-    fn recordPendingTaskFlows(self: *TaskShellService, tick: u64) !void {
-        while (self.state.next_ledger_flow_order < self.ux.flow_count) : (self.state.next_ledger_flow_order += 1) {
-            const flow = self.ux.flowAtOrder(self.state.next_ledger_flow_order) orelse return error.MissingTaskFlow;
-            try self.ledger.recordTaskFlow(flow.*, tick);
-        }
+    inline fn recordPendingTaskFlows(self: *TaskShellService, tick: u64) !void {
+        return task_launch.recordPendingTaskFlows(self.ux, self.ledger, &self.state.next_ledger_flow_order, tick);
     }
 
     fn recover(self: *TaskShellService, tick: u64, response: *TaskShellResponse) !void {
-        if (!self.checkpoint_store.valid) return error.RecoveryStateMissing;
-        if (!self.runtime_service.restartFromCheckpoint(tick)) return error.RecoveryStateMissing;
-        const compositor_recovered = self.compositor_service.dispatch(.{ .operation = .recover_state });
-        if (compositor_recovered.status != .ok or !compositor_recovered.recovered) return error.RecoveryStateMissing;
-        self.state = self.checkpoint_store.state;
-        if (self.state.task_id != 0 and self.runtime_service.runtimePtr().find(self.state.task_id) == null) {
-            return error.RecoveryStateMissing;
-        }
+        try task_launch.recoverCheckpointedTaskState(
+            self.runtime_service,
+            self.compositor_service,
+            self.checkpoint_store,
+            &self.state,
+            tick,
+        );
         response.recovered = true;
     }
 

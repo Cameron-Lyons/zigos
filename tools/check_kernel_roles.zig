@@ -992,16 +992,6 @@ fn readString(strings: []const u8, raw_offset: u32) ParseError![]const u8 {
     return strings[offset..terminator];
 }
 
-fn readU16(bytes: []const u8, offset: usize) ParseError!u16 {
-    const value = try checkedSlice(bytes, offset, @sizeOf(u16));
-    return std.mem.readInt(u16, value[0..2], .little);
-}
-
-fn readU32(bytes: []const u8, offset: usize) ParseError!u32 {
-    const value = try checkedSlice(bytes, offset, @sizeOf(u32));
-    return std.mem.readInt(u32, value[0..4], .little);
-}
-
 fn checkedSlice(bytes: []const u8, offset: anytype, length: anytype) ParseError![]const u8 {
     const start = std.math.cast(usize, offset) orelse return error.IntegerOverflow;
     const count = std.math.cast(usize, length) orelse return error.IntegerOverflow;

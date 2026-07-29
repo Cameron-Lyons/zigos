@@ -1990,13 +1990,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return latest;
         }
 
-        fn transportFrameSlots(self: *Self, queue_kind: TransportQueueKind) []DurableTransportFrameSlot {
-            return switch (queue_kind) {
-                .outbound => self.state().outbound_transport_frames.slots[0..],
-                .inbound => self.state().inbound_transport_frames.slots[0..],
-            };
-        }
-
         fn transportFrameSlotsConst(self: *const Self, queue_kind: TransportQueueKind) []const DurableTransportFrameSlot {
             return switch (queue_kind) {
                 .outbound => self.stateConst().outbound_transport_frames.slots[0..],

@@ -398,10 +398,7 @@ pub const NativeTransportService = struct {
             connection.in_flight_frames
         else
             @intCast(newly_delivered);
-        connection.in_flight_frames = saturatingSubUsize(
-            connection.in_flight_frames,
-            delivered_frames,
-        );
+        connection.in_flight_frames -|= delivered_frames;
     }
 
     pub fn sendSigned(
@@ -799,11 +796,6 @@ fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
         @intFromEnum(principal.PrincipalKind.team) => .team,
         else => error.NativeTransportMalformedFrame,
     };
-}
-
-fn saturatingSubUsize(value: usize, amount: usize) usize {
-    if (amount >= value) return 0;
-    return value - amount;
 }
 
 fn macAddressPresent(mac_address: [6]u8) bool {

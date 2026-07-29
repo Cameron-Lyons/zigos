@@ -670,7 +670,7 @@ fn constantTimeEql(a: []const u8, b: []const u8) bool {
     return difference == 0;
 }
 
-fn encodeHexLower(bytes: []const u8, output: []u8) void {
+pub fn encodeHexLower(bytes: []const u8, output: []u8) void {
     const digits = "0123456789abcdef";
     for (bytes, 0..) |byte, index| {
         output[index * 2] = digits[byte >> 4];

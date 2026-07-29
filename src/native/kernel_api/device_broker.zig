@@ -655,7 +655,6 @@ pub fn mmioWindow(device_id: u64, window_index: u8) Error!MmioWindow {
     return error.UnsupportedMmioWindow;
 }
 
-
 fn findController(device_id: u64) ?*ControllerSlot {
     const slot = findControllerSlot(device_id) orelse return null;
     if (!slot.published) return null;
@@ -775,11 +774,6 @@ fn resetControllerSlot(slot: *ControllerSlot) void {
     slot.published = false;
     slot.device_id = 0;
     slot.broker_generation = 0;
-}
-
-fn controllerSlotId(slot: *const ControllerSlot) u64 {
-    if (slot.device_id == 0) return 0;
-    return controllerKey(slot.device_id);
 }
 
 fn dmaProgramSlotId(slot: *const DmaProgramSlot) u64 {

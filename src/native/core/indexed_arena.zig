@@ -10,6 +10,82 @@ pub fn nonZeroKey(key: u64) u64 {
     return if (key == 0) 1 else key;
 }
 
+inline fn popReusableIndex(
+    comptime capacity: usize,
+    claimed_count: usize,
+    free_head: *?usize,
+    free_next: *[capacity]?usize,
+    next_unclaimed_index: *usize,
+) ?usize {
+    if (free_head.*) |slot_index| {
+        if (slot_index >= claimed_count) return null;
+        free_head.* = free_next.*[slot_index];
+        free_next.*[slot_index] = null;
+        return slot_index;
+    }
+
+    if (claimed_count >= capacity) return null;
+    next_unclaimed_index.* += 1;
+    return claimed_count;
+}
+
+inline fn pushReusableIndex(
+    comptime capacity: usize,
+    free_head: *?usize,
+    free_next: *[capacity]?usize,
+    slot_index: usize,
+) void {
+    free_next.*[slot_index] = free_head.*;
+    free_head.* = slot_index;
+}
+
+inline fn unlinkReusableIndex(
+    comptime capacity: usize,
+    claimed_count: usize,
+    free_head: *?usize,
+    free_next: *[capacity]?usize,
+    slot_index: usize,
+) bool {
+    if (slot_index >= claimed_count) return false;
+    var previous: ?usize = null;
+    var current = free_head.*;
+    while (current) |current_index| {
+        if (current_index >= claimed_count) return false;
+        const next = free_next.*[current_index];
+        if (current_index == slot_index) {
+            if (previous) |previous_index| {
+                free_next.*[previous_index] = next;
+            } else {
+                free_head.* = next;
+            }
+            free_next.*[current_index] = null;
+            return true;
+        }
+        previous = current_index;
+        current = next;
+    }
+    return false;
+}
+
+inline fn claimReusableIndex(
+    comptime capacity: usize,
+    claimed_count: usize,
+    free_head: *?usize,
+    free_next: *[capacity]?usize,
+    next_unclaimed_index: *usize,
+    slot_index: usize,
+) bool {
+    if (slot_index >= claimed_count) {
+        while (next_unclaimed_index.* < slot_index) : (next_unclaimed_index.* += 1) {
+            pushReusableIndex(capacity, free_head, free_next, next_unclaimed_index.*);
+        }
+        next_unclaimed_index.* = slot_index + 1;
+        return true;
+    }
+
+    return unlinkReusableIndex(capacity, claimed_count, free_head, free_next, slot_index);
+}
+
 pub fn UniqueIndex(comptime capacity: usize) type {
     if (capacity == 0) @compileError("unique index requires at least one slot");
 
@@ -530,15 +606,6 @@ pub fn IndexedArenaWithKeyOptions(
             return self.used_count;
         }
 
-        fn countMatching(self: *const Self, context: anytype, comptime matches: anytype) usize {
-            var count: usize = 0;
-            for (self.slots[0..self.claimedCount()]) |*slot| {
-                if (!slot.in_use) continue;
-                if (matches(context, slot)) count += 1;
-            }
-            return count;
-        }
-
         fn findMatching(self: *Self, context: anytype, comptime matches: anytype) ?*Slot {
             for (self.slots[0..self.claimedCount()]) |*slot| {
                 if (!slot.in_use) continue;
@@ -671,61 +738,17 @@ pub fn IndexedArenaWithKeyOptions(
             return self.next_unclaimed_index;
         }
 
-        fn popFreeIndex(self: *Self) ?usize {
-            const claimed_count = self.claimedCount();
-            if (self.free_head) |slot_index| {
-                if (slot_index >= claimed_count) return null;
-                self.free_head = self.free_next[slot_index];
-                self.free_next[slot_index] = null;
-                return slot_index;
-            }
-
-            if (claimed_count >= capacity) return null;
-            const slot_index = claimed_count;
-            self.next_unclaimed_index += 1;
-            return slot_index;
+        inline fn popFreeIndex(self: *Self) ?usize {
+            return popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index);
         }
 
-        fn pushFreeIndex(self: *Self, slot_index: usize) void {
-            self.free_next[slot_index] = self.free_head;
-            self.free_head = slot_index;
+        inline fn pushFreeIndex(self: *Self, slot_index: usize) void {
+            pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
         }
 
-        fn claimFreeIndex(self: *Self, slot_index: usize) bool {
+        inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
             if (slot_index >= capacity or self.slots[slot_index].in_use) return false;
-
-            if (slot_index >= self.next_unclaimed_index) {
-                while (self.next_unclaimed_index < slot_index) : (self.next_unclaimed_index += 1) {
-                    self.pushFreeIndex(self.next_unclaimed_index);
-                }
-                self.next_unclaimed_index = slot_index + 1;
-                return true;
-            }
-
-            return self.unlinkFreeIndex(slot_index);
-        }
-
-        fn unlinkFreeIndex(self: *Self, slot_index: usize) bool {
-            const claimed_count = self.claimedCount();
-            if (slot_index >= claimed_count) return false;
-            var previous: ?usize = null;
-            var current = self.free_head;
-            while (current) |current_index| {
-                if (current_index >= claimed_count) return false;
-                const next = self.free_next[current_index];
-                if (current_index == slot_index) {
-                    if (previous) |previous_index| {
-                        self.free_next[previous_index] = next;
-                    } else {
-                        self.free_head = next;
-                    }
-                    self.free_next[current_index] = null;
-                    return true;
-                }
-                previous = current_index;
-                current = next;
-            }
-            return false;
+            return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
         }
     };
 }
@@ -1046,61 +1069,17 @@ pub fn PagedIndexedArenaWithKey(
             return slot.in_use and self.slot_generations[slot_index] == handle.generation();
         }
 
-        fn popFreeIndex(self: *Self) ?usize {
-            const claimed_count = self.claimedCount();
-            if (self.free_head) |slot_index| {
-                if (slot_index >= claimed_count) return null;
-                self.free_head = self.free_next[slot_index];
-                self.free_next[slot_index] = null;
-                return slot_index;
-            }
-
-            if (claimed_count >= capacity) return null;
-            const slot_index = claimed_count;
-            self.next_unclaimed_index += 1;
-            return slot_index;
+        inline fn popFreeIndex(self: *Self) ?usize {
+            return popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index);
         }
 
-        fn pushFreeIndex(self: *Self, slot_index: usize) void {
-            self.free_next[slot_index] = self.free_head;
-            self.free_head = slot_index;
+        inline fn pushFreeIndex(self: *Self, slot_index: usize) void {
+            pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
         }
 
-        fn claimFreeIndex(self: *Self, slot_index: usize) bool {
+        inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
             if (slot_index >= capacity or self.slotAtConst(slot_index).in_use) return false;
-
-            if (slot_index >= self.next_unclaimed_index) {
-                while (self.next_unclaimed_index < slot_index) : (self.next_unclaimed_index += 1) {
-                    self.pushFreeIndex(self.next_unclaimed_index);
-                }
-                self.next_unclaimed_index = slot_index + 1;
-                return true;
-            }
-
-            return self.unlinkFreeIndex(slot_index);
-        }
-
-        fn unlinkFreeIndex(self: *Self, slot_index: usize) bool {
-            const claimed_count = self.claimedCount();
-            if (slot_index >= claimed_count) return false;
-            var previous: ?usize = null;
-            var current = self.free_head;
-            while (current) |current_index| {
-                if (current_index >= claimed_count) return false;
-                const next = self.free_next[current_index];
-                if (current_index == slot_index) {
-                    if (previous) |previous_index| {
-                        self.free_next[previous_index] = next;
-                    } else {
-                        self.free_head = next;
-                    }
-                    self.free_next[current_index] = null;
-                    return true;
-                }
-                previous = current_index;
-                current = next;
-            }
-            return false;
+            return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
         }
     };
 }

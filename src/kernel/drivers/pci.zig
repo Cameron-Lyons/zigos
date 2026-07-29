@@ -1,6 +1,6 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const console = @import("../utils/console.zig");
+const spin = @import("../utils/spin.zig");
 const paging = @import("../memory/paging64.zig");
 const mcfg = @import("../platform/mcfg.zig");
 
@@ -151,20 +151,12 @@ pub fn ecamPhysicalAddress(
 
 fn acquireConfigurationLock() void {
     while (@atomicRmw(bool, &configuration_lock, .Xchg, true, .seq_cst)) {
-        spinHint();
+        spin.hint();
     }
 }
 
 fn releaseConfigurationLock() void {
     @atomicStore(bool, &configuration_lock, false, .seq_cst);
-}
-
-fn spinHint() void {
-    if (comptime builtin.cpu.arch == .x86_64) {
-        asm volatile ("pause");
-    } else {
-        asm volatile ("" ::: .{ .memory = true });
-    }
 }
 
 fn mappedRegister(bus: u8, device: u8, function: u8, offset: u16) ?*volatile u32 {

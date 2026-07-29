@@ -921,7 +921,7 @@ pub fn telemetrySampleIsFresh(
 
 fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCounters) TelemetrySample {
     const reserved_bytes = std.math.add(usize, counters.reserved_memory_bytes, counters.reserved_shared_memory_bytes) catch std.math.maxInt(usize);
-    const available_memory_bytes = saturatingSubUsize(counters.memory_capacity_bytes, reserved_bytes);
+    const available_memory_bytes = counters.memory_capacity_bytes -| reserved_bytes;
     return .{
         .source = .hardware,
         .observed_tick = observed_tick,
@@ -931,7 +931,7 @@ fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCoun
         .gpu_available = counters.gpu_driver_online,
         .npu_available = counters.npu_driver_online,
         .media_available = counters.media_driver_online,
-        .cpu_budget_ticks = saturatingSubTicks(counters.total_cpu_budget_ticks, counters.consumed_cpu_ticks),
+        .cpu_budget_ticks = counters.total_cpu_budget_ticks -| counters.consumed_cpu_ticks,
         .memory_bandwidth_units = available_memory_bytes / units.bytes_per_kib,
         .grid_carbon_intensity_grams_per_kwh = counters.grid_carbon_intensity_grams_per_kwh,
         .hardware_evidence = counters.hardware_evidence,
@@ -950,16 +950,6 @@ fn thermalPressureFromMilliCelsius(value: u32) ThermalPressure {
     if (value >= 90_000) return .critical;
     if (value >= 75_000) return .elevated;
     return .nominal;
-}
-
-fn saturatingSubTicks(value: u64, amount: u64) u64 {
-    if (amount >= value) return 0;
-    return value - amount;
-}
-
-fn saturatingSubUsize(value: usize, amount: usize) usize {
-    if (amount >= value) return 0;
-    return value - amount;
 }
 
 fn zeroClaim() ClaimRecord {

@@ -572,7 +572,7 @@ fn hashContainedFile(io: std.Io, root: ContainedRoot, relative_path: []const u8,
     var digest: [Sha256.digest_length]u8 = undefined;
     hasher.final(&digest);
     var digest_hex: [sha256_hex_len]u8 = undefined;
-    encodeHexLower(&digest, &digest_hex);
+    trust.encodeHexLower(&digest, &digest_hex);
     return .{ .digest_hex = digest_hex, .size_bytes = total };
 }
 
@@ -1170,16 +1170,8 @@ fn sha256HexAlloc(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
     const output = try allocator.alloc(u8, sha256_hex_len);
     var digest: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(data, &digest, .{});
-    encodeHexLower(&digest, output);
+    trust.encodeHexLower(&digest, output);
     return output;
-}
-
-fn encodeHexLower(bytes: []const u8, output: []u8) void {
-    const digits = "0123456789abcdef";
-    for (bytes, 0..) |byte, index| {
-        output[index * 2] = digits[byte >> 4];
-        output[index * 2 + 1] = digits[byte & 0x0f];
-    }
 }
 
 fn isSha256Hex(value: []const u8) bool {
