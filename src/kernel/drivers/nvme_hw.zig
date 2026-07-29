@@ -442,9 +442,8 @@ pub fn backendFlush() callconv(.c) bool {
 }
 
 // Kernel-exported bridge so the native storage layer can use the real NVMe data
-// plane as a bootstrap backend (peer of the ATA bootstrap bridge in
-// storage_driver_task.zig). The native side declares these `extern` behind a
-// freestanding guard and falls back to stubs on host builds.
+// plane as the freestanding storage backend. The native side declares these
+// `extern` behind a freestanding guard and falls back to stubs on host builds.
 export fn zigosStorageBootstrapNvmeAttached() callconv(.c) bool {
     return active_present;
 }

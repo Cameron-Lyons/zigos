@@ -25,7 +25,6 @@ const expectSharedMemoryRevoke = common.expectSharedMemoryRevoke;
 const resourceQuery = common.resourceQuery;
 const sharedMemoryCreateResult = common.sharedMemoryCreateResult;
 const sharedMemoryMapResult = common.sharedMemoryMapResult;
-const storageGrant = common.storageGrant;
 const units = @import("../../core/units.zig");
 
 const SHARED_MEMORY_PAGE_BYTES: usize = shared_memory_mod.PAGE_SIZE;
@@ -236,12 +235,12 @@ pub fn proveBootedDriverPermissions(
 
     device_broker.reset();
     defer device_broker.reset();
-    try std.testing.expect(device_broker.publishAtaController(storage_driver.device_id, storageGrant()));
+    try std.testing.expect(device_broker.publishPciController(storage_driver.device_id));
 
     runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
     const descriptor = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 90);
     try std.testing.expectEqual(storage_driver.device_id, descriptor.device_id);
-    try std.testing.expectEqual(@as(u16, 0x1F0), descriptor.base_port);
+    try std.testing.expectEqual(@as(u16, 0), descriptor.base_port);
 
     runtime.allowHostPointerSyscallsForTask(network_service_task.id);
     const cross_task = deviceDescribeResult(kernel_port, network_service_task.id, storage_driver.authority_capability_id, 91);

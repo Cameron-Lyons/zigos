@@ -786,16 +786,28 @@ pub fn invalidateDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
 
 pub fn describe(device_id: u64) Error!ControllerDescriptor {
     const slot = findController(device_id) orelse return error.DeviceNotFound;
-    if (slot.kind != .ata) return error.WrongControllerKind;
-    return .{
-        .device_id = device_id,
-        .base_port = slot.grant.base_port,
-        .io_port_count = ata_io_register_count,
-        .ctrl_port = slot.grant.ctrl_port,
-        .is_master = slot.grant.is_master,
-        .irq_line = slot.grant.irq_line,
-        .mmio_window_count = 0,
-        .sector_count = slot.grant.sector_count,
+    return switch (slot.kind) {
+        .none => error.WrongControllerKind,
+        .ata => .{
+            .device_id = device_id,
+            .base_port = slot.grant.base_port,
+            .io_port_count = ata_io_register_count,
+            .ctrl_port = slot.grant.ctrl_port,
+            .is_master = slot.grant.is_master,
+            .irq_line = slot.grant.irq_line,
+            .mmio_window_count = 0,
+            .sector_count = slot.grant.sector_count,
+        },
+        .pci => .{
+            .device_id = device_id,
+            .base_port = 0,
+            .io_port_count = 0,
+            .ctrl_port = 0,
+            .is_master = false,
+            .irq_line = 0,
+            .mmio_window_count = 0,
+            .sector_count = 0,
+        },
     };
 }
 
@@ -1299,7 +1311,9 @@ test "PCI controller publication cannot expose ATA port authority" {
     const device_id: u64 = 0x0000_8086_5845_0001;
     try std.testing.expect(publishPciController(device_id));
     try std.testing.expect(brokerGeneration(device_id) != null);
-    try std.testing.expectError(error.WrongControllerKind, describe(device_id));
+    const descriptor = try describe(device_id);
+    try std.testing.expectEqual(device_id, descriptor.device_id);
+    try std.testing.expectEqual(@as(u16, 0), descriptor.io_port_count);
     try std.testing.expectError(error.WrongControllerKind, readPort(device_id, 0, .u8));
     try std.testing.expectError(error.WrongControllerKind, writePort(device_id, 0, .u8, 0));
     try std.testing.expect(!revokeAtaController(device_id));

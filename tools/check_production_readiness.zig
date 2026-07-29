@@ -765,7 +765,6 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_device_inventory_snippets = [_][]const u8{
         "requireProductionDriverDeviceId",
-        "sourceCanEnterInventory",
         "sourceCanBindProductionDriver",
         "NonProductionDeviceBinding",
         "intel_i225_lm_inventory",
@@ -777,12 +776,11 @@ fn validateNuc11tnki5KernelProofSources(
         "if (source == .absent or source == .synthetic or device_id == 0) return false",
         ".absent => \"absent\"",
         "device inventory starts absent until hardware is discovered",
-        "if (!sourceCanEnterInventory(device_class, source, device_id)) return",
+        "if (!sourceCanBindProductionDriver(device_class, source, device_id)) return",
         ".platform_policy",
         "device inventory refuses synthetic records for production driver binding",
-        "device inventory records ATA bootstrap but requires target-grade NVMe for production storage binding",
+        "device inventory requires target-grade NVMe for production storage binding",
         "device inventory refuses PS/2 bootstrap for production input binding",
-        "device inventory promotes observed ATA storage to target NVMe production binding",
     };
     for (required_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) == null) {
@@ -802,6 +800,8 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const retired_device_inventory_binding_snippets = [_][]const u8{
         ".input_device => source == .ps2_bootstrap",
+        ".ata_bootstrap",
+        "AtaBrokerGrant",
     };
     for (retired_device_inventory_binding_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) != null) {
@@ -1570,10 +1570,7 @@ fn validateStorageModernOnlyTrack(
 
     const backend_source_path = "src/native/storage/volume/backend.zig";
     const backend_source = try readRequiredSource(allocator, io, errors, backend_source_path) orelse return;
-    const backend_snippets = [_][]const u8{
-        "nvme_pci",
-        "ata_bootstrap_broker",
-    };
+    const backend_snippets = [_][]const u8{"nvme_pci"};
     for (backend_snippets) |snippet| {
         if (std.mem.indexOf(u8, backend_source, snippet) == null) {
             try common.addError(errors, allocator, "Storage production track must keep distinct backend kind: {s}", .{snippet});
@@ -1586,7 +1583,8 @@ fn validateStorageModernOnlyTrack(
         "attachPublishedStorageBackend(publication, publication.backend.?)",
         "storagePublicationMatchesTargetNvme",
         "storage_volume.attachNvmePciBackend(backend)",
-        "storage_volume.attachAtaBootstrapBrokerBackend",
+        "StorageControllerSession",
+        "device_broker.publishPciController(publication.device_id)",
     };
     for (driver_port_snippets) |snippet| {
         if (std.mem.indexOf(u8, driver_port_source, snippet) == null) {
@@ -1596,8 +1594,13 @@ fn validateStorageModernOnlyTrack(
 
     const storage_test_path = "src/native/storage/storage_volume_test.zig";
     const storage_test_source = try readRequiredSource(allocator, io, errors, storage_test_path) orelse return;
-    if (std.mem.indexOf(u8, storage_test_source, "storage volume separates generic, target nvme, and brokered ata attachments") == null) {
+    if (std.mem.indexOf(u8, storage_test_source, "storage volume separates generic and target nvme attachments") == null) {
         try common.addError(errors, allocator, "Storage production track must keep regression coverage for production storage attachment kinds", .{});
+    }
+    if (std.mem.indexOf(u8, backend_source, "ata_bootstrap_broker") != null or
+        std.mem.indexOf(u8, driver_port_source, "attachAtaBootstrap") != null)
+    {
+        try common.addError(errors, allocator, "Storage production track must not reintroduce the retired ATA attachment bridge", .{});
     }
 
     const native_store_mount_path = "src/native/session/native_store_mount.zig";
