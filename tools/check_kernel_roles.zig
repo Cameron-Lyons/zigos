@@ -28,6 +28,7 @@ const sht_dynsym: u32 = 11;
 
 const shf_write: u64 = 1 << 0;
 const shf_alloc: u64 = 1 << 1;
+const shf_execinstr: u64 = 1 << 2;
 
 const pt_load: u32 = 1;
 const pf_execute: u32 = 1 << 0;
@@ -117,6 +118,7 @@ const ParseError = error{
     InvalidProgramHeaderSize,
     InvalidProgramHeaderTable,
     InvalidLoadSegment,
+    WritableExecutableLoadSegment,
     MissingWritableLoadSegment,
     MissingSectionHeaderTable,
     InvalidSectionHeaderSize,
@@ -130,6 +132,8 @@ const ParseError = error{
     MissingDataSection,
     DuplicateDataSection,
     InvalidDataSection,
+    UnexpectedAllocatedKernelSection,
+    InvalidKernelSectionPermissions,
     MissingSymbolTable,
     InvalidSymbolTable,
     InvalidSymbolStringTable,
@@ -421,6 +425,8 @@ fn analyzeElf(bytes: []const u8) ParseError!Analysis {
         const section = try parseSection(bytes, sections, section_index);
         try validateSection(bytes, section);
         const section_name = try readString(section_names, section.name_offset);
+
+        try validateKernelSectionPolicy(section_name, section);
 
         if (section.flags & shf_alloc != 0 and
             !sectionCoveredByLoad(bytes, programs, section))
@@ -811,6 +817,26 @@ const ProgramAnalysis = struct {
     writable_load_size: u64,
 };
 
+fn validateKernelSectionPolicy(name: []const u8, section: Section) ParseError!void {
+    if (section.flags & shf_alloc == 0) return;
+
+    const expected_flags: u64 = if (std.mem.eql(u8, name, ".text"))
+        shf_alloc | shf_execinstr
+    else if (std.mem.eql(u8, name, ".rodata") or
+        std.mem.eql(u8, name, ".zigos_userspace_archive"))
+        shf_alloc
+    else if (std.mem.eql(u8, name, ".relro") or
+        std.mem.eql(u8, name, ".data") or
+        std.mem.eql(u8, name, ".bss"))
+        shf_alloc | shf_write
+    else
+        return error.UnexpectedAllocatedKernelSection;
+
+    if (section.flags & (shf_write | shf_alloc | shf_execinstr) != expected_flags) {
+        return error.InvalidKernelSectionPermissions;
+    }
+}
+
 fn analyzeProgramHeaders(bytes: []const u8, table: ProgramTable) ParseError!ProgramAnalysis {
     var load_count: usize = 0;
     var writable_load_count: usize = 0;
@@ -824,6 +850,9 @@ fn analyzeProgramHeaders(bytes: []const u8, table: ProgramTable) ParseError!Prog
         }
         if (program.segment_type != pt_load) continue;
         load_count += 1;
+        if (program.flags & (pf_write | pf_execute) == (pf_write | pf_execute)) {
+            return error.WritableExecutableLoadSegment;
+        }
         if (program.file_size > program.memory_size) return error.InvalidLoadSegment;
         if (program.alignment != 0 and program.alignment != 1) {
             if (!std.math.isPowerOfTwo(program.alignment) or
@@ -1138,6 +1167,7 @@ fn parseErrorDescription(err: ParseError) []const u8 {
         error.InvalidProgramHeaderSize => "the program-header entry size is invalid",
         error.InvalidProgramHeaderTable => "the program-header table is invalid",
         error.InvalidLoadSegment => "an allocated section or load segment is invalid",
+        error.WritableExecutableLoadSegment => "a load segment is both writable and executable",
         error.MissingWritableLoadSegment => "the ELF has no writable load segment",
         error.MissingSectionHeaderTable => "the section-header table is missing",
         error.InvalidSectionHeaderSize => "the section-header entry size is invalid",
@@ -1151,6 +1181,8 @@ fn parseErrorDescription(err: ParseError) []const u8 {
         error.MissingDataSection => "the .data section is missing",
         error.DuplicateDataSection => "more than one .data section is present",
         error.InvalidDataSection => "the .data section is not writable, allocated PROGBITS",
+        error.UnexpectedAllocatedKernelSection => "an allocated section is outside the closed kernel section policy",
+        error.InvalidKernelSectionPermissions => "an allocated kernel section has unexpected write or execute flags",
         error.MissingSymbolTable => "a static symbol table is required",
         error.InvalidSymbolTable => "a symbol table has invalid sizing or metadata",
         error.InvalidSymbolStringTable => "a symbol table does not reference a valid string table",
@@ -1542,6 +1574,8 @@ test "ELF parser reads loaded state, defined symbols, and workload signatures" {
     const writable_program_offset = elf_header_size + program_header_size;
     writeU32(&storage, writable_program_offset + 24, 4);
     try std.testing.expectError(error.MissingWritableLoadSegment, analyzeElf(bytes));
+    writeU32(&storage, writable_program_offset + 24, 4 | pf_write | pf_execute);
+    try std.testing.expectError(error.WritableExecutableLoadSegment, analyzeElf(bytes));
     writeU32(&storage, writable_program_offset + 24, 4 | pf_write);
 
     storage[ei_class] = 0xff;
@@ -1559,6 +1593,34 @@ test "ELF parser reads loaded state, defined symbols, and workload signatures" {
     const symbol_section_offset = section_table_offset + 5 * section_header_size;
     writeU32(&storage, symbol_section_offset + 36, 8);
     try std.testing.expectError(error.InvalidSymbolTable, analyzeElf(bytes));
+}
+
+test "kernel ELF section policy rejects unknown and incorrectly flagged sections" {
+    var section = Section{
+        .name_offset = 0,
+        .section_type = sht_progbits,
+        .flags = shf_alloc,
+        .address = 0x1000,
+        .offset = 0,
+        .size = 0x1000,
+        .link = 0,
+        .info = 0,
+        .alignment = 0x1000,
+        .entry_size = 0,
+    };
+
+    try validateKernelSectionPolicy(".rodata", section);
+    section.flags = shf_alloc | shf_execinstr;
+    try validateKernelSectionPolicy(".text", section);
+    try std.testing.expectError(
+        error.UnexpectedAllocatedKernelSection,
+        validateKernelSectionPolicy(".orphan", section),
+    );
+    section.flags |= shf_write;
+    try std.testing.expectError(
+        error.InvalidKernelSectionPermissions,
+        validateKernelSectionPolicy(".text", section),
+    );
 }
 
 test "ELF64 parser reads the same loaded-state and symbol contract" {

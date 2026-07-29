@@ -12,6 +12,7 @@ pub const cpu_baseline_rejected = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";
 pub const cpu_nx_enabled = "ZIGOS:CPU:NX:ENABLED";
 pub const cpu_smep_enabled = "ZIGOS:CPU:SMEP:ENABLED";
 pub const cpu_umip_enabled = "ZIGOS:CPU:UMIP:ENABLED";
+pub const kernel_wx_enforced = "ZIGOS:KERNEL:W_X:ENFORCED";
 
 pub const bench_start = "BENCH:START";
 pub const bench_summary_prefix = "BENCH:SUMMARY";

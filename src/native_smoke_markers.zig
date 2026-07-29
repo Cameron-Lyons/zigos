@@ -9,6 +9,7 @@ pub const production_required = [_][]const u8{
     boot_markers.kernel_role_production,
     boot_markers.cpu_baseline_ready,
     boot_markers.cpu_nx_enabled,
+    boot_markers.kernel_wx_enforced,
     boot_markers.boot_core_ready,
     boot_markers.kernel_network_deferred,
     boot_markers.native_bootstrap,
@@ -74,6 +75,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.kernel_role_verification,
     boot_markers.cpu_baseline_ready,
     boot_markers.cpu_nx_enabled,
+    boot_markers.kernel_wx_enforced,
     boot_markers.boot_core_ready,
     boot_markers.kernel_network_deferred,
     boot_markers.native_bootstrap,
@@ -369,6 +371,7 @@ pub const recovery_required = [_][]const u8{
     boot_markers.kernel_role_verification,
     boot_markers.cpu_baseline_ready,
     boot_markers.cpu_nx_enabled,
+    boot_markers.kernel_wx_enforced,
     boot_markers.boot_core_ready,
     boot_markers.recovery_start,
     boot_markers.recovery_break_glass_audited,
@@ -395,6 +398,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.kernel_role_production,
         boot_markers.cpu_baseline_ready,
         boot_markers.cpu_nx_enabled,
+        boot_markers.kernel_wx_enforced,
         boot_markers.boot_core_ready,
         boot_markers.userspace_artifacts_ready,
         boot_markers.service_boot_service_contracts_ready,
@@ -418,6 +422,8 @@ test "verification smoke groups require the verification kernel role" {
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_baseline_ready));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_nx_enabled));
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_nx_enabled));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.kernel_wx_enforced));
+    try std.testing.expect(contains(&recovery_required, boot_markers.kernel_wx_enforced));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.kernel_role_verification));
     try std.testing.expect(contains(&driver_restart_required, boot_markers.kernel_role_verification));
     try std.testing.expect(contains(&tampered_artifact_manifest_required, boot_markers.kernel_role_verification));
