@@ -470,6 +470,9 @@ pub fn addKernelArtifact(
         // kernel symbol table in every supported optimization mode; public
         // release packaging can produce a separately stripped derivative.
         .strip = false,
+        // Privileged code may be interrupted at any instruction boundary and
+        // cannot rely on an ABI-owned area below the current stack pointer.
+        .red_zone = false,
     });
     const binary_cursor_module = b.createModule(.{
         .root_source_file = b.path("src/native/core/binary_cursor.zig"),
@@ -499,6 +502,10 @@ pub fn addKernelArtifact(
         .install_step = &install.step,
         .output_path = b.getInstallPath(.bin, name),
         .kernel_role = kernel_role,
+        .bootloader_source_path = if (target.result.cpu.arch == .x86_64)
+            "src/boot/boot_x86_64.S"
+        else
+            "src/boot/boot64.S",
     };
 }
 
