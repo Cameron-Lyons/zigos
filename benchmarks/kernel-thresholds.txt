@@ -7,6 +7,7 @@ background_dispatch.allowed_sync 13500
 service_supervisor.ready_lookup 4000
 task_runtime.checkpoint.write_restore 2100000
 task_runtime.checkpoint.write_low_occupancy 42000
+paging.address_space_roundtrip 40000
 accelerator_scheduler.claim_release 260000
 storage.file_bridge.resolve_view 2300
 storage.workspace.commit_overlay 220000

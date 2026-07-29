@@ -28,7 +28,6 @@ pub const PAGE_WRITE_THROUGH: u32 = 0x8;
 pub const PAGE_CACHE_DISABLE: u32 = 0x10;
 pub const PAGE_ACCESSED: u32 = 0x20;
 pub const PAGE_DIRTY: u32 = 0x40;
-pub const PAGE_GLOBAL: u32 = 0x100;
 // Logical mapping input. Hardware represents the inverse permission with NX.
 pub const PAGE_EXECUTABLE: u32 = 0x200;
 
@@ -119,13 +118,13 @@ const entryOwner = table64.owner;
 const entryAddress = table64.address;
 const tableEntry = table64.make;
 
-fn leafFlags(flags: u32) u64 {
+fn leafFlags(flags: u32, global: bool) u64 {
     var result: u64 = ENTRY_PRESENT | table64.NO_EXECUTE;
     if ((flags & PAGE_WRITABLE) != 0) result |= ENTRY_WRITABLE;
     if ((flags & PAGE_USER) != 0) result |= ENTRY_USER;
     if ((flags & PAGE_WRITE_THROUGH) != 0) result |= ENTRY_WRITE_THROUGH;
     if ((flags & PAGE_CACHE_DISABLE) != 0) result |= ENTRY_CACHE_DISABLE;
-    if ((flags & PAGE_GLOBAL) != 0) result |= ENTRY_GLOBAL;
+    if (global) result |= ENTRY_GLOBAL;
     if ((flags & PAGE_EXECUTABLE) != 0) result &= ~table64.NO_EXECUTE;
     return result;
 }
@@ -139,7 +138,7 @@ const KernelImageExtents = struct {
 fn kernelIdentityLeafFlags(page_address: u32, image: KernelImageExtents) u64 {
     const executable = page_address >= image.text_start and page_address < image.text_end;
     const immutable = page_address >= image.text_start and page_address < image.immutable_end;
-    var flags: u64 = ENTRY_PRESENT;
+    var flags: u64 = ENTRY_PRESENT | ENTRY_GLOBAL;
     if (!immutable) flags |= ENTRY_WRITABLE;
     return table64.withExecutePermission(flags, executable);
 }
@@ -275,6 +274,7 @@ fn mapBorrowedPageIn(
     phys_addr: usize,
     flags: u32,
     table_owner: u3,
+    global: bool,
 ) UserMapError!void {
     if (pageOffset(virt_addr) != 0 or pageOffset(phys_addr) != 0) {
         return error.InvalidRange;
@@ -289,8 +289,8 @@ fn mapBorrowedPageIn(
         return error.AlreadyMapped;
     }
 
-    page_entry.* = tableEntry(phys_addr, leafFlags(flags), PAGE_OWNER_BORROWED);
-    if (pml4 == getCurrentPageDirectory()) invalidate_page(virt_addr);
+    page_entry.* = tableEntry(phys_addr, leafFlags(flags, global), PAGE_OWNER_BORROWED);
+    if (global or pml4 == getCurrentPageDirectory()) invalidate_page(virt_addr);
 }
 
 fn mapFailure(error_value: UserMapError) noreturn {
@@ -315,6 +315,7 @@ pub fn mapKernelBorrowedPage(virt_addr: usize, phys_addr: usize, flags: u32) voi
         phys_addr,
         flags & ~PAGE_USER,
         TABLE_OWNER_KERNEL_DYNAMIC,
+        true,
     ) catch |err| mapFailure(err);
 }
 
@@ -453,7 +454,7 @@ pub fn mapOwnedUserRange(
         if (permissions.writable) flags |= PAGE_WRITABLE;
         if (permissions.write_through) flags |= PAGE_WRITE_THROUGH;
         if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
-        const entry_flags = table64.withExecutePermission(leafFlags(flags), permissions.executable);
+        const entry_flags = table64.withExecutePermission(leafFlags(flags, false), permissions.executable);
         page_entry.* = tableEntry(page_phys, entry_flags, PAGE_OWNER_USER_PRIVATE);
     }
 }
@@ -700,6 +701,7 @@ test "kernel identity mapping executes only the linker-bounded text pages" {
     };
 
     const low_memory = kernelIdentityLeafFlags(0, image);
+    try std.testing.expect((low_memory & ENTRY_GLOBAL) != 0);
     try std.testing.expect((low_memory & ENTRY_WRITABLE) != 0);
     try std.testing.expect(!table64.isExecutable(low_memory));
 
@@ -716,7 +718,12 @@ test "kernel identity mapping executes only the linker-bounded text pages" {
     try std.testing.expect(!table64.isExecutable(mutable_data));
 }
 
-test "kernel mappings are non-executable unless explicitly requested" {
-    try std.testing.expect((leafFlags(PAGE_PRESENT | PAGE_WRITABLE) & table64.NO_EXECUTE) != 0);
-    try std.testing.expect((leafFlags(PAGE_PRESENT | PAGE_EXECUTABLE) & table64.NO_EXECUTE) == 0);
+test "leaf mappings encode global and execute permissions explicitly" {
+    const kernel_leaf = leafFlags(PAGE_PRESENT | PAGE_WRITABLE, true);
+    try std.testing.expect((kernel_leaf & table64.NO_EXECUTE) != 0);
+    try std.testing.expect((kernel_leaf & ENTRY_GLOBAL) != 0);
+
+    const user_leaf = leafFlags(PAGE_PRESENT | PAGE_USER | PAGE_EXECUTABLE, false);
+    try std.testing.expect((user_leaf & table64.NO_EXECUTE) == 0);
+    try std.testing.expect((user_leaf & ENTRY_GLOBAL) == 0);
 }
