@@ -11,6 +11,8 @@
 
 const console = @import("../utils/console.zig");
 const paging = @import("../memory/paging64.zig");
+const dmar = @import("../platform/dmar.zig");
+const intel_vtd = @import("../platform/intel_vtd.zig");
 const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
@@ -39,10 +41,6 @@ const CC_IOCQES: u32 = 4 << 20; // 2^4 = 16-byte completion entries
 const CSTS_RDY: u32 = 1 << 0;
 const CSTS_CFS: u32 = 1 << 1;
 
-const PCI_COMMAND_OFFSET: u8 = 0x04;
-const PCI_COMMAND_MEMORY_SPACE: u32 = 1 << 1;
-const PCI_COMMAND_BUS_MASTER: u32 = 1 << 2;
-
 const ADMIN_QUEUE_ENTRIES: u32 = 32;
 const SQ_ENTRY_BYTES: usize = 64;
 const CQ_ENTRY_BYTES: usize = 16;
@@ -59,6 +57,7 @@ pub const Error = error{
     ControllerEnableTimeout,
     ControllerFatal,
     QueueAllocationFailed,
+    BusMasteringNotRevoked,
     CommandTimeout,
     CommandFailed,
     TransferTooLarge,
@@ -82,6 +81,7 @@ const NVM_OPC_READ: u32 = 0x02;
 const IO_QUEUE_ID: u16 = 1;
 const IO_QUEUE_ENTRIES: u32 = 32;
 const COMMAND_SPIN_LIMIT: u64 = 50_000_000;
+const DMA_FRAME_COUNT: u32 = 5;
 
 const Queue = struct {
     sq_phys: u32,
@@ -92,6 +92,24 @@ const Queue = struct {
     cq_head: u32 = 0,
     phase: u1 = 1,
     next_cid: u16 = 0,
+};
+
+const DmaFrames = struct {
+    base: u32,
+
+    fn frame(self: DmaFrames, index: u32) u32 {
+        return self.base + index * PAGE_SIZE;
+    }
+
+    fn windows(self: DmaFrames) [DMA_FRAME_COUNT]intel_vtd.DmaWindow {
+        return .{
+            .{ .base = self.frame(0), .device_readable = true, .device_writable = false },
+            .{ .base = self.frame(1), .device_readable = false, .device_writable = true },
+            .{ .base = self.frame(2), .device_readable = true, .device_writable = false },
+            .{ .base = self.frame(3), .device_readable = false, .device_writable = true },
+            .{ .base = self.frame(4), .device_readable = true, .device_writable = true },
+        };
+    }
 };
 
 pub const Controller = struct {
@@ -159,17 +177,6 @@ fn mapBar(phys: usize) usize {
     return KERNEL_MMIO_VIRTUAL_BASE;
 }
 
-fn enablePciBusMastering(dev: pci.PCIDevice) void {
-    const command = pci.readConfig(dev.bus, dev.device, dev.function, PCI_COMMAND_OFFSET);
-    pci.writeConfig(
-        dev.bus,
-        dev.device,
-        dev.function,
-        PCI_COMMAND_OFFSET,
-        command | PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER,
-    );
-}
-
 fn doorbellStride(cap: u64) usize {
     const dstrd: u5 = @intCast((cap >> 32) & 0xF);
     return @as(usize, 4) << dstrd;
@@ -185,12 +192,12 @@ fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
     return false;
 }
 
-// Bring the controller from reset to enabled with admin queues installed.
-pub fn bringUp(dev: pci.PCIDevice) Error!Controller {
+// Reset the controller and install admin queues while PCI bus mastering is
+// still revoked. The caller must establish the DMA domain before enabling it.
+fn prepare(dev: pci.PCIDevice, frames: DmaFrames) Error!Controller {
     const bar_phys = barPhysicalAddress(dev) orelse return error.BarUnmappable;
     if (bar_phys == 0) return error.BarUnmappable;
 
-    enablePciBusMastering(dev);
     const bar = mapBar(bar_phys);
 
     var controller = Controller{
@@ -207,8 +214,8 @@ pub fn bringUp(dev: pci.PCIDevice) Error!Controller {
         return error.ControllerResetTimeout;
     }
 
-    const sq_phys = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
-    const cq_phys = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
+    const sq_phys = frames.frame(0);
+    const cq_phys = frames.frame(1);
     zeroFrame(sq_phys);
     zeroFrame(cq_phys);
     controller.admin = .{ .sq_phys = sq_phys, .cq_phys = cq_phys, .entries = ADMIN_QUEUE_ENTRIES, .qid = 0 };
@@ -219,13 +226,15 @@ pub fn bringUp(dev: pci.PCIDevice) Error!Controller {
     controller.writeReg64(REG_ASQ, sq_phys);
     controller.writeReg64(REG_ACQ, cq_phys);
 
-    controller.writeReg32(REG_CC, CC_CSS_NVM | CC_MPS_4K | CC_AMS_RR | CC_IOSQES | CC_IOCQES | CC_EN);
-    if (!spinUntilReady(&controller, true)) {
-        if (controller.fatal()) return error.ControllerFatal;
+    return controller;
+}
+
+fn enable(self: *Controller) Error!void {
+    self.writeReg32(REG_CC, CC_CSS_NVM | CC_MPS_4K | CC_AMS_RR | CC_IOSQES | CC_IOCQES | CC_EN);
+    if (!spinUntilReady(self, true)) {
+        if (self.fatal()) return error.ControllerFatal;
         return error.ControllerEnableTimeout;
     }
-
-    return controller;
 }
 
 fn sqDoorbell(self: *const Controller, qid: u16) usize {
@@ -269,9 +278,9 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
 }
 
 // Create the single I/O submission/completion queue pair used for block I/O.
-pub fn createIoQueues(self: *Controller) Error!void {
-    const cq_phys = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
-    const sq_phys = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
+pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {
+    const cq_phys = frames.frame(3);
+    const sq_phys = frames.frame(2);
     zeroFrame(cq_phys);
     zeroFrame(sq_phys);
 
@@ -355,8 +364,7 @@ pub fn attached() bool {
 // lba_bytes from the in-use LBA format. Fails closed: a missing namespace or an
 // LBA size other than the 512-byte sector the storage volume contract assumes is
 // rejected here rather than silently mis-addressing the device later.
-fn identifyNamespace(self: *Controller) Error!void {
-    const buffer = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
+fn identifyNamespace(self: *Controller, buffer: u32) Error!void {
     zeroFrame(buffer);
     var cmd = [_]u32{0} ** 16;
     cmd[0] = ADMIN_OPC_IDENTIFY;
@@ -386,14 +394,36 @@ fn identifyNamespace(self: *Controller) Error!void {
 }
 
 // Bring the controller online and register it as the active storage backend.
-pub fn attachAsBackend(dev: pci.PCIDevice) Error!void {
-    var controller = try bringUp(dev);
-    try createIoQueues(&controller);
-    try identifyNamespace(&controller);
-    const bounce = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
+// Real hardware supplies a validated DMAR summary; test machines deliberately
+// pass null because their emulated chipset has no VT-d unit.
+pub fn attachAsBackend(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !bool {
+    if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
+    const dma_base = paging.alloc_frames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
+    const frames = DmaFrames{ .base = dma_base };
+    var retain_dma_frames = vtd_summary != null;
+    errdefer if (!retain_dma_frames) paging.release_frames(dma_base, DMA_FRAME_COUNT) catch {};
+    for (0..DMA_FRAME_COUNT) |index| zeroFrame(frames.frame(@intCast(index)));
+
+    var controller = try prepare(dev, frames);
+    var bus_master_enabled = false;
+    errdefer if (bus_master_enabled) {
+        controller.writeReg32(REG_CC, controller.reg32(REG_CC) & ~CC_EN);
+        _ = spinUntilReady(&controller, false);
+        pci.disableBusMastering(dev);
+    };
+    const windows = frames.windows();
+    if (vtd_summary) |summary| try intel_vtd.enforceNvme(summary, dev, &windows);
+    pci.enableMemoryBusMastering(dev);
+    bus_master_enabled = true;
+    try enable(&controller);
+    try createIoQueues(&controller, frames);
+    const bounce = frames.frame(4);
+    try identifyNamespace(&controller, bounce);
     active_controller = controller;
     bounce_phys = bounce;
     active_present = true;
+    retain_dma_frames = true;
+    return vtd_summary != null;
 }
 
 pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
@@ -498,13 +528,8 @@ export fn zigosStorageBootstrapNvmeDmaWindow(
 // Diagnostic probe used to validate the MMIO foundation in QEMU. Brings the
 // controller and I/O queues online (non-destructive) and prints the capability
 // and version registers. Safe to call only when a real NVMe controller exists.
-pub fn probeAndReport(dev: pci.PCIDevice) void {
-    attachAsBackend(dev) catch |err| {
-        console.print("ZIGOS:NVME:HW:BRINGUP_FAIL ");
-        console.print(@errorName(err));
-        console.print("\n");
-        return;
-    };
+pub fn probeAndReport(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !bool {
+    const isolated = try attachAsBackend(dev, vtd_summary);
     console.print("ZIGOS:NVME:HW:CAP=");
     printHex64(active_controller.capabilities());
     console.print(" VS=");
@@ -512,6 +537,7 @@ pub fn probeAndReport(dev: pci.PCIDevice) void {
     console.print(" RDY=1\n");
     console.print("ZIGOS:NVME:HW:BRINGUP_OK\n");
     console.print("ZIGOS:NVME:HW:IOQ_OK\n");
+    return isolated;
 }
 
 // Keep the destructive backend roundtrip compiler-checked though it is never
@@ -529,7 +555,7 @@ const TEST_PATTERN: u8 = 0xA5;
 // pattern to a scratch LBA through backendWrite, read it back through
 // backendRead, and verify. NOT run on a production boot.
 fn roundtripSelfTest(dev: pci.PCIDevice) void {
-    attachAsBackend(dev) catch |err| {
+    _ = attachAsBackend(dev, null) catch |err| {
         console.print("ZIGOS:NVME:HW:IOQ_FAIL ");
         console.print(@errorName(err));
         console.print("\n");
