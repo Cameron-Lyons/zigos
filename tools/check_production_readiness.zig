@@ -677,6 +677,7 @@ fn validateNuc11tnki5KernelProofSources(
     const xhci_path = "src/kernel/drivers/xhci.zig";
     const nvme_path = "src/kernel/drivers/nvme.zig";
     const i225_path = "src/kernel/drivers/intel_i225.zig";
+    const pci_path = "src/kernel/drivers/pci.zig";
     if (!common.pathExists(io, hardware_proof_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source is missing: {s}", .{hardware_proof_path});
         return;
@@ -780,6 +781,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 I225 proof source is missing: {s}", .{i225_path});
         return;
     }
+    if (!common.pathExists(io, pci_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 PCI inventory source is missing: {s}", .{pci_path});
+        return;
+    }
     const hardware_proof_source = try common.readFileAlloc(allocator, io, hardware_proof_path, common.source_file_max_bytes);
     const apic_source = try common.readFileAlloc(allocator, io, apic_path, common.source_file_max_bytes);
     const devices_source = try common.readFileAlloc(allocator, io, devices_path, common.source_file_max_bytes);
@@ -805,6 +810,7 @@ fn validateNuc11tnki5KernelProofSources(
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
+    const pci_source = try common.readFileAlloc(allocator, io, pci_path, common.source_file_max_bytes);
     const required_hardware_proof_snippets = [_][]const u8{
         "recordApicTimerProof",
         "recordFramebufferProof",
@@ -878,6 +884,20 @@ fn validateNuc11tnki5KernelProofSources(
         if (std.mem.indexOf(u8, devices_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 boot device inventory source must capture target-specific PCI snippet: {s}", .{snippet});
         }
+    }
+    const required_pci_inventory_snippets = [_][]const u8{
+        "boot_inventory_initialized",
+        "PCI_SECONDARY_BUS_OFFSET",
+        "enqueueSecondaryBus",
+        "return firstMatchingIn(Query, bootDevices(), query, matches)",
+    };
+    for (required_pci_inventory_snippets) |snippet| {
+        if (std.mem.indexOf(u8, pci_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must retain its cached topology-aware inventory: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, pci_source, "while (bus < PCI_MAX_BUS_COUNT)") != null) {
+        try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not restore repeated exhaustive 256-bus scans", .{});
     }
     const required_service_bootstrap_snippets = [_][]const u8{
         "device_inventory.requireProductionDriverDeviceId(device_class)",

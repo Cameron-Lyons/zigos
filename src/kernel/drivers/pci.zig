@@ -1,3 +1,4 @@
+const std = @import("std");
 const io = @import("../utils/io.zig");
 const console = @import("../utils/console.zig");
 
@@ -15,6 +16,7 @@ const PCI_MAX_FUNCTION_COUNT: u8 = 8;
 const PCI_VENDOR_DEVICE_OFFSET: u8 = 0x00;
 const PCI_CLASS_INFO_OFFSET: u8 = 0x08;
 const PCI_HEADER_TYPE_OFFSET: u8 = 0x0E;
+const PCI_SECONDARY_BUS_OFFSET: u8 = 0x19;
 const PCI_BAR0_OFFSET: u8 = 0x10;
 const PCI_BAR1_OFFSET: u8 = 0x14;
 const PCI_BAR2_OFFSET: u8 = 0x18;
@@ -24,6 +26,9 @@ const PCI_BAR5_OFFSET: u8 = 0x24;
 
 const PCI_ABSENT_VENDOR_ID: u16 = 0xFFFF;
 const PCI_MULTI_FUNCTION_FLAG: u8 = 0x80;
+const PCI_CLASS_BRIDGE: u8 = 0x06;
+const PCI_SUBCLASS_PCI_TO_PCI: u8 = 0x04;
+const PCI_INVENTORY_CAPACITY: usize = 256;
 const PCI_U8_MASK: u32 = 0xFF;
 const PCI_U16_MASK: u32 = 0xFFFF;
 const BITS_PER_BYTE: u5 = 8;
@@ -63,6 +68,11 @@ pub const PCI_SUBCLASS_USB: u8 = 0x03;
 pub const PCI_PROG_IF_XHCI: u8 = 0x30;
 pub const PCI_VENDOR_INTEL: u16 = 0x8086;
 pub const PCI_DEVICE_INTEL_I225_LM: u16 = 0x15F2;
+
+var boot_inventory: [PCI_INVENTORY_CAPACITY]PCIDevice = undefined;
+var boot_inventory_count: usize = 0;
+var boot_inventory_initialized = false;
+var boot_inventory_valid = false;
 
 fn configAddress(bus: u8, device: u8, func: u8, offset: u8) u32 {
     return CONFIG_ADDRESS_ENABLE |
@@ -152,29 +162,103 @@ fn deviceHasMultipleFunctions(bus: u8, device: u8) bool {
     return (readConfigByte(bus, device, 0, PCI_HEADER_TYPE_OFFSET) & PCI_MULTI_FUNCTION_FLAG) != 0;
 }
 
+fn isPciBridge(device_info: PCIDevice) bool {
+    return device_info.class_code == PCI_CLASS_BRIDGE and
+        device_info.subclass == PCI_SUBCLASS_PCI_TO_PCI;
+}
+
+fn appendBootDevice(device_info: PCIDevice) bool {
+    if (boot_inventory_count == boot_inventory.len) return false;
+    boot_inventory[boot_inventory_count] = device_info;
+    boot_inventory_count += 1;
+    return true;
+}
+
+fn enqueueSecondaryBus(
+    device_info: PCIDevice,
+    visited: *[PCI_MAX_BUS_COUNT]bool,
+    queue: *[PCI_MAX_BUS_COUNT]u8,
+    queue_tail: *usize,
+) bool {
+    if (!isPciBridge(device_info)) return true;
+    const secondary_bus = readConfigByte(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        PCI_SECONDARY_BUS_OFFSET,
+    );
+    if (secondary_bus == 0 or visited[secondary_bus]) return true;
+    if (queue_tail.* == queue.len) return false;
+    visited[secondary_bus] = true;
+    queue[queue_tail.*] = secondary_bus;
+    queue_tail.* += 1;
+    return true;
+}
+
+fn buildBootInventory() void {
+    if (boot_inventory_initialized) return;
+    boot_inventory_initialized = true;
+    boot_inventory_count = 0;
+    boot_inventory_valid = false;
+
+    var visited = [_]bool{false} ** PCI_MAX_BUS_COUNT;
+    var queue = [_]u8{0} ** PCI_MAX_BUS_COUNT;
+    var queue_head: usize = 0;
+    var queue_tail: usize = 1;
+    visited[0] = true;
+
+    while (queue_head < queue_tail) : (queue_head += 1) {
+        const bus = queue[queue_head];
+        var device: u8 = 0;
+        while (device < PCI_MAX_DEVICE_COUNT) : (device += 1) {
+            const function_zero = checkDevice(bus, device, 0) orelse continue;
+            if (!appendBootDevice(function_zero) or
+                !enqueueSecondaryBus(function_zero, &visited, &queue, &queue_tail))
+            {
+                boot_inventory_count = 0;
+                return;
+            }
+            if (!deviceHasMultipleFunctions(bus, device)) continue;
+
+            var function: u8 = 1;
+            while (function < PCI_MAX_FUNCTION_COUNT) : (function += 1) {
+                const device_info = checkDevice(bus, device, function) orelse continue;
+                if (!appendBootDevice(device_info) or
+                    !enqueueSecondaryBus(device_info, &visited, &queue, &queue_tail))
+                {
+                    boot_inventory_count = 0;
+                    return;
+                }
+            }
+        }
+    }
+    boot_inventory_valid = true;
+}
+
+fn bootDevices() []const PCIDevice {
+    buildBootInventory();
+    if (!boot_inventory_valid) return &.{};
+    return boot_inventory[0..boot_inventory_count];
+}
+
+fn firstMatchingIn(
+    comptime Query: type,
+    devices: []const PCIDevice,
+    query: Query,
+    comptime matches: fn (Query, PCIDevice) bool,
+) ?PCIDevice {
+    for (devices) |device_info| {
+        if (matches(query, device_info)) return device_info;
+    }
+    return null;
+}
+
 fn firstMatchingDevice(
     comptime Query: type,
     query: Query,
     comptime matches: fn (Query, PCIDevice) bool,
 ) ?PCIDevice {
-    var bus: u16 = 0;
-    while (bus < PCI_MAX_BUS_COUNT) : (bus += 1) {
-        var device: u8 = 0;
-        while (device < PCI_MAX_DEVICE_COUNT) : (device += 1) {
-            var func: u8 = 0;
-            while (func < PCI_MAX_FUNCTION_COUNT) : (func += 1) {
-                if (checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    if (matches(query, pci_device)) {
-                        return pci_device;
-                    }
-
-                    if (func == 0 and !deviceHasMultipleFunctions(@intCast(bus), device)) break;
-                }
-            }
-        }
-    }
-
-    return null;
+    return firstMatchingIn(Query, bootDevices(), query, matches);
 }
 
 pub fn findDevice(vendor_id: u16, device_id: u16) ?PCIDevice {
@@ -242,33 +326,22 @@ pub fn findDeviceByStableId(target_device_id: u64) ?PCIDevice {
 pub fn scanBus() void {
     console.print("Scanning PCI bus...\n");
 
-    var bus: u16 = 0;
-    while (bus < PCI_MAX_BUS_COUNT) : (bus += 1) {
-        var device: u8 = 0;
-        while (device < PCI_MAX_DEVICE_COUNT) : (device += 1) {
-            var func: u8 = 0;
-            while (func < PCI_MAX_FUNCTION_COUNT) : (func += 1) {
-                if (checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    console.print("PCI ");
-                    printHex8(@intCast(bus));
-                    console.print(":");
-                    printHex8(device);
-                    console.print(".");
-                    printHex8(func);
-                    console.print(" - Vendor: ");
-                    printHex16(pci_device.vendor_id);
-                    console.print(" Device: ");
-                    printHex16(pci_device.device_id);
-                    console.print(" Class: ");
-                    printHex8(pci_device.class_code);
-                    console.print(":");
-                    printHex8(pci_device.subclass);
-                    console.print("\n");
-
-                    if (func == 0 and !deviceHasMultipleFunctions(@intCast(bus), device)) break;
-                }
-            }
-        }
+    for (bootDevices()) |pci_device| {
+        console.print("PCI ");
+        printHex8(pci_device.bus);
+        console.print(":");
+        printHex8(pci_device.device);
+        console.print(".");
+        printHex8(pci_device.function);
+        console.print(" - Vendor: ");
+        printHex16(pci_device.vendor_id);
+        console.print(" Device: ");
+        printHex16(pci_device.device_id);
+        console.print(" Class: ");
+        printHex8(pci_device.class_code);
+        console.print(":");
+        printHex8(pci_device.subclass);
+        console.print("\n");
     }
 }
 
@@ -357,6 +430,24 @@ test "PCI helpers identify xHCI USB controllers" {
 
     const ehci = syntheticPciDevice(PCI_VENDOR_INTEL, 0x1E26, PCI_CLASS_SERIAL_BUS_CONTROLLER, PCI_SUBCLASS_USB, 0x20);
     try @import("std").testing.expect(!isXhciController(ehci));
+}
+
+test "PCI inventory queries reuse one discovered device set" {
+    const devices = [_]PCIDevice{
+        syntheticPciDevice(0x1234, 0x0001, PCI_CLASS_NETWORK_ADAPTER, 0, 0),
+        syntheticPciDevice(0x144D, 0xA80A, PCI_CLASS_STORAGE_CONTROLLER, PCI_SUBCLASS_NVM, PCI_PROG_IF_NVME),
+    };
+    const nvme = firstMatchingIn(
+        ClassSubclassProgIfQuery,
+        &devices,
+        .{
+            .class_code = PCI_CLASS_STORAGE_CONTROLLER,
+            .subclass = PCI_SUBCLASS_NVM,
+            .prog_if = PCI_PROG_IF_NVME,
+        },
+        matchesClassSubclassProgIfQuery,
+    ) orelse return error.MissingDevice;
+    try std.testing.expectEqual(@as(u16, 0xA80A), nvme.device_id);
 }
 
 pub fn writeConfigDword(bus: u8, device: u8, func: u8, offset: u8, value: u32) void {
