@@ -10,7 +10,7 @@ source "$ROOT_DIR/scripts/qemu-harness.sh"
 ISO_PATH="${1:?x86-64 kernel ISO required}"
 LOG_PATH="${2:?serial log path required}"
 QEMU_LOG_PATH="${LOG_PATH%.log}.qemu.log"
-READY_MARKER="BOOT:CORE_READY"
+READY_MARKER="ZIGOS:USERSPACE:RESUME:OK"
 TIMEOUT_SECONDS="${ZIGOS_X86_64_KERNEL_SECONDS:-30}"
 
 case "$TIMEOUT_SECONDS" in
@@ -53,7 +53,10 @@ for required_marker in \
   "BOOT:PROFILE:zigos_native" \
   "BOOT:ROLE:production" \
   "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY" \
-  "ZIGOS:ARCH:X86_64:PAGING:READY"; do
+  "ZIGOS:ARCH:X86_64:PAGING:READY" \
+  "BOOT:CORE_READY" \
+  "ZIGOS:USERSPACE:ARTIFACTS:READY" \
+  "ZIGOS:USERSPACE:EXEC_PROBE:OK"; do
   if ! grep -Fq "$required_marker" "$LOG_PATH"; then
     echo "x86-64 kernel smoke test failed: missing '$required_marker'" >&2
     cat "$LOG_PATH" >&2
@@ -61,4 +64,4 @@ for required_marker in \
   fi
 done
 
-echo "x86-64 kernel core boot smoke test passed. Log: $LOG_PATH"
+echo "x86-64 kernel and userspace launch smoke test passed. Log: $LOG_PATH"

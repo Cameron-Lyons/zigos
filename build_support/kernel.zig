@@ -52,7 +52,7 @@ pub fn addX86ArchitectureCompileCheck(
 pub fn addX86_64KernelCompileCheck(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    userspace_images: userspace_build.ArtifactSet,
+    userspace_images: userspace_build.X86_64ArtifactSet,
 ) *std.Build.Step {
     const kernel_module = createX86_64KernelModule(b, optimize, userspace_images);
     const object = b.addObject(.{
@@ -67,7 +67,7 @@ pub fn addX86_64KernelCompileCheck(
 pub fn addX86_64KernelBootCheck(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    userspace_images: userspace_build.ArtifactSet,
+    userspace_images: userspace_build.X86_64ArtifactSet,
 ) *std.Build.Step {
     const kernel_module = createX86_64KernelModule(b, optimize, userspace_images);
     const kernel_object = b.addObject(.{
@@ -116,15 +116,17 @@ pub fn addX86_64KernelBootCheck(
     run.addFileArg(iso_path);
     run.addArg("build/x86_64-kernel-core-boot.log");
 
-    const step = b.step("x86_64-kernel-core-boot-check", "Boot the production kernel through Multiboot2 and the four-level pager in QEMU");
+    const step = b.step("x86_64-kernel-core-boot-check", "Boot the production kernel and complete ELF64 userspace catalog through a trap/resume cycle in QEMU");
     step.dependOn(&run.step);
+    const userspace_step = b.step("x86_64-userspace-launch-check", "Launch the production ELF64 userspace catalog and prove its first trap/resume cycle in QEMU");
+    userspace_step.dependOn(step);
     return step;
 }
 
 fn createX86_64KernelModule(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    userspace_images: userspace_build.ArtifactSet,
+    userspace_images: userspace_build.X86_64ArtifactSet,
 ) *std.Build.Module {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
