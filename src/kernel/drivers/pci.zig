@@ -1,28 +1,29 @@
 const std = @import("std");
-const io = @import("../utils/io.zig");
 const console = @import("../utils/console.zig");
+const paging = @import("../memory/paging64.zig");
+const mcfg = @import("../platform/mcfg.zig");
 
-const CONFIG_ADDRESS = 0xCF8;
-const CONFIG_DATA = 0xCFC;
-const CONFIG_ADDRESS_ENABLE: u32 = 0x8000_0000;
-const CONFIG_BUS_SHIFT = 16;
-const CONFIG_DEVICE_SHIFT = 11;
-const CONFIG_FUNCTION_SHIFT = 8;
-const CONFIG_DWORD_ALIGNMENT_MASK: u8 = 0xFC;
+const ECAM_BUS_SHIFT: u6 = 20;
+const ECAM_DEVICE_SHIFT: u6 = 15;
+const ECAM_FUNCTION_SHIFT: u6 = 12;
+const ECAM_FUNCTION_BYTES: usize = 1 << ECAM_FUNCTION_SHIFT;
+const ECAM_CONFIG_OFFSET_MASK: u16 = ECAM_FUNCTION_BYTES - 1;
+const CONFIG_DWORD_ALIGNMENT_MASK: u16 = 0x0FFC;
+const KERNEL_ECAM_WINDOW_VIRTUAL_BASE: usize = 0xFFFF_8000_1000_0000;
 
 const PCI_MAX_BUS_COUNT: u16 = 256;
 const PCI_MAX_DEVICE_COUNT: u8 = 32;
 const PCI_MAX_FUNCTION_COUNT: u8 = 8;
-const PCI_VENDOR_DEVICE_OFFSET: u8 = 0x00;
-const PCI_CLASS_INFO_OFFSET: u8 = 0x08;
-const PCI_HEADER_TYPE_OFFSET: u8 = 0x0E;
-const PCI_SECONDARY_BUS_OFFSET: u8 = 0x19;
-const PCI_BAR0_OFFSET: u8 = 0x10;
-const PCI_BAR1_OFFSET: u8 = 0x14;
-const PCI_BAR2_OFFSET: u8 = 0x18;
-const PCI_BAR3_OFFSET: u8 = 0x1C;
-const PCI_BAR4_OFFSET: u8 = 0x20;
-const PCI_BAR5_OFFSET: u8 = 0x24;
+const PCI_VENDOR_DEVICE_OFFSET: u16 = 0x00;
+const PCI_CLASS_INFO_OFFSET: u16 = 0x08;
+const PCI_HEADER_TYPE_OFFSET: u16 = 0x0E;
+const PCI_SECONDARY_BUS_OFFSET: u16 = 0x19;
+const PCI_BAR0_OFFSET: u16 = 0x10;
+const PCI_BAR1_OFFSET: u16 = 0x14;
+const PCI_BAR2_OFFSET: u16 = 0x18;
+const PCI_BAR3_OFFSET: u16 = 0x1C;
+const PCI_BAR4_OFFSET: u16 = 0x20;
+const PCI_BAR5_OFFSET: u16 = 0x24;
 
 const PCI_ABSENT_VENDOR_ID: u16 = 0xFFFF;
 const PCI_MULTI_FUNCTION_FLAG: u8 = 0x80;
@@ -73,23 +74,105 @@ var boot_inventory: [PCI_INVENTORY_CAPACITY]PCIDevice = undefined;
 var boot_inventory_count: usize = 0;
 var boot_inventory_initialized = false;
 var boot_inventory_valid = false;
+var ecam_allocation: ?mcfg.Allocation = null;
+var mapped_configuration_page: ?usize = null;
+var configuration_lock: bool = false;
 
-fn configAddress(bus: u8, device: u8, func: u8, offset: u8) u32 {
-    return CONFIG_ADDRESS_ENABLE |
-        (@as(u32, bus) << CONFIG_BUS_SHIFT) |
-        (@as(u32, device) << CONFIG_DEVICE_SHIFT) |
-        (@as(u32, func) << CONFIG_FUNCTION_SHIFT) |
-        (@as(u32, offset) & CONFIG_DWORD_ALIGNMENT_MASK);
+pub const InitError = error{InvalidEcamAllocation};
+
+pub fn init(allocation: mcfg.Allocation) InitError!void {
+    if (allocation.segment_group != 0 or allocation.start_bus != 0 or
+        allocation.start_bus > allocation.end_bus or
+        allocation.base_address == 0 or allocation.base_address % mcfg.ECAM_BUS_BYTES != 0)
+    {
+        return error.InvalidEcamAllocation;
+    }
+    const span = std.math.mul(u64, allocation.busCount(), mcfg.ECAM_BUS_BYTES) catch
+        return error.InvalidEcamAllocation;
+    const last_address = std.math.add(u64, allocation.base_address, span - 1) catch
+        return error.InvalidEcamAllocation;
+    _ = std.math.cast(usize, last_address) orelse return error.InvalidEcamAllocation;
+
+    ecam_allocation = allocation;
+    mapped_configuration_page = null;
+    boot_inventory_count = 0;
+    boot_inventory_initialized = false;
+    boot_inventory_valid = false;
 }
 
-pub fn readConfig(bus: u8, device: u8, func: u8, offset: u8) u32 {
-    io.outl(CONFIG_ADDRESS, configAddress(bus, device, func, offset));
-    return io.inl(CONFIG_DATA);
+pub fn initialized() bool {
+    return ecam_allocation != null;
 }
 
-pub fn writeConfig(bus: u8, device: u8, func: u8, offset: u8, value: u32) void {
-    io.outl(CONFIG_ADDRESS, configAddress(bus, device, func, offset));
-    io.outl(CONFIG_DATA, value);
+pub fn ecamPhysicalAddress(
+    allocation: mcfg.Allocation,
+    bus: u8,
+    device: u8,
+    function: u8,
+    offset: u16,
+) ?usize {
+    if (!allocation.containsBus(bus) or device >= PCI_MAX_DEVICE_COUNT or
+        function >= PCI_MAX_FUNCTION_COUNT or offset > ECAM_CONFIG_OFFSET_MASK)
+    {
+        return null;
+    }
+    const bus_offset = @as(u64, bus - allocation.start_bus) << ECAM_BUS_SHIFT;
+    const device_offset = @as(u64, device) << ECAM_DEVICE_SHIFT;
+    const function_offset = @as(u64, function) << ECAM_FUNCTION_SHIFT;
+    const address = std.math.add(
+        u64,
+        allocation.base_address,
+        bus_offset | device_offset | function_offset | offset,
+    ) catch return null;
+    return std.math.cast(usize, address);
+}
+
+fn acquireConfigurationLock() void {
+    while (@atomicRmw(bool, &configuration_lock, .Xchg, true, .seq_cst)) {
+        asm volatile ("pause");
+    }
+}
+
+fn releaseConfigurationLock() void {
+    @atomicStore(bool, &configuration_lock, false, .seq_cst);
+}
+
+fn mappedRegister(bus: u8, device: u8, function: u8, offset: u16) ?*volatile u32 {
+    const allocation = ecam_allocation orelse return null;
+    const aligned_offset = offset & CONFIG_DWORD_ALIGNMENT_MASK;
+    const physical_address = ecamPhysicalAddress(allocation, bus, device, function, aligned_offset) orelse return null;
+    const physical_page = physical_address & ~(ECAM_FUNCTION_BYTES - 1);
+    if (mapped_configuration_page == null or mapped_configuration_page.? != physical_page) {
+        paging.mapKernelBorrowedPage(
+            KERNEL_ECAM_WINDOW_VIRTUAL_BASE,
+            physical_page,
+            paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
+        );
+        mapped_configuration_page = physical_page;
+    }
+    return @ptrFromInt(KERNEL_ECAM_WINDOW_VIRTUAL_BASE + (physical_address & (ECAM_FUNCTION_BYTES - 1)));
+}
+
+fn readConfigUnlocked(bus: u8, device: u8, function: u8, offset: u16) u32 {
+    const register = mappedRegister(bus, device, function, offset) orelse return std.math.maxInt(u32);
+    return register.*;
+}
+
+fn writeConfigUnlocked(bus: u8, device: u8, function: u8, offset: u16, value: u32) void {
+    const register = mappedRegister(bus, device, function, offset) orelse return;
+    register.* = value;
+}
+
+pub fn readConfig(bus: u8, device: u8, function: u8, offset: u16) u32 {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    return readConfigUnlocked(bus, device, function, offset);
+}
+
+pub fn writeConfig(bus: u8, device: u8, function: u8, offset: u16, value: u32) void {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    writeConfigUnlocked(bus, device, function, offset, value);
 }
 
 pub fn checkDevice(bus: u8, device: u8, func: u8) ?PCIDevice {
@@ -357,36 +440,44 @@ fn printHex16(value: u16) void {
     printHex8(@intCast(value & PCI_U8_MASK));
 }
 
-pub fn readConfigByte(bus: u8, device: u8, func: u8, offset: u8) u8 {
-    const data = readConfig(bus, device, func, offset);
+pub fn readConfigByte(bus: u8, device: u8, function: u8, offset: u16) u8 {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    const data = readConfigUnlocked(bus, device, function, offset);
     const shift: u5 = @intCast((offset & 3) * BITS_PER_BYTE);
     return @as(u8, @truncate(data >> shift));
 }
 
-pub fn readConfigWord(bus: u8, device: u8, func: u8, offset: u8) u16 {
-    const data = readConfig(bus, device, func, offset);
+pub fn readConfigWord(bus: u8, device: u8, function: u8, offset: u16) u16 {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    const data = readConfigUnlocked(bus, device, function, offset);
     const shift: u5 = @intCast((offset & 2) * BITS_PER_BYTE);
     return @as(u16, @truncate(data >> shift));
 }
 
-pub fn readConfigDword(bus: u8, device: u8, func: u8, offset: u8) u32 {
-    return readConfig(bus, device, func, offset);
+pub fn readConfigDword(bus: u8, device: u8, function: u8, offset: u16) u32 {
+    return readConfig(bus, device, function, offset);
 }
 
-pub fn writeConfigByte(bus: u8, device: u8, func: u8, offset: u8, value: u8) void {
-    const old_data = readConfig(bus, device, func, offset);
+pub fn writeConfigByte(bus: u8, device: u8, function: u8, offset: u16, value: u8) void {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    const old_data = readConfigUnlocked(bus, device, function, offset);
     const shift = (offset & 3) * BITS_PER_BYTE;
     const mask = ~(PCI_U8_MASK << shift);
     const new_data = (old_data & mask) | (@as(u32, value) << shift);
-    writeConfig(bus, device, func, offset, new_data);
+    writeConfigUnlocked(bus, device, function, offset, new_data);
 }
 
-pub fn writeConfigWord(bus: u8, device: u8, func: u8, offset: u8, value: u16) void {
-    const old_data = readConfig(bus, device, func, offset);
+pub fn writeConfigWord(bus: u8, device: u8, function: u8, offset: u16, value: u16) void {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    const old_data = readConfigUnlocked(bus, device, function, offset);
     const shift: u5 = @intCast((offset & 2) * BITS_PER_BYTE);
     const mask = ~(PCI_U16_MASK << shift);
     const new_data = (old_data & mask) | (@as(u32, value) << shift);
-    writeConfig(bus, device, func, offset, new_data);
+    writeConfigUnlocked(bus, device, function, offset, new_data);
 }
 
 fn syntheticPciDevice(vendor_id: u16, device_id: u16, class_code: u8, subclass: u8, prog_if: u8) PCIDevice {
@@ -406,6 +497,56 @@ fn syntheticPciDevice(vendor_id: u16, device_id: u16, class_code: u8, subclass: 
         .bar4 = 0,
         .bar5 = 0,
     };
+}
+
+test "PCIe ECAM address calculation covers buses devices functions and extended configuration" {
+    const allocation = mcfg.Allocation{
+        .base_address = 0xB000_0000,
+        .segment_group = 0,
+        .start_bus = 0,
+        .end_bus = 0xFF,
+    };
+    try std.testing.expectEqual(
+        @as(?usize, 0xB000_0000),
+        ecamPhysicalAddress(allocation, 0, 0, 0, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 0xB123_4ABC),
+        ecamPhysicalAddress(allocation, 0x12, 6, 4, 0xABC),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        ecamPhysicalAddress(allocation, 0, PCI_MAX_DEVICE_COUNT, 0, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        ecamPhysicalAddress(allocation, 0, 0, PCI_MAX_FUNCTION_COUNT, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        ecamPhysicalAddress(allocation, 0, 0, 0, ECAM_CONFIG_OFFSET_MASK + 1),
+    );
+}
+
+test "PCIe ECAM address calculation honors allocation bus origins" {
+    const allocation = mcfg.Allocation{
+        .base_address = 0x8000_0000,
+        .segment_group = 7,
+        .start_bus = 0x40,
+        .end_bus = 0x4F,
+    };
+    try std.testing.expectEqual(
+        @as(?usize, 0x8000_1000),
+        ecamPhysicalAddress(allocation, 0x40, 0, 1, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 0x80F0_0000),
+        ecamPhysicalAddress(allocation, 0x4F, 0, 0, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        ecamPhysicalAddress(allocation, 0x3F, 0, 0, 0),
+    );
 }
 
 test "PCI helpers identify NVMe controllers" {
@@ -450,6 +591,6 @@ test "PCI inventory queries reuse one discovered device set" {
     try std.testing.expectEqual(@as(u16, 0xA80A), nvme.device_id);
 }
 
-pub fn writeConfigDword(bus: u8, device: u8, func: u8, offset: u8, value: u32) void {
-    writeConfig(bus, device, func, offset, value);
+pub fn writeConfigDword(bus: u8, device: u8, function: u8, offset: u16, value: u32) void {
+    writeConfig(bus, device, function, offset, value);
 }

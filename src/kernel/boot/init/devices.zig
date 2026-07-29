@@ -37,6 +37,10 @@ pub fn init() void {
     console.print("Initializing device drivers...\n");
     bootstrap_driver_port.reset();
     device_inventory.reset();
+    hardware_proof.capturePlatformFirmwareEvidence();
+    const ecam_allocation = hardware_proof.pciEcamAllocation() orelse
+        @panic("ACPI MCFG is required for PCIe discovery");
+    pci.init(ecam_allocation) catch @panic("ACPI MCFG exposed an invalid PCIe ECAM allocation");
     // QEMU "modeled" test boots cannot expose the exact first-target Intel
     // devices, so explicit test profiles request a modeled inventory seed.
     // Native QEMU paths that cannot pass `-append` reliably also fall back to
