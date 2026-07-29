@@ -41,10 +41,6 @@ rm -f "$LOG_PATH" "$NODE_A_LOG" "$NODE_B_LOG" "$NODE_A_QEMU_LOG" "$NODE_B_QEMU_L
 bash "$ROOT_DIR/scripts/build-native-store.sh" "$NODE_A_STORE" "$NATIVE_STORE_SIZE_MIB" reset
 bash "$ROOT_DIR/scripts/build-native-store.sh" "$NODE_B_STORE" "$NATIVE_STORE_SIZE_MIB" reset
 
-# Two-node sync runs the production native profile under QEMU, so request the
-# explicit modeled inventory path for first-target devices the emulator lacks.
-QEMU_KERNEL_APPEND="${QEMU_KERNEL_APPEND:-model_inventory}"
-
 build_node_command() {
   local store_image="$1"
   local serial_log="$2"
@@ -56,9 +52,9 @@ build_node_command() {
     "file:$serial_log" \
     yes \
     no \
-    -drive "$(qemu_harness_drive_arg "$store_image")" \
     -netdev "socket,id=syncnet,$socket_mode" \
     -device "e1000,netdev=syncnet"
+  qemu_harness_append_native_store_drive "$store_image"
 }
 
 build_node_command "$NODE_A_STORE" "$NODE_A_LOG" "listen=127.0.0.1:${SYNC_TWO_NODE_PORT}"

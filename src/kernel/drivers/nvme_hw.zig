@@ -47,6 +47,10 @@ const ADMIN_QUEUE_ENTRIES: u32 = 32;
 const SQ_ENTRY_BYTES: usize = 64;
 const CQ_ENTRY_BYTES: usize = 16;
 const BAR_MAP_BYTES: u32 = 0x2000; // registers + first doorbell page
+const BAR_IO_SPACE: u32 = 1 << 0;
+const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
+const BAR_MEMORY_TYPE_64: u32 = 0x4;
+const KERNEL_MMIO_VIRTUAL_BASE: usize = 0xFFFF_8000_0000_0000;
 const READY_SPIN_LIMIT: u64 = 50_000_000;
 
 pub const Error = error{
@@ -132,18 +136,27 @@ pub const Controller = struct {
     }
 };
 
-fn barPhysicalAddress(dev: pci.PCIDevice) usize {
-    // BAR0 is a 64-bit MMIO BAR: low dword (type bits masked) + high dword.
-    // The current managed physical aperture requires the high dword to be zero.
-    return @as(usize, dev.bar0 & 0xFFFF_FFF0);
+fn barPhysicalAddress(dev: pci.PCIDevice) ?usize {
+    if ((dev.bar0 & BAR_IO_SPACE) != 0 or
+        (dev.bar0 & BAR_MEMORY_TYPE_MASK) != BAR_MEMORY_TYPE_64)
+    {
+        return null;
+    }
+    return (@as(usize, dev.bar1) << 32) |
+        @as(usize, dev.bar0 & 0xFFFF_FFF0);
 }
 
-fn identityMapBar(phys: usize) void {
+fn mapBar(phys: usize) usize {
     var offset: u32 = 0;
     while (offset < BAR_MAP_BYTES) : (offset += PAGE_SIZE) {
-        const addr: u32 = @intCast(phys + offset);
-        paging.mapKernelBorrowedPage(addr, addr, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE);
+        const page_offset: usize = offset;
+        paging.mapKernelBorrowedPage(
+            KERNEL_MMIO_VIRTUAL_BASE + page_offset,
+            phys + page_offset,
+            paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
+        );
     }
+    return KERNEL_MMIO_VIRTUAL_BASE;
 }
 
 fn enablePciBusMastering(dev: pci.PCIDevice) void {
@@ -174,12 +187,11 @@ fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
 
 // Bring the controller from reset to enabled with admin queues installed.
 pub fn bringUp(dev: pci.PCIDevice) Error!Controller {
-    if (dev.bar1 != 0) return error.BarUnmappable;
-    const bar = barPhysicalAddress(dev);
-    if (bar == 0) return error.BarUnmappable;
+    const bar_phys = barPhysicalAddress(dev) orelse return error.BarUnmappable;
+    if (bar_phys == 0) return error.BarUnmappable;
 
     enablePciBusMastering(dev);
-    identityMapBar(bar);
+    const bar = mapBar(bar_phys);
 
     var controller = Controller{
         .bar = bar,

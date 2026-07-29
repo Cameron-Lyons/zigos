@@ -5,7 +5,7 @@ IMAGE_PATH="${1:?ELF image path required}"
 GRUB_FILE="${GRUB_FILE:-}"
 
 if [ -z "$GRUB_FILE" ]; then
-  for candidate in grub-file i686-elf-grub-file x86_64-elf-grub-file; do
+  for candidate in x86_64-elf-grub-file grub-file; do
     if command -v "$candidate" >/dev/null 2>&1; then
       GRUB_FILE="$candidate"
       break

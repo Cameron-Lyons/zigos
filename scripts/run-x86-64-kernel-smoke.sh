@@ -23,7 +23,7 @@ esac
 mkdir -p "$(dirname "$LOG_PATH")"
 rm -f "$LOG_PATH" "$QEMU_LOG_PATH"
 
-qemu_harness_build_bios_cdrom_command "$ISO_PATH" "128M" "file:$LOG_PATH"
+qemu_harness_build_uefi_cdrom_command "$ISO_PATH" "128M" "file:$LOG_PATH"
 "${QEMU_HARNESS_COMMAND[@]}" >"$QEMU_LOG_PATH" 2>&1 &
 qemu_pid=$!
 elapsed=0

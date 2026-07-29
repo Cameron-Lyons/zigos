@@ -13,6 +13,28 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+find_grub_module_dir() {
+  local grub_cmd="$1"
+  local grub_path prefix path
+
+  grub_path="$(command -v "${grub_cmd}")"
+  prefix="${grub_path%/bin/*}"
+  for path in \
+    "${GRUB_MODULE_DIR:-}" \
+    "${prefix}/lib/x86_64-elf/grub/x86_64-efi" \
+    /usr/lib/grub/x86_64-efi \
+    /usr/lib64/grub/x86_64-efi \
+    /usr/share/grub/x86_64-efi; do
+    [ -n "${path}" ] || continue
+    if [ -f "${path}/modinfo.sh" ]; then
+      printf '%s\n' "${path}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 find_ovmf_code() {
   local path
 
@@ -58,7 +80,7 @@ install_macos() {
   fi
 
   log "Installing dependencies with Homebrew..."
-  brew install zig nasm qemu dosfstools xorriso mtools i686-elf-grub
+  brew install zig nasm qemu dosfstools xorriso mtools x86_64-elf-grub
 }
 
 install_apt() {
@@ -67,7 +89,7 @@ install_apt() {
 
   log "Installing dependencies with apt..."
   ${s} apt-get update
-  ${s} apt-get install -y nasm qemu-system-x86 ovmf grub-common grub-pc-bin dosfstools xorriso mtools
+  ${s} apt-get install -y nasm qemu-system-x86 ovmf grub-common grub-efi-amd64-bin dosfstools xorriso mtools
 
   if ! have_cmd zig; then
     if ! ${s} apt-get install -y zig; then
@@ -81,7 +103,7 @@ install_dnf() {
   s="$(sudo_cmd)"
 
   log "Installing dependencies with dnf..."
-  ${s} dnf install -y zig nasm qemu-system-x86 edk2-ovmf grub2-tools grub2-tools-extra dosfstools xorriso mtools
+  ${s} dnf install -y zig nasm qemu-system-x86 edk2-ovmf grub2-tools grub2-tools-extra grub2-efi-x64-modules dosfstools xorriso mtools
 }
 
 install_pacman() {
@@ -115,14 +137,22 @@ verify_tools() {
   fi
 
   local grub_cmd=""
-  for cmd in grub-mkrescue i686-elf-grub-mkrescue x86_64-elf-grub-mkrescue; do
+  for cmd in x86_64-elf-grub-mkrescue grub-mkrescue; do
     if have_cmd "${cmd}"; then
       grub_cmd="${cmd}"
       break
     fi
   done
   if [ -z "${grub_cmd}" ]; then
-    log "Missing GRUB mkrescue command."
+    log "Missing x86-64 EFI-capable GRUB mkrescue command."
+    missing=1
+  fi
+
+  local grub_module_dir=""
+  if [ -n "${grub_cmd}" ] && grub_module_dir="$(find_grub_module_dir "${grub_cmd}")"; then
+    log "Using x86-64 EFI GRUB modules: ${grub_module_dir}"
+  else
+    log "Missing x86-64 EFI GRUB modules. Install them or set GRUB_MODULE_DIR."
     missing=1
   fi
 

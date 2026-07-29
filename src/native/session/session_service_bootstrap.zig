@@ -101,6 +101,7 @@ const HostedStorageDataPlane = struct {
 
     fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
         const buffer = buffer_ptr[0..buffer_len];
+        if (buffer.len == 0 or buffer.len % storage_volume_mod.sector_size != 0) return false;
         const start = @as(usize, @intCast(start_lba)) * storage_volume_mod.sector_size;
         const end = start + buffer.len;
         if (end > image.len) return false;
@@ -110,6 +111,7 @@ const HostedStorageDataPlane = struct {
 
     fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
         const buffer = buffer_ptr[0..buffer_len];
+        if (buffer.len == 0 or buffer.len % storage_volume_mod.sector_size != 0) return false;
         const start = @as(usize, @intCast(start_lba)) * storage_volume_mod.sector_size;
         const end = start + buffer.len;
         if (end > image.len) return false;
@@ -164,20 +166,21 @@ const BootedStorageDataPlane = struct {
 
 const StorageRestartProbe = struct {
     old_session: ?storage_driver_task_mod.AtaControllerSession = null,
+    old_controller_session: ?bootstrap_driver_port.StorageControllerSession = null,
     old_authority_capability_id: u64 = 0,
     old_process_generation: u32 = 0,
     old_dma_domain_id: u64 = 0,
     old_dma_domain_programmed: bool = false,
     old_brokered_dma_buffer_ready: bool = false,
-    timeout_propagated: bool = false,
+    controller_fault_contained: bool = false,
     partial_transfer_rejected: bool = false,
     stale_authority_rejected: bool = false,
-    stale_dma_port_access_rejected: bool = false,
+    stale_dma_access_rejected: bool = false,
     stale_access_rejected: bool = false,
     rebind_observed: bool = false,
     rebound_dma_domain_programmed: bool = false,
     rebound_brokered_dma_buffer_ready: bool = false,
-    broker_revoke_rejected: bool = false,
+    controller_revoke_rejected: bool = false,
     stale_broker_session_rejected: bool = false,
     republished_session_ready: bool = false,
 
@@ -187,9 +190,23 @@ const StorageRestartProbe = struct {
         fillPattern(expected[0..], "zigos-storage-before-restart", 0x21);
         @memset(readback[0..], 0);
 
-        if (!writeRestartProbeStorage(service_id, storage_restart_scratch_lba, expected[0..])) return false;
-        if (!readRestartProbeStorage(service_id, storage_restart_scratch_lba, readback[0..])) return false;
+        if (!bootstrap_driver_port.activeStorageWrite(service_id, storage_restart_scratch_lba, expected[0..])) return false;
+        if (!bootstrap_driver_port.activeStorageRead(service_id, storage_restart_scratch_lba, readback[0..])) return false;
         if (!std.mem.eql(u8, expected[0..], readback[0..])) return false;
+
+        self.old_controller_session = bootstrap_driver_port.activeStorageControllerSession(service_id);
+        if (self.old_controller_session) |session| {
+            self.old_authority_capability_id = session.authority_capability_id;
+            self.old_process_generation = session.process_generation;
+            self.old_dma_domain_id = session.dma_domain_id;
+            if (self.old_authority_capability_id == 0 or self.old_process_generation == 0 or self.old_dma_domain_id == 0) return false;
+            self.old_dma_domain_programmed = session.dma_isolation.mode == .brokered_dma_buffers and
+                session.dma_isolation.hardware_iommu_programmed and
+                (builtin.target.os.tag != .freestanding or session.dma_isolation.bus_master_dma_enabled);
+            self.old_brokered_dma_buffer_ready = device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
+            if (!self.old_dma_domain_programmed or !self.old_brokered_dma_buffer_ready) return false;
+            return self.verifyModernDmaAndPartialTransfer(service_id, session, expected[0..]);
+        }
 
         self.old_session = bootstrap_driver_port.activeStorageAtaSession(service_id);
         if (self.old_session) |session| {
@@ -204,12 +221,46 @@ const StorageRestartProbe = struct {
         if (builtin.target.os.tag != .freestanding and self.old_session == null) {
             self.old_dma_domain_programmed = true;
             self.old_brokered_dma_buffer_ready = true;
-            self.timeout_propagated = true;
+            self.controller_fault_contained = true;
             self.partial_transfer_rejected = true;
         } else if (!self.verifyTimeoutAndPartialTransferBeforeRestart(service_id, expected[0..])) {
             return false;
         }
         return true;
+    }
+
+    fn verifyModernDmaAndPartialTransfer(
+        self: *@This(),
+        service_id: u64,
+        session: bootstrap_driver_port.StorageControllerSession,
+        expected: []const u8,
+    ) bool {
+        const denied_address = std.math.maxInt(u64) - storage_volume_mod.sector_size;
+        device_broker.validateDmaAccess(
+            session.device_id,
+            session.dma_domain_id,
+            denied_address,
+            storage_volume_mod.sector_size,
+            .device_read,
+        ) catch |err| {
+            if (err != error.DmaWindowDenied) return false;
+            self.controller_fault_contained = true;
+        };
+        if (!self.controller_fault_contained) return false;
+
+        var partial_attempt: [storage_volume_mod.sector_size]u8 = undefined;
+        fillPattern(partial_attempt[0..], "zigos-storage-partial-transfer", 0x67);
+        self.partial_transfer_rejected = !bootstrap_driver_port.activeStorageWrite(
+            service_id,
+            storage_restart_scratch_lba,
+            partial_attempt[0 .. storage_volume_mod.sector_size / 2],
+        );
+        if (!self.partial_transfer_rejected) return false;
+
+        var readback: [storage_volume_mod.sector_size]u8 = undefined;
+        @memset(readback[0..], 0);
+        if (!bootstrap_driver_port.activeStorageRead(service_id, storage_restart_scratch_lba, readback[0..])) return false;
+        return std.mem.eql(u8, expected, readback[0..]);
     }
 
     fn verifyTimeoutAndPartialTransferBeforeRestart(
@@ -223,9 +274,9 @@ const StorageRestartProbe = struct {
         storage_driver_task_mod.forceNextAtaTimeout(&session);
         storage_driver_task_mod.readAtaBootstrapSessionChecked(&session, storage_restart_scratch_lba, timeout_read[0..]) catch |err| {
             if (err != error.Timeout) return false;
-            self.timeout_propagated = true;
+            self.controller_fault_contained = true;
         };
-        if (!self.timeout_propagated) return false;
+        if (!self.controller_fault_contained) return false;
 
         var partial_attempt: [storage_volume_mod.sector_size]u8 = undefined;
         fillPattern(partial_attempt[0..], "zigos-storage-partial-transfer", 0x67);
@@ -246,23 +297,52 @@ const StorageRestartProbe = struct {
     }
 
     fn rejectStaleAccessAfterGenerationChange(self: *@This()) bool {
+        if (self.old_controller_session) |session| {
+            self.stale_authority_rejected = !bootstrap_driver_port.storageSessionIsCurrent(&session);
+            self.stale_dma_access_rejected = !device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
+            var stale_read: [storage_volume_mod.sector_size]u8 = undefined;
+            self.stale_access_rejected = !bootstrap_driver_port.activeStorageRead(
+                session.service_id,
+                storage_restart_scratch_lba,
+                stale_read[0..],
+            );
+            return self.stale_authority_rejected and
+                self.stale_dma_access_rejected and
+                self.stale_access_rejected;
+        }
+
         var session = self.old_session orelse {
             self.stale_authority_rejected = builtin.target.os.tag != .freestanding;
-            self.stale_dma_port_access_rejected = builtin.target.os.tag != .freestanding;
+            self.stale_dma_access_rejected = builtin.target.os.tag != .freestanding;
             self.stale_access_rejected = builtin.target.os.tag != .freestanding;
             return self.stale_access_rejected;
         };
         var stale_read: [storage_volume_mod.sector_size]u8 = undefined;
         self.stale_authority_rejected = storage_driver_task_mod.staleAuthorityRejectedAfterGenerationChange(&session);
-        self.stale_dma_port_access_rejected = storage_driver_task_mod.staleDmaPortAccessRejectedAfterGenerationChange(&session);
+        self.stale_dma_access_rejected = storage_driver_task_mod.staleDmaPortAccessRejectedAfterGenerationChange(&session);
         self.stale_access_rejected = !storage_driver_task_mod.readAtaBootstrapSession(&session, storage_restart_scratch_lba, stale_read[0..]);
         self.stale_access_rejected = self.stale_authority_rejected and
-            self.stale_dma_port_access_rejected and
+            self.stale_dma_access_rejected and
             self.stale_access_rejected;
         return self.stale_access_rejected;
     }
 
     fn verifyReboundSession(self: *@This(), service_id: u64, driver: *const driver_service.DriverRecord) bool {
+        if (self.old_controller_session != null) {
+            const session = bootstrap_driver_port.activeStorageControllerSession(service_id) orelse return false;
+            if (session.authority_capability_id != driver.authority_capability_id or
+                session.task_id != driver.owner_task_id or
+                session.process_generation <= self.old_process_generation or
+                session.dma_domain_id != driver.dma_domain_id or
+                session.dma_domain_id == self.old_dma_domain_id) return false;
+            self.rebound_dma_domain_programmed = session.dma_isolation.mode == .brokered_dma_buffers and
+                session.dma_isolation.hardware_iommu_programmed and
+                (builtin.target.os.tag != .freestanding or session.dma_isolation.bus_master_dma_enabled);
+            self.rebound_brokered_dma_buffer_ready = device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
+            self.rebind_observed = self.rebound_dma_domain_programmed and self.rebound_brokered_dma_buffer_ready;
+            return self.rebind_observed;
+        }
+
         const session = bootstrap_driver_port.activeStorageAtaSession(service_id) orelse {
             self.rebind_observed = builtin.target.os.tag != .freestanding;
             self.rebound_dma_domain_programmed = self.rebind_observed;
@@ -305,8 +385,40 @@ const StorageRestartProbe = struct {
         driver: *const driver_service.DriverRecord,
         kernel_port: *component_port.KernelPort,
     ) bool {
+        if (self.old_controller_session != null) {
+            const session = bootstrap_driver_port.activeStorageControllerSession(service_id) orelse return false;
+            const broker_generation_before = session.broker_generation;
+            var revoked_read: [storage_volume_mod.sector_size]u8 = undefined;
+            if (!device_broker.revokePciController(session.device_id)) return false;
+            self.controller_revoke_rejected = !bootstrap_driver_port.activeStorageRead(
+                service_id,
+                storage_restart_scratch_lba,
+                revoked_read[0..],
+            );
+            if (!self.controller_revoke_rejected) return false;
+            if (!device_broker.publishPciController(session.device_id)) return false;
+            self.stale_broker_session_rejected = !bootstrap_driver_port.storageSessionIsCurrent(&session);
+            if (!self.stale_broker_session_rejected) return false;
+
+            if (!bootstrap_driver_port.deactivateStorageBackend(service_id)) return false;
+            if (!bootstrap_driver_port.activateStorageBackend(
+                driver.device_id,
+                service_id,
+                driver.authority_capability_id,
+                driver.owner_task_id,
+                driver.dma_domain_id,
+                86,
+                kernel_port,
+            )) return false;
+            const republished_session = bootstrap_driver_port.activeStorageControllerSession(service_id) orelse return false;
+            self.republished_session_ready = republished_session.broker_generation != broker_generation_before and
+                republished_session.process_generation == session.process_generation and
+                bootstrap_driver_port.storageSessionIsCurrent(&republished_session);
+            return self.republished_session_ready;
+        }
+
         var session = bootstrap_driver_port.activeStorageAtaSession(service_id) orelse {
-            self.broker_revoke_rejected = builtin.target.os.tag != .freestanding;
+            self.controller_revoke_rejected = builtin.target.os.tag != .freestanding;
             self.stale_broker_session_rejected = builtin.target.os.tag != .freestanding;
             self.republished_session_ready = builtin.target.os.tag != .freestanding;
             return self.republished_session_ready;
@@ -318,9 +430,9 @@ const StorageRestartProbe = struct {
         if (!device_broker.revokeAtaController(session.device_id)) return false;
         storage_driver_task_mod.readAtaBootstrapSessionChecked(&session, storage_restart_scratch_lba, revoked_read[0..]) catch |err| {
             if (err != error.BrokerRevoked) return false;
-            self.broker_revoke_rejected = true;
+            self.controller_revoke_rejected = true;
         };
-        if (!self.broker_revoke_rejected) return false;
+        if (!self.controller_revoke_rejected) return false;
         if (storage_driver_task_mod.brokeredDmaBufferReady(&session)) return false;
 
         const grant = device_inventory.ataBootstrapBridgeGrant(session.device_id) orelse return false;
@@ -352,18 +464,10 @@ const StorageRestartProbe = struct {
     }
 
     fn readRestartProbeStorage(service_id: u64, start_lba: u64, buffer: []u8) bool {
-        if (bootstrap_driver_port.activeStorageAtaSession(service_id) != null) {
-            return bootstrap_driver_port.activeBrokeredStorageRead(service_id, start_lba, buffer);
-        }
-        if (builtin.target.os.tag == .freestanding) return false;
         return bootstrap_driver_port.activeStorageRead(service_id, start_lba, buffer);
     }
 
     fn writeRestartProbeStorage(service_id: u64, start_lba: u64, buffer: []const u8) bool {
-        if (bootstrap_driver_port.activeStorageAtaSession(service_id) != null) {
-            return bootstrap_driver_port.activeBrokeredStorageWrite(service_id, start_lba, buffer);
-        }
-        if (builtin.target.os.tag == .freestanding) return false;
         return bootstrap_driver_port.activeStorageWrite(service_id, start_lba, buffer);
     }
 
@@ -578,10 +682,7 @@ fn activateDrivers(
     ) orelse return false;
     const storage_inventory = device_inventory.recordForClass(.storage_controller);
     const can_claim_storage_bootstrap = storage_inventory.detected and
-        (storage_inventory.source == .ata_bootstrap or
-            (device_inventory.modelDeviceInventoryEnabled() and
-                !nvme_bridge.attached() and
-                device_inventory.ataBootstrapBridgeGrant(storage_driver.device_id) != null));
+        storage_inventory.source == .ata_bootstrap;
     if (bootstrap_driver_port.storagePublication() == null and can_claim_storage_bootstrap) {
         const claimed_storage_bootstrap = bootstrap_driver_port.claimStorageAtaBootstrapInventory(
             storage_driver,
@@ -961,11 +1062,12 @@ pub fn proveStorageDriverRestartIo(
     };
 
     const storage_driver = env.driver_directory.findByService(state.services.storage_service.id) orelse return false;
-    const expected_storage_data_plane = storage_recovery.userspace_brokered_data_plane or builtin.target.os.tag != .freestanding;
+    const expected_storage_data_plane = storage_recovery.userspace_brokered_data_plane or
+        bootstrap_driver_port.activeStorageControllerSession(state.services.storage_service.id) != null;
     if (!storage_probe.stale_authority_rejected or
-        !storage_probe.stale_dma_port_access_rejected or
+        !storage_probe.stale_dma_access_rejected or
         !storage_probe.stale_access_rejected or
-        !storage_probe.timeout_propagated or
+        !storage_probe.controller_fault_contained or
         !storage_probe.partial_transfer_rejected or
         !storage_probe.old_dma_domain_programmed or
         !storage_probe.old_brokered_dma_buffer_ready or
@@ -980,10 +1082,10 @@ pub fn proveStorageDriverRestartIo(
     }
     common.printBootMarker(boot_markers.service_boot_storage_dma_domain_programmed);
     common.printBootMarker(boot_markers.service_boot_storage_brokered_dma_buffer_ok);
-    common.printBootMarker(boot_markers.service_boot_storage_timeout_propagated);
+    common.printBootMarker(boot_markers.service_boot_storage_controller_fault_contained);
     common.printBootMarker(boot_markers.service_boot_storage_partial_transfer_rejected);
     common.printBootMarker(boot_markers.service_boot_storage_stale_authority_rejected);
-    common.printBootMarker(boot_markers.service_boot_storage_stale_dma_port_rejected);
+    common.printBootMarker(boot_markers.service_boot_storage_stale_dma_access_rejected);
     common.printBootMarker(boot_markers.service_boot_storage_stale_access_rejected);
 
     if (!storage_probe.verifyReboundSession(state.services.storage_service.id, storage_driver) or
@@ -996,14 +1098,14 @@ pub fn proveStorageDriverRestartIo(
     common.printBootMarker(boot_markers.service_boot_storage_rebind_ok);
 
     if (!storage_probe.verifyBrokerRevocationRecovery(state.services.storage_service.id, storage_driver, kernel_port) or
-        !storage_probe.broker_revoke_rejected or
+        !storage_probe.controller_revoke_rejected or
         !storage_probe.stale_broker_session_rejected or
         !storage_probe.republished_session_ready)
     {
         recordBootFailure(env, state.services.storage_service.id, 84, error.MissingBootstrapLaunch);
         return false;
     }
-    common.printBootMarker(boot_markers.service_boot_storage_broker_revoke_rejected);
+    common.printBootMarker(boot_markers.service_boot_storage_controller_revoke_rejected);
     common.printBootMarker(boot_markers.service_boot_storage_republish_after_revoke_ok);
 
     if (!storage_probe.verifyAfterRestart(state.services.storage_service.id)) {
