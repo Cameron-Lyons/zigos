@@ -2,9 +2,9 @@ const std = @import("std");
 const x86 = @import("../../arch/x86.zig");
 const console = @import("console.zig");
 
-// Symbols from boot64.S bounding the BSP boot stack. The page at
-// stack_bottom is the unmapped overflow guard, so painting and scanning
-// both start one page above it.
+// Symbols from the architecture entry assembly bounding the BSP boot stack.
+// The page at stack_bottom is the unmapped overflow guard, so painting and
+// scanning both start one page above it.
 extern var stack_bottom: u8;
 extern var stack_top: u8;
 

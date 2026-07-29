@@ -35,23 +35,27 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{
         .default_target = .{
-            .cpu_arch = .x86,
+            .cpu_arch = .x86_64,
             .os_tag = .freestanding,
             .abi = .none,
         },
     });
+    if (target.result.cpu.arch != .x86_64 or
+        target.result.os.tag != .freestanding or
+        target.result.abi != .none)
+    {
+        @panic("Zigos supports only the x86_64-freestanding-none target");
+    }
     const optimize = b.standardOptimizeOption(.{});
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
-    const userspace_x86_64_images = userspace_build.addX86_64Artifacts(b, optimize);
     const test_artifacts = tests_build.addTestArtifacts(b, optimize, userspace_images);
-    const x86_architecture_compile_check = kernel_build.addX86ArchitectureCompileCheck(b, optimize);
-    const x86_64_kernel_compile_check = kernel_build.addX86_64KernelCompileCheck(b, optimize, userspace_x86_64_images);
+    const x86_64_architecture_compile_check = kernel_build.addX86_64ArchitectureCompileCheck(b, optimize);
+    const x86_64_kernel_compile_check = kernel_build.addX86_64KernelCompileCheck(b, optimize, userspace_images);
     const x86_64_long_mode_entry_check = kernel_build.addX86_64LongModeEntryCheck(b, optimize);
-    const x86_64_kernel_core_boot_check = kernel_build.addX86_64KernelBootCheck(b, optimize, userspace_x86_64_images);
+    const x86_64_kernel_core_boot_check = kernel_build.addX86_64KernelBootCheck(b, optimize, userspace_images);
     const kernels = kernel_build.addKernelProfiles(b, target, optimize, userspace_images);
     const kernel_steps = kernel_build.addKernelProfileSteps(b, kernels, userspace_images);
-    kernel_steps.kernel.dependOn(userspace_x86_64_images.step);
-    kernel_steps.kernel.dependOn(x86_architecture_compile_check);
+    kernel_steps.kernel.dependOn(x86_64_architecture_compile_check);
     kernel_steps.kernel.dependOn(x86_64_kernel_compile_check);
 
     const kernel_role_check_tool = b.addExecutable(.{
