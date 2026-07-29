@@ -379,15 +379,12 @@ pub fn firstHardwareTargetGate() !void {
         .bar5 = 0,
     }));
     var mmap = [_]u8{0} ** XHCI_CAPABILITY_MMAP_BYTES;
-    mmap[0] = 20;
-    mmap[4] = 0;
-    mmap[5] = 0;
-    mmap[6] = 0x10;
-    mmap[12] = 0;
-    mmap[13] = 0;
-    mmap[14] = 0x20;
-    mmap[20] = 1;
-    const memory_map = try kernel_handoff.parseMemoryMapSummary(mmap[0..]);
+    mmap[2] = 0x10;
+    mmap[10] = 0x20;
+    mmap[16] = 1;
+    const memory_map = try kernel_handoff.summarizeMemoryMap(
+        kernel_handoff.multiboot2MemoryMap(mmap[0..], @intCast(XHCI_CAPABILITY_MMAP_BYTES)),
+    );
     try std.testing.expect(memory_map.hasUsableMemory());
     const nuc_smbios_table = [_]u8{
         1,   8,   1,   0,   1,   2,   0,   0,
