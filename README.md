@@ -164,8 +164,14 @@ Use the pinned toolchain and repo entrypoints:
   devices. Boot revokes every discovered PCI bus master, masks INTx and disables
   MSI/MSI-X, installs coherent deny-by-default DMA and interrupt-remapping tables
   across every segment-zero unit, maps only the five direction-scoped NVMe
-  queue/bounce pages, and confirms translation on every unit. Before normal
-  storage attach, the controller must trigger a primary VT-d record by attempting
+  queue/bounce pages and, when present, the I225-LM descriptor and transmit-buffer
+  pages in an independent domain, and confirms translation on every unit. The
+  I225-LM path attaches to the firmware-negotiated PHY, publishes the permanent
+  MAC, and uses one bounded polled TX queue only after its requester is confined.
+  Native payloads are carried in padded Ethernet frames under the local
+  experimental EtherType; receive ownership and interrupt delivery remain gated
+  work. Before normal storage attach, the controller must trigger a primary VT-d
+  record by attempting
   a write to a reserved but unmapped guard page; the requester, address, direction,
   and unchanged canary are verified before the controller is reset and reused.
   Every later synchronous command polls the same primary records; a DMA fault

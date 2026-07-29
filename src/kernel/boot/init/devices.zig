@@ -1,8 +1,10 @@
 const console = @import("../../utils/console.zig");
 const config = @import("../../config.zig");
 const first_target_telemetry = @import("../../drivers/first_target_telemetry.zig");
+const intel_i225_hw = @import("../../drivers/intel_i225_hw.zig");
 const pci = @import("../../drivers/pci.zig");
 const nvme_hw = @import("../../drivers/nvme_hw.zig");
+const intel_vtd = @import("../../platform/intel_vtd.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
 const common = @import("../common.zig");
@@ -99,8 +101,22 @@ fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
 }
 
 fn capturePciInventory() void {
+    var network_domain: ?intel_vtd.DmaDomain = null;
+    var network_prepared = false;
     if (pci.firstIntelI225Lm()) |dev| {
         device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .intel_i225_lm_inventory, false);
+        intel_i225_hw.prepare(dev) catch |err| {
+            console.print("ZIGOS:I225:HW:BRINGUP_FAIL ");
+            console.print(@errorName(err));
+            console.print("\n");
+            if (hardware_proof.realTargetDetected()) {
+                @panic("production I225-LM preparation failed closed");
+            }
+            return;
+        };
+        network_domain = intel_i225_hw.isolationDomain() orelse
+            @panic("I225-LM preparation omitted its DMA isolation domain");
+        network_prepared = true;
     }
     if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {
         device_inventory.registerDetected(.graphics_adapter, pciDeviceId(dev), .pci_inventory, false);
@@ -115,6 +131,7 @@ fn capturePciInventory() void {
     } else if (pci.firstDeviceByClass(PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);
     }
+    var storage_attached = false;
     if (pci.firstNvmeController()) |dev| {
         device_inventory.registerDetected(.storage_controller, pciDeviceId(dev), .nvme_pci_inventory, false);
         var vtd_summary = if (hardware_proof.realTargetDetected())
@@ -122,7 +139,7 @@ fn capturePciInventory() void {
         else
             null;
         const vtd_summary_ptr = if (vtd_summary) |*summary| summary else null;
-        const fault_proof = nvme_hw.probeAndReport(dev, vtd_summary_ptr) catch |err| {
+        const fault_proof = nvme_hw.probeAndReport(dev, vtd_summary_ptr, network_domain) catch |err| {
             console.print("ZIGOS:NVME:HW:BRINGUP_FAIL ");
             console.print(@errorName(err));
             console.print("\n");
@@ -132,14 +149,30 @@ fn capturePciInventory() void {
             return;
         };
         if (fault_proof) |proof| hardware_proof.recordVtdIsolationProof(proof);
+        storage_attached = true;
+    }
+    if (network_prepared) {
+        if (!storage_attached and hardware_proof.realTargetDetected()) {
+            @panic("production I225-LM activation requires the confined storage bootstrap");
+        }
+        intel_i225_hw.activate() catch |err| {
+            console.print("ZIGOS:I225:HW:BRINGUP_FAIL ");
+            console.print(@errorName(err));
+            console.print("\n");
+            if (hardware_proof.realTargetDetected()) {
+                @panic("production I225-LM activation failed closed");
+            }
+            return;
+        };
+        console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
     }
 }
 
 fn publishDeferredNetworkBootstrap() void {
     const network_record = device_inventory.recordForClass(.network_adapter);
     if (!network_record.detected) return;
-    // Network adapters are deliberately left as user-space driver claims. Kernel
-    // boot records inventory only; it does not publish NIC data-plane transports.
+    // The kernel keeps the confined queue behind its narrow bridge; the native
+    // network service remains the only publisher and claims it during activation.
 }
 
 fn pciDeviceId(device_info: pci.PCIDevice) u64 {

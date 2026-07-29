@@ -643,9 +643,10 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
 
-        fn send(frame: []const u8) void {
+        fn send(frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
+            return true;
         }
 
         fn mac() [6]u8 {

@@ -36,10 +36,49 @@ const storage_restart_probe_sectors: u64 = 2;
 const booted_storage_sector_count: u64 = storage_restart_scratch_lba + storage_restart_probe_sectors;
 const booted_storage_image_bytes: usize = @as(usize, @intCast(booted_storage_sector_count)) * storage_volume_mod.sector_size;
 
+const i225_bridge = if (builtin.target.os.tag == .freestanding)
+    struct {
+        extern fn zigosNetworkBootstrapI225Attached() callconv(.c) bool;
+        extern fn zigosNetworkBootstrapI225Send(payload_ptr: [*]const u8, payload_len: usize) callconv(.c) bool;
+        extern fn zigosNetworkBootstrapI225Mac(output: [*]u8) callconv(.c) bool;
+
+        pub fn attached() bool {
+            return zigosNetworkBootstrapI225Attached();
+        }
+
+        pub fn send(payload: []const u8) bool {
+            return zigosNetworkBootstrapI225Send(payload.ptr, payload.len);
+        }
+
+        pub fn mac() ?[6]u8 {
+            var address: [6]u8 = undefined;
+            if (!zigosNetworkBootstrapI225Mac(&address)) return null;
+            return address;
+        }
+    }
+else
+    struct {
+        pub fn attached() bool {
+            return false;
+        }
+
+        pub fn send(_: []const u8) bool {
+            return false;
+        }
+
+        pub fn mac() ?[6]u8 {
+            return null;
+        }
+    };
+
 const BootedNetworkDataPlane = struct {
-    fn send(_: []const u8) void {}
+    fn send(data: []const u8) bool {
+        if (i225_bridge.attached()) return i225_bridge.send(data);
+        return builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled();
+    }
 
     fn getMacAddress() [6]u8 {
+        if (i225_bridge.mac()) |address| return address;
         return .{ 0x02, 0x5A, 0x47, 0x00, 0x00, 0x01 };
     }
 
@@ -50,6 +89,9 @@ const BootedNetworkDataPlane = struct {
 
     fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
         if (device_id != device_inventory.deviceIdForClass(.network_adapter)) return null;
+        if (builtin.target.os.tag == .freestanding and
+            !i225_bridge.attached() and
+            !device_inventory.modelDeviceInventoryEnabled()) return null;
         return &device;
     }
 };

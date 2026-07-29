@@ -8,15 +8,12 @@ const PAGE_SIZE: u32 = 4096;
 const PAGE_MASK: u64 = PAGE_SIZE - 1;
 const MANAGED_DMA_LIMIT: u64 = 128 * 1024 * 1024;
 const TABLE_ENTRY_COUNT: usize = 512;
-const TABLE_PAGE_COUNT: u32 = 10;
+const TABLE_PAGE_COUNT: u32 = 24;
 const INTERRUPT_TABLE_PAGE_COUNT: u32 = 1;
 const ROOT_PAGE: u32 = 0;
-const CONTEXT_PAGE: u32 = 1;
-const L4_PAGE: u32 = 2;
-const L3_PAGE: u32 = 3;
-const L2_PAGE: u32 = 4;
-const FIRST_LEAF_PAGE: u32 = 5;
-const MAX_DMA_WINDOWS: usize = TABLE_PAGE_COUNT - FIRST_LEAF_PAGE;
+const FIRST_DYNAMIC_TABLE_PAGE: u32 = 1;
+const MAX_DMA_DOMAINS: usize = 2;
+const MAX_DMA_WINDOWS_PER_DOMAIN: usize = 8;
 const INTERRUPT_TABLE_PAGE: u32 = TABLE_PAGE_COUNT;
 const FIRST_INVALIDATION_QUEUE_PAGE: u32 = INTERRUPT_TABLE_PAGE + INTERRUPT_TABLE_PAGE_COUNT;
 const INTERRUPT_REMAP_ENTRY_COUNT: usize = PAGE_SIZE / 16;
@@ -27,7 +24,7 @@ const SECOND_STAGE_READ: u64 = 1 << 0;
 const SECOND_STAGE_WRITE: u64 = 1 << 1;
 const PRESENT: u64 = 1;
 const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-const STORAGE_DOMAIN_ID: u16 = 1;
+const FIRST_DOMAIN_ID: u16 = 1;
 
 const KERNEL_VTD_MMIO_VIRTUAL_BASE: usize = 0xFFFF_8000_3000_0000;
 const UNIT_MMIO_STRIDE: usize = 0x4000;
@@ -100,6 +97,11 @@ pub const DmaWindow = struct {
     device_writable: bool,
 };
 
+pub const DmaDomain = struct {
+    device: pci.PCIDevice,
+    windows: []const DmaWindow,
+};
+
 pub const Error = error{
     AlreadyEnabled,
     FirmwarePolicyUnsupported,
@@ -163,13 +165,14 @@ pub const FaultRecord = struct {
 var enabled = false;
 var interrupt_remapping_enabled = false;
 var fault_monitoring_enabled = false;
-var active_table_base: u32 = 0;
-var protected_requester_id: u16 = 0;
+var protected_requester_ids: [MAX_DMA_DOMAINS]u16 = [_]u16{0} ** MAX_DMA_DOMAINS;
+var protected_requester_count: usize = 0;
 var active_units: [dmar.MAX_REMAPPING_UNITS]UnitRegisters = undefined;
 var active_unit_count: usize = 0;
 var blocked_dma_proof: ?FaultRecord = null;
+var deferred_faults: [MAX_DMA_DOMAINS]?FaultRecord = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
 
-pub fn storageIsolationEnabled() bool {
+pub fn dmaIsolationEnabled() bool {
     return enabled;
 }
 
@@ -187,18 +190,34 @@ pub fn blockedDmaProof() ?FaultRecord {
 
 pub fn pollFault() Error!?FaultRecord {
     if (!faultMonitoringEnabled()) return null;
-    return takeFault();
+    const source_id = protectedRequesterId() orelse return error.UnexpectedDmaFault;
+    return pollFaultForSource(source_id);
 }
 
-pub fn protectedRequesterId() ?u16 {
-    if (!enabled) return null;
-    return protected_requester_id;
+pub fn pollFaultForDevice(device_info: pci.PCIDevice) Error!?FaultRecord {
+    if (!faultMonitoringEnabled()) return null;
+    const source_id = requesterId(device_info);
+    if (protectedRequesterIndex(source_id) == null) return error.UnexpectedDmaFault;
+    return pollFaultForSource(source_id);
 }
 
-pub fn enforceNvme(
+fn protectedRequesterId() ?u16 {
+    if (!enabled or protected_requester_count == 0) return null;
+    return protected_requester_ids[0];
+}
+
+pub fn requesterProtected(device_info: pci.PCIDevice) bool {
+    if (!enabled) return false;
+    const source_id = requesterId(device_info);
+    for (protected_requester_ids[0..protected_requester_count]) |protected| {
+        if (protected == source_id) return true;
+    }
+    return false;
+}
+
+pub fn enforceDevices(
     summary: *const dmar.Summary,
-    device_info: pci.PCIDevice,
-    windows: []const DmaWindow,
+    domains: []const DmaDomain,
 ) Error!void {
     if (enabled) return error.AlreadyEnabled;
     if (!summary.productionEnforcementReady()) return error.FirmwarePolicyUnsupported;
@@ -208,7 +227,7 @@ pub fn enforceNvme(
     {
         return error.ActiveInterruptSource;
     }
-    try validateWindows(windows);
+    try validateDomains(domains);
 
     var units: [dmar.MAX_REMAPPING_UNITS]UnitRegisters = undefined;
     var common_sagaw: u8 = CAP_SAGAW_MASK;
@@ -227,7 +246,7 @@ pub fn enforceNvme(
     var may_release_tables = true;
     errdefer if (may_release_tables) paging.release_frames(table_base, retained_page_count) catch {};
     const tables: *Tables = @ptrFromInt(table_base);
-    populateTables(tables, table_base, device_info, windows, address_width);
+    try populateTables(tables, table_base, domains, address_width);
     const interrupt_table_base = tablePagePhysical(table_base, INTERRUPT_TABLE_PAGE);
     const interrupt_table: *InterruptTable = @ptrFromInt(interrupt_table_base);
     @memset(std.mem.asBytes(interrupt_table), 0);
@@ -257,26 +276,55 @@ pub fn enforceNvme(
         active_units[index] = unit;
     }
 
-    active_table_base = table_base;
-    protected_requester_id = requesterId(device_info);
+    protected_requester_count = domains.len;
+    for (domains, 0..) |domain, index| {
+        protected_requester_ids[index] = requesterId(domain.device);
+    }
     active_unit_count = summary.remapping_unit_count;
     interrupt_remapping_enabled = true;
     fault_monitoring_enabled = true;
     blocked_dma_proof = null;
+    deferred_faults = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
     enabled = true;
 }
 
+fn validateDomains(domains: []const DmaDomain) Error!void {
+    if (domains.len == 0 or domains.len > MAX_DMA_DOMAINS) return error.InvalidDmaWindow;
+    for (domains, 0..) |domain, index| {
+        try validateWindows(domain.windows);
+        const source_id = requesterId(domain.device);
+        for (domains[0..index]) |prior| {
+            if (requesterId(prior.device) == source_id) return error.InvalidDmaWindow;
+            for (domain.windows) |window| {
+                const window_end = @as(u64, window.base) + window.length;
+                for (prior.windows) |prior_window| {
+                    const prior_end = @as(u64, prior_window.base) + prior_window.length;
+                    if (@as(u64, window.base) < prior_end and
+                        @as(u64, prior_window.base) < window_end)
+                    {
+                        return error.InvalidDmaWindow;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn validateWindows(windows: []const DmaWindow) Error!void {
-    if (windows.len == 0 or windows.len > MAX_DMA_WINDOWS) return error.InvalidDmaWindow;
+    if (windows.len == 0 or windows.len > MAX_DMA_WINDOWS_PER_DOMAIN) return error.InvalidDmaWindow;
     for (windows, 0..) |window, index| {
-        if (window.length != PAGE_SIZE or window.base % PAGE_SIZE != 0 or
+        const window_end = @as(u64, window.base) + window.length;
+        if (window.length == 0 or window.length % PAGE_SIZE != 0 or window.base % PAGE_SIZE != 0 or
             (!window.device_readable and !window.device_writable) or
-            @as(u64, window.base) + window.length > MANAGED_DMA_LIMIT)
+            window_end > MANAGED_DMA_LIMIT)
         {
             return error.InvalidDmaWindow;
         }
         for (windows[0..index]) |prior| {
-            if (prior.base == window.base) return error.InvalidDmaWindow;
+            const prior_end = @as(u64, prior.base) + prior.length;
+            if (@as(u64, window.base) < prior_end and @as(u64, prior.base) < window_end) {
+                return error.InvalidDmaWindow;
+            }
         }
     }
 }
@@ -375,8 +423,7 @@ fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8) Err
 fn validateCapabilities(capability: u64, extended: u64, host_address_width: u8) Error!void {
     if ((extended & ECAP_PAGE_WALK_COHERENT) == 0) return error.NonCoherentPageWalk;
     const remapping = ECAP_QUEUED_INVALIDATION | ECAP_INTERRUPT_REMAP;
-    if ((extended & remapping) != remapping)
-    {
+    if ((extended & remapping) != remapping) {
         return error.InterruptRemappingUnsupported;
     }
     if ((extended & ECAP_EXTENDED_INTERRUPT_MODE) == 0) {
@@ -386,67 +433,98 @@ fn validateCapabilities(capability: u64, extended: u64, host_address_width: u8) 
     if (maximum_guest_width < host_address_width) return error.UnsupportedAddressWidth;
 }
 
-fn populateTables(
+const TableBuilder = struct {
     tables: *Tables,
     table_base: u32,
-    device_info: pci.PCIDevice,
-    windows: []const DmaWindow,
     address_width: AddressWidth,
-) void {
-    @memset(std.mem.asBytes(tables), 0);
+    next_page: u32 = FIRST_DYNAMIC_TABLE_PAGE,
+    context_pages: [256]u8 = [_]u8{0} ** 256,
 
-    const root = &tables.*[ROOT_PAGE];
-    const context = &tables.*[CONTEXT_PAGE];
-    const l4 = &tables.*[L4_PAGE];
-    const l3 = &tables.*[L3_PAGE];
-    const l2 = &tables.*[L2_PAGE];
-    const context_phys = tablePagePhysical(table_base, CONTEXT_PAGE);
-    const l4_phys = tablePagePhysical(table_base, L4_PAGE);
-    const l3_phys = tablePagePhysical(table_base, L3_PAGE);
-    const l2_phys = tablePagePhysical(table_base, L2_PAGE);
+    fn allocatePage(self: *TableBuilder) Error!u32 {
+        if (self.next_page >= TABLE_PAGE_COUNT) return error.TableAllocationFailed;
+        const page = self.next_page;
+        self.next_page += 1;
+        return page;
+    }
 
-    const root_index = @as(usize, device_info.bus) * 2;
-    root[root_index] = context_phys | PRESENT;
+    fn contextPage(self: *TableBuilder, bus: u8) Error!u32 {
+        const slot = &self.context_pages[bus];
+        if (slot.* != 0) return slot.*;
+        const page = try self.allocatePage();
+        slot.* = @intCast(page);
+        const root_index = @as(usize, bus) * 2;
+        self.tables.*[ROOT_PAGE][root_index] = tablePagePhysical(self.table_base, page) | PRESENT;
+        return page;
+    }
 
-    const context_index = (@as(usize, device_info.device) * 8 + device_info.function) * 2;
-    const second_stage_root = switch (address_width) {
-        .bits39 => l3_phys,
-        .bits48 => l4_phys,
-    };
-    context[context_index] = second_stage_root | PRESENT;
-    context[context_index + 1] = (@as(u64, STORAGE_DOMAIN_ID) << 8) |
-        @intFromEnum(address_width);
+    fn addDomain(self: *TableBuilder, domain: DmaDomain, domain_id: u16) Error!void {
+        const context_page = try self.contextPage(domain.device.bus);
+        const l4_page = if (self.address_width == .bits48) try self.allocatePage() else null;
+        const l3_page = try self.allocatePage();
+        const l2_page = try self.allocatePage();
 
-    if (address_width == .bits48) l4[0] = l3_phys | SECOND_STAGE_READ | SECOND_STAGE_WRITE;
-    l3[0] = l2_phys | SECOND_STAGE_READ | SECOND_STAGE_WRITE;
+        const context_index = (@as(usize, domain.device.device) * 8 + domain.device.function) * 2;
+        const second_stage_root = tablePagePhysical(
+            self.table_base,
+            if (l4_page) |page| page else l3_page,
+        );
+        self.tables.*[context_page][context_index] = second_stage_root | PRESENT;
+        self.tables.*[context_page][context_index + 1] = (@as(u64, domain_id) << 8) |
+            @intFromEnum(self.address_width);
 
-    var mapped_l2_indices: [MAX_DMA_WINDOWS]u16 = undefined;
-    var mapped_leaf_count: usize = 0;
-    for (windows) |window| {
-        const l2_index: u16 = @intCast((window.base >> 21) & 0x1FF);
-        var leaf_slot: ?usize = null;
-        for (mapped_l2_indices[0..mapped_leaf_count], 0..) |mapped_index, slot| {
-            if (mapped_index == l2_index) {
-                leaf_slot = slot;
-                break;
+        if (l4_page) |page| {
+            self.tables.*[page][0] = tablePagePhysical(self.table_base, l3_page) |
+                SECOND_STAGE_READ | SECOND_STAGE_WRITE;
+        }
+        self.tables.*[l3_page][0] = tablePagePhysical(self.table_base, l2_page) |
+            SECOND_STAGE_READ | SECOND_STAGE_WRITE;
+
+        for (domain.windows) |window| {
+            var page_base: u64 = window.base;
+            const window_end = @as(u64, window.base) + window.length;
+            while (page_base < window_end) : (page_base += PAGE_SIZE) {
+                try self.mapPage(l2_page, @intCast(page_base), window);
             }
         }
-        if (leaf_slot == null) {
-            leaf_slot = mapped_leaf_count;
-            mapped_l2_indices[mapped_leaf_count] = l2_index;
-            const leaf_page = FIRST_LEAF_PAGE + @as(u32, @intCast(mapped_leaf_count));
-            l2[l2_index] = tablePagePhysical(table_base, leaf_page) |
+    }
+
+    fn mapPage(self: *TableBuilder, l2_page: u32, page_base: u32, window: DmaWindow) Error!void {
+        const l2_index: usize = @intCast((page_base >> 21) & 0x1FF);
+        const l2_entry = &self.tables.*[l2_page][l2_index];
+        var leaf_page: u32 = undefined;
+        if (l2_entry.* == 0) {
+            leaf_page = try self.allocatePage();
+            l2_entry.* = tablePagePhysical(self.table_base, leaf_page) |
                 SECOND_STAGE_READ | SECOND_STAGE_WRITE;
-            mapped_leaf_count += 1;
+        } else {
+            const leaf_phys = l2_entry.* & ADDRESS_MASK;
+            leaf_page = @intCast((leaf_phys - self.table_base) / PAGE_SIZE);
         }
 
-        const leaf_page = FIRST_LEAF_PAGE + @as(u32, @intCast(leaf_slot.?));
-        const leaf = &tables.*[leaf_page];
-        const leaf_index: usize = @intCast((window.base >> 12) & 0x1FF);
+        const leaf_index: usize = @intCast((page_base >> 12) & 0x1FF);
+        const leaf_entry = &self.tables.*[leaf_page][leaf_index];
+        if (leaf_entry.* != 0) return error.InvalidDmaWindow;
         var permissions: u64 = 0;
         if (window.device_readable) permissions |= SECOND_STAGE_READ;
         if (window.device_writable) permissions |= SECOND_STAGE_WRITE;
-        leaf[leaf_index] = @as(u64, window.base) | permissions;
+        leaf_entry.* = @as(u64, page_base) | permissions;
+    }
+};
+
+fn populateTables(
+    tables: *Tables,
+    table_base: u32,
+    domains: []const DmaDomain,
+    address_width: AddressWidth,
+) Error!void {
+    @memset(std.mem.asBytes(tables), 0);
+    var builder = TableBuilder{
+        .tables = tables,
+        .table_base = table_base,
+        .address_width = address_width,
+    };
+    for (domains, 0..) |domain, index| {
+        try builder.addDomain(domain, FIRST_DOMAIN_ID + @as(u16, @intCast(index)));
     }
 }
 
@@ -601,10 +679,11 @@ fn invalidationDescriptors(status_address: u64) [2][2]u64 {
 
 pub fn waitForBlockedWrite(expected_address: u32) Error!FaultRecord {
     if (!faultMonitoringEnabled()) return error.DmaFaultMissing;
+    const expected_requester = protectedRequesterId() orelse return error.DmaFaultMissing;
     var spins: u64 = 0;
     while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
-        if (try takeFault()) |fault| {
-            if (!fault.provesBlockedWrite(protected_requester_id, expected_address)) {
+        if (try pollFault()) |fault| {
+            if (!fault.provesBlockedWrite(expected_requester, expected_address)) {
                 return error.UnexpectedDmaFault;
             }
             blocked_dma_proof = fault;
@@ -688,6 +767,34 @@ fn requesterId(device_info: pci.PCIDevice) u16 {
         device_info.function;
 }
 
+fn protectedRequesterIndex(source_id: u16) ?usize {
+    for (protected_requester_ids[0..protected_requester_count], 0..) |protected, index| {
+        if (protected == source_id) return index;
+    }
+    return null;
+}
+
+fn pollFaultForSource(source_id: u16) Error!?FaultRecord {
+    const requested_index = protectedRequesterIndex(source_id) orelse
+        return error.UnexpectedDmaFault;
+    if (deferred_faults[requested_index]) |fault| {
+        deferred_faults[requested_index] = null;
+        return fault;
+    }
+
+    const fault = try takeFault() orelse return null;
+    return routeObservedFault(source_id, fault);
+}
+
+fn routeObservedFault(source_id: u16, fault: FaultRecord) Error!?FaultRecord {
+    if (fault.source_id == source_id) return fault;
+    const fault_index = protectedRequesterIndex(fault.source_id) orelse
+        return error.UnexpectedDmaFault;
+    if (deferred_faults[fault_index] != null) return error.UnexpectedDmaFault;
+    deferred_faults[fault_index] = fault;
+    return null;
+}
+
 fn tablePagePhysical(table_base: u32, page: u32) u64 {
     return @as(u64, table_base) + @as(u64, page) * PAGE_SIZE;
 }
@@ -743,6 +850,22 @@ fn syntheticNvme() pci.PCIDevice {
     };
 }
 
+fn syntheticI225() pci.PCIDevice {
+    var device_info = syntheticNvme();
+    device_info.bus = 4;
+    device_info.device = 2;
+    device_info.function = 0;
+    device_info.device_id = 0x15F2;
+    device_info.class_code = 0x02;
+    device_info.subclass = 0;
+    device_info.prog_if = 0;
+    return device_info;
+}
+
+fn tablePageIndex(table_base: u32, entry: u64) usize {
+    return @intCast(((entry & ADDRESS_MASK) - table_base) / PAGE_SIZE);
+}
+
 test "VT-d tables expose only the NVMe requester and exact DMA pages" {
     var tables: Tables align(PAGE_SIZE) = undefined;
     const table_base: u32 = 0x0100_0000;
@@ -752,21 +875,25 @@ test "VT-d tables expose only the NVMe requester and exact DMA pages" {
         .{ .base = 0x0200_2000, .device_readable = true, .device_writable = true },
     };
     const device_info = syntheticNvme();
-    populateTables(&tables, table_base, device_info, &windows, .bits39);
+    const domains = [_]DmaDomain{.{ .device = device_info, .windows = &windows }};
+    try populateTables(&tables, table_base, &domains, .bits39);
 
     const root_index = @as(usize, device_info.bus) * 2;
-    try std.testing.expectEqual(tablePagePhysical(table_base, CONTEXT_PAGE) | PRESENT, tables[ROOT_PAGE][root_index]);
+    const context_page = tablePageIndex(table_base, tables[ROOT_PAGE][root_index]);
+    try std.testing.expect(context_page >= FIRST_DYNAMIC_TABLE_PAGE);
     try std.testing.expectEqual(@as(u64, 0), tables[ROOT_PAGE][0]);
 
     const context_index = (@as(usize, device_info.device) * 8 + device_info.function) * 2;
-    try std.testing.expectEqual(tablePagePhysical(table_base, L3_PAGE) | PRESENT, tables[CONTEXT_PAGE][context_index]);
+    const l3_page = tablePageIndex(table_base, tables[context_page][context_index]);
     try std.testing.expectEqual(
-        (@as(u64, STORAGE_DOMAIN_ID) << 8) | @intFromEnum(AddressWidth.bits39),
-        tables[CONTEXT_PAGE][context_index + 1],
+        (@as(u64, FIRST_DOMAIN_ID) << 8) | @intFromEnum(AddressWidth.bits39),
+        tables[context_page][context_index + 1],
     );
-    try std.testing.expectEqual(@as(u64, 0), tables[CONTEXT_PAGE][0]);
+    try std.testing.expectEqual(@as(u64, 0), tables[context_page][0]);
 
-    const leaf = tables[FIRST_LEAF_PAGE];
+    const l2_page = tablePageIndex(table_base, tables[l3_page][0]);
+    const leaf_page = tablePageIndex(table_base, tables[l2_page][@intCast(windows[0].base >> 21)]);
+    const leaf = tables[leaf_page];
     try std.testing.expectEqual(@as(u64, windows[0].base) | SECOND_STAGE_READ, leaf[0]);
     try std.testing.expectEqual(@as(u64, windows[1].base) | SECOND_STAGE_WRITE, leaf[1]);
     try std.testing.expectEqual(
@@ -782,14 +909,77 @@ test "VT-d tables allocate a distinct leaf table across a 2 MiB boundary" {
         .{ .base = 0x021F_F000, .device_readable = true, .device_writable = false },
         .{ .base = 0x0220_0000, .device_readable = false, .device_writable = true },
     };
-    populateTables(&tables, 0x0100_0000, syntheticNvme(), &windows, .bits48);
+    const table_base: u32 = 0x0100_0000;
+    const domains = [_]DmaDomain{.{ .device = syntheticNvme(), .windows = &windows }};
+    try populateTables(&tables, table_base, &domains, .bits48);
 
     const first_l2: usize = @intCast((windows[0].base >> 21) & 0x1FF);
     const second_l2: usize = @intCast((windows[1].base >> 21) & 0x1FF);
     try std.testing.expect(first_l2 != second_l2);
-    try std.testing.expectEqual(tablePagePhysical(0x0100_0000, FIRST_LEAF_PAGE) | 3, tables[L2_PAGE][first_l2]);
-    try std.testing.expectEqual(tablePagePhysical(0x0100_0000, FIRST_LEAF_PAGE + 1) | 3, tables[L2_PAGE][second_l2]);
-    try std.testing.expectEqual(tablePagePhysical(0x0100_0000, L3_PAGE) | 3, tables[L4_PAGE][0]);
+    const root_entry = tables[ROOT_PAGE][@as(usize, syntheticNvme().bus) * 2];
+    const context_page = tablePageIndex(table_base, root_entry);
+    const context_index = (@as(usize, syntheticNvme().device) * 8 + syntheticNvme().function) * 2;
+    const l4_page = tablePageIndex(table_base, tables[context_page][context_index]);
+    const l3_page = tablePageIndex(table_base, tables[l4_page][0]);
+    const l2_page = tablePageIndex(table_base, tables[l3_page][0]);
+    try std.testing.expect(tables[l2_page][first_l2] != 0);
+    try std.testing.expect(tables[l2_page][second_l2] != 0);
+    try std.testing.expect(tablePageIndex(table_base, tables[l2_page][first_l2]) !=
+        tablePageIndex(table_base, tables[l2_page][second_l2]));
+}
+
+test "VT-d domains isolate NVMe and I225 requesters with multi-page windows" {
+    var tables: Tables align(PAGE_SIZE) = undefined;
+    const table_base: u32 = 0x0100_0000;
+    const storage_windows = [_]DmaWindow{
+        .{ .base = 0x0200_0000, .device_readable = true, .device_writable = true },
+    };
+    const network_windows = [_]DmaWindow{
+        .{ .base = 0x0240_0000, .length = 2 * PAGE_SIZE, .device_readable = true, .device_writable = false },
+    };
+    const domains = [_]DmaDomain{
+        .{ .device = syntheticNvme(), .windows = &storage_windows },
+        .{ .device = syntheticI225(), .windows = &network_windows },
+    };
+    try validateDomains(&domains);
+    try populateTables(&tables, table_base, &domains, .bits39);
+
+    const nvme_context_page = tablePageIndex(
+        table_base,
+        tables[ROOT_PAGE][@as(usize, syntheticNvme().bus) * 2],
+    );
+    const i225_context_page = tablePageIndex(
+        table_base,
+        tables[ROOT_PAGE][@as(usize, syntheticI225().bus) * 2],
+    );
+    try std.testing.expect(nvme_context_page != i225_context_page);
+
+    const nvme_context_index = (@as(usize, syntheticNvme().device) * 8 + syntheticNvme().function) * 2;
+    const i225_context_index = (@as(usize, syntheticI225().device) * 8 + syntheticI225().function) * 2;
+    try std.testing.expectEqual(
+        (@as(u64, FIRST_DOMAIN_ID) << 8) | @intFromEnum(AddressWidth.bits39),
+        tables[nvme_context_page][nvme_context_index + 1],
+    );
+    try std.testing.expectEqual(
+        (@as(u64, FIRST_DOMAIN_ID + 1) << 8) | @intFromEnum(AddressWidth.bits39),
+        tables[i225_context_page][i225_context_index + 1],
+    );
+
+    const i225_l3 = tablePageIndex(table_base, tables[i225_context_page][i225_context_index]);
+    const i225_l2 = tablePageIndex(table_base, tables[i225_l3][0]);
+    const i225_leaf = tablePageIndex(
+        table_base,
+        tables[i225_l2][@intCast(network_windows[0].base >> 21)],
+    );
+    const first_leaf_index: usize = @intCast(network_windows[0].base >> 12 & 0x1FF);
+    try std.testing.expectEqual(
+        @as(u64, network_windows[0].base) | SECOND_STAGE_READ,
+        tables[i225_leaf][first_leaf_index],
+    );
+    try std.testing.expectEqual(
+        @as(u64, network_windows[0].base + PAGE_SIZE) | SECOND_STAGE_READ,
+        tables[i225_leaf][first_leaf_index + 1],
+    );
 }
 
 test "VT-d window policy rejects aliases and capability selection prefers fewer walks" {
@@ -798,9 +988,41 @@ test "VT-d window policy rejects aliases and capability selection prefers fewer 
         .{ .base = 0x0200_0000, .device_readable = false, .device_writable = true },
     };
     try std.testing.expectError(error.InvalidDmaWindow, validateWindows(&aliased));
+    const storage_windows = [_]DmaWindow{
+        .{ .base = 0x0200_0000, .length = 2 * PAGE_SIZE, .device_readable = true, .device_writable = true },
+    };
+    const overlapping_network_windows = [_]DmaWindow{
+        .{ .base = 0x0200_1000, .device_readable = true, .device_writable = false },
+    };
+    const overlapping_domains = [_]DmaDomain{
+        .{ .device = syntheticNvme(), .windows = &storage_windows },
+        .{ .device = syntheticI225(), .windows = &overlapping_network_windows },
+    };
+    try std.testing.expectError(error.InvalidDmaWindow, validateDomains(&overlapping_domains));
     try std.testing.expectEqual(AddressWidth.bits39, chooseAddressWidth(0b00110).?);
     try std.testing.expectEqual(AddressWidth.bits48, chooseAddressWidth(0b00100).?);
     try std.testing.expect(chooseAddressWidth(0b00001) == null);
+}
+
+test "VT-d fault routing retains a record for the owning requester" {
+    protected_requester_ids = .{ requesterId(syntheticNvme()), requesterId(syntheticI225()) };
+    protected_requester_count = 2;
+    deferred_faults = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
+    defer {
+        protected_requester_ids = [_]u16{0} ** MAX_DMA_DOMAINS;
+        protected_requester_count = 0;
+        deferred_faults = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
+    }
+    const network_fault = FaultRecord{
+        .unit_index = 0,
+        .source_id = requesterId(syntheticI225()),
+        .reason = 1,
+        .request_type = .read,
+        .info = 0x0240_0000,
+    };
+    try std.testing.expect((try routeObservedFault(requesterId(syntheticNvme()), network_fault)) == null);
+    const routed = (try pollFaultForSource(requesterId(syntheticI225()))).?;
+    try std.testing.expectEqual(network_fault, routed);
 }
 
 test "VT-d interrupt table denies every interrupt and invalidation is completion fenced" {

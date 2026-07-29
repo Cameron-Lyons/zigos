@@ -532,7 +532,7 @@ pub fn capturePciEvidence() void {
 
 pub fn recordVtdIsolationProof(proof: intel_vtd.FaultRecord) void {
     if (facts.real_target_sku and facts.vtdDiscoveryReady() and
-        intel_vtd.storageIsolationEnabled() and
+        intel_vtd.dmaIsolationEnabled() and
         intel_vtd.interruptIsolationEnabled() and
         intel_vtd.faultMonitoringEnabled())
     {

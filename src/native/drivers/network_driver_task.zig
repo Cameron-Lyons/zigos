@@ -10,7 +10,7 @@ const network_policy = @import("../sync/network_policy.zig");
 const signing = @import("../core/signing.zig");
 
 pub const NetworkDevice = struct {
-    send: *const fn (data: []const u8) void,
+    send: *const fn (data: []const u8) bool,
     getMacAddress: *const fn () [6]u8,
 };
 
@@ -35,6 +35,7 @@ const NativeFrameWriter = binary_cursor.Writer(Error, error.PayloadTooLarge);
 
 pub const Error = error{
     EgressDenied,
+    TransmitFailed,
     PayloadTooLarge,
     ServiceIdentityTooLong,
     DiscoveryClassTooLong,
@@ -302,7 +303,7 @@ pub const NativeNetworkStack = struct {
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeNativeFrame(wire_frame[0..], connection, &frame);
-        device.send(encoded);
+        if (!device.send(encoded)) return error.TransmitFailed;
         self.transmitted_packets += 1;
         return frame;
     }
@@ -363,7 +364,7 @@ pub const NativeNetworkStack = struct {
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeDiscoveryFrame(wire_frame[0..], connection, &frame);
-        device.send(encoded);
+        if (!device.send(encoded)) return error.TransmitFailed;
         self.transmitted_packets += 1;
         return frame;
     }
@@ -487,7 +488,7 @@ pub fn sendActiveFrame(frame: []const u8) bool {
     if (frame.len > last_active_driver_frame.len) return false;
     if (!authorizeDriverTx(frame)) return false;
     const device = active_device orelse return false;
-    device.send(frame);
+    if (!device.send(frame)) return false;
     active_driver_tx_count += 1;
     last_active_driver_frame_len = frame.len;
     @memcpy(last_active_driver_frame[0..frame.len], frame);
@@ -650,8 +651,9 @@ test "network driver data plane is brokered by explicit egress capability" {
     const Harness = struct {
         var send_count: usize = 0;
 
-        fn send(_: []const u8) void {
+        fn send(_: []const u8) bool {
             send_count += 1;
+            return true;
         }
 
         fn mac() [6]u8 {
@@ -687,14 +689,44 @@ test "network driver data plane is brokered by explicit egress capability" {
     try std.testing.expectEqual(@as(usize, 0), lastActiveDriverFrame().len);
 }
 
+test "network transmit failure is reported without advancing ownership telemetry" {
+    const Harness = struct {
+        fn send(_: []const u8) bool {
+            return false;
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0, 0, 0, 0, 2 };
+        }
+
+        fn broker(_: EgressRequest) EgressDecision {
+            return .{ .allowed = true, .capability_backed = true };
+        }
+    };
+
+    reset();
+    defer reset();
+    const device = NetworkDevice{
+        .send = Harness.send,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(activateDevice(&device, 8));
+    setEgressBroker(Harness.broker);
+    bindEgressCapability(100, 42);
+    try std.testing.expect(!sendActiveFrame("frame"));
+    try std.testing.expectEqual(@as(usize, 0), activeDriverTransmitCount());
+    try std.testing.expectEqual(@as(usize, 0), lastActiveDriverFrame().len);
+}
+
 test "native network stack gates service identity packets on attested policy capability" {
     const Harness = struct {
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
 
-        fn send(frame: []const u8) void {
+        fn send(frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
+            return true;
         }
 
         fn mac() [6]u8 {
@@ -923,9 +955,10 @@ test "native network stack requires scoped local discovery before discovery broa
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
 
-        fn send(frame: []const u8) void {
+        fn send(frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
+            return true;
         }
 
         fn mac() [6]u8 {
