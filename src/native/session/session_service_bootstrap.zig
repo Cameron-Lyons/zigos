@@ -40,6 +40,11 @@ const i225_bridge = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn zigosNetworkBootstrapI225Attached() callconv(.c) bool;
         extern fn zigosNetworkBootstrapI225Send(payload_ptr: [*]const u8, payload_len: usize) callconv(.c) bool;
+        extern fn zigosNetworkBootstrapI225Receive(
+            output_ptr: [*]u8,
+            output_capacity: usize,
+            output_len: *usize,
+        ) callconv(.c) u8;
         extern fn zigosNetworkBootstrapI225Mac(output: [*]u8) callconv(.c) bool;
 
         pub fn attached() bool {
@@ -48,6 +53,20 @@ const i225_bridge = if (builtin.target.os.tag == .freestanding)
 
         pub fn send(payload: []const u8) bool {
             return zigosNetworkBootstrapI225Send(payload.ptr, payload.len);
+        }
+
+        pub fn receive(output: []u8) bootstrap_driver_port.ReceiveResult {
+            var length: usize = 0;
+            const status = zigosNetworkBootstrapI225Receive(output.ptr, output.len, &length);
+            return .{
+                .status = switch (status) {
+                    0 => .empty,
+                    1 => .frame,
+                    2 => .dropped,
+                    else => .failed,
+                },
+                .length = length,
+            };
         }
 
         pub fn mac() ?[6]u8 {
@@ -66,6 +85,10 @@ else
             return false;
         }
 
+        pub fn receive(_: []u8) bootstrap_driver_port.ReceiveResult {
+            return .{ .status = .empty };
+        }
+
         pub fn mac() ?[6]u8 {
             return null;
         }
@@ -77,6 +100,14 @@ const BootedNetworkDataPlane = struct {
         return builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled();
     }
 
+    fn receive(output: []u8) bootstrap_driver_port.ReceiveResult {
+        if (i225_bridge.attached()) return i225_bridge.receive(output);
+        if (builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled()) {
+            return .{ .status = .empty };
+        }
+        return .{ .status = .failed };
+    }
+
     fn getMacAddress() [6]u8 {
         if (i225_bridge.mac()) |address| return address;
         return .{ 0x02, 0x5A, 0x47, 0x00, 0x00, 0x01 };
@@ -84,6 +115,7 @@ const BootedNetworkDataPlane = struct {
 
     const device = bootstrap_driver_port.NetworkDevice{
         .send = send,
+        .receive = receive,
         .getMacAddress = getMacAddress,
     };
 

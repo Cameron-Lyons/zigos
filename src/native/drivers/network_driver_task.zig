@@ -9,8 +9,25 @@ const principal = @import("../core/principal.zig");
 const network_policy = @import("../sync/network_policy.zig");
 const signing = @import("../core/signing.zig");
 
+pub const ReceiveStatus = enum(u8) {
+    empty = 0,
+    frame = 1,
+    dropped = 2,
+    failed = 3,
+};
+
+pub const ReceiveResult = struct {
+    status: ReceiveStatus,
+    length: usize = 0,
+};
+
+pub fn noNetworkFrame(_: []u8) ReceiveResult {
+    return .{ .status = .empty };
+}
+
 pub const NetworkDevice = struct {
     send: *const fn (data: []const u8) bool,
+    receive: *const fn (output: []u8) ReceiveResult,
     getMacAddress: *const fn () [6]u8,
 };
 
@@ -29,6 +46,7 @@ pub const EgressDecision = struct {
 pub const EgressBroker = *const fn (request: EgressRequest) EgressDecision;
 pub const MAX_NATIVE_PAYLOAD_BYTES: usize = 160;
 pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
+pub const MAX_RECEIVE_FRAME_BYTES: usize = 1500;
 const SERVICE_IDENTITY_FRAME_MAGIC = "ZGNI";
 const DISCOVERY_FRAME_MAGIC = "ZGND";
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PayloadTooLarge);
@@ -415,6 +433,11 @@ var active_network_policy_id: u64 = 0;
 var active_driver_tx_count: usize = 0;
 var last_active_driver_frame_len: usize = 0;
 var last_active_driver_frame: [MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_NATIVE_FRAME_BYTES;
+var active_driver_rx_count: usize = 0;
+var active_driver_rx_drop_count: usize = 0;
+var active_driver_rx_failure_count: usize = 0;
+var last_active_driver_rx_frame_len: usize = 0;
+var last_active_driver_rx_frame: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES;
 
 pub fn reset() void {
     active_device = null;
@@ -423,6 +446,7 @@ pub fn reset() void {
     active_egress_capability_id = 0;
     active_network_policy_id = 0;
     clearTransmitTelemetry();
+    clearReceiveTelemetry();
 }
 
 pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
@@ -464,12 +488,36 @@ pub fn clearTransmitTelemetry() void {
     @memset(last_active_driver_frame[0..], 0);
 }
 
+pub fn clearReceiveTelemetry() void {
+    active_driver_rx_count = 0;
+    active_driver_rx_drop_count = 0;
+    active_driver_rx_failure_count = 0;
+    last_active_driver_rx_frame_len = 0;
+    @memset(last_active_driver_rx_frame[0..], 0);
+}
+
 pub fn activeDriverTransmitCount() usize {
     return active_driver_tx_count;
 }
 
 pub fn lastActiveDriverFrame() []const u8 {
     return last_active_driver_frame[0..last_active_driver_frame_len];
+}
+
+pub fn activeDriverReceiveCount() usize {
+    return active_driver_rx_count;
+}
+
+pub fn activeDriverReceiveDropCount() usize {
+    return active_driver_rx_drop_count;
+}
+
+pub fn activeDriverReceiveFailureCount() usize {
+    return active_driver_rx_failure_count;
+}
+
+pub fn lastActiveDriverReceivedFrame() []const u8 {
+    return last_active_driver_rx_frame[0..last_active_driver_rx_frame_len];
 }
 
 pub fn authorizeDriverTx(frame: []const u8) bool {
@@ -493,6 +541,43 @@ pub fn sendActiveFrame(frame: []const u8) bool {
     last_active_driver_frame_len = frame.len;
     @memcpy(last_active_driver_frame[0..frame.len], frame);
     return true;
+}
+
+pub fn receiveActiveFrame(output: []u8) ReceiveResult {
+    const device = active_device orelse {
+        active_driver_rx_failure_count += 1;
+        return .{ .status = .failed };
+    };
+    const result = device.receive(output);
+    switch (result.status) {
+        .empty => {
+            if (result.length != 0) return invalidReceiveResult();
+            return result;
+        },
+        .dropped => {
+            if (result.length != 0) return invalidReceiveResult();
+            active_driver_rx_drop_count += 1;
+            return result;
+        },
+        .failed => {
+            active_driver_rx_failure_count += 1;
+            return .{ .status = .failed };
+        },
+        .frame => {
+            if (result.length == 0 or result.length > output.len or result.length > MAX_RECEIVE_FRAME_BYTES) {
+                return invalidReceiveResult();
+            }
+            active_driver_rx_count += 1;
+            last_active_driver_rx_frame_len = result.length;
+            @memcpy(last_active_driver_rx_frame[0..result.length], output[0..result.length]);
+            return result;
+        },
+    }
+}
+
+fn invalidReceiveResult() ReceiveResult {
+    active_driver_rx_failure_count += 1;
+    return .{ .status = .failed };
 }
 
 fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypto_hash.Digest {
@@ -673,6 +758,7 @@ test "network driver data plane is brokered by explicit egress capability" {
 
     const device = NetworkDevice{
         .send = Harness.send,
+        .receive = noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     try std.testing.expect(activateDevice(&device, 7));
@@ -708,6 +794,7 @@ test "network transmit failure is reported without advancing ownership telemetry
     defer reset();
     const device = NetworkDevice{
         .send = Harness.send,
+        .receive = noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     try std.testing.expect(activateDevice(&device, 8));
@@ -716,6 +803,65 @@ test "network transmit failure is reported without advancing ownership telemetry
     try std.testing.expect(!sendActiveFrame("frame"));
     try std.testing.expectEqual(@as(usize, 0), activeDriverTransmitCount());
     try std.testing.expectEqual(@as(usize, 0), lastActiveDriverFrame().len);
+}
+
+test "network receive polling distinguishes empty drop failure and owned frame" {
+    const Harness = struct {
+        const Mode = enum { empty, frame, dropped, failed, malformed };
+        var mode: Mode = .empty;
+
+        fn send(_: []const u8) bool {
+            return true;
+        }
+
+        fn receive(output: []u8) ReceiveResult {
+            return switch (mode) {
+                .empty => .{ .status = .empty },
+                .frame => result: {
+                    @memcpy(output[0..8], "incoming");
+                    break :result .{ .status = .frame, .length = 8 };
+                },
+                .dropped => .{ .status = .dropped },
+                .failed => .{ .status = .failed },
+                .malformed => .{ .status = .frame, .length = output.len + 1 },
+            };
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0, 0, 0, 0, 3 };
+        }
+    };
+
+    reset();
+    defer reset();
+    Harness.mode = .empty;
+    const device = NetworkDevice{
+        .send = Harness.send,
+        .receive = Harness.receive,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(activateDevice(&device, 9));
+    var output: [32]u8 = undefined;
+
+    try std.testing.expectEqual(ReceiveStatus.empty, receiveActiveFrame(&output).status);
+    Harness.mode = .frame;
+    const frame = receiveActiveFrame(&output);
+    try std.testing.expectEqual(ReceiveStatus.frame, frame.status);
+    try std.testing.expectEqual(@as(usize, 8), frame.length);
+    try std.testing.expectEqualStrings("incoming", output[0..frame.length]);
+    try std.testing.expectEqual(@as(usize, 1), activeDriverReceiveCount());
+    try std.testing.expectEqualStrings("incoming", lastActiveDriverReceivedFrame());
+
+    Harness.mode = .dropped;
+    try std.testing.expectEqual(ReceiveStatus.dropped, receiveActiveFrame(&output).status);
+    try std.testing.expectEqual(@as(usize, 1), activeDriverReceiveDropCount());
+
+    Harness.mode = .failed;
+    try std.testing.expectEqual(ReceiveStatus.failed, receiveActiveFrame(&output).status);
+    Harness.mode = .malformed;
+    try std.testing.expectEqual(ReceiveStatus.failed, receiveActiveFrame(&output).status);
+    try std.testing.expectEqual(@as(usize, 2), activeDriverReceiveFailureCount());
+    try std.testing.expectEqual(@as(usize, 1), activeDriverReceiveCount());
 }
 
 test "native network stack gates service identity packets on attested policy capability" {
@@ -741,6 +887,7 @@ test "native network stack gates service identity packets on attested policy cap
 
     const device = NetworkDevice{
         .send = Harness.send,
+        .receive = noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     try std.testing.expect(activateDevice(&device, 70));
@@ -973,6 +1120,7 @@ test "native network stack requires scoped local discovery before discovery broa
 
     const device = NetworkDevice{
         .send = Harness.send,
+        .receive = noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     try std.testing.expect(activateDevice(&device, 80));
