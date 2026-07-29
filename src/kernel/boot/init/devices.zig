@@ -42,8 +42,18 @@ pub fn init() void {
         @panic("ACPI MCFG is required for PCIe discovery");
     pci.init(ecam_allocation) catch @panic("ACPI MCFG exposed an invalid PCIe ECAM allocation");
     _ = pci.revokeBootBusMasters();
+    _ = pci.disableBootMessageSignaledInterrupts() catch
+        @panic("PCI capability chain prevented interrupt quiescence");
     if (pci.bootBusMasterCount() != 0) {
         @panic("PCI bus-master revocation failed before device ownership transfer");
+    }
+    if (pci.bootLegacyInterruptCount() != 0) {
+        @panic("PCI INTx quiescence failed before VT-d handoff");
+    }
+    if ((pci.bootMessageSignaledInterruptCount() catch
+        @panic("PCI capability chain prevented interrupt verification")) != 0)
+    {
+        @panic("PCI message-signaled interrupt quiescence failed before VT-d handoff");
     }
     // QEMU "modeled" test boots cannot expose the exact first-target Intel
     // devices, so explicit test profiles request a modeled inventory seed.
@@ -112,7 +122,7 @@ fn capturePciInventory() void {
         else
             null;
         const vtd_summary_ptr = if (vtd_summary) |*summary| summary else null;
-        const isolated = nvme_hw.probeAndReport(dev, vtd_summary_ptr) catch |err| {
+        const fault_proof = nvme_hw.probeAndReport(dev, vtd_summary_ptr) catch |err| {
             console.print("ZIGOS:NVME:HW:BRINGUP_FAIL ");
             console.print(@errorName(err));
             console.print("\n");
@@ -121,7 +131,7 @@ fn capturePciInventory() void {
             }
             return;
         };
-        if (isolated) hardware_proof.recordVtdStorageIsolation();
+        if (fault_proof) |proof| hardware_proof.recordVtdIsolationProof(proof);
     }
 }
 
