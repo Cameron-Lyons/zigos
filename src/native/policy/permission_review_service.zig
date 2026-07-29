@@ -34,18 +34,6 @@ else
     struct {
         pub fn hlt() void {}
     };
-const keyboard = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/drivers/keyboard.zig")
-else
-    struct {
-        pub fn has_char() bool {
-            return false;
-        }
-
-        pub fn getchar() u8 {
-            return 0;
-        }
-    };
 const serial = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/drivers/serial.zig")
 else
@@ -866,9 +854,6 @@ pub const Service = struct {
         _ = self;
         if (serial.hasChar()) {
             return serial.getchar();
-        }
-        if (keyboard.has_char()) {
-            return keyboard.getchar();
         }
         return null;
     }
