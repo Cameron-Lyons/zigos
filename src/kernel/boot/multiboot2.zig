@@ -9,12 +9,16 @@ const TAG_COMMAND_LINE: u32 = 1;
 const TAG_BASIC_MEMORY: u32 = 4;
 const TAG_MEMORY_MAP: u32 = 6;
 const TAG_FRAMEBUFFER: u32 = 8;
+const TAG_ACPI_OLD: u32 = 14;
+const TAG_ACPI_NEW: u32 = 15;
 const TAG_HEADER_BYTES: usize = 8;
 const INFO_HEADER_BYTES: usize = 8;
 const MEMORY_MAP_HEADER_BYTES: usize = 16;
 const MEMORY_MAP_ENTRY_MIN_BYTES: usize = 24;
 const FRAMEBUFFER_COMMON_BYTES: usize = 32;
 const FRAMEBUFFER_RGB_BYTES: usize = 6;
+const ACPI_RSDP_V1_BYTES: usize = 20;
+const ACPI_RSDP_V2_MIN_BYTES: usize = 36;
 const TAG_ALIGNMENT: usize = 8;
 
 pub const Error = error{
@@ -35,6 +39,7 @@ pub const ParsedInfo = struct {
     has_command_line: bool = false,
     has_memory_map: bool = false,
     has_framebuffer: bool = false,
+    has_acpi_rsdp: bool = false,
     mem_lower_kib: u32 = 0,
     mem_upper_kib: u32 = 0,
     cmdline_addr: u32 = 0,
@@ -49,6 +54,8 @@ pub const ParsedInfo = struct {
     framebuffer_bpp: u8 = 0,
     framebuffer_type: u8 = 0,
     framebuffer_rgb: [FRAMEBUFFER_RGB_BYTES]u8 = [_]u8{0} ** FRAMEBUFFER_RGB_BYTES,
+    acpi_rsdp_addr: u32 = 0,
+    acpi_rsdp_length: u32 = 0,
 };
 
 pub fn declaredTotalSize(header: []const u8) Error!u32 {
@@ -71,6 +78,8 @@ pub fn parse(bytes: []const u8, physical_base: u32) Error!ParsedInfo {
     var seen_basic_memory = false;
     var seen_memory_map = false;
     var seen_framebuffer = false;
+    var seen_acpi_old = false;
+    var seen_acpi_new = false;
     var saw_end = false;
     var offset: usize = INFO_HEADER_BYTES;
 
@@ -150,6 +159,26 @@ pub fn parse(bytes: []const u8, physical_base: u32) Error!ParsedInfo {
                     }
                     @memcpy(parsed.framebuffer_rgb[0..], bytes[offset + FRAMEBUFFER_COMMON_BYTES ..][0..FRAMEBUFFER_RGB_BYTES]);
                 }
+            },
+            TAG_ACPI_OLD => {
+                if (seen_acpi_old) return error.DuplicateTag;
+                seen_acpi_old = true;
+                const payload_length = tag_size - TAG_HEADER_BYTES;
+                if (payload_length < ACPI_RSDP_V1_BYTES) return error.InvalidTag;
+                if (!seen_acpi_new) {
+                    parsed.has_acpi_rsdp = true;
+                    parsed.acpi_rsdp_addr = try physicalAddress(physical_base, header_end);
+                    parsed.acpi_rsdp_length = std.math.cast(u32, payload_length) orelse return error.InvalidTag;
+                }
+            },
+            TAG_ACPI_NEW => {
+                if (seen_acpi_new) return error.DuplicateTag;
+                seen_acpi_new = true;
+                const payload_length = tag_size - TAG_HEADER_BYTES;
+                if (payload_length < ACPI_RSDP_V2_MIN_BYTES) return error.InvalidTag;
+                parsed.has_acpi_rsdp = true;
+                parsed.acpi_rsdp_addr = try physicalAddress(physical_base, header_end);
+                parsed.acpi_rsdp_length = std.math.cast(u32, payload_length) orelse return error.InvalidTag;
             },
             else => {},
         }
@@ -234,6 +263,32 @@ test "Multiboot2 parser rejects malformed tag extents and map strides" {
 
     writeU32(bytes[12..16], 40);
     try std.testing.expectError(error.InvalidTag, parse(&bytes, 0x1000));
+}
+
+test "Multiboot2 parser prefers the revision 2 ACPI RSDP handoff" {
+    var bytes = [_]u8{0} ** 96;
+    writeU32(bytes[0..4], bytes.len);
+
+    var offset: usize = INFO_HEADER_BYTES;
+    writeU32(bytes[offset .. offset + 4], TAG_ACPI_OLD);
+    writeU32(bytes[offset + 4 .. offset + 8], TAG_HEADER_BYTES + ACPI_RSDP_V1_BYTES);
+    @memcpy(bytes[offset + TAG_HEADER_BYTES ..][0..8], "RSD PTR ");
+    offset = alignTag(offset + TAG_HEADER_BYTES + ACPI_RSDP_V1_BYTES);
+
+    writeU32(bytes[offset .. offset + 4], TAG_ACPI_NEW);
+    writeU32(bytes[offset + 4 .. offset + 8], TAG_HEADER_BYTES + ACPI_RSDP_V2_MIN_BYTES);
+    @memcpy(bytes[offset + TAG_HEADER_BYTES ..][0..8], "RSD PTR ");
+    const expected_address = 0x4000 + offset + TAG_HEADER_BYTES;
+    offset = alignTag(offset + TAG_HEADER_BYTES + ACPI_RSDP_V2_MIN_BYTES);
+
+    writeU32(bytes[offset .. offset + 4], TAG_END);
+    writeU32(bytes[offset + 4 .. offset + 8], TAG_HEADER_BYTES);
+    try std.testing.expectEqual(bytes.len, offset + TAG_HEADER_BYTES);
+
+    const parsed = try parse(&bytes, 0x4000);
+    try std.testing.expect(parsed.has_acpi_rsdp);
+    try std.testing.expectEqual(@as(u32, @intCast(expected_address)), parsed.acpi_rsdp_addr);
+    try std.testing.expectEqual(@as(u32, ACPI_RSDP_V2_MIN_BYTES), parsed.acpi_rsdp_length);
 }
 
 test "Multiboot2 parser requires a final end tag and bounded physical offsets" {

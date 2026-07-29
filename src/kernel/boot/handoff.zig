@@ -14,6 +14,7 @@ const FLAG_MEMORY_INFO: u32 = 1 << 0;
 const FLAG_CMDLINE: u32 = 1 << 2;
 const FLAG_MEMORY_MAP: u32 = 1 << 6;
 const FLAG_FRAMEBUFFER: u32 = 1 << 12;
+const FLAG_ACPI_RSDP: u32 = 1 << 13;
 
 const FRAMEBUFFER_RGB_COLOR_INFO_BYTES: usize = 6;
 const MULTIBOOT2_INFO_HEADER_BYTES: usize = 8;
@@ -48,6 +49,8 @@ pub const Info = struct {
     info_bytes: u32,
     cmdline_length: u32,
     mmap_entry_size: u32,
+    acpi_rsdp_addr: u32 = 0,
+    acpi_rsdp_length: u32 = 0,
 
     pub fn hasMemoryInfo(self: Info) bool {
         return (self.flags & FLAG_MEMORY_INFO) != 0;
@@ -63,6 +66,10 @@ pub const Info = struct {
 
     pub fn hasFramebuffer(self: Info) bool {
         return (self.flags & FLAG_FRAMEBUFFER) != 0 and self.framebuffer_addr != 0;
+    }
+
+    pub fn hasAcpiRsdp(self: Info) bool {
+        return (self.flags & FLAG_ACPI_RSDP) != 0 and self.acpi_rsdp_addr != 0 and self.acpi_rsdp_length > 0;
     }
 };
 
@@ -161,6 +168,7 @@ pub fn parseMultiboot2Info(bytes: []const u8, physical_base: u32) Error!Info {
     if (parsed.has_command_line) flags |= FLAG_CMDLINE;
     if (parsed.has_memory_map) flags |= FLAG_MEMORY_MAP;
     if (parsed.has_framebuffer) flags |= FLAG_FRAMEBUFFER;
+    if (parsed.has_acpi_rsdp) flags |= FLAG_ACPI_RSDP;
 
     return .{
         .flags = flags,
@@ -179,6 +187,8 @@ pub fn parseMultiboot2Info(bytes: []const u8, physical_base: u32) Error!Info {
         .info_bytes = parsed.total_size,
         .cmdline_length = parsed.cmdline_length,
         .mmap_entry_size = parsed.mmap_entry_size,
+        .acpi_rsdp_addr = parsed.acpi_rsdp_addr,
+        .acpi_rsdp_length = parsed.acpi_rsdp_length,
     };
 }
 
@@ -200,6 +210,12 @@ pub fn capturedMemoryMap(info: Info) ?MemoryMap {
 
 pub fn multiboot2MemoryMap(bytes: []const u8, entry_size: u32) MemoryMap {
     return .{ .bytes = bytes, .entry_size = entry_size };
+}
+
+pub fn capturedAcpiRsdp(info: Info) ?[]const u8 {
+    if (!info.hasAcpiRsdp()) return null;
+    const length = std.math.cast(usize, info.acpi_rsdp_length) orelse return null;
+    return checkedPhysicalBytes(info.acpi_rsdp_addr, length);
 }
 
 pub fn summarizeMemoryMap(map: MemoryMap) Error!MemoryMapSummary {

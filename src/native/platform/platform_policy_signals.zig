@@ -1165,6 +1165,7 @@ fn testHardwareProofFacts(reader_generation: u32) hardware_proof.ProbeFacts {
         .acpi_rsdp = true,
         .acpi_madt = true,
         .acpi_fadt = true,
+        .acpi_mcfg = true,
         .fadt_firmware = testFadtFirmware(),
         .telemetry_reader_generation = reader_generation,
         .thermal_zone_count = 2,

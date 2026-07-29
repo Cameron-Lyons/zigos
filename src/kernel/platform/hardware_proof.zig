@@ -3,11 +3,13 @@ const builtin = @import("builtin");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
 const fadt = @import("fadt.zig");
+const mcfg = @import("mcfg.zig");
 const framebuffer = @import("framebuffer.zig");
 const smbios = @import("smbios.zig");
 const crash_record = @import("crash_record.zig");
 const handoff = @import("../boot/handoff.zig");
 const console = @import("../utils/console.zig");
+const paging = @import("../memory/paging64.zig");
 const intel_i225 = @import("../drivers/intel_i225.zig");
 const nvme = @import("../drivers/nvme.zig");
 const pci = @import("../drivers/pci.zig");
@@ -17,6 +19,11 @@ const hardware_target = @import("../../native/platform/hardware_target.zig");
 const BIOS_RSDP_SCAN_BASE: usize = 0xE0000;
 const BIOS_RSDP_SCAN_LENGTH: usize = 0x20000;
 const MAX_ACPI_TABLE_BYTES: usize = 1024 * 1024;
+const PAGE_SIZE: usize = 4096;
+const PAGE_MASK: usize = PAGE_SIZE - 1;
+const MAX_X86_PHYSICAL_ADDRESS: u64 = 0x000F_FFFF_FFFF_FFFF;
+const KERNEL_ACPI_ROOT_VIRTUAL_BASE: usize = 0xFFFF_8000_2000_0000;
+const KERNEL_ACPI_ENTRY_VIRTUAL_BASE: usize = 0xFFFF_8000_2020_0000;
 
 pub const ProbeFacts = struct {
     real_target_sku: bool = false,
@@ -26,7 +33,9 @@ pub const ProbeFacts = struct {
     acpi_rsdp: bool = false,
     acpi_madt: bool = false,
     acpi_fadt: bool = false,
+    acpi_mcfg: bool = false,
     fadt_firmware: ?fadt.FixedAcpiDescription = null,
+    mcfg_allocation: ?mcfg.Allocation = null,
     apic_timer: bool = false,
     framebuffer_gop: bool = false,
     xhci_controller: bool = false,
@@ -80,7 +89,7 @@ pub const ProbeFacts = struct {
     }
 
     pub fn acpiTablesReady(self: ProbeFacts) bool {
-        return self.acpi_rsdp and self.acpi_madt and self.acpi_fadt;
+        return self.acpi_rsdp and self.acpi_madt and self.acpi_fadt and self.acpi_mcfg;
     }
 
     pub fn nvmeBlockReady(self: ProbeFacts) bool {
@@ -394,6 +403,11 @@ pub fn factsSnapshot() ProbeFacts {
     return facts;
 }
 
+pub fn pciEcamAllocation() ?mcfg.Allocation {
+    if (!facts.acpi_mcfg) return null;
+    return facts.mcfg_allocation;
+}
+
 pub fn telemetryRecordingReady() bool {
     return facts.real_target_sku and
         facts.acpi_fadt and
@@ -459,6 +473,10 @@ pub fn captureEarlyBootEvidence() void {
         _ = handoff.framebufferInfo(info) catch {};
     }
 
+    printNewMarkers();
+}
+
+pub fn capturePlatformFirmwareEvidence() void {
     captureAcpiEvidence();
     printNewMarkers();
 }
@@ -600,22 +618,23 @@ pub fn recordGridCarbonIntensitySample(sample: GridCarbonIntensitySample) void {
 }
 
 fn captureAcpiEvidence() void {
-    const rsdp_location = findRsdpInBiosRegions() orelse return;
+    const rsdp = findRsdp() orelse return;
     facts.acpi_rsdp = true;
 
-    const root_address: u64 = if (rsdp_location.descriptor.xsdt_address != 0)
-        rsdp_location.descriptor.xsdt_address
+    const root_address: u64 = if (rsdp.xsdt_address != 0)
+        rsdp.xsdt_address
     else
-        rsdp_location.descriptor.rsdt_address;
-    const root_table = physicalTableBytes(root_address) orelse return;
+        rsdp.rsdt_address;
+    const root_table = mappedPhysicalTableBytes(root_address, KERNEL_ACPI_ROOT_VIRTUAL_BASE) orelse return;
 
     const count = acpi.rootTableEntryCount(root_table) catch return;
     var found_madt = false;
     var found_fadt = false;
+    var found_mcfg: ?mcfg.Allocation = null;
     var index: u32 = 0;
     while (index < count) : (index += 1) {
         const table_address = acpi.rootTableEntryAddress(root_table, index) catch continue;
-        const table = physicalTableBytes(table_address) orelse continue;
+        const table = mappedPhysicalTableBytes(table_address, KERNEL_ACPI_ENTRY_VIRTUAL_BASE) orelse continue;
         const header = acpi.parseSdtHeader(table) catch continue;
         if (std.mem.eql(u8, header.signature[0..], apic.MADT_SIGNATURE)) {
             if (apic.parseMadt(table)) |summary| {
@@ -625,11 +644,15 @@ fn captureAcpiEvidence() void {
             const firmware = fadt.parseFadt(table) catch continue;
             facts.fadt_firmware = firmware;
             found_fadt = true;
+        } else if (std.mem.eql(u8, header.signature[0..], mcfg.MCFG_SIGNATURE)) {
+            found_mcfg = mcfg.segmentZeroAllocation(table) catch continue;
         }
     }
 
     facts.acpi_madt = found_madt;
     facts.acpi_fadt = found_fadt;
+    facts.acpi_mcfg = found_mcfg != null;
+    facts.mcfg_allocation = found_mcfg;
 }
 
 fn acceptTelemetryGeneration(reader_generation: u32) bool {
@@ -654,19 +677,48 @@ fn firmwareSupportsTelemetry(firmware: fadt.FixedAcpiDescription) bool {
         firmware.pm_timer_length != 0;
 }
 
-fn findRsdpInBiosRegions() ?acpi.RsdpLocation {
+fn findRsdp() ?acpi.Rsdp {
+    if (handoff.capturedInfo()) |info| {
+        if (handoff.capturedAcpiRsdp(info)) |bytes| {
+            if (acpi.parseRsdp(bytes)) |descriptor| return descriptor else |_| {}
+        }
+    }
     const bios = @as([*]const u8, @ptrFromInt(BIOS_RSDP_SCAN_BASE))[0..BIOS_RSDP_SCAN_LENGTH];
-    return acpi.findRsdp(bios, BIOS_RSDP_SCAN_BASE);
+    const location = acpi.findRsdp(bios, BIOS_RSDP_SCAN_BASE) orelse return null;
+    return location.descriptor;
 }
 
-fn physicalTableBytes(physical_address: u64) ?[]const u8 {
-    const max_address: u64 = std.math.maxInt(usize);
-    if (physical_address == 0 or physical_address > max_address - acpi.SDT_HEADER_LENGTH) return null;
-    const address: usize = @intCast(physical_address);
-    const header_bytes = @as([*]const u8, @ptrFromInt(address))[0..acpi.SDT_HEADER_LENGTH];
+fn mappedPhysicalTableBytes(physical_address: u64, virtual_base: usize) ?[]const u8 {
+    if (physical_address == 0 or physical_address > MAX_X86_PHYSICAL_ADDRESS - acpi.SDT_HEADER_LENGTH) return null;
+    const address = std.math.cast(usize, physical_address) orelse return null;
+    const physical_page = address & ~PAGE_MASK;
+    const page_offset = address & PAGE_MASK;
+    const header_span = std.math.add(usize, page_offset, acpi.SDT_HEADER_LENGTH) catch return null;
+    const header_pages = (header_span + PAGE_MASK) / PAGE_SIZE;
+    mapAcpiPages(physical_page, virtual_base, header_pages);
+
+    const table_virtual_address = virtual_base + page_offset;
+    const header_bytes = @as([*]const u8, @ptrFromInt(table_virtual_address))[0..acpi.SDT_HEADER_LENGTH];
     const length: usize = @intCast(acpi.sdtLengthFromHeader(header_bytes) catch return null);
     if (length < acpi.SDT_HEADER_LENGTH or length > MAX_ACPI_TABLE_BYTES) return null;
-    return @as([*]const u8, @ptrFromInt(address))[0..length];
+    const last_physical_address = std.math.add(u64, physical_address, length - 1) catch return null;
+    if (last_physical_address > MAX_X86_PHYSICAL_ADDRESS) return null;
+    const table_span = std.math.add(usize, page_offset, length) catch return null;
+    const page_count = std.math.add(usize, table_span, PAGE_MASK) catch return null;
+    mapAcpiPages(physical_page, virtual_base, page_count / PAGE_SIZE);
+    return @as([*]const u8, @ptrFromInt(table_virtual_address))[0..length];
+}
+
+fn mapAcpiPages(physical_base: usize, virtual_base: usize, page_count: usize) void {
+    var page_index: usize = 0;
+    while (page_index < page_count) : (page_index += 1) {
+        const page_offset = page_index * PAGE_SIZE;
+        paging.mapKernelBorrowedPage(
+            virtual_base + page_offset,
+            physical_base + page_offset,
+            paging.PAGE_PRESENT | paging.PAGE_CACHE_DISABLE,
+        );
+    }
 }
 
 fn printNewMarkers() void {
@@ -872,6 +924,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .acpi_rsdp = true,
         .acpi_madt = true,
         .acpi_fadt = true,
+        .acpi_mcfg = true,
         .apic_timer = true,
         .xhci_controller = true,
         .nvme_controller = true,
@@ -879,6 +932,9 @@ test "hardware proof requires composed NUC subsystem evidence" {
     };
     try std.testing.expect(partial.uefiBootReady());
     try std.testing.expect(partial.acpiTablesReady());
+    var without_ecam = partial;
+    without_ecam.acpi_mcfg = false;
+    try std.testing.expect(!without_ecam.acpiTablesReady());
     try std.testing.expect(!allSubsystemMarkersReady(partial));
     try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, evaluateEvidence(partial)));
 
@@ -890,6 +946,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .acpi_rsdp = true,
         .acpi_madt = true,
         .acpi_fadt = true,
+        .acpi_mcfg = true,
         .apic_timer = true,
         .xhci_controller = true,
         .xhci_keyboard_input = true,

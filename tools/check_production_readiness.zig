@@ -656,8 +656,10 @@ fn validateNuc11tnki5KernelProofSources(
     const devices_path = "src/kernel/boot/init/devices.zig";
     const crash_record_path = "src/kernel/platform/crash_record.zig";
     const fadt_path = "src/kernel/platform/fadt.zig";
+    const mcfg_path = "src/kernel/platform/mcfg.zig";
     const framebuffer_path = "src/kernel/platform/framebuffer.zig";
     const handoff_path = "src/kernel/boot/handoff.zig";
+    const multiboot2_path = "src/kernel/boot/multiboot2.zig";
     const hardware_target_path = "src/native/platform/hardware_target.zig";
     const first_target_telemetry_path = "src/kernel/drivers/first_target_telemetry.zig";
     const platform_policy_signals_path = "src/native/platform/platform_policy_signals.zig";
@@ -698,12 +700,20 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 FADT suspend proof source is missing: {s}", .{fadt_path});
         return;
     }
+    if (!common.pathExists(io, mcfg_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 PCIe firmware parser is missing: {s}", .{mcfg_path});
+        return;
+    }
     if (!common.pathExists(io, framebuffer_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 framebuffer proof source is missing: {s}", .{framebuffer_path});
         return;
     }
     if (!common.pathExists(io, handoff_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 boot handoff source is missing: {s}", .{handoff_path});
+        return;
+    }
+    if (!common.pathExists(io, multiboot2_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 Multiboot2 parser is missing: {s}", .{multiboot2_path});
         return;
     }
     if (!common.pathExists(io, hardware_target_path)) {
@@ -790,8 +800,10 @@ fn validateNuc11tnki5KernelProofSources(
     const devices_source = try common.readFileAlloc(allocator, io, devices_path, common.source_file_max_bytes);
     const crash_record_source = try common.readFileAlloc(allocator, io, crash_record_path, common.source_file_max_bytes);
     const fadt_source = try common.readFileAlloc(allocator, io, fadt_path, common.source_file_max_bytes);
+    const mcfg_source = try common.readFileAlloc(allocator, io, mcfg_path, common.source_file_max_bytes);
     const framebuffer_source = try common.readFileAlloc(allocator, io, framebuffer_path, common.source_file_max_bytes);
     const handoff_source = try common.readFileAlloc(allocator, io, handoff_path, common.source_file_max_bytes);
+    const multiboot2_source = try common.readFileAlloc(allocator, io, multiboot2_path, common.source_file_max_bytes);
     const hardware_target_source = try common.readFileAlloc(allocator, io, hardware_target_path, common.source_file_max_bytes);
     const first_target_telemetry_source = try common.readFileAlloc(allocator, io, first_target_telemetry_path, common.source_file_max_bytes);
     const platform_policy_signals_source = try common.readFileAlloc(allocator, io, platform_policy_signals_path, common.source_file_max_bytes);
@@ -873,6 +885,8 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_device_inventory_snippets = [_][]const u8{
+        "hardware_proof.capturePlatformFirmwareEvidence()",
+        "pci.init(ecam_allocation)",
         "pci.firstIntelI225Lm()",
         ".intel_i225_lm_inventory",
         "pci.firstNvmeController()",
@@ -886,6 +900,11 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_pci_inventory_snippets = [_][]const u8{
+        "mcfg.Allocation",
+        "KERNEL_ECAM_WINDOW_VIRTUAL_BASE",
+        "paging.mapKernelBorrowedPage",
+        "mapped_configuration_page",
+        "configuration_lock",
         "boot_inventory_initialized",
         "PCI_SECONDARY_BUS_OFFSET",
         "enqueueSecondaryBus",
@@ -898,6 +917,30 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (std.mem.indexOf(u8, pci_source, "while (bus < PCI_MAX_BUS_COUNT)") != null) {
         try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not restore repeated exhaustive 256-bus scans", .{});
+    }
+    const retired_pci_config_port_snippets = [_][]const u8{
+        "CONFIG_ADDRESS",
+        "CONFIG_DATA",
+        "../utils/io.zig",
+        "io.outl",
+        "io.inl",
+    };
+    for (retired_pci_config_port_snippets) |snippet| {
+        if (std.mem.indexOf(u8, pci_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not restore legacy configuration-port access: {s}", .{snippet});
+        }
+    }
+    const required_mcfg_snippets = [_][]const u8{
+        "MCFG_SIGNATURE",
+        "segmentZeroAllocation",
+        "acpi.parseSdtHeader",
+        "allocation.base_address % ECAM_BUS_BYTES",
+        "error.MissingSegmentZero",
+    };
+    for (required_mcfg_snippets) |snippet| {
+        if (std.mem.indexOf(u8, mcfg_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 PCIe discovery must retain validated ACPI MCFG parsing: {s}", .{snippet});
+        }
     }
     const required_service_bootstrap_snippets = [_][]const u8{
         "device_inventory.requireProductionDriverDeviceId(device_class)",
@@ -1071,11 +1114,34 @@ fn validateNuc11tnki5KernelProofSources(
         "MULTIBOOT2_BOOTLOADER_MAGIC",
         "parseMultiboot2Info",
         "multiboot2MemoryMap",
+        "capturedAcpiRsdp",
         "zigos_multiboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC",
     };
     for (required_boot_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, handoff_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must remain Multiboot2-only: {s}", .{snippet});
+        }
+    }
+    const required_multiboot2_acpi_snippets = [_][]const u8{
+        "TAG_ACPI_NEW",
+        "TAG_ACPI_OLD",
+        "parsed.acpi_rsdp_addr",
+        "seen_acpi_new",
+    };
+    for (required_multiboot2_acpi_snippets) |snippet| {
+        if (std.mem.indexOf(u8, multiboot2_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must retain the ACPI RSDP tag path: {s}", .{snippet});
+        }
+    }
+    const required_mapped_acpi_snippets = [_][]const u8{
+        "capturePlatformFirmwareEvidence",
+        "mappedPhysicalTableBytes",
+        "paging.mapKernelBorrowedPage",
+        "mcfg.segmentZeroAllocation",
+    };
+    for (required_mapped_acpi_snippets) |snippet| {
+        if (std.mem.indexOf(u8, hardware_proof_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 firmware discovery must retain mapped ACPI table access: {s}", .{snippet});
         }
     }
     const retired_boot_handoff_snippets = [_][]const u8{
