@@ -1,11 +1,9 @@
 const std = @import("std");
 const driver_service = @import("driver_service.zig");
-const storage_driver_protocol = @import("storage_driver_protocol.zig");
 
 pub const DetectionSource = enum(u8) {
     absent,
     synthetic,
-    ata_bootstrap,
     pci_inventory,
     nvme_pci_inventory,
     intel_i225_lm_inventory,
@@ -25,12 +23,9 @@ pub const DeviceRecord = struct {
     source: DetectionSource,
     detected: bool,
     kernel_bootstrap: bool,
-    ata_bootstrap_grant: ?storage_driver_protocol.AtaBrokerGrant = null,
 };
 
 var records = defaultRecords();
-var captured_ata_bootstrap_device_id: u64 = 0;
-var captured_ata_bootstrap_grant: ?storage_driver_protocol.AtaBrokerGrant = null;
 
 // Modeled-inventory mode: set by the kernel for QEMU "modeled" test boots (e.g.
 // the storage-durability proof) where the emulator does not expose the exact
@@ -42,8 +37,6 @@ var model_device_inventory_enabled = false;
 
 pub fn reset() void {
     records = defaultRecords();
-    captured_ata_bootstrap_device_id = 0;
-    captured_ata_bootstrap_grant = null;
 }
 
 pub fn setModelDeviceInventory(enabled: bool) void {
@@ -61,7 +54,7 @@ pub fn registerDetected(
     kernel_bootstrap: bool,
 ) void {
     if (device_id == 0) return;
-    if (!sourceCanEnterInventory(device_class, source, device_id)) return;
+    if (!sourceCanBindProductionDriver(device_class, source, device_id)) return;
 
     const record = recordForClassMut(device_class);
     if (record.detected) {
@@ -81,31 +74,6 @@ pub fn registerDetected(
     };
 }
 
-pub fn recordAtaBootstrapGrant(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) void {
-    if (device_id == 0) return;
-    const record = recordForClassMut(.storage_controller);
-    if (!record.detected or record.device_id != device_id or record.source != .ata_bootstrap) return;
-    record.ata_bootstrap_grant = grant;
-    captured_ata_bootstrap_device_id = device_id;
-    captured_ata_bootstrap_grant = grant;
-}
-
-pub fn ataBootstrapGrant(device_id: u64) ?storage_driver_protocol.AtaBrokerGrant {
-    const record = recordForClass(.storage_controller);
-    if (!record.detected or record.device_id != device_id or record.source != .ata_bootstrap) return null;
-    return record.ata_bootstrap_grant;
-}
-
-pub fn ataBootstrapBridgeGrant(device_id: u64) ?storage_driver_protocol.AtaBrokerGrant {
-    if (ataBootstrapGrant(device_id)) |grant| return grant;
-    if (!model_device_inventory_enabled) return null;
-    if (captured_ata_bootstrap_device_id == 0) return null;
-    const record = recordForClass(.storage_controller);
-    if (!record.detected or record.device_id != device_id) return null;
-    if (!sourceCanBindProductionDriver(.storage_controller, record.source, record.device_id)) return null;
-    return captured_ata_bootstrap_grant;
-}
-
 pub fn recordForClass(device_class: driver_service.DeviceClass) DeviceRecord {
     return recordForClassMut(device_class).*;
 }
@@ -119,18 +87,6 @@ pub fn requireProductionDriverDeviceId(device_class: driver_service.DeviceClass)
     if (!record.detected) return error.DeviceNotDetected;
     if (!sourceCanBindProductionDriver(device_class, record.source, record.device_id)) return error.NonProductionDeviceBinding;
     return record.device_id;
-}
-
-/// Inventory admission is the production-binding policy plus exactly one
-/// bootstrap concession: the early ATA storage path may enter the inventory
-/// before a production driver can bind it.
-pub fn sourceCanEnterInventory(
-    device_class: driver_service.DeviceClass,
-    source: DetectionSource,
-    device_id: u64,
-) bool {
-    if (device_class == .storage_controller and source == .ata_bootstrap and device_id != 0) return true;
-    return sourceCanBindProductionDriver(device_class, source, device_id);
 }
 
 pub fn sourceCanBindProductionDriver(
@@ -153,7 +109,6 @@ pub fn sourceName(source: DetectionSource) []const u8 {
     return switch (source) {
         .absent => "absent",
         .synthetic => "synthetic",
-        .ata_bootstrap => "ata_bootstrap",
         .pci_inventory => "pci_inventory",
         .nvme_pci_inventory => "nvme_pci_inventory",
         .intel_i225_lm_inventory => "intel_i225_lm_inventory",
@@ -207,7 +162,6 @@ fn defaultRecord(device_class: driver_service.DeviceClass) DeviceRecord {
         .source = .absent,
         .detected = false,
         .kernel_bootstrap = false,
-        .ata_bootstrap_grant = null,
     };
 }
 
@@ -230,7 +184,6 @@ test "device inventory starts absent until hardware is discovered" {
     try std.testing.expectEqual(DetectionSource.absent, network.source);
     try std.testing.expectEqualStrings("absent", sourceName(network.source));
     try std.testing.expect(!network.detected);
-    try std.testing.expect(!sourceCanEnterInventory(.network_adapter, network.source, network.device_id));
     try std.testing.expect(!sourceCanBindProductionDriver(.network_adapter, network.source, network.device_id));
     try std.testing.expectError(error.DeviceNotDetected, requireProductionDriverDeviceId(.network_adapter));
     try std.testing.expect(!storage.kernel_bootstrap);
@@ -256,34 +209,15 @@ test "device inventory refuses synthetic records for production driver binding" 
     registerDetected(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory, false);
     try std.testing.expectEqual(@as(u64, 0x8086_15F2_0001), try requireProductionDriverDeviceId(.network_adapter));
     const network = recordForClass(.network_adapter);
-    try std.testing.expect(sourceCanEnterInventory(.network_adapter, network.source, network.device_id));
     try std.testing.expect(sourceCanBindProductionDriver(.network_adapter, network.source, network.device_id));
 }
 
-test "device inventory records ATA bootstrap but requires target-grade NVMe for production storage binding" {
+test "device inventory requires target-grade NVMe for production storage binding" {
     reset();
 
     registerDetected(.storage_controller, 0x1F001, .nvme_pci_inventory, false);
     try std.testing.expect(!recordForClass(.storage_controller).detected);
     try std.testing.expectError(error.DeviceNotDetected, requireProductionDriverDeviceId(.storage_controller));
-
-    registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
-    recordAtaBootstrapGrant(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = 4096,
-    });
-    const ata_storage = recordForClass(.storage_controller);
-    try std.testing.expect(ata_storage.detected);
-    try std.testing.expectEqual(DetectionSource.ata_bootstrap, ata_storage.source);
-    try std.testing.expect(sourceCanEnterInventory(.storage_controller, ata_storage.source, ata_storage.device_id));
-    try std.testing.expect(!sourceCanBindProductionDriver(.storage_controller, ata_storage.source, ata_storage.device_id));
-    try std.testing.expect(ataBootstrapGrant(0x1F001) != null);
-    try std.testing.expectError(error.NonProductionDeviceBinding, requireProductionDriverDeviceId(.storage_controller));
-
-    reset();
 
     registerDetected(.storage_controller, 0x8086_9A0B_0001, .pci_inventory, false);
     try std.testing.expect(!recordForClass(.storage_controller).detected);
@@ -292,7 +226,6 @@ test "device inventory records ATA bootstrap but requires target-grade NVMe for 
     registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
     try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), try requireProductionDriverDeviceId(.storage_controller));
     const storage = recordForClass(.storage_controller);
-    try std.testing.expect(sourceCanEnterInventory(.storage_controller, storage.source, storage.device_id));
     try std.testing.expect(sourceCanBindProductionDriver(.storage_controller, storage.source, storage.device_id));
 }
 
@@ -301,7 +234,6 @@ test "device inventory refuses PS/2 bootstrap for production input binding" {
 
     registerDetected(.input_device, 0x8042_0001, .ps2_bootstrap, false);
     try std.testing.expect(!recordForClass(.input_device).detected);
-    try std.testing.expect(!sourceCanEnterInventory(.input_device, .ps2_bootstrap, 0x8042_0001));
     try std.testing.expect(!sourceCanBindProductionDriver(.input_device, .ps2_bootstrap, 0x8042_0001));
     try std.testing.expectError(error.DeviceNotDetected, requireProductionDriverDeviceId(.input_device));
 
@@ -312,66 +244,10 @@ test "device inventory refuses PS/2 bootstrap for production input binding" {
     try std.testing.expectEqual(@as(u64, 0x8086_A0ED_0001), try requireProductionDriverDeviceId(.input_device));
 }
 
-test "device inventory promotes observed ATA storage to target NVMe production binding" {
-    reset();
-
-    registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
-    recordAtaBootstrapGrant(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = 4096,
-    });
-    try std.testing.expectError(error.NonProductionDeviceBinding, requireProductionDriverDeviceId(.storage_controller));
-    try std.testing.expect(ataBootstrapGrant(0x1F001) != null);
-
-    registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
-    const storage = recordForClass(.storage_controller);
-    try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), storage.device_id);
-    try std.testing.expectEqual(DetectionSource.nvme_pci_inventory, storage.source);
-    try std.testing.expect(storage.ata_bootstrap_grant == null);
-    try std.testing.expect(ataBootstrapBridgeGrant(storage.device_id) == null);
-    try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), try requireProductionDriverDeviceId(.storage_controller));
-}
-
-test "modeled inventory keeps captured ATA grant as an explicit bridge" {
-    reset();
-    setModelDeviceInventory(true);
-    defer setModelDeviceInventory(false);
-
-    registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
-    recordAtaBootstrapGrant(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = 4096,
-    });
-    registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
-
-    const storage = recordForClass(.storage_controller);
-    try std.testing.expectEqual(DetectionSource.nvme_pci_inventory, storage.source);
-    try std.testing.expect(storage.ata_bootstrap_grant == null);
-    const bridge_grant = ataBootstrapBridgeGrant(storage.device_id) orelse return error.MissingBridgeGrant;
-    try std.testing.expectEqual(@as(u16, 0x1F0), bridge_grant.base_port);
-    try std.testing.expectEqual(@as(u64, 4096), bridge_grant.sector_count);
-
-    setModelDeviceInventory(false);
-    try std.testing.expect(ataBootstrapBridgeGrant(storage.device_id) == null);
-}
-
 test "device inventory records discovered hardware without overwriting the first handoff record" {
     reset();
 
-    registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
-    recordAtaBootstrapGrant(0x1F001, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = 4096,
-    });
+    registerDetected(.storage_controller, 0x8086_9A0B_0001, .nvme_pci_inventory, false);
     registerDetected(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory, false);
     registerDetected(.network_adapter, 0xDEAD_BEEF, .intel_i225_lm_inventory, false);
     registerDetected(.usb_controller, 0x8086_A0ED_0001, .xhci_inventory, false);
@@ -384,15 +260,12 @@ test "device inventory records discovered hardware without overwriting the first
     const input = recordForClass(.input_device);
     const compositor_policy = recordForClass(.compositor_policy);
 
-    try std.testing.expectEqual(@as(u64, 0x1F001), storage.device_id);
-    try std.testing.expectEqual(DetectionSource.ata_bootstrap, storage.source);
+    try std.testing.expectEqual(@as(u64, 0x8086_9A0B_0001), storage.device_id);
+    try std.testing.expectEqual(DetectionSource.nvme_pci_inventory, storage.source);
     try std.testing.expect(storage.detected);
-    try std.testing.expect(storage.kernel_bootstrap);
-    try std.testing.expect(storage.ata_bootstrap_grant != null);
-    try std.testing.expectEqual(@as(u16, 0x1F0), ataBootstrapGrant(0x1F001).?.base_port);
-    try std.testing.expect(sourceCanEnterInventory(.storage_controller, storage.source, storage.device_id));
-    try std.testing.expect(!sourceCanBindProductionDriver(.storage_controller, storage.source, storage.device_id));
-    try std.testing.expectError(error.NonProductionDeviceBinding, requireProductionDriverDeviceId(.storage_controller));
+    try std.testing.expect(!storage.kernel_bootstrap);
+    try std.testing.expect(sourceCanBindProductionDriver(.storage_controller, storage.source, storage.device_id));
+    try std.testing.expectEqual(storage.device_id, try requireProductionDriverDeviceId(.storage_controller));
 
     try std.testing.expectEqual(@as(u64, 0x8086_15F2_0001), network.device_id);
     try std.testing.expectEqual(DetectionSource.intel_i225_lm_inventory, network.source);
