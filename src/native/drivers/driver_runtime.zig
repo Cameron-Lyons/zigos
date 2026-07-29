@@ -138,10 +138,7 @@ pub const Runtime = struct {
                             now_ticks,
                             self.kernel_port,
                         )) {
-                            record.mode = if (publication.kind == .ata_bootstrap_bridge)
-                                .userspace_brokered_data_plane
-                            else
-                                .published_data_plane;
+                            record.mode = .published_data_plane;
                             try recordPublishedActivation(&record, record.mode, publication);
                         }
                     }
@@ -342,7 +339,7 @@ test "kernel bootstrap cannot publish network data-plane transports" {
     try std.testing.expect(!activation.exclusive_claim);
 }
 
-test "runtime uses the activation tick when claiming storage bootstrap authority" {
+test "runtime uses the activation tick when claiming storage authority" {
     const capability = @import("../kernel_api/capability.zig");
     const device_broker = @import("../kernel_api/device_broker.zig");
     const endpoint = @import("../kernel_api/endpoint.zig");
@@ -351,7 +348,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     const shared_memory = @import("../kernel_api/shared_memory.zig");
     const generated_image_fixtures = @import("../task/generated_image_fixtures.zig");
     const task_runtime = @import("../task/task_runtime.zig");
-    const device_id: u64 = 0x0000_1F00_0001;
+    const device_id: u64 = 0x0000_8086_5845_0001;
 
     bootstrap_driver_port.reset();
     defer bootstrap_driver_port.reset();
@@ -375,14 +372,26 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     );
     var kernel_port = component_port.KernelPort.init(&kernel);
 
-    device_inventory.registerDetected(.storage_controller, device_id, .ata_bootstrap, true);
-    device_inventory.recordAtaBootstrapGrant(device_id, .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
+    const Backend = struct {
+        fn read(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+
+        fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+
+        fn flush() callconv(.c) bool {
+            return true;
+        }
+    };
+    device_inventory.registerDetected(.storage_controller, device_id, .nvme_pci_inventory, false);
+    const backend = storage_volume.Backend{
         .sector_count = storage_volume.required_device_sectors,
-    });
+        .read = Backend.read,
+        .write = Backend.write,
+        .flush = Backend.flush,
+    };
 
     const storage_driver_lease_image = try generated_image_fixtures.storageDriverImage();
     const driver_task = try runtime.createTask(.{
@@ -436,7 +445,12 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         },
         .bootstrap_transport = .kernel_bootstrap_broker,
     });
-    try std.testing.expect(try bootstrap_driver_port.claimStorageAtaBootstrapInventory(driver, "zigos.system.storage-driver"));
+    try std.testing.expect(try bootstrap_driver_port.publishStorageBackend(
+        driver.device_id,
+        "zigos.system.storage-driver",
+        backend,
+        false,
+    ));
 
     var driver_runtime = Runtime.init();
     driver_runtime.bindKernelPort(&kernel_port);

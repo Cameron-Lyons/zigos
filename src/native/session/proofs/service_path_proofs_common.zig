@@ -7,13 +7,11 @@ const generated_image_fixtures = if (@import("builtin").is_test) @import("../../
 const principal = @import("../../core/principal.zig");
 const shared_memory = @import("../../kernel_api/shared_memory.zig");
 const signing = @import("../../core/signing.zig");
-const storage_driver_protocol = @import("../../drivers/storage_driver_protocol.zig");
 const syscall_surface = @import("../../kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const units = @import("../../core/units.zig");
 
 pub const RESOURCE_PROBE_SHARED_MEMORY_BYTES = units.kibibytes(1);
-pub const STORAGE_GRANT_SECTOR_COUNT: u64 = 4096;
 
 pub fn createResourceProbeTask(
     kernel_port: *component_port.KernelPort,
@@ -451,16 +449,6 @@ pub fn findServiceAuthority(
         if (record.target.kind == .service and record.rights.has(right)) return capability_id;
     }
     return null;
-}
-
-pub fn storageGrant() storage_driver_protocol.AtaBrokerGrant {
-    return .{
-        .base_port = 0x1F0,
-        .ctrl_port = 0x3F6,
-        .is_master = true,
-        .irq_line = 14,
-        .sector_count = STORAGE_GRANT_SECTOR_COUNT,
-    };
 }
 
 pub fn signer(label: []const u8, seed: u8) signing.SignerIdentity {
