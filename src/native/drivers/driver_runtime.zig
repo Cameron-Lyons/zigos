@@ -287,6 +287,7 @@ test "kernel bootstrap cannot publish network data-plane transports" {
 
         const device = bootstrap_driver_port.NetworkDevice{
             .send = send,
+            .receive = bootstrap_driver_port.noNetworkFrame,
             .getMacAddress = getMacAddress,
         };
 

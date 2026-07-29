@@ -660,6 +660,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
 
     const device = network_driver_task.NetworkDevice{
         .send = Harness.send,
+        .receive = network_driver_task.noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     try std.testing.expect(network_driver_task.activateDevice(&device, network_service_task.id));

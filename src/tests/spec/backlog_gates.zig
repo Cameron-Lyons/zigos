@@ -12,7 +12,8 @@ const event_ledger = @import("../../native/platform/event_ledger.zig");
 const hardware_target = @import("../../native/platform/hardware_target.zig");
 const ids = @import("../../native/core/ids.zig");
 const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
-const intel_i225_tx = @import("../../kernel/drivers/intel_i225_tx.zig");
+const intel_i225_frame = @import("../../kernel/drivers/intel_i225_frame.zig");
+const intel_i225_rx = @import("../../kernel/drivers/intel_i225_rx.zig");
 const immutable_base = @import("../../native/platform/immutable_base.zig");
 const kernel_crash_record = @import("../../kernel/platform/crash_record.zig");
 const kernel_acpi = @import("../../kernel/platform/acpi.zig");
@@ -97,6 +98,7 @@ pub fn networkTransportHardeningGate() !void {
 
     const device = network_driver_task.NetworkDevice{
         .send = Driver.send,
+        .receive = network_driver_task.noNetworkFrame,
         .getMacAddress = Driver.mac,
     };
     try std.testing.expect(network_driver_task.activateDevice(&device, 709));
@@ -957,6 +959,7 @@ fn networkDriverBrokerRevocationGate() !void {
     const target_device = spec_support.device(882);
     const network_device = network_driver_task.NetworkDevice{
         .send = Harness.send,
+        .receive = network_driver_task.noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     try std.testing.expect(network_driver_task.activateDevice(&network_device, 880));
@@ -1033,7 +1036,9 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expectEqualStrings("bootstrap_i225_lm_inventory_shim", intel_i225.kernel_boundary_role);
     try std.testing.expect(!intel_i225.publishes_full_network_service);
     try std.testing.expect(intel_i225.network_data_plane_exports_fail_closed);
-    try std.testing.expectEqual(@as(usize, 1500), intel_i225_tx.MAX_PAYLOAD_BYTES);
+    try std.testing.expectEqual(@as(usize, 1500), intel_i225_frame.MAX_PAYLOAD_BYTES);
+    try std.testing.expectEqual(@as(u32, 64), intel_i225_rx.DESCRIPTOR_COUNT);
+    try std.testing.expectEqual(@as(u32, 128 * 1024), intel_i225_rx.BUFFER_REGION_BYTES);
     try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, intel_i225.rejectKernelTransmit(.{
         .device_id = 0x8086_15F2_0000,
         .frame_len = 64,

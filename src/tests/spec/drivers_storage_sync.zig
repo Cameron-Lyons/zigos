@@ -34,6 +34,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
 
         const published_device = bootstrap_driver_port.NetworkDevice{
             .send = send,
+            .receive = bootstrap_driver_port.noNetworkFrame,
             .getMacAddress = getMacAddress,
         };
 
@@ -941,6 +942,7 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
     });
     const device = bootstrap_driver_port.NetworkDevice{
         .send = Harness.send,
+        .receive = bootstrap_driver_port.noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     const i225_device_id: u64 = 0x8086_15F2_0001;
