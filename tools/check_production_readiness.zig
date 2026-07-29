@@ -806,6 +806,7 @@ fn validateNuc11tnki5KernelProofSources(
     const nvme_path = "src/kernel/drivers/nvme.zig";
     const i225_path = "src/kernel/drivers/intel_i225.zig";
     const pci_path = "src/kernel/drivers/pci.zig";
+    const mmio_windows_path = "src/kernel/memory/mmio_windows.zig";
     if (!common.pathExists(io, hardware_proof_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source is missing: {s}", .{hardware_proof_path});
         return;
@@ -969,6 +970,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 PCI inventory source is missing: {s}", .{pci_path});
         return;
     }
+    if (!common.pathExists(io, mmio_windows_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 kernel MMIO layout source is missing: {s}", .{mmio_windows_path});
+        return;
+    }
     const hardware_proof_source = try common.readFileAlloc(allocator, io, hardware_proof_path, common.source_file_max_bytes);
     const apic_source = try common.readFileAlloc(allocator, io, apic_path, common.source_file_max_bytes);
     const devices_source = try common.readFileAlloc(allocator, io, devices_path, common.source_file_max_bytes);
@@ -1013,6 +1018,7 @@ fn validateNuc11tnki5KernelProofSources(
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
     const pci_source = try common.readFileAlloc(allocator, io, pci_path, common.source_file_max_bytes);
+    const mmio_windows_source = try common.readFileAlloc(allocator, io, mmio_windows_path, common.source_file_max_bytes);
     const required_hardware_proof_snippets = [_][]const u8{
         "recordApicTimerProof",
         "recordFramebufferProof",
@@ -1091,7 +1097,7 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_pci_inventory_snippets = [_][]const u8{
         "mcfg.Allocation",
-        "KERNEL_ECAM_WINDOW_VIRTUAL_BASE",
+        "mmio_windows.pci_ecam.base",
         "paging.mapKernelBorrowedPage",
         "mapped_configuration_page",
         "configuration_lock",
@@ -1107,6 +1113,24 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (std.mem.indexOf(u8, pci_source, "while (bus < PCI_MAX_BUS_COUNT)") != null) {
         try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not restore repeated exhaustive 256-bus scans", .{});
+    }
+    const required_mmio_layout_snippets = [_][]const u8{
+        "pub const nvme = Region",
+        "pub const pci_ecam = Region",
+        "pub const intel_i225 = Region",
+        "pub const acpi_root = Region",
+        "pub const acpi_entry = Region",
+        "pub const intel_vtd = Region",
+        "pub fn validLayout",
+        "region.base % PAGE_BYTES != 0",
+        "region.bytes % PAGE_BYTES != 0",
+        "if (region.base < prior_end and prior.base < region_end) return false",
+        "@compileError(\"kernel MMIO windows overlap or are invalid\")",
+    };
+    for (required_mmio_layout_snippets) |snippet| {
+        if (std.mem.indexOf(u8, mmio_windows_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 kernel MMIO layout must retain bounded non-overlap enforcement: {s}", .{snippet});
+        }
     }
     const retired_pci_config_port_snippets = [_][]const u8{
         "CONFIG_ADDRESS",
