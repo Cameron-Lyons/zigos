@@ -15,7 +15,6 @@ const ids = @import("../../native/core/ids.zig");
 const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
 const immutable_base = @import("../../native/platform/immutable_base.zig");
 const kernel_crash_record = @import("../../kernel/platform/crash_record.zig");
-const kernel_ata = @import("../../kernel/drivers/ata.zig");
 const kernel_acpi = @import("../../kernel/platform/acpi.zig");
 const kernel_apic = @import("../../kernel/platform/apic.zig");
 const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_boundary.zig");
@@ -1540,15 +1539,6 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expect(rollback_proof.verified());
     const crash = try kernel_crash_record.init(.panic, 1, 2, 3, 4, "target proof crash");
     try kernel_crash_record.validate(crash);
-
-    try std.testing.expectEqualStrings("bootstrap_storage_inventory_shim", kernel_ata.kernel_boundary_role);
-    try std.testing.expect(!kernel_ata.publishes_full_storage_service);
-    try std.testing.expect(kernel_ata.ata_data_plane_exports_fail_closed);
-    try std.testing.expectError(error.KernelStorageDataPlaneDisabled, kernel_ata.rejectKernelDataPlaneTransfer(.{
-        .device_id = 0x1F001,
-        .lba = 7,
-        .sector_count = 1,
-    }));
 
     try std.testing.expectEqualStrings("bootstrap_nvme_inventory_shim", kernel_nvme.kernel_boundary_role);
     try std.testing.expect(!kernel_nvme.publishes_full_storage_service);

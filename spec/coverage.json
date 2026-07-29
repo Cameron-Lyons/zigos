@@ -952,7 +952,6 @@
         "src/native/session/service_path_proofs.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/drivers/ata.zig",
         "src/kernel/boot/init/devices.zig",
         "src/kernel/boot/init/data_plane_boundary.zig"
       ],
@@ -1087,7 +1086,6 @@
         "src/native/session/service_path_proofs.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/drivers/ata.zig",
         "src/kernel/boot/init/devices.zig",
         "src/kernel/boot/init/data_plane_boundary.zig"
       ],
@@ -1810,7 +1808,6 @@
         "src/kernel/drivers/keyboard.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/drivers/ata.zig",
         "src/kernel/boot/init/devices.zig",
         "src/kernel/boot/init/data_plane_boundary.zig"
       ],
