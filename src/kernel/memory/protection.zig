@@ -1,4 +1,3 @@
-const std = @import("std");
 const paging = @import("paging64.zig");
 const vga = @import("../drivers/vga.zig");
 
@@ -12,30 +11,93 @@ const vga = @import("../drivers/vga.zig");
 
 const PAGE_SIZE: usize = 0x1000;
 
-// Linker-script symbols bounding the region to write-protect: .multiboot,
-// .text and .rodata (the measured region), then the embedded userspace ELF
-// archive. The archive bytes are only ever read - the loader digests and
-// copies them into freshly mapped frames - and keeping them immutable closes
-// the window between digest verification and copy. The section that follows
-// (.data) is 4 KiB aligned, so rounding the end up covers only linker
-// padding.
-extern const __kernel_measure_start: u8;
+extern const __kernel_text_start: u8;
+extern const __kernel_text_end: u8;
+extern const __kernel_rodata_start: u8;
+extern const __kernel_rodata_end: u8;
+extern const __kernel_archive_start: u8;
 extern const __kernel_archive_end: u8;
+extern const __kernel_relro_start: u8;
+extern const __kernel_relro_end: u8;
+extern const __kernel_data_start: u8;
+extern const __kernel_data_end: u8;
+extern const __kernel_bss_start: u8;
+extern const __kernel_bss_end: u8;
+extern var stack_bottom: u8;
 
-pub fn protectKernelMemory() void {
-    const image_start = @intFromPtr(&__kernel_measure_start);
-    const image_end = @intFromPtr(&__kernel_archive_end);
+const PageRange = struct {
+    start: usize,
+    end: usize,
+};
 
-    var addr = image_start & ~(PAGE_SIZE - 1);
-    const rounded_image_end = std.math.add(usize, image_end, PAGE_SIZE - 1) catch
-        @panic("kernel image protection extent overflows the native pager");
-    const end = rounded_image_end & ~(PAGE_SIZE - 1);
-    while (addr < end) : (addr += PAGE_SIZE) {
+fn linkerRange(start_symbol: *const u8, end_symbol: *const u8) PageRange {
+    const start = @intFromPtr(start_symbol);
+    const end = @intFromPtr(end_symbol);
+    if (start % PAGE_SIZE != 0 or end % PAGE_SIZE != 0 or start > end) {
+        @panic("invalid page-aligned kernel section extent");
+    }
+    return .{ .start = start, .end = end };
+}
+
+fn nonEmptyLinkerRange(start_symbol: *const u8, end_symbol: *const u8) PageRange {
+    const range = linkerRange(start_symbol, end_symbol);
+    if (range.start == range.end) @panic("required kernel section is empty");
+    return range;
+}
+
+fn setRangeReadOnly(range: PageRange) void {
+    var addr = range.start;
+    while (addr < range.end) : (addr += PAGE_SIZE) {
         paging.setPageReadOnly(addr);
     }
-    // Without CR0.WP the read-only bits do not bind supervisor-mode writes
-    // and the pass above would be decorative.
+}
+
+fn verifyRange(
+    range: PageRange,
+    writable: bool,
+    executable: bool,
+    allowed_unmapped_page: ?usize,
+) void {
+    var addr = range.start;
+    while (addr < range.end) : (addr += PAGE_SIZE) {
+        const permissions = paging.currentPagePermissions(addr) orelse {
+            if (allowed_unmapped_page != null and addr == allowed_unmapped_page.?) continue;
+            @panic("kernel section page is unexpectedly unmapped");
+        };
+        if (permissions.user or
+            permissions.writable != writable or
+            permissions.executable != executable)
+        {
+            @panic("kernel section page permissions violate W^X");
+        }
+    }
+}
+
+pub fn protectKernelMemory() void {
+    const text = nonEmptyLinkerRange(&__kernel_text_start, &__kernel_text_end);
+    const rodata = nonEmptyLinkerRange(&__kernel_rodata_start, &__kernel_rodata_end);
+    const archive = nonEmptyLinkerRange(&__kernel_archive_start, &__kernel_archive_end);
+    const relro = linkerRange(&__kernel_relro_start, &__kernel_relro_end);
+    const data = nonEmptyLinkerRange(&__kernel_data_start, &__kernel_data_end);
+    const bss = nonEmptyLinkerRange(&__kernel_bss_start, &__kernel_bss_end);
+
+    // The userspace archive is immutable after link: launch verifies its digest
+    // before copying bytes into task-owned frames. Keeping it R/NX closes the
+    // verification-to-copy window just like ordinary kernel rodata.
+    setRangeReadOnly(text);
+    setRangeReadOnly(rodata);
+    setRangeReadOnly(archive);
+    setRangeReadOnly(relro);
+
+    // Without CR0.WP the read-only bits do not bind supervisor writes.
     paging.enableWriteProtect();
 
-    vga.print("Kernel text, rodata, and userspace archive write-protected\n");
+    verifyRange(text, false, true, null);
+    verifyRange(rodata, false, false, null);
+    verifyRange(archive, false, false, null);
+    verifyRange(relro, false, false, null);
+    verifyRange(data, true, false, null);
+    verifyRange(bss, true, false, @intFromPtr(&stack_bottom));
+
+    vga.print("Kernel W^X enforced: text RX, immutable data R/NX, mutable memory RW/NX\n");
 }

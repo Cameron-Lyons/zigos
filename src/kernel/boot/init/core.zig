@@ -25,6 +25,7 @@ pub fn init() void {
     console.print("Enabling kernel memory protection...\n");
     const protection = @import("../../memory/protection.zig");
     protection.protectKernelMemory();
+    @import("../common.zig").printBootMarker(@import("../markers.zig").kernel_wx_enforced);
 
     console.print("Initializing memory allocator...\n");
     memory.init();

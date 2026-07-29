@@ -396,7 +396,7 @@ fn writeArchive(
         \\const builtin = @import("builtin");
         \\const userspace_archive_section = switch (builtin.target.ofmt) {
         \\    .macho => "__DATA,zigos_userspace",
-        \\    else => ".zigos_userspace_archive",
+        \\    else => ".rodata.zigos_userspace_archive",
         \\};
         \\
         \\pub const SegmentAccess = packed struct(u8) {

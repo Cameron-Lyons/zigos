@@ -28,6 +28,8 @@ pub const PAGE_CACHE_DISABLE: u32 = 0x10;
 pub const PAGE_ACCESSED: u32 = 0x20;
 pub const PAGE_DIRTY: u32 = 0x40;
 pub const PAGE_GLOBAL: u32 = 0x100;
+// Logical mapping input. Hardware represents the inverse permission with NX.
+pub const PAGE_EXECUTABLE: u32 = 0x200;
 
 const ENTRY_PRESENT = table64.PRESENT;
 const ENTRY_WRITABLE = table64.WRITABLE;
@@ -84,6 +86,9 @@ const PAGE_OWNER_BORROWED: u3 = 0;
 const PAGE_OWNER_USER_PRIVATE: u3 = 1;
 
 extern var stack_bottom: u8;
+extern const __kernel_text_start: u8;
+extern const __kernel_text_end: u8;
+extern const __kernel_relro_end: u8;
 
 var kernel_pml4: PageDirectory align(PAGE_SIZE) = undefined;
 var kernel_pdpt: PageTable align(PAGE_SIZE) = undefined;
@@ -106,13 +111,51 @@ const entryAddress = table64.address;
 const tableEntry = table64.make;
 
 fn leafFlags(flags: u32) u64 {
-    var result: u64 = ENTRY_PRESENT;
+    var result: u64 = ENTRY_PRESENT | table64.NO_EXECUTE;
     if ((flags & PAGE_WRITABLE) != 0) result |= ENTRY_WRITABLE;
     if ((flags & PAGE_USER) != 0) result |= ENTRY_USER;
     if ((flags & PAGE_WRITE_THROUGH) != 0) result |= ENTRY_WRITE_THROUGH;
     if ((flags & PAGE_CACHE_DISABLE) != 0) result |= ENTRY_CACHE_DISABLE;
     if ((flags & PAGE_GLOBAL) != 0) result |= ENTRY_GLOBAL;
+    if ((flags & PAGE_EXECUTABLE) != 0) result &= ~table64.NO_EXECUTE;
     return result;
+}
+
+const KernelImageExtents = struct {
+    text_start: u32,
+    text_end: u32,
+    immutable_end: u32,
+};
+
+fn kernelIdentityLeafFlags(page_address: u32, image: KernelImageExtents) u64 {
+    const executable = page_address >= image.text_start and page_address < image.text_end;
+    const immutable = page_address >= image.text_start and page_address < image.immutable_end;
+    var flags: u64 = ENTRY_PRESENT;
+    if (!immutable) flags |= ENTRY_WRITABLE;
+    return table64.withExecutePermission(flags, executable);
+}
+
+fn kernelImageExtents() KernelImageExtents {
+    const text_start = std.math.cast(u32, @intFromPtr(&__kernel_text_start)) orelse
+        haltWithMessage("Kernel text lies outside the low physical aperture!\n");
+    const text_end = std.math.cast(u32, @intFromPtr(&__kernel_text_end)) orelse
+        haltWithMessage("Kernel text lies outside the low physical aperture!\n");
+    const immutable_end = std.math.cast(u32, @intFromPtr(&__kernel_relro_end)) orelse
+        haltWithMessage("Kernel immutable image lies outside the low physical aperture!\n");
+    if (text_start % PAGE_SIZE != 0 or
+        text_end % PAGE_SIZE != 0 or
+        immutable_end % PAGE_SIZE != 0 or
+        text_start >= text_end or
+        text_end >= immutable_end or
+        immutable_end > MEMORY_SIZE)
+    {
+        haltWithMessage("Invalid page-aligned kernel image extents!\n");
+    }
+    return .{
+        .text_start = text_start,
+        .text_end = text_end,
+        .immutable_end = immutable_end,
+    };
 }
 
 fn tableFromEntry(entry: PageTableEntry) *PageTable {
@@ -261,6 +304,22 @@ pub fn setPageReadOnly(virt_addr: usize) void {
     if (!entryPresent(entry.*)) return;
     entry.* &= ~ENTRY_WRITABLE;
     invalidate_page(virt_addr);
+}
+
+pub const PagePermissions = struct {
+    writable: bool,
+    executable: bool,
+    user: bool,
+};
+
+pub fn currentPagePermissions(virt_addr: usize) ?PagePermissions {
+    const entry = lookupLeaf(getCurrentPageDirectory(), virt_addr) orelse return null;
+    if (!entryPresent(entry.*)) return null;
+    return .{
+        .writable = (entry.* & ENTRY_WRITABLE) != 0,
+        .executable = table64.isExecutable(entry.*),
+        .user = (entry.* & ENTRY_USER) != 0,
+    };
 }
 
 pub fn enableWriteProtect() void {
@@ -447,11 +506,16 @@ fn initializeKernelHierarchy() void {
     kernel_pml4[0] = tableEntry(@intFromPtr(&kernel_pdpt), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
     kernel_pdpt[0] = tableEntry(@intFromPtr(&kernel_page_directory), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
 
+    const image = kernelImageExtents();
     var physical_address: u32 = 0;
     for (&kernel_page_tables, 0..) |*page_table, table_index| {
         zeroTable(page_table);
         for (page_table) |*entry| {
-            entry.* = tableEntry(physical_address, ENTRY_PRESENT | ENTRY_WRITABLE, PAGE_OWNER_BORROWED);
+            entry.* = tableEntry(
+                physical_address,
+                kernelIdentityLeafFlags(physical_address, image),
+                PAGE_OWNER_BORROWED,
+            );
             physical_address += PAGE_SIZE;
         }
         kernel_page_directory[table_index] = tableEntry(
@@ -494,6 +558,9 @@ pub fn init() void {
         haltWithMessage("No usable physical frames remain after kernel reservation!\n");
     }
 
+    // Make the final section policy effective at the same point as the CR3
+    // switch; there is no transient writable-text window in the active table.
+    enableWriteProtect();
     current_page_directory = &kernel_pml4;
     x86.writeCr3(@intFromPtr(&kernel_pml4));
     unmapBootStackGuardPage();
@@ -569,4 +636,33 @@ fn invalidate_page(virt_addr: usize) void {
 
 comptime {
     if (IDENTITY_PAGE_TABLES != 64) @compileError("the 128 MiB identity aperture must use 64 page tables");
+}
+
+test "kernel identity mapping executes only the linker-bounded text pages" {
+    const image = KernelImageExtents{
+        .text_start = 0x10_0000,
+        .text_end = 0x12_0000,
+        .immutable_end = 0x18_0000,
+    };
+
+    const low_memory = kernelIdentityLeafFlags(0, image);
+    try std.testing.expect((low_memory & ENTRY_WRITABLE) != 0);
+    try std.testing.expect(!table64.isExecutable(low_memory));
+
+    const text = kernelIdentityLeafFlags(image.text_start, image);
+    try std.testing.expect((text & ENTRY_WRITABLE) == 0);
+    try std.testing.expect(table64.isExecutable(text));
+
+    const immutable_data = kernelIdentityLeafFlags(image.text_end, image);
+    try std.testing.expect((immutable_data & ENTRY_WRITABLE) == 0);
+    try std.testing.expect(!table64.isExecutable(immutable_data));
+
+    const mutable_data = kernelIdentityLeafFlags(image.immutable_end, image);
+    try std.testing.expect((mutable_data & ENTRY_WRITABLE) != 0);
+    try std.testing.expect(!table64.isExecutable(mutable_data));
+}
+
+test "kernel mappings are non-executable unless explicitly requested" {
+    try std.testing.expect((leafFlags(PAGE_PRESENT | PAGE_WRITABLE) & table64.NO_EXECUTE) != 0);
+    try std.testing.expect((leafFlags(PAGE_PRESENT | PAGE_EXECUTABLE) & table64.NO_EXECUTE) == 0);
 }
