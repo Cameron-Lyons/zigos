@@ -62,17 +62,33 @@ pub fn detect() baseline.Features {
     return baseline.decode(registers);
 }
 
-/// Turn on the hardware protections that are safe with the current memory
+pub const ProcessContextMode = enum {
+    hardware_pcid,
+    software_flush,
+};
+
+/// Turn on the mandatory CPU facilities that are safe with the current memory
 /// access model. NX enforces execute-disable page-table entries, SMEP blocks
-/// ring-0 execution from user pages, and UMIP hides descriptor-table state from
-/// ring 3. SMAP is required by the baseline but is enabled with the controlled
+/// ring-0 execution from user pages, UMIP hides descriptor-table state from
+/// ring 3, and PCID preserves translations across address-space switches.
+/// SMAP is required by the baseline but is enabled with the controlled
 /// user-copy primitives in the paging migration.
-pub fn enableSupervisorProtections(features: baseline.Features) void {
-    if (!baseline.isSupported(features)) unreachable;
+pub fn enableModernFeatures(features: baseline.Features, process_context_mode: ProcessContextMode) void {
+    var required_features = features;
+    if (process_context_mode == .software_flush) {
+        required_features.pcid = true;
+        required_features.invpcid = true;
+    }
+    if (!baseline.isSupported(required_features)) unreachable;
     x86.enableNoExecute();
     if (!x86.noExecuteEnabled()) unreachable;
     var cr4 = x86.readCr4();
     cr4 |= x86.CR4_SMEP;
     cr4 |= x86.CR4_UMIP;
     x86.writeCr4(cr4);
+    if (process_context_mode == .hardware_pcid) {
+        if (!features.pcid or !features.invpcid) unreachable;
+        x86.enableProcessContextIdentifiers();
+        if (!x86.processContextIdentifiersEnabled()) unreachable;
+    }
 }
