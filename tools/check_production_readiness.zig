@@ -57,7 +57,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_MARKERS = [_][]const u8{
 const FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS = [_][]const u8{
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SMBIOS_SKU:OBSERVED",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:MULTIBOOT_MEMORY_MAP:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_RSDP:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_XSDT:OBSERVED",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_MADT:OBSERVED",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_FADT:OBSERVED",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER_INTERRUPT:OBSERVED",
@@ -113,7 +113,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:BOARD_SKU:NUC11TNKi5",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SMBIOS_SKU:OBSERVED",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:MULTIBOOT_MEMORY_MAP:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_RSDP:OBSERVED",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_XSDT:OBSERVED",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_MADT:OBSERVED",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_FADT:OBSERVED",
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS",
@@ -655,6 +655,7 @@ fn validateNuc11tnki5KernelProofSources(
     const apic_path = "src/kernel/platform/apic.zig";
     const devices_path = "src/kernel/boot/init/devices.zig";
     const crash_record_path = "src/kernel/platform/crash_record.zig";
+    const acpi_path = "src/kernel/platform/acpi.zig";
     const fadt_path = "src/kernel/platform/fadt.zig";
     const mcfg_path = "src/kernel/platform/mcfg.zig";
     const framebuffer_path = "src/kernel/platform/framebuffer.zig";
@@ -694,6 +695,10 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (!common.pathExists(io, crash_record_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 crash persistence proof source is missing: {s}", .{crash_record_path});
+        return;
+    }
+    if (!common.pathExists(io, acpi_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 ACPI parser is missing: {s}", .{acpi_path});
         return;
     }
     if (!common.pathExists(io, fadt_path)) {
@@ -799,6 +804,7 @@ fn validateNuc11tnki5KernelProofSources(
     const apic_source = try common.readFileAlloc(allocator, io, apic_path, common.source_file_max_bytes);
     const devices_source = try common.readFileAlloc(allocator, io, devices_path, common.source_file_max_bytes);
     const crash_record_source = try common.readFileAlloc(allocator, io, crash_record_path, common.source_file_max_bytes);
+    const acpi_source = try common.readFileAlloc(allocator, io, acpi_path, common.source_file_max_bytes);
     const fadt_source = try common.readFileAlloc(allocator, io, fadt_path, common.source_file_max_bytes);
     const mcfg_source = try common.readFileAlloc(allocator, io, mcfg_path, common.source_file_max_bytes);
     const framebuffer_source = try common.readFileAlloc(allocator, io, framebuffer_path, common.source_file_max_bytes);
@@ -1114,7 +1120,7 @@ fn validateNuc11tnki5KernelProofSources(
         "MULTIBOOT2_BOOTLOADER_MAGIC",
         "parseMultiboot2Info",
         "multiboot2MemoryMap",
-        "capturedAcpiRsdp",
+        "capturedAcpi2Rsdp",
         "zigos_multiboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC",
     };
     for (required_boot_handoff_snippets) |snippet| {
@@ -1124,8 +1130,8 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_multiboot2_acpi_snippets = [_][]const u8{
         "TAG_ACPI_NEW",
-        "TAG_ACPI_OLD",
-        "parsed.acpi_rsdp_addr",
+        "ACPI_RSDP_V2_MIN_BYTES",
+        "parsed.acpi2_rsdp_addr",
         "seen_acpi_new",
     };
     for (required_multiboot2_acpi_snippets) |snippet| {
@@ -1133,15 +1139,64 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must retain the ACPI RSDP tag path: {s}", .{snippet});
         }
     }
+    const retired_multiboot2_acpi_snippets = [_][]const u8{
+        "TAG_ACPI_OLD",
+        "ACPI_RSDP_V1_BYTES",
+        "seen_acpi_old",
+    };
+    for (retired_multiboot2_acpi_snippets) |snippet| {
+        if (std.mem.indexOf(u8, multiboot2_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must not restore the ACPI 1 compatibility tag: {s}", .{snippet});
+        }
+    }
+    const required_acpi2_xsdt_snippets = [_][]const u8{
+        "RSDP_BASE_CHECKSUM_LENGTH",
+        "RSDP_V2_MIN_LENGTH",
+        "UnsupportedRevision",
+        "MissingXsdt",
+        "xsdtEntryCount",
+        "xsdtEntryAddress",
+    };
+    for (required_acpi2_xsdt_snippets) |snippet| {
+        if (std.mem.indexOf(u8, acpi_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 ACPI parser must require ACPI 2+ with XSDT entries: {s}", .{snippet});
+        }
+    }
+    const retired_acpi_compatibility_snippets = [_][]const u8{
+        "RSDT_SIGNATURE",
+        "rsdt_address",
+        "findRsdp(",
+        "rootEntrySize",
+    };
+    for (retired_acpi_compatibility_snippets) |snippet| {
+        if (std.mem.indexOf(u8, acpi_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 ACPI parser must not restore RSDT or BIOS scanning compatibility: {s}", .{snippet});
+        }
+    }
     const required_mapped_acpi_snippets = [_][]const u8{
         "capturePlatformFirmwareEvidence",
+        "capturedRsdp",
         "mappedPhysicalTableBytes",
         "paging.mapKernelBorrowedPage",
+        "acpi.xsdtEntryCount",
         "mcfg.segmentZeroAllocation",
+        ":ACPI_XSDT:OBSERVED",
     };
     for (required_mapped_acpi_snippets) |snippet| {
         if (std.mem.indexOf(u8, hardware_proof_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 firmware discovery must retain mapped ACPI table access: {s}", .{snippet});
+        }
+    }
+    const retired_hardware_acpi_compatibility_snippets = [_][]const u8{
+        "BIOS_RSDP_SCAN",
+        "acpi.findRsdp",
+        "rsdp.rsdt_address",
+        "rootTableEntry",
+        ":ACPI_RSDP:OBSERVED",
+    };
+    for (retired_hardware_acpi_compatibility_snippets) |snippet| {
+        if (std.mem.indexOf(u8, hardware_proof_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 firmware discovery must not restore BIOS ACPI scanning or RSDT fallback: {s}", .{snippet});
         }
     }
     const retired_boot_handoff_snippets = [_][]const u8{
