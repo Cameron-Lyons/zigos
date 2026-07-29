@@ -50,6 +50,9 @@ else
     };
 
 pub const NetworkDevice = network_driver_task.NetworkDevice;
+pub const ReceiveStatus = network_driver_task.ReceiveStatus;
+pub const ReceiveResult = network_driver_task.ReceiveResult;
+pub const noNetworkFrame = network_driver_task.noNetworkFrame;
 pub const EgressRequest = network_driver_task.EgressRequest;
 pub const EgressDecision = network_driver_task.EgressDecision;
 pub const EgressBroker = network_driver_task.EgressBroker;
@@ -237,6 +240,10 @@ pub fn authorizeDriverTx(frame: []const u8) bool {
 
 pub fn sendActiveNetworkFrame(frame: []const u8) bool {
     return network_driver_task.sendActiveFrame(frame);
+}
+
+pub fn receiveActiveNetworkFrame(output: []u8) ReceiveResult {
+    return network_driver_task.receiveActiveFrame(output);
 }
 
 pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
@@ -562,6 +569,7 @@ test "driver-backed network tx fails closed without capability-backed egress dec
 
     const device = NetworkDevice{
         .send = Harness.send,
+        .receive = noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     try std.testing.expect(try publishNetworkDevice(i225_device_id, "i225-userspace", &device, false));
@@ -618,6 +626,7 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
 
     const device = NetworkDevice{
         .send = Harness.send,
+        .receive = noNetworkFrame,
         .getMacAddress = Harness.mac,
     };
     device_inventory.registerDetected(.network_adapter, i225_device_id, .intel_i225_lm_inventory, false);

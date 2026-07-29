@@ -927,6 +927,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     defer network_driver_task.reset();
     const device = network_driver_task.NetworkDevice{
         .send = Driver.send,
+        .receive = network_driver_task.noNetworkFrame,
         .getMacAddress = Driver.mac,
     };
     try std.testing.expect(network_driver_task.activateDevice(&device, 90));
@@ -1331,6 +1332,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     ProductionDriver.allowed_policy_id = relay.id;
     const production_device = network_driver_task.NetworkDevice{
         .send = ProductionDriver.send,
+        .receive = network_driver_task.noNetworkFrame,
         .getMacAddress = ProductionDriver.mac,
     };
     try std.testing.expect(network_driver_task.activateDevice(&production_device, 176));

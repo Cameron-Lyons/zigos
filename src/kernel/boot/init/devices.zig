@@ -163,6 +163,7 @@ fn capturePciInventory() void {
             return;
         };
         console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
+        console.print("ZIGOS:I225:HW:RX_QUEUE_OK\n");
     }
 }
 
