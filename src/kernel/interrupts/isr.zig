@@ -1,7 +1,6 @@
-const builtin = @import("builtin");
 const std = @import("std");
-const gdt = @import("gdt_select.zig");
-const idt = if (builtin.cpu.arch == .x86_64) @import("idt64.zig") else @import("idt.zig");
+const gdt = @import("gdt64.zig");
+const idt = @import("idt64.zig");
 const keyboard = @import("../drivers/keyboard.zig");
 const io = @import("../utils/io.zig");
 
@@ -146,52 +145,32 @@ const irq_stubs = [_]GateHandler{
     &irq15,
 };
 
-pub const Registers = if (builtin.cpu.arch == .x86_64)
-    extern struct {
-        ds: usize,
-        r15: usize,
-        r14: usize,
-        r13: usize,
-        r12: usize,
-        r11: usize,
-        r10: usize,
-        r9: usize,
-        r8: usize,
-        edi: usize,
-        esi: usize,
-        ebp: usize,
-        esp: usize,
-        ebx: usize,
-        edx: usize,
-        ecx: usize,
-        eax: usize,
-        int_no: usize,
-        err_code: usize,
-        eip: usize,
-        cs: usize,
-        eflags: usize,
-        useresp: usize,
-        ss: usize,
-    }
-else
-    extern struct {
-        ds: u32,
-        edi: u32,
-        esi: u32,
-        ebp: u32,
-        esp: u32,
-        ebx: u32,
-        edx: u32,
-        ecx: u32,
-        eax: u32,
-        int_no: u32,
-        err_code: u32,
-        eip: u32,
-        cs: u32,
-        eflags: u32,
-        useresp: u32,
-        ss: u32,
-    };
+pub const Registers = extern struct {
+    ds: usize,
+    r15: usize,
+    r14: usize,
+    r13: usize,
+    r12: usize,
+    r11: usize,
+    r10: usize,
+    r9: usize,
+    r8: usize,
+    edi: usize,
+    esi: usize,
+    ebp: usize,
+    esp: usize,
+    ebx: usize,
+    edx: usize,
+    ecx: usize,
+    eax: usize,
+    int_no: usize,
+    err_code: usize,
+    eip: usize,
+    cs: usize,
+    eflags: usize,
+    useresp: usize,
+    ss: usize,
+};
 
 const exception_messages = [_][]const u8{
     "Division By Zero",
@@ -237,7 +216,7 @@ pub export fn isrHandler(regs: *Registers) void {
     }
 
     if (vector == PAGE_FAULT_VECTOR) {
-        const paging = @import("../memory/paging_select.zig");
+        const paging = @import("../memory/paging64.zig");
         paging.page_fault_handler(regs);
         return;
     }
@@ -285,23 +264,15 @@ pub fn init() void {
         setKernelGate(@as(u8, @intCast(vector)), stub);
     }
 
-    if (comptime builtin.cpu.arch == .x86_64) {
-        gdt.configureDoubleFaultIst();
-        idt.setIstGate(
-            DOUBLE_FAULT_VECTOR,
-            &isr8,
-            gdt.KERNEL_CODE_SEG,
-            IDT_INTERRUPT_GATE,
-            gdt.DOUBLE_FAULT_IST_INDEX,
-        );
-        registerHandler(DOUBLE_FAULT_VECTOR, doubleFaultInterrupt);
-    } else {
-        // A double fault after a stack overflow cannot push an exception frame
-        // on the broken stack; the 32-bit task gate supplies a known-good TSS.
-        const handler_address = std.math.cast(u32, @intFromPtr(&doubleFaultTask)) orelse unreachable;
-        gdt.configureDoubleFaultTask(handler_address);
-        idt.setTaskGate(DOUBLE_FAULT_VECTOR, gdt.DOUBLE_FAULT_TSS_SEG);
-    }
+    gdt.configureDoubleFaultIst();
+    idt.setIstGate(
+        DOUBLE_FAULT_VECTOR,
+        &isr8,
+        gdt.KERNEL_CODE_SEG,
+        IDT_INTERRUPT_GATE,
+        gdt.DOUBLE_FAULT_IST_INDEX,
+    );
+    registerHandler(DOUBLE_FAULT_VECTOR, doubleFaultInterrupt);
 
     remapPIC();
 
@@ -313,18 +284,6 @@ pub fn init() void {
     setUserGate(NATIVE_SYSCALL_VECTOR, &isr129);
 
     idt.init();
-}
-
-fn doubleFaultTask() callconv(.c) noreturn {
-    // The hardware task switch sets CR0.TS; clear it so the panic path may
-    // use SSE without raising a device-not-available fault mid-report.
-    asm volatile ("clts");
-    const context = gdt.interruptedContext();
-    const panic_utils = @import("../utils/panic.zig");
-    panic_utils.panic(
-        "DOUBLE FAULT: eip=0x{x:0>8} esp=0x{x:0>8} ebp=0x{x:0>8} (likely kernel stack overflow)",
-        .{ context.eip, context.esp, context.ebp },
-    );
 }
 
 fn doubleFaultInterrupt(frame: *InterruptFrame) void {
@@ -363,10 +322,10 @@ fn remapPIC() void {
 }
 
 comptime {
-    if (builtin.cpu.arch == .x86_64 and @offsetOf(Registers, "int_no") != 136) {
+    if (@offsetOf(Registers, "int_no") != 136) {
         @compileError("x86-64 interrupt frame layout diverged from interrupt64.S");
     }
-    if (builtin.cpu.arch == .x86_64 and @sizeOf(Registers) != 192) {
+    if (@sizeOf(Registers) != 192) {
         @compileError("x86-64 interrupt frame size diverged from interrupt64.S");
     }
 }

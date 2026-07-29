@@ -103,18 +103,6 @@ pub fn configureDoubleFaultIst() void {
     tss.ist1 = @intFromPtr(&double_fault_stack) + double_fault_stack.len;
 }
 
-pub fn refreshDoubleFaultCr3() void {}
-
-pub const InterruptedContext = struct {
-    eip: usize,
-    esp: usize,
-    ebp: usize,
-};
-
-pub fn interruptedContext() InterruptedContext {
-    unreachable;
-}
-
 fn segmentDescriptor(base: u32, limit: u20, access: u8, flags: u4) u64 {
     return @as(u64, limit & 0xFFFF) |
         (@as(u64, base & 0xFF_FFFF) << 16) |

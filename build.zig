@@ -58,17 +58,25 @@ pub fn build(b: *std.Build) void {
     kernel_steps.kernel.dependOn(x86_64_architecture_compile_check);
     kernel_steps.kernel.dependOn(x86_64_kernel_compile_check);
 
+    const kernel_role_options = b.addOptions();
+    kernel_role_options.addOption(
+        u64,
+        "maximum_production_writable_load_size",
+        if (optimize == .Debug) 24 * 1024 * 1024 else 16 * 1024 * 1024,
+    );
+    const kernel_role_check_module = b.createModule(.{
+        .root_source_file = b.path("tools/check_kernel_roles.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    kernel_role_check_module.addOptions("kernel_role_options", kernel_role_options);
     const kernel_role_check_tool = b.addExecutable(.{
         .name = "check-kernel-roles",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/check_kernel_roles.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
+        .root_module = kernel_role_check_module,
     });
     const kernel_role_check_cmd = b.addRunArtifact(kernel_role_check_tool);
-    kernel_role_check_cmd.addFileArg(kernels.zigos_native.compile_step.getEmittedBin());
-    kernel_role_check_cmd.addFileArg(kernels.zigos_native_verification.compile_step.getEmittedBin());
+    kernel_role_check_cmd.addFileArg(kernels.zigos_native.output_file);
+    kernel_role_check_cmd.addFileArg(kernels.zigos_native_verification.output_file);
     kernel_role_check_cmd.addArg("--production-userspace");
     for (userspace_images.production_compile_steps) |compile_step| {
         kernel_role_check_cmd.addFileArg(compile_step.getEmittedBin());
@@ -77,13 +85,15 @@ pub fn build(b: *std.Build) void {
     for (userspace_images.verification_only_compile_steps) |compile_step| {
         kernel_role_check_cmd.addFileArg(compile_step.getEmittedBin());
     }
+    const kernel_role_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/check_kernel_roles.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    kernel_role_test_module.addOptions("kernel_role_options", kernel_role_options);
     const kernel_role_check_tests = b.addTest(.{
         .name = "check-kernel-roles-tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/check_kernel_roles.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
+        .root_module = kernel_role_test_module,
     });
     const kernel_role_check_test_cmd = b.addRunArtifact(kernel_role_check_tests);
     const kernel_role_check_step = b.step("kernel-role-check", "Reject verification proof code or state in the production kernel");

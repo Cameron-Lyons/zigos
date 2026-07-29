@@ -25,6 +25,7 @@ pub const SmokeFaultMode = enum {
 
 pub const KernelArtifact = struct {
     compile_step: *std.Build.Step.Compile,
+    output_file: std.Build.LazyPath,
     install_step: *std.Build.Step,
     output_path: []const u8,
     kernel_role: KernelRole,
