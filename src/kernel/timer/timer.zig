@@ -1,4 +1,4 @@
-const vga = @import("../drivers/vga.zig");
+const console = @import("../utils/console.zig");
 const io = @import("../utils/io.zig");
 const numfmt = @import("../utils/numfmt.zig");
 
@@ -17,9 +17,9 @@ pub const NANOSECONDS_PER_TICK: u64 = 1_000_000_000 / TICKS_PER_SECOND;
 var ticks: u64 = 0;
 
 pub fn init(frequency_hz: u32) void {
-    vga.print("Initializing PIT timer at ");
+    console.print("Initializing PIT timer at ");
     numfmt.printDec(frequency_hz);
-    vga.print(" Hz...\n");
+    console.print(" Hz...\n");
 
     ticks = 0;
 
@@ -30,7 +30,7 @@ pub fn init(frequency_hz: u32) void {
     io.outb(PIT_CHANNEL0, @truncate(divisor & LOW_BYTE_MASK));
     io.outb(PIT_CHANNEL0, @truncate((divisor >> BYTE_BITS) & LOW_BYTE_MASK));
 
-    vga.print("Timer initialized!\n");
+    console.print("Timer initialized!\n");
 }
 
 pub fn handleInterrupt() void {

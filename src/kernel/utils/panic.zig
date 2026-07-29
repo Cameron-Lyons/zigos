@@ -1,11 +1,9 @@
 const std = @import("std");
-const vga = @import("../drivers/vga.zig");
 const config = @import("../config.zig");
 const console = @import("console.zig");
 const qemu_exit = @import("qemu_exit.zig");
 
 var panic_occurred: bool = false;
-const panic_color: u8 = 0x4F;
 const panic_message_buffer_size = 256;
 const max_stack_frames = 24;
 // Frame pointers must stay inside physical memory the boot identity map
@@ -17,7 +15,7 @@ extern const __kernel_start: u8;
 extern const __kernel_end: u8;
 
 fn printPanic(text: []const u8) void {
-    console.printWithColor(text, panic_color);
+    console.print(text);
 }
 
 fn printStackTrace() void {
@@ -59,8 +57,6 @@ pub fn panic(comptime format: []const u8, args: anytype) noreturn {
         }
     }
     panic_occurred = true;
-
-    vga.clearWithColor(panic_color);
 
     printPanic("\n");
     printPanic("============================ KERNEL PANIC ============================\n");
