@@ -78,3 +78,16 @@ runs:
       if: inputs.install-build-dependencies == 'true'
       shell: bash
       run: ./scripts/setup-deps.sh
+
+    - name: Enable KVM acceleration when available
+      if: inputs.install-build-dependencies == 'true'
+      shell: bash
+      run: |
+        if [ ! -e /dev/kvm ]; then
+          echo "KVM is unavailable; the QEMU harness will use software emulation."
+          exit 0
+        fi
+        sudo chmod 0666 /dev/kvm
+        test -r /dev/kvm
+        test -w /dev/kvm
+        echo "KVM acceleration is available."
