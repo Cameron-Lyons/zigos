@@ -62,7 +62,7 @@ pub const MissingFeature = enum {
     pcid,
     invpcid,
     x2apic,
-    tsc_frequency,
+    tsc,
 };
 
 pub fn decode(registers: Registers) Features {
@@ -122,7 +122,7 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.pcid) return .pcid;
     if (!features.invpcid) return .invpcid;
     if (!features.x2apic) return .x2apic;
-    if (features.tsc_frequency_hz == 0) return .tsc_frequency;
+    if (!features.tsc_deadline or !features.invariant_tsc or features.tsc_frequency_hz == 0) return .tsc;
     return null;
 }
 
@@ -261,7 +261,13 @@ test "baseline rejects every missing required feature" {
         .pcid = true,
         .invpcid = true,
     }).?);
-    try std.testing.expectEqual(MissingFeature.tsc_frequency, firstMissing(.{
+    var missing_tsc_deadline = complete;
+    missing_tsc_deadline.tsc_deadline = false;
+    try std.testing.expectEqual(MissingFeature.tsc, firstMissing(missing_tsc_deadline).?);
+    var missing_invariant_tsc = complete;
+    missing_invariant_tsc.invariant_tsc = false;
+    try std.testing.expectEqual(MissingFeature.tsc, firstMissing(missing_invariant_tsc).?);
+    try std.testing.expectEqual(MissingFeature.tsc, firstMissing(.{
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
@@ -274,6 +280,8 @@ test "baseline rejects every missing required feature" {
         .pcid = true,
         .invpcid = true,
         .x2apic = true,
+        .tsc_deadline = true,
+        .invariant_tsc = true,
     }).?);
     try std.testing.expect(isSupported(complete));
     try std.testing.expect(isSupported(.{
@@ -289,6 +297,8 @@ test "baseline rejects every missing required feature" {
         .pcid = true,
         .invpcid = true,
         .x2apic = true,
+        .tsc_deadline = true,
+        .invariant_tsc = true,
         .tsc_frequency_hz = 2_400_000_000,
     }));
 }
