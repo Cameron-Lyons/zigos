@@ -67,6 +67,11 @@ const QualitySummary = struct {
     total_cycles: u64,
 };
 
+const Accelerator = enum {
+    kvm,
+    tcg,
+};
+
 const Summary = struct {
     benchmarks: u64,
     quality_gates: u64,
@@ -79,6 +84,8 @@ const Log = struct {
     quality_results: Table(QualityResult),
     quality_summary: ?QualitySummary = null,
     summary: ?Summary = null,
+    accelerator: ?Accelerator = null,
+    accelerator_markers: usize = 0,
     start_markers: usize = 0,
     pass_markers: usize = 0,
 
@@ -144,10 +151,17 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_buffer: [256]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    try stdout_writer.interface.print(
-        "Kernel benchmark gates passed: {d} benchmarks and {d} quality gates.\n",
-        .{ analysis.thresholds.entries.items.len, analysis.quality_gates.entries.items.len },
-    );
+    if (performanceGatesEnforced(&analysis.log)) {
+        try stdout_writer.interface.print(
+            "Kernel benchmark KVM performance and quality gates passed: {d} benchmarks and {d} quality gates.\n",
+            .{ analysis.thresholds.entries.items.len, analysis.quality_gates.entries.items.len },
+        );
+    } else {
+        try stdout_writer.interface.print(
+            "Kernel benchmark functional and quality gates passed under {s}: {d} benchmarks and {d} quality gates; cycle ceilings were not enforced.\n",
+            .{ acceleratorName(analysis.log.accelerator), analysis.thresholds.entries.items.len, analysis.quality_gates.entries.items.len },
+        );
+    }
     try stdout_writer.interface.flush();
 }
 
@@ -416,7 +430,9 @@ fn parseLog(
         const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (!std.mem.startsWith(u8, line, "BENCH:")) continue;
 
-        if (std.mem.eql(u8, line, "BENCH:START")) {
+        if (std.mem.startsWith(u8, line, "BENCH:ENV:")) {
+            try parseEnvironmentLine(allocator, diagnostics, log, line, line_number);
+        } else if (std.mem.eql(u8, line, "BENCH:START")) {
             log.start_markers += 1;
         } else if (std.mem.eql(u8, line, "BENCH:PASS")) {
             log.pass_markers += 1;
@@ -431,6 +447,37 @@ fn parseLog(
         } else {
             try diagnostics.add(allocator, "Unrecognized benchmark record on log line {d}", .{line_number});
         }
+    }
+}
+
+fn parseEnvironmentLine(
+    allocator: std.mem.Allocator,
+    diagnostics: *Diagnostics,
+    log: *Log,
+    line: []const u8,
+    line_number: usize,
+) !void {
+    log.accelerator_markers += 1;
+    if (log.accelerator_markers > 1) {
+        try diagnostics.add(allocator, "Duplicate benchmark accelerator record on log line {d}", .{line_number});
+        return;
+    }
+
+    var fields: [4][]const u8 = undefined;
+    if (splitFields(line, &fields) != 3 or
+        !std.mem.eql(u8, fields[0], "BENCH") or
+        !std.mem.eql(u8, fields[1], "ENV"))
+    {
+        return addMalformed(allocator, diagnostics, "benchmark environment", line_number);
+    }
+    const accelerator = fieldValue(fields[2], "accelerator") orelse
+        return addMalformed(allocator, diagnostics, "benchmark environment", line_number);
+    if (std.mem.eql(u8, accelerator, "kvm")) {
+        log.accelerator = .kvm;
+    } else if (std.mem.eql(u8, accelerator, "tcg")) {
+        log.accelerator = .tcg;
+    } else {
+        try diagnostics.add(allocator, "Unsupported benchmark accelerator '{s}' on log line {d}", .{ accelerator, line_number });
     }
 }
 
@@ -607,6 +654,7 @@ fn addMalformed(
 }
 
 fn validateAnalysis(allocator: std.mem.Allocator, analysis: *Analysis) !void {
+    const enforce_performance = performanceGatesEnforced(&analysis.log);
     for (analysis.thresholds.entries.items) |threshold| {
         if (!analysis.baselines.by_name.contains(threshold.name)) {
             try analysis.diagnostics.add(allocator, "Threshold {s} has no matching baseline", .{threshold.name});
@@ -632,7 +680,7 @@ fn validateAnalysis(allocator: std.mem.Allocator, analysis: *Analysis) !void {
             try analysis.diagnostics.add(allocator, "Threshold for {s} overflows fixed-point scaling", .{threshold.name});
             continue;
         };
-        if (result.cycles_per_op_hundredths > threshold_scaled) {
+        if (enforce_performance and result.cycles_per_op_hundredths > threshold_scaled) {
             try analysis.diagnostics.add(
                 allocator,
                 "Benchmark threshold failed for {s}: {d}.{d:0>2} > {d} cycles/op",
@@ -644,20 +692,22 @@ fn validateAnalysis(allocator: std.mem.Allocator, analysis: *Analysis) !void {
                 },
             );
         }
-        if (lookup(Baseline, &analysis.baselines, threshold.name)) |baseline| {
-            if (!passesBaseline(result.cycles_per_op_hundredths, baseline)) {
-                try analysis.diagnostics.add(
-                    allocator,
-                    "Benchmark baseline regression for {s}: {d}.{d:0>2} exceeds {d}.{d:0>2} with {d}% allowance",
-                    .{
-                        threshold.name,
-                        result.cycles_per_op_hundredths / 100,
-                        result.cycles_per_op_hundredths % 100,
-                        baseline.cycles_hundredths / 100,
-                        baseline.cycles_hundredths % 100,
-                        baseline.allowed_percent,
-                    },
-                );
+        if (enforce_performance) {
+            if (lookup(Baseline, &analysis.baselines, threshold.name)) |baseline| {
+                if (!passesBaseline(result.cycles_per_op_hundredths, baseline)) {
+                    try analysis.diagnostics.add(
+                        allocator,
+                        "Benchmark baseline regression for {s}: {d}.{d:0>2} exceeds {d}.{d:0>2} with {d}% allowance",
+                        .{
+                            threshold.name,
+                            result.cycles_per_op_hundredths / 100,
+                            result.cycles_per_op_hundredths % 100,
+                            baseline.cycles_hundredths / 100,
+                            baseline.cycles_hundredths % 100,
+                            baseline.allowed_percent,
+                        },
+                    );
+                }
             }
         }
     }
@@ -697,6 +747,11 @@ fn validateAnalysis(allocator: std.mem.Allocator, analysis: *Analysis) !void {
         allocator,
         "Benchmark log must contain exactly one BENCH:PASS marker; found {d}",
         .{analysis.log.pass_markers},
+    );
+    if (analysis.log.accelerator_markers != 1) try analysis.diagnostics.add(
+        allocator,
+        "Benchmark log must contain exactly one BENCH:ENV accelerator record; found {d}",
+        .{analysis.log.accelerator_markers},
     );
 
     const benchmark_cycles = checkedCycleTotal(Result, analysis.log.results.entries.items);
@@ -759,6 +814,16 @@ fn validateAnalysis(allocator: std.mem.Allocator, analysis: *Analysis) !void {
     }
 }
 
+fn performanceGatesEnforced(log: *const Log) bool {
+    const accelerator = log.accelerator orelse return false;
+    return accelerator == .kvm;
+}
+
+fn acceleratorName(accelerator: ?Accelerator) []const u8 {
+    const value = accelerator orelse return "UNKNOWN";
+    return @tagName(value);
+}
+
 fn lookup(comptime Entry: type, table: *const Table(Entry), name: []const u8) ?Entry {
     const index = table.by_name.get(name) orelse return null;
     return table.entries.items[index];
@@ -788,6 +853,16 @@ fn renderMarkdown(allocator: std.mem.Allocator, analysis: *const Analysis) ![]co
 
     try writer.writeAll("## Kernel Benchmark Summary\n\n");
     try writer.print("- Overall status: `{s}`\n", .{overall});
+    try writer.print("- Accelerator: `{s}`\n", .{acceleratorName(analysis.log.accelerator)});
+    if (analysis.log.accelerator) |accelerator| {
+        if (accelerator == .kvm) {
+            try writer.writeAll("- Cycle ceilings: `ENFORCED`\n");
+        } else {
+            try writer.writeAll("- Cycle ceilings: `NOT ENFORCED` (software-emulation functional run)\n");
+        }
+    } else {
+        try writer.writeAll("- Cycle ceilings: `UNAVAILABLE`\n");
+    }
     if (analysis.log.summary) |summary| {
         try writer.print("- Benchmarks reported: `{d}`\n", .{summary.benchmarks});
         try writer.print("- Quality gates reported: `{d}`\n", .{summary.quality_gates});
@@ -820,7 +895,13 @@ fn renderMarkdown(allocator: std.mem.Allocator, analysis: *const Analysis) ![]co
             } else {
                 try writer.writeAll("--");
             }
-            try writer.print(" | {s} |\n", .{if (row_passes) "PASS" else "FAIL"});
+            const row_status = if (!performanceGatesEnforced(&analysis.log))
+                "NOT ENFORCED"
+            else if (row_passes)
+                "PASS"
+            else
+                "FAIL";
+            try writer.print(" | {s} |\n", .{row_status});
         } else {
             try writer.print("| `{s}` | -- | -- | <= {d} | -- | MISSING |\n", .{ threshold.name, threshold.max_cycles });
         }
@@ -852,7 +933,7 @@ fn renderMarkdown(allocator: std.mem.Allocator, analysis: *const Analysis) ![]co
 const valid_thresholds = "bench.case 10\n";
 const valid_baselines = "bench.case 10.00 0\n";
 const valid_quality_gates = "gate.case 1 1\n";
-const valid_log =
+const valid_log_without_environment =
     \\BOOT:START
     \\BENCH:START
     \\BENCH:RESULT:bench.case:iterations=100:cycles=1000:cycles_per_op=10.00:checksum=7
@@ -861,6 +942,7 @@ const valid_log =
     \\BENCH:SUMMARY:benchmarks=1:quality_gates=1:quality_cycles=5:total_cycles=1000
     \\BENCH:PASS
 ;
+const valid_log = "BENCH:ENV:accelerator=kvm\n" ++ valid_log_without_environment;
 
 fn analyzeFixture(
     allocator: std.mem.Allocator,
@@ -957,6 +1039,7 @@ test "enforces threshold baseline and quality boundaries with integer math" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const over_log =
+        \\BENCH:ENV:accelerator=kvm
         \\BENCH:START
         \\BENCH:RESULT:bench.case:iterations=100:cycles=1001:cycles_per_op=10.01:checksum=7
         \\BENCH:QUALITY:gate.case:value=2:cycles=5
@@ -968,6 +1051,64 @@ test "enforces threshold baseline and quality boundaries with integer math" {
     try std.testing.expect(diagnosticsContain(&analysis, "Benchmark threshold failed"));
     try std.testing.expect(diagnosticsContain(&analysis, "Benchmark baseline regression"));
     try std.testing.expect(diagnosticsContain(&analysis, "Quality gate failed"));
+}
+
+test "software emulation skips cycle ceilings but retains quality gates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tcg_log =
+        \\BENCH:ENV:accelerator=tcg
+        \\BENCH:START
+        \\BENCH:RESULT:bench.case:iterations=100:cycles=100000:cycles_per_op=1000.00:checksum=7
+        \\BENCH:QUALITY:gate.case:value=1:cycles=5
+        \\BENCH:QUALITY_SUMMARY:gates=1:total_cycles=5
+        \\BENCH:SUMMARY:benchmarks=1:quality_gates=1:quality_cycles=5:total_cycles=100000
+        \\BENCH:PASS
+    ;
+    const analysis = try analyzeFixture(arena.allocator(), valid_thresholds, valid_baselines, valid_quality_gates, tcg_log);
+    try std.testing.expectEqual(@as(usize, 0), analysis.diagnostics.items.items.len);
+    const markdown = try renderMarkdown(arena.allocator(), &analysis);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "Cycle ceilings: `NOT ENFORCED`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "| NOT ENFORCED |") != null);
+}
+
+test "software emulation still enforces structural and quality gates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bad_tcg_log =
+        \\BENCH:ENV:accelerator=tcg
+        \\BENCH:START
+        \\BENCH:RESULT:bench.case:iterations=100:cycles=100000:cycles_per_op=1000.00:checksum=7
+        \\BENCH:QUALITY:gate.case:value=2:cycles=5
+        \\BENCH:QUALITY_SUMMARY:gates=1:total_cycles=5
+        \\BENCH:SUMMARY:benchmarks=1:quality_gates=1:quality_cycles=5:total_cycles=100000
+        \\BENCH:PASS
+    ;
+    const analysis = try analyzeFixture(arena.allocator(), valid_thresholds, valid_baselines, valid_quality_gates, bad_tcg_log);
+    try std.testing.expect(diagnosticsContain(&analysis, "Quality gate failed"));
+    try std.testing.expect(!diagnosticsContain(&analysis, "Benchmark threshold failed"));
+    try std.testing.expect(!diagnosticsContain(&analysis, "Benchmark baseline regression"));
+}
+
+test "requires one supported accelerator record" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const missing = try analyzeFixture(arena.allocator(), valid_thresholds, valid_baselines, valid_quality_gates, valid_log_without_environment);
+    try std.testing.expect(diagnosticsContain(&missing, "exactly one BENCH:ENV accelerator record"));
+
+    const duplicate = try analyzeFixture(
+        arena.allocator(),
+        valid_thresholds,
+        valid_baselines,
+        valid_quality_gates,
+        valid_log ++ "\nBENCH:ENV:accelerator=kvm\n",
+    );
+    try std.testing.expect(diagnosticsContain(&duplicate, "Duplicate benchmark accelerator record"));
+
+    const unsupported_log = "BENCH:ENV:accelerator=hvf\n" ++ valid_log_without_environment;
+    const unsupported = try analyzeFixture(arena.allocator(), valid_thresholds, valid_baselines, valid_quality_gates, unsupported_log);
+    try std.testing.expect(diagnosticsContain(&unsupported, "Unsupported benchmark accelerator"));
 }
 
 test "rejects duplicate and nonsensical quality-gate configuration" {
