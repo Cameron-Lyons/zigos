@@ -45,7 +45,7 @@ pub fn init() void {
     capturePciInventory();
     hardware_proof.capturePciEvidence();
     const model_via_cmdline = if (handoff.capturedInfo()) |info|
-        handoff.commandLineContains(info, "model_inventory")
+        handoff.commandLineHasFlag(info, "model_inventory")
     else
         false;
     device_inventory.setModelDeviceInventory(
