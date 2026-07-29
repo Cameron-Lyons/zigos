@@ -16,6 +16,7 @@ const immutable_base = @import("../../native/platform/immutable_base.zig");
 const kernel_crash_record = @import("../../kernel/platform/crash_record.zig");
 const kernel_acpi = @import("../../kernel/platform/acpi.zig");
 const kernel_apic = @import("../../kernel/platform/apic.zig");
+const kernel_dmar = @import("../../kernel/platform/dmar.zig");
 const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_boundary.zig");
 const kernel_fadt = @import("../../kernel/platform/fadt.zig");
 const kernel_framebuffer = @import("../../kernel/platform/framebuffer.zig");
@@ -322,10 +323,18 @@ pub fn firstHardwareTargetGate() !void {
         hardware_target.nuc11tnki5_proof_metadata_markers[0..],
         hardware_target.nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
     ));
-    try std.testing.expectEqual(@as(usize, 14), hardware_target.nuc11tnki5_hardware_fact_markers.len);
+    try std.testing.expectEqual(@as(usize, 16), hardware_target.nuc11tnki5_hardware_fact_markers.len);
     try std.testing.expect(containsString(
         hardware_target.nuc11tnki5_hardware_fact_markers[0..],
         hardware_target.nuc11tnki5_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
+    ));
+    try std.testing.expect(containsString(
+        hardware_target.nuc11tnki5_hardware_fact_markers[0..],
+        hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_DMAR:OBSERVED",
+    ));
+    try std.testing.expect(containsString(
+        hardware_target.nuc11tnki5_hardware_fact_markers[0..],
+        hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_SEGMENT_ZERO:OBSERVED",
     ));
     try std.testing.expect(containsString(
         hardware_target.nuc11tnki5_hardware_fact_markers[0..],
@@ -733,6 +742,21 @@ pub fn firstHardwareTargetGate() !void {
     };
     try std.testing.expect(hardware_target.hardwareProofSatisfied(target, complete_hardware_evidence));
 
+    var production_dmar = kernel_dmar.Summary{
+        .host_address_width = kernel_dmar.MIN_PRODUCTION_HOST_ADDRESS_WIDTH,
+        .interrupt_remapping = true,
+        .x2apic_opt_out = false,
+        .dma_control_platform_opt_in = true,
+        .dma_remapping_opt_out = false,
+    };
+    production_dmar.remapping_units[0] = .{
+        .register_base_address = 0xFED9_1000,
+        .register_page_count = 1,
+        .segment = 0,
+        .include_pci_all = true,
+    };
+    production_dmar.remapping_unit_count = 1;
+
     const composed_partial = kernel_hardware_proof.ProbeFacts{
         .real_target_sku = true,
         .multiboot_handoff = true,
@@ -742,6 +766,7 @@ pub fn firstHardwareTargetGate() !void {
         .acpi_madt = true,
         .acpi_fadt = true,
         .acpi_mcfg = true,
+        .acpi_dmar = true,
         .apic_timer = true,
         .xhci_controller = true,
         .nvme_controller = true,
@@ -761,6 +786,8 @@ pub fn firstHardwareTargetGate() !void {
         .acpi_madt = true,
         .acpi_fadt = true,
         .acpi_mcfg = true,
+        .acpi_dmar = true,
+        .dmar_summary = production_dmar,
         .apic_timer = hardware_apic_timer_proof.productionHardwareVerified(),
         .xhci_controller = true,
         .xhci_keyboard_input = hardware_xhci_input_proof.productionHardwareVerified(),
