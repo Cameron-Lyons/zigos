@@ -2,6 +2,7 @@ const std = @import("std");
 const x86 = @import("../../../arch/x86.zig");
 const abi = @import("../../../native/core/abi.zig");
 const console = @import("../../utils/console.zig");
+const paging = @import("../../memory/paging64.zig");
 const qemu_exit = @import("../../utils/qemu_exit.zig");
 const benchmark_cases = @import("cases.zig");
 const benchmark_authority = @import("authority.zig");
@@ -220,6 +221,11 @@ const BenchmarkImageContext = struct {
     service_image: task_runtime.ExecutableImageSpec = .{},
 };
 
+const AddressSpaceBenchmarkContext = struct {
+    prepared: bool = false,
+    space: ?paging.UserAddressSpace = null,
+};
+
 const cases = benchmark_cases.benchmarkCases(.{
     .capability_derive = benchmarkCapabilityDerive,
     .capability_mint_reuse_free_slot = benchmarkCapabilityMintReuseFreeSlot,
@@ -230,6 +236,7 @@ const cases = benchmark_cases.benchmarkCases(.{
     .supervisor_ready_lookup = benchmarkSupervisorReadyLookup,
     .task_checkpoint_write_restore = benchmarkTaskCheckpointWriteRestore,
     .task_checkpoint_write_low_occupancy = benchmarkTaskCheckpointWriteLowOccupancy,
+    .address_space_roundtrip = benchmarkAddressSpaceRoundtrip,
     .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
     .file_bridge_resolve = benchmarkFileBridgeResolve,
     .workspace_commit_overlay = benchmarkWorkspaceCommitOverlay,
@@ -441,6 +448,7 @@ var capability_lookup_context = CapabilityLookupContext{};
 var recovery_context = RecoveryContext{};
 var update_health_context = UpdateHealthContext{};
 var benchmark_image_context = BenchmarkImageContext{};
+var address_space_benchmark_context = AddressSpaceBenchmarkContext{};
 
 // task_runtime.Runtime is >2 MiB, and a Runtime local (plus the temporary a
 // Debug build materializes for its initializer) put multi-megabyte frames on
@@ -469,6 +477,7 @@ pub fn run() noreturn {
 
 fn prepareFixtures() void {
     prepareBenchmarkUserspaceImages();
+    prepareAddressSpaceBenchmarkFixture();
     prepareCapabilityLookupFixture();
     prepareFileBridgeFixture();
     preparePermissionReviewFixture();
@@ -481,6 +490,13 @@ fn prepareFixtures() void {
     prepareTaskCheckpointFixture();
     preparePackageFixture();
     restoreStorageVolumeSeedImage();
+}
+
+fn prepareAddressSpaceBenchmarkFixture() void {
+    if (address_space_benchmark_context.prepared) return;
+    address_space_benchmark_context.space = paging.createUserAddressSpace() catch |err|
+        benchmark_reporting.benchStepFailure("address-space benchmark fixture", err);
+    address_space_benchmark_context.prepared = true;
 }
 
 fn prepareCapabilityLookupFixture() void {
@@ -1197,6 +1213,13 @@ fn benchmarkTaskCheckpointWriteLowOccupancy(iteration: u32) u64 {
         helper.address_space_id +
         helper.capability_count +
         helper.latestAuditEvent().?.tick;
+}
+
+fn benchmarkAddressSpaceRoundtrip(iteration: u32) u64 {
+    const space = &address_space_benchmark_context.space.?;
+    paging.switchToUserAddressSpace(space);
+    paging.switchToKernelAddressSpace();
+    return @as(u64, iteration) ^ @as(u64, @intFromPtr(paging.getCurrentPageDirectory()));
 }
 
 fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
