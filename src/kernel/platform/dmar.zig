@@ -85,6 +85,7 @@ pub const Summary = struct {
         [_]RemappingUnit{.{}} ** MAX_REMAPPING_UNITS,
     remapping_unit_count: usize = 0,
     reserved_memory_region_count: usize = 0,
+    reserved_memory_with_non_pci_scope_count: usize = 0,
     ats_capability_count: usize = 0,
 
     pub fn units(self: *const Summary) []const RemappingUnit {
@@ -112,6 +113,26 @@ pub const Summary = struct {
             !self.dma_remapping_opt_out and
             self.segmentZeroCatchAll() != null;
     }
+
+    pub fn productionEnforcementReady(self: *const Summary) bool {
+        if (!self.productionDiscoveryReady() or self.reserved_memory_with_non_pci_scope_count != 0) {
+            return false;
+        }
+        for (self.units()) |unit| {
+            if (unit.segment != 0) return false;
+        }
+        return true;
+    }
+};
+
+const DeviceScopeSummary = struct {
+    count: u16 = 0,
+    only_pci_devices: bool = true,
+};
+
+const ReservedMemoryRegion = struct {
+    segment: u16,
+    only_pci_devices: bool,
 };
 
 const ScopePolicy = enum {
@@ -190,9 +211,12 @@ pub fn parseDmar(table: []const u8) Error!Summary {
                 summary.remapping_unit_count += 1;
             },
             RMRR_TYPE => {
-                const segment = try validateReservedMemoryRegion(structure, host_address_width);
-                if (!summary.coversSegment(segment)) return error.InvalidReservedMemoryRegion;
+                const region = try validateReservedMemoryRegion(structure, host_address_width);
+                if (!summary.coversSegment(region.segment)) return error.InvalidReservedMemoryRegion;
                 summary.reserved_memory_region_count += 1;
+                if (!region.only_pci_devices) {
+                    summary.reserved_memory_with_non_pci_scope_count += 1;
+                }
             },
             ATSR_TYPE => {
                 const segment = try validateAtsCapability(structure);
@@ -224,7 +248,7 @@ fn parseRemappingUnit(structure: []const u8, host_address_width: u8) Error!Remap
     }
 
     const include_pci_all = (flags & DRHD_FLAG_INCLUDE_PCI_ALL) != 0;
-    const scope_count = try validateDeviceScopes(
+    const scope_summary = try validateDeviceScopes(
         structure[DRHD_MIN_BYTES..],
         false,
         if (include_pci_all) .interrupt_sources_only else .any,
@@ -234,11 +258,11 @@ fn parseRemappingUnit(structure: []const u8, host_address_width: u8) Error!Remap
         .register_page_count = @as(u32, 1) << @intCast(size_exponent),
         .segment = endian.readU16Le(structure[6..8]),
         .include_pci_all = include_pci_all,
-        .device_scope_count = scope_count,
+        .device_scope_count = scope_summary.count,
     };
 }
 
-fn validateReservedMemoryRegion(structure: []const u8, host_address_width: u8) Error!u16 {
+fn validateReservedMemoryRegion(structure: []const u8, host_address_width: u8) Error!ReservedMemoryRegion {
     if (structure.len < RMRR_MIN_BYTES) return error.InvalidReservedMemoryRegion;
     if (endian.readU16Le(structure[4..6]) != 0) return error.InvalidReserved;
     const base = endian.readU64Le(structure[8..16]);
@@ -251,8 +275,11 @@ fn validateReservedMemoryRegion(structure: []const u8, host_address_width: u8) E
     if (length % PAGE_SIZE != 0 or !rangeFitsHostAddressWidth(base, length, host_address_width)) {
         return error.InvalidReservedMemoryRegion;
     }
-    _ = try validateDeviceScopes(structure[RMRR_MIN_BYTES..], true, .any);
-    return endian.readU16Le(structure[6..8]);
+    const scopes = try validateDeviceScopes(structure[RMRR_MIN_BYTES..], true, .any);
+    return .{
+        .segment = endian.readU16Le(structure[6..8]),
+        .only_pci_devices = scopes.only_pci_devices,
+    };
 }
 
 fn validateAtsCapability(structure: []const u8) Error!u16 {
@@ -269,8 +296,8 @@ fn validateAtsCapability(structure: []const u8) Error!u16 {
     return endian.readU16Le(structure[6..8]);
 }
 
-fn validateDeviceScopes(bytes: []const u8, required: bool, policy: ScopePolicy) Error!u16 {
-    var count: u16 = 0;
+fn validateDeviceScopes(bytes: []const u8, required: bool, policy: ScopePolicy) Error!DeviceScopeSummary {
+    var summary = DeviceScopeSummary{};
     var offset: usize = 0;
     while (offset < bytes.len) {
         if (bytes.len - offset < DEVICE_SCOPE_HEADER_BYTES) return error.InvalidDeviceScope;
@@ -299,6 +326,11 @@ fn validateDeviceScopes(bytes: []const u8, required: bool, policy: ScopePolicy) 
                 return error.InvalidDeviceScope;
             },
         }
+        if (scope_type != DEVICE_SCOPE_TYPE_PCI_ENDPOINT and
+            scope_type != DEVICE_SCOPE_TYPE_PCI_SUB_HIERARCHY)
+        {
+            summary.only_pci_devices = false;
+        }
 
         var path_offset = offset + DEVICE_SCOPE_HEADER_BYTES;
         const scope_end = offset + scope_length;
@@ -307,11 +339,11 @@ fn validateDeviceScopes(bytes: []const u8, required: bool, policy: ScopePolicy) 
                 return error.InvalidDeviceScope;
             }
         }
-        count = std.math.add(u16, count, 1) catch return error.InvalidDeviceScope;
+        summary.count = std.math.add(u16, summary.count, 1) catch return error.InvalidDeviceScope;
         offset = scope_end;
     }
-    if (required and count == 0) return error.InvalidDeviceScope;
-    return count;
+    if (required and summary.count == 0) return error.InvalidDeviceScope;
+    return summary;
 }
 
 fn rangeFitsHostAddressWidth(base: u64, length: u64, host_address_width: u8) bool {
@@ -383,10 +415,38 @@ test "DMAR parser discovers production-policy segment-zero VT-d units" {
     try std.testing.expect(!summary.dma_remapping_opt_out);
     try std.testing.expectEqual(@as(usize, 2), summary.units().len);
     try std.testing.expectEqual(@as(usize, 1), summary.reserved_memory_region_count);
+    try std.testing.expectEqual(@as(usize, 0), summary.reserved_memory_with_non_pci_scope_count);
     const catch_all = summary.segmentZeroCatchAll().?;
     try std.testing.expectEqual(@as(u64, 0xFED9_1000), catch_all.register_base_address);
     try std.testing.expectEqual(@as(u32, 1), catch_all.register_page_count);
     try std.testing.expect(summary.productionDiscoveryReady());
+    try std.testing.expect(summary.productionEnforcementReady());
+}
+
+test "DMAR enforcement policy rejects reserved memory owned by non-PCI DMA devices" {
+    var table = validDmar();
+    table[112] = DEVICE_SCOPE_TYPE_ACPI_NAMESPACE;
+    checksum.finishSum8Prefix(table[0..], 9, table.len);
+
+    const summary = try parseDmar(table[0..]);
+    try std.testing.expect(summary.productionDiscoveryReady());
+    try std.testing.expectEqual(@as(usize, 1), summary.reserved_memory_with_non_pci_scope_count);
+    try std.testing.expect(!summary.productionEnforcementReady());
+}
+
+test "DMAR enforcement policy rejects units outside the only scanned PCI segment" {
+    const table = validDmar();
+    var summary = try parseDmar(table[0..]);
+    summary.remapping_units[summary.remapping_unit_count] = .{
+        .register_base_address = 0x0000_0000_FEDA_0000,
+        .register_page_count = 1,
+        .segment = 1,
+        .include_pci_all = true,
+    };
+    summary.remapping_unit_count += 1;
+
+    try std.testing.expect(summary.productionDiscoveryReady());
+    try std.testing.expect(!summary.productionEnforcementReady());
 }
 
 test "DMAR parser rejects corrupt headers and reserved fields" {

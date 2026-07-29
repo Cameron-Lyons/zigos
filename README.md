@@ -161,8 +161,11 @@ Use the pinned toolchain and repo entrypoints:
 - Production hardware must expose a checksum-valid ACPI DMAR table with at
   least 39 DMA address bits, interrupt remapping, no x2APIC or DMA-remapping
   firmware opt-out, and a segment-zero VT-d unit covering all remaining PCI
-  devices. Discovery is proof-gated; enabling translation and interrupt
-  remapping remains separate hardware work.
+  devices. Boot revokes every discovered PCI bus master, installs coherent
+  deny-by-default translation tables across every segment-zero unit, maps only
+  the five direction-scoped NVMe queue/bounce pages, confirms translation on
+  every unit, and only then enables the controller. Interrupt remapping and
+  captured fault-record evidence remain separate hardware work.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses

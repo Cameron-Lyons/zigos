@@ -316,6 +316,7 @@
       "uefi_boot",
       "acpi_tables",
       "vtd_discovery",
+      "vtd_storage_isolation",
       "apic_timer",
       "framebuffer_gop",
       "usb_input_xhci",
@@ -332,6 +333,7 @@
       "src/kernel/boot/handoff.zig",
       "src/kernel/platform/hardware_proof.zig",
       "src/kernel/platform/dmar.zig",
+      "src/kernel/platform/intel_vtd.zig",
       "src/kernel/platform/smbios.zig",
       "src/native/drivers/device_inventory.zig",
       "src/native/session/service_bootstrap.zig",
@@ -539,6 +541,7 @@
         "src/kernel/platform/acpi.zig",
         "src/kernel/platform/apic.zig",
         "src/kernel/platform/dmar.zig",
+        "src/kernel/platform/intel_vtd.zig",
         "src/kernel/platform/fadt.zig",
         "src/kernel/platform/framebuffer.zig",
         "src/kernel/platform/hardware_proof.zig",
@@ -548,19 +551,20 @@
         "src/kernel/boot/init/devices.zig",
         "src/kernel/drivers/pci.zig",
         "src/kernel/drivers/nvme.zig",
+        "src/kernel/drivers/nvme_hw.zig",
         "src/kernel/drivers/intel_i225.zig",
         "src/kernel/drivers/xhci.zig"
       ],
       "current_evidence": [
         "The first supported hardware target is pinned to Intel NUC 11 Pro Kit NUC11TNKi5 instead of a generic PC-compatible bucket.",
-        "The target contract enumerates UEFI boot, ACPI tables, Intel VT-d discovery, APIC timer, GOP framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM network, compositor framebuffer presentation, suspend/resume, crash recovery, crash-record persistence, and update rollback power cycling as required hardware proof.",
+        "The target contract enumerates UEFI boot, ACPI tables, Intel VT-d discovery, hardware-enforced VT-d storage isolation, APIC timer, GOP framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM network, compositor framebuffer presentation, suspend/resume, crash recovery, crash-record persistence, and update rollback power cycling as required hardware proof.",
         "Early kernel diagnostics are serial-only, while graphical output is owned by the validated UEFI GOP framebuffer and native compositor; the fixed VGA text buffer driver is absent and production readiness rejects its restoration.",
         "The build exposes OVMF-backed uefi-qemu-test and uefi-verification-qemu-test preflights for the production and verification ISO paths before attempting both images on the NUC firmware.",
         "The Multiboot2-only entry path preserves bootloader magic and info pointers, asks GRUB to keep a 32-bit framebuffer payload, and exposes tested tagged memory-map, framebuffer, and ACPI 2 RSDP handoff parsers for runtime proof capture; the obsolete ACPI 1 tag is ignored and production readiness rejects restoration of either that path or the retired Multiboot1 parser.",
         "The kernel tree now has a tested SMBIOS scanner/parser that can match the NUC11TNKi5 SKU from real firmware tables before emitting real-hardware source or board markers.",
         "The kernel tree now has a tested ACPI 2+ RSDP parser that rejects revision 1 descriptors and missing XSDT addresses instead of scanning the BIOS compatibility window.",
         "The ACPI parser validates SDT headers and 64-bit XSDT entries, maps firmware tables outside the boot identity aperture after paging, and validates MCFG allocation ranges so the hardware proof path can require XSDT, MADT, FADT, and segment-zero PCIe ECAM presence instead of a standalone RSDP checksum; the 32-bit RSDT path is absent.",
-        "The Intel VT-d parser validates the current DMAR revision, host address width, firmware opt-out and reserved flags, ordered remapping structures, register-set sizing and alignment, device scopes, reserved-memory regions, and ATS capabilities. The first hardware target now fails its proof contract unless firmware exposes interrupt remapping, at least 39 DMA address bits, no x2APIC or DMA-remapping opt-out, and a segment-zero INCLUDE_PCI_ALL unit.",
+        "The Intel VT-d parser validates the current DMAR revision, host address width, firmware opt-out and reserved flags, ordered remapping structures, register-set sizing and alignment, device scopes, reserved-memory regions, and ATS capabilities. The enforcement path rejects non-PCI reserved-memory owners and non-segment-zero units, revokes every discovered PCI bus master, requires coherent page walks, installs one shared deny-by-default root across every remapping unit, maps only five direction-scoped NVMe queue and bounce pages, performs the architected root-pointer and global cache-invalidation handshake, confirms translation status on every unit, and only then enables NVMe bus mastering.",
         "The kernel tree now has a tested MADT parser that summarizes local APIC, I/O APIC, interrupt-source override, x2APIC, and PC-AT compatibility data before APIC timer bring-up.",
         "The kernel tree now has a tested APIC timer interrupt proof that requires a valid LAPIC vector, nonzero divisor and initial count, count advancement, delivered timer interrupts, and EOI accounting, plus a separate productionHardwareVerified path that refuses the NUC APIC timer marker unless hardware LAPIC timer register writes, current-count reads, ISR vector observations, interrupt-handler entries, EOI register writes, and TSC advancement are present.",
         "The kernel tree now has a tested FADT parser and ACPI suspend/resume proof model for PM control blocks, PM event blocks, SCI wake interrupts, PM timer advancement, reset plumbing, and resumed timer/framebuffer/xHCI/NVMe/I225 subsystem usability, plus a separate productionHardwareVerified path that refuses the NUC suspend/resume marker unless PM1 sleep writes, S-state entry observations, S0 resume observations, PM timer resume reads, SCI wake interrupts, and post-resume subsystem probes are present.",
@@ -574,14 +578,14 @@
         "Production driver attachment requires explicitly detected, non-synthetic, target-grade device inventory before minting authority or attaching data planes. Input inventory and permission review are xHCI-only: the kernel PS/2 scancode driver, IRQ1 handler, fallback poller, and PS/2 inventory source are absent, while hosted modeled boots still seed explicit I225-LM/NVMe/xHCI inventory records.",
         "Production runtime scheduling now requires invariant-TSC x2APIC deadline interrupts with an architectural TSC frequency. Logical time catches up directly from the invariant counter after delayed interrupts, scheduler wakeups use phase-aligned one-shot deadlines, and the native idle loop disarms its deadline when no task is runnable. The calibrated periodic x2APIC countdown path is isolated behind the explicit QEMU-only software CPU fallback that production media forbids. The QEMU harness selects KVM with the host CPU when a Linux runner exposes it and otherwise uses an x2APIC-capable software CPU with a pinned architectural TSC rate. Both legacy PICs are fully masked, PIT programming and IRQ stubs are absent, and production readiness rejects their restoration.",
         "The production CPU baseline now requires PGE, PCID, INVPCID, and architectural SYSCALL/SYSRET. Boot enables CR4.PGE and CR4.PCIDE before paging handoff, marks every shared supervisor-only kernel leaf global, assigns one bounded nonzero identifier to each userspace address space, preserves translations across typed user and kernel CR3 transitions, skips redundant switches, and invalidates each context before identifier reuse; user mappings remain non-global and the generic flush-on-every-switch API is absent. Software-emulator boots may use the typed flushing path only when the QEMU-only boot configuration supplies its explicit CPU fallback flag, which the production boot configuration forbids. Native userspace entry uses SCE, STAR/LSTAR/FMASK, a GS-based kernel-stack switch, RDI/RSI/RDX request arguments, RAX/RDX/R10 results, and SYSRET; the former user-callable software-interrupt syscall and yield gates are absent. Booted address-space round-trip and 64,000-operation syscall entry benchmarks measure both transition paths directly through the KVM-first validation harness with the calibrated software-emulator fallback. The benchmark keeps its installed diagnostic ELF symbolized but boots a separately linked debug-stripped derivative so UEFI firmware and GRUB do not parse non-loadable debug sections.",
-        "A composed kernel hardware-proof module now gates NUC markers on real SKU evidence, Multiboot memory-map handoff, GOP hardware framebuffer scanout proof evidence, mapped and checksum-validated ACPI MADT/FADT/MCFG/DMAR discovery, production-policy VT-d unit evidence, APIC hardware LAPIC timer proof evidence, xHCI hardware event-ring input proof evidence, NVMe hardware-DMA write/read proof evidence, I225 hardware descriptor-ring packet proof evidence, hardware power-transition suspend/resume proof counts, hardware reboot-persistence crash-record proof counts, and hardware power-cycle update rollback proof counts.",
+        "A composed kernel hardware-proof module now gates NUC markers on real SKU evidence, Multiboot memory-map handoff, GOP hardware framebuffer scanout proof evidence, mapped and checksum-validated ACPI MADT/FADT/MCFG/DMAR discovery, completed VT-d translation enablement for the NVMe requester, APIC hardware LAPIC timer proof evidence, xHCI hardware event-ring input proof evidence, NVMe hardware-DMA write/read proof evidence, I225 hardware descriptor-ring packet proof evidence, hardware power-transition suspend/resume proof counts, hardware reboot-persistence crash-record proof counts, and hardware power-cycle update rollback proof counts.",
         "The NUC11TNKi5 proof bundle contract requires two distinct real-hardware single boots: production-serial.log binds the shipped production ISO/kernel to BOOT:ROLE:production, early SKU/Multiboot/ACPI facts, essential readiness, a structured clean error=none checkpoint, and native-ready; verification-serial.log binds the verification ISO/kernel to BOOT:ROLE:verification, native-ready, the exhaustive marker contract, and observation-before-PASS ordering.",
         "Production readiness rejects QEMU-only or scalar-only evidence: a canonical capture statement binds a fresh nonce, stable device identity, repo IDs, both log hashes, both ISO/kernel pairs, both marker contracts, every sidecar, a canonical manifest of individually hashed cycle logs, and two role quote/signature pairs; an externally pinned verifier must return the exact statement-digest and nonce assertion."
       ],
       "production_gaps": [
         "The repo can now emit the shipped production kernel's early NUC identity/ACPI evidence and the verification kernel's exhaustive subsystem PASS and concrete hardware fact markers only when the corresponding facts are present, but neither required real NUC11TNKi5 boot log has been captured.",
         "UEFI handoff still depends on the GRUB production and verification ISO paths, and neither has been proven on the selected NUC firmware.",
-        "ACPI 2 RSDP, XSDT, MADT, MCFG, DMAR, APIC timer interrupt proof modeling, FADT discovery, and suspend/resume proof modeling are wired into post-paging mapped proof capture; the target proof now rejects missing, opted-out, narrow-address, or non-covering VT-d firmware, but translation tables, queued invalidation, interrupt-remapping tables, and fault capture are not programmed yet. NUC APIC timer marker recording rejects modeled-only LAPIC timer proof without hardware register/interrupt evidence, and NUC suspend/resume marker recording rejects modeled-only ACPI suspend proof without hardware power-transition evidence, but no real DMAR capture, LAPIC timer interrupt run, PCIe ECAM inventory, or suspend/resume cycle has been captured on the target hardware.",
+        "ACPI 2 RSDP, XSDT, MADT, MCFG, DMAR, APIC timer interrupt proof modeling, FADT discovery, and suspend/resume proof modeling are wired into post-paging mapped proof capture. NVMe second-stage translation structures and register-based invalidation are programmed and proof-gated on the selected target, but interrupt-remapping tables and archived fault-record evidence are not implemented yet. NUC APIC timer marker recording rejects modeled-only LAPIC timer proof without hardware register/interrupt evidence, and NUC suspend/resume marker recording rejects modeled-only ACPI suspend proof without hardware power-transition evidence, but no real DMAR/enforcement capture, LAPIC timer interrupt run, PCIe ECAM inventory, or suspend/resume cycle has been captured on the target hardware.",
         "The framebuffer descriptor validator is wired to Multiboot/GOP-style framebuffer handoff, native compositor presentation is proof-gated in the modeled framebuffer, and the kernel GOP marker now rejects modeled-only framebuffer samples without hardware GOP scanout evidence, but real GOP ownership and rendering still need capture on HDMI/framebuffer output.",
         "Crash record formatting and recovered-record persistence proof are tested, and NUC crash marker recording now rejects modeled-only persistence without hardware reboot-persistence evidence, but real crash records are not yet written before reboot or consumed by a recovery boot on the target hardware.",
         "PCI target identification, NVMe controller queue validation, executable modeled NVMe MMIO doorbell/PRP completion proof cycles, and executable modeled I225 tail-register, interrupt, PHY-link, and TX/RX packet proof cycles are tested; NUC storage marker recording now rejects modeled-only NVMe completions without hardware-DMA evidence and NUC network marker recording rejects modeled-only I225 packet cycles without hardware descriptor-ring evidence, but real NVMe controller register writes, DMA ownership capture, hardware completions, Intel I225-LM descriptor-ring ownership, hardware interrupts, and PHY-backed packet I/O are not implemented.",
@@ -869,6 +873,7 @@
         "src/native/kernel_api/device_broker.zig",
         "src/native/session/service_path_proofs.zig",
         "src/kernel/platform/dmar.zig",
+        "src/kernel/platform/intel_vtd.zig",
         "src/kernel/boot/init/data_plane_boundary.zig"
       ],
       "current_evidence": [
@@ -882,22 +887,22 @@
         "Driver broker, runtime lease, storage-driver attach, and driver-boundary spec tests now create runnable driver/control/app tasks from generated userspace image fixtures instead of synthetic executable descriptors, and the production-readiness gate rejects synthetic descriptors in those driver data-path sources.",
         "A native accelerator driver task now owns brokered GPU, NPU, and media queue sessions, requires hardware queue ownership plus completion-interrupt evidence, emits typed scheduler queue events only after rejecting CPU engines, missing brokers, missing owners, missing generations, missing interrupts, and stale completions, and the booted driver proof now emits queue-owned and completion-interrupt markers required by native smoke and the NUC11TNKi5 hardware marker contract.",
         "QEMU driver restart proof performs NVMe-backed storage reads and writes before and after restart, contains out-of-window DMA faults, rejects partial-sector transfers, stale authority, stale DMA buffers, explicit PCI controller revocation, and stale broker generations, then gates republish/rebind before post-restart I/O; the expanded marker group is required by the real-hardware proof marker contract.",
-        "The kernel now discovers bounded Intel VT-d remapping units from checksum-validated ACPI DMAR data and admits target discovery evidence only when a segment-zero catch-all unit satisfies the address-width, interrupt-remapping, x2APIC, and DMA-remapping opt-out policy. This is discovery evidence only; no hardware-enforced DMA-isolation claim is made before translation structures and faults are live."
+        "The kernel discovers bounded Intel VT-d remapping units from checksum-validated ACPI DMAR data, revokes firmware-owned PCI bus masters, installs a deny-by-default root across every unit, gives the NVMe requester read/write access only to its exact queue and bounce pages, completes global invalidation, confirms translation status, and emits hardware-enforced storage isolation evidence before enabling the controller. Interrupt remapping and captured fault records remain explicit follow-up work."
       ],
       "production_gaps": [
         "Bootstrap storage has the deepest hardware-like data-plane proof; network now has booted encrypted frame ownership evidence and accelerator queues now have brokered driver-event evidence, but other driver classes remain inventory, policy, or publication proofs.",
-        "IOMMU and DMA isolation now have executable native programming and brokered-buffer evidence plus real-firmware Intel VT-d discovery and fail-closed target admission, but not VT-d translation-table programming, queued invalidation, interrupt-remapping tables, or device fault capture.",
+        "IOMMU and DMA isolation now have executable native programming, brokered-buffer evidence, real-firmware Intel VT-d discovery, and live legacy second-stage translation for the NVMe requester. Interrupt-remapping tables and archived device-fault capture are still pending.",
         "QEMU coverage now gates brokered restart, timeout propagation, partial-sector rejection, explicit broker revocation, republish, and rebind; real hardware packet/block I/O evidence and mid-transfer device-fault capture are still pending."
       ],
       "graduation_criteria": [
         "Add broker-mediated data-plane tests for at least storage and network that run in QEMU and prove no kernel direct publication for excluded subsystems.",
-        "Replace the native IOMMU model with real hardware programming and fault evidence before broadening the first production target beyond brokered programmed-I/O storage.",
-        "Keep unconfined bus-master DMA fail-closed, and keep confined bus-master programs (the NVMe queue/bounce windows) modeled-evidence-only, until hardware IOMMU programming, queued invalidation, interrupt remapping, and captured device-fault records are present in the hardware proof bundle.",
+        "Capture real VT-d enablement and denied-access fault evidence before broadening the first production target beyond brokered NVMe storage.",
+        "Keep unconfined bus-master DMA fail-closed, require the NVMe queue/bounce allow-list before controller enablement, and add interrupt remapping plus captured device-fault records to the hardware proof bundle.",
         "Gate driver restart on active I/O recovery, broker revocation, rebind, and no stale DMA or port access after generation change."
       ],
       "next_actions": [
         "Capture hardware packet/block I/O traces for timeout, mid-transfer fault, and post-restart recovery on the first production target.",
-        "Bind the native DMA-domain model, including the confined NVMe bus-master windows, to real VT-d/AMD-Vi programming and archive device-fault evidence before treating DMA isolation as hardware-enforced.",
+        "Capture the VT_D_STORAGE_ISOLATION marker, translation-status register evidence, and an induced out-of-window NVMe fault record on the NUC11TNKi5.",
         "Capture the expanded driver restart/rebind marker group, including DMA-domain and brokered-buffer markers, in the NUC11TNKi5 hardware proof bundle."
       ],
       "verification_commands": [
