@@ -54,6 +54,78 @@ pub fn addX86_64KernelCompileCheck(
     optimize: std.builtin.OptimizeMode,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step {
+    const kernel_module = createX86_64KernelModule(b, optimize, userspace_images);
+    const object = b.addObject(.{
+        .name = "kernel-x86_64-compile-check",
+        .root_module = kernel_module,
+    });
+    const step = b.step("kernel-x86_64-compile-check", "Compile the kernel, descriptor tables, interrupts, and userspace transition for x86-64");
+    step.dependOn(&object.step);
+    return step;
+}
+
+pub fn addX86_64KernelBootCheck(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+    userspace_images: userspace_build.ArtifactSet,
+) *std.Build.Step {
+    const kernel_module = createX86_64KernelModule(b, optimize, userspace_images);
+    const kernel_object = b.addObject(.{
+        .name = "kernel-x86_64-core-boot",
+        .root_module = kernel_module,
+    });
+    kernel_object.bundle_compiler_rt = true;
+
+    const link = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "ld.lld",
+        "-m",
+        "elf_x86_64",
+        "--gc-sections",
+        "-z",
+        "common-page-size=4096",
+        "-z",
+        "max-page-size=4096",
+        "-T",
+    });
+    link.addFileArg(b.path("src/arch/x86_64/linker.ld"));
+    link.addArg("-o");
+    const linked_kernel = link.addOutputFileArg("kernel-x86_64-core-boot.elf");
+    link.addFileArg(kernel_object.getEmittedBin());
+
+    const validate_image = b.addSystemCommand(&.{
+        "bash",
+        "scripts/check-multiboot2-image.sh",
+    });
+    validate_image.addFileArg(linked_kernel);
+
+    const iso = b.addSystemCommand(&.{
+        "bash",
+        "scripts/build-grub-iso.sh",
+    });
+    iso.addFileArg(linked_kernel);
+    const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
+    _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
+    iso.addFileArg(b.path("src/boot/grub-x86_64-kernel.cfg"));
+    iso.step.dependOn(&validate_image.step);
+
+    const run = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-x86-64-kernel-smoke.sh",
+    });
+    run.addFileArg(iso_path);
+    run.addArg("build/x86_64-kernel-core-boot.log");
+
+    const step = b.step("x86_64-kernel-core-boot-check", "Boot the production kernel through Multiboot2 and the four-level pager in QEMU");
+    step.dependOn(&run.step);
+    return step;
+}
+
+fn createX86_64KernelModule(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+    userspace_images: userspace_build.ArtifactSet,
+) *std.Build.Module {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .freestanding,
@@ -69,6 +141,9 @@ pub fn addX86_64KernelCompileCheck(
         .target = target,
         .optimize = optimize,
         .strip = false,
+        // Interrupts may arrive at any instruction boundary, so the kernel
+        // cannot use the userspace ABI's 128-byte area below RSP.
+        .red_zone = false,
     });
     kernel_module.addImport("binary_cursor", b.createModule(.{
         .root_source_file = b.path("src/native/core/binary_cursor.zig"),
@@ -79,14 +154,7 @@ pub fn addX86_64KernelCompileCheck(
     kernel_module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
     kernel_module.addOptions("build_options", options);
     addKernelAssemblyFiles(b, kernel_module, .x86_64);
-
-    const object = b.addObject(.{
-        .name = "kernel-x86_64-compile-check",
-        .root_module = kernel_module,
-    });
-    const step = b.step("kernel-x86_64-compile-check", "Compile the kernel, descriptor tables, interrupts, and userspace transition for x86-64");
-    step.dependOn(&object.step);
-    return step;
+    return kernel_module;
 }
 
 pub fn addX86_64LongModeEntryCheck(
@@ -437,7 +505,10 @@ fn addKernelAssemblyFiles(
     kernel_module: *std.Build.Module,
     cpu_arch: std.Target.Cpu.Arch,
 ) void {
-    kernel_module.addAssemblyFile(b.path("src/boot/boot64.S"));
+    kernel_module.addAssemblyFile(b.path(if (cpu_arch == .x86_64)
+        "src/boot/boot_x86_64.S"
+    else
+        "src/boot/boot64.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
     switch (cpu_arch) {
         .x86 => {

@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const console = @import("../../utils/console.zig");
 const isr = @import("../../interrupts/isr.zig");
 const paging = @import("../../memory/paging_select.zig");
@@ -20,6 +21,9 @@ pub fn init() void {
 
     console.print("Initializing paging...\n");
     paging.init();
+    if (comptime builtin.cpu.arch == .x86_64) {
+        @import("../common.zig").printBootMarker(@import("../markers.zig").x86_64_paging_ready);
+    }
 
     console.print("Enabling kernel memory protection...\n");
     const protection = @import("../../memory/protection.zig");

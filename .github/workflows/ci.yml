@@ -93,8 +93,8 @@ jobs:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
-      job-name: x86-64 Long-Mode Entry
-      command: ./scripts/zig.sh build -Doptimize=ReleaseFast x86_64-long-mode-entry-check
+      job-name: x86-64 Boot Path
+      command: ./scripts/zig.sh build -Doptimize=ReleaseFast x86_64-long-mode-entry-check x86_64-kernel-core-boot-check
       timeout-minutes: 10
 
   benchmark:

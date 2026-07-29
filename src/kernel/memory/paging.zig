@@ -493,13 +493,13 @@ pub fn init() void {
         haltWithMessage("Missing Multiboot memory-map handoff!\n");
     const boot_info_address = handoff.capturedInfoAddress() orelse
         haltWithMessage("Invalid Multiboot information extent!\n");
-    const memory_map_bytes = handoff.capturedMemoryMapBytes(boot_info) orelse
+    const memory_map = handoff.capturedMemoryMap(boot_info) orelse
         haltWithMessage("Missing Multiboot memory map!\n");
     firmware_memory_map.initializeAllocator(
         MEMORY_SIZE,
         PAGE_SIZE,
         &physical_frames,
-        memory_map_bytes,
+        memory_map,
     ) catch haltWithMessage("Invalid Multiboot memory map!\n");
     firmware_memory_map.reserveLiveHandoffRanges(
         MEMORY_SIZE,
