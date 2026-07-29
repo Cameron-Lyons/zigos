@@ -30,7 +30,7 @@ const freestanding = if (builtin.target.os.tag == .freestanding)
     struct {
         pub const gdt = @import("../../kernel/interrupts/gdt_select.zig");
         pub const isr = @import("../../kernel/interrupts/isr.zig");
-        pub const paging = @import("../../kernel/memory/paging.zig");
+        pub const paging = @import("../../kernel/memory/paging_select.zig");
     }
 else
     struct {
@@ -132,8 +132,7 @@ fn trapStackPaintableBase() usize {
 fn armTrapStackGuard() void {
     if (builtin.target.os.tag != .freestanding) return;
     if (trap_stack_guard_armed) return;
-    const guard_address = std.math.cast(u32, @intFromPtr(&trap_stack)) orelse
-        native_util.impossibleByInvariant("userspace trap stack lies outside the 32-bit pager");
+    const guard_address = @intFromPtr(&trap_stack);
     _ = freestanding.paging.unmapBorrowedCurrentPage(guard_address);
     const base = trapStackPaintableBase();
     const words: [*]u32 = @ptrFromInt(base);
