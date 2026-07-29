@@ -7,7 +7,6 @@ pub const DetectionSource = enum(u8) {
     pci_inventory,
     nvme_pci_inventory,
     intel_i225_lm_inventory,
-    ps2_bootstrap,
     xhci_inventory,
     platform_policy,
 };
@@ -112,7 +111,6 @@ pub fn sourceName(source: DetectionSource) []const u8 {
         .pci_inventory => "pci_inventory",
         .nvme_pci_inventory => "nvme_pci_inventory",
         .intel_i225_lm_inventory => "intel_i225_lm_inventory",
-        .ps2_bootstrap => "ps2_bootstrap",
         .xhci_inventory => "xhci_inventory",
         .platform_policy => "platform_policy",
     };
@@ -229,12 +227,12 @@ test "device inventory requires target-grade NVMe for production storage binding
     try std.testing.expect(sourceCanBindProductionDriver(.storage_controller, storage.source, storage.device_id));
 }
 
-test "device inventory refuses PS/2 bootstrap for production input binding" {
+test "device inventory accepts only target xHCI input hardware" {
     reset();
 
-    registerDetected(.input_device, 0x8042_0001, .ps2_bootstrap, false);
+    registerDetected(.input_device, 0x8086_A0ED_0001, .pci_inventory, false);
     try std.testing.expect(!recordForClass(.input_device).detected);
-    try std.testing.expect(!sourceCanBindProductionDriver(.input_device, .ps2_bootstrap, 0x8042_0001));
+    try std.testing.expect(!sourceCanBindProductionDriver(.input_device, .pci_inventory, 0x8086_A0ED_0001));
     try std.testing.expectError(error.DeviceNotDetected, requireProductionDriverDeviceId(.input_device));
 
     registerDetected(.input_device, 0x8086_A0ED_0001, .xhci_inventory, false);
