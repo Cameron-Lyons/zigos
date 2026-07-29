@@ -178,10 +178,10 @@ fn liveRangeRun(
 const TEST_PAGE_SIZE: u32 = 4096;
 
 fn appendEntry(bytes: []u8, offset: usize, base: u64, length: u64, kind: u32) usize {
-    endian.writeU32Le(bytes[offset .. offset + 4], 20);
-    endian.writeU64Le(bytes[offset + 4 .. offset + 12], base);
-    endian.writeU64Le(bytes[offset + 12 .. offset + 20], length);
-    endian.writeU32Le(bytes[offset + 20 .. offset + 24], kind);
+    endian.writeU64Le(bytes[offset .. offset + 8], base);
+    endian.writeU64Le(bytes[offset + 8 .. offset + 16], length);
+    endian.writeU32Le(bytes[offset + 16 .. offset + 20], kind);
+    endian.writeU32Le(bytes[offset + 20 .. offset + 24], 0);
     return offset + 24;
 }
 
@@ -200,6 +200,9 @@ fn testInfo(flags: u32, mmap_addr: u32, mmap_length: u32, cmdline_addr: u32) han
         .framebuffer_bpp = 0,
         .framebuffer_type = 0,
         .framebuffer_rgb = [_]u8{0} ** 6,
+        .info_bytes = 8,
+        .cmdline_length = if (cmdline_addr == 0) 0 else 512,
+        .mmap_entry_size = 24,
     };
 }
 
@@ -209,7 +212,7 @@ test "firmware map opens only complete usable pages" {
     var bytes = [_]u8{0} ** 24;
     _ = appendEntry(&bytes, 0, TEST_PAGE_SIZE / 2, 3 * TEST_PAGE_SIZE, 1);
 
-    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot1MemoryMap(&bytes));
+    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&bytes, 24));
 
     try std.testing.expect(allocator.isReserved(0));
     try std.testing.expect(!allocator.isReserved(1 * TEST_PAGE_SIZE));
@@ -230,8 +233,8 @@ test "non-usable pages win over usable pages in either descriptor order" {
 
     var first = Allocator.init();
     var second = Allocator.init();
-    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &first, handoff.multiboot1MemoryMap(&usable_first));
-    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &second, handoff.multiboot1MemoryMap(&reserved_first));
+    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &first, handoff.multiboot2MemoryMap(&usable_first, 24));
+    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &second, handoff.multiboot2MemoryMap(&reserved_first, 24));
 
     try std.testing.expect(first.isReserved(2 * TEST_PAGE_SIZE));
     try std.testing.expect(second.isReserved(2 * TEST_PAGE_SIZE));
@@ -247,7 +250,7 @@ test "non-usable page ceilings and aperture clipping are conservative" {
     _ = appendEntry(&bytes, offset, 8 * TEST_PAGE_SIZE - 1, 2, 4);
 
     var allocator = Allocator.init();
-    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot1MemoryMap(&bytes));
+    try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&bytes, 24));
 
     try std.testing.expect(allocator.isReserved(0));
     try std.testing.expect(allocator.isReserved(TEST_PAGE_SIZE));
@@ -264,13 +267,13 @@ test "malformed or overflowing firmware maps leave the aperture closed" {
 
     try std.testing.expectError(
         error.InvalidMemoryMap,
-        initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot1MemoryMap(&bytes)),
+        initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&bytes, 24)),
     );
     try std.testing.expectEqual(@as(u32, 0), allocator.stats().free);
 
     try std.testing.expectError(
         error.InvalidMemoryMap,
-        initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot1MemoryMap(&[_]u8{})),
+        initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&[_]u8{}, 24)),
     );
     try std.testing.expectEqual(@as(u32, 0), allocator.stats().free);
 }

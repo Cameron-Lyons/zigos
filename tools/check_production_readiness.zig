@@ -657,6 +657,7 @@ fn validateNuc11tnki5KernelProofSources(
     const crash_record_path = "src/kernel/platform/crash_record.zig";
     const fadt_path = "src/kernel/platform/fadt.zig";
     const framebuffer_path = "src/kernel/platform/framebuffer.zig";
+    const handoff_path = "src/kernel/boot/handoff.zig";
     const hardware_target_path = "src/native/platform/hardware_target.zig";
     const first_target_telemetry_path = "src/kernel/drivers/first_target_telemetry.zig";
     const platform_policy_signals_path = "src/native/platform/platform_policy_signals.zig";
@@ -693,6 +694,10 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (!common.pathExists(io, framebuffer_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 framebuffer proof source is missing: {s}", .{framebuffer_path});
+        return;
+    }
+    if (!common.pathExists(io, handoff_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 boot handoff source is missing: {s}", .{handoff_path});
         return;
     }
     if (!common.pathExists(io, hardware_target_path)) {
@@ -756,6 +761,7 @@ fn validateNuc11tnki5KernelProofSources(
     const crash_record_source = try common.readFileAlloc(allocator, io, crash_record_path, common.source_file_max_bytes);
     const fadt_source = try common.readFileAlloc(allocator, io, fadt_path, common.source_file_max_bytes);
     const framebuffer_source = try common.readFileAlloc(allocator, io, framebuffer_path, common.source_file_max_bytes);
+    const handoff_source = try common.readFileAlloc(allocator, io, handoff_path, common.source_file_max_bytes);
     const hardware_target_source = try common.readFileAlloc(allocator, io, hardware_target_path, common.source_file_max_bytes);
     const first_target_telemetry_source = try common.readFileAlloc(allocator, io, first_target_telemetry_path, common.source_file_max_bytes);
     const platform_policy_signals_source = try common.readFileAlloc(allocator, io, platform_policy_signals_path, common.source_file_max_bytes);
@@ -905,6 +911,27 @@ fn validateNuc11tnki5KernelProofSources(
     for (required_early_console_snippets) |snippet| {
         if (std.mem.indexOf(u8, console_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 early console must remain serial-backed: {s}", .{snippet});
+        }
+    }
+    const required_boot_handoff_snippets = [_][]const u8{
+        "MULTIBOOT2_BOOTLOADER_MAGIC",
+        "parseMultiboot2Info",
+        "multiboot2MemoryMap",
+        "zigos_multiboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC",
+    };
+    for (required_boot_handoff_snippets) |snippet| {
+        if (std.mem.indexOf(u8, handoff_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must remain Multiboot2-only: {s}", .{snippet});
+        }
+    }
+    const retired_boot_handoff_snippets = [_][]const u8{
+        "multiboot1",
+        "MULTIBOOT_BOOTLOADER_MAGIC",
+        "parseInfo(",
+    };
+    for (retired_boot_handoff_snippets) |snippet| {
+        if (std.mem.indexOf(u8, handoff_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must not restore legacy Multiboot1 parsing: {s}", .{snippet});
         }
     }
     const required_apic_snippets = [_][]const u8{
