@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
+
+# shellcheck source=scripts/qemu-harness.sh
+source "$ROOT_DIR/scripts/qemu-harness.sh"
 
 KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
@@ -50,5 +53,25 @@ if grep -Eqi "panic|KERNEL PANIC|System Halted|BENCH:FAIL" "$LOG_PATH"; then
   cat "$LOG_PATH" >&2
   exit 1
 fi
+
+if grep -Fq "BENCH:ENV:" "$LOG_PATH"; then
+  echo "Kernel benchmark capture failed: guest output must not declare its host accelerator" >&2
+  exit 1
+fi
+
+accelerator="$(qemu_harness_accelerator)"
+case "$accelerator" in
+  kvm|kvm,*)
+    benchmark_accelerator="kvm"
+    ;;
+  ""|tcg|tcg,*)
+    benchmark_accelerator="tcg"
+    ;;
+  *)
+    echo "Kernel benchmark capture failed: unsupported accelerator '$accelerator'" >&2
+    exit 1
+    ;;
+esac
+printf 'BENCH:ENV:accelerator=%s\n' "$benchmark_accelerator" >> "$LOG_PATH"
 
 echo "Kernel benchmark capture complete. Run the typed benchmark gate through './scripts/zig.sh build benchmark'. Log: $LOG_PATH"
