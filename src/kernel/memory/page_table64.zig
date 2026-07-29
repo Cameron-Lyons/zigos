@@ -18,12 +18,23 @@ pub const NO_EXECUTE: u64 = 1 << 63;
 const OWNER_SHIFT = 9;
 const OWNER_MASK: u64 = 0x7 << OWNER_SHIFT;
 const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+const PAGE_OFFSET_MASK: u64 = 0xFFF;
 
 pub const Entry = u64;
 pub const Table = [TABLE_ENTRIES]Entry;
 
 pub fn index(virtual_address: usize, shift: u6) usize {
     return (virtual_address >> shift) & INDEX_MASK;
+}
+
+pub fn isCanonicalVirtualAddress(address_value: usize) bool {
+    const upper = address_value >> 48;
+    const sign_bit = (address_value >> 47) & 1;
+    return if (sign_bit == 0) upper == 0 else upper == 0xFFFF;
+}
+
+pub fn physicalAddressFits(address_value: usize) bool {
+    return (@as(u64, address_value) & ~(ADDRESS_MASK | PAGE_OFFSET_MASK)) == 0;
 }
 
 pub fn isPresent(entry: Entry) bool {
@@ -74,6 +85,15 @@ test "each four-level index consumes exactly nine address bits" {
     try std.testing.expectEqual(@as(usize, 511), index(@as(usize, 511) << PAGE_DIRECTORY_SHIFT, PAGE_DIRECTORY_SHIFT));
     try std.testing.expectEqual(@as(usize, 511), index(@as(usize, 511) << PDPT_SHIFT, PDPT_SHIFT));
     try std.testing.expectEqual(@as(usize, 511), index(@as(usize, 511) << PML4_SHIFT, PML4_SHIFT));
+}
+
+test "four-level addresses accept canonical kernel mappings and 52-bit physical frames" {
+    try std.testing.expect(isCanonicalVirtualAddress(0x0000_7FFF_FFFF_F000));
+    try std.testing.expect(isCanonicalVirtualAddress(0xFFFF_8000_0000_0000));
+    try std.testing.expect(!isCanonicalVirtualAddress(0x0000_8000_0000_0000));
+    try std.testing.expect(!isCanonicalVirtualAddress(0xFFFF_7FFF_FFFF_F000));
+    try std.testing.expect(physicalAddressFits(0x000F_FFFF_FFFF_FFFF));
+    try std.testing.expect(!physicalAddressFits(0x0010_0000_0000_0000));
 }
 
 comptime {

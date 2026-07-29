@@ -63,6 +63,19 @@ pub const StoragePublicationKind = enum(u8) {
     ata_bootstrap_bridge,
 };
 
+pub const StorageControllerSession = struct {
+    kernel_port: *component_port.KernelPort,
+    device_id: u64,
+    service_id: u64,
+    authority_capability_id: u64,
+    task_id: u64,
+    process_generation: u32,
+    dma_domain_id: u64,
+    broker_generation: u64,
+    dma_isolation: device_broker.DmaIsolationStatus,
+    brokered_dma_buffer: device_broker.BrokeredDmaBuffer,
+};
+
 pub const DeviceDataPlanePublication = struct {
     device_class: driver_service.DeviceClass = .graphics_adapter,
     device_id: u64,
@@ -100,6 +113,7 @@ pub const StoragePublication = struct {
     publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     backend: ?storage_volume.Backend = null,
     ata_session: ?storage_driver_task.AtaControllerSession = null,
+    controller_session: ?StorageControllerSession = null,
     activator: ?StorageActivator = null,
     kind: StoragePublicationKind = .backend,
     kernel_bootstrap: bool = true,
@@ -321,6 +335,18 @@ pub fn activateStorageBackend(
                     const activator = publication.activator orelse return false;
                     publication.backend = activator(device_id) orelse return false;
                 }
+                if (kernel_port) |bound_kernel_port| {
+                    if (!establishStorageControllerSession(
+                        publication,
+                        service_id,
+                        authority_capability_id,
+                        owner_task_id,
+                        dma_domain_id,
+                        bound_kernel_port,
+                    )) return false;
+                } else if (builtin.target.os.tag == .freestanding) {
+                    return false;
+                }
                 if (!attachPublishedStorageBackend(publication, publication.backend.?)) return false;
             },
         }
@@ -344,6 +370,7 @@ pub fn deactivateStorageBackend(service_id: u64) bool {
     if (publicationForDeactivation(StoragePublication, &published_storage, service_id)) |publication| {
         publication.active_service_id = 0;
         publication.ata_session = null;
+        publication.controller_session = null;
         if (active_storage_backend_service_id == service_id) active_storage_backend_service_id = 0;
         storage_volume.clearAttachedBackend();
         return true;
@@ -364,6 +391,7 @@ pub fn refreshActiveStorageAttachment(service_id: u64) bool {
         },
         .backend, .activator => blk: {
             const backend = publication.backend orelse break :blk false;
+            if (!storageControllerSessionCurrent(publication)) break :blk false;
             break :blk attachPublishedStorageBackend(publication, backend);
         },
     };
@@ -382,6 +410,7 @@ pub fn activeStorageRead(service_id: u64, start_lba: u64, buffer: []u8) bool {
         },
         .backend, .activator => blk: {
             const backend = publication.backend orelse return false;
+            if (!storageControllerSessionCurrent(publication)) break :blk false;
             break :blk backend.read(start_lba, buffer.ptr, buffer.len);
         },
     };
@@ -400,6 +429,7 @@ pub fn activeStorageWrite(service_id: u64, start_lba: u64, buffer: []const u8) b
         },
         .backend, .activator => blk: {
             const backend = publication.backend orelse return false;
+            if (!storageControllerSessionCurrent(publication)) break :blk false;
             break :blk backend.write(start_lba, buffer.ptr, buffer.len);
         },
     };
@@ -418,6 +448,7 @@ pub fn activeStorageFlush(service_id: u64) bool {
         },
         .backend, .activator => blk: {
             const backend = publication.backend orelse return false;
+            if (!storageControllerSessionCurrent(publication)) break :blk false;
             break :blk backend.flush();
         },
     };
@@ -460,6 +491,20 @@ pub fn activeStorageAtaSession(service_id: u64) ?storage_driver_task.AtaControll
     const publication = publicationForActiveStorage(service_id) orelse return null;
     if (publication.kind != .ata_bootstrap_bridge) return null;
     return publication.ata_session;
+}
+
+pub fn activeStorageControllerSession(service_id: u64) ?StorageControllerSession {
+    const publication = publicationForActiveStorage(service_id) orelse return null;
+    if (publication.kind == .ata_bootstrap_bridge or
+        !storageControllerSessionCurrent(publication)) return null;
+    return publication.controller_session;
+}
+
+pub fn storageSessionIsCurrent(session: *const StorageControllerSession) bool {
+    const task = session.kernel_port.kernel.runtime.find(session.task_id) orelse return false;
+    if (task.process_generation != session.process_generation) return false;
+    if (device_broker.brokerGeneration(session.device_id) != session.broker_generation) return false;
+    return device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
 }
 
 pub fn deactivateDeviceDataPlane(device_class: driver_service.DeviceClass, service_id: u64) bool {
@@ -524,6 +569,50 @@ fn refreshAtaPublicationSession(publication: *StoragePublication) bool {
     return true;
 }
 
+fn establishStorageControllerSession(
+    publication: *StoragePublication,
+    service_id: u64,
+    authority_capability_id: u64,
+    owner_task_id: u64,
+    dma_domain_id: u64,
+    kernel_port: *component_port.KernelPort,
+) bool {
+    if (service_id == 0 or authority_capability_id == 0 or owner_task_id == 0 or dma_domain_id == 0) return false;
+    if (device_broker.brokerGeneration(publication.device_id) == null and
+        !device_broker.publishPciController(publication.device_id)) return false;
+    if (!programStorageDmaIsolation(publication.device_id, dma_domain_id)) return false;
+
+    const task = kernel_port.kernel.runtime.find(owner_task_id) orelse return false;
+    const dma_isolation = device_broker.dmaIsolationStatus(publication.device_id, dma_domain_id) catch return false;
+    const staging_window = device_broker.defaultBrokeredDmaWindow(publication.device_id);
+    const brokered_dma_buffer = device_broker.authorizeDmaBuffer(
+        publication.device_id,
+        dma_domain_id,
+        staging_window.base,
+        staging_window.length,
+        .bidirectional,
+    ) catch return false;
+    publication.controller_session = .{
+        .kernel_port = kernel_port,
+        .device_id = publication.device_id,
+        .service_id = service_id,
+        .authority_capability_id = authority_capability_id,
+        .task_id = owner_task_id,
+        .process_generation = task.process_generation,
+        .dma_domain_id = dma_domain_id,
+        .broker_generation = device_broker.brokerGeneration(publication.device_id) orelse return false,
+        .dma_isolation = dma_isolation,
+        .brokered_dma_buffer = brokered_dma_buffer,
+    };
+    return true;
+}
+
+fn storageControllerSessionCurrent(publication: *const StoragePublication) bool {
+    const session = publication.controller_session orelse
+        return builtin.target.os.tag != .freestanding;
+    return storageSessionIsCurrent(&session);
+}
+
 fn establishAtaPublicationSession(
     publication: *StoragePublication,
     authority_capability_id: u64,
@@ -547,7 +636,7 @@ fn establishAtaPublicationSession(
 
 // Program the storage device's DMA isolation to match its real data plane.
 // When the kernel NVMe engine is attached, the program is a window-confined
-// bus-master one: the ATA-session staging window plus the NVMe queue and
+// bus-master one: the brokered staging window plus the NVMe queue and
 // bounce frames the device actually masters. Otherwise (host builds, modeled
 // ATA bridge) it stays the synthetic non-bus-master brokered window.
 fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool {

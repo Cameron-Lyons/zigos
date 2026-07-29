@@ -260,7 +260,7 @@ pub fn build(b: *std.Build) void {
         "build/os.iso",
         "build/iso",
     );
-    const iso_step = b.step("iso", "Build a bootable native-only ISO");
+    const iso_step = b.step("iso", "Build a bootable x86-64 UEFI native-only ISO");
     iso_step.dependOn(&iso_cmd.step);
     iso_step.dependOn(kernel_role_check_step);
 
@@ -271,7 +271,7 @@ pub fn build(b: *std.Build) void {
         "build/os-verification.iso",
         "build/iso-verification",
     );
-    const verification_iso_step = b.step("iso-verification", "Build bootable verification media for proof workloads");
+    const verification_iso_step = b.step("iso-verification", "Build x86-64 UEFI verification media for proof workloads");
     verification_iso_step.dependOn(&verification_iso_cmd.step);
     verification_iso_step.dependOn(kernel_role_check_step);
 

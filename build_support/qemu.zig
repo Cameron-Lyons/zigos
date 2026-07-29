@@ -198,10 +198,8 @@ fn addKernelBootCommand(
     kernel: shared.KernelArtifact,
     args: []const []const u8,
 ) *std.Build.Step.Run {
-    const command = b.addSystemCommand(&.{
-        "bash",
-        "scripts/run-with-qemu-boot-iso.sh",
-    });
+    const command = b.addSystemCommand(&.{"bash"});
+    command.addFileArg(b.path("scripts/run-with-qemu-boot-iso.sh"));
     command.addFileArg(kernel.qemu_boot_iso_path);
     command.addArgs(args);
     command.step.dependOn(kernel.install_step);
@@ -215,9 +213,9 @@ pub fn addIsoCommand(
     output_path: []const u8,
     staging_path: []const u8,
 ) *std.Build.Step.Run {
-    const command = b.addSystemCommand(&.{
-        "bash",
-        "scripts/build-grub-iso.sh",
+    const command = b.addSystemCommand(&.{"bash"});
+    command.addFileArg(b.path("scripts/build-grub-iso.sh"));
+    command.addArgs(&.{
         kernel.output_path,
         output_path,
         staging_path,
@@ -245,9 +243,9 @@ pub fn addUefiQemuCommand(
     log_path: []const u8,
     expected_role: []const u8,
 ) *std.Build.Step.Run {
-    const command = b.addSystemCommand(&.{
-        "bash",
-        "scripts/run-uefi-boot-test.sh",
+    const command = b.addSystemCommand(&.{"bash"});
+    command.addFileArg(b.path("scripts/run-uefi-boot-test.sh"));
+    command.addArgs(&.{
         iso_path,
         log_path,
         expected_role,

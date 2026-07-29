@@ -15,7 +15,7 @@ const PML4_SHIFT = table64.PML4_SHIFT;
 const PDPT_SHIFT = table64.PDPT_SHIFT;
 const PAGE_DIRECTORY_SHIFT = table64.PAGE_DIRECTORY_SHIFT;
 const PAGE_TABLE_SHIFT = table64.PAGE_TABLE_SHIFT;
-const PAGE_OFFSET_MASK: u32 = PAGE_SIZE - 1;
+const PAGE_OFFSET_MASK: usize = PAGE_SIZE - 1;
 const HEX_NIBBLE_BITS = 4;
 const HEX_NIBBLE_MASK = 0xF;
 const MAX_U32: u32 = ~@as(u32, 0);
@@ -101,7 +101,7 @@ var frame_lock: bool = false;
 
 const tableIndex = table64.index;
 
-fn pageOffset(address: u32) u32 {
+fn pageOffset(address: usize) usize {
     return address & PAGE_OFFSET_MASK;
 }
 
@@ -238,8 +238,8 @@ fn ensureChildTable(
 
 fn mapBorrowedPageIn(
     pml4: *PageDirectory,
-    virt_addr: u32,
-    phys_addr: u32,
+    virt_addr: usize,
+    phys_addr: usize,
     flags: u32,
     table_owner: u3,
 ) UserMapError!void {
@@ -247,18 +247,17 @@ fn mapBorrowedPageIn(
         return error.InvalidRange;
     }
 
-    const address: usize = virt_addr;
     const user = (flags & PAGE_USER) != 0;
-    const pdpt = try ensureChildTable(pml4, tableIndex(address, PML4_SHIFT), user, table_owner);
-    const page_directory = try ensureChildTable(pdpt, tableIndex(address, PDPT_SHIFT), user, table_owner);
-    const page_table = try ensureChildTable(page_directory, tableIndex(address, PAGE_DIRECTORY_SHIFT), user, table_owner);
-    const page_entry = &page_table[tableIndex(address, PAGE_TABLE_SHIFT)];
+    const pdpt = try ensureChildTable(pml4, tableIndex(virt_addr, PML4_SHIFT), user, table_owner);
+    const page_directory = try ensureChildTable(pdpt, tableIndex(virt_addr, PDPT_SHIFT), user, table_owner);
+    const page_table = try ensureChildTable(page_directory, tableIndex(virt_addr, PAGE_DIRECTORY_SHIFT), user, table_owner);
+    const page_entry = &page_table[tableIndex(virt_addr, PAGE_TABLE_SHIFT)];
     if (entryPresent(page_entry.*) and entryOwner(page_entry.*) == PAGE_OWNER_USER_PRIVATE) {
         return error.AlreadyMapped;
     }
 
     page_entry.* = tableEntry(phys_addr, leafFlags(flags), PAGE_OWNER_BORROWED);
-    if (pml4 == getCurrentPageDirectory()) invalidate_page(address);
+    if (pml4 == getCurrentPageDirectory()) invalidate_page(virt_addr);
 }
 
 fn mapFailure(error_value: UserMapError) noreturn {
@@ -273,14 +272,14 @@ fn mapFailure(error_value: UserMapError) noreturn {
 }
 
 pub fn mapKernelBorrowedPage(virt_addr: usize, phys_addr: usize, flags: u32) void {
-    const virtual = std.math.cast(u32, virt_addr) orelse
-        haltWithMessage("Kernel mapping lies outside the low physical aperture!\n");
-    const physical = std.math.cast(u32, phys_addr) orelse
-        haltWithMessage("Kernel physical mapping lies outside the managed aperture!\n");
+    if (!table64.isCanonicalVirtualAddress(virt_addr))
+        haltWithMessage("Kernel mapping uses a non-canonical virtual address!\n");
+    if (!table64.physicalAddressFits(phys_addr))
+        haltWithMessage("Kernel physical mapping exceeds the x86-64 address width!\n");
     mapBorrowedPageIn(
         &kernel_pml4,
-        virtual,
-        physical,
+        virt_addr,
+        phys_addr,
         flags & ~PAGE_USER,
         TABLE_OWNER_KERNEL_DYNAMIC,
     ) catch |err| mapFailure(err);
@@ -346,6 +345,10 @@ pub fn createUserAddressSpace() error{OutOfMemory}!UserAddressSpace {
     const pdpt: *PageTable = @ptrFromInt(pdpt_phys);
     zeroTable(pdpt);
     for (&kernel_pdpt, pdpt) |kernel_entry, *user_entry| {
+        if (entryPresent(kernel_entry)) user_entry.* = kernel_entry;
+    }
+
+    for (kernel_pml4[1..], pml4[1..]) |kernel_entry, *user_entry| {
         if (entryPresent(kernel_entry)) user_entry.* = kernel_entry;
     }
 
