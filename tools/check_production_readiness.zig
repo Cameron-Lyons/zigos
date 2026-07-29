@@ -666,6 +666,8 @@ fn validateNuc11tnki5KernelProofSources(
     const isr_path = "src/kernel/interrupts/isr.zig";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
+    const console_path = "src/kernel/utils/console.zig";
+    const legacy_vga_path = "src/kernel/drivers/vga.zig";
     const xhci_path = "src/kernel/drivers/xhci.zig";
     const nvme_path = "src/kernel/drivers/nvme.zig";
     const i225_path = "src/kernel/drivers/intel_i225.zig";
@@ -729,6 +731,13 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 permission review source is missing: {s}", .{permission_review_path});
         return;
     }
+    if (!common.pathExists(io, console_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 early console source is missing: {s}", .{console_path});
+        return;
+    }
+    if (common.pathExists(io, legacy_vga_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 early console must not restore the legacy VGA text driver: {s}", .{legacy_vga_path});
+    }
     if (!common.pathExists(io, nvme_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 NVMe proof source is missing: {s}", .{nvme_path});
         return;
@@ -756,6 +765,7 @@ fn validateNuc11tnki5KernelProofSources(
     const isr_source = try common.readFileAlloc(allocator, io, isr_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
+    const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
@@ -885,6 +895,17 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (std.mem.indexOf(u8, permission_review_source, "const xhci = @import") == null) {
         try common.addError(errors, allocator, "NUC11TNKi5 permission review must retain the xHCI HID input source", .{});
+    }
+    const required_early_console_snippets = [_][]const u8{
+        "const serial = @import(\"../drivers/serial.zig\")",
+        "serial.init()",
+        "serial.print(str)",
+        "serial.putChar(c)",
+    };
+    for (required_early_console_snippets) |snippet| {
+        if (std.mem.indexOf(u8, console_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 early console must remain serial-backed: {s}", .{snippet});
+        }
     }
     const required_apic_snippets = [_][]const u8{
         "TimerEvidenceSource",
