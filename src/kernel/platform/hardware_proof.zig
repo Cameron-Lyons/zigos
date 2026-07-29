@@ -10,6 +10,7 @@ const smbios = @import("smbios.zig");
 const crash_record = @import("crash_record.zig");
 const handoff = @import("../boot/handoff.zig");
 const console = @import("../utils/console.zig");
+const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const intel_i225 = @import("../drivers/intel_i225.zig");
 const intel_vtd = @import("intel_vtd.zig");
@@ -22,8 +23,15 @@ const MAX_ACPI_TABLE_BYTES: usize = 1024 * 1024;
 const PAGE_SIZE: usize = 4096;
 const PAGE_MASK: usize = PAGE_SIZE - 1;
 const MAX_X86_PHYSICAL_ADDRESS: u64 = 0x000F_FFFF_FFFF_FFFF;
-const KERNEL_ACPI_ROOT_VIRTUAL_BASE: usize = 0xFFFF_8000_2000_0000;
-const KERNEL_ACPI_ENTRY_VIRTUAL_BASE: usize = 0xFFFF_8000_2020_0000;
+
+comptime {
+    const maximum_mapped_span = MAX_ACPI_TABLE_BYTES + PAGE_SIZE;
+    if (maximum_mapped_span > mmio_windows.acpi_root.bytes or
+        maximum_mapped_span > mmio_windows.acpi_entry.bytes)
+    {
+        @compileError("ACPI table mapping exceeds its reserved MMIO window");
+    }
+}
 
 pub const ProbeFacts = struct {
     real_target_sku: bool = false,
@@ -677,7 +685,7 @@ pub fn recordGridCarbonIntensitySample(sample: GridCarbonIntensitySample) void {
 
 fn captureAcpiEvidence() void {
     const rsdp = capturedRsdp() orelse return;
-    const xsdt = mappedPhysicalTableBytes(rsdp.xsdt_address, KERNEL_ACPI_ROOT_VIRTUAL_BASE) orelse return;
+    const xsdt = mappedPhysicalTableBytes(rsdp.xsdt_address, mmio_windows.acpi_root.base) orelse return;
     const count = acpi.xsdtEntryCount(xsdt) catch return;
     facts.acpi_xsdt = true;
     var found_madt = false;
@@ -688,7 +696,7 @@ fn captureAcpiEvidence() void {
     var index: u32 = 0;
     while (index < count) : (index += 1) {
         const table_address = acpi.xsdtEntryAddress(xsdt, index) catch continue;
-        const table = mappedPhysicalTableBytes(table_address, KERNEL_ACPI_ENTRY_VIRTUAL_BASE) orelse continue;
+        const table = mappedPhysicalTableBytes(table_address, mmio_windows.acpi_entry.base) orelse continue;
         const header = acpi.parseSdtHeader(table) catch continue;
         if (std.mem.eql(u8, header.signature[0..], apic.MADT_SIGNATURE)) {
             if (apic.parseMadt(table)) |summary| {
