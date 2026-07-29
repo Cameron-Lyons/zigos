@@ -23,6 +23,13 @@ pub const ArtifactSet = struct {
     verification_manifest_module: *std.Build.Module,
 };
 
+pub const X86_64ArtifactSet = struct {
+    step: *std.Build.Step,
+    production_compile_steps: [production_artifact_count]*std.Build.Step.Compile,
+    production_archive_module: *std.Build.Module,
+    production_manifest_module: *std.Build.Module,
+};
+
 const BuiltArtifact = struct {
     compile_step: *std.Build.Step.Compile,
     install_step: *std.Build.Step,
@@ -108,38 +115,54 @@ pub fn addUserspaceArtifacts(
     };
 }
 
-pub fn addX86_64CompileCheck(
+pub fn addX86_64Artifacts(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-) *std.Build.Step {
+) X86_64ArtifactSet {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .freestanding,
         .abi = .none,
     });
     const userspace_modules = native_modules.addUserspaceRuntimeModules(b, target, optimize);
-    const artifact = addUserspaceCompile(
-        b,
-        target,
-        optimize,
-        userspace_modules,
-        production_registry.production_boot_image_specs[0],
-        "userspace-x86_64-contract-check.elf",
-    );
     const native_archive_deps_module = b.createModule(.{
         .root_source_file = b.path("src/native/archive_generator_deps.zig"),
     });
     const archive_generator = addArchiveGenerator(b, userspace_modules.descriptor, native_archive_deps_module);
     const archive_run = b.addRunArtifact(archive_generator);
-    _ = archive_run.addOutputDirectoryArg("userspace-x86_64-archive-check");
-    archive_run.addArg("x86_64-check");
+    const archive_dir = archive_run.addOutputDirectoryArg("userspace-x86_64-production-archive");
+    const archive_source = archive_dir.path(b, "userspace_archive.zig");
+    const manifest_source = archive_dir.path(b, "production_artifact_manifest.zig");
+    archive_run.addArg("zigos_native");
     archive_run.addArg("production");
-    archive_run.addFileArg(b.path("src/boot/boot64.S"));
-    archive_run.addArtifactArg(artifact);
+    archive_run.addFileArg(b.path("src/boot/boot_x86_64.S"));
 
-    const step = b.step("userspace-x86_64-compile-check", "Compile and inspect the userspace ABI for the long-mode target");
+    var production_compile_steps: [production_artifact_count]*std.Build.Step.Compile = undefined;
+    for (production_registry.production_boot_image_specs, 0..) |spec, artifact_index| {
+        const artifact = addUserspaceCompile(
+            b,
+            target,
+            optimize,
+            userspace_modules,
+            spec,
+            b.fmt("x86_64-{s}", .{spec.artifact_name}),
+        );
+        production_compile_steps[artifact_index] = artifact;
+        archive_run.addArtifactArg(artifact);
+    }
+
+    const step = b.step("userspace-x86_64-compile-check", "Compile and inspect the complete production userspace catalog for the long-mode target");
     step.dependOn(&archive_run.step);
-    return step;
+    return .{
+        .step = step,
+        .production_compile_steps = production_compile_steps,
+        .production_archive_module = b.createModule(.{
+            .root_source_file = archive_source,
+        }),
+        .production_manifest_module = b.createModule(.{
+            .root_source_file = manifest_source,
+        }),
+    };
 }
 
 fn addArchiveGenerator(
@@ -206,7 +229,7 @@ fn addUserspaceCompile(
     options.addOption(bool, "run_mmu_isolation_probe", (spec.contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
     options.addOption(u8, "service_kind", @intFromEnum(spec.service_kind));
 
-    const module = b.addModule(spec.artifact_name, .{
+    const module = b.createModule(.{
         .root_source_file = b.path(spec.source_path),
         .target = target,
         .optimize = optimize,
