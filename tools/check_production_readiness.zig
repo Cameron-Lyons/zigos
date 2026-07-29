@@ -71,6 +71,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS = [_][]const u8{
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "BOOT:ROLE:verification",
+    "ZIGOS:CPU:PCID:ENABLED",
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
     "ZIGOS:USERSPACE:EXEC_PROBE:OK",
@@ -105,6 +106,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "BOOT:START",
     "BOOT:PROFILE:zigos_native",
     "BOOT:ROLE:production",
+    "ZIGOS:CPU:PCID:ENABLED",
     "BOOT:CORE_READY",
     "ZIGOS:KERNEL_NETWORK:DEFERRED",
     "ZIGOS:NATIVE:BOOTSTRAP",
@@ -672,8 +674,17 @@ fn validateNuc11tnki5KernelProofSources(
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
     const timer_path = "src/kernel/timer/timer.zig";
     const qemu_harness_path = "scripts/qemu-harness.sh";
+    const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
+    const production_grub_path = "src/boot/grub-x86_64-kernel.cfg";
     const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
     const cpu_baseline_path = "src/arch/cpu_baseline.zig";
+    const x86_path = "src/arch/x86.zig";
+    const invpcid_path = "src/arch/x86/invpcid.S";
+    const cpu_features_path = "src/arch/cpu_features.zig";
+    const boot_entry_path = "src/kernel/boot/entry.zig";
+    const paging_path = "src/kernel/memory/paging64.zig";
+    const pcid_allocator_path = "src/kernel/memory/pcid_allocator.zig";
+    const userspace_executor_path = "src/native/task/userspace_executor.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
     const console_path = "src/kernel/utils/console.zig";
     const legacy_vga_path = "src/kernel/drivers/vga.zig";
@@ -765,12 +776,48 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 QEMU harness is missing: {s}", .{qemu_harness_path});
         return;
     }
+    if (!common.pathExists(io, qemu_grub_path)) {
+        try common.addError(errors, allocator, "QEMU boot configuration is missing: {s}", .{qemu_grub_path});
+        return;
+    }
+    if (!common.pathExists(io, production_grub_path)) {
+        try common.addError(errors, allocator, "production boot configuration is missing: {s}", .{production_grub_path});
+        return;
+    }
     if (!common.pathExists(io, ci_setup_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 CI setup action is missing: {s}", .{ci_setup_path});
         return;
     }
     if (!common.pathExists(io, cpu_baseline_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 CPU baseline source is missing: {s}", .{cpu_baseline_path});
+        return;
+    }
+    if (!common.pathExists(io, x86_path)) {
+        try common.addError(errors, allocator, "x86 process-context source is missing: {s}", .{x86_path});
+        return;
+    }
+    if (!common.pathExists(io, invpcid_path)) {
+        try common.addError(errors, allocator, "x86 process-context invalidation assembly is missing: {s}", .{invpcid_path});
+        return;
+    }
+    if (!common.pathExists(io, cpu_features_path)) {
+        try common.addError(errors, allocator, "modern CPU feature enablement source is missing: {s}", .{cpu_features_path});
+        return;
+    }
+    if (!common.pathExists(io, boot_entry_path)) {
+        try common.addError(errors, allocator, "modern CPU boot gate source is missing: {s}", .{boot_entry_path});
+        return;
+    }
+    if (!common.pathExists(io, paging_path)) {
+        try common.addError(errors, allocator, "PCID-aware paging source is missing: {s}", .{paging_path});
+        return;
+    }
+    if (!common.pathExists(io, pcid_allocator_path)) {
+        try common.addError(errors, allocator, "bounded PCID allocator source is missing: {s}", .{pcid_allocator_path});
+        return;
+    }
+    if (!common.pathExists(io, userspace_executor_path)) {
+        try common.addError(errors, allocator, "userspace address-space switching source is missing: {s}", .{userspace_executor_path});
         return;
     }
     if (!common.pathExists(io, permission_review_path)) {
@@ -821,8 +868,17 @@ fn validateNuc11tnki5KernelProofSources(
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
     const timer_source = try common.readFileAlloc(allocator, io, timer_path, common.source_file_max_bytes);
     const qemu_harness_source = try common.readFileAlloc(allocator, io, qemu_harness_path, common.source_file_max_bytes);
+    const qemu_grub_source = try common.readFileAlloc(allocator, io, qemu_grub_path, common.source_file_max_bytes);
+    const production_grub_source = try common.readFileAlloc(allocator, io, production_grub_path, common.source_file_max_bytes);
     const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
     const cpu_baseline_source = try common.readFileAlloc(allocator, io, cpu_baseline_path, common.source_file_max_bytes);
+    const x86_source = try common.readFileAlloc(allocator, io, x86_path, common.source_file_max_bytes);
+    const invpcid_source = try common.readFileAlloc(allocator, io, invpcid_path, common.source_file_max_bytes);
+    const cpu_features_source = try common.readFileAlloc(allocator, io, cpu_features_path, common.source_file_max_bytes);
+    const boot_entry_source = try common.readFileAlloc(allocator, io, boot_entry_path, common.source_file_max_bytes);
+    const paging_source = try common.readFileAlloc(allocator, io, paging_path, common.source_file_max_bytes);
+    const pcid_allocator_source = try common.readFileAlloc(allocator, io, pcid_allocator_path, common.source_file_max_bytes);
+    const userspace_executor_source = try common.readFileAlloc(allocator, io, userspace_executor_path, common.source_file_max_bytes);
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
@@ -1063,11 +1119,18 @@ fn validateNuc11tnki5KernelProofSources(
         "-c /dev/kvm",
         "QEMU_HARNESS_COMMAND+=(-accel",
         "printf '%s\\n' \"host\"",
+        "max,+x2apic,tsc-frequency=2400000000",
     };
     for (required_accelerated_qemu_snippets) |snippet| {
         if (std.mem.indexOf(u8, qemu_harness_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 QEMU validation must use hardware-backed x2APIC when KVM is available: {s}", .{snippet});
         }
+    }
+    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_tlb_fallback") == null) {
+        try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator TLB fallback", .{});
+    }
+    if (std.mem.indexOf(u8, production_grub_source, "qemu_software_tlb_fallback") != null) {
+        try common.addError(errors, allocator, "production boot configuration must not permit the software-emulator TLB fallback", .{});
     }
     const required_ci_kvm_snippets = [_][]const u8{
         "Enable KVM acceleration when available",
@@ -1090,16 +1153,124 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "NUC11TNKi5 timer must not restore PIT programming: {s}", .{snippet});
         }
     }
-    const required_timer_cpu_baseline_snippets = [_][]const u8{
+    const required_modern_cpu_baseline_snippets = [_][]const u8{
         "x2apic",
         "tsc_deadline",
         "invariant_tsc",
         "tsc_frequency_hz",
         "decodeTscFrequency",
+        "pcid",
+        "invpcid",
     };
-    for (required_timer_cpu_baseline_snippets) |snippet| {
+    for (required_modern_cpu_baseline_snippets) |snippet| {
         if (std.mem.indexOf(u8, cpu_baseline_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 CPU baseline must expose the x2APIC timer selection contract: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 CPU baseline must expose the modern timer and process-context contract: {s}", .{snippet});
+        }
+    }
+    const required_x86_pcid_snippets = [_][]const u8{
+        "CR4_PCIDE",
+        "CR3_NO_FLUSH",
+        "pcidCr3Value",
+        "writeCr3WithPcid",
+        "invalidatePcid",
+        "enableProcessContextIdentifiers",
+        "processContextIdentifiersEnabled",
+    };
+    for (required_x86_pcid_snippets) |snippet| {
+        if (std.mem.indexOf(u8, x86_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86 process-context support must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_invpcid_assembly_snippets = [_][]const u8{
+        "x86_invalidate_pcid",
+        "mov $1, %rcx",
+        ".byte 0x66, 0x0f, 0x38, 0x82, 0x0f",
+    };
+    for (required_invpcid_assembly_snippets) |snippet| {
+        if (std.mem.indexOf(u8, invpcid_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86 process-context invalidation must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_cpu_feature_pcid_snippets = [_][]const u8{
+        "enableModernFeatures",
+        "ProcessContextMode",
+        "hardware_pcid",
+        "software_flush",
+        "enableProcessContextIdentifiers",
+        "processContextIdentifiersEnabled",
+    };
+    for (required_cpu_feature_pcid_snippets) |snippet| {
+        if (std.mem.indexOf(u8, cpu_features_source, snippet) == null) {
+            try common.addError(errors, allocator, "modern CPU feature enablement must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_boot_process_context_snippets = [_][]const u8{
+        "softwareProcessContextFallbackRequested",
+        "model_inventory",
+        "qemu_software_tlb_fallback",
+        "qemu_tsc_frequency_hz",
+        "hardware_process_contexts",
+        "cpu_pcid_enabled",
+        "cpu_pcid_software_fallback",
+        "cpu_pcid_ready",
+    };
+    for (required_boot_process_context_snippets) |snippet| {
+        if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "CPU boot process-context gate must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_pcid_allocator_snippets = [_][]const u8{
+        "KERNEL_IDENTIFIER",
+        "MAX_IDENTIFIER",
+        "next_hint",
+        "NotAllocated",
+    };
+    for (required_pcid_allocator_snippets) |snippet| {
+        if (std.mem.indexOf(u8, pcid_allocator_source, snippet) == null) {
+            try common.addError(errors, allocator, "bounded PCID allocation must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_pcid_paging_snippets = [_][]const u8{
+        "pcid_allocator.Allocator",
+        "tryAllocProcessContext",
+        "releaseProcessContext",
+        "x86.invalidatePcid",
+        "x86.processContextIdentifiersEnabled",
+        "x86.writeCr3WithPcid",
+        "x86.writeCr3",
+        "switchToUserAddressSpace",
+        "switchToKernelAddressSpace",
+        "switchAddressSpace",
+    };
+    for (required_pcid_paging_snippets) |snippet| {
+        if (std.mem.indexOf(u8, paging_source, snippet) == null) {
+            try common.addError(errors, allocator, "PCID-aware paging must retain snippet: {s}", .{snippet});
+        }
+    }
+    const retired_flush_switch_snippets = [_][]const u8{
+        "switchPageDirectory",
+    };
+    const address_space_switch_sources = [_]struct {
+        label: []const u8,
+        source: []const u8,
+    }{
+        .{ .label = paging_path, .source = paging_source },
+        .{ .label = userspace_executor_path, .source = userspace_executor_source },
+    };
+    for (address_space_switch_sources) |source_check| {
+        for (retired_flush_switch_snippets) |snippet| {
+            if (std.mem.indexOf(u8, source_check.source, snippet) != null) {
+                try common.addError(errors, allocator, "address-space switching must not restore the flush-on-every-switch API in {s}: {s}", .{ source_check.label, snippet });
+            }
+        }
+    }
+    const required_userspace_switch_snippets = [_][]const u8{
+        "switchToUserAddressSpace",
+        "switchToKernelAddressSpace",
+    };
+    for (required_userspace_switch_snippets) |snippet| {
+        if (std.mem.indexOf(u8, userspace_executor_source, snippet) == null) {
+            try common.addError(errors, allocator, "userspace execution must use the typed PCID-aware switch surface: {s}", .{snippet});
         }
     }
     if (std.mem.indexOf(u8, permission_review_source, "const xhci = @import") == null) {
