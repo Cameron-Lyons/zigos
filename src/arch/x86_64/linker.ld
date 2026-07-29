@@ -8,13 +8,16 @@ SECTIONS
 
     .text : ALIGN(4K)
     {
+        KEEP(*(.multiboot2))
         *(.multiboot)
+        *(.text.boot)
         *(.text)
         *(.text.*)
     }
 
     .rodata : ALIGN(4K)
     {
+        *(.rodata.boot)
         *(.rodata)
         *(.rodata.*)
     }
