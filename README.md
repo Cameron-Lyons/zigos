@@ -159,13 +159,17 @@ Use the pinned toolchain and repo entrypoints:
   enters the bootstrap in 32-bit protected mode; the bootstrap immediately
   installs four-level paging and enters the x86-64 Zig kernel.
 - Production hardware must expose a checksum-valid ACPI DMAR table with at
-  least 39 DMA address bits, interrupt remapping, no x2APIC or DMA-remapping
+  least 39 DMA address bits, x2APIC interrupt remapping, no x2APIC or DMA-remapping
   firmware opt-out, and a segment-zero VT-d unit covering all remaining PCI
-  devices. Boot revokes every discovered PCI bus master, installs coherent
-  deny-by-default translation tables across every segment-zero unit, maps only
-  the five direction-scoped NVMe queue/bounce pages, confirms translation on
-  every unit, and only then enables the controller. Interrupt remapping and
-  captured fault-record evidence remain separate hardware work.
+  devices. Boot revokes every discovered PCI bus master, masks INTx and disables
+  MSI/MSI-X, installs coherent deny-by-default DMA and interrupt-remapping tables
+  across every segment-zero unit, maps only the five direction-scoped NVMe
+  queue/bounce pages, and confirms translation on every unit. Before normal
+  storage attach, the controller must trigger a primary VT-d record by attempting
+  a write to a reserved but unmapped guard page; the requester, address, direction,
+  and unchanged canary are verified before the controller is reset and reused.
+  Every later synchronous command polls the same primary records; a DMA fault
+  disables the controller and PCI bus mastering and withdraws the storage backend.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses

@@ -10,6 +10,7 @@
 // (virt == phys) with caching disabled before touching registers.
 
 const console = @import("../utils/console.zig");
+const builtin = @import("builtin");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("../platform/dmar.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
@@ -65,6 +66,8 @@ pub const Error = error{
     LbaOutOfRange,
     NamespaceMissing,
     UnsupportedLbaFormat,
+    DmaIsolationBypassed,
+    DmaFault,
 };
 
 // Admin opcodes.
@@ -187,7 +190,7 @@ fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
     while (spins < READY_SPIN_LIMIT) : (spins += 1) {
         if (controller.fatal()) return false;
         if (controller.ready() == want_ready) return true;
-        asm volatile ("pause");
+        spinHint();
     }
     return false;
 }
@@ -263,16 +266,24 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
     const cqe: [*]volatile u32 = @ptrFromInt(queue.cq_phys + queue.cq_head * CQ_ENTRY_BYTES);
     var spins: u64 = 0;
     while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
+        if ((spins & 0x3FF) == 0 and intel_vtd.faultMonitoringEnabled()) {
+            if ((intel_vtd.pollFault() catch return error.DmaFault) != null) return error.DmaFault;
+        }
         const status_dword = cqe[3];
         const phase: u1 = @intCast((status_dword >> 16) & 1);
         if (phase == queue.phase) {
             queue.cq_head = (queue.cq_head + 1) % queue.entries;
             if (queue.cq_head == 0) queue.phase ^= 1;
             self.writeReg32(cqDoorbell(self, queue.qid), queue.cq_head);
+            if (intel_vtd.faultMonitoringEnabled() and
+                (intel_vtd.pollFault() catch return error.DmaFault) != null)
+            {
+                return error.DmaFault;
+            }
             if (((status_dword >> 17) & 0x7FFF) != 0) return error.CommandFailed;
             return;
         }
-        asm volatile ("pause");
+        spinHint();
     }
     return error.CommandTimeout;
 }
@@ -345,6 +356,14 @@ fn zeroFrame(phys: u32) void {
     @memset(bytes[0..PAGE_SIZE], 0);
 }
 
+fn spinHint() void {
+    if (comptime builtin.cpu.arch == .x86_64) {
+        asm volatile ("pause");
+    } else {
+        asm volatile ("" ::: .{ .memory = true });
+    }
+}
+
 // ---- Storage backend integration ----------------------------------------
 // The storage volume drives I/O through volume/backend.zig with single-sector
 // (512-byte) buffers where start_lba is the absolute device LBA. We satisfy
@@ -353,6 +372,7 @@ fn zeroFrame(phys: u32) void {
 // alignment guarantees. (General sector-multiple lengths are handled by
 // looping one page — BOUNCE_SECTORS — per NVMe command.)
 var active_controller: Controller = undefined;
+var active_device: pci.PCIDevice = undefined;
 var active_present: bool = false;
 var bounce_phys: u32 = 0;
 
@@ -393,10 +413,48 @@ fn identifyNamespace(self: *Controller, buffer: u32) Error!void {
     self.namespace_sectors = nsze;
 }
 
+fn issueFaultProbe(self: *Controller, guard_phys: u32) void {
+    const queue = &self.admin;
+    const cid = queue.next_cid;
+    queue.next_cid +%= 1;
+
+    const command = faultProbeCommand(self.nsid, guard_phys);
+
+    const sq_entry: [*]volatile u32 = @ptrFromInt(queue.sq_phys + queue.sq_tail * SQ_ENTRY_BYTES);
+    for (0..command.len) |index| sq_entry[index] = command[index];
+    sq_entry[0] = (command[0] & 0x0000_FFFF) | (@as(u32, cid) << 16);
+    queue.sq_tail = (queue.sq_tail + 1) % queue.entries;
+    self.writeReg32(sqDoorbell(self, queue.qid), queue.sq_tail);
+}
+
+fn faultProbeCommand(nsid: u32, guard_phys: u32) [16]u32 {
+    var command = [_]u32{0} ** 16;
+    command[0] = ADMIN_OPC_IDENTIFY;
+    command[1] = nsid;
+    command[6] = guard_phys;
+    command[10] = IDENTIFY_CNS_NAMESPACE;
+    return command;
+}
+
+fn fillGuardPage(guard_phys: u32) void {
+    const bytes: [*]u8 = @ptrFromInt(guard_phys);
+    @memset(bytes[0..PAGE_SIZE], 0xA5);
+}
+
+fn guardPageIntact(guard_phys: u32) bool {
+    const bytes: [*]const u8 = @ptrFromInt(guard_phys);
+    return guardPatternIntact(bytes[0..PAGE_SIZE]);
+}
+
+fn guardPatternIntact(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte != 0xA5) return false;
+    return true;
+}
+
 // Bring the controller online and register it as the active storage backend.
 // Real hardware supplies a validated DMAR summary; test machines deliberately
 // pass null because their emulated chipset has no VT-d unit.
-pub fn attachAsBackend(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !bool {
+pub fn attachAsBackend(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !?intel_vtd.FaultRecord {
     if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
     const dma_base = paging.alloc_frames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
     const frames = DmaFrames{ .base = dma_base };
@@ -408,22 +466,41 @@ pub fn attachAsBackend(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !b
     var bus_master_enabled = false;
     errdefer if (bus_master_enabled) {
         controller.writeReg32(REG_CC, controller.reg32(REG_CC) & ~CC_EN);
-        _ = spinUntilReady(&controller, false);
         pci.disableBusMastering(dev);
+        _ = spinUntilReady(&controller, false);
     };
     const windows = frames.windows();
     if (vtd_summary) |summary| try intel_vtd.enforceNvme(summary, dev, &windows);
     pci.enableMemoryBusMastering(dev);
     bus_master_enabled = true;
     try enable(&controller);
+
+    var fault_proof: ?intel_vtd.FaultRecord = null;
+    if (vtd_summary != null) {
+        const guard_phys = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
+        var guard_releasable = false;
+        defer if (guard_releasable) paging.release_frames(guard_phys, 1) catch {};
+        fillGuardPage(guard_phys);
+        issueFaultProbe(&controller, guard_phys);
+        fault_proof = try intel_vtd.waitForBlockedWrite(guard_phys);
+
+        // The denied command can remain outstanding in the controller. Reset it
+        // before reclaiming the guard page or submitting normal admin work.
+        controller = try prepare(dev, frames);
+        if (!guardPageIntact(guard_phys)) return error.DmaIsolationBypassed;
+        guard_releasable = true;
+        try enable(&controller);
+    }
+
     try createIoQueues(&controller, frames);
     const bounce = frames.frame(4);
     try identifyNamespace(&controller, bounce);
     active_controller = controller;
+    active_device = dev;
     bounce_phys = bounce;
     active_present = true;
     retain_dma_frames = true;
-    return vtd_summary != null;
+    return fault_proof;
 }
 
 pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
@@ -438,7 +515,10 @@ pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callcon
         // One NVMe command per page (single-PRP limit), not per 512B sector.
         const chunk = @min(total_sectors - sector, BOUNCE_SECTORS);
         const chunk_bytes = chunk * SECTOR_BYTES;
-        readSectors(&active_controller, start_lba + sector, bounce_phys, @intCast(chunk)) catch return false;
+        readSectors(&active_controller, start_lba + sector, bounce_phys, @intCast(chunk)) catch |err| {
+            handleBackendError(err);
+            return false;
+        };
         @memcpy((buffer_ptr + sector * SECTOR_BYTES)[0..chunk_bytes], bounce[0..chunk_bytes]);
         sector += chunk;
     }
@@ -459,7 +539,10 @@ pub fn backendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) 
         const chunk = @min(total_sectors - sector, BOUNCE_SECTORS);
         const chunk_bytes = chunk * SECTOR_BYTES;
         @memcpy(bounce[0..chunk_bytes], (buffer_ptr + sector * SECTOR_BYTES)[0..chunk_bytes]);
-        writeSectors(&active_controller, start_lba + sector, bounce_phys, @intCast(chunk)) catch return false;
+        writeSectors(&active_controller, start_lba + sector, bounce_phys, @intCast(chunk)) catch |err| {
+            handleBackendError(err);
+            return false;
+        };
         sector += chunk;
     }
     return true;
@@ -467,8 +550,21 @@ pub fn backendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) 
 
 pub fn backendFlush() callconv(.c) bool {
     if (!active_present) return false;
-    flush(&active_controller) catch return false;
+    flush(&active_controller) catch |err| {
+        handleBackendError(err);
+        return false;
+    };
     return true;
+}
+
+fn handleBackendError(err: anyerror) void {
+    if (err != error.DmaFault or !active_present) return;
+    active_present = false;
+    bounce_phys = 0;
+    active_controller.writeReg32(REG_CC, active_controller.reg32(REG_CC) & ~CC_EN);
+    pci.disableBusMastering(active_device);
+    _ = spinUntilReady(&active_controller, false);
+    console.print("ZIGOS:NVME:HW:DMA_FAULT_CONTAINED\n");
 }
 
 // Kernel-exported bridge so the native storage layer can use the real NVMe data
@@ -528,8 +624,8 @@ export fn zigosStorageBootstrapNvmeDmaWindow(
 // Diagnostic probe used to validate the MMIO foundation in QEMU. Brings the
 // controller and I/O queues online (non-destructive) and prints the capability
 // and version registers. Safe to call only when a real NVMe controller exists.
-pub fn probeAndReport(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !bool {
-    const isolated = try attachAsBackend(dev, vtd_summary);
+pub fn probeAndReport(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !?intel_vtd.FaultRecord {
+    const fault_proof = try attachAsBackend(dev, vtd_summary);
     console.print("ZIGOS:NVME:HW:CAP=");
     printHex64(active_controller.capabilities());
     console.print(" VS=");
@@ -537,7 +633,7 @@ pub fn probeAndReport(dev: pci.PCIDevice, vtd_summary: ?*const dmar.Summary) !bo
     console.print(" RDY=1\n");
     console.print("ZIGOS:NVME:HW:BRINGUP_OK\n");
     console.print("ZIGOS:NVME:HW:IOQ_OK\n");
-    return isolated;
+    return fault_proof;
 }
 
 // Keep the destructive backend roundtrip compiler-checked though it is never
