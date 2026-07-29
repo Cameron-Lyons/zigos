@@ -12,10 +12,10 @@ const hardware_proof = @import("../platform/hardware_proof.zig");
 
 const QEMU_TSC_FREQUENCY_HZ: u64 = 2_400_000_000;
 
-fn softwareProcessContextFallbackRequested() bool {
+fn softwareCpuFallbackRequested() bool {
     const info = handoff.capturedInfo() orelse return false;
     return handoff.commandLineHasFlag(info, "model_inventory") and
-        handoff.commandLineHasFlag(info, "qemu_software_tlb_fallback") and
+        handoff.commandLineHasFlag(info, "qemu_software_cpu_fallback") and
         handoff.commandLineU64(info, "qemu_tsc_frequency_hz") == QEMU_TSC_FREQUENCY_HZ;
 }
 
@@ -38,12 +38,19 @@ pub fn kernelMain() void {
             }
         }
     }
+    const software_cpu_fallback = softwareCpuFallbackRequested();
     const hardware_process_contexts = features.pcid and features.invpcid;
-    const software_process_context_fallback = !hardware_process_contexts and softwareProcessContextFallbackRequested();
+    const software_process_context_fallback = !hardware_process_contexts and software_cpu_fallback;
+    const hardware_tsc_timer = features.tsc_deadline and features.invariant_tsc;
+    const software_timer_fallback = !hardware_tsc_timer and software_cpu_fallback;
     var required_features = features;
     if (software_process_context_fallback) {
         required_features.pcid = true;
         required_features.invpcid = true;
+    }
+    if (software_timer_fallback) {
+        required_features.tsc_deadline = true;
+        required_features.invariant_tsc = true;
     }
     if (cpu_features.baseline.firstMissing(required_features)) |missing_feature| {
         common.printBootMarker(boot_markers.cpu_baseline_rejected);
@@ -55,7 +62,7 @@ pub fn kernelMain() void {
     }
     common.printBootMarker(boot_markers.cpu_baseline_ready);
     cpu_features.enableModernFeatures(
-        features,
+        required_features,
         if (hardware_process_contexts) .hardware_pcid else .software_flush,
     );
     common.printBootMarker(boot_markers.cpu_nx_enabled);
@@ -77,7 +84,10 @@ pub fn kernelMain() void {
     init_devices.init();
     console.print("Delegating network ownership to native service contracts.\n");
     common.printBootMarker(boot_markers.kernel_network_deferred);
-    init_runtime.init(features);
+    init_runtime.init(
+        features,
+        if (hardware_tsc_timer) .tsc_deadline else .calibrated_countdown,
+    );
 
     common.printBootMarker(boot_markers.boot_core_ready);
     switch (comptime config.bootProfile()) {
