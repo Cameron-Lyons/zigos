@@ -142,7 +142,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
     const descriptor_before = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 781);
     try std.testing.expectEqual(storage_driver.device_id, descriptor_before.device_id);
-    try std.testing.expectEqual(@as(u16, 0), descriptor_before.base_port);
+    try std.testing.expectEqual(@as(u8, 0), descriptor_before.mmio_window_count);
 
     try proveStorageWriteRead(storage_service_record.id, storage_restart_probe_lba, "driver-restart-before", 0x31);
     const stale_crash_session = bootstrap_driver_port.activeStorageControllerSession(storage_service_record.id) orelse return error.MissingBootedDriverBinding;
@@ -290,8 +290,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     runtime.allowHostPointerSyscallsForTask(swapped_driver.owner_task_id);
     const swapped_descriptor = try expectDeviceDescribe(kernel_port, swapped_driver.owner_task_id, next_authority.id, 802);
     try std.testing.expectEqual(swapped_driver.device_id, swapped_descriptor.device_id);
-    try std.testing.expectEqual(@as(u16, 0), swapped_descriptor.base_port);
-    try std.testing.expectEqual(@as(u8, 0), swapped_descriptor.irq_line);
+    try std.testing.expectEqual(@as(u8, 0), swapped_descriptor.mmio_window_count);
     try proveReboundStorageSession(
         storage_service_record.id,
         swapped_driver,

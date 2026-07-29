@@ -344,30 +344,6 @@ pub const operations = [_]Descriptor{
         .required_right = .device_use,
         .target_kind = .{ .fixed = .device },
     },
-    .{
-        .operation = .device_port_read,
-        .binding = .{
-            .request_type_name = "DevicePortReadRequest",
-            .response_type_name = "DevicePortReadResponse",
-            .handler_name = "dispatchDevicePortRead",
-            .port_method_name = "devicePortRead",
-        },
-        .domain = .device,
-        .required_right = .device_use,
-        .target_kind = .{ .fixed = .device },
-    },
-    .{
-        .operation = .device_port_write,
-        .binding = .{
-            .request_type_name = "DevicePortWriteRequest",
-            .response_type_name = "void",
-            .handler_name = "dispatchDevicePortWrite",
-            .port_method_name = "devicePortWrite",
-        },
-        .domain = .device,
-        .required_right = .device_use,
-        .target_kind = .{ .fixed = .device },
-    },
 };
 
 pub fn declarationFor(comptime operation: abi.NativeOperation) Descriptor {
@@ -400,7 +376,7 @@ test "native operation metadata covers every operation once" {
     try std.testing.expectEqual(Domain.task, declarationFor(.task_create).domain);
     try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, declarationFor(.task_create).request_copy);
     try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, declarationFor(.endpoint_send).request_copy);
-    try std.testing.expectEqual(capability.CapabilityRight.device_use, declarationFor(.device_port_write).required_right);
+    try std.testing.expectEqual(capability.CapabilityRight.device_use, declarationFor(.device_describe).required_right);
     try std.testing.expect(switch (declarationFor(.capability_query).target_kind) {
         .same_as_target_capability => true,
         else => false,
