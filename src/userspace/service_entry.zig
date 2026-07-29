@@ -19,7 +19,10 @@ pub fn Main(comptime mode: EntryMode) type {
 
         pub fn main() callconv(.c) noreturn {
             switch (mode) {
-                .contract => runtime.zigos_userspace_contract_main(build_options.run_mmu_isolation_probe),
+                .contract => runtime.zigos_userspace_contract_main(
+                    build_options.run_mmu_isolation_probe,
+                    build_options.run_nx_isolation_probe,
+                ),
                 .service => |service_kind| runtime.zigos_userspace_service_main(service_kind),
             }
         }

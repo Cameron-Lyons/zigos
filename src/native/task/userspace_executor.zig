@@ -8,6 +8,7 @@ const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
+const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
 
 const x86 = if (builtin.target.os.tag == .freestanding)
@@ -25,6 +26,17 @@ else
     struct {
         pub fn printBootMarker(_: []const u8) void {}
     };
+
+const kernel_config = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/config.zig")
+else
+    struct {
+        pub fn includesVerificationEvidence() bool {
+            return true;
+        }
+    };
+const include_verification_evidence = kernel_config.includesVerificationEvidence();
+const NxProbeTarget = if (include_verification_evidence) u32 else void;
 
 const freestanding = if (builtin.target.os.tag == .freestanding)
     struct {
@@ -49,6 +61,7 @@ else
             pub const PageDirectory = opaque {};
             pub const UserPermissions = struct {
                 writable: bool,
+                executable: bool = false,
                 write_through: bool = false,
                 cache_disabled: bool = false,
             };
@@ -61,6 +74,7 @@ else
                 AddressOverflow,
                 KernelMappingCollision,
                 AlreadyMapped,
+                WritableExecutable,
             };
             pub const UserWriteError = error{
                 InvalidRange,
@@ -90,6 +104,9 @@ else
             }
             pub fn writeOwnedUserRange(_: *const UserAddressSpace, _: u32, _: []const u8) UserWriteError!void {
                 return error.PageNotOwned;
+            }
+            pub fn ownedUserPageIsExecutable(_: *const UserAddressSpace, _: u32) ?bool {
+                return null;
             }
             pub fn destroyUserAddressSpace(_: *UserAddressSpace) UserAddressSpaceDestroyError!void {}
             pub fn unmapBorrowedCurrentPage(_: u32) bool {
@@ -261,6 +278,7 @@ pub const Executor = struct {
     last_fault_address: u32 = 0,
     last_fault_error_code: u32 = 0,
     user_page_fault_count: u64 = 0,
+    active_nx_probe_target: NxProbeTarget = if (include_verification_evidence) 0 else {},
     mappings: [task_runtime.MAX_TASKS]MappingEntry = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS,
     mapping_index: MappingIndex = MappingIndex.init(),
 
@@ -354,6 +372,7 @@ pub const Executor = struct {
         self.last_fault_address = 0;
         self.last_fault_error_code = 0;
         self.user_page_fault_count = 0;
+        if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
         self.mappings = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
         self.mapping_index.reset();
         zigos_userspace_resume_requested = 0;
@@ -379,6 +398,23 @@ pub const Executor = struct {
         if (self.last_fault_address_space_id != address_space_id) return false;
         if (self.last_fault_address != expected_fault_address) return false;
         if ((self.last_fault_error_code & 0x4) == 0) return false;
+        self.clearUserPageFaultObservation();
+        return true;
+    }
+
+    pub fn consumeUserExecuteFault(
+        self: *Executor,
+        task_id: u64,
+        address_space_id: u64,
+        expected_fault_address: u32,
+    ) bool {
+        const required = @as(u32, 0x1 | 0x4 | 0x10);
+        const forbidden = @as(u32, 0x2);
+        if (self.last_fault_task_id != task_id) return false;
+        if (self.last_fault_address_space_id != address_space_id) return false;
+        if (self.last_fault_address != expected_fault_address) return false;
+        if ((self.last_fault_error_code & required) != required) return false;
+        if ((self.last_fault_error_code & forbidden) != 0) return false;
         self.clearUserPageFaultObservation();
         return true;
     }
@@ -443,8 +479,15 @@ pub const Executor = struct {
                 .stack_pointer = stack_pointer,
             };
 
+        const nx_probe_target = if (include_verification_evidence and
+            (image.contract_flags & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
+            std.math.cast(u32, image.bootstrap_mailbox_address) orelse return false
+        else
+            0;
+
         self.active_mapping = mapping;
         self.active_task_id = task_id;
+        if (comptime include_verification_evidence) self.active_nx_probe_target = nx_probe_target;
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
         zigos_userspace_resume_requested = 0;
@@ -460,6 +503,7 @@ pub const Executor = struct {
 
         self.active_task_id = 0;
         self.active_mapping = null;
+        if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
         publishRootActiveTaskId(0);
         zigos_userspace_resume_requested = 0;
 
@@ -764,12 +808,56 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     mapping.last_fault_address = faulting_address;
     mapping.last_fault_error_code = error_code;
 
+    if (nxProbeRecoveryContext(executor, mapping, frame, faulting_address, error_code)) {
+        mapping.resume_valid = true;
+        mapping.resume_instruction_pointer = @intCast(frame.eip);
+        mapping.resume_stack_pointer = @intCast(frame.useresp);
+        captureUserContext64(mapping, frame);
+    }
+
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
 
     if (executor.kernel_page_directory_ptr != 0) {
         freestanding.paging.switchPageDirectory(@ptrFromInt(executor.kernel_page_directory_ptr));
     }
+}
+
+fn nxProbeRecoveryContext(
+    executor: *const Executor,
+    mapping: *MappingEntry,
+    frame: *freestanding.isr.InterruptFrame,
+    faulting_address: u32,
+    error_code: u32,
+) bool {
+    if (comptime !include_verification_evidence) return false;
+    if (executor.active_nx_probe_target == 0 or faulting_address != executor.active_nx_probe_target) return false;
+    const required = @as(u32, 0x1 | 0x4 | 0x10);
+    if ((error_code & required) != required or (error_code & 0x2) != 0) return false;
+    const target_is_executable = freestanding.paging.ownedUserPageIsExecutable(
+        &mapping.address_space.?,
+        faulting_address,
+    ) orelse return false;
+    if (target_is_executable) return false;
+
+    const recovery_address = std.math.cast(u32, frame.r15) orelse return false;
+    const runtime = executor.bound_runtime orelse return false;
+    const task = runtime.find(executor.active_task_id) orelse return false;
+    const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
+    if (!addressSpaceAllowsExecution(address_space, recovery_address)) return false;
+    if (!(freestanding.paging.ownedUserPageIsExecutable(&mapping.address_space.?, recovery_address) orelse false)) return false;
+    frame.eip = recovery_address;
+    return true;
+}
+
+fn addressSpaceAllowsExecution(address_space: *const task_runtime.AddressSpaceRecord, address: u32) bool {
+    const address64: u64 = address;
+    for (address_space.regions[0..address_space.region_count]) |region| {
+        if (region.kind != .load_segment or !region.access.execute) continue;
+        const region_end = std.math.add(u64, region.virtual_address, region.size_bytes) catch continue;
+        if (address64 >= region.virtual_address and address64 < region_end) return true;
+    }
+    return false;
 }
 
 fn mapLoadRegion(
@@ -786,6 +874,7 @@ fn mapLoadRegion(
     const reader = elf_file.reader() orelse return error.ImageExtentInvalid;
     try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
         .writable = region.access.write,
+        .executable = region.access.execute,
     });
 
     var source_offset = start;
@@ -810,6 +899,7 @@ fn mapZeroedRegion(
     const size_bytes = std.math.cast(u32, size_bytes_raw) orelse return error.InvalidRange;
     try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
         .writable = access.write,
+        .executable = access.execute,
     });
 }
 
@@ -952,4 +1042,21 @@ test "executor page-fault observations are scoped to an address-space incarnatio
     executor.retireAddressSpace(.{ .address_space_id = 42, .reason = .snapshot_restore });
     try std.testing.expectEqual(@as(u64, 0), executor.last_fault_task_id);
     try std.testing.expectEqual(@as(u64, 0), executor.last_fault_address_space_id);
+}
+
+test "executor distinguishes a present user NX instruction-fetch fault" {
+    var executor = Executor{
+        .last_fault_task_id = 7,
+        .last_fault_address_space_id = 42,
+        .last_fault_address = 0x4000_3000,
+        .last_fault_error_code = 0x15,
+    };
+
+    try std.testing.expect(!executor.consumeUserExecuteFault(7, 42, 0x4000_4000));
+    try std.testing.expect(executor.consumeUserExecuteFault(7, 42, 0x4000_3000));
+    executor.last_fault_task_id = 7;
+    executor.last_fault_address_space_id = 42;
+    executor.last_fault_address = 0x4000_3000;
+    executor.last_fault_error_code = 0x14;
+    try std.testing.expect(!executor.consumeUserExecuteFault(7, 42, 0x4000_3000));
 }

@@ -92,6 +92,8 @@ pub fn runFreestandingAndPrint(
         .local_only = true,
     }) catch return false;
     const task_id = launched.id;
+    const proof_image = catalog.findById(launched.launch.image_id) orelse return false;
+    const nx_probe_address = std.math.cast(u32, proof_image.bootstrap_mailbox_address) orelse return false;
 
     const baseline_frames = paging.frameStats().allocated;
     const baseline_mappings = scheduler.executor.materializedCount();
@@ -129,6 +131,7 @@ pub fn runFreestandingAndPrint(
     }
 
     var saw_syscall_pointer_denial = false;
+    var saw_user_nx_fault = false;
     var attempt: usize = 0;
     while (attempt < 8) : (attempt += 1) {
         const yielded = scheduler.executeTask(task_id, attempt);
@@ -145,12 +148,21 @@ pub fn runFreestandingAndPrint(
             saw_syscall_pointer_denial = true;
         }
 
+        if (!saw_user_nx_fault and scheduler.executor.consumeUserExecuteFault(
+            task_id,
+            current.address_space_id,
+            nx_probe_address,
+        )) {
+            common.printBootMarker(boot_markers.runtime_proof_user_nx_fault);
+            saw_user_nx_fault = true;
+        }
+
         if (scheduler.executor.consumeUserPageFault(
             task_id,
             current.address_space_id,
             userspace_bootstrap_mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR,
         )) {
-            if (!saw_syscall_pointer_denial) return false;
+            if (!saw_syscall_pointer_denial or !saw_user_nx_fault) return false;
             common.printBootMarker(boot_markers.runtime_proof_mmu_user_fault);
             if (!(runtime.terminateTask(task_id, task_runtime.MAX_TASKS + 10) catch return false)) return false;
             if (scheduler.executor.materializedCount() != baseline_mappings) return false;
