@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
+const dmar = @import("dmar.zig");
 const fadt = @import("fadt.zig");
 const mcfg = @import("mcfg.zig");
 const framebuffer = @import("framebuffer.zig");
@@ -32,8 +33,10 @@ pub const ProbeFacts = struct {
     acpi_madt: bool = false,
     acpi_fadt: bool = false,
     acpi_mcfg: bool = false,
+    acpi_dmar: bool = false,
     fadt_firmware: ?fadt.FixedAcpiDescription = null,
     mcfg_allocation: ?mcfg.Allocation = null,
+    dmar_summary: ?dmar.Summary = null,
     apic_timer: bool = false,
     framebuffer_gop: bool = false,
     xhci_controller: bool = false,
@@ -87,7 +90,13 @@ pub const ProbeFacts = struct {
     }
 
     pub fn acpiTablesReady(self: ProbeFacts) bool {
-        return self.acpi_xsdt and self.acpi_madt and self.acpi_fadt and self.acpi_mcfg;
+        return self.acpi_xsdt and self.acpi_madt and self.acpi_fadt and self.acpi_mcfg and self.acpi_dmar;
+    }
+
+    pub fn vtdDiscoveryReady(self: ProbeFacts) bool {
+        if (!self.real_target_sku or !self.acpi_dmar) return false;
+        const summary = self.dmar_summary orelse return false;
+        return summary.productionDiscoveryReady();
     }
 
     pub fn nvmeBlockReady(self: ProbeFacts) bool {
@@ -357,6 +366,8 @@ const PrintedMarkers = struct {
     acpi_xsdt: bool = false,
     acpi_madt: bool = false,
     acpi_fadt: bool = false,
+    acpi_dmar: bool = false,
+    vtd_segment_zero: bool = false,
     apic_timer_interrupt: bool = false,
     framebuffer_scanout: bool = false,
     xhci_keyboard_report: bool = false,
@@ -368,6 +379,7 @@ const PrintedMarkers = struct {
     attestation_root_lifecycle: bool = false,
     uefi: bool = false,
     acpi_tables: bool = false,
+    vtd_discovery: bool = false,
     apic_timer: bool = false,
     framebuffer_gop: bool = false,
     xhci_input: bool = false,
@@ -406,6 +418,11 @@ pub fn pciEcamAllocation() ?mcfg.Allocation {
     return facts.mcfg_allocation;
 }
 
+pub fn vtdSummary() ?dmar.Summary {
+    if (!facts.vtdDiscoveryReady()) return null;
+    return facts.dmar_summary;
+}
+
 pub fn telemetryRecordingReady() bool {
     return facts.real_target_sku and
         facts.acpi_fadt and
@@ -432,6 +449,7 @@ pub fn evaluateEvidence(probe: ProbeFacts) hardware_target.EvidenceSummary {
 pub fn allSubsystemMarkersReady(probe: ProbeFacts) bool {
     return probe.uefiBootReady() and
         probe.acpiTablesReady() and
+        probe.vtdDiscoveryReady() and
         probe.apic_timer and
         probe.framebuffer_gop and
         probe.xhci_keyboard_input and
@@ -623,6 +641,8 @@ fn captureAcpiEvidence() void {
     var found_madt = false;
     var found_fadt = false;
     var found_mcfg: ?mcfg.Allocation = null;
+    var found_dmar: ?dmar.Summary = null;
+    var dmar_table_seen = false;
     var index: u32 = 0;
     while (index < count) : (index += 1) {
         const table_address = acpi.xsdtEntryAddress(xsdt, index) catch continue;
@@ -638,6 +658,13 @@ fn captureAcpiEvidence() void {
             found_fadt = true;
         } else if (std.mem.eql(u8, header.signature[0..], mcfg.MCFG_SIGNATURE)) {
             found_mcfg = mcfg.segmentZeroAllocation(table) catch continue;
+        } else if (std.mem.eql(u8, header.signature[0..], dmar.DMAR_SIGNATURE)) {
+            if (dmar_table_seen) {
+                found_dmar = null;
+                continue;
+            }
+            dmar_table_seen = true;
+            found_dmar = dmar.parseDmar(table) catch continue;
         }
     }
 
@@ -645,6 +672,8 @@ fn captureAcpiEvidence() void {
     facts.acpi_fadt = found_fadt;
     facts.acpi_mcfg = found_mcfg != null;
     facts.mcfg_allocation = found_mcfg;
+    facts.acpi_dmar = found_dmar != null;
+    facts.dmar_summary = found_dmar;
 }
 
 fn acceptTelemetryGeneration(reader_generation: u32) bool {
@@ -737,6 +766,14 @@ fn printNewMarkers() void {
         printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_FADT:OBSERVED");
         printed.acpi_fadt = true;
     }
+    if (facts.real_target_sku and facts.acpi_dmar and !printed.acpi_dmar) {
+        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_DMAR:OBSERVED");
+        printed.acpi_dmar = true;
+    }
+    if (facts.vtdDiscoveryReady() and !printed.vtd_segment_zero) {
+        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_SEGMENT_ZERO:OBSERVED");
+        printed.vtd_segment_zero = true;
+    }
     if (facts.uefiBootReady() and !printed.uefi) {
         printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":UEFI_BOOT:PASS");
         printed.uefi = true;
@@ -744,6 +781,10 @@ fn printNewMarkers() void {
     if (facts.real_target_sku and facts.acpiTablesReady() and !printed.acpi_tables) {
         printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_TABLES:PASS");
         printed.acpi_tables = true;
+    }
+    if (facts.vtdDiscoveryReady() and !printed.vtd_discovery) {
+        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_DISCOVERY:PASS");
+        printed.vtd_discovery = true;
     }
     if (facts.real_target_sku and facts.apic_timer and !printed.apic_timer) {
         if (!printed.apic_timer_interrupt) {
@@ -901,6 +942,24 @@ fn testFadtFirmware() fadt.FixedAcpiDescription {
     };
 }
 
+fn testDmarSummary() dmar.Summary {
+    var summary = dmar.Summary{
+        .host_address_width = dmar.MIN_PRODUCTION_HOST_ADDRESS_WIDTH,
+        .interrupt_remapping = true,
+        .x2apic_opt_out = false,
+        .dma_control_platform_opt_in = true,
+        .dma_remapping_opt_out = false,
+    };
+    summary.remapping_units[0] = .{
+        .register_base_address = 0xFED9_1000,
+        .register_page_count = 1,
+        .segment = 0,
+        .include_pci_all = true,
+    };
+    summary.remapping_unit_count = 1;
+    return summary;
+}
+
 test "hardware proof requires composed NUC subsystem evidence" {
     const target = &hardware_target.first_supported_target;
     const partial = ProbeFacts{
@@ -912,6 +971,8 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .acpi_madt = true,
         .acpi_fadt = true,
         .acpi_mcfg = true,
+        .acpi_dmar = true,
+        .dmar_summary = testDmarSummary(),
         .apic_timer = true,
         .xhci_controller = true,
         .nvme_controller = true,
@@ -922,6 +983,14 @@ test "hardware proof requires composed NUC subsystem evidence" {
     var without_ecam = partial;
     without_ecam.acpi_mcfg = false;
     try std.testing.expect(!without_ecam.acpiTablesReady());
+    var without_dmar = partial;
+    without_dmar.acpi_dmar = false;
+    try std.testing.expect(!without_dmar.acpiTablesReady());
+    var opted_out = partial;
+    var opted_out_summary = opted_out.dmar_summary.?;
+    opted_out_summary.dma_remapping_opt_out = true;
+    opted_out.dmar_summary = opted_out_summary;
+    try std.testing.expect(!opted_out.vtdDiscoveryReady());
     try std.testing.expect(!allSubsystemMarkersReady(partial));
     try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, evaluateEvidence(partial)));
 
@@ -934,6 +1003,8 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .acpi_madt = true,
         .acpi_fadt = true,
         .acpi_mcfg = true,
+        .acpi_dmar = true,
+        .dmar_summary = testDmarSummary(),
         .apic_timer = true,
         .xhci_controller = true,
         .xhci_keyboard_input = true,
