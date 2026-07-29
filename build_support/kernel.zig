@@ -108,9 +108,9 @@ pub fn addX86_64KernelBootCheck(
     run.addFileArg(iso_path);
     run.addArg("build/x86_64-kernel-core-boot.log");
 
-    const step = b.step("x86_64-kernel-core-boot-check", "Boot the production kernel and complete ELF64 userspace catalog through a trap/resume cycle in QEMU");
+    const step = b.step("x86_64-kernel-core-boot-check", "Boot the production kernel and complete ELF64 userspace catalog through a syscall/resume cycle in QEMU");
     step.dependOn(&run.step);
-    const userspace_step = b.step("x86_64-userspace-launch-check", "Launch the production ELF64 userspace catalog and prove its first trap/resume cycle in QEMU");
+    const userspace_step = b.step("x86_64-userspace-launch-check", "Launch the production ELF64 userspace catalog and prove its first syscall/resume cycle in QEMU");
     userspace_step.dependOn(step);
     return step;
 }
@@ -499,13 +499,36 @@ pub fn addKernelArtifact(
     const linked_kernel = link.addOutputFileArg(name);
     link.addFileArg(kernel_object.getEmittedBin());
 
+    // Keep the installed benchmark ELF symbolized for diagnostics, but do not
+    // make firmware and GRUB parse its large non-loadable debug sections.
+    const boot_kernel = if (boot_profile == .benchmark) boot: {
+        const boot_link = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "ld.lld",
+            "-m",
+            "elf_x86_64",
+            "--gc-sections",
+            "--strip-debug",
+            "-z",
+            "common-page-size=4096",
+            "-z",
+            "max-page-size=4096",
+            "-T",
+        });
+        boot_link.addFileArg(b.path("src/arch/x86_64/linker.ld"));
+        boot_link.addArg("-o");
+        const boot_output = boot_link.addOutputFileArg(b.fmt("{s}.boot", .{name}));
+        boot_link.addFileArg(kernel_object.getEmittedBin());
+        break :boot boot_output;
+    } else linked_kernel;
+
     const validate_qemu_image = b.addSystemCommand(&.{"bash"});
     validate_qemu_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
-    validate_qemu_image.addFileArg(linked_kernel);
+    validate_qemu_image.addFileArg(boot_kernel);
 
     const qemu_iso = b.addSystemCommand(&.{"bash"});
     qemu_iso.addFileArg(b.path("scripts/build-grub-iso.sh"));
-    qemu_iso.addFileArg(linked_kernel);
+    qemu_iso.addFileArg(boot_kernel);
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
     qemu_iso.addFileArg(b.path("src/boot/grub-x86_64-qemu.cfg"));
@@ -531,6 +554,7 @@ fn addKernelAssemblyFiles(
     kernel_module.addAssemblyFile(b.path("src/arch/x86/invpcid.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt64.S"));
+    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/syscall64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
     kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry64.S"));
 }

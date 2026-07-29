@@ -23,16 +23,16 @@ pub const Tss = extern struct {
 
 pub const KERNEL_CODE_SEG: u16 = 0x08;
 pub const KERNEL_DATA_SEG: u16 = 0x10;
-pub const USER_CODE_SEG: u16 = 0x18;
-pub const USER_DATA_SEG: u16 = 0x20;
+pub const USER_DATA_SEG: u16 = 0x18;
+pub const USER_CODE_SEG: u16 = 0x20;
 pub const TSS_SEG: u16 = 0x28;
 pub const DOUBLE_FAULT_IST_INDEX: u3 = 1;
 
 const NULL_DESCRIPTOR_INDEX = 0;
 const KERNEL_CODE_DESCRIPTOR_INDEX = 1;
 const KERNEL_DATA_DESCRIPTOR_INDEX = 2;
-const USER_CODE_DESCRIPTOR_INDEX = 3;
-const USER_DATA_DESCRIPTOR_INDEX = 4;
+const USER_DATA_DESCRIPTOR_INDEX = 3;
+const USER_CODE_DESCRIPTOR_INDEX = 4;
 const TSS_DESCRIPTOR_LOW_INDEX = 5;
 const TSS_DESCRIPTOR_HIGH_INDEX = 6;
 
