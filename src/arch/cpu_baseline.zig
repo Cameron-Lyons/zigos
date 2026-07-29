@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const leaf1_ecx_pcid: u32 = 1 << 17;
+const leaf1_edx_pge: u32 = 1 << 13;
 const leaf1_edx_sse2: u32 = 1 << 26;
 const leaf1_ecx_x2apic: u32 = 1 << 21;
 const leaf1_ecx_tsc_deadline: u32 = 1 << 24;
@@ -37,6 +38,7 @@ pub const Features = struct {
     smep: bool = false,
     smap: bool = false,
     umip: bool = false,
+    pge: bool = false,
     pcid: bool = false,
     invpcid: bool = false,
     x2apic: bool = false,
@@ -53,6 +55,7 @@ pub const MissingFeature = enum {
     smep,
     smap,
     umip,
+    pge,
     pcid,
     invpcid,
     x2apic,
@@ -65,6 +68,7 @@ pub fn decode(registers: Registers) Features {
     var features = Features{ .cpuid = true };
     if (registers.max_basic_leaf >= 1) {
         features.sse2 = (registers.leaf1_edx & leaf1_edx_sse2) != 0;
+        features.pge = (registers.leaf1_edx & leaf1_edx_pge) != 0;
         features.pcid = (registers.leaf1_ecx & leaf1_ecx_pcid) != 0;
         features.x2apic = (registers.leaf1_ecx & leaf1_ecx_x2apic) != 0;
         features.tsc_deadline = (registers.leaf1_ecx & leaf1_ecx_tsc_deadline) != 0;
@@ -109,6 +113,7 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.smep) return .smep;
     if (!features.smap) return .smap;
     if (!features.umip) return .umip;
+    if (!features.pge) return .pge;
     if (!features.pcid) return .pcid;
     if (!features.invpcid) return .invpcid;
     if (!features.x2apic) return .x2apic;
@@ -125,7 +130,7 @@ test "decode recognizes the modern x86-64-capable baseline" {
         .cpuid_available = true,
         .max_basic_leaf = 0x16,
         .leaf1_ecx = leaf1_ecx_pcid | leaf1_ecx_x2apic | leaf1_ecx_tsc_deadline,
-        .leaf1_edx = leaf1_edx_sse2,
+        .leaf1_edx = leaf1_edx_sse2 | leaf1_edx_pge,
         .leaf15_eax = 2,
         .leaf15_ebx = 200,
         .leaf15_ecx = 24_000_000,
@@ -139,6 +144,7 @@ test "decode recognizes the modern x86-64-capable baseline" {
     try std.testing.expect(isSupported(features));
     try std.testing.expect(features.pcid);
     try std.testing.expect(features.invpcid);
+    try std.testing.expect(features.pge);
     try std.testing.expectEqual(@as(?MissingFeature, null), firstMissing(features));
 }
 
@@ -158,6 +164,7 @@ test "decode ignores registers outside advertised CPUID ranges" {
     try std.testing.expect(!features.smep);
     try std.testing.expect(!features.smap);
     try std.testing.expect(!features.umip);
+    try std.testing.expect(!features.pge);
     try std.testing.expect(!features.pcid);
     try std.testing.expect(!features.invpcid);
     try std.testing.expect(!features.x2apic);
@@ -175,6 +182,7 @@ test "baseline rejects every missing required feature" {
         .smep = true,
         .smap = true,
         .umip = true,
+        .pge = true,
         .pcid = true,
         .invpcid = true,
         .x2apic = true,
@@ -222,6 +230,9 @@ test "baseline rejects every missing required feature" {
     var missing_invpcid = complete;
     missing_invpcid.invpcid = false;
     try std.testing.expectEqual(MissingFeature.invpcid, firstMissing(missing_invpcid).?);
+    var missing_pge = complete;
+    missing_pge.pge = false;
+    try std.testing.expectEqual(MissingFeature.pge, firstMissing(missing_pge).?);
     try std.testing.expectEqual(MissingFeature.x2apic, firstMissing(.{
         .cpuid = true,
         .sse2 = true,
@@ -230,6 +241,7 @@ test "baseline rejects every missing required feature" {
         .smep = true,
         .smap = true,
         .umip = true,
+        .pge = true,
         .pcid = true,
         .invpcid = true,
     }).?);
@@ -241,6 +253,7 @@ test "baseline rejects every missing required feature" {
         .smep = true,
         .smap = true,
         .umip = true,
+        .pge = true,
         .pcid = true,
         .invpcid = true,
         .x2apic = true,
@@ -254,6 +267,7 @@ test "baseline rejects every missing required feature" {
         .smep = true,
         .smap = true,
         .umip = true,
+        .pge = true,
         .pcid = true,
         .invpcid = true,
         .x2apic = true,

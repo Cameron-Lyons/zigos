@@ -116,6 +116,7 @@ pub const CR0_MP: usize = 1 << 1;
 pub const CR0_WP: usize = 1 << 16;
 pub const CR0_PG: usize = 1 << 31;
 
+pub const CR4_PGE: usize = 1 << 7;
 pub const CR4_OSFXSR: usize = 1 << 9;
 pub const CR4_OSXMMEXCPT: usize = 1 << 10;
 pub const CR4_UMIP: usize = 1 << 11;
@@ -210,6 +211,10 @@ pub inline fn enableProcessContextIdentifiers() void {
 
 pub inline fn processContextIdentifiersEnabled() bool {
     return (readCr4() & CR4_PCIDE) != 0;
+}
+
+pub inline fn globalPagesEnabled() bool {
+    return (readCr4() & CR4_PGE) != 0;
 }
 
 pub fn enableSse() void {

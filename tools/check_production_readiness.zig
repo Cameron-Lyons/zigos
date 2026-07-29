@@ -71,6 +71,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS = [_][]const u8{
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "BOOT:ROLE:verification",
+    "ZIGOS:CPU:PGE:ENABLED",
     "ZIGOS:CPU:PCID:ENABLED",
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
@@ -106,6 +107,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "BOOT:START",
     "BOOT:PROFILE:zigos_native",
     "BOOT:ROLE:production",
+    "ZIGOS:CPU:PGE:ENABLED",
     "ZIGOS:CPU:PCID:ENABLED",
     "BOOT:CORE_READY",
     "ZIGOS:KERNEL_NETWORK:DEFERRED",
@@ -1161,6 +1163,7 @@ fn validateNuc11tnki5KernelProofSources(
         "decodeTscFrequency",
         "pcid",
         "invpcid",
+        "pge",
     };
     for (required_modern_cpu_baseline_snippets) |snippet| {
         if (std.mem.indexOf(u8, cpu_baseline_source, snippet) == null) {
@@ -1169,12 +1172,14 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_x86_pcid_snippets = [_][]const u8{
         "CR4_PCIDE",
+        "CR4_PGE",
         "CR3_NO_FLUSH",
         "pcidCr3Value",
         "writeCr3WithPcid",
         "invalidatePcid",
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
+        "globalPagesEnabled",
     };
     for (required_x86_pcid_snippets) |snippet| {
         if (std.mem.indexOf(u8, x86_source, snippet) == null) {
@@ -1196,6 +1201,8 @@ fn validateNuc11tnki5KernelProofSources(
         "ProcessContextMode",
         "hardware_pcid",
         "software_flush",
+        "CR4_PGE",
+        "globalPagesEnabled",
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
     };
@@ -1213,6 +1220,7 @@ fn validateNuc11tnki5KernelProofSources(
         "cpu_pcid_enabled",
         "cpu_pcid_software_fallback",
         "cpu_pcid_ready",
+        "cpu_pge_enabled",
     };
     for (required_boot_process_context_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
@@ -1241,6 +1249,8 @@ fn validateNuc11tnki5KernelProofSources(
         "switchToUserAddressSpace",
         "switchToKernelAddressSpace",
         "switchAddressSpace",
+        "ENTRY_GLOBAL",
+        "leafFlags(flags, global)",
     };
     for (required_pcid_paging_snippets) |snippet| {
         if (std.mem.indexOf(u8, paging_source, snippet) == null) {
@@ -1271,6 +1281,27 @@ fn validateNuc11tnki5KernelProofSources(
     for (required_userspace_switch_snippets) |snippet| {
         if (std.mem.indexOf(u8, userspace_executor_source, snippet) == null) {
             try common.addError(errors, allocator, "userspace execution must use the typed PCID-aware switch surface: {s}", .{snippet});
+        }
+    }
+    const required_address_space_benchmark_snippets = [_][]const u8{
+        "paging.address_space_roundtrip",
+        "benchmarkAddressSpaceRoundtrip",
+        "switchToUserAddressSpace",
+        "switchToKernelAddressSpace",
+    };
+    const benchmark_cases_path = "src/kernel/boot/benchmark/cases.zig";
+    const benchmark_suite_path = "src/kernel/boot/benchmark/suite.zig";
+    if (!common.pathExists(io, benchmark_cases_path) or !common.pathExists(io, benchmark_suite_path)) {
+        try common.addError(errors, allocator, "address-space benchmark sources are missing", .{});
+    } else {
+        const benchmark_cases_source = try common.readFileAlloc(allocator, io, benchmark_cases_path, common.source_file_max_bytes);
+        const benchmark_suite_source = try common.readFileAlloc(allocator, io, benchmark_suite_path, common.source_file_max_bytes);
+        for (required_address_space_benchmark_snippets) |snippet| {
+            if (std.mem.indexOf(u8, benchmark_cases_source, snippet) == null and
+                std.mem.indexOf(u8, benchmark_suite_source, snippet) == null)
+            {
+                try common.addError(errors, allocator, "address-space benchmark must retain snippet: {s}", .{snippet});
+            }
         }
     }
     if (std.mem.indexOf(u8, permission_review_source, "const xhci = @import") == null) {
