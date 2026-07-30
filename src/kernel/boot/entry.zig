@@ -20,9 +20,6 @@ fn softwareCpuFallbackRequested() bool {
 }
 
 pub fn kernelMain() void {
-    // The long-mode Zig entry may use SSE registers before CPUID decoding.
-    // SSE2 is therefore both an entry precondition and an explicitly verified
-    // member of the supported CPU contract.
     x86.enableSse();
     console.init();
     common.printBootMarker(boot_markers.boot_start);

@@ -122,9 +122,6 @@ pub const PutRequest = struct {
     parent_version_id: ?ids.VersionId = null,
 };
 
-/// A write whose metadata signature is created inside the trusted local
-/// storage boundary. Externally supplied signatures must use PutRequest so the
-/// store verifies them before insertion.
 pub const PutLocallySignedRequest = struct {
     preferred_object_id: ?ids.ObjectId = null,
     object_type: ObjectType,
@@ -634,9 +631,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return self.insertVersionRef(request);
         }
 
-        /// Signs metadata locally and inserts it without repeating public-key
-        /// verification of the signature that was just produced. This method
-        /// does not accept caller-supplied metadata or signatures.
         pub inline fn putLocallySignedVersion(self: *Self, request: PutLocallySignedRequest) PutLocallySignedError!PutResult {
             if (request.payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
             const metadata = try signMetadata(
@@ -1103,8 +1097,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return self.putBlobPrepared(address, merkle_root, payload, &chunk_refs, chunk_count);
         }
 
-        /// `chunk_refs` addresses must already be derived from `payload` and
-        /// `address`/`merkle_root` from those refs; callers own that proof.
         fn putBlobPrepared(
             self: *Self,
             address: BlobAddress,
@@ -1145,7 +1137,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return self.putChunkPrepared(address, payload);
         }
 
-        /// `address` must already be `computeChunkAddress(payload)`; callers own that proof.
         fn putChunkPrepared(self: *Self, address: ChunkAddress, payload: []const u8) Error!usize {
             if (self.chunkSlotIndex(address)) |slot_index| {
                 const slot = self.chunkSlotAt(slot_index);

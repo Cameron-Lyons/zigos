@@ -6,22 +6,14 @@ ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 ZIG="${ROOT_DIR}/scripts/zig.sh"
 MARKER_TOOL="${ROOT_DIR}/src/print_native_smoke_markers.zig"
 
-# shellcheck source=scripts/qemu-harness.sh
 source "$ROOT_DIR/scripts/qemu-harness.sh"
 
 KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
-# Per-boot cap on waiting for each proof marker. Marker detection stops QEMU
-# early, so this only bounds the failure path; keep it generous for slow
-# shared runners.
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-420}"
 NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
 
-# Drive the native store as a real NVMe controller so the kernel NVMe data-plane
-# driver provides genuine persistence across the forced reboots in this proof.
-# Keep both the block backend and controller cache write-back capable so the
-# proof exercises the storage stack's explicit durability barriers.
 export ZIGOS_NATIVE_STORE_CACHE=writeback
 export ZIGOS_NVME_WRITE_CACHE=on
 

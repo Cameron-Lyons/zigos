@@ -1123,12 +1123,6 @@ test "workspace commit compacts the mutation log so high-churn workspaces avoid 
         .metadata = try object_store.signMetadata(signer, "churn", "text/plain", .document, "churn", 0),
     });
 
-    // Each iteration adds the entry then deletes it: two mutations per iteration (a
-    // put after a delete is always an add mutation, regardless of content), reusing
-    // one blob and keeping the live entry set at ~0. Without compaction this hits
-    // error.EntryTableFull once the lifetime mutation log passes
-    // MAX_WORKSPACE_ENTRY_MUTATIONS; compaction keeps it bounded, so the loop
-    // completing past the cap is the proof.
     const iterations: u64 = workspace.MAX_WORKSPACE_ENTRY_MUTATIONS * 2;
     var i: u64 = 0;
     while (i < iterations) : (i += 1) {
@@ -1140,8 +1134,6 @@ test "workspace commit compacts the mutation log so high-churn workspaces avoid 
         _ = try service.commit(ws.id, i);
     }
 
-    // The workspace stayed coherent through repeated compaction: the path is gone
-    // (last op was a delete) and the workspace is still writable.
     try std.testing.expectError(error.EntryNotFound, service.resolve(ws.id, path));
     const final = try service.putVersion(.{
         .preferred_object_id = object_store.ids.object(9_911),
@@ -1171,7 +1163,6 @@ test "workspace mutation-log compaction is skipped while a live snapshot needs o
     const keep_path = "documents/keep.md";
     const churn_path = "documents/churn.md";
 
-    // Commit one durable entry, then snapshot the workspace at that generation.
     const keep_version = try service.putVersion(.{
         .preferred_object_id = object_store.ids.object(9_930),
         .object_type = .document,
@@ -1192,11 +1183,6 @@ test "workspace mutation-log compaction is skipped while a live snapshot needs o
         .metadata = try object_store.signMetadata(signer, "churn", "text/plain", .document, "snapchurn", 0),
     });
 
-    // Churn a second path past the compaction threshold but under the hard cap. The
-    // snapshot pins generation 1, so compaction MUST be skipped; if it wrongly fired
-    // the older generation would be discarded and the restore below would lose the
-    // kept entry. 75 iterations = 150 mutations: above the 144 threshold, below the
-    // 192 hard cap.
     var i: u64 = 0;
     while (i < 75) : (i += 1) {
         try service.beginTransaction(ws.id);
@@ -1207,8 +1193,6 @@ test "workspace mutation-log compaction is skipped while a live snapshot needs o
         _ = try service.commit(ws.id, i);
     }
 
-    // Restore the snapshot: the kept entry must reconstruct from the preserved
-    // generation-1 history, proving compaction respected the snapshot guard.
     _ = try service.restore(ws.id, snap.id, 2);
     const restored = try service.resolve(ws.id, keep_path);
     try std.testing.expectEqual(keep_version.version_id.raw(), restored.version_id.raw());

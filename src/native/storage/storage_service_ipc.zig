@@ -15,7 +15,7 @@ const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
 const workspace = @import("workspace.zig");
 
-pub const MAGIC: u32 = 0x53544731; // STG1
+pub const MAGIC: u32 = 0x53544731;
 pub const WIRE_VERSION: u16 = 1;
 pub const MAX_WORKSPACE_LABEL_BYTES: usize = 48;
 

@@ -1,7 +1,3 @@
-// Event taxonomy: the kinds of events the ledger records and the typed action/
-// reason enums their persisted detail codes decode to. Extracted from
-// event_ledger.zig as a dependency-free vocabulary module.
-
 pub const EventKind = enum(u8) {
     permission_decision,
     process_crash,

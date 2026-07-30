@@ -1,9 +1,3 @@
-// Minimal polled transmit and receive path for the first hardware target's
-// Intel I225-LM. Firmware remains responsible for PHY initialization and link
-// negotiation; this path attaches only when BAR0, the permanent MAC address,
-// and queue registers are usable. PCI bus mastering stays revoked until VT-d
-// contains the requester in its own domain.
-
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");

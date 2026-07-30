@@ -27,7 +27,7 @@ pub const PAGE_WRITE_THROUGH: u32 = 0x8;
 pub const PAGE_CACHE_DISABLE: u32 = 0x10;
 pub const PAGE_ACCESSED: u32 = 0x20;
 pub const PAGE_DIRTY: u32 = 0x40;
-// Logical mapping input. Hardware represents the inverse permission with NX.
+
 pub const PAGE_EXECUTABLE: u32 = 0x200;
 
 const ENTRY_PRESENT = table64.PRESENT;
@@ -604,8 +604,6 @@ pub fn init() void {
         haltWithMessage("No usable physical frames remain after kernel reservation!\n");
     }
 
-    // Make the final section policy effective at the same point as the CR3
-    // switch; there is no transient writable-text window in the active table.
     enableWriteProtect();
     current_page_directory = &kernel_pml4;
     current_process_context = pcid_allocator.KERNEL_IDENTIFIER;

@@ -727,8 +727,6 @@ pub const TwentyFifthFeature = enum(u8) {
 
 pub const twenty_fifth_feature_count = std.meta.fields(TwentyFifthFeature).len;
 
-// Checklist and ExtraChecklist use the same generic enum-indexed checklist as the
-// other 23 contracts below; the builders set features by @intFromEnum(...) name.
 pub const Checklist = FeatureChecklist(Feature);
 
 pub const ExtraChecklist = FeatureChecklist(ExtraFeature);
@@ -2975,10 +2973,6 @@ pub fn currentRepositoryThirteenthContract() ThirteenthChecklist {
     return .{ .satisfied_features = features };
 }
 
-// Shared shape for a kernel-contract service bootstrap entry: published native
-// service, userspace image present, kernel-contract launch granting service task
-// authority, and a matching typed interface. Each service's check differs only
-// by its class, interface id, and interface name.
 fn serviceBootstrapContractCheck(
     class: service_catalog.ServiceClass,
     interface_id: component_abi_schema.InterfaceId,
@@ -2996,10 +2990,6 @@ fn serviceBootstrapContractCheck(
         std.mem.eql(u8, contract.interface.name, interface_name);
 }
 
-// Shared shape for a service's generated boot image registry record. All system
-// service images share src/userspace/service_main.zig and expose exactly one
-// provided interface; they differ only by class, bundle id, artifact name, and
-// interface name.
 fn serviceBootImageRegistryCheck(
     class: service_catalog.ServiceClass,
     bundle_id: []const u8,

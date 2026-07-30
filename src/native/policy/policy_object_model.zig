@@ -1,6 +1,3 @@
-// Policy model: scopes, decision reasons, request records, and the PolicyObject
-// itself. Extracted from policy_object.zig so the policy data model is separate
-// from the Directory container/index logic that operates on it.
 const std = @import("std");
 const manifest = @import("manifest.zig");
 const principal = @import("../core/principal.zig");

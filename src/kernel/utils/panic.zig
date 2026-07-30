@@ -6,8 +6,7 @@ const qemu_exit = @import("qemu_exit.zig");
 var panic_occurred: bool = false;
 const panic_message_buffer_size = 256;
 const max_stack_frames = 24;
-// Frame pointers must stay inside physical memory the boot identity map
-// covers; a clobbered chain would otherwise fault inside the panic handler.
+
 const stack_walk_lowest_frame = 0x1000;
 const stack_walk_highest_frame = 0x0800_0000;
 
@@ -34,12 +33,10 @@ fn printStackTrace() void {
         const return_address = frame[1];
         if (return_address < text_start or return_address >= text_end) break;
 
-        // SAFETY: filled by the subsequent std.fmt.bufPrint call
         var line_buffer: [48]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buffer, "  [{d}] 0x{x:0>8}\n", .{ depth, return_address }) catch break;
         printPanic(line);
 
-        // The stack grows down, so each saved frame must be strictly higher.
         if (caller_frame_pointer <= frame_pointer) break;
         frame_pointer = caller_frame_pointer;
     }
@@ -62,7 +59,6 @@ pub fn panic(comptime format: []const u8, args: anytype) noreturn {
     printPanic("============================ KERNEL PANIC ============================\n");
     printPanic("\n");
 
-    // SAFETY: filled by the subsequent std.fmt.bufPrint call
     var buf: [panic_message_buffer_size]u8 = undefined;
     const message = std.fmt.bufPrint(&buf, format, args) catch "Failed to format panic message";
     printPanic(message);

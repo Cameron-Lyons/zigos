@@ -665,8 +665,6 @@ fn encodeDiscoveryFrame(
     );
 }
 
-/// Both native wire frames share one layout: magic, three u64 ids, source
-/// MAC, length-prefixed class/identity, length-prefixed ciphertext, digest.
 fn encodeWireFrame(
     buffer: []u8,
     magic: []const u8,
@@ -696,10 +694,6 @@ fn encodeWireFrame(
     return buffer[0..writer.offset];
 }
 
-/// Modeled confidentiality only: a repeating-key XOR keystream stands in for
-/// a real AEAD in the proof environment. It provides no secrecy against a
-/// known-plaintext observer and must be replaced before any real network
-/// payload depends on the frame's `encrypted` flag.
 fn applyModeledKeystream(
     ciphertext: *[MAX_NATIVE_PAYLOAD_BYTES]u8,
     payload: []const u8,

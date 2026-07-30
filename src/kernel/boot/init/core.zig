@@ -4,8 +4,6 @@ const paging = @import("../../memory/paging64.zig");
 const memory = @import("../../memory/memory.zig");
 
 pub fn init() void {
-    // Paint the free boot stack first, while the call chain is shallow, so
-    // the high-water mark reported at NATIVE:READY covers all of boot.
     const stack_watermark = @import("../../utils/stack_watermark.zig");
     stack_watermark.paint();
 

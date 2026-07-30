@@ -15,7 +15,6 @@ pub const EnvVar = struct {
     value_len: usize,
 };
 
-// SAFETY: entries are initialized on demand via setenv; env_count tracks valid entries
 var env_vars: [MAX_ENV_VARS]EnvVar = undefined;
 var env_count: usize = 0;
 var initialized: bool = false;

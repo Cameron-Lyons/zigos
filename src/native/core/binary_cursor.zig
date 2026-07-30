@@ -14,9 +14,6 @@ pub fn Writer(comptime ErrorSet: type, comptime full_error: ErrorSet) type {
         }
 
         pub fn writeBytes(self: *Self, bytes: []const u8) ErrorSet!void {
-            // Wrap-safe: offset <= buffer.len always holds (offset only advances
-            // after a passing check), so buffer.len - offset never underflows. The
-            // naive `offset + bytes.len` form can wrap on a hostile huge length.
             if (bytes.len > self.buffer.len - self.offset) return full_error;
             @memcpy(self.buffer[self.offset .. self.offset + bytes.len], bytes);
             self.offset += bytes.len;

@@ -27,8 +27,6 @@ pub const intel_i225 = Region{
     .bytes = 0x1_0000,
 };
 
-// ACPI tables may begin at the final byte of a physical page. Reserve one
-// extra page beyond the one MiB table limit for that leading page offset.
 pub const acpi_root = Region{
     .base = 0xFFFF_8000_2000_0000,
     .bytes = 0x101_000,

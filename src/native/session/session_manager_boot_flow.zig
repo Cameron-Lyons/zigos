@@ -260,14 +260,10 @@ pub const SessionManager = struct {
         printReadyBanner();
     }
 
-    // Report-only: production reaches ready with checkpointing enabled and a
-    // clean store. Verification may deliberately leave proof-only mutations
-    // dirty after disabling checkpoints so a later cold boot cannot mistake
-    // synthetic state for production state.
     fn reportFinalCheckpointState(self: *SessionManager) bool {
         const storage = self.storageServicePtr();
         const checkpoint_error: []const u8 = if (storage.checkpoint_store.last_checkpoint_error) |err| @errorName(err) else "none";
-        // SAFETY: filled by the subsequent std.fmt.bufPrint call
+
         var line_buffer: [128]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buffer,

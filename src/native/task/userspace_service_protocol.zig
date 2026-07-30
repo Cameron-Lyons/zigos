@@ -1,7 +1,7 @@
 const std = @import("std");
 const userspace_wire = @import("userspace_wire");
 
-pub const MAGIC: u32 = 0x5356_4331; // SVC1
+pub const MAGIC: u32 = 0x5356_4331;
 pub const WIRE_VERSION: u16 = 1;
 pub const MAX_OPERATIONS: usize = 4;
 pub const MAX_OPERATION_NAME_BYTES: usize = 32;

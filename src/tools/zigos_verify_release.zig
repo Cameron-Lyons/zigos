@@ -35,14 +35,13 @@ const DarwinAcl = if (builtin.os.tag.isDarwin()) struct {
 } else struct {};
 
 pub const VerifyOptions = struct {
-    /// Raw root metadata obtained independently of the release bundle.
     trusted_root: []const u8,
-    /// Lowercase SHA-256 pin obtained independently of the release bundle.
+
     trusted_root_sha256: []const u8,
-    /// Persistent state outside both the release bundle and artifact tree.
+
     trust_state_path: []const u8,
     now_unix: i64,
-    /// Candidate verification checks rollback state but does not advance it.
+
     advance_trust_state: bool = true,
 };
 
@@ -75,10 +74,10 @@ const TrustState = struct {
     rootSha256: []const u8,
     rootVersion: u64,
     policyVersion: u64,
-    /// SHA-256 of the authenticated decoded policy payload, not its DSSE wrapper.
+
     policyPayloadSha256: []const u8,
     releaseSequence: u64,
-    /// SHA-256 of the authenticated decoded manifest payload, not its DSSE wrapper.
+
     manifestPayloadSha256: []const u8,
     observedAt: i64,
 };
@@ -1128,9 +1127,6 @@ fn decodeBase64Alloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return output;
 }
 
-/// Call only after the corresponding trust verifier has authenticated the
-/// envelope. Rollback identity belongs to the signed payload; JSON whitespace,
-/// member order, and other unsigned DSSE wrapper serialization do not.
 fn authenticatedPayloadSha256(
     allocator: std.mem.Allocator,
     envelope_source: []const u8,

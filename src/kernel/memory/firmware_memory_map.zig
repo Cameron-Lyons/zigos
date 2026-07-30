@@ -7,11 +7,6 @@ pub const Error = handoff.Error || frame_allocator.Error || error{
     InvalidHandoffRange,
 };
 
-/// Initializes a fixed physical-frame allocator from a Multiboot memory map.
-/// The complete managed aperture starts closed. Only pages fully enclosed by a
-/// type-1 descriptor are opened, then every page touched by any other
-/// descriptor is closed again. The second pass makes reserved memory win over
-/// usable memory regardless of firmware descriptor order.
 pub fn initializeAllocator(
     comptime memory_bytes: u32,
     comptime page_size: u32,
@@ -24,8 +19,6 @@ pub fn initializeAllocator(
         .count = frame_allocator.Fixed(memory_bytes, page_size).total_frames,
     });
 
-    // Validate the whole byte stream before opening a single frame. A bad
-    // trailing entry therefore leaves the allocator completely closed.
     var validator = memory_map.iterator();
     var entry_count: usize = 0;
     while (try validator.next()) |_| {
@@ -50,10 +43,6 @@ pub fn initializeAllocator(
     }
 }
 
-/// Permanently reserves every Multiboot range that remains observable after
-/// paging and frame allocation are enabled. All extents must fit completely in
-/// the managed identity aperture; otherwise later pointer dereferences would
-/// be unsafe even if their in-aperture fragment were reserved.
 pub fn reserveLiveHandoffRanges(
     comptime memory_bytes: u32,
     comptime page_size: u32,
@@ -91,9 +80,6 @@ pub fn reserveLiveHandoffRanges(
         run_count += 1;
     }
 
-    // Preserve cross-range transactionality if this helper is ever called
-    // after allocation has started. Boot currently calls it before any frame
-    // can be allocated.
     for (runs[0..run_count]) |run| {
         var frame: u32 = 0;
         while (frame < run.count) : (frame += 1) {
@@ -148,8 +134,6 @@ fn touchedPageRun(
     const rounded_end = if (end_remainder == 0)
         clipped_end
     else
-        // memory_bytes is page-aligned and clipped_end is below it here, so
-        // this checked ceiling cannot escape the managed aperture.
         std.math.add(u64, clipped_end, page - end_remainder) catch return null;
     if (start >= rounded_end) return null;
 

@@ -582,7 +582,7 @@ pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments
         &bytes,
         string_table_header,
         1,
-        3, // SHT_STRTAB
+        3,
         0,
         0,
         SYNTHETIC_ELF_SECTION_NAMES_OFFSET,
@@ -594,8 +594,8 @@ pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments
         &bytes,
         mailbox_header,
         11,
-        1, // SHT_PROGBITS
-        0x1 | 0x2, // SHF_WRITE | SHF_ALLOC
+        1,
+        0x1 | 0x2,
         entry_point + SYNTHETIC_ELF_SEGMENT_ALIGNMENT,
         SYNTHETIC_ELF_SEGMENTS_OFFSET + SYNTHETIC_ELF_SEGMENT_MEMORY_BYTES,
         userspace_bootstrap_mailbox.ABI_SIZE_BYTES,

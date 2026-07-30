@@ -188,18 +188,12 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     return true;
 }
 
-// The bool-returning evidence flows fail the boot gracefully through
-// failBoot, but a bare `return false` leaves the smoke log with nothing but
-// a missing ready marker and thirty candidate exits. These helpers keep the
-// bool contract and name the step (plus the error, when there is one) so
-// one boot log identifies the exit taken.
 fn evidenceCheckFailed(comptime step: []const u8) bool {
     common.printBootMarker("ZIGOS:BOOTED_EVIDENCE:CHECK_FAILED step=" ++ step);
     return false;
 }
 
 fn evidenceStepFailed(comptime step: []const u8, err: anyerror) bool {
-    // SAFETY: filled by the subsequent std.fmt.bufPrint call
     var line_buffer: [128]u8 = undefined;
     const line = std.fmt.bufPrint(
         &line_buffer,
@@ -393,9 +387,7 @@ fn printJourneyControlRejected(
     response: production_journey.ProductionJourneyResponse,
 ) void {
     printJourneyControlRejectedMarker(control);
-    // The rejection markers alone cost a debugging session on CI-only
-    // failures; name the status and concrete error so a boot log is enough.
-    // SAFETY: filled by the subsequent std.fmt.bufPrint call
+
     var detail_buffer: [96]u8 = undefined;
     const detail = std.fmt.bufPrint(
         &detail_buffer,
@@ -408,16 +400,11 @@ fn printJourneyControlRejected(
     common.printBootMarker(detail);
 }
 
-// Distinguishes the three ways a workspace lookup dies: record gone from
-// the arena (id and label both miss), primary-index corruption (id misses
-// while the label index still resolves), or a stale captured id (label
-// resolves to a different id). One CI boot log is then enough to tell them
-// apart instead of reproducing a timing-dependent failure.
 fn printJourneyStorageDiagnostics(storage: anytype, workspace_id: u64) void {
     const by_id: []const u8 = if (storage.findWorkspaceRecordConst(workspace_id) != null) "hit" else "miss";
     const label_id: u64 = if (storage.findWorkspaceByLabel("notes-workspace")) |record| record.id.raw() else 0;
     const checkpoint_error: []const u8 = if (storage.checkpoint_store.last_checkpoint_error) |err| @errorName(err) else "none";
-    // SAFETY: filled by the subsequent std.fmt.bufPrint call
+
     var line_buffer: [160]u8 = undefined;
     const line = std.fmt.bufPrint(
         &line_buffer,

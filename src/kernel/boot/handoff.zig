@@ -314,9 +314,6 @@ const PhysicalExtent = struct {
     length: usize,
 };
 
-/// Validates the complete outer extent before constructing a physical-pointer
-/// slice. Boot handoff bytes must stay inside the 128 MiB identity aperture
-/// installed by both entry paths, and additions must not wrap on any target.
 fn checkedPhysicalExtent(address: u32, length: usize) ?PhysicalExtent {
     if (address == 0 or length == 0) return null;
     const base = std.math.cast(usize, address) orelse return null;

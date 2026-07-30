@@ -34,7 +34,6 @@ SECTIONS
     }
     __kernel_measure_end = .;
 
-    /* Userspace ELF bytes are covered by the signed build artifact manifest. */
     .zigos_userspace_archive : ALIGN(4K)
     {
         __kernel_archive_start = .;
@@ -43,7 +42,6 @@ SECTIONS
         __kernel_archive_end = .;
     }
 
-    /* Statically resolved GOT entries need loader write permission only. */
     .relro : ALIGN(4K)
     {
         __kernel_relro_start = .;

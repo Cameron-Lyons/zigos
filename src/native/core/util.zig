@@ -68,13 +68,6 @@ fn fnv1a64AppendIntegerLittleEndian(comptime T: type, hash: u64, value: T) u64 {
     return next;
 }
 
-// For boot-evidence proof steps whose failure is environmental (device
-// fault, capacity edge, stale state), not an invariant violation. In
-// ReleaseFast a `catch unreachable` on these paths is undefined behavior:
-// control flow continues on the happy path with a garbage payload and the
-// failure surfaces tens of proofs later with no cause in the log. An
-// explicit panic fails at the point of detection with the error name and a
-// backtrace in every build mode.
 pub fn bootProofFailure(comptime step: []const u8, err: anyerror) noreturn {
     std.debug.panic("boot proof failed: {s}: {s}", .{ step, @errorName(err) });
 }

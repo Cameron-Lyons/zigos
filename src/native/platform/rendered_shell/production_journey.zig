@@ -93,8 +93,7 @@ pub const ProductionJourneyRequest = struct {
 pub const ProductionJourneyResponse = struct {
     control: ProductionJourneyControl,
     status: ProductionJourneyStatus = .ok,
-    // The error behind a non-ok status; statuses group many causes and boot
-    // logs need the precise one to diagnose a rejected journey step.
+
     failure: ?anyerror = null,
     task_id: u64 = 0,
     active_window_id: u64 = 0,

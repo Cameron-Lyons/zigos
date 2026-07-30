@@ -134,7 +134,6 @@ pub fn insertEntryObjectSlot(comptime capacity: usize, slots: *[capacity]EntryOb
             return;
         }
         if (slots[index].object_id == key) {
-            // Preserve the first sorted path for duplicate object ids.
             return;
         }
         index = (index + 1) % capacity;

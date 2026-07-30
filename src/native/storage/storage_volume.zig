@@ -317,16 +317,9 @@ fn saveIncremental(
     else
         BuiltLog{};
 
-    // The selected root can be visible through a write-back cache even when
-    // its final durability barrier failed. Settle it before a forced
-    // compaction chooses the opposite region, which may still back the prior
-    // durable root.
     if (current != null and !can_append) try flushWrites(writer);
 
     if (can_append and delta.bytes_len == 0) {
-        // A failed post-root barrier can leave the new root visible through a
-        // write-back controller cache while its corresponding dirty state remains
-        // set. Retry the barrier before accepting that visible root as durable.
         if (started_dirty) try flushWrites(writer);
         store.clearDirty();
         workspaces.clearDirty();
@@ -343,8 +336,7 @@ fn saveIncremental(
         next_root.log_segment_count = current.?.root.log_segment_count + delta.segment_count;
         next_root.compacted_generation = current.?.root.compacted_generation;
         const next_root_sector = volume_root_slot.nextRootSector(current);
-        // Append-only beyond the current log within the same region: the prior
-        // root's prefix is untouched, so an interrupted append falls back to it.
+
         try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, self.io_log_buffer[0..delta.bytes_len]);
         try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
@@ -354,8 +346,6 @@ fn saveIncremental(
         return .{ .generation = next_generation };
     }
 
-    // Build directly in the inactive ping-pong region's staging slice. The
-    // bounded writer fails before a checkpoint can cross into the live region.
     const checkpoint_log_len = try serializeCheckpointRecord(
         store,
         workspaces,
@@ -363,8 +353,7 @@ fn saveIncremental(
     );
 
     const next_generation = current_generation + 1;
-    // Ping-pong to the region the current root does not occupy so its backing
-    // log survives until the new root is durably committed.
+
     const next_data_offset: u32 = if (current) |loaded|
         (if (loaded.root.data_offset == 0) alternate_data_region_offset else 0)
     else
@@ -592,17 +581,6 @@ fn flushWrites(writer: anytype) Error!void {
     }
 }
 
-/// Per-save memo for workspace state hashes: buildDeltaLog and buildRootState
-/// both need the hash of a dirty workspace, and hashing walks the full
-/// mutation log, share table, and recoverable-delete list.
-// Lives on the Volume and survives across saves: the full workspace state
-// hash walks every entry, mutation, share grant, and recoverable delete, and
-// buildRootState needs a hash for EVERY workspace on EVERY flush - which
-// noteMutation triggers on each durable boundary. Entries are invalidated
-// from the directory's dirty-id set at the top of each save, so the cache
-// leans on exactly the completeness contract the delta builder already
-// requires: a workspace absent from the dirty set has not changed since the
-// last clearDirty.
 const WorkspaceStateHashCache = struct {
     ids: [workspace.MAX_WORKSPACES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACES,
     hashes: [workspace.MAX_WORKSPACES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACES,
@@ -695,10 +673,6 @@ fn canAppendToRoot(root: RootState, store: *const object_store.Store, workspaces
     if (volume_root_slot.lastIssuedId(root.next_workspace_id) > volume_root_slot.lastIssuedId(workspaces.next_workspace_id)) return false;
     if (root.last_snapshot_id > volume_root_slot.lastIssuedId(workspaces.next_snapshot_id)) return false;
 
-    // Dirty identifiers at or below a root watermark are ambiguous: they can
-    // come from a visible root whose final durability barrier failed, or from a
-    // corrupted root that falsely claims data is already present. Compacting
-    // is safe in both cases and avoids silently clearing unpersisted records.
     for (store.dirtyObjectIds()) |object_id| {
         const object_record = store.objectConst(object_id) orelse return false;
         if (object_record.latest_version_id.raw() <= root.last_version_id) return false;
@@ -783,8 +757,7 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     if (!volume_root_slot.hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     store.reset();
     workspaces.reset();
-    // The directory contents are replaced wholesale below and replay clears
-    // dirty tracking, so cached hashes keyed to the old contents must go.
+
     self.workspace_state_hashes.reset();
     if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
     if (root.log_segment_count > max_log_segments) return error.CorruptImage;
@@ -1072,11 +1045,7 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     const workspace_id = ids.workspace(try reader.readU64());
     const slot = workspaces.workspaces.get(workspace_id) orelse
         workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
-    // New arena slots are already initialized by reserveClean. Existing slots
-    // came from the checkpoint or an earlier delta in this replay, so retain
-    // their backing storage, overwrite every live prefix below, and scrub only
-    // the prefixes that become inactive. The derived indexes are rebuilt after
-    // the complete log has been replayed.
+
     const previous_entry_count = slot.workspace.path_index.entry_count;
     const previous_mutation_count = slot.workspace.mutation_log.entry_mutation_count;
     const previous_share_grant_count = slot.workspace.share_table.share_grant_count;
@@ -1351,7 +1320,6 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
         if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
     }
-
 }
 
 fn writeMetadata(writer: *CursorWriter, metadata: object_store.SignedMetadata) Error!void {
@@ -1782,8 +1750,6 @@ pub const testing = struct {
         return alternate_data_region_offset;
     }
 
-    // Scribble an entire data region as a stand-in for a compaction checkpoint
-    // write that was interrupted by power loss before its root committed.
     pub fn scribbleDataRegion(image: []u8, region_offset: u32) void {
         const start = data_start_byte + region_offset;
         @memset(image[start .. start + data_region_bytes], 0xAB);

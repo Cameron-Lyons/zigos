@@ -751,7 +751,7 @@ fn readEnvelope(reader: *CursorReader) Error!Envelope {
     try reader.readBytes(&magic_buffer);
     if (!std.mem.eql(u8, &magic_buffer, record_magic)) return error.CorruptState;
     const version = try reader.readU16();
-    // Single-version on-disk format: only the current record_version is accepted.
+
     if (version != record_version) return error.UnsupportedStateVersion;
     return .{
         .kind = try parseRecordKind(try reader.readByte()),
