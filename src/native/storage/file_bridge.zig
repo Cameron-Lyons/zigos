@@ -20,8 +20,6 @@ pub const ResolveRequest = struct {
     access: AccessMode,
 };
 
-/// Derived object metadata. The request path is an input and is not retained in
-/// the returned view.
 pub const View = struct {
     authoritative: bool = false,
     export_only: bool = true,
@@ -102,8 +100,7 @@ pub const Bridge = struct {
         }
 
         const can_read = authority.rights.has(.object_read);
-        // File bridges are derived views. Mutations must go through storage objects
-        // and workspace transactions, never through a bridge path.
+
         if (request.access == .write or !can_read) return error.PermissionDenied;
 
         const entry = switch (authority.target.kind) {

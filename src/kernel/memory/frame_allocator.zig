@@ -21,9 +21,6 @@ pub const Error = error{
     NotAllocated,
 };
 
-/// A fixed-capacity physical-frame allocator with separate reservation and
-/// live-allocation accounting. The type owns no storage outside itself, so it
-/// can be exercised by host tests and embedded directly in the kernel.
 pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
     if (page_size == 0 or (page_size & (page_size - 1)) != 0) {
         @compileError("page_size must be a power of two");
@@ -56,9 +53,6 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             self.* = init();
         }
 
-        /// Permanently excludes a physical run from allocation. Repeating an
-        /// overlapping reservation is idempotent, while overlap with a live
-        /// allocation is rejected without partially changing the allocator.
         pub fn reserve(self: *Self, run: FrameRun) Error!void {
             const start = try validateRun(run);
 
@@ -82,10 +76,6 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             }
         }
 
-        /// Marks a previously unavailable run allocatable. This is used at
-        /// boot after reserving the complete physical aperture, then opening
-        /// only full pages reported as type-1 RAM by firmware. Repeated and
-        /// overlapping availability declarations are idempotent.
         pub fn makeAvailable(self: *Self, run: FrameRun) Error!void {
             const start = try validateRun(run);
 
@@ -106,9 +96,6 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             self.search_frame_hint = @min(self.search_frame_hint, start);
         }
 
-        /// Allocates a physically contiguous run. Search begins near the last
-        /// allocation but performs a full non-wrapping scan before reporting
-        /// exhaustion.
         pub fn allocate(self: *Self, count: u32) ?FrameRun {
             if (count == 0 or count > frame_count) return null;
 
@@ -125,9 +112,6 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             };
         }
 
-        /// Releases exactly one previously allocated run. Validation happens
-        /// before mutation, so double frees and mixed valid/invalid ranges do
-        /// not corrupt the bitmaps or counters.
         pub fn release(self: *Self, run: FrameRun) Error!void {
             const start = try validateRun(run);
 

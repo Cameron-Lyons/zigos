@@ -53,11 +53,6 @@ pub fn emitSummary(benchmark_count: usize, quality_gate_count: usize, quality_cy
     console.print(line);
 }
 
-// Benchmark harness steps must not fail silently: in ReleaseFast a
-// `catch |err| benchStepFailure("benchmark reporting", err)` on a fallible fixture or measurement step is
-// undefined behavior, and the run limps on to publish numbers and
-// checksums computed from garbage state. Failing loudly at the step keeps
-// the gated measurements trustworthy.
 pub fn benchStepFailure(comptime step: []const u8, err: anyerror) noreturn {
     std.debug.panic("benchmark step failed: {s}: {s}", .{ step, @errorName(err) });
 }

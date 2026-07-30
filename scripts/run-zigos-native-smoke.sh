@@ -7,7 +7,6 @@ ZIG="${ROOT_DIR}/scripts/zig.sh"
 MARKER_TOOL="${ROOT_DIR}/src/print_native_smoke_markers.zig"
 PRODUCTION_BOOT_LOG_CHECKER="${ROOT_DIR}/scripts/check-production-boot-log.sh"
 
-# shellcheck source=scripts/qemu-harness.sh
 source "$ROOT_DIR/scripts/qemu-harness.sh"
 
 KERNEL_PATH="${1:?kernel path required}"
@@ -16,10 +15,6 @@ NATIVE_STORE_IMAGE="${3:?native store image path required}"
 MODE="${4:-full}"
 USERSPACE_BIN_DIR="${5:-$ROOT_DIR/zig-out/bin}"
 BOOTLOADER_SOURCE_PATH="${6:-src/boot/boot_x86_64.S}"
-# Per-boot cap on waiting for the validation marker. The harness stops QEMU as
-# soon as the marker appears, so this only bounds the failure path; keep it
-# generous enough that a slow shared runner does not fail an otherwise healthy
-# boot.
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-420}"
 NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
 

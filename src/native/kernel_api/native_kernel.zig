@@ -614,17 +614,11 @@ pub const Kernel = struct {
         const descriptor = operation_metadata.declarationFor(expected_operation);
         if (context.operation != descriptor.operation) return error.UnexpectedOperation;
 
-        // Resolve the calling task first when authenticated, preserving the
-        // original TaskNotFound-before-capability error ordering.
         const subject_task = if (context.caller_task_id != 0)
             (self.runtime.find(context.caller_task_id) orelse return error.TaskNotFound)
         else
             null;
 
-        // Resolve live table membership, lease state, and target generation in
-        // one indexed lookup. Callers consume the immutable record before any
-        // capability-table mutation, so authorization never needs to copy the
-        // full capability record.
         const owned = try self.capability_table.requireUsable(context.presented_capability_id, now_ticks);
 
         if (subject_task) |task| {

@@ -296,8 +296,7 @@ test "syscall surface dispatches typed task creation requests" {
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     try std.testing.expectEqual(@as(u32, @sizeOf(abi.TaskDescriptor)), result.bytes_written);
     try std.testing.expectEqual(abi.DenialReason.none, result.denial_reason);
-    // Successful syscalls intentionally carry no synthesized provenance record:
-    // the register ABI discards it, so it is built only on the denial path.
+
     try std.testing.expectEqual(debug_contract.ProvenanceKind.none, result.provenance.kind);
     try std.testing.expect(response.task_id != 0);
     try std.testing.expectEqual(@as(u16, @intFromEnum(task_runtime.ComponentClass.app_component)), response.component_class);
@@ -700,5 +699,4 @@ test "syscall surface dispatches typed PCI device broker requests" {
     );
     try std.testing.expectEqual(abi.SyscallStatus.success, describe_result.status);
     try std.testing.expectEqual(@as(u64, 0x1F001), describe_response.device_id);
-
 }

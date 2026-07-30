@@ -62,9 +62,6 @@ pub fn addUserspaceRuntimeHostTestModules(
     return addUserspaceRuntimeModulesFor(b, b.graph.host, optimize, b.graph.host, optimize);
 }
 
-/// `support_target`/`support_optimize` apply to the wire, descriptor, abi,
-/// bootstrap-mailbox, and service-protocol modules; the runtime module always
-/// gets an explicit target and optimize mode.
 fn addUserspaceRuntimeModulesFor(
     b: *std.Build,
     support_target: ?std.Build.ResolvedTarget,

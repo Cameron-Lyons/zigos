@@ -118,8 +118,7 @@ pub const FileRecord = struct {
 pub const ReleaseManifest = struct {
     policyVersion: u64,
     profileId: []const u8,
-    /// Callers compare this authenticated value with their persisted sequence
-    /// before accepting the release or updating rollback-protection state.
+
     releaseSequence: u64,
     issuedAt: i64,
     expiresAt: i64,
@@ -178,10 +177,6 @@ pub const VerifiedManifest = struct {
     }
 };
 
-/// Establishes the initial root of trust. `expected_sha256_hex` must come from
-/// outside the release bundle (for example, an installer or independently
-/// pinned configuration). The JSON is not parsed or interpreted until its raw
-/// bytes match that digest.
 pub fn verifyRootMetadata(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -200,8 +195,6 @@ pub fn verifyRootMetadata(
     return .{ .parsed = parsed };
 }
 
-/// Authenticates a trust policy with the externally pinned root before parsing
-/// the policy payload into its typed representation.
 pub fn verifyTrustPolicy(
     allocator: std.mem.Allocator,
     envelope_source: []const u8,
@@ -222,9 +215,6 @@ pub fn verifyTrustPolicy(
     };
 }
 
-/// Authenticates every DSSE signature before parsing the manifest payload.
-/// Unknown, duplicate, revoked, unauthorized, expired, or invalid signatures
-/// fail the whole envelope, including signatures beyond the threshold.
 pub fn verifyReleaseManifest(
     allocator: std.mem.Allocator,
     envelope_source: []const u8,
@@ -320,7 +310,6 @@ fn authenticateReleaseEnvelope(
         signer_ids[index] = key.keyId;
     }
 
-    // The returned IDs refer to policy-owned strings, not envelope-owned data.
     const stable_signer_ids = try allocator.dupe([]const u8, signer_ids);
     return .{
         .payload = envelope.payload,
@@ -468,8 +457,6 @@ fn validateManifest(
     try validateWindow(manifest.issuedAt, manifest.expiresAt, now_unix);
     if (manifest.issuedAt < policy.issuedAt or manifest.expiresAt > policy.expiresAt) return error.ManifestOutsidePolicyWindow;
 
-    // Checking current time before payload parsing prevents backdating. These
-    // checks additionally bind the signed manifest's own interval to every key.
     for (signer_ids) |signer_id| {
         const key = findReleaseKey(policy, signer_id).?;
         if (manifest.issuedAt < key.notBefore or manifest.issuedAt >= key.notAfter or manifest.expiresAt > key.notAfter) {

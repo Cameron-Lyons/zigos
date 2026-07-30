@@ -44,8 +44,6 @@ pub const production_target_paths = sortedConcatenation(
     production_userspace_target_paths,
 );
 
-/// This file is transported as evidence, not trusted as its own authority. A
-/// verifier must authenticate it using a trust-root digest obtained out of band.
 pub const root_metadata_evidence_name = "root-metadata.json";
 
 pub const release_evidence_names = [_][]const u8{

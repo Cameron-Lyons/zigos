@@ -25,9 +25,6 @@ const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(r
 else
     @import("../storage/storage_volume.zig");
 
-// Bridge to the kernel NVMe driver's DMA footprint (nvme_hw.zig). When the
-// real NVMe engine backs storage, its bus-master DMA program is confined to
-// exactly these queue/bounce frames. Host builds report no windows.
 const nvme_dma_bridge = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn zigosStorageBootstrapNvmeDmaWindow(
@@ -463,11 +460,6 @@ fn storageControllerSessionCurrent(publication: *const StoragePublication) bool 
     return storageSessionIsCurrent(&session);
 }
 
-// Program the storage device's DMA isolation to match its real data plane.
-// When the kernel NVMe engine is attached, the program is a window-confined
-// bus-master one: the brokered staging window plus the NVMe queue and
-// bounce frames the device actually masters. Host models retain a single
-// synthetic brokered window.
 fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
     var windows: [device_broker.MAX_DMA_WINDOWS]device_broker.DmaWindow = undefined;
     windows[0] = device_broker.defaultBrokeredDmaWindow(device_id);

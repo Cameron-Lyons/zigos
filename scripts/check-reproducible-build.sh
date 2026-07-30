@@ -50,9 +50,6 @@ case "$(realpath "$OUTPUT_PATH")" in
     ;;
 esac
 
-# Reproducibility evidence is part of the signed exact bundle. Withdraw the
-# publication marker and remove the previous pair before rebuilding so a
-# standalone invocation cannot mutate an apparently published release.
 rm -f -- \
   "$OUTPUT_PATH/release-manifest.dsse.json" \
   "$OUTPUT_PATH/reproducible-artifact-digests.sha256" \

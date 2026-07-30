@@ -19,8 +19,7 @@ pub fn rootAddress(entries: anytype) RootAddress {
 
 pub fn rebuildPathMerkle(index: anytype) void {
     for (0..index.entry_count) |entry_index| updatePathLeaf(index, entry_index);
-    // Structural rebuilds retain the old scrubbing guarantee so deleted-entry
-    // digests do not remain visible through the public workspace record.
+
     for (index.leaf_hashes[index.entry_count..]) |*leaf_hash| {
         leaf_hash.* = zeroRootAddress();
     }

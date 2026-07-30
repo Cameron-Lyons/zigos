@@ -71,10 +71,6 @@ pub inline fn insert(comptime capacity: usize, table: *[capacity]Slot, id: u64, 
     native_util.impossibleByInvariant("id index capacity covers all live slots");
 }
 
-/// Insert a key that the caller has already proved absent. Unlike insert(),
-/// this can claim the first tombstone immediately instead of probing onward
-/// for a possible duplicate, which keeps high-churn arena indexes bounded by
-/// the nearest reusable bucket.
 pub inline fn insertAbsent(
     comptime capacity: usize,
     table: *[capacity]Slot,

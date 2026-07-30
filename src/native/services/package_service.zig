@@ -731,10 +731,6 @@ fn bundleKey(bundle_id: []const u8) u64 {
     return indexed_arena.nonZeroKey(hasher.final());
 }
 
-// Arena primary key for a live bundle slot. Only consulted for in-use slots, so
-// the empty-slot bundleKey("") is never indexed. install() dedups by bundle_id,
-// so the key is unique per slot; find()/findConst() still string-compare the
-// bundle_id to stay correct under the (astronomically rare) Wyhash collision.
 fn bundleSlotKey(slot: *const BundleSlot) u64 {
     return bundleKey(slot.bundle.bundleIdSlice());
 }

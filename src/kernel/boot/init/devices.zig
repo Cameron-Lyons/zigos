@@ -55,11 +55,7 @@ pub fn init() void {
     {
         @panic("PCI message-signaled interrupt quiescence failed before VT-d handoff");
     }
-    // QEMU "modeled" test boots cannot expose the exact first-target Intel
-    // devices, so explicit test profiles request a modeled inventory seed.
-    // Native QEMU paths that cannot pass `-append` reliably also fall back to
-    // modeled inventory only when first-target network hardware is absent.
-    // Real freestanding hardware keeps strict detected-inventory binding.
+
     capturePciInventory();
     hardware_proof.capturePciEvidence();
     const model_via_cmdline = if (handoff.capturedInfo()) |info|
@@ -88,10 +84,7 @@ pub fn startDeferredRuntimeInit() void {
 
 fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
     if (config.smokeFaultMode() != .none or model_via_cmdline) return true;
-    // The direct multiboot QEMU path does not reliably surface `-append`
-    // before service bootstrap. The first supported hardware target exposes an
-    // Intel I225-LM inventory record, so a native profile without that record is
-    // treated as modeled QEMU inventory rather than production hardware proof.
+
     if (config.bootProfile() == .zigos_native) {
         return !device_inventory.recordForClass(.network_adapter).detected;
     }
@@ -170,8 +163,6 @@ fn capturePciInventory() void {
 fn publishDeferredNetworkBootstrap() void {
     const network_record = device_inventory.recordForClass(.network_adapter);
     if (!network_record.detected) return;
-    // The kernel keeps the confined queue behind its narrow bridge; the native
-    // network service remains the only publisher and claims it during activation.
 }
 
 fn pciDeviceId(device_info: pci.PCIDevice) u64 {

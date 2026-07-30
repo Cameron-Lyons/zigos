@@ -181,8 +181,6 @@ pub const Runtime = struct {
     pub const AddressSpaceRecordType = AddressSpaceRecord;
     pub const AddressSpaceRegionType = AddressSpaceRegionRecord;
 
-    // Identifier cursors never move backwards within a runtime generation.
-    // Zero is the exhausted sentinel after assigning the maximum u64 value.
     next_task_id: u64 = 1,
     next_process_id: u64 = 1,
     next_address_space_id: u64 = 1,
@@ -493,7 +491,7 @@ pub const Runtime = struct {
     pub fn allowHostPointerSyscallsForTask(self: *Runtime, task_id: u64) void {
         const task = self.find(task_id).?;
         const address_space = self.findAddressSpace(task.address_space_id).?;
-        // Host-side syscall proofs pass pointers from the native test stack.
+
         address_space.region_count = 0;
     }
 
@@ -1749,8 +1747,6 @@ test "sparse checkpoints preserve cross-page slot order and retire only live add
         .tick = 77,
     });
 
-    // Remove every intermediate slot in descending order so the replacement
-    // takes slot one while the older high task remains beyond a page boundary.
     var task_index = task_ids.len - 1;
     while (task_index > 1) {
         task_index -= 1;

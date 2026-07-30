@@ -20,17 +20,16 @@ fn heapStartAddress() usize {
 const BlockHeader = struct {
     size: usize,
     is_free: bool,
-    // Address-ordered neighbours, for splitting and coalescing.
+
     next: ?*BlockHeader,
     prev: ?*BlockHeader,
-    // Free-list links; only meaningful while is_free.
+
     next_free: ?*BlockHeader,
     prev_free: ?*BlockHeader,
 };
 
-// SAFETY: assigned in init() before any heap operations
 var heap_start: [*]u8 = undefined;
-// SAFETY: assigned in init() before any heap operations
+
 var heap_end: [*]u8 = undefined;
 var free_list: ?*BlockHeader = null;
 var is_initialized = false;
@@ -160,17 +159,12 @@ pub fn kfree(ptr: ?*anyopaque) void {
         return;
     }
 
-    // Guard against double-free: coalescing an already-free block a second time
-    // corrupts the free list (it merges neighbours twice).
     if (block.is_free) {
         return;
     }
 
     block.is_free = true;
 
-    // Absorb a free successor, then fold into a free predecessor; the
-    // neighbour being absorbed leaves the free list, and the surviving
-    // block enters it exactly once.
     if (block.next) |next| {
         if (next.is_free) {
             freeListRemove(next);

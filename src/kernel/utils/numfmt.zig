@@ -10,7 +10,6 @@ pub fn printDec(value: anytype) void {
         return;
     }
 
-    // SAFETY: populated by the digit extraction loop below.
     var digits: [DECIMAL_U64_BUFFER_BYTES]u8 = undefined;
     var count: usize = 0;
     while (v > 0) : (v /= 10) {
@@ -32,7 +31,7 @@ pub fn printHex(value: anytype) void {
     }
 
     const hex = "0123456789ABCDEF";
-    // SAFETY: populated by the nibble extraction loop below.
+
     var digits: [HEX_U64_BUFFER_BYTES]u8 = undefined;
     var count: usize = 0;
     while (v > 0) : (v >>= 4) {

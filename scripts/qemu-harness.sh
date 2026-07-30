@@ -37,8 +37,6 @@ qemu_harness_cpu_model() {
     return
   fi
 
-  # Current software emulators expose the mandatory x2APIC contract through
-  # 'max'. Pinning the TSC rate matches the QEMU boot profile calibration.
   printf '%s\n' "max,+x2apic,tsc-frequency=2400000000"
 }
 

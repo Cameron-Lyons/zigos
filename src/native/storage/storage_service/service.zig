@@ -121,9 +121,6 @@ pub const StorageCore = struct {
         return result;
     }
 
-    /// Creates the metadata signature inside the trusted storage service and
-    /// avoids re-verifying that freshly generated signature. Use putVersion for
-    /// metadata or signatures supplied across a trust boundary.
     pub inline fn putLocallySignedVersion(
         self: *Service,
         request: object_store.PutLocallySignedRequest,

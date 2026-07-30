@@ -591,10 +591,6 @@ test "sync service inbound queue evicts out-of-window frames instead of the queu
         .path = path,
     };
 
-    // Accept well past MAX_TRANSPORT_FRAMES distinct inbound frames (monotonic
-    // source_frame_id, one scope). Before reclamation the (MAX+1)th returned
-    // error.TransportQueueFull, permanently breaking inbound sync for this peer;
-    // the persist of a full table also depended on storage mutation-log compaction.
     const total: u64 = sync_service.MAX_TRANSPORT_FRAMES * 2;
     var sfid: u64 = 1;
     while (sfid <= total) : (sfid += 1) {
@@ -602,16 +598,11 @@ test "sync service inbound queue evicts out-of-window frames instead of the queu
         _ = try port.acceptTransportFrame(authority, &storage, request);
     }
 
-    // The inbound table stays bounded to the most-recent window.
     try std.testing.expect(resident.inboundTransportFrameCount() <= sync_service.MAX_TRANSPORT_FRAMES);
 
-    // A replay of an old, evicted (out-of-window) frame is still rejected: eviction
-    // only drops frames at least TRANSPORT_REPLAY_WINDOW behind the high-water, so the
-    // replay floor never regresses.
     request.source_frame_id = 1;
     try std.testing.expectError(error.TransportReplayRejected, port.acceptTransportFrame(authority, &storage, request));
 
-    // A recent in-window frame is still deduplicated (never evicted), not re-enqueued.
     request.source_frame_id = total;
     const before = resident.inboundTransportFrameCount();
     const duplicate = try port.acceptTransportFrame(authority, &storage, request);
@@ -1974,8 +1965,6 @@ test "overlay sessions cover sync remote access private service publishing and e
         19,
     ));
 
-    // Four records already occupy the eight-slot arena: two live and two closed.
-    // Fill the unclaimed slots, then force both closed slots through reuse.
     const unclaimed_session_count = sync_service.MAX_OVERLAY_SESSIONS - 4;
     for (0..unclaimed_session_count) |offset| {
         _ = try service_port.openOverlaySession(

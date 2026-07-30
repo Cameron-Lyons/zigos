@@ -58,17 +58,11 @@ GENERATOR_EVIDENCE_NAMES=(
   "sbom.spdx.json"
 )
 
-# Withhold the publication marker before touching any evidence. Remove only the
-# files owned by this generator so a failed invocation cannot leave a stale mix
-# that a manually invoked finalizer could publish.
 rm -f -- "$OUTPUT_PATH/release-manifest.dsse.json"
 for evidence_name in "${GENERATOR_EVIDENCE_NAMES[@]}"; do
   rm -f -- "$OUTPUT_PATH/$evidence_name"
 done
 
-# Build every owned evidence file in a same-filesystem staging directory. The
-# final renames replace hostile leaf symlinks or hard links instead of following
-# them, while the absent manifest keeps a partially published set untrusted.
 WORK_PATH="$(mktemp -d "$OUTPUT_PATH/.generate.XXXXXX")"
 cleanup_generation() {
   rm -rf -- "$WORK_PATH"

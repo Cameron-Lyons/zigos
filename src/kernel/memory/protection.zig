@@ -1,14 +1,6 @@
 const paging = @import("paging64.zig");
 const console = @import("../utils/console.zig");
 
-// User-memory validation and user/kernel copies are owned by the native syscall
-// surface (native/kernel_api/syscall_dispatch.validateUserRange), which checks
-// each access against the calling task's registered address-space regions. The
-// freestanding kernel only needs to lock down its own image here. The previous
-// implementation walked 0xC0000000.. and re-mapped whatever it found writable;
-// this kernel identity-maps the low 128 MiB, so that range held no mappings
-// and nothing was ever protected.
-
 const PAGE_SIZE: usize = 0x1000;
 
 extern const __kernel_text_start: u8;
@@ -81,15 +73,11 @@ pub fn protectKernelMemory() void {
     const data = nonEmptyLinkerRange(&__kernel_data_start, &__kernel_data_end);
     const bss = nonEmptyLinkerRange(&__kernel_bss_start, &__kernel_bss_end);
 
-    // The userspace archive is immutable after link: launch verifies its digest
-    // before copying bytes into task-owned frames. Keeping it R/NX closes the
-    // verification-to-copy window just like ordinary kernel rodata.
     setRangeReadOnly(text);
     setRangeReadOnly(rodata);
     setRangeReadOnly(archive);
     setRangeReadOnly(relro);
 
-    // Without CR0.WP the read-only bits do not bind supervisor writes.
     paging.enableWriteProtect();
 
     verifyRange(text, false, true, null);

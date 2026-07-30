@@ -231,8 +231,6 @@ pub const Directory = struct {
         return &slot.driver;
     }
 
-    /// Rotates the DMA isolation domain for a live record borrowed from this
-    /// directory before the runtime reactivates it.
     pub fn markRestarted(self: *Directory, driver: *DriverRecord) bool {
         const dma_domain_id = self.nextReservableDmaDomainId() orelse return false;
         _ = device_broker.invalidateDmaIsolation(driver.device_id, driver.dma_domain_id);
@@ -324,10 +322,6 @@ fn driverServiceClassKey(service_id: u64, device_class: DeviceClass) u64 {
     return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.driver_service_class_key, &bytes));
 }
 
-// Arena primary key: a driver slot is uniquely identified by (service_id,
-// device_class) (registerSigned rejects a duplicate pair). Only in-use slots are
-// keyed; findSlotByServiceAndClass re-checks both fields to stay correct under a
-// (vanishingly rare) Wyhash collision.
 fn driverSlotKey(slot: *const DriverSlot) u64 {
     return driverServiceClassKey(slot.driver.service_id, slot.driver.device_class);
 }

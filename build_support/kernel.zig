@@ -135,8 +135,7 @@ fn createX86_64KernelModule(
         .target = target,
         .optimize = optimize,
         .strip = false,
-        // Interrupts may arrive at any instruction boundary, so the kernel
-        // cannot use the userspace ABI's 128-byte area below RSP.
+
         .red_zone = false,
     });
     kernel_module.addImport("binary_cursor", b.createModule(.{
@@ -452,12 +451,9 @@ pub fn addKernelArtifact(
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        // The role gate inspects symbols as well as loaded bytes. Keep the
-        // kernel symbol table in every supported optimization mode; public
-        // release packaging can produce a separately stripped derivative.
+
         .strip = false,
-        // Privileged code may be interrupted at any instruction boundary and
-        // cannot rely on an ABI-owned area below the current stack pointer.
+
         .red_zone = false,
     });
     const binary_cursor_module = b.createModule(.{
@@ -499,8 +495,6 @@ pub fn addKernelArtifact(
     const linked_kernel = link.addOutputFileArg(name);
     link.addFileArg(kernel_object.getEmittedBin());
 
-    // Keep the installed benchmark ELF symbolized for diagnostics, but do not
-    // make firmware and GRUB parse its large non-loadable debug sections.
     const boot_kernel = if (boot_profile == .benchmark) boot: {
         const boot_link = b.addSystemCommand(&.{
             b.graph.zig_exe,

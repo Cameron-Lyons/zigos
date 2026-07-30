@@ -302,14 +302,12 @@ test "replacement-only workspace commits preserve duplicate fallbacks and object
     _ = try directory.commit(workspace.id, 47);
     try std.testing.expectEqualStrings("a.md", (try directory.resolveObject(workspace.id, ids.object(10))).pathSlice());
 
-    // Changing the first sorted duplicate must expose the remaining path.
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "a.md", ids.object(11), ids.version(104), .document);
     _ = try directory.commit(workspace.id, 48);
     try std.testing.expectEqualStrings("b.md", (try directory.resolveObject(workspace.id, ids.object(10))).pathSlice());
     try std.testing.expectEqualStrings("a.md", (try directory.resolveObject(workspace.id, ids.object(11))).pathSlice());
 
-    // Rebuild the object index only after both sides of a swap are installed.
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "c.md", ids.object(30), ids.version(105), .document);
     try directory.stagePut(workspace.id, "d.md", ids.object(20), ids.version(106), .document);
@@ -569,9 +567,6 @@ test "aborting a transaction discards staged entries and reopens the workspace" 
     try std.testing.expectEqual(@as(usize, 0), notes.staging.staged_entries[0].path_len);
     try std.testing.expect(notes.staging.staged_entries[0].object_id.isZero());
 
-    // The staged put must not survive the abort, and the workspace must be
-    // open for the next transaction rather than wedged with
-    // TransactionAlreadyOpen.
     try std.testing.expectError(error.EntryNotFound, directory.resolve(notes.id, "documents/notes.md"));
     try directory.beginTransaction(notes.id);
     try directory.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);

@@ -187,11 +187,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         secret_transfer_adapter: SecretTransferAdapter = sync_adapters.default_secret_transfer_adapter,
         database_sync_adapter: DatabaseSyncAdapter = sync_adapters.default_database_sync_adapter,
         transport_queue: TransportQueue = TransportQueue.init(),
-        // Coalesces the full-state checkpoint across an inbound replication burst:
-        // while a batch is open, acceptTransportFrame defers its checkpoint and one
-        // is flushed when the batch closes. Mirrors the outbound ack coalescing and
-        // the event_ledger persistence batch. Standalone callers (depth 0) stay
-        // durable per call.
+
         replication_batch_depth: usize = 0,
         replication_checkpoint_pending: bool = false,
 
@@ -549,10 +545,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return self.active_overlay_session_count;
         }
 
-        /// Returns an in-process, read-only borrow of the service-owned record.
-        /// The borrow is valid only while this service instance stays at the same
-        /// address. Closing updates the record to `.closed`; a later open may reuse
-        /// its fixed-arena slot, after which this pointer must not be dereferenced.
         pub fn openOverlaySession(
             self: *Self,
             workspace_id: u64,
@@ -865,14 +857,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return accepted;
         }
 
-        // Open an inbound replication batch: subsequent acceptTransportFrame calls
-        // defer their checkpoint until endReplicationBatch closes the outermost batch.
         pub fn beginReplicationBatch(self: *Self) void {
             self.replication_batch_depth += 1;
         }
 
-        // Close a batch and, when the outermost one closes, flush exactly one
-        // checkpoint if any inbound frame deferred it.
         pub fn endReplicationBatch(self: *Self) Error!void {
             if (self.replication_batch_depth != 0) self.replication_batch_depth -= 1;
             if (self.replication_batch_depth != 0) return;
@@ -881,19 +869,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             try self.checkpoint();
         }
 
-        // Abandon a batch without flushing (error path); clears the deferred
-        // checkpoint once the outermost batch is gone so it cannot leak forward.
         pub fn cancelReplicationBatch(self: *Self) void {
             if (self.replication_batch_depth != 0) self.replication_batch_depth -= 1;
             if (self.replication_batch_depth == 0) self.replication_checkpoint_pending = false;
         }
 
-        // Acknowledge a batch of delivered outbound frames with a single
-        // checkpoint at the end. The per-frame variant used to run a full state
-        // re-persist (encode every table + storage scan) for each frame; a
-        // replication pass delivers many frames at once, so coalescing collapses N
-        // full persists into one. Returns the count newly acknowledged and
-        // reclaims delivered outbound slots immediately.
         pub fn ackOutboundTransportFrames(self: *Self, frame_ids: []const u64) Error!usize {
             var newly_acked: usize = 0;
             var changed = false;
@@ -1755,17 +1735,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             native_util.impossibleByInvariant("transport frame count found a free slot but allocation cursor did not");
         }
 
-        // When the inbound table is full, reclaim the oldest frame that is already
-        // OUTSIDE its scope's replay window. Such a frame is redundant: a re-send of it
-        // is rejected by replayWindowRejects (its source_frame_id is at least
-        // TRANSPORT_REPLAY_WINDOW behind the scope's high-water), so dedup no longer
-        // needs it. Frames inside any scope's window are never evicted, and a scope's
-        // highest source_frame_id is never evicted, so both the duplicate set and the
-        // scan-derived replay floor stay sound. This turns the hard TransportQueueFull
-        // cliff (inbound sync permanently breaking after MAX_TRANSPORT_FRAMES distinct
-        // frames) into a bounded most-recent window. Only inbound evicts (outbound is
-        // reclaimed by acking). Returns null (fail closed) only in the pathological
-        // case where every resident frame is still within some scope's replay window.
         fn reclaimInboundTransportFrameSlotIndex(self: *Self, queue_kind: TransportQueueKind, frame_id: u64) ?usize {
             if (queue_kind != .inbound) return null;
             const frames = &self.state().inbound_transport_frames;
@@ -1971,9 +1940,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return request.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= latest_source_frame_id;
         }
 
-        // Highest source_frame_id resident for one (workspace, source, target)
-        // replay scope, found through the inbound target index rather than a
-        // full-table scan.
         fn latestInboundSourceFrameId(
             self: *const Self,
             workspace_id: u64,

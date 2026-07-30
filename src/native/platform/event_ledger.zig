@@ -1286,8 +1286,6 @@ pub const Ledger = struct {
         });
     }
 
-    /// Borrow the latest event of a kind for immediate read-only inspection.
-    /// The pointer remains valid only until the ledger is mutated.
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?*const Event {
         const tail = self.kind_index.tail(kindKey(kind));
         if (tail == indexed_arena.no_index) return null;
@@ -1727,12 +1725,6 @@ pub const Ledger = struct {
     fn appendEvent(self: *Ledger, event: *const Event) Error!void {
         const sequence = self.next_sequence;
         const event_index = self.events.insertIndex(sequence, .{ .event = event.* }) orelse reserve: {
-            // The live arena is a bounded most-recent-N ring: the persistence layer
-            // already stages deletion of events older than MAX_PERSISTED_EVENTS
-            // (see persistRange), so when the in-memory arena fills we evict the
-            // oldest event rather than jamming with EventTableFull. Without this the
-            // tamper-evident audit ledger would permanently stop accepting capability,
-            // crash, and sensitive-capture records after MAX_EVENTS lifetime events.
             if (!self.evictOldestEvent()) return error.EventTableFull;
             break :reserve self.events.insertIndex(sequence, .{ .event = event.* }) orelse return error.EventTableFull;
         };
@@ -1903,9 +1895,7 @@ pub const Ledger = struct {
         };
 
         try storage.beginTransaction(self.workspace_id);
-        // A failed append must not leave the ledger workspace's transaction
-        // open: every later append would then die with TransactionAlreadyOpen,
-        // turning one transient storage error into a permanently wedged ledger.
+
         errdefer storage.abortTransaction(self.workspace_id) catch {};
         var expired_sequence = first_sequence;
         while (expired_sequence <= latest_sequence) : (expired_sequence += 1) {

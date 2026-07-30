@@ -20,8 +20,7 @@ pub const WorkspaceSummary = struct {
 pub const RootState = struct {
     generation: u64 = 0,
     log_bytes: u32 = 0,
-    // Byte offset (relative to data_start_byte) of the log region this root
-    // references. Either 0 or volume_layout.alternate_data_region_offset.
+
     data_offset: u32 = 0,
     next_object_id: u64 = 1,
     next_version_id: u64 = 1,

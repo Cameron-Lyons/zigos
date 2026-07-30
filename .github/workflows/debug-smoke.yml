@@ -5,8 +5,6 @@ permissions:
 
 on:
   schedule:
-    # Nightly; Debug QEMU boots are too slow to gate every pull request,
-    # but safety-checked builds catch corruption that ReleaseFast masks.
     - cron: '17 9 * * *'
   workflow_dispatch:
 
@@ -25,7 +23,5 @@ jobs:
 
     - name: Run Debug native smoke test
       env:
-        # Debug boots take several times the ReleaseFast wall time; give
-        # each marker wait ample headroom on shared runners.
         ZIGOS_NATIVE_SECONDS: "1800"
       run: ./scripts/zig.sh build zigos-native-smoke-test

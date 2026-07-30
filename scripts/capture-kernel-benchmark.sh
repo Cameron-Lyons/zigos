@@ -5,7 +5,6 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
-# shellcheck source=scripts/qemu-harness.sh
 source "$ROOT_DIR/scripts/qemu-harness.sh"
 
 KERNEL_PATH="${1:?kernel path required}"
