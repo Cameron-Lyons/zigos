@@ -533,27 +533,21 @@ test "event ledger evicts oldest events instead of jamming past MAX_EVENTS" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 7 };
 
-    // Record well past ring capacity. Before the ring fix the (MAX_EVENTS+1)th
-    // append returned error.EventTableFull, permanently disabling the security
-    // audit log for every subsequent capability/crash/sensitive-capture record.
     const total: u64 = event_ledger.MAX_EVENTS * 2 + 5;
     var task_id: u64 = 1;
     while (task_id <= total) : (task_id += 1) {
         try ledger.recordPermissionDecision(user, task_id, .screen_capture, false, .policy_denied, task_id, "denied", true);
     }
 
-    // The live ring retains exactly the most-recent MAX_EVENTS entries.
     try std.testing.expectEqual(event_ledger.MAX_EVENTS, ledger.countMatching(.{ .kind = .permission_decision }));
     try std.testing.expectEqual(event_ledger.MAX_EVENTS, ledger.countMatching(.{ .subject = user }));
 
-    // task_id == sequence here, so the oldest are evicted and the newest survive.
     const oldest_retained = total - event_ledger.MAX_EVENTS + 1;
     try std.testing.expectEqual(@as(usize, 0), ledger.countMatching(.{ .task_id = 1 }));
     try std.testing.expectEqual(@as(usize, 0), ledger.countMatching(.{ .task_id = oldest_retained - 1 }));
     try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .task_id = oldest_retained }));
     try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .task_id = total }));
 
-    // The most recent event survives and carries the latest monotonic sequence.
     const latest = ledger.latestKind(.permission_decision).?;
     try std.testing.expectEqual(total, latest.sequence);
     try std.testing.expectEqual(total, latest.task_id);
@@ -813,11 +807,6 @@ test "event ledger persist failure aborts its transaction instead of wedging the
     }
     _ = try storage.commit(ledger.workspace_id, 6);
 
-    // Persisting a new event needs a fresh entry in the full workspace, so
-    // the append fails partway through its transaction. It must fail with
-    // the underlying storage error on every attempt; before the abort-on-
-    // error fix the first failure left the transaction open and every later
-    // append died with TransactionAlreadyOpen instead.
     try std.testing.expectError(
         error.EntryTableFull,
         ledger.recordUpdateTransition(owner, 1, .none, false, 10, "stable-b activated"),

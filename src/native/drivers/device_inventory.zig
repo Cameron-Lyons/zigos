@@ -26,12 +26,6 @@ pub const DeviceRecord = struct {
 
 var records = defaultRecords();
 
-// Modeled-inventory mode: set by the kernel for QEMU "modeled" test boots (e.g.
-// the storage-durability proof) where the emulator does not expose the exact
-// first-target devices. When enabled, the bootstrap seed may fill in absent
-// non-storage device classes so service bootstrap can bring up its drivers,
-// while real detected devices (e.g. a QEMU NVMe controller) are left untouched.
-// It stays false for the real-hardware ISO build, which keeps strict detection.
 var model_device_inventory_enabled = false;
 
 pub fn reset() void {
@@ -145,7 +139,6 @@ fn isStablePciVendorDevice(device_id: u64, vendor_id: u16, pci_device_id: u16) b
 const device_class_count = std.meta.fields(driver_service.DeviceClass).len;
 
 fn defaultRecords() [device_class_count]DeviceRecord {
-    // SAFETY: every slot is written by the inline for below.
     var result: [device_class_count]DeviceRecord = undefined;
     inline for (std.meta.fields(driver_service.DeviceClass)) |field| {
         result[field.value] = defaultRecord(@enumFromInt(field.value));

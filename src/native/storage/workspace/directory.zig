@@ -15,11 +15,7 @@ const workspace_sharing = @import("sharing.zig");
 pub const MAX_WORKSPACES: usize = 8;
 pub const MAX_WORKSPACE_ENTRIES: usize = 96;
 pub const MAX_WORKSPACE_ENTRY_MUTATIONS: usize = MAX_WORKSPACE_ENTRIES * 2;
-// Once the per-generation mutation log grows past this, commit collapses it back to
-// the current live entry set (one mutation each at the current generation), as long as
-// no live snapshot needs the older generations. This keeps high-churn workspaces (e.g.
-// the sync-state workspace, which rewrites transport-frame records) from hitting the
-// hard MAX_WORKSPACE_ENTRY_MUTATIONS cap over their lifetime.
+
 pub const MUTATION_LOG_COMPACTION_THRESHOLD: usize = MAX_WORKSPACE_ENTRY_MUTATIONS * 3 / 4;
 pub const MAX_SNAPSHOTS: usize = 16;
 pub const MAX_RECOVERABLE_DELETES: usize = 24;
@@ -646,14 +642,6 @@ pub const Directory = struct {
         return workspace.generation;
     }
 
-    // Best-effort: collapse a large mutation log to the current live entry set so a
-    // high-churn workspace cannot exhaust MAX_WORKSPACE_ENTRY_MUTATIONS over its
-    // lifetime. Safe because (1) it only runs when no live snapshot references a
-    // generation older than the current one (snapshot restore reconstructs older
-    // generations from the log), and (2) entryChangesSince() only coarsens — a peer
-    // behind the collapsed generation receives the full current set, which
-    // replicateWorkspace re-deduplicates by remote version. The workspace generation
-    // is preserved, so peer replication cursors stay valid.
     fn compactMutationLogIfSafe(workspace: *WorkspaceRecord) void {
         if (workspace.mutation_log.entry_mutation_count <= MUTATION_LOG_COMPACTION_THRESHOLD) return;
         if (workspace.oldest_snapshot_generation < workspace.generation) return;
@@ -738,8 +726,6 @@ pub const Directory = struct {
         return (try self.resolveBorrowed(workspace_id, path)).*;
     }
 
-    /// Borrow a directory-owned entry for immediate read-only inspection. The
-    /// pointer remains valid only until the directory is mutated.
     pub fn resolveBorrowed(self: *const Directory, workspace_id: ids.WorkspaceId, path: []const u8) Error!*const Entry {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
         const index = findWorkspaceEntryIndex(workspace, path) orelse return error.EntryNotFound;
@@ -1316,8 +1302,6 @@ fn findWorkspaceEntryObjectIndex(workspace: *const WorkspaceRecord, object_id: i
     return null;
 }
 
-// Staged entries stay path-sorted via insertSortedEntry/removeEntry, so a
-// binary search is enough; staging keeps no hash index.
 fn findStagedEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
     return findEntryIndex(workspace.staging.staged_entries[0..workspace.staging.staged_entry_count], path);
 }
@@ -1444,15 +1428,12 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
 }
 
 fn compactMutationLogToCurrentEntries(workspace: *WorkspaceRecord) Error!void {
-    // Copy the live entries out first: seedWorkspaceEntries clears path_index before
-    // reading its source, so a slice into path_index.entries would be zeroed mid-use.
     var current_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
     const count = workspace.path_index.entry_count;
     for (workspace.path_index.entries[0..count], 0..) |entry, index| {
         current_entries[index] = entry;
     }
-    // Re-seed the log with exactly the current entries at the current generation,
-    // discarding the older per-generation history. Generation is preserved.
+
     try seedWorkspaceEntries(workspace, current_entries[0..count], workspace.generation);
 }
 
@@ -1599,9 +1580,6 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
     if (structural_change) {
         rebuildWorkspaceEntryIndex(workspace);
     } else if (workspace.staging.staged_entry_count != 0) {
-        // Replacement-only transactions preserve sorted path positions. Keep
-        // the path index, refresh the object index only when identity changed,
-        // and rehash just the leaves written above before folding the root.
         if (object_index_dirty) {
             workspace_index.rebuildObjectSlots(
                 ENTRY_OBJECT_INDEX_CAPACITY,

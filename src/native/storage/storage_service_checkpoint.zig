@@ -15,8 +15,7 @@ else
 const workspace = @import("workspace.zig");
 
 const MAX_CHECKPOINT_ATTEMPTS: u8 = 2;
-// A freestanding kernel has one hardware-backed root volume. Checkpoint stores
-// borrow it instead of embedding a second 1.2 MiB I/O and signature workspace.
+
 const shares_root_volume = builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume");
 const CheckpointVolume = if (shares_root_volume) void else storage_volume.Volume;
 
@@ -161,11 +160,7 @@ fn retryableCheckpointError(err: storage_volume.Error) bool {
     };
 }
 
-// A swallowed flush error leaves the on-disk store one generation behind
-// whatever the boot log claims was committed; without a marker the next
-// cold boot debugs as an unrelated reload failure.
 fn reportFlushError(err: storage_volume.Error) void {
-    // SAFETY: filled by the subsequent std.fmt.bufPrint call
     var line_buffer: [96]u8 = undefined;
     const line = std.fmt.bufPrint(
         &line_buffer,

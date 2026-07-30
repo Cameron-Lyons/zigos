@@ -128,10 +128,6 @@ const BootedNetworkDataPlane = struct {
     }
 };
 
-// Bridge to the kernel's real NVMe data plane (src/kernel/drivers/nvme_hw.zig).
-// When a real NVMe controller is brought up (QEMU `-device nvme` or the first
-// target), the booted storage backend uses it for genuine persistence across
-// reboots. Host builds get inert stubs.
 const nvme_bridge = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn zigosStorageBootstrapNvmeAttached() callconv(.c) bool;
@@ -208,12 +204,7 @@ const BootedStorageDataPlane = struct {
         if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
         if (nvme_bridge.attached()) {
             const nvme_sectors = nvme_bridge.sectorCount();
-            // Real persistence: report the device's true capacity and never floor
-            // it. If the namespace cannot hold the full volume layout plus the
-            // restart-probe scratch range, fail closed (return null -> the
-            // production storage gate refuses) rather than advertising a phantom
-            // 1554-sector device whose writes would address LBAs past the
-            // namespace and fail silently per sector at runtime.
+
             if (nvme_sectors < booted_storage_sector_count) return null;
             return .{
                 .sector_count = nvme_sectors,
@@ -223,8 +214,6 @@ const BootedStorageDataPlane = struct {
             };
         }
         if (comptime builtin.target.os.tag == .freestanding) {
-            // Freestanding boots must use a brokered device publication or the
-            // real NVMe bridge. Never turn missing hardware into ephemeral disk.
             return null;
         } else {
             return .{
@@ -513,8 +502,6 @@ fn launchServices(
 }
 
 fn seedHostedModelDeviceInventory() void {
-    // Seed absent classes for host builds and explicitly modeled freestanding
-    // boots. Real hardware keeps strict detected-inventory binding.
     if (builtin.target.os.tag == .freestanding and !device_inventory.modelDeviceInventoryEnabled()) return;
 
     const hosted_xhci_device_id = 0x8086_A0ED_0001;

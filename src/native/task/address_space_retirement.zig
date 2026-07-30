@@ -10,9 +10,6 @@ pub const Event = struct {
     reason: Reason,
 };
 
-/// Runtime-only boundary for releasing resources owned by an address-space
-/// implementation. Retirement is an infallible notification: lifecycle state
-/// is committed before delivery, and consumers must make cleanup idempotent.
 pub const Sink = struct {
     context: *anyopaque,
     notify_fn: *const fn (*anyopaque, Event) void,

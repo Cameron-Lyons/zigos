@@ -23,10 +23,7 @@ pub const SearchResult = struct {
     body_hits: u16 = 0,
     sensitivity: manifest.DataSensitivity = .internal_data,
     title_fingerprint: u64 = 0,
-    // Borrows the originating Service's fixed document arena. Valid only while
-    // that Service instance remains alive at the same address and continues to
-    // own this record; updating or removing the document invalidates the slice.
-    // Redaction replaces the borrow with an empty slice.
+
     title: []const u8,
 
     pub fn titleSlice(self: *const SearchResult) []const u8 {
@@ -287,8 +284,6 @@ fn worstResultIndex(results: []const SearchResult) usize {
 }
 
 fn scoreDocument(record: *const DocumentRecord, folded_needle: []const u8, generation: u64) ?SearchResult {
-    // Hit counts are bounded by the stored text sizes, so the score always
-    // fits the u16 result fields; keep that proof next to the arithmetic.
     comptime std.debug.assert(MAX_TITLE_BYTES * 4 + MAX_BODY_BYTES <= std.math.maxInt(u16));
     const title_hits = countOccurrencesFolded(record.titleSlice(), folded_needle);
     const body_hits = countOccurrencesFolded(record.bodySlice(), folded_needle);

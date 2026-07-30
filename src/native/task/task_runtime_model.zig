@@ -19,10 +19,7 @@ pub const MAX_TASKS: usize = TASK_PAGE_SIZE * TASK_PAGE_COUNT;
 pub const MAX_TASK_CAPABILITIES: usize = 24;
 pub const MAX_TASK_COMPONENTS: usize = 8;
 pub const MAX_AUDIT_EVENTS: usize = 16;
-// Task-local provenance is the hot recovery/debug view, not the durable
-// system event ledger. Keep only the latest lifecycle window so every task
-// and task checkpoint in the production image does not reserve dozens of
-// text-heavy records. The verification image retains the deeper history.
+
 pub const MAX_TASK_PROVENANCE_EVENTS: usize = if (includesVerificationEvidence()) 24 else 8;
 pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_TASK_SOURCE_IDENTITY_BYTES: usize = 96;

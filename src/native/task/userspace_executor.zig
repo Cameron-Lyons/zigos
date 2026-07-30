@@ -133,7 +133,7 @@ const USERSPACE_TRAP_VECTOR: u8 = 129;
 const PAGE_FAULT_VECTOR: u8 = 14;
 const TRAP_STACK_BYTES: usize = units.kibibytes(48);
 const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
-// Same word the boot-stack watermark uses; unlikely as live stack data.
+
 const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
 const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
@@ -142,12 +142,6 @@ const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || 
     ImageExtentInvalid,
 };
 
-// The ring-0 stack every userspace trap and syscall dispatch runs on. It used
-// to be a 16 KiB field inside Executor, where an overflow ran silently into
-// the executor's own mapping tables - the failure mode the boot stack had
-// before it grew a guard page. Page-aligned so the lowest page can be
-// unmapped as a guard (an overflow then double-faults with diagnostics), and
-// painted so boot logs report the high-water mark.
 var trap_stack: [TRAP_STACK_BYTES]u8 align(PAGE_SIZE) = [_]u8{0} ** TRAP_STACK_BYTES;
 var trap_stack_guard_armed: bool = false;
 
@@ -176,8 +170,6 @@ pub fn prepareKernelStack() usize {
     return @intFromPtr(&trap_stack) + trap_stack.len;
 }
 
-/// Emit the trap-stack high-water mark; creep toward capacity shows up in
-/// QEMU logs long before the guard page would trip mid-syscall.
 pub fn reportTrapStackPeak() void {
     if (builtin.target.os.tag != .freestanding) return;
     if (!trap_stack_guard_armed) return;
@@ -191,7 +183,7 @@ pub fn reportTrapStackPeak() void {
         untouched += @sizeOf(u32);
     }
     const used = (top - base) - untouched;
-    // SAFETY: filled by the subsequent std.fmt.bufPrint call
+
     var line_buffer: [96]u8 = undefined;
     const line = std.fmt.bufPrint(
         &line_buffer,
@@ -239,8 +231,6 @@ comptime {
     }
 }
 
-// The entry assembly receives a UserContext64 pointer in the first argument
-// and reserves the second argument for the C ABI boundary.
 extern fn zigos_enter_userspace(context: usize, reserved: usize) callconv(.c) u32;
 
 pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
@@ -316,9 +306,6 @@ pub const Executor = struct {
         self.initialized = true;
     }
 
-    /// Gives one scheduler exclusive ownership of this executor and binds all
-    /// materialized address-space identifiers to one runtime namespace. The
-    /// owner token makes even an otherwise-identical second wrapper distinct.
     pub fn claimRuntimeBinding(
         self: *Executor,
         owner: *const anyopaque,
@@ -742,7 +729,6 @@ pub const Executor = struct {
         self.last_fault_address = 0;
         self.last_fault_error_code = 0;
     }
-
 };
 
 fn debugIndexChecksEnabled() bool {

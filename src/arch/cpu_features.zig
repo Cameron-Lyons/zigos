@@ -1,6 +1,3 @@
-//! Hardware CPUID collection and supervisor-protection enablement for the
-//! mandatory modern CPU baseline.
-
 const x86 = @import("x86.zig");
 pub const baseline = @import("cpu_baseline.zig");
 
@@ -28,8 +25,6 @@ fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
 }
 
 pub fn detect() baseline.Features {
-    // CPUID predates the mandatory x86-64 baseline by a decade. Unsupported
-    // pre-Pentium processors are deliberately outside the platform contract.
     var registers = baseline.Registers{ .cpuid_available = true };
     registers.max_basic_leaf = cpuid(0, 0).eax;
     if (registers.max_basic_leaf >= 1) {
@@ -67,13 +62,6 @@ pub const ProcessContextMode = enum {
     software_flush,
 };
 
-/// Turn on the mandatory CPU facilities that are safe with the current memory
-/// access model. NX enforces execute-disable page-table entries, SMEP blocks
-/// ring-0 execution from user pages, UMIP hides descriptor-table state from
-/// ring 3, PGE shares kernel translations, and PCID preserves process-local
-/// translations across address-space switches.
-/// SMAP is required by the baseline but is enabled with the controlled
-/// user-copy primitives in the paging migration.
 pub fn enableModernFeatures(features: baseline.Features, process_context_mode: ProcessContextMode) void {
     var required_features = features;
     if (process_context_mode == .software_flush) {

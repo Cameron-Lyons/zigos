@@ -238,11 +238,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return inserted.*;
         }
 
-        /// Returns a read-only borrow of the table-owned child in its fixed arena
-        /// slot. The borrow may be used only while this table instance stays in
-        /// place and the child remains stored. Copy the record before revoking or
-        /// otherwise removing the child: removal clears the slot immediately, and
-        /// a later insertion may reuse it.
         pub fn derive(self: *Self, request: DeriveRequest) Error!*const Capability {
             const parent_slot = self.findConstSlot(request.parent_capability_id) orelse return error.CapabilityNotFound;
             const parent = &parent_slot.capability;
@@ -316,9 +311,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return slot.capability;
         }
 
-        /// Returns a table-backed view of a live grant and its current lease and
-        /// target-generation state. The pointer remains valid only until the
-        /// capability table is mutated.
         pub fn inspect(self: *const Self, capability_id: u64, now_ticks: u64) ?Inspection {
             const slot = self.findConstSlot(capability_id) orelse return null;
             return .{

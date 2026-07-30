@@ -119,8 +119,7 @@ pub fn validateUserspaceImage(
         const segment = image.segments[index];
         if (segment.memory_size == 0) return error.InvalidUserspaceImage;
         if (segment.file_size > segment.memory_size) return error.InvalidUserspaceImage;
-        // Admission rejects ambiguous W+X declarations before the pager also
-        // enforces the same invariant with read-only executable or NX leaves.
+
         if (segment.access.write and segment.access.execute) return error.InvalidUserspaceImage;
 
         const alignment: u64 = segment.alignment;

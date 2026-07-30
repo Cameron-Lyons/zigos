@@ -89,9 +89,6 @@ pub const Mailbox = extern struct {
     last_counter: u32 = 0,
 };
 
-/// Stable bootstrap wire layout. Host-side artifact tools may have a wider
-/// extern struct tail alignment, so serialized extent checks must not use host
-/// `@sizeOf(Mailbox)`.
 pub const ABI_SIZE_BYTES: usize = 76;
 pub const ABI_ALIGNMENT: usize = 4;
 

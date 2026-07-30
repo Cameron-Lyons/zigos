@@ -1,10 +1,6 @@
-// Component ABI wire records: the fixed-size extern request/response structs
-// for each typed component operation, plus the shared WireHeader and the magic
-// and version constants. Extracted from component_abi_schema.zig so the schema
-// and contract logic stay separate from the on-wire record layouts.
 const crypto_hash = @import("../core/crypto_hash.zig");
 
-pub const MAGIC: u32 = 0x54434142; // TCAB
+pub const MAGIC: u32 = 0x54434142;
 pub const VERSION: u16 = 1;
 
 pub const WireHeader = extern struct {

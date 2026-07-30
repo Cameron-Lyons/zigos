@@ -229,7 +229,7 @@ fn findRequiredMailboxSectionAddress(
         if (!reader.readInto(section_offset, std.mem.asBytes(&section))) return error.InvalidSectionHeaderTable;
         if (!sectionNameEquals(reader, names_start, names_len, section.sh_name, section_name)) continue;
 
-        const required_flags: @TypeOf(section.sh_flags) = 0x1 | 0x2; // SHF_WRITE | SHF_ALLOC
+        const required_flags: @TypeOf(section.sh_flags) = 0x1 | 0x2;
         if (section.sh_addr == 0 or
             section.sh_size < userspace_bootstrap_mailbox.ABI_SIZE_BYTES or
             (section.sh_flags & required_flags) != required_flags)

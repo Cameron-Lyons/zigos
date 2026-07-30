@@ -178,9 +178,6 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             return self.service.publishPrivateService(workspace_id, label);
         }
 
-        /// Returns an in-process, read-only borrow from `self.service`. Keep that
-        /// service at a stable address. Closing remains observable as `.closed`;
-        /// after a later open reuses the slot, the pointer must not be dereferenced.
         pub fn openOverlaySession(
             self: *Self,
             authority: AuthorityContext,
@@ -299,9 +296,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
 
             var acked_ids: [MAX_TRANSPORT_FRAMES]u64 = undefined;
             var acked_count: usize = 0;
-            // Coalesce the peer's per-frame inbound checkpoint into one persist for
-            // the whole delivered batch (the per-frame acceptTransportFrame otherwise
-            // re-encodes and re-persists the entire sync state for every frame).
+
             peer.service.beginReplicationBatch();
             errdefer peer.service.cancelReplicationBatch();
             for (frames[0..frame_count]) |frame| {
@@ -317,8 +312,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
                 }
             }
             try peer.service.endReplicationBatch();
-            // Coalesce the sender's per-frame state persist into one checkpoint for
-            // the whole delivered batch.
+
             _ = try self.service.ackOutboundTransportFrames(acked_ids[0..acked_count]);
             return result;
         }

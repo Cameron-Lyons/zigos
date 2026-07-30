@@ -149,9 +149,6 @@ fn expectBarrierFailurePreservesDirtyState(failing_flush: usize, object_serial: 
         0,
     ));
 
-    // Retry without a power cycle. In the second-barrier case, reads can see
-    // the write-back root written by the failed attempt, so the retry must flush
-    // that root before it is allowed to clear the dirty sets.
     WriteBackBackend.beginAttempt(0);
     const retried = try volume.saveToVolume(&store, &workspaces);
     try std.testing.expectEqual(@as(u64, if (failing_flush == 2) 2 else 1), retried.generation);
@@ -896,8 +893,6 @@ test "storage volume survives an interrupted compaction into the alternate regio
     });
     _ = try saveToImage(image, &store, &workspaces);
 
-    // Drive enough mutations to force at least one ping-pong compaction so the
-    // committed root references a definite data region.
     var previous_version_id = object_store.ids.VersionId.zero;
     const compaction_mutations = @as(usize, storage_volume.testing.maxReplayLogSegments()) + 4;
     for (0..compaction_mutations) |index| {
@@ -916,12 +911,6 @@ test "storage volume survives an interrupted compaction into the alternate regio
 
     try std.testing.expect((try storage_volume.testing.latestImageCompactedGeneration(image)) > 1);
 
-    // Simulate a power loss midway through the NEXT compaction: it would write a
-    // fresh checkpoint into the region the live root does not use and then commit
-    // a new root. Scribble that alternate region but leave the root sectors so the
-    // previously committed root is still the newest on disk. Before the ping-pong
-    // fix, compaction overwrote the live root's only data copy and this lost every
-    // persisted object.
     const committed_offset = try storage_volume.testing.latestImageDataOffset(image);
     const alternate: u32 = if (committed_offset == 0) storage_volume.testing.alternateDataRegionOffset() else 0;
     storage_volume.testing.scribbleDataRegion(image, alternate);
@@ -1048,12 +1037,6 @@ test "storage volume persists a mutated workspace alongside an untouched one acr
     _ = try workspaces.commit(journal.id, 22);
     _ = try volume.saveToImage(image, &store, &workspaces);
 
-    // Share the journal workspace only. share() marks the workspace dirty
-    // but does not bump its generation, so the delta builder's skip check
-    // falls through to the state hash alone: if the volume's cross-save
-    // cache served a stale hash here, the grant would match the persisted
-    // summary and be silently dropped from the delta. The untouched notes
-    // workspace exercises the cache-hit path in the same save.
     const shared_principal = principal.PrincipalId{ .kind = .user, .serial = 2 };
     try workspaces.share(journal.id, .{
         .principal_id = shared_principal,

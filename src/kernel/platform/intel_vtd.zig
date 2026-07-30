@@ -266,8 +266,6 @@ pub fn enforceDevices(
     }
     publishTables();
 
-    // From this point onward a unit may retain the table pointer even if a later
-    // unit fails. Keep the frames permanently reserved on every such failure.
     may_release_tables = false;
     for (units[0..summary.remapping_unit_count], 0..) |unit, index| {
         try programUnit(unit, table_base);
@@ -337,8 +335,6 @@ fn validateWindows(windows: []const DmaWindow) Error!void {
 }
 
 fn chooseAddressWidth(sagaw: u8) ?AddressWidth {
-    // The current physical aperture fits comfortably in 39 bits. Prefer the
-    // three-level walk to remove one dependent memory access from every miss.
     if ((sagaw & (@as(u8, 1) << @intFromEnum(AddressWidth.bits39))) != 0) return .bits39;
     if ((sagaw & (@as(u8, 1) << @intFromEnum(AddressWidth.bits48))) != 0) return .bits48;
     return null;
@@ -357,9 +353,7 @@ fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8) Err
 
     const version = read32(virtual_base + REG_VERSION);
     const major: u8 = @intCast((version >> 4) & 0xF);
-    // Major version 6 removes register-based invalidation. The first supported
-    // target exposes the current legacy interface; a later queued-invalidation
-    // backend should be explicit instead of silently changing semantics here.
+
     if (major == 0 or major >= 6) return error.UnsupportedHardwareVersion;
 
     const capability = read64(virtual_base + REG_CAPABILITY);
@@ -575,8 +569,6 @@ fn programUnit(unit: UnitRegisters, root_table_base: u32) Error!void {
 }
 
 fn armFaultMonitoring(unit: UnitRegisters) Error!void {
-    // Fault-event interrupts are intentionally masked: the early kernel has no
-    // external interrupt dependency and polls the mandatory primary records.
     const fault_control =
         read32(unit.base + REG_FAULT_EVENT_CONTROL) | FAULT_EVENT_INTERRUPT_MASK;
     write32(unit.base + REG_FAULT_EVENT_CONTROL, fault_control);
@@ -621,8 +613,6 @@ fn programInterruptRemapping(
         try globallyInvalidateInterruptEntries(unit, invalidation_queue_base);
     }
 
-    // x2APIC extended mode blocks compatibility-format interrupts. The all-zero
-    // IRTE table blocks every remappable interrupt as not-present.
     writeGlobalCommand(
         unit.base,
         GLOBAL_INTERRUPT_REMAP_ENABLE,
@@ -674,9 +664,8 @@ fn globallyInvalidateInterruptEntries(unit: UnitRegisters, queue_base: u64) Erro
 
 fn invalidationDescriptors(status_address: u64) [2][2]u64 {
     return .{
-        // Type 4, granularity 0: global interrupt-entry-cache invalidation.
         .{ 0x4, 0 },
-        // Type 5 with status-write: completion follows the IEC invalidation.
+
         .{
             (@as(u64, INVALIDATION_STATUS_VALUE) << 32) | (1 << 5) | 0x5,
             status_address,

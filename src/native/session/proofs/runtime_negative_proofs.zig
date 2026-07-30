@@ -45,10 +45,6 @@ var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
 var reboot_proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
 var reboot_proof_restarted_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
 
-// task_runtime.Runtime alone is >2 MiB, so a proof that carried these
-// fixtures in its stack frame overflowed the boot stack and silently
-// corrupted the globals below it. Keep them here and reset on entry; the
-// proofs run one at a time.
 var proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
 var proof_capabilities: capability.CapabilityTable = capability.CapabilityTable.init();
 var proof_endpoints: endpoint.Table = endpoint.Table.init();
@@ -111,9 +107,6 @@ pub fn runFreestandingAndPrint(
     if (scheduler.executor.materializedCount() != baseline_mappings + 1) return false;
     if (paging.frameStats().allocated != baseline_frames + frame_footprint) return false;
 
-    // Churn beyond the logical address-space table capacity. Each rehost must
-    // retire the old physical mapping before the replacement is materialized,
-    // proving bounded frame use instead of relying on eventual reboot cleanup.
     var rehost_iteration: usize = 0;
     while (rehost_iteration < task_runtime.MAX_TASKS + 1) : (rehost_iteration += 1) {
         const before = runtime.find(task_id) orelse return false;

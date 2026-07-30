@@ -1,14 +1,3 @@
-// Real NVMe controller bring-up over MMIO for the first hardware target and
-// QEMU's emulated NVMe controller. This replaces the modeled
-// `bootstrap_nvme_inventory_shim` data plane with actual register access,
-// admin-queue setup, and polled command completion.
-//
-// Memory model assumptions (see src/kernel/memory/paging64.zig): the kernel
-// identity-maps the first 128 MiB, so frames returned by alloc_frames have
-// phys == virt and are usable directly as DMA/PRP targets. The controller BAR
-// lives above the identity-mapped window, so we map it cache-disabled into its
-// dedicated higher-half MMIO region before touching registers.
-
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
@@ -19,26 +8,24 @@ const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
 const PAGE_SIZE: u32 = 4096;
-// Sectors per single-PRP transfer: the bounce frame is one page, so a single NVMe
-// command moves at most this many sectors (8). The backend batches up to this.
+
 const BOUNCE_SECTORS: usize = PAGE_SIZE / SECTOR_BYTES;
 
-// Controller register offsets (bytes from BAR0).
-const REG_CAP: usize = 0x00; // 64-bit capabilities
-const REG_VS: usize = 0x08; // version
-const REG_CC: usize = 0x14; // controller configuration
-const REG_CSTS: usize = 0x1C; // controller status
-const REG_AQA: usize = 0x24; // admin queue attributes
-const REG_ASQ: usize = 0x28; // admin submission queue base (64-bit)
-const REG_ACQ: usize = 0x30; // admin completion queue base (64-bit)
+const REG_CAP: usize = 0x00;
+const REG_VS: usize = 0x08;
+const REG_CC: usize = 0x14;
+const REG_CSTS: usize = 0x1C;
+const REG_AQA: usize = 0x24;
+const REG_ASQ: usize = 0x28;
+const REG_ACQ: usize = 0x30;
 const REG_DOORBELL_BASE: usize = 0x1000;
 
 const CC_EN: u32 = 1 << 0;
 const CC_CSS_NVM: u32 = 0 << 4;
 const CC_MPS_4K: u32 = 0 << 7;
 const CC_AMS_RR: u32 = 0 << 11;
-const CC_IOSQES: u32 = 6 << 16; // 2^6 = 64-byte submission entries
-const CC_IOCQES: u32 = 4 << 20; // 2^4 = 16-byte completion entries
+const CC_IOSQES: u32 = 6 << 16;
+const CC_IOCQES: u32 = 4 << 20;
 
 const CSTS_RDY: u32 = 1 << 0;
 const CSTS_CFS: u32 = 1 << 1;
@@ -46,7 +33,7 @@ const CSTS_CFS: u32 = 1 << 1;
 const ADMIN_QUEUE_ENTRIES: u32 = 32;
 const SQ_ENTRY_BYTES: usize = 64;
 const CQ_ENTRY_BYTES: usize = 16;
-const BAR_MAP_BYTES: u32 = 0x2000; // registers + first doorbell page
+const BAR_MAP_BYTES: u32 = 0x2000;
 const BAR_IO_SPACE: u32 = 1 << 0;
 const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
 const BAR_MEMORY_TYPE_64: u32 = 0x4;
@@ -76,13 +63,12 @@ pub const Error = error{
     DmaFault,
 };
 
-// Admin opcodes.
 const ADMIN_OPC_CREATE_IO_SQ: u32 = 0x01;
 const ADMIN_OPC_CREATE_IO_CQ: u32 = 0x05;
 const ADMIN_OPC_IDENTIFY: u32 = 0x06;
-// Identify selectors.
+
 const IDENTIFY_CNS_NAMESPACE: u32 = 0x00;
-// NVM I/O opcodes.
+
 const NVM_OPC_FLUSH: u32 = 0x00;
 const NVM_OPC_WRITE: u32 = 0x01;
 const NVM_OPC_READ: u32 = 0x02;
@@ -201,8 +187,6 @@ fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
     return false;
 }
 
-// Reset the controller and install admin queues while PCI bus mastering is
-// still revoked. The caller must establish the DMA domain before enabling it.
 fn prepare(dev: pci.PCIDevice, frames: DmaFrames) Error!Controller {
     const bar_phys = barPhysicalAddress(dev) orelse return error.BarUnmappable;
     if (bar_phys == 0) return error.BarUnmappable;
@@ -216,7 +200,6 @@ fn prepare(dev: pci.PCIDevice, frames: DmaFrames) Error!Controller {
         .admin = undefined,
     };
 
-    // Disable the controller and wait for it to quiesce.
     controller.writeReg32(REG_CC, controller.reg32(REG_CC) & ~CC_EN);
     if (!spinUntilReady(&controller, false)) {
         if (controller.fatal()) return error.ControllerFatal;
@@ -229,7 +212,6 @@ fn prepare(dev: pci.PCIDevice, frames: DmaFrames) Error!Controller {
     zeroFrame(cq_phys);
     controller.admin = .{ .sq_phys = sq_phys, .cq_phys = cq_phys, .entries = ADMIN_QUEUE_ENTRIES, .qid = 0 };
 
-    // AQA: zero-based queue sizes for completion (bits 16-27) and submission (bits 0-11).
     const aqa = ((ADMIN_QUEUE_ENTRIES - 1) << 16) | (ADMIN_QUEUE_ENTRIES - 1);
     controller.writeReg32(REG_AQA, aqa);
     controller.writeReg64(REG_ASQ, sq_phys);
@@ -254,9 +236,6 @@ fn cqDoorbell(self: *const Controller, qid: u16) usize {
     return REG_DOORBELL_BASE + (2 * @as(usize, qid) + 1) * self.doorbell_stride;
 }
 
-// Submit one 64-byte command to a queue, ring the submission doorbell, and poll
-// the completion queue for the matching phase. Synchronous: one outstanding
-// command per queue at a time, which is all the bootstrap data plane needs.
 fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void {
     const cid = queue.next_cid;
     queue.next_cid +%= 1;
@@ -294,7 +273,6 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
     return error.CommandTimeout;
 }
 
-// Create the single I/O submission/completion queue pair used for block I/O.
 pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {
     const cq_phys = frames.frame(3);
     const sq_phys = frames.frame(2);
@@ -303,16 +281,16 @@ pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {
 
     var create_cq = [_]u32{0} ** 16;
     create_cq[0] = ADMIN_OPC_CREATE_IO_CQ;
-    create_cq[6] = cq_phys; // PRP1 low
+    create_cq[6] = cq_phys;
     create_cq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
-    create_cq[11] = 1; // PC=1, interrupts disabled (polled)
+    create_cq[11] = 1;
     try submit(self, &self.admin, &create_cq);
 
     var create_sq = [_]u32{0} ** 16;
     create_sq[0] = ADMIN_OPC_CREATE_IO_SQ;
-    create_sq[6] = sq_phys; // PRP1 low
+    create_sq[6] = sq_phys;
     create_sq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
-    create_sq[11] = (@as(u32, IO_QUEUE_ID) << 16) | 1; // CQID, PC=1
+    create_sq[11] = (@as(u32, IO_QUEUE_ID) << 16) | 1;
     try submit(self, &self.admin, &create_sq);
 
     self.io = .{ .sq_phys = sq_phys, .cq_phys = cq_phys, .entries = IO_QUEUE_ENTRIES, .qid = IO_QUEUE_ID };
@@ -321,21 +299,18 @@ pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {
 
 fn ioCommand(self: *Controller, opcode: u32, lba: u64, buffer_phys: u32, sector_count: u16) Error!void {
     if (!self.io_ready) return error.NamespaceMissing;
-    // NLB is encoded zero-based (cmd[12] = sector_count - 1); a zero count would
-    // underflow to 0xFFFF_FFFF and request a 4 GiB transfer.
+
     if (sector_count == 0) return error.EmptyTransfer;
     if (@as(usize, sector_count) * self.lba_bytes > PAGE_SIZE) return error.TransferTooLarge;
-    // Fail closed against the identified namespace size (NSZE) instead of trusting
-    // the controller to reject an out-of-range LBA. Overflow-safe: the `or`
-    // short-circuits so `namespace_sectors - lba` only runs once lba is in range.
+
     if (lba > self.namespace_sectors or self.namespace_sectors - lba < sector_count) return error.LbaOutOfRange;
     var cmd = [_]u32{0} ** 16;
     cmd[0] = opcode;
     cmd[1] = self.nsid;
-    cmd[6] = buffer_phys; // PRP1 low (single page transfer)
-    cmd[10] = @truncate(lba & 0xFFFF_FFFF); // SLBA low
-    cmd[11] = @truncate(lba >> 32); // SLBA high
-    cmd[12] = @as(u32, sector_count) - 1; // NLB zero-based
+    cmd[6] = buffer_phys;
+    cmd[10] = @truncate(lba & 0xFFFF_FFFF);
+    cmd[11] = @truncate(lba >> 32);
+    cmd[12] = @as(u32, sector_count) - 1;
     try submit(self, &self.io, &cmd);
 }
 
@@ -356,19 +331,10 @@ pub fn flush(self: *Controller) Error!void {
 }
 
 fn zeroFrame(phys: u32) void {
-    // Freshly allocated normal-RAM frame, not yet handed to the controller, so a
-    // bulk non-volatile @memset is safe and far cheaper than a byte loop.
     const bytes: [*]u8 = @ptrFromInt(phys);
     @memset(bytes[0..PAGE_SIZE], 0);
 }
 
-// ---- Storage backend integration ----------------------------------------
-// The storage volume drives I/O through volume/backend.zig with single-sector
-// (512-byte) buffers where start_lba is the absolute device LBA. We satisfy
-// that `callconv(.c) fn(start_lba, ptr, len) bool` contract with one global
-// active controller plus a page-aligned bounce buffer, so callers need no
-// alignment guarantees. (General sector-multiple lengths are handled by
-// looping one page — BOUNCE_SECTORS — per NVMe command.)
 var active_controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var active_present: bool = false;
@@ -378,17 +344,13 @@ pub fn attached() bool {
     return active_present;
 }
 
-// Identify the active namespace, populating namespace_sectors (NSZE) and
-// lba_bytes from the in-use LBA format. Fails closed: a missing namespace or an
-// LBA size other than the 512-byte sector the storage volume contract assumes is
-// rejected here rather than silently mis-addressing the device later.
 fn identifyNamespace(self: *Controller, buffer: u32) Error!void {
     zeroFrame(buffer);
     var cmd = [_]u32{0} ** 16;
     cmd[0] = ADMIN_OPC_IDENTIFY;
     cmd[1] = self.nsid;
-    cmd[6] = buffer; // PRP1
-    cmd[10] = IDENTIFY_CNS_NAMESPACE; // CNS=0: Identify Namespace
+    cmd[6] = buffer;
+    cmd[10] = IDENTIFY_CNS_NAMESPACE;
     try submit(self, &self.admin, &cmd);
     const words: [*]volatile u32 = @ptrFromInt(buffer);
     const nsze_low: u64 = words[0];
@@ -396,9 +358,6 @@ fn identifyNamespace(self: *Controller, buffer: u32) Error!void {
     const nsze = nsze_low | (nsze_high << 32);
     if (nsze == 0) return error.NamespaceMissing;
 
-    // FLBAS is byte 26 of Identify-Namespace; the in-use format index is bits
-    // 0-3. The LBA Format table starts at byte 128 (word 32), 4 bytes per entry,
-    // with LBADS (LBA data size as a power of two) in bits 16-23.
     const flbas: u32 = (words[6] >> 16) & 0xFF;
     const fmt_index: u32 = flbas & 0x0F;
     const lbaf: u32 = words[32 + fmt_index];
@@ -449,9 +408,6 @@ fn guardPatternIntact(bytes: []const u8) bool {
     return true;
 }
 
-// Bring the controller online and register it as the active storage backend.
-// Real hardware supplies a validated DMAR summary; test machines deliberately
-// pass null because their emulated chipset has no VT-d unit.
 pub fn attachAsBackend(
     dev: pci.PCIDevice,
     vtd_summary: ?*const dmar.Summary,
@@ -497,8 +453,6 @@ pub fn attachAsBackend(
         issueFaultProbe(&controller, guard_phys);
         fault_proof = try intel_vtd.waitForBlockedWrite(guard_phys);
 
-        // The denied command can remain outstanding in the controller. Reset it
-        // before reclaiming the guard page or submitting normal admin work.
         controller = try prepare(dev, frames);
         if (!guardPageIntact(guard_phys)) return error.DmaIsolationBypassed;
         guard_releasable = true;
@@ -519,13 +473,11 @@ pub fn attachAsBackend(
 pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
     if (!active_present or bounce_phys == 0) return false;
     if (buffer_len == 0 or buffer_len % SECTOR_BYTES != 0) return false;
-    // submit() polls completion before returning, and x86 DMA to normal RAM is
-    // cache-coherent, so the bounce frame is stable and can be read non-volatile.
+
     const bounce: [*]u8 = @ptrFromInt(bounce_phys);
     const total_sectors = buffer_len / SECTOR_BYTES;
     var sector: usize = 0;
     while (sector < total_sectors) {
-        // One NVMe command per page (single-PRP limit), not per 512B sector.
         const chunk = @min(total_sectors - sector, BOUNCE_SECTORS);
         const chunk_bytes = chunk * SECTOR_BYTES;
         readSectors(&active_controller, start_lba + sector, bounce_phys, @intCast(chunk)) catch |err| {
@@ -541,14 +493,11 @@ pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callcon
 pub fn backendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
     if (!active_present or bounce_phys == 0) return false;
     if (buffer_len == 0 or buffer_len % SECTOR_BYTES != 0) return false;
-    // Fill the bounce frame with a bulk @memcpy; the subsequent writeSectors()
-    // doorbell is a volatile MMIO store, and x86-TSO keeps these RAM stores
-    // ordered ahead of it so the controller observes the staged data.
+
     const bounce: [*]u8 = @ptrFromInt(bounce_phys);
     const total_sectors = buffer_len / SECTOR_BYTES;
     var sector: usize = 0;
     while (sector < total_sectors) {
-        // One NVMe command per page (single-PRP limit), not per 512B sector.
         const chunk = @min(total_sectors - sector, BOUNCE_SECTORS);
         const chunk_bytes = chunk * SECTOR_BYTES;
         @memcpy(bounce[0..chunk_bytes], (buffer_ptr + sector * SECTOR_BYTES)[0..chunk_bytes]);
@@ -580,9 +529,6 @@ fn handleBackendError(err: anyerror) void {
     console.print("ZIGOS:NVME:HW:DMA_FAULT_CONTAINED\n");
 }
 
-// Kernel-exported bridge so the native storage layer can use the real NVMe data
-// plane as the freestanding storage backend. The native side declares these
-// `extern` behind a freestanding guard and falls back to stubs on host builds.
 export fn zigosStorageBootstrapNvmeAttached() callconv(.c) bool {
     return active_present;
 }
@@ -604,12 +550,6 @@ export fn zigosStorageBootstrapNvmeFlush() callconv(.c) bool {
     return backendFlush();
 }
 
-// The steady-state DMA footprint of the active controller, one page per index:
-// the four queue frames the device fetches commands from (device-read) or posts
-// completions into (device-write), plus the bidirectional bounce frame that all
-// data transfers stage through. Exported so the native device broker can
-// confine the NVMe bus-master DMA program to exactly these windows. Returns
-// false past the last window or when no controller is attached.
 export fn zigosStorageBootstrapNvmeDmaWindow(
     index: u32,
     base_out: *u64,
@@ -634,9 +574,6 @@ export fn zigosStorageBootstrapNvmeDmaWindow(
     return true;
 }
 
-// Diagnostic probe used to validate the MMIO foundation in QEMU. Brings the
-// controller and I/O queues online (non-destructive) and prints the capability
-// and version registers. Safe to call only when a real NVMe controller exists.
 pub fn probeAndReport(
     dev: pci.PCIDevice,
     vtd_summary: ?*const dmar.Summary,
@@ -653,10 +590,6 @@ pub fn probeAndReport(
     return fault_proof;
 }
 
-// Keep the destructive backend roundtrip compiler-checked though it is never
-// run on a production boot (it writes to a scratch LBA). Validated in QEMU.
-// (backendRead/Write, readSectors/writeSectors are already reachable from the
-// exported bridge, so they need no explicit reference here.)
 comptime {
     _ = &roundtripSelfTest;
 }
@@ -664,9 +597,6 @@ comptime {
 const SCRATCH_LBA: u64 = 8;
 const TEST_PATTERN: u8 = 0xA5;
 
-// Destructive validation of the full storage-backend contract: write a known
-// pattern to a scratch LBA through backendWrite, read it back through
-// backendRead, and verify. NOT run on a production boot.
 fn roundtripSelfTest(dev: pci.PCIDevice) void {
     _ = attachAsBackend(dev, null, null) catch |err| {
         console.print("ZIGOS:NVME:HW:IOQ_FAIL ");

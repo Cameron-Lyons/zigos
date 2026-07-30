@@ -124,10 +124,6 @@ pub fn UniqueIndex(comptime capacity: usize) type {
     };
 }
 
-/// A bounded one-to-many index with insertion-order traversal. Every linked
-/// slot can belong to one bucket per index; compact bidirectional links make
-/// append and arbitrary removal constant-time after the keyed bucket lookup,
-/// without heap allocation or a per-bucket link scan.
 pub fn MultimapIndex(
     comptime link_capacity: usize,
     comptime bucket_capacity: usize,
@@ -335,11 +331,6 @@ pub fn MultimapIndex(
 }
 
 pub const Options = struct {
-    /// Record reserved and removed keys in a drainable dirty-id set. Enable
-    /// only for arenas whose owner drains dirtyIds()/clearDirty() on a bounded
-    /// cadence (the storage commit path): the set holds at most one entry per
-    /// slot, so an undrained arena panics once more distinct keys have churned
-    /// through it than it has slots.
     track_dirty: bool = false,
 };
 
@@ -405,8 +396,6 @@ pub fn IndexedArenaWithKeyOptions(
             self.* = Self.init();
         }
 
-        /// Discard every live membership without clearing payload bytes that
-        /// remain unreachable until a later reservation initializes the slot.
         pub fn resetRetainingPayloads(self: *Self) void {
             const claimed_count = self.claimedCount();
             const dirty_count = self.dirty_count;
@@ -431,8 +420,6 @@ pub fn IndexedArenaWithKeyOptions(
             return &self.slots[slot_index];
         }
 
-        /// Reserve state restored from a trusted persistence boundary without
-        /// adding it to the incremental dirty set.
         pub fn reserveClean(self: *Self, key: Key) ?*Slot {
             const slot_index = self.reserveIndexClean(key) orelse return null;
             return &self.slots[slot_index];
@@ -442,8 +429,6 @@ pub fn IndexedArenaWithKeyOptions(
             return self.reserveIndexWithDirty(key, true);
         }
 
-        /// Reserve a key and install a complete slot value without first writing
-        /// the slot's default payload. The arena owns the membership flag.
         pub fn insertIndex(self: *Self, key: Key, value: Slot) ?usize {
             const raw_key = ids.raw(key);
             if (raw_key == 0) return null;
@@ -486,10 +471,6 @@ pub fn IndexedArenaWithKeyOptions(
             return slot_index;
         }
 
-        /// Insert a complete slot value at a specific free index without first
-        /// writing the slot's default payload. The arena owns the membership
-        /// flag and preserves the same exact-index reservation semantics as
-        /// reserveIndexAt.
         pub fn insertIndexAt(self: *Self, key: Key, slot_index: usize, value: Slot) ?usize {
             const raw_key = ids.raw(key);
             if (raw_key == 0 or slot_index >= capacity) return null;
@@ -730,7 +711,6 @@ pub fn IndexedArenaWithKeyOptions(
             return null;
         }
 
-        /// Return the allocator-owned prefix, including live slots and reusable holes.
         pub inline fn claimedCount(self: *const Self) usize {
             if (self.next_unclaimed_index > capacity) {
                 native_util.impossibleByInvariant("indexed arena claimed prefix fits its slots");
@@ -839,7 +819,6 @@ pub fn PagedIndexedArenaWithKey(
             return .{};
         }
 
-        /// Clear all membership and payloads while invalidating issued handles.
         pub fn reset(self: *Self) void {
             const claimed_count = self.claimedCount();
             var slot_index: usize = 0;
@@ -857,9 +836,6 @@ pub fn PagedIndexedArenaWithKey(
             self.used_count = 0;
         }
 
-        /// Discard every live membership and invalidate issued handles without
-        /// clearing payload bytes that remain unreachable until a later
-        /// reservation initializes the slot.
         pub fn resetRetainingPayloads(self: *Self) void {
             const claimed_count = self.claimedCount();
             var slot_index: usize = 0;
@@ -1055,7 +1031,6 @@ pub fn PagedIndexedArenaWithKey(
             return null;
         }
 
-        /// Return the allocator-owned prefix, including live slots and reusable holes.
         pub inline fn claimedCount(self: *const Self) usize {
             if (self.next_unclaimed_index > capacity) {
                 native_util.impossibleByInvariant("paged indexed arena claimed prefix fits its slots");
@@ -1159,9 +1134,6 @@ test "indexed arena reuses tombstoned primary index slots" {
     const Arena = IndexedArena(TestSlot, 2, 2, testSlotId);
     var arena = Arena.init();
 
-    // Untracked arenas keep no dirty-id bookkeeping, so churning far more
-    // distinct keys through the arena than it has slots must never trip the
-    // dirty-capacity invariant.
     var id: u64 = 1;
     while (id <= 8) : (id += 1) {
         const slot = arena.reserve(id).?;
@@ -1313,9 +1285,6 @@ test "indexed arena supports constant-time arbitrary multimap removal" {
     try std.testing.expect(owner_index.remove(7, 3));
     try std.testing.expectEqual(@as(usize, 0), owner_index.count(7));
 
-    // Empty buckets return directly to the free list. Filling the remaining
-    // distinct-key capacity proves that reuse does not depend on a table scan
-    // and that live buckets are never overwritten.
     try std.testing.expect(owner_index.append(9, 0));
     try std.testing.expect(owner_index.append(10, 2));
     try std.testing.expect(owner_index.append(11, 3));
@@ -1476,8 +1445,6 @@ test "paged indexed arena can reset membership while retaining unreachable paylo
     try std.testing.expectEqualStrings("retained", arena.slotAt(high_slot_index).record.label);
     const parked_high_generation = arena.slot_generations[high_slot_index];
 
-    // An empty reset and a later reset of only a lower, cross-page prefix must
-    // not roll back the generation parked for the previously claimed high slot.
     arena.resetRetainingPayloads();
     _ = arena.reserveIndexAt(52, 2).?;
     arena.resetRetainingPayloads();

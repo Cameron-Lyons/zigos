@@ -134,11 +134,7 @@ const WorkspaceCommitContext = struct {
 const StorageVolumeContext = struct {
     volume: storage_volume.Volume = storage_volume.Volume.init(),
     seed_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
-    // Byte-for-byte copy of seed_image as the one-time fixture build left it.
-    // The compact-checkpoint case saves into seed_image, so without a restore
-    // between measurement passes each pass starts from the previous pass's
-    // mutated image and the reported best-pass checksum becomes timing-
-    // dependent (whether a pass crosses the compaction threshold varies).
+
     pristine_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
     store: object_store.Store = object_store.Store.init(),
     workspaces: workspace.Directory = workspace.Directory.init(),
@@ -240,8 +236,7 @@ const SYSCALL_BENCHMARK_CODE_ADDRESS: u32 = 0x4000_0000;
 const SYSCALL_BENCHMARK_STACK_ADDRESS: u32 = 0xB000_0000;
 const SYSCALL_BENCHMARK_PAGE_BYTES: u32 = 4096;
 const SYSCALL_BENCHMARK_BATCH_SIZE: u64 = 64;
-// Keep asynchronous timer work outside the isolated syscall microbenchmark;
-// interrupt-enabled userspace remains covered by the native smoke suites.
+
 const SYSCALL_BENCHMARK_USER_FLAGS: u64 = userspace_executor.USER_RFLAGS_RESERVED;
 const GENERAL_PROTECTION_FAULT_VECTOR: u8 = 13;
 const USERSPACE_YIELD_VECTOR: u8 = 129;
@@ -475,10 +470,6 @@ var benchmark_image_context = BenchmarkImageContext{};
 var address_space_benchmark_context = AddressSpaceBenchmarkContext{};
 var syscall_benchmark_context = SyscallBenchmarkContext{};
 
-// task_runtime.Runtime is >2 MiB, and a Runtime local (plus the temporary a
-// Debug build materializes for its initializer) put multi-megabyte frames on
-// the boot stack — deep enough to reach the guard page below it. Gates and
-// probes run one at a time, so they share this fixture and reset it on entry.
 var quality_gate_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
 
 pub fn run() noreturn {
@@ -611,11 +602,6 @@ fn prepareCapabilityLookupFixture() void {
         benchmark_reporting.benchStepFailure("capability lookup fixture", err);
 }
 
-// The storage volume fixture is built lazily inside the case bodies so its
-// 25-save construction is paid once (and discarded with the slowest pass)
-// rather than measured on every pass. Restoring the image bytes here keeps
-// each pass starting from identical on-image state without moving the
-// construction cost into the timed window.
 fn restoreStorageVolumeSeedImage() void {
     if (!storage_volume_context.prepared) return;
     @memcpy(storage_volume_context.seed_image[0..], storage_volume_context.pristine_image[0..]);
@@ -815,10 +801,6 @@ fn prepareStorageVolumeFixture() void {
 fn prepareTaskCheckpointFixture() void {
     task_checkpoint_context.source_runtime.reset();
     task_checkpoint_context.restored_runtime.reset();
-    // The snapshot needs no reset: writeSnapshot fully rewrites the header
-    // and the dense task records that restoreFromSnapshot reads back, and
-    // re-initializing the >2 MiB Snapshot here would put its Debug-mode
-    // temporary on the boot stack.
 
     const sync_image = benchmarkAppImage();
     const primary = task_checkpoint_context.source_runtime.createTask(.{
@@ -1006,9 +988,6 @@ fn prepareOverlaySessionFixture() void {
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
-// Host-side timing noise (TCG JIT warmup, runner preemption) only ever adds
-// cycles, so the fastest of several passes is the closest estimate of the true
-// cost and keeps the CI thresholds stable on shared runners.
 const BENCH_MEASUREMENT_PASSES: u32 = 3;
 
 fn runCase(case: BenchmarkCase) u64 {
@@ -1020,7 +999,6 @@ fn runCase(case: BenchmarkCase) u64 {
     var best_checksum: u64 = 0;
     var pass: u32 = 0;
     while (pass < BENCH_MEASUREMENT_PASSES) : (pass += 1) {
-        // Benchmark cases mutate shared fixtures, so rebuild them before each pass.
         prepareFixtures();
         var checksum: u64 = 0;
         const start = x86.rdtsc();
@@ -1257,8 +1235,7 @@ fn benchmarkTaskCheckpointWriteRestore(iteration: u32) u64 {
 
 fn benchmarkTaskCheckpointWriteLowOccupancy(iteration: u32) u64 {
     _ = iteration;
-    // This two-task fixture isolates the cost of skipping the arena's
-    // unclaimed tail. Cross-page holes and reuse are covered by host tests.
+
     task_checkpoint_context.source_runtime.writeSnapshot(&task_checkpoint_context.snapshot);
     std.mem.doNotOptimizeAway(&task_checkpoint_context.snapshot);
 
@@ -1371,9 +1348,6 @@ fn benchmarkFileBridgeResolve(iteration: u32) u64 {
     return view.object_id + view.version_id + path.len + @intFromBool(view.readable);
 }
 
-// This large case is sensitive to TCG translation-block placement. Keep its
-// entry address stable when unrelated kernel text shrinks or grows so the gate
-// continues to measure workspace commits instead of linker layout.
 fn benchmarkWorkspaceCommitOverlay(iteration: u32) align(4096) u64 {
     const directory = &workspace_commit_context.baseline;
     const workspace_id = workspace_commit_context.workspace_id;

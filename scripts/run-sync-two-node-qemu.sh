@@ -6,7 +6,6 @@ ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 ZIG="${ROOT_DIR}/scripts/zig.sh"
 MARKER_TOOL="${ROOT_DIR}/src/print_native_smoke_markers.zig"
 
-# shellcheck source=scripts/qemu-harness.sh
 source "$ROOT_DIR/scripts/qemu-harness.sh"
 
 KERNEL_PATH="${1:?kernel path required}"

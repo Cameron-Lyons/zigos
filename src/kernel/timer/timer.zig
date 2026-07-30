@@ -141,9 +141,7 @@ pub fn handleInterrupt() void {
     x86.writeMsr(X2APIC_EOI_MSR, 0);
 }
 
-pub fn handleSpuriousInterrupt() void {
-    // Intel specifies that spurious local-APIC interrupts do not receive EOI.
-}
+pub fn handleSpuriousInterrupt() void {}
 
 pub fn getTicks() u64 {
     return ticks;

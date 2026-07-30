@@ -697,10 +697,6 @@ pub fn dangerousPermissionKind(kind: PermissionKind) bool {
     };
 }
 
-// Canonical short display label for a permission kind. Review surfaces (the
-// compositor permission review, permission_review rendering, and the SDK review
-// tree) share this single source of truth; the humane permissions layer keeps
-// its own friendlier, separately-tested vocabulary on purpose.
 pub fn permissionDisplayLabel(kind: PermissionKind) []const u8 {
     return switch (kind) {
         .object_access => "Object access",

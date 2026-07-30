@@ -421,11 +421,6 @@ pub fn reset() void {
     controllers.reset();
     dma_programs = DmaProgramArena.init();
     dma_program_device_index = DmaProgramDeviceIndex.init();
-
-    // This is an operational reset, not a machine reboot. Authority held by
-    // the discarded tables can still exist in clients, so rewinding any of
-    // these cursors would let stale sessions or DMA buffers alias newly
-    // published state with the same device and domain identifiers.
 }
 
 pub fn publishPciController(device_id: u64) bool {
@@ -497,11 +492,6 @@ pub fn programBrokeredDmaIsolation(device_id: u64, dma_domain_id: u64) Error!Dma
     });
 }
 
-// Program a window-confined bus-master DMA program for a real storage data
-// plane (the NVMe engine): the device may master the bus, but only into the
-// declared queue/bounce frames. Unconfined bus mastering stays rejected by
-// programDmaIsolation, so the only real DMA engine is now inside broker
-// mediation instead of bypassing it.
 pub fn programBusMasterStorageDmaIsolation(
     device_id: u64,
     dma_domain_id: u64,
@@ -519,9 +509,7 @@ pub fn programBusMasterStorageDmaIsolation(
 pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus {
     _ = findController(request.device_id) orelse return error.DeviceNotFound;
     if (request.dma_domain_id == 0) return error.InvalidDmaDomain;
-    // Bus-master DMA is permitted only when confined: brokered-buffer mode with
-    // declared windows and a full IOMMU program (both enforced below). An
-    // unconfined bus-master request (programmed-IO mode) is still rejected.
+
     if (request.bus_master_dma_enabled and request.mode != .brokered_dma_buffers) {
         return error.UnsupportedBusMasterDma;
     }

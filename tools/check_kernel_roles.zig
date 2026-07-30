@@ -88,11 +88,6 @@ const verification_userspace_identities = [_]VerificationUserspaceIdentity{
 };
 const mmu_proof_identity_index = verification_userspace_identities.len - 1;
 
-// These encoded proof constants are stable across supported optimization
-// modes. They are searched only inside executable PT_LOAD segments. The
-// foreign address is additionally required to be followed closely by the
-// proof fault code, preventing unrelated userspace-layout constants from
-// satisfying the second machine-code sentinel.
 const mmu_probe_role_tag_machine_code = [_]u8{ 0x16, 0xa1, 0x00, 0x00 };
 const mmu_probe_foreign_address_machine_code = [_]u8{ 0x00, 0x00, 0x00, 0x70 };
 const mmu_probe_fault_code_imm32_machine_code = [_]u8{ 0x72, 0x00, 0x00, 0x00 };

@@ -10,9 +10,6 @@ const STATUS_DONE: u32 = 1;
 const STATUS_END_OF_PACKET: u32 = 1 << 1;
 const ERROR_RECEIVE: u32 = 1 << 31;
 
-// Hardware reads both qwords as packet/header addresses and overwrites the same
-// 16 bytes with advanced receive metadata. The upper write-back qword contains
-// status/error in bits 0..31, length in bits 32..47, and VLAN in bits 48..63.
 pub const Descriptor = extern struct {
     packet_or_metadata: u64,
     header_or_writeback: u64,

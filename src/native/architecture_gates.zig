@@ -1,15 +1,3 @@
-// Architecture gates: each flag is a comptime introspection of the live code,
-// not a hardcoded `true`. backlog_gates.expectAllMetadataTrue asserts every flag
-// holds, so removing or renaming a gated arena/index/decl makes the corresponding
-// flag false and fails the gate.
-//
-// Absence claims ("removed fixed-table scan", "removed monolithic codec",
-// etc.) are intentionally NOT modeled: the removal of a pattern cannot be proven
-// by introspection, and the positive presence checks below already prove the
-// indexed replacements exist. This file is test-only (imported solely by
-// src/tests/spec/backlog_gates.zig), so its module imports do not enter any
-// production binary.
-
 const indexed_arena = @import("core/indexed_arena.zig");
 const principal = @import("core/principal.zig");
 const service_registry = @import("services/service_registry.zig");
@@ -59,9 +47,6 @@ const session_bootstrap = @import("session/session_bootstrap.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
 const session_service_bootstrap = @import("session/session_service_bootstrap.zig");
 
-// A trivial instantiation of the indexed arena so its tracked-count field can be
-// introspected (the arena is a generic factory, so the field lives on the
-// instantiated type).
 const ProbeArenaSlot = struct { in_use: bool = false };
 fn probeArenaKey(_: *const ProbeArenaSlot) u64 {
     return 0;
@@ -163,8 +148,7 @@ pub const indexed_hot_path_tables = .{
     .os_identity = .{
         .uses_credential_arena = @hasDecl(@FieldType(os_identity.Store, "credentials"), "reserveIndex"),
     },
-    // Services migrated from [MAX]Slot + first-free linear scans to
-    // indexed_arena.IndexedArenaWithKey: the slots field must be an arena.
+
     .secret_vault_service = .{
         .uses_handle_arena = @hasDecl(@FieldType(secret_vault_service.Service, "handles"), "reserve"),
         .uses_secret_handle_index = @hasField(secret_vault_service.Service, "secret_handle_index"),

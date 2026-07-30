@@ -66,12 +66,6 @@ pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, ali
     }
 
     if (memory.address_space) |address_space| {
-        // An address space with zero registered regions is the hosted/in-process
-        // (no MMU region map) mode: the pointers are real process pointers, so
-        // allow, matching the absent-address_space case below. A freestanding task
-        // has a real MMU region map and always publishes its regions before it can
-        // issue a syscall, so zero regions there means an unmapped pointer: fail
-        // closed rather than inherit the hosted allow-all.
         if (address_space.region_count == 0) {
             if (builtin.target.os.tag == .freestanding) return false;
             return true;
@@ -224,11 +218,7 @@ pub fn withSyscallContract(
             0,
         );
     }
-    // Successful syscalls return only status/bytes_written/denial_reason in
-    // RAX/RDX/R10, so synthesizing and FNV-hashing
-    // a full provenance record on every successful call is pure waste on the
-    // hottest path in the system. Build provenance only for the denial path, where
-    // it feeds audit and diagnostics.
+
     if (!success_status and out.provenance.kind == .none) {
         out.provenance = debug_contract.syscallProvenance(
             decision,
