@@ -213,7 +213,13 @@ Use the pinned toolchain and repo entrypoints:
   disables the controller and PCI bus mastering and withdraws the storage backend.
   The xHCI input lifecycle assigns device slots in constant time, recycles them
   after disconnects, and clears queued keyboard reports before a reclaimed slot
-  can be assigned to another port.
+  can be assigned to another port. PCI inventory accepts an xHCI controller only
+  after a shared typed BAR decoder maps one dedicated read-only cache-disabled
+  page and the live capability block reports xHCI 1.1+, nonzero slots, ports,
+  and interrupters, plus aligned doorbell and runtime offsets; bus mastering
+  remains revoked throughout this probe. This publishes controller inventory
+  only; input-device authority still requires keyboard enumeration and hardware
+  event-ring evidence.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses

@@ -235,6 +235,15 @@ test "device inventory accepts only target xHCI input hardware" {
     try std.testing.expectEqual(@as(u64, 0x8086_A0ED_0001), try requireProductionDriverDeviceId(.input_device));
 }
 
+test "xHCI controller inventory does not imply keyboard authority" {
+    reset();
+
+    registerDetected(.usb_controller, 0x8086_A0ED_0001, .xhci_inventory, false);
+    try std.testing.expect(recordForClass(.usb_controller).detected);
+    try std.testing.expect(!recordForClass(.input_device).detected);
+    try std.testing.expectError(error.DeviceNotDetected, requireProductionDriverDeviceId(.input_device));
+}
+
 test "device inventory records discovered hardware without overwriting the first handoff record" {
     reset();
 
