@@ -72,6 +72,8 @@ var descriptor_prefix_count: u64 = 0;
 var device_descriptor_count: u64 = 0;
 var configuration_descriptor_header_count: u64 = 0;
 var configuration_descriptor_count: u64 = 0;
+var set_configuration_count: u64 = 0;
+var configure_endpoint_count: u64 = 0;
 
 const PortAction = enum(u8) {
     none,
@@ -82,6 +84,8 @@ const PortAction = enum(u8) {
     read_device_descriptor,
     read_configuration_descriptor_header,
     read_configuration_descriptor,
+    set_configuration,
+    configure_endpoint,
     disable_slot,
 };
 
@@ -93,6 +97,9 @@ const PortRuntimeState = struct {
     device_descriptor: ?xhci.UsbDeviceDescriptor = null,
     configuration_descriptor_header: ?xhci.UsbConfigurationDescriptor = null,
     configuration_descriptor: ?xhci.UsbConfigurationDescriptor = null,
+    boot_keyboard: ?xhci.UsbBootKeyboardConfiguration = null,
+    configuration_set: bool = false,
+    endpoint_configured: bool = false,
     speed_id: u4 = 0,
     slot_id: u8 = 0,
     endpoint_zero_max_packet_size: u16 = 0,
@@ -114,6 +121,7 @@ const ControlTransferKind = enum(u8) {
     device_descriptor,
     configuration_descriptor_header,
     configuration_descriptor,
+    set_configuration,
 };
 
 const OutstandingTransfer = struct {
@@ -156,6 +164,8 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     device_descriptor_count = 0;
     configuration_descriptor_header_count = 0;
     configuration_descriptor_count = 0;
+    set_configuration_count = 0;
+    configure_endpoint_count = 0;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -316,6 +326,8 @@ pub fn activate() Error!void {
     device_descriptor_count = 0;
     configuration_descriptor_header_count = 0;
     configuration_descriptor_count = 0;
+    set_configuration_count = 0;
+    configure_endpoint_count = 0;
     @atomicStore(bool, &active, true, .seq_cst);
     try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
     msi_enabled = false;
@@ -470,6 +482,14 @@ pub fn configurationDescriptorCount() u64 {
     return configuration_descriptor_count;
 }
 
+pub fn setConfigurationCount() u64 {
+    return set_configuration_count;
+}
+
+pub fn configureEndpointCount() u64 {
+    return configure_endpoint_count;
+}
+
 pub fn deviceDescriptorForPort(port_id: u8) ?xhci.UsbDeviceDescriptor {
     if (!@atomicLoad(bool, &active, .seq_cst)) return null;
     const capabilities = active_capabilities orelse return null;
@@ -484,6 +504,20 @@ pub fn configurationDescriptorForPort(port_id: u8) ?xhci.UsbConfigurationDescrip
     return ports[port_id].configuration_descriptor;
 }
 
+pub fn bootKeyboardConfigurationForPort(port_id: u8) ?xhci.UsbBootKeyboardConfiguration {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    const capabilities = active_capabilities orelse return null;
+    if (port_id == 0 or port_id > capabilities.max_ports) return null;
+    return ports[port_id].boot_keyboard;
+}
+
+pub fn portConfigured(port_id: u8) bool {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return false;
+    const capabilities = active_capabilities orelse return false;
+    if (port_id == 0 or port_id > capabilities.max_ports) return false;
+    return ports[port_id].endpoint_configured;
+}
+
 pub fn handledInterruptCount() u64 {
     return @atomicLoad(u64, &interrupt_count, .seq_cst);
 }
@@ -493,6 +527,9 @@ fn clearPortDescriptorState(state: *PortRuntimeState) void {
     state.device_descriptor = null;
     state.configuration_descriptor_header = null;
     state.configuration_descriptor = null;
+    state.boot_keyboard = null;
+    state.configuration_set = false;
+    state.endpoint_configured = false;
     state.endpoint_zero_max_packet_size = 0;
     state.pending_endpoint_zero_max_packet_size = 0;
 }
@@ -557,6 +594,16 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
             !transferTargets(event.port_id))
         {
             state.action = .read_configuration_descriptor;
+        } else if (state.addressed and state.configuration_descriptor != null and
+            state.boot_keyboard != null and !state.configuration_set and
+            !transferTargets(event.port_id))
+        {
+            state.action = .set_configuration;
+        } else if (state.addressed and state.configuration_set and
+            !state.endpoint_configured and
+            !commandTargets(event.port_id, .configure_endpoint))
+        {
+            state.action = .configure_endpoint;
         }
         return;
     }
@@ -611,6 +658,18 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
                 return error.InvalidInputContext;
             }
             state.action = if (state.addressed) .read_device_descriptor_prefix else .disable_slot;
+        },
+        .configure_endpoint => {
+            if (command.slot_id == 0 or event.slot_id != command.slot_id or
+                state.slot_id != command.slot_id or !state.addressed or
+                state.configuration_descriptor == null or state.boot_keyboard == null or
+                !state.configuration_set or state.endpoint_configured)
+            {
+                return error.InvalidDeviceSlot;
+            }
+            state.endpoint_configured = true;
+            state.action = .none;
+            configure_endpoint_count +%= 1;
         },
         .evaluate_context => {
             if (command.slot_id == 0 or event.slot_id != command.slot_id or
@@ -739,15 +798,29 @@ fn handleTransferCompletion(event: xhci.Event) Error!void {
             if (state.device_descriptor == null or state.configuration_descriptor != null) {
                 return error.InvalidDeviceSlot;
             }
-            const descriptor = try parseConfigurationDescriptorFromDma(
+            const selection = try parseConfigurationDescriptorFromDma(
                 protocol,
+                state.speed_id,
                 source,
                 expected.total_length,
             );
-            if (!std.meta.eql(expected, descriptor)) return error.InvalidUsbDescriptor;
-            state.configuration_descriptor = descriptor;
-            state.action = .none;
+            if (!std.meta.eql(expected, selection.configuration)) {
+                return error.InvalidUsbDescriptor;
+            }
+            state.configuration_descriptor = selection.configuration;
+            state.boot_keyboard = selection.keyboard;
+            state.action = .set_configuration;
             configuration_descriptor_count +%= 1;
+        },
+        .set_configuration => {
+            if (state.configuration_descriptor == null or state.boot_keyboard == null or
+                state.configuration_set or state.endpoint_configured)
+            {
+                return error.InvalidDeviceSlot;
+            }
+            state.configuration_set = true;
+            state.action = .configure_endpoint;
+            set_configuration_count +%= 1;
         },
     }
     outstanding_transfer = null;
@@ -755,15 +828,16 @@ fn handleTransferCompletion(event: xhci.Event) Error!void {
 
 fn parseConfigurationDescriptorFromDma(
     protocol: xhci.PortProtocol,
+    speed_id: u4,
     source: [*]volatile u8,
     total_length: u16,
-) Error!xhci.UsbConfigurationDescriptor {
+) Error!xhci.UsbBootKeyboardSelection {
     if (total_length < xhci.USB_CONFIGURATION_DESCRIPTOR_BYTES or
         total_length > xhci.USB_ENUMERATION_BUFFER_BYTES)
     {
         return error.InvalidUsbDescriptor;
     }
-    var parser = xhci.ConfigurationDescriptorParser.init(protocol);
+    var parser = xhci.ConfigurationDescriptorParser.initForPort(protocol, speed_id);
     var descriptor_storage: [std.math.maxInt(u8)]u8 = undefined;
     var offset: usize = 0;
     while (offset < total_length) {
@@ -780,7 +854,7 @@ fn parseConfigurationDescriptorFromDma(
         try parser.consume(descriptor_storage[0..descriptor_length]);
         offset = end;
     }
-    return parser.finish(total_length);
+    return parser.finishBootKeyboard(total_length);
 }
 
 fn commandTargets(port_id: u8, kind: xhci.CommandKind) bool {
@@ -862,6 +936,10 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
                 );
                 return;
             },
+            .set_configuration => {
+                try submitSetConfigurationTransfer(port_id, state, reader);
+                return;
+            },
             else => {},
         }
 
@@ -873,6 +951,8 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
             .read_device_descriptor => unreachable,
             .read_configuration_descriptor_header => unreachable,
             .read_configuration_descriptor => unreachable,
+            .set_configuration => unreachable,
+            .configure_endpoint => .configure_endpoint,
             .evaluate_endpoint_zero => .evaluate_context,
             .disable_slot => .disable_slot,
         };
@@ -888,6 +968,14 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
             .address_device => address: {
                 try prepareAddressDeviceInputContext(port_id, state);
                 break :address try xhci.addressDeviceCommand(
+                    plan.arena.input_context_address,
+                    state.slot_id,
+                    command_producer.cycle_state,
+                );
+            },
+            .configure_endpoint => configure: {
+                try prepareConfigureBootKeyboardInputContext(state);
+                break :configure try xhci.configureEndpointCommand(
                     plan.arena.input_context_address,
                     state.slot_id,
                     command_producer.cycle_state,
@@ -983,12 +1071,14 @@ fn submitDescriptorTransfer(
         {
             return error.InvalidDeviceSlot;
         },
+        .set_configuration => unreachable,
     }
     const transfer_bytes: u17 = switch (kind) {
         .device_descriptor_prefix => xhci.USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
         .device_descriptor => xhci.USB_DEVICE_DESCRIPTOR_BYTES,
         .configuration_descriptor_header => xhci.USB_CONFIGURATION_DESCRIPTOR_BYTES,
         .configuration_descriptor => state.configuration_descriptor_header.?.total_length,
+        .set_configuration => unreachable,
     };
     if (transfer_bytes > plan.arena.enumeration_buffer_bytes or
         plan.arena.enumeration_buffer_address % xhci.XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES != 0)
@@ -999,6 +1089,7 @@ fn submitDescriptorTransfer(
         .device_descriptor_prefix, .device_descriptor => xhci.USB_DESCRIPTOR_DEVICE,
         .configuration_descriptor_header, .configuration_descriptor =>
         xhci.USB_DESCRIPTOR_CONFIGURATION,
+        .set_configuration => unreachable,
     };
     const buffer: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(
         plan.arena.enumeration_buffer_address,
@@ -1039,6 +1130,49 @@ fn submitDescriptorTransfer(
     try xhci.ringDeviceDoorbell(capabilities, state.slot_id, xhci.ENDPOINT_ZERO_DCI, reader);
 }
 
+fn submitSetConfigurationTransfer(
+    port_id: u8,
+    state: *PortRuntimeState,
+    reader: *ExtendedCapabilityReader,
+) Error!void {
+    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
+    const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
+    const configuration = state.configuration_descriptor orelse
+        return error.InvalidDeviceSlot;
+    const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
+    if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
+        state.endpoint_zero_max_packet_size == 0 or state.configuration_set or
+        state.endpoint_configured or
+        keyboard.configuration_value != configuration.configuration_value)
+    {
+        return error.InvalidDeviceSlot;
+    }
+
+    const ring_address = try plan.arena.controlTransferRingAddress(state.slot_id);
+    const producer = &control_producers[state.slot_id];
+    const setup = try xhci.setConfigurationSetupStage(
+        keyboard.configuration_value,
+        producer.cycle_state,
+    );
+    _ = try writeRingTrb(producer, ring_address, plan.arena.control_transfer_ring_trbs, setup);
+    const status_address = try writeRingTrb(
+        producer,
+        ring_address,
+        plan.arena.control_transfer_ring_trbs,
+        xhci.controlInStatusStage(producer.cycle_state),
+    );
+    publishDmaStructures();
+    state.action = .none;
+    outstanding_transfer = .{
+        .kind = .set_configuration,
+        .status_trb_address = status_address,
+        .port_id = port_id,
+        .slot_id = state.slot_id,
+        .deadline = tsc_clock.afterMilliseconds(CONTROL_TRANSFER_TIMEOUT_MILLISECONDS),
+    };
+    try xhci.ringDeviceDoorbell(capabilities, state.slot_id, xhci.ENDPOINT_ZERO_DCI, reader);
+}
+
 fn prepareAddressDeviceInputContext(port_id: u8, state: *PortRuntimeState) Error!void {
     const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
     const protocols = active_protocols orelse return error.MissingSupportedProtocols;
@@ -1061,6 +1195,29 @@ fn prepareAddressDeviceInputContext(port_id: u8, state: *PortRuntimeState) Error
     );
     clearPortDescriptorState(state);
     state.endpoint_zero_max_packet_size = max_packet_size;
+}
+
+fn prepareConfigureBootKeyboardInputContext(state: *const PortRuntimeState) Error!void {
+    const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
+    const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
+    const configuration = state.configuration_descriptor orelse
+        return error.InvalidDeviceSlot;
+    const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
+    if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
+        !state.configuration_set or state.endpoint_configured or
+        keyboard.configuration_value != configuration.configuration_value)
+    {
+        return error.InvalidDeviceSlot;
+    }
+    const input_context: [*]u8 = @ptrFromInt(@as(usize, @intCast(
+        plan.arena.input_context_address,
+    )));
+    try xhci.initializeConfigureInterruptInEndpointInputContext(
+        capabilities.context_size,
+        keyboard,
+        try plan.arena.interruptTransferRingAddress(state.slot_id),
+        input_context[0..plan.arena.input_context_bytes],
+    );
 }
 
 fn prepareEvaluateEndpointZeroInputContext(state: *const PortRuntimeState) Error!void {
@@ -1394,6 +1551,7 @@ test "xHCI hardware DMA windows retain page-granular access directions" {
     try std.testing.expect(windows[2].device_readable and !windows[2].device_writable);
     try std.testing.expect(windows[4].device_readable and windows[4].device_writable);
     try std.testing.expect(windows[6].device_readable and !windows[6].device_writable);
+    try std.testing.expect(!windows[7].device_readable and windows[7].device_writable);
 
     const outside_managed_width = try xhci.planControllerDma(
         capabilities,
