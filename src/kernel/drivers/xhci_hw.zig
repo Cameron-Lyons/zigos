@@ -13,6 +13,7 @@ const PAGE_BYTES = mmio_windows.PAGE_BYTES;
 const OWNERSHIP_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const PORT_RESET_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const COMMAND_TIMEOUT_MILLISECONDS: u64 = 1_000;
+const CONTROL_TRANSFER_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const OS_OWNED_BYTE_OFFSET: usize = 3;
 const PORT_RESET_COMPLETION_CHANGE_MASK: u7 = (1 << 2) | (1 << 4);
 
@@ -59,17 +60,22 @@ var active_dma_window_count: usize = 0;
 var active_bar_address: usize = 0;
 var active = false;
 var event_consumer = xhci.EventRingConsumer{};
-var command_producer = xhci.CommandRingProducer{};
+var command_producer = xhci.TrbRingProducer{};
+var control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
 var pending_interrupts: u32 = 0;
 var interrupt_count: u64 = 0;
 var event_count: u64 = 0;
 var port_status_change_count: u64 = 0;
 var command_completion_count: u64 = 0;
+var transfer_completion_count: u64 = 0;
+var descriptor_prefix_count: u64 = 0;
 
 const PortAction = enum(u8) {
     none,
     enable_slot,
     address_device,
+    read_device_descriptor,
+    evaluate_endpoint_zero,
     disable_slot,
 };
 
@@ -77,8 +83,11 @@ const PortRuntimeState = struct {
     connected: bool = false,
     enabled: bool = false,
     addressed: bool = false,
+    descriptor_prefix_valid: bool = false,
     speed_id: u4 = 0,
     slot_id: u8 = 0,
+    endpoint_zero_max_packet_size: u16 = 0,
+    pending_endpoint_zero_max_packet_size: u16 = 0,
     reset_deadline: ?tsc_clock.Deadline = null,
     action: PortAction = .none,
 };
@@ -91,8 +100,16 @@ const OutstandingCommand = struct {
     deadline: tsc_clock.Deadline,
 };
 
+const OutstandingTransfer = struct {
+    status_trb_address: u64,
+    port_id: u8,
+    slot_id: u8,
+    deadline: tsc_clock.Deadline,
+};
+
 var ports: [256]PortRuntimeState = [_]PortRuntimeState{.{}} ** 256;
 var outstanding_command: ?OutstandingCommand = null;
+var outstanding_transfer: ?OutstandingTransfer = null;
 var next_port_scan: u16 = 1;
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
@@ -107,14 +124,18 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active = false;
     event_consumer = .{};
     command_producer = .{};
+    control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
     ports = [_]PortRuntimeState{.{}} ** 256;
     outstanding_command = null;
+    outstanding_transfer = null;
     next_port_scan = 1;
     @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
     @atomicStore(u64, &interrupt_count, 0, .seq_cst);
     event_count = 0;
     port_status_change_count = 0;
     command_completion_count = 0;
+    transfer_completion_count = 0;
+    descriptor_prefix_count = 0;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -259,14 +280,18 @@ pub fn activate() Error!void {
 
     event_consumer = .{};
     command_producer = .{};
+    control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
     ports = [_]PortRuntimeState{.{}} ** 256;
     outstanding_command = null;
+    outstanding_transfer = null;
     next_port_scan = 1;
     @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
     @atomicStore(u64, &interrupt_count, 0, .seq_cst);
     event_count = 0;
     port_status_change_count = 0;
     command_completion_count = 0;
+    transfer_completion_count = 0;
+    descriptor_prefix_count = 0;
     @atomicStore(bool, &active, true, .seq_cst);
     try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
     msi_enabled = false;
@@ -293,7 +318,7 @@ pub fn eventWorkPending() bool {
 
 pub fn lifecyclePending() bool {
     if (!@atomicLoad(bool, &active, .seq_cst)) return false;
-    if (outstanding_command != null) return true;
+    if (outstanding_command != null or outstanding_transfer != null) return true;
     const capabilities = active_capabilities orelse return false;
     var port_id: u16 = 1;
     while (port_id <= capabilities.max_ports) : (port_id += 1) {
@@ -345,11 +370,17 @@ pub fn servicePendingEvents() usize {
                 };
                 command_completion_count +%= 1;
             },
+            .transfer => {
+                handleTransferCompletion(event) catch {
+                    containFailure("ZIGOS:XHCI:HW:TRANSFER_EVENT_CONTAINED\n");
+                    return processed + 1;
+                };
+                transfer_completion_count +%= 1;
+            },
             .host_controller, .vendor_defined, .unknown => {
                 containFailure("ZIGOS:XHCI:HW:CONTROLLER_EVENT_CONTAINED\n");
                 return processed + 1;
             },
-            .transfer,
             .bandwidth_request,
             .doorbell,
             .device_notification,
@@ -395,6 +426,14 @@ pub fn commandCompletionEventCount() u64 {
     return command_completion_count;
 }
 
+pub fn transferCompletionEventCount() u64 {
+    return transfer_completion_count;
+}
+
+pub fn deviceDescriptorPrefixCount() u64 {
+    return descriptor_prefix_count;
+}
+
 pub fn handledInterruptCount() u64 {
     return @atomicLoad(u64, &interrupt_count, .seq_cst);
 }
@@ -417,14 +456,17 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
     if (!status.connected) {
         reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
         state.addressed = false;
+        state.descriptor_prefix_valid = false;
         state.speed_id = 0;
+        state.endpoint_zero_max_packet_size = 0;
+        state.pending_endpoint_zero_max_packet_size = 0;
         state.reset_deadline = null;
         state.action = if (state.slot_id != 0) .disable_slot else .none;
         return;
     }
     if (!status.powered) return error.InvalidPortStatus;
     if (status.enabled) {
-        _ = try xhci.endpointZeroMaxPacketSize(protocol, status.speed);
+        const initial_max_packet_size = try xhci.endpointZeroMaxPacketSize(protocol, status.speed);
         reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
         state.speed_id = status.speed;
         state.reset_deadline = null;
@@ -434,6 +476,14 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
             !commandTargets(event.port_id, .address_device))
         {
             state.action = .address_device;
+        } else if (state.addressed and !state.descriptor_prefix_valid and
+            state.pending_endpoint_zero_max_packet_size == 0 and
+            !transferTargets(event.port_id))
+        {
+            if (state.endpoint_zero_max_packet_size == 0) {
+                state.endpoint_zero_max_packet_size = initial_max_packet_size;
+            }
+            state.action = .read_device_descriptor;
         }
         return;
     }
@@ -474,6 +524,9 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
             try writeDcbaaSlot(event.slot_id, try active_dma_plan.?.arena.deviceContextAddress(event.slot_id));
             state.slot_id = event.slot_id;
             state.addressed = false;
+            state.descriptor_prefix_valid = false;
+            state.endpoint_zero_max_packet_size = 0;
+            state.pending_endpoint_zero_max_packet_size = 0;
             state.action = if (state.connected and state.enabled) .address_device else .disable_slot;
         },
         .address_device => {
@@ -483,7 +536,23 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
                 return error.InvalidDeviceSlot;
             }
             state.addressed = state.connected and state.enabled;
-            state.action = if (state.addressed) .none else .disable_slot;
+            if (state.addressed and state.endpoint_zero_max_packet_size == 0) {
+                return error.InvalidInputContext;
+            }
+            state.action = if (state.addressed) .read_device_descriptor else .disable_slot;
+        },
+        .evaluate_context => {
+            if (command.slot_id == 0 or event.slot_id != command.slot_id or
+                state.slot_id != command.slot_id or !state.addressed or
+                state.pending_endpoint_zero_max_packet_size == 0 or
+                state.descriptor_prefix_valid)
+            {
+                return error.InvalidDeviceSlot;
+            }
+            state.endpoint_zero_max_packet_size = state.pending_endpoint_zero_max_packet_size;
+            state.pending_endpoint_zero_max_packet_size = 0;
+            state.descriptor_prefix_valid = true;
+            state.action = .none;
         },
         .disable_slot => {
             if (command.slot_id == 0 or event.slot_id != command.slot_id or
@@ -495,10 +564,55 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
             try clearDeviceContext(command.slot_id);
             state.slot_id = 0;
             state.addressed = false;
+            state.descriptor_prefix_valid = false;
+            state.endpoint_zero_max_packet_size = 0;
+            state.pending_endpoint_zero_max_packet_size = 0;
             state.action = if (state.connected and state.enabled) .enable_slot else .none;
         },
     }
     outstanding_command = null;
+}
+
+fn handleTransferCompletion(event: xhci.Event) Error!void {
+    const transfer = outstanding_transfer orelse return error.TrbRingStateInvalid;
+    if (!event.succeeded() or event.parameter != transfer.status_trb_address or
+        event.slot_id != transfer.slot_id or
+        event.endpoint_id != xhci.ENDPOINT_ZERO_DCI or
+        event.event_data or event.transfer_length != 0)
+    {
+        return error.TrbRingStateInvalid;
+    }
+    const protocols = active_protocols orelse return error.MissingSupportedProtocols;
+    const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
+    const state = &ports[transfer.port_id];
+    if (!state.connected or !state.enabled or !state.addressed or
+        state.slot_id != transfer.slot_id or state.descriptor_prefix_valid or
+        state.pending_endpoint_zero_max_packet_size != 0)
+    {
+        return error.InvalidDeviceSlot;
+    }
+
+    var descriptor_prefix: [xhci.USB_DEVICE_DESCRIPTOR_PREFIX_BYTES]u8 = undefined;
+    const source: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(
+        plan.arena.enumeration_buffer_address,
+    )));
+    for (&descriptor_prefix, 0..) |*byte, index| byte.* = source[index];
+    const protocol = protocols.forPort(transfer.port_id) orelse
+        return error.MissingPortProtocol;
+    const max_packet_size = try xhci.deviceDescriptorEndpointZeroMaxPacketSize(
+        protocol,
+        state.speed_id,
+        &descriptor_prefix,
+    );
+    if (max_packet_size != state.endpoint_zero_max_packet_size) {
+        state.pending_endpoint_zero_max_packet_size = max_packet_size;
+        state.action = .evaluate_endpoint_zero;
+    } else {
+        state.descriptor_prefix_valid = true;
+        state.action = .none;
+    }
+    descriptor_prefix_count +%= 1;
+    outstanding_transfer = null;
 }
 
 fn commandTargets(port_id: u8, kind: xhci.CommandKind) bool {
@@ -506,10 +620,21 @@ fn commandTargets(port_id: u8, kind: xhci.CommandKind) bool {
     return command.port_id == port_id and command.kind == kind;
 }
 
+fn transferTargets(port_id: u8) bool {
+    const transfer = outstanding_transfer orelse return false;
+    return transfer.port_id == port_id;
+}
+
 fn lifecycleTimedOut() bool {
     if (outstanding_command) |command| {
         if (command.deadline.expired()) {
             containFailure("ZIGOS:XHCI:HW:COMMAND_TIMEOUT_CONTAINED\n");
+            return true;
+        }
+    }
+    if (outstanding_transfer) |transfer| {
+        if (transfer.deadline.expired()) {
+            containFailure("ZIGOS:XHCI:HW:TRANSFER_TIMEOUT_CONTAINED\n");
             return true;
         }
     }
@@ -527,7 +652,7 @@ fn lifecycleTimedOut() bool {
 }
 
 fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
-    if (outstanding_command != null) return;
+    if (outstanding_command != null or outstanding_transfer != null) return;
     const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
     const protocols = active_protocols orelse return error.MissingSupportedProtocols;
     const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
@@ -537,11 +662,17 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
         next_port_scan = if (next_port_scan >= capabilities.max_ports) 1 else next_port_scan + 1;
         const state = &ports[port_id];
         if (state.action == .none) continue;
+        if (state.action == .read_device_descriptor) {
+            try submitDeviceDescriptorPrefix(port_id, state, reader);
+            return;
+        }
 
         const kind: xhci.CommandKind = switch (state.action) {
             .none => unreachable,
             .enable_slot => .enable_slot,
             .address_device => .address_device,
+            .read_device_descriptor => unreachable,
+            .evaluate_endpoint_zero => .evaluate_context,
             .disable_slot => .disable_slot,
         };
         const words = switch (kind) {
@@ -561,19 +692,21 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
                     command_producer.cycle_state,
                 );
             },
+            .evaluate_context => evaluate: {
+                try prepareEvaluateEndpointZeroInputContext(state);
+                break :evaluate try xhci.evaluateContextCommand(
+                    plan.arena.input_context_address,
+                    state.slot_id,
+                    command_producer.cycle_state,
+                );
+            },
         };
-        const command_address = try command_producer.commandAddress(plan.ring_plan);
-        const command_cycle = command_producer.cycle_state;
-        const trb: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(command_address)));
-        trb[0] = words[0];
-        trb[1] = words[1];
-        trb[2] = words[2];
-        trb[3] = words[3];
-        if (try command_producer.advance(plan.ring_plan.command_ring_trbs)) {
-            const link_address = try command_producer.linkAddress(plan.ring_plan);
-            const link: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(link_address)));
-            link[3] = xhci.commandLinkControl(command_cycle);
-        }
+        const command_address = try writeRingTrb(
+            &command_producer,
+            plan.ring_plan.command_ring_address,
+            plan.ring_plan.command_ring_trbs,
+            words,
+        );
         publishDmaStructures();
         state.action = .none;
         outstanding_command = .{
@@ -588,7 +721,73 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
     }
 }
 
-fn prepareAddressDeviceInputContext(port_id: u8, state: *const PortRuntimeState) Error!void {
+fn writeRingTrb(
+    producer: *xhci.TrbRingProducer,
+    ring_address: u64,
+    ring_trbs: u32,
+    words: [4]u32,
+) Error!u64 {
+    const trb_address = try producer.trbAddress(ring_address, ring_trbs);
+    const cycle_state = producer.cycle_state;
+    const trb: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(trb_address)));
+    trb[0] = words[0];
+    trb[1] = words[1];
+    trb[2] = words[2];
+    trb[3] = words[3];
+    if (try producer.advance(ring_trbs)) {
+        const link_address = try producer.linkAddress(ring_address, ring_trbs);
+        const link: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(link_address)));
+        link[3] = xhci.ringLinkControl(cycle_state);
+    }
+    return trb_address;
+}
+
+fn submitDeviceDescriptorPrefix(
+    port_id: u8,
+    state: *PortRuntimeState,
+    reader: *ExtendedCapabilityReader,
+) Error!void {
+    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
+    const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
+    if (!state.connected or !state.enabled or !state.addressed or
+        state.descriptor_prefix_valid or state.pending_endpoint_zero_max_packet_size != 0 or
+        state.slot_id == 0 or state.endpoint_zero_max_packet_size == 0)
+    {
+        return error.InvalidDeviceSlot;
+    }
+    const buffer: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(
+        plan.arena.enumeration_buffer_address,
+    )));
+    for (0..xhci.USB_DEVICE_DESCRIPTOR_PREFIX_BYTES) |index| buffer[index] = 0;
+
+    const ring_address = try plan.arena.controlTransferRingAddress(state.slot_id);
+    const producer = &control_producers[state.slot_id];
+    const setup = xhci.deviceDescriptorPrefixSetupStage(producer.cycle_state);
+    _ = try writeRingTrb(producer, ring_address, plan.arena.control_transfer_ring_trbs, setup);
+    const data = try xhci.deviceDescriptorPrefixDataStage(
+        plan.arena.enumeration_buffer_address,
+        producer.cycle_state,
+    );
+    _ = try writeRingTrb(producer, ring_address, plan.arena.control_transfer_ring_trbs, data);
+    const status = xhci.deviceDescriptorPrefixStatusStage(producer.cycle_state);
+    const status_address = try writeRingTrb(
+        producer,
+        ring_address,
+        plan.arena.control_transfer_ring_trbs,
+        status,
+    );
+    publishDmaStructures();
+    state.action = .none;
+    outstanding_transfer = .{
+        .status_trb_address = status_address,
+        .port_id = port_id,
+        .slot_id = state.slot_id,
+        .deadline = tsc_clock.afterMilliseconds(CONTROL_TRANSFER_TIMEOUT_MILLISECONDS),
+    };
+    try xhci.ringDeviceDoorbell(capabilities, state.slot_id, xhci.ENDPOINT_ZERO_DCI, reader);
+}
+
+fn prepareAddressDeviceInputContext(port_id: u8, state: *PortRuntimeState) Error!void {
     const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
     const protocols = active_protocols orelse return error.MissingSupportedProtocols;
     const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
@@ -606,6 +805,28 @@ fn prepareAddressDeviceInputContext(port_id: u8, state: *const PortRuntimeState)
         state.speed_id,
         max_packet_size,
         try plan.arena.controlTransferRingAddress(state.slot_id),
+        input_context[0..plan.arena.input_context_bytes],
+    );
+    state.endpoint_zero_max_packet_size = max_packet_size;
+    state.pending_endpoint_zero_max_packet_size = 0;
+    state.descriptor_prefix_valid = false;
+}
+
+fn prepareEvaluateEndpointZeroInputContext(state: *const PortRuntimeState) Error!void {
+    const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
+    const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
+    if (!state.connected or !state.enabled or !state.addressed or
+        state.descriptor_prefix_valid or state.slot_id == 0 or
+        state.pending_endpoint_zero_max_packet_size == 0)
+    {
+        return error.InvalidDeviceSlot;
+    }
+    const input_context: [*]u8 = @ptrFromInt(@as(usize, @intCast(
+        plan.arena.input_context_address,
+    )));
+    try xhci.initializeEvaluateEndpointZeroInputContext(
+        capabilities.context_size,
+        state.pending_endpoint_zero_max_packet_size,
         input_context[0..plan.arena.input_context_bytes],
     );
 }
@@ -676,6 +897,9 @@ fn containFailure(marker: []const u8) void {
     @atomicStore(bool, &active, false, .seq_cst);
     @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
     outstanding_command = null;
+    outstanding_transfer = null;
+    command_producer = .{};
+    control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
     ports = [_]PortRuntimeState{.{}} ** 256;
     if (active_capabilities) |capabilities| {
         if (active_bar_address != 0) {
@@ -741,9 +965,10 @@ fn validateControllerRegisterRanges(
 ) Error!void {
     const operational_bytes = @as(u64, 0x400) +
         @as(u64, capabilities.max_ports) * 0x10;
+    const doorbell_bytes = (@as(u64, capabilities.max_device_slots) + 1) * @sizeOf(u32);
     try validateBarRange(bar_address, capabilities.capability_length, operational_bytes);
     try validateBarRange(bar_address, capabilities.runtime_register_offset, 0x40);
-    try validateBarRange(bar_address, capabilities.doorbell_offset, @sizeOf(u32));
+    try validateBarRange(bar_address, capabilities.doorbell_offset, doorbell_bytes);
 }
 
 fn validateBarRange(bar_address: usize, offset: u64, byte_count: u64) Error!void {
