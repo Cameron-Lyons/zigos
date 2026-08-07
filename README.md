@@ -226,9 +226,10 @@ Use the pinned toolchain and repo entrypoints:
   decodes 32- or 64-byte contexts, and reconstructs the split 10-bit scratchpad
   count while rejecting restore-state claims without scratchpad storage. The typed
   DMA plan reserves a zeroed DCBAA page, page-aligned scratchpad pointer and buffer
-  storage, one complete 32-entry Device Context per enabled slot, and one
-  page-contained 33-entry Input Context. Checked arithmetic and disjoint-range
-  validation cover the command, event, and transfer rings, ERST, and DMA arena. The
+  storage, one complete 32-entry Device Context and compact endpoint-zero transfer
+  ring per enabled slot, and one page-contained reusable 33-entry Input Context.
+  Checked arithmetic and disjoint-range validation cover the command and event
+  pages, ERST, and DMA arena. The
   same page is remapped as a bounded sliding window over the extended-capability chain, and
   ownership is requested with the architected 8-bit OS-semaphore write, and the
   firmware semaphore must clear within a one-second invariant-TSC deadline. The
@@ -253,13 +254,17 @@ Use the pinned toolchain and repo entrypoints:
   event ring per pass, follows the consumer cycle bit across wrap, writes ERDP
   to the first unconsumed TRB with EHB acknowledgement, and rechecks the ring
   before sleeping. Supported Protocol ranges may be sparse but must not overlap;
-  every serviced port must resolve to its exact Protocol Slot Type. Port-status changes
+  every capability must carry the USB name and a supported revision, and explicit
+  PSI entries define the accepted speed identifiers. Every serviced port must
+  resolve to its exact Protocol Slot Type and endpoint-zero packet size. Port-status changes
   preserve only architected sticky controls while acknowledging RW1CS bits;
   connected USB2/USB3 ports receive bounded normal/warm resets as appropriate.
-  A single cycle-tracked command producer submits Enable Slot and disconnect-time
-  Disable Slot commands through doorbell zero, validates completion pointers and
-  slot identities, and links or clears DCBAA entries only at the specified
-  completion boundary. Reset and command waits keep the one-shot timer armed and
+  A single cycle-tracked command producer submits Enable Slot, Address Device, and
+  disconnect-time Disable Slot commands through doorbell zero. Address Device uses
+  the shared serialized Input Context to publish only Slot and endpoint-zero state,
+  with a slot-private control ring and the negotiated root-port speed. Completion
+  pointers and slot identities are validated before state advances, and DCBAA entries
+  are linked or cleared only at the specified completion boundary. Reset and command waits keep the one-shot timer armed and
   contain the controller after one second without progress. DMA faults, invalid
   port or command events, unsupported event types, ERDP rejection, or an
   unexpected halted/error state quiesce the controller and revoke MSI plus bus

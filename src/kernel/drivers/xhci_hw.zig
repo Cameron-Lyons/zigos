@@ -69,12 +69,15 @@ var command_completion_count: u64 = 0;
 const PortAction = enum(u8) {
     none,
     enable_slot,
+    address_device,
     disable_slot,
 };
 
 const PortRuntimeState = struct {
     connected: bool = false,
     enabled: bool = false,
+    addressed: bool = false,
+    speed_id: u4 = 0,
     slot_id: u8 = 0,
     reset_deadline: ?tsc_clock.Deadline = null,
     action: PortAction = .none,
@@ -413,16 +416,24 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
     state.enabled = status.enabled;
     if (!status.connected) {
         reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        state.addressed = false;
+        state.speed_id = 0;
         state.reset_deadline = null;
         state.action = if (state.slot_id != 0) .disable_slot else .none;
         return;
     }
     if (!status.powered) return error.InvalidPortStatus;
     if (status.enabled) {
+        _ = try xhci.endpointZeroMaxPacketSize(protocol, status.speed);
         reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        state.speed_id = status.speed;
         state.reset_deadline = null;
         if (state.slot_id == 0 and !commandTargets(event.port_id, .enable_slot)) {
             state.action = .enable_slot;
+        } else if (state.slot_id != 0 and !state.addressed and
+            !commandTargets(event.port_id, .address_device))
+        {
+            state.action = .address_device;
         }
         return;
     }
@@ -462,7 +473,17 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
             try clearDeviceContext(event.slot_id);
             try writeDcbaaSlot(event.slot_id, try active_dma_plan.?.arena.deviceContextAddress(event.slot_id));
             state.slot_id = event.slot_id;
-            state.action = if (state.connected and state.enabled) .none else .disable_slot;
+            state.addressed = false;
+            state.action = if (state.connected and state.enabled) .address_device else .disable_slot;
+        },
+        .address_device => {
+            if (command.slot_id == 0 or event.slot_id != command.slot_id or
+                state.slot_id != command.slot_id or state.addressed)
+            {
+                return error.InvalidDeviceSlot;
+            }
+            state.addressed = state.connected and state.enabled;
+            state.action = if (state.addressed) .none else .disable_slot;
         },
         .disable_slot => {
             if (command.slot_id == 0 or event.slot_id != command.slot_id or
@@ -473,6 +494,7 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
             try writeDcbaaSlot(command.slot_id, 0);
             try clearDeviceContext(command.slot_id);
             state.slot_id = 0;
+            state.addressed = false;
             state.action = if (state.connected and state.enabled) .enable_slot else .none;
         },
     }
@@ -519,6 +541,7 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
         const kind: xhci.CommandKind = switch (state.action) {
             .none => unreachable,
             .enable_slot => .enable_slot,
+            .address_device => .address_device,
             .disable_slot => .disable_slot,
         };
         const words = switch (kind) {
@@ -530,6 +553,14 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
                 state.slot_id,
                 command_producer.cycle_state,
             ),
+            .address_device => address: {
+                try prepareAddressDeviceInputContext(port_id, state);
+                break :address try xhci.addressDeviceCommand(
+                    plan.arena.input_context_address,
+                    state.slot_id,
+                    command_producer.cycle_state,
+                );
+            },
         };
         const command_address = try command_producer.commandAddress(plan.ring_plan);
         const command_cycle = command_producer.cycle_state;
@@ -555,6 +586,28 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
         try xhci.ringCommandDoorbell(capabilities, reader);
         return;
     }
+}
+
+fn prepareAddressDeviceInputContext(port_id: u8, state: *const PortRuntimeState) Error!void {
+    const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
+    const protocols = active_protocols orelse return error.MissingSupportedProtocols;
+    const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
+    if (!state.connected or !state.enabled or state.addressed or state.slot_id == 0) {
+        return error.InvalidDeviceSlot;
+    }
+    const protocol = protocols.forPort(port_id) orelse return error.MissingPortProtocol;
+    const max_packet_size = try xhci.endpointZeroMaxPacketSize(protocol, state.speed_id);
+    const input_context: [*]u8 = @ptrFromInt(@as(usize, @intCast(
+        plan.arena.input_context_address,
+    )));
+    try xhci.initializeAddressDeviceInputContext(
+        capabilities.context_size,
+        port_id,
+        state.speed_id,
+        max_packet_size,
+        try plan.arena.controlTransferRingAddress(state.slot_id),
+        input_context[0..plan.arena.input_context_bytes],
+    );
 }
 
 fn writeDcbaaSlot(slot_id: u8, address: u64) Error!void {
