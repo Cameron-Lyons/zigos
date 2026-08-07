@@ -216,8 +216,11 @@ Use the pinned toolchain and repo entrypoints:
   can be assigned to another port. PCI inventory accepts an xHCI controller only
   after a shared typed BAR decoder maps one dedicated read-only cache-disabled
   page and the live capability block reports xHCI 1.1+, nonzero slots, ports,
-  and interrupters, plus aligned doorbell and runtime offsets. The same page is
-  remapped as a bounded sliding window over the extended-capability chain, and
+  and interrupters, plus aligned doorbell and runtime offsets. Capability parsing
+  masks the architectural 11-bit interrupter field, requires 64-bit DMA addressing,
+  decodes 32- or 64-byte contexts, and reconstructs the split 10-bit scratchpad
+  count while rejecting restore-state claims without scratchpad storage. The same
+  page is remapped as a bounded sliding window over the extended-capability chain, and
   ownership is requested with the architected 8-bit OS-semaphore write, and the
   firmware semaphore must clear within a one-second invariant-TSC deadline. The
   window is restored read-only immediately after that byte write, while bus

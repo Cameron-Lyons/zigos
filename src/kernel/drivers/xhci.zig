@@ -13,7 +13,6 @@ pub const usb_input_data_plane_exports_fail_closed = true;
 
 pub const TRB_BYTES: u32 = 16;
 pub const RING_ALIGNMENT_BYTES: u64 = 64;
-pub const CONTEXT_BYTES: u32 = 32;
 pub const ERST_ENTRY_BYTES: u32 = 16;
 pub const HID_BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const HID_BOOT_KEY_SLOTS: usize = 6;
@@ -38,12 +37,22 @@ pub const MAX_EXTENDED_CAPABILITY_OFFSET: u32 = @as(u32, std.math.maxInt(u16)) <
 pub const MAX_EXTENDED_CAPABILITIES: usize = 64;
 pub const CONTROLLER_HALT_TIMEOUT_MILLISECONDS: u64 = 16;
 pub const CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS: u64 = 1_000;
+pub const ContextSize = enum(u8) {
+    bytes_32 = 32,
+    bytes_64 = 64,
+
+    pub fn byteCount(self: ContextSize) u32 {
+        return @intFromEnum(self);
+    }
+};
+
 const DEVICE_SLOT_TABLE_ENTRIES: usize = MAX_DEVICE_SLOTS + 1;
 const MIN_CAPABILITY_LENGTH: u8 = 0x20;
 const MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0110;
 const CAPABILITY_LENGTH_OFFSET: usize = 0x00;
 const INTERFACE_VERSION_OFFSET: usize = 0x02;
 const HCSPARAMS1_OFFSET: usize = 0x04;
+const HCSPARAMS2_OFFSET: usize = 0x08;
 const HCCPARAMS1_OFFSET: usize = 0x10;
 const DOORBELL_OFFSET_OFFSET: usize = 0x14;
 const RUNTIME_REGISTER_OFFSET_OFFSET: usize = 0x18;
@@ -52,7 +61,14 @@ const RUNTIME_REGISTER_OFFSET_ALIGNMENT_MASK: u32 = 0x1F;
 const U16_REGISTER_BYTES: usize = @sizeOf(u16);
 const U32_REGISTER_BYTES: usize = @sizeOf(u32);
 const HCSPARAMS1_MAX_INTERRUPTERS_SHIFT = 8;
+const HCSPARAMS1_MAX_INTERRUPTERS_MASK: u32 = 0x7FF;
 const HCSPARAMS1_MAX_PORTS_SHIFT = 24;
+const HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT = 21;
+const HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_LO_SHIFT = 27;
+const HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK: u32 = 0x1F;
+const HCSPARAMS2_SCRATCHPAD_RESTORE: u32 = 1 << 26;
+const HCCPARAMS1_64_BIT_ADDRESSING: u32 = 1 << 0;
+const HCCPARAMS1_CONTEXT_SIZE: u32 = 1 << 2;
 const HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT = 16;
 const EXTENDED_CAPABILITY_ID_MASK: u32 = 0xFF;
 const EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT = 8;
@@ -78,6 +94,8 @@ const TEST_UNSUPPORTED_INTERFACE_VERSION: u16 = 0x0080;
 const TEST_MAX_DEVICE_SLOTS: u8 = 32;
 const TEST_MAX_INTERRUPTERS: u16 = 8;
 const TEST_MAX_PORTS: u8 = 12;
+const TEST_MAX_SCRATCHPAD_BUFFERS: u16 = 33;
+const TEST_CONTEXT_SIZE: ContextSize = .bytes_64;
 const TEST_DOORBELL_OFFSET: u32 = 0x2000;
 const TEST_RUNTIME_REGISTER_OFFSET: u32 = 0x1000;
 const TEST_RING_TRBS: u32 = 64;
@@ -92,6 +110,8 @@ pub const Error = error{
     TooSmall,
     InvalidCapabilityLength,
     UnsupportedVersion,
+    Unsupported32BitAddressing,
+    InvalidScratchpadRestore,
     MissingDeviceSlots,
     MissingPorts,
     MissingInterrupters,
@@ -143,6 +163,10 @@ pub const CapabilityRegisters = struct {
     max_device_slots: u8,
     max_interrupters: u16,
     max_ports: u8,
+    supports_64_bit_addressing: bool,
+    context_size: ContextSize,
+    max_scratchpad_buffers: u16,
+    scratchpad_restore: bool,
     extended_capability_offset: u32,
     doorbell_offset: u32,
     runtime_register_offset: u32,
@@ -258,6 +282,7 @@ pub const MmioInputProof = struct {
     input_context_address: u64,
     transfer_ring_address: u64,
     event_ring_segment_table_address: u64,
+    context_size: ContextSize,
     device_context_bytes: u32,
     input_context_bytes: u32,
     transfer_ring_trbs: u32,
@@ -283,8 +308,8 @@ pub const MmioInputProof = struct {
             aligned(self.input_context_address, RING_ALIGNMENT_BYTES) and
             aligned(self.transfer_ring_address, RING_ALIGNMENT_BYTES) and
             aligned(self.event_ring_segment_table_address, RING_ALIGNMENT_BYTES) and
-            self.device_context_bytes >= @as(u32, self.max_device_slots) * CONTEXT_BYTES and
-            self.input_context_bytes >= CONTEXT_BYTES * 2 and
+            self.device_context_bytes >= @as(u32, self.max_device_slots) * self.context_size.byteCount() and
+            self.input_context_bytes >= self.context_size.byteCount() * 2 and
             self.transfer_ring_trbs >= 16 and
             self.event_ring_segment_table_entries > 0 and
             self.command_doorbells >= 3 and
@@ -338,6 +363,7 @@ const MmioState = struct {
             .input_context_address = self.input_context_address,
             .transfer_ring_address = self.transfer_ring_address,
             .event_ring_segment_table_address = self.event_ring_segment_table_address,
+            .context_size = self.capabilities.context_size,
             .device_context_bytes = self.device_context_bytes,
             .input_context_bytes = self.input_context_bytes,
             .transfer_ring_trbs = self.transfer_ring_trbs,
@@ -399,6 +425,10 @@ pub const HidController = struct {
     }
 
     pub fn initWithMmio(capabilities: CapabilityRegisters, ring_plan: RingPlan) Error!HidController {
+        if (!capabilities.supports_64_bit_addressing) return error.Unsupported32BitAddressing;
+        if (capabilities.max_scratchpad_buffers == 0 and capabilities.scratchpad_restore) {
+            return error.InvalidScratchpadRestore;
+        }
         if (capabilities.max_device_slots == 0) return error.MissingDeviceSlots;
         if (capabilities.max_ports == 0) return error.MissingPorts;
         if (capabilities.max_interrupters == 0) return error.MissingInterrupters;
@@ -411,8 +441,9 @@ pub const HidController = struct {
         var controller = try HidController.init(ring_plan);
         controller.port_limit = @min(capabilities.max_ports, maxBootPortsU8());
         controller.device_slot_limit = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
-        const device_context_bytes = @as(u32, capabilities.max_device_slots) * CONTEXT_BYTES;
-        const input_context_bytes = CONTEXT_BYTES * 2;
+        const context_bytes = capabilities.context_size.byteCount();
+        const device_context_bytes = @as(u32, capabilities.max_device_slots) * context_bytes;
+        const input_context_bytes = context_bytes * 2;
         const device_context_base_address = alignForward(
             ring_plan.command_ring_address + ringByteLength(ring_plan.command_ring_trbs),
             RING_ALIGNMENT_BYTES,
@@ -744,13 +775,34 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
 
     const hcsparams1 = readU32Le(mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES]);
     const max_device_slots: u8 = @truncate(hcsparams1);
-    const max_interrupters: u16 = @truncate(hcsparams1 >> HCSPARAMS1_MAX_INTERRUPTERS_SHIFT);
+    const max_interrupters: u16 = @intCast(
+        (hcsparams1 >> HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) & HCSPARAMS1_MAX_INTERRUPTERS_MASK,
+    );
     const max_ports: u8 = @truncate(hcsparams1 >> HCSPARAMS1_MAX_PORTS_SHIFT);
     if (max_device_slots == 0) return error.MissingDeviceSlots;
     if (max_ports == 0) return error.MissingPorts;
     if (max_interrupters == 0) return error.MissingInterrupters;
 
+    const hcsparams2 = readU32Le(mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES]);
+    const scratchpad_hi: u16 = @intCast(
+        (hcsparams2 >> HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT) &
+            HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK,
+    );
+    const scratchpad_lo: u16 = @intCast(
+        (hcsparams2 >> HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_LO_SHIFT) &
+            HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK,
+    );
+    const max_scratchpad_buffers = (scratchpad_hi << 5) | scratchpad_lo;
+    const scratchpad_restore = (hcsparams2 & HCSPARAMS2_SCRATCHPAD_RESTORE) != 0;
+    if (max_scratchpad_buffers == 0 and scratchpad_restore) return error.InvalidScratchpadRestore;
+
     const hccparams1 = readU32Le(mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES]);
+    const supports_64_bit_addressing = (hccparams1 & HCCPARAMS1_64_BIT_ADDRESSING) != 0;
+    if (!supports_64_bit_addressing) return error.Unsupported32BitAddressing;
+    const context_size: ContextSize = if ((hccparams1 & HCCPARAMS1_CONTEXT_SIZE) != 0)
+        .bytes_64
+    else
+        .bytes_32;
     const extended_capability_offset =
         (hccparams1 >> HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT) << EXTENDED_CAPABILITY_DWORD_SHIFT;
 
@@ -769,6 +821,10 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
         .max_device_slots = max_device_slots,
         .max_interrupters = max_interrupters,
         .max_ports = max_ports,
+        .supports_64_bit_addressing = supports_64_bit_addressing,
+        .context_size = context_size,
+        .max_scratchpad_buffers = max_scratchpad_buffers,
+        .scratchpad_restore = scratchpad_restore,
         .extended_capability_offset = extended_capability_offset,
         .doorbell_offset = doorbell_offset,
         .runtime_register_offset = runtime_register_offset,
@@ -932,6 +988,10 @@ pub fn defaultCapabilityRegisters() CapabilityRegisters {
         .max_device_slots = TEST_MAX_DEVICE_SLOTS,
         .max_interrupters = TEST_MAX_INTERRUPTERS,
         .max_ports = TEST_MAX_PORTS,
+        .supports_64_bit_addressing = true,
+        .context_size = TEST_CONTEXT_SIZE,
+        .max_scratchpad_buffers = TEST_MAX_SCRATCHPAD_BUFFERS,
+        .scratchpad_restore = true,
         .extended_capability_offset = 0,
         .doorbell_offset = TEST_DOORBELL_OFFSET,
         .runtime_register_offset = TEST_RUNTIME_REGISTER_OFFSET,
@@ -999,6 +1059,16 @@ fn validCapabilityRegisters() [CAPABILITY_REGISTERS_BYTES]u8 {
             (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
             (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT),
     );
+    writeU32Le(
+        mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES],
+        (@as(u32, TEST_MAX_SCRATCHPAD_BUFFERS >> 5) << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT) |
+            ((@as(u32, TEST_MAX_SCRATCHPAD_BUFFERS) & HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK) << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_LO_SHIFT) |
+            HCSPARAMS2_SCRATCHPAD_RESTORE,
+    );
+    writeU32Le(
+        mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
+        HCCPARAMS1_64_BIT_ADDRESSING | HCCPARAMS1_CONTEXT_SIZE,
+    );
     writeU32Le(mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_DOORBELL_OFFSET);
     writeU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_RUNTIME_REGISTER_OFFSET);
     return mmio;
@@ -1012,9 +1082,39 @@ test "xHCI capability parser extracts controller limits" {
     try std.testing.expectEqual(TEST_MAX_DEVICE_SLOTS, caps.max_device_slots);
     try std.testing.expectEqual(TEST_MAX_INTERRUPTERS, caps.max_interrupters);
     try std.testing.expectEqual(TEST_MAX_PORTS, caps.max_ports);
+    try std.testing.expect(caps.supports_64_bit_addressing);
+    try std.testing.expectEqual(TEST_CONTEXT_SIZE, caps.context_size);
+    try std.testing.expectEqual(TEST_MAX_SCRATCHPAD_BUFFERS, caps.max_scratchpad_buffers);
+    try std.testing.expect(caps.scratchpad_restore);
     try std.testing.expectEqual(@as(u32, 0), caps.extended_capability_offset);
     try std.testing.expectEqual(TEST_DOORBELL_OFFSET, caps.doorbell_offset);
     try std.testing.expectEqual(TEST_RUNTIME_REGISTER_OFFSET, caps.runtime_register_offset);
+}
+
+test "xHCI capability parser isolates context scratchpad and interrupter fields" {
+    var mmio = validCapabilityRegisters();
+    writeU32Le(
+        mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES],
+        @as(u32, TEST_MAX_DEVICE_SLOTS) |
+            (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
+            (@as(u32, 0x1F) << 19) |
+            (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT),
+    );
+    writeU32Le(
+        mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES],
+        (HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT) |
+            (HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_LO_SHIFT),
+    );
+    writeU32Le(
+        mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
+        HCCPARAMS1_64_BIT_ADDRESSING,
+    );
+
+    const caps = try parseCapabilityRegisters(mmio[0..]);
+    try std.testing.expectEqual(TEST_MAX_INTERRUPTERS, caps.max_interrupters);
+    try std.testing.expectEqual(ContextSize.bytes_32, caps.context_size);
+    try std.testing.expectEqual(@as(u16, 1023), caps.max_scratchpad_buffers);
+    try std.testing.expect(!caps.scratchpad_restore);
 }
 
 const TestExtendedCapabilityReader = struct {
@@ -1036,7 +1136,9 @@ test "xHCI capability parser extracts the extended capability pointer" {
     var mmio = validCapabilityRegisters();
     writeU32Le(
         mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        @as(u32, 0x2000) << HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT,
+        HCCPARAMS1_64_BIT_ADDRESSING |
+            HCCPARAMS1_CONTEXT_SIZE |
+            (@as(u32, 0x2000) << HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT),
     );
     const caps = try parseCapabilityRegisters(mmio[0..]);
     try std.testing.expectEqual(@as(u32, 0x8000), caps.extended_capability_offset);
@@ -1405,6 +1507,20 @@ test "xHCI capability parser rejects unsupported controllers" {
 
     mmio = validCapabilityRegisters();
     writeU32Le(
+        mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
+        HCCPARAMS1_CONTEXT_SIZE,
+    );
+    try std.testing.expectError(error.Unsupported32BitAddressing, parseCapabilityRegisters(mmio[0..]));
+
+    mmio = validCapabilityRegisters();
+    writeU32Le(
+        mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES],
+        HCSPARAMS2_SCRATCHPAD_RESTORE,
+    );
+    try std.testing.expectError(error.InvalidScratchpadRestore, parseCapabilityRegisters(mmio[0..]));
+
+    mmio = validCapabilityRegisters();
+    writeU32Le(
         mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES],
         (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
             (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT),
@@ -1450,6 +1566,10 @@ test "xHCI controller binds MMIO command doorbells and event ring input proof" {
         .max_device_slots = TEST_MAX_DEVICE_SLOTS,
         .max_interrupters = TEST_MAX_INTERRUPTERS,
         .max_ports = TEST_MAX_PORTS,
+        .supports_64_bit_addressing = true,
+        .context_size = TEST_CONTEXT_SIZE,
+        .max_scratchpad_buffers = 0,
+        .scratchpad_restore = false,
         .extended_capability_offset = 0,
         .doorbell_offset = 0,
         .runtime_register_offset = TEST_RUNTIME_REGISTER_OFFSET,
@@ -1479,8 +1599,12 @@ test "xHCI controller binds MMIO command doorbells and event ring input proof" {
     try std.testing.expectEqual(@as(u32, 2), proof.mmio.device_context_writes);
     try std.testing.expectEqual(@as(u32, 1), proof.mmio.endpoint_context_writes);
     try std.testing.expectEqual(@as(u32, 1), proof.mmio.event_ring_segment_table_writes);
-    try std.testing.expectEqual(@as(u32, TEST_MAX_DEVICE_SLOTS) * CONTEXT_BYTES, proof.mmio.device_context_bytes);
-    try std.testing.expectEqual(CONTEXT_BYTES * 2, proof.mmio.input_context_bytes);
+    try std.testing.expectEqual(TEST_CONTEXT_SIZE, proof.mmio.context_size);
+    try std.testing.expectEqual(
+        @as(u32, TEST_MAX_DEVICE_SLOTS) * TEST_CONTEXT_SIZE.byteCount(),
+        proof.mmio.device_context_bytes,
+    );
+    try std.testing.expectEqual(TEST_CONTEXT_SIZE.byteCount() * 2, proof.mmio.input_context_bytes);
     try std.testing.expectEqual(@as(u32, DEFAULT_TRANSFER_RING_TRBS), proof.mmio.transfer_ring_trbs);
     try std.testing.expectEqual(@as(u32, DEFAULT_ERST_ENTRIES), proof.mmio.event_ring_segment_table_entries);
     try std.testing.expectEqual(@as(u32, 1), proof.mmio.event_ring_dequeue_count);
