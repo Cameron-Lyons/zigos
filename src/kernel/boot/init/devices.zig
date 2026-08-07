@@ -132,7 +132,8 @@ fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
 }
 
 fn capturePciInventory() void {
-    var network_domain: ?intel_vtd.DmaDomain = null;
+    var isolation_domains: [2]intel_vtd.DmaDomain = undefined;
+    var isolation_domain_count: usize = 0;
     if (pci.firstIntelI225Lm()) |dev| {
         device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .intel_i225_lm_inventory, false);
         intel_i225_hw.prepare(dev) catch |err| {
@@ -144,8 +145,9 @@ fn capturePciInventory() void {
             }
             return;
         };
-        network_domain = intel_i225_hw.isolationDomain() orelse
+        isolation_domains[isolation_domain_count] = intel_i225_hw.isolationDomain() orelse
             @panic("I225-LM preparation omitted its DMA isolation domain");
+        isolation_domain_count += 1;
         network_prepared = true;
     }
     if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {
@@ -159,6 +161,10 @@ fn capturePciInventory() void {
             console.print("ZIGOS:XHCI:HW:OWNERSHIP_OK\n");
             console.print("ZIGOS:XHCI:HW:RESET_OK\n");
             console.print("ZIGOS:XHCI:HW:SLOTS_OK\n");
+            isolation_domains[isolation_domain_count] = xhci_hw.isolationDomain() orelse
+                @panic("xHCI preparation omitted its DMA isolation domain");
+            isolation_domain_count += 1;
+            console.print("ZIGOS:XHCI:HW:DMA_OK\n");
         } else |err| {
             console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_FAIL ");
             console.print(@errorName(err));
@@ -180,7 +186,11 @@ fn capturePciInventory() void {
         else
             null;
         const vtd_summary_ptr = if (vtd_summary) |*summary| summary else null;
-        const fault_proof = nvme_hw.probeAndReport(dev, vtd_summary_ptr, network_domain) catch |err| {
+        const fault_proof = nvme_hw.probeAndReport(
+            dev,
+            vtd_summary_ptr,
+            isolation_domains[0..isolation_domain_count],
+        ) catch |err| {
             console.print("ZIGOS:NVME:HW:BRINGUP_FAIL ");
             console.print(@errorName(err));
             console.print("\n");
