@@ -25,18 +25,21 @@ pub const Queue = struct {
     head: u32 = 0,
     tail: u32 = 0,
     in_flight: u32 = 0,
+    submitted_at_ticks: [DESCRIPTOR_COUNT]u64 = [_]u64{0} ** DESCRIPTOR_COUNT,
 
-    pub fn reserve(self: *Queue) error{RingFull}!u32 {
+    pub fn reserve(self: *Queue, now_ticks: u64) error{RingFull}!u32 {
         if (self.in_flight == CAPACITY) return error.RingFull;
         const descriptor_index = self.tail;
+        self.submitted_at_ticks[descriptor_index] = now_ticks;
         self.tail = nextIndex(self.tail);
         self.in_flight += 1;
         return descriptor_index;
     }
 
-    pub fn reclaim(self: *Queue) ?u32 {
-        if (self.in_flight == 0) return null;
+    pub fn reclaimCompleted(self: *Queue, completion_status: u32) ?u32 {
+        if (self.in_flight == 0 or !completionDone(completion_status)) return null;
         const descriptor_index = self.head;
+        self.submitted_at_ticks[descriptor_index] = 0;
         self.head = nextIndex(self.head);
         self.in_flight -= 1;
         return descriptor_index;
@@ -44,6 +47,11 @@ pub const Queue = struct {
 
     pub fn full(self: *const Queue) bool {
         return self.in_flight == CAPACITY;
+    }
+
+    pub fn oldestSubmissionExpired(self: *const Queue, now_ticks: u64, timeout_ticks: u64) bool {
+        if (self.in_flight == 0 or timeout_ticks == 0) return false;
+        return now_ticks -% self.submitted_at_ticks[self.head] >= timeout_ticks;
     }
 };
 
@@ -97,18 +105,37 @@ test "I225 transmit queue applies backpressure and reuses reclaimed slots" {
     var queue = Queue{};
     var index: u32 = 0;
     while (index < CAPACITY) : (index += 1) {
-        try std.testing.expectEqual(index, try queue.reserve());
+        try std.testing.expectEqual(index, try queue.reserve(100 + index));
     }
     try std.testing.expect(queue.full());
-    try std.testing.expectError(error.RingFull, queue.reserve());
-    try std.testing.expectEqual(@as(u32, 0), queue.reclaim().?);
+    try std.testing.expectError(error.RingFull, queue.reserve(200));
+    try std.testing.expectEqual(@as(u32, 0), queue.reclaimCompleted(STATUS_DONE).?);
     try std.testing.expectEqual(@as(u32, CAPACITY - 1), queue.in_flight);
-    try std.testing.expectEqual(@as(u32, CAPACITY), try queue.reserve());
+    try std.testing.expectEqual(@as(u32, CAPACITY), try queue.reserve(200));
     try std.testing.expect(queue.full());
 
     index = 1;
     while (index <= CAPACITY) : (index += 1) {
-        try std.testing.expectEqual(index, queue.reclaim().?);
+        try std.testing.expectEqual(index, queue.reclaimCompleted(STATUS_DONE).?);
     }
-    try std.testing.expect(queue.reclaim() == null);
+    try std.testing.expect(queue.reclaimCompleted(STATUS_DONE) == null);
+}
+
+test "I225 transmit queue detects only an expired oldest submission" {
+    var queue = Queue{};
+    try std.testing.expect(!queue.oldestSubmissionExpired(100, 10));
+    try std.testing.expectEqual(@as(u32, 0), try queue.reserve(100));
+    try std.testing.expectEqual(@as(u32, 1), try queue.reserve(105));
+    try std.testing.expect(!queue.oldestSubmissionExpired(109, 10));
+    try std.testing.expect(queue.oldestSubmissionExpired(110, 10));
+    try std.testing.expect(queue.reclaimCompleted(0) == null);
+    try std.testing.expectEqual(@as(u32, 0), queue.reclaimCompleted(STATUS_DONE).?);
+    try std.testing.expect(!queue.oldestSubmissionExpired(114, 10));
+    try std.testing.expect(queue.oldestSubmissionExpired(115, 10));
+    try std.testing.expectEqual(@as(u32, 1), queue.reclaimCompleted(STATUS_DONE).?);
+    try std.testing.expect(!queue.oldestSubmissionExpired(1_000, 10));
+
+    try std.testing.expectEqual(@as(u32, 2), try queue.reserve(std.math.maxInt(u64) - 4));
+    try std.testing.expect(!queue.oldestSubmissionExpired(4, 10));
+    try std.testing.expect(queue.oldestSubmissionExpired(5, 10));
 }
