@@ -216,10 +216,12 @@ Use the pinned toolchain and repo entrypoints:
   can be assigned to another port. PCI inventory accepts an xHCI controller only
   after a shared typed BAR decoder maps one dedicated read-only cache-disabled
   page and the live capability block reports xHCI 1.1+, nonzero slots, ports,
-  and interrupters, plus aligned doorbell and runtime offsets; bus mastering
-  remains revoked throughout this probe. This publishes controller inventory
-  only; input-device authority still requires keyboard enumeration and hardware
-  event-ring evidence.
+  and interrupters, plus aligned doorbell and runtime offsets. The same page is
+  remapped as a bounded sliding window over the extended-capability chain, and
+  a controller whose USB legacy register is still firmware-owned is rejected;
+  bus mastering and all controller writes remain disabled throughout this probe.
+  This publishes controller inventory only; input-device authority still requires
+  keyboard enumeration and hardware event-ring evidence.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses

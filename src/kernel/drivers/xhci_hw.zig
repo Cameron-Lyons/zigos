@@ -17,12 +17,15 @@ pub const Error = xhci.Error || error{
     NotXhciController,
     BarUnmappable,
     BarMisaligned,
+    BarRangeOverflow,
 };
 
 var active_capabilities: ?xhci.CapabilityRegisters = null;
+var active_legacy_ownership: ?xhci.LegacyOwnership = null;
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_capabilities = null;
+    active_legacy_ownership = null;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -31,16 +34,24 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     );
     const snapshot = readCapabilitySnapshot(mmio_windows.xhci.base);
     const capabilities = try xhci.parseCapabilityRegisters(&snapshot);
+    try validateExtendedCapabilityRange(bar.address, capabilities.extended_capability_offset);
+    var reader = ExtendedCapabilityReader{ .bar_address = bar.address };
+    const legacy_ownership = try xhci.inspectLegacyOwnership(capabilities.extended_capability_offset, &reader);
     active_capabilities = capabilities;
+    active_legacy_ownership = legacy_ownership;
     return capabilities;
 }
 
 pub fn validated() bool {
-    return active_capabilities != null;
+    return active_capabilities != null and active_legacy_ownership != null;
 }
 
 pub fn probedCapabilities() ?xhci.CapabilityRegisters {
     return active_capabilities;
+}
+
+pub fn probedLegacyOwnership() ?xhci.LegacyOwnership {
+    return active_legacy_ownership;
 }
 
 fn validateBar(device_info: pci.PCIDevice) Error!pci.MemoryBar {
@@ -50,6 +61,33 @@ fn validateBar(device_info: pci.PCIDevice) Error!pci.MemoryBar {
     if (bar.address % PAGE_BYTES != 0) return error.BarMisaligned;
     return bar;
 }
+
+fn validateExtendedCapabilityRange(bar_address: usize, first_offset: u32) Error!void {
+    if (first_offset == 0) return;
+    if (bar_address > std.math.maxInt(usize) - @as(usize, xhci.MAX_EXTENDED_CAPABILITY_OFFSET)) {
+        return error.BarRangeOverflow;
+    }
+}
+
+const ExtendedCapabilityReader = struct {
+    bar_address: usize,
+    mapped_page_offset: ?usize = null,
+
+    pub fn readDword(self: *@This(), offset: u32) u32 {
+        const byte_offset: usize = @intCast(offset);
+        const page_offset = byte_offset & ~(PAGE_BYTES - 1);
+        if (self.mapped_page_offset == null or self.mapped_page_offset.? != page_offset) {
+            paging.mapKernelBorrowedPage(
+                mmio_windows.xhci.base,
+                self.bar_address + page_offset,
+                paging.PAGE_PRESENT | paging.PAGE_CACHE_DISABLE,
+            );
+            self.mapped_page_offset = page_offset;
+        }
+        const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
+        return @as(*volatile u32, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).*;
+    }
+};
 
 fn readCapabilitySnapshot(base: usize) [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
     var snapshot = [_]u8{0} ** xhci.CAPABILITY_REGISTERS_BYTES;
@@ -66,6 +104,7 @@ fn validTestSnapshot() [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
     snapshot[0] = 0x40;
     endian.writeU16Le(snapshot[2..4], 0x0110);
     endian.writeU32Le(snapshot[4..8], 32 | (@as(u32, 8) << 8) | (@as(u32, 12) << 24));
+    endian.writeU32Le(snapshot[0x10..0x14], @as(u32, 0x2000) << 16);
     endian.writeU32Le(snapshot[0x14..0x18], 0x2000);
     endian.writeU32Le(snapshot[0x18..0x1C], 0x1000);
     return snapshot;
@@ -109,4 +148,14 @@ test "xHCI hardware capability snapshot uses the shared modern parser" {
     try std.testing.expectEqual(@as(u16, 0x0110), capabilities.interface_version);
     try std.testing.expectEqual(@as(u8, 32), capabilities.max_device_slots);
     try std.testing.expectEqual(@as(u8, 12), capabilities.max_ports);
+    try std.testing.expectEqual(@as(u32, 0x8000), capabilities.extended_capability_offset);
+}
+
+test "xHCI hardware probe bounds extended capability BAR arithmetic" {
+    try validateExtendedCapabilityRange(0xFEB0_0000, 0x8000);
+    try validateExtendedCapabilityRange(std.math.maxInt(usize), 0);
+    try std.testing.expectError(
+        error.BarRangeOverflow,
+        validateExtendedCapabilityRange(std.math.maxInt(usize), 0x8000),
+    );
 }
