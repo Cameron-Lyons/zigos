@@ -1,16 +1,22 @@
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
+const x86 = @import("../../arch/x86.zig");
+const timer = @import("../timer/timer.zig");
 const tsc_clock = @import("../timer/tsc_clock.zig");
+const interrupt_context = @import("../interrupts/context.zig");
+const x2apic = @import("../interrupts/x2apic.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("../platform/dmar.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const nvme_completion = @import("nvme_completion.zig");
+const nvme_interrupt = @import("nvme_interrupt.zig");
 const nvme_prp = @import("nvme_prp.zig");
 const nvme_timing = @import("nvme_timing.zig");
 const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
+pub const INTERRUPT_VECTOR = nvme_interrupt.INTERRUPT_VECTOR;
 const PAGE_SIZE: u32 = 4096;
 
 const BOUNCE_FIRST_FRAME: u32 = 4;
@@ -69,6 +75,9 @@ pub const Error = error{
     UnsupportedLbaFormat,
     DmaIsolationBypassed,
     DmaFault,
+    InterruptIsolationUnavailable,
+    InterruptRouteInstallFailed,
+    MsiEnableFailed,
 };
 
 const ADMIN_OPC_CREATE_IO_SQ: u32 = 0x01;
@@ -269,10 +278,16 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
     self.writeReg32(sqDoorbell(self, queue.qid), queue.sq_tail);
 
     const cqe: [*]volatile u32 = @ptrFromInt(queue.cq_phys + queue.cq_head * CQ_ENTRY_BYTES);
+    const wait_with_interrupt = nvme_interrupt.mayIdleWait(
+        queue.qid,
+        @atomicLoad(bool, &io_interrupts_active, .seq_cst),
+        interrupt_context.active(),
+    );
+    const restore_interrupt_mask = wait_with_interrupt and !x86.interruptsEnabled();
     const deadline = tsc_clock.afterMilliseconds(nvme_timing.COMMAND_TIMEOUT_MILLISECONDS);
     var spins: u64 = 0;
     while (true) : (spins +%= 1) {
-        if ((spins & 0x3FF) == 0) {
+        if (wait_with_interrupt or (spins & 0x3FF) == 0) {
             if (deadline.expired()) return error.CommandTimeout;
             if (self.fatal()) return error.ControllerFatal;
             if (intel_vtd.faultMonitoringEnabled() and
@@ -299,7 +314,18 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
             if (!completion.succeeded()) return error.CommandFailed;
             return;
         }
-        spin.hint();
+        if (wait_with_interrupt) {
+            timer.armSchedulerTick();
+            x86.cli();
+            if (nvme_completion.phase(cqe[3]) == queue.phase) {
+                if (!restore_interrupt_mask) x86.sti();
+                continue;
+            }
+            x86.stiHlt();
+            if (restore_interrupt_mask) x86.cli();
+        } else {
+            spin.hint();
+        }
     }
 }
 
@@ -313,7 +339,7 @@ pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {
     create_cq[0] = ADMIN_OPC_CREATE_IO_CQ;
     create_cq[6] = cq_phys;
     create_cq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
-    create_cq[11] = 1;
+    create_cq[11] = nvme_interrupt.createCompletionQueueControl();
     try submit(self, &self.admin, &create_cq);
 
     var create_sq = [_]u32{0} ** 16;
@@ -389,9 +415,39 @@ var active_controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var active_present: bool = false;
 var bounce_phys: u32 = 0;
+var io_interrupts_active: bool = false;
+var completion_interrupt_count: u64 = 0;
 
 pub fn attached() bool {
     return active_present;
+}
+
+pub fn activateInterrupts() Error!void {
+    if (!active_present) return error.NamespaceMissing;
+    if (@atomicLoad(bool, &io_interrupts_active, .seq_cst)) return;
+    if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
+    const remapped = intel_vtd.routeInterrupt(
+        active_device,
+        INTERRUPT_VECTOR,
+        x2apic.localId(),
+    ) catch return error.InterruptRouteInstallFailed;
+    pci.enableSingleMsi(active_device, .{
+        .address = remapped.address,
+        .data = remapped.data,
+    }) catch return error.MsiEnableFailed;
+    @atomicStore(u64, &completion_interrupt_count, 0, .seq_cst);
+    @atomicStore(bool, &io_interrupts_active, true, .seq_cst);
+}
+
+pub fn handleInterrupt() void {
+    if (@atomicLoad(bool, &io_interrupts_active, .seq_cst)) {
+        _ = @atomicRmw(u64, &completion_interrupt_count, .Add, 1, .seq_cst);
+    }
+    x2apic.acknowledge();
+}
+
+pub fn completionInterruptCount() u64 {
+    return @atomicLoad(u64, &completion_interrupt_count, .seq_cst);
 }
 
 fn identifyNamespace(self: *Controller, buffer: u32) Error!void {
@@ -465,6 +521,8 @@ pub fn attachAsBackend(
     additional_domain: ?intel_vtd.DmaDomain,
 ) !?intel_vtd.FaultRecord {
     if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
+    @atomicStore(bool, &io_interrupts_active, false, .seq_cst);
+    @atomicStore(u64, &completion_interrupt_count, 0, .seq_cst);
     const dma_base = paging.alloc_frames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
     const frames = DmaFrames{ .base = dma_base };
     var retain_dma_frames = vtd_summary != null;
@@ -575,6 +633,8 @@ fn handleBackendError(err: anyerror) void {
     if (!backendErrorRequiresContainment(err) or !active_present) return;
     active_present = false;
     bounce_phys = 0;
+    @atomicStore(bool, &io_interrupts_active, false, .seq_cst);
+    pci.disableMsi(active_device) catch {};
     active_controller.writeReg32(REG_CC, active_controller.reg32(REG_CC) & ~CC_EN);
     pci.disableBusMastering(active_device);
     _ = spinUntilReady(&active_controller, false);
