@@ -34,6 +34,7 @@ pub const USB_DESCRIPTOR_DEVICE: u8 = 0x01;
 pub const USB_DESCRIPTOR_CONFIGURATION: u8 = 0x02;
 pub const USB_DESCRIPTOR_INTERFACE: u8 = 0x04;
 pub const USB_DESCRIPTOR_ENDPOINT: u8 = 0x05;
+pub const USB_DESCRIPTOR_SUPERSPEED_ENDPOINT_COMPANION: u8 = 0x30;
 pub const USB_DESCRIPTOR_HID: u8 = 0x21;
 pub const USB_CLASS_HID: u8 = 0x03;
 pub const USB_HID_SUBCLASS_BOOT: u8 = 0x01;
@@ -47,6 +48,9 @@ pub const MAX_BOOT_PORTS: usize = 32;
 pub const MAX_DEVICE_SLOTS: usize = 32;
 pub const USB_DEVICE_DESCRIPTOR_PREFIX_BYTES: usize = 8;
 pub const USB_DEVICE_DESCRIPTOR_BYTES: usize = 18;
+pub const USB_CONFIGURATION_DESCRIPTOR_BYTES: usize = 9;
+pub const USB_ENUMERATION_BUFFER_BYTES: u32 = 64 * 1024;
+pub const XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES: u64 = 64 * 1024;
 pub const ENDPOINT_ZERO_DCI: u5 = 1;
 
 pub const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
@@ -145,6 +149,7 @@ const ADDRESS_DEVICE_COMMAND_TRB_TYPE: u32 = 11;
 const EVALUATE_CONTEXT_COMMAND_TRB_TYPE: u32 = 13;
 const TRB_TYPE_SHIFT: u5 = 10;
 const TRB_TYPE_MASK: u32 = 0x3F;
+const TRB_INTERRUPT_ON_SHORT_PACKET: u32 = 1 << 2;
 const TRB_INTERRUPT_ON_COMPLETION: u32 = 1 << 5;
 const TRB_IMMEDIATE_DATA: u32 = 1 << 6;
 const CONTROL_TRANSFER_DIRECTION_IN: u32 = 1 << 16;
@@ -440,6 +445,132 @@ pub const UsbDeviceDescriptor = struct {
     configuration_count: u8,
 };
 
+pub const UsbConfigurationDescriptor = struct {
+    total_length: u16,
+    interface_count: u8,
+    configuration_value: u8,
+    string_index: u8,
+    self_powered: bool,
+    remote_wakeup: bool,
+    max_power_milliamps: u16,
+};
+
+pub const ConfigurationDescriptorParser = struct {
+    protocol: PortProtocol,
+    header: ?UsbConfigurationDescriptor = null,
+    bytes_consumed: usize = 0,
+    interface_numbers: [4]u64 = [_]u64{0} ** 4,
+    distinct_interface_count: u16 = 0,
+    active_interface: bool = false,
+    expected_endpoint_count: u8 = 0,
+    seen_endpoint_count: u8 = 0,
+    expects_superspeed_companion: bool = false,
+
+    pub fn init(protocol: PortProtocol) ConfigurationDescriptorParser {
+        return .{ .protocol = protocol };
+    }
+
+    pub fn consume(self: *ConfigurationDescriptorParser, descriptor: []const u8) Error!void {
+        if (descriptor.len < 2 or descriptor.len != descriptor[0]) {
+            return error.InvalidUsbDescriptor;
+        }
+        const descriptor_type = descriptor[1];
+        if (self.header == null) {
+            if (descriptor_type != USB_DESCRIPTOR_CONFIGURATION) {
+                return error.InvalidUsbDescriptor;
+            }
+            self.header = try parseUsbConfigurationDescriptorHeader(self.protocol, descriptor);
+            self.bytes_consumed = descriptor.len;
+            return;
+        }
+        if (descriptor_type == USB_DESCRIPTOR_CONFIGURATION) {
+            return error.InvalidUsbDescriptor;
+        }
+        if (self.expects_superspeed_companion) {
+            if (descriptor_type != USB_DESCRIPTOR_SUPERSPEED_ENDPOINT_COMPANION or
+                descriptor.len != 6)
+            {
+                return error.InvalidUsbDescriptor;
+            }
+            self.expects_superspeed_companion = false;
+            self.bytes_consumed = std.math.add(
+                usize,
+                self.bytes_consumed,
+                descriptor.len,
+            ) catch return error.InvalidUsbDescriptor;
+            return;
+        }
+        switch (descriptor_type) {
+            USB_DESCRIPTOR_INTERFACE => {
+                try self.finishActiveInterface();
+                if (descriptor.len < USB_CONFIGURATION_DESCRIPTOR_BYTES or descriptor[5] == 0) {
+                    return error.InvalidUsbDescriptor;
+                }
+                const header = self.header.?;
+                const interface_number = descriptor[2];
+                if (interface_number >= header.interface_count) return error.InvalidUsbDescriptor;
+                const word_index: usize = interface_number / 64;
+                const bit = @as(u64, 1) << @intCast(interface_number % 64);
+                if ((self.interface_numbers[word_index] & bit) == 0) {
+                    self.interface_numbers[word_index] |= bit;
+                    self.distinct_interface_count += 1;
+                }
+                self.active_interface = true;
+                self.expected_endpoint_count = descriptor[4];
+                self.seen_endpoint_count = 0;
+            },
+            USB_DESCRIPTOR_ENDPOINT => {
+                if (!self.active_interface or descriptor.len < 7 or
+                    self.seen_endpoint_count >= self.expected_endpoint_count)
+                {
+                    return error.InvalidUsbDescriptor;
+                }
+                const endpoint_address = descriptor[2];
+                const transfer_type = descriptor[3] & 0x03;
+                const packet_payload_bytes = readU16Le(descriptor[4..6]) & 0x07FF;
+                if ((endpoint_address & 0x70) != 0 or (endpoint_address & 0x0F) == 0 or
+                    (transfer_type != 1 and packet_payload_bytes == 0))
+                {
+                    return error.InvalidUsbDescriptor;
+                }
+                self.seen_endpoint_count += 1;
+                self.expects_superspeed_companion = self.protocol.kind == .usb3;
+            },
+            USB_DESCRIPTOR_SUPERSPEED_ENDPOINT_COMPANION => {
+                return error.InvalidUsbDescriptor;
+            },
+            else => {},
+        }
+        self.bytes_consumed = std.math.add(
+            usize,
+            self.bytes_consumed,
+            descriptor.len,
+        ) catch return error.InvalidUsbDescriptor;
+    }
+
+    pub fn finish(
+        self: *ConfigurationDescriptorParser,
+        expected_bytes: usize,
+    ) Error!UsbConfigurationDescriptor {
+        try self.finishActiveInterface();
+        if (self.expects_superspeed_companion) return error.InvalidUsbDescriptor;
+        const header = self.header orelse return error.InvalidUsbDescriptor;
+        if (self.bytes_consumed != expected_bytes or
+            expected_bytes != header.total_length or
+            self.distinct_interface_count != header.interface_count)
+        {
+            return error.InvalidUsbDescriptor;
+        }
+        return header;
+    }
+
+    fn finishActiveInterface(self: *ConfigurationDescriptorParser) Error!void {
+        if (self.active_interface and self.seen_endpoint_count != self.expected_endpoint_count) {
+            return error.InvalidUsbDescriptor;
+        }
+    }
+};
+
 pub const SupportedProtocols = struct {
     ports: [256]?PortProtocol = [_]?PortProtocol{null} ** 256,
 
@@ -699,6 +830,60 @@ pub fn parseUsbDeviceDescriptor(
     };
 }
 
+pub fn parseUsbConfigurationDescriptorHeader(
+    protocol: PortProtocol,
+    descriptor: []const u8,
+) Error!UsbConfigurationDescriptor {
+    if (descriptor.len < USB_CONFIGURATION_DESCRIPTOR_BYTES or
+        descriptor[0] != USB_CONFIGURATION_DESCRIPTOR_BYTES or
+        descriptor[1] != USB_DESCRIPTOR_CONFIGURATION)
+    {
+        return error.InvalidUsbDescriptor;
+    }
+    const total_length = readU16Le(descriptor[2..4]);
+    const interface_count = descriptor[4];
+    const configuration_value = descriptor[5];
+    const attributes = descriptor[7];
+    if (total_length < descriptor[0] or interface_count == 0 or
+        configuration_value == 0 or (attributes & 0x9F) != 0x80)
+    {
+        return error.InvalidUsbDescriptor;
+    }
+    const power_unit_milliamps: u16 = switch (protocol.kind) {
+        .usb2 => 2,
+        .usb3 => 8,
+    };
+    return .{
+        .total_length = total_length,
+        .interface_count = interface_count,
+        .configuration_value = configuration_value,
+        .string_index = descriptor[6],
+        .self_powered = (attributes & 0x40) != 0,
+        .remote_wakeup = (attributes & 0x20) != 0,
+        .max_power_milliamps = @as(u16, descriptor[8]) * power_unit_milliamps,
+    };
+}
+
+pub fn parseUsbConfigurationDescriptor(
+    protocol: PortProtocol,
+    descriptors: []const u8,
+) Error!UsbConfigurationDescriptor {
+    var parser = ConfigurationDescriptorParser.init(protocol);
+    var offset: usize = 0;
+    while (offset < descriptors.len) {
+        if (offset + 2 > descriptors.len) return error.InvalidUsbDescriptor;
+        const descriptor_length: usize = descriptors[offset];
+        const end = std.math.add(usize, offset, descriptor_length) catch
+            return error.InvalidUsbDescriptor;
+        if (descriptor_length < 2 or end > descriptors.len) {
+            return error.InvalidUsbDescriptor;
+        }
+        try parser.consume(descriptors[offset..end]);
+        offset = end;
+    }
+    return parser.finish(descriptors.len);
+}
+
 fn validBcd(value: u16) bool {
     return (value & 0x000F) <= 9 and
         ((value >> 4) & 0x000F) <= 9 and
@@ -732,12 +917,17 @@ pub fn controlInDataStage(
     cycle_state: u1,
 ) Error![4]u32 {
     if (buffer_address == 0 or transfer_bytes == 0) return error.DmaAddressOutsidePlan;
+    const boundary_offset = buffer_address & (XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES - 1);
+    if (boundary_offset + transfer_bytes > XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES) {
+        return error.DmaAddressOutsidePlan;
+    }
     return .{
         @truncate(buffer_address),
         @truncate(buffer_address >> 32),
         transfer_bytes,
         CONTROL_TRANSFER_DIRECTION_IN |
             (DATA_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_INTERRUPT_ON_SHORT_PACKET |
             cycle_state,
     };
 }
@@ -2048,11 +2238,19 @@ pub fn controllerDmaFrameCount(
     capabilities: CapabilityRegisters,
     enabled_device_slots: u8,
 ) Error!u32 {
-    return (try planControllerDma(
-        capabilities,
-        enabled_device_slots,
-        XHCI_PAGE_BYTES,
-    )).frameCount();
+    var maximum_frames: u32 = 0;
+    var base_address = XHCI_PAGE_BYTES;
+    while (base_address <= XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES) : (base_address += XHCI_PAGE_BYTES) {
+        maximum_frames = @max(
+            maximum_frames,
+            try (try planControllerDma(
+                capabilities,
+                enabled_device_slots,
+                base_address,
+            )).frameCount(),
+        );
+    }
+    return maximum_frames;
 }
 
 fn planControllerDmaFromRings(
@@ -2147,9 +2345,11 @@ pub fn planDmaArena(
     cursor = checkedAdd(cursor, device_contexts_bytes) catch return error.DmaLayoutOverflow;
     cursor = alignForwardChecked(cursor, XHCI_PAGE_BYTES) catch return error.DmaLayoutOverflow;
 
+    cursor = alignForwardChecked(cursor, XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES) catch
+        return error.DmaLayoutOverflow;
     const enumeration_buffer_address = cursor;
-    const enumeration_buffer_bytes: u32 = @intCast(XHCI_PAGE_BYTES);
-    cursor = checkedAdd(cursor, XHCI_PAGE_BYTES) catch return error.DmaLayoutOverflow;
+    const enumeration_buffer_bytes = USB_ENUMERATION_BUFFER_BYTES;
+    cursor = checkedAdd(cursor, enumeration_buffer_bytes) catch return error.DmaLayoutOverflow;
 
     const input_context_address = cursor;
     const input_context_bytes = std.math.mul(
@@ -2864,6 +3064,92 @@ test "xHCI full device descriptor parser validates identity and USB generation" 
     try std.testing.expectError(error.InvalidUsbDescriptor, parseUsbDeviceDescriptor(usb3, 4, &bytes));
 }
 
+test "xHCI configuration parser validates complete USB2 and USB3 descriptor trees" {
+    const usb2 = PortProtocol{
+        .kind = .usb2,
+        .slot_type = 0,
+        .speed_ids = @as(u16, 1) << 3,
+        .high_speed_ids = @as(u16, 1) << 3,
+    };
+    var usb2_bytes = bootKeyboardConfigurationDescriptor(DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
+    const usb2_header = try parseUsbConfigurationDescriptorHeader(
+        usb2,
+        usb2_bytes[0..USB_CONFIGURATION_DESCRIPTOR_BYTES],
+    );
+    try std.testing.expectEqual(@as(u16, usb2_bytes.len), usb2_header.total_length);
+    try std.testing.expectEqual(@as(u8, 1), usb2_header.interface_count);
+    try std.testing.expectEqual(@as(u8, 1), usb2_header.configuration_value);
+    try std.testing.expect(!usb2_header.self_powered);
+    try std.testing.expect(!usb2_header.remote_wakeup);
+    try std.testing.expectEqual(@as(u16, 100), usb2_header.max_power_milliamps);
+    try std.testing.expectEqualDeep(
+        usb2_header,
+        try parseUsbConfigurationDescriptor(usb2, &usb2_bytes),
+    );
+
+    usb2_bytes[7] = 0;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        parseUsbConfigurationDescriptor(usb2, &usb2_bytes),
+    );
+    usb2_bytes[7] = 0x80;
+    usb2_bytes[0] = USB_CONFIGURATION_DESCRIPTOR_BYTES + 1;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        parseUsbConfigurationDescriptorHeader(
+            usb2,
+            usb2_bytes[0..USB_CONFIGURATION_DESCRIPTOR_BYTES],
+        ),
+    );
+    usb2_bytes[0] = USB_CONFIGURATION_DESCRIPTOR_BYTES;
+    usb2_bytes[4] = 2;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        parseUsbConfigurationDescriptor(usb2, &usb2_bytes),
+    );
+    usb2_bytes[4] = 1;
+    usb2_bytes[13] = 2;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        parseUsbConfigurationDescriptor(usb2, &usb2_bytes),
+    );
+    usb2_bytes[13] = 1;
+    usb2_bytes[29] = 0;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        parseUsbConfigurationDescriptor(usb2, &usb2_bytes),
+    );
+    usb2_bytes[29] = USB_ENDPOINT_DIRECTION_IN | DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        parseUsbConfigurationDescriptor(
+            usb2,
+            usb2_bytes[0 .. usb2_bytes.len - 1],
+        ),
+    );
+
+    const usb3 = PortProtocol{
+        .kind = .usb3,
+        .slot_type = 1,
+        .speed_ids = @as(u16, 1) << 4,
+    };
+    var usb3_bytes = [_]u8{
+        9, USB_DESCRIPTOR_CONFIGURATION, 31, 0, 1, 1, 0, 0xA0, 50,
+        9, USB_DESCRIPTOR_INTERFACE, 0, 0, 1, USB_CLASS_HID, USB_HID_SUBCLASS_BOOT, USB_HID_PROTOCOL_KEYBOARD, 0,
+        7, USB_DESCRIPTOR_ENDPOINT, USB_ENDPOINT_DIRECTION_IN | 1, USB_ENDPOINT_TRANSFER_INTERRUPT, 8, 0, 10,
+        6, USB_DESCRIPTOR_SUPERSPEED_ENDPOINT_COMPANION, 0, 0, 0, 0,
+    };
+    const usb3_descriptor = try parseUsbConfigurationDescriptor(usb3, &usb3_bytes);
+    try std.testing.expectEqual(@as(u16, 31), usb3_descriptor.total_length);
+    try std.testing.expect(usb3_descriptor.remote_wakeup);
+    try std.testing.expectEqual(@as(u16, 400), usb3_descriptor.max_power_milliamps);
+    usb3_bytes[26] = USB_DESCRIPTOR_HID;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        parseUsbConfigurationDescriptor(usb3, &usb3_bytes),
+    );
+}
+
 test "xHCI legacy ownership rejects firmware-owned and malformed chains" {
     var registers = [_]u8{0} ** 0x80;
     writeU32Le(
@@ -3376,7 +3662,9 @@ test "xHCI descriptor control stages and slot doorbell are exact" {
     try std.testing.expectEqual(@as(u32, 0x9000), data[0]);
     try std.testing.expectEqual(@as(u32, USB_DEVICE_DESCRIPTOR_PREFIX_BYTES), data[2]);
     try std.testing.expectEqual(
-        CONTROL_TRANSFER_DIRECTION_IN | (DATA_STAGE_TRB_TYPE << TRB_TYPE_SHIFT),
+        CONTROL_TRANSFER_DIRECTION_IN |
+            (DATA_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_INTERRUPT_ON_SHORT_PACKET,
         data[3],
     );
     const status = controlOutStatusStage(1);
@@ -3413,6 +3701,16 @@ test "xHCI descriptor control stages and slot doorbell are exact" {
         error.DmaAddressOutsidePlan,
         controlInDataStage(0x9000, 0, 1),
     );
+    try std.testing.expectError(
+        error.DmaAddressOutsidePlan,
+        controlInDataStage(0xF000, 0x2000, 1),
+    );
+    const maximum_data = try controlInDataStage(
+        XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES,
+        @intCast(USB_ENUMERATION_BUFFER_BYTES),
+        1,
+    );
+    try std.testing.expectEqual(USB_ENUMERATION_BUFFER_BYTES, maximum_data[2]);
 
     var mmio = MockDoorbellMmio{};
     const capabilities = defaultCapabilityRegisters();
@@ -3699,17 +3997,17 @@ test "xHCI DMA arena packs complete contexts and scratchpads without overlap" {
     try std.testing.expectEqual(@as(u64, 0x36800), try plan.deviceContextAddress(32));
     try std.testing.expectError(error.InvalidDeviceSlot, plan.deviceContextAddress(0));
     try std.testing.expectError(error.InvalidDeviceSlot, plan.deviceContextAddress(33));
-    try std.testing.expectEqual(@as(u64, 0x37000), plan.enumeration_buffer_address);
-    try std.testing.expectEqual(@as(u32, XHCI_PAGE_BYTES), plan.enumeration_buffer_bytes);
-    try std.testing.expectEqual(@as(u64, 0x38000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u64, 0x40000), plan.enumeration_buffer_address);
+    try std.testing.expectEqual(USB_ENUMERATION_BUFFER_BYTES, plan.enumeration_buffer_bytes);
+    try std.testing.expectEqual(@as(u64, 0x50000), plan.input_context_address);
     try std.testing.expectEqual(@as(u32, 2112), plan.input_context_bytes);
-    try std.testing.expectEqual(@as(u64, 0x39000), plan.control_transfer_rings_address);
+    try std.testing.expectEqual(@as(u64, 0x51000), plan.control_transfer_rings_address);
     try std.testing.expectEqual(@as(u32, 256), plan.control_transfer_ring_stride);
     try std.testing.expectEqual(@as(u64, 0x2000), plan.control_transfer_rings_bytes);
-    try std.testing.expectEqual(@as(u64, 0x39000), try plan.controlTransferRingAddress(1));
-    try std.testing.expectEqual(@as(u64, 0x3AF00), try plan.controlTransferRingAddress(32));
+    try std.testing.expectEqual(@as(u64, 0x51000), try plan.controlTransferRingAddress(1));
+    try std.testing.expectEqual(@as(u64, 0x52F00), try plan.controlTransferRingAddress(32));
     try std.testing.expectError(error.InvalidDeviceSlot, plan.controlTransferRingAddress(33));
-    try std.testing.expectEqual(@as(u64, 0x37000), plan.total_bytes);
+    try std.testing.expectEqual(@as(u64, 0x4F000), plan.total_bytes);
 }
 
 test "xHCI DMA arena handles compact contexts and rejects invalid ranges" {
@@ -3724,12 +4022,12 @@ test "xHCI DMA arena handles compact contexts and rejects invalid ranges" {
     try std.testing.expectEqual(@as(u32, 1024), plan.device_context_stride);
     try std.testing.expectEqual(@as(u64, 0x2000), plan.device_contexts_address);
     try std.testing.expectEqual(@as(u64, 3072), plan.device_contexts_bytes);
-    try std.testing.expectEqual(@as(u64, 0x3000), plan.enumeration_buffer_address);
-    try std.testing.expectEqual(@as(u64, 0x4000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u64, 0x10000), plan.enumeration_buffer_address);
+    try std.testing.expectEqual(@as(u64, 0x20000), plan.input_context_address);
     try std.testing.expectEqual(@as(u32, 1056), plan.input_context_bytes);
-    try std.testing.expectEqual(@as(u64, 0x5000), plan.control_transfer_rings_address);
+    try std.testing.expectEqual(@as(u64, 0x21000), plan.control_transfer_rings_address);
     try std.testing.expectEqual(@as(u64, XHCI_PAGE_BYTES), plan.control_transfer_rings_bytes);
-    try std.testing.expectEqual(@as(u64, 0x5000), plan.total_bytes);
+    try std.testing.expectEqual(@as(u64, 0x21000), plan.total_bytes);
 
     try std.testing.expectError(error.DmaArenaBaseInvalid, planDmaArena(capabilities, 3, 0));
     try std.testing.expectError(error.DmaArenaBaseInvalid, planDmaArena(capabilities, 3, 0x1800));
@@ -3749,14 +4047,14 @@ test "xHCI DMA arena page-rounds the maximum scratchpad pointer array" {
     try std.testing.expectEqual(@as(u64, 0x4000), plan.scratchpad_buffers_address);
     try std.testing.expectEqual(@as(u64, 1023) * XHCI_PAGE_BYTES, plan.scratchpad_buffers_bytes);
     try std.testing.expectEqual(@as(u64, 0x403000), plan.device_contexts_address);
-    try std.testing.expectEqual(@as(u64, 0x404000), plan.enumeration_buffer_address);
-    try std.testing.expectEqual(@as(u64, 0x405000), plan.input_context_address);
-    try std.testing.expectEqual(@as(u64, 0x406000), plan.control_transfer_rings_address);
-    try std.testing.expectEqual(@as(u64, 0x406000), plan.total_bytes);
+    try std.testing.expectEqual(@as(u64, 0x410000), plan.enumeration_buffer_address);
+    try std.testing.expectEqual(@as(u64, 0x420000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u64, 0x421000), plan.control_transfer_rings_address);
+    try std.testing.expectEqual(@as(u64, 0x421000), plan.total_bytes);
 
     capabilities.max_device_slots = TEST_MAX_DEVICE_SLOTS;
     const full_plan = try planControllerDma(capabilities, TEST_MAX_DEVICE_SLOTS, 0x1000);
-    try std.testing.expectEqual(@as(u32, 1048), try full_plan.frameCount());
+    try std.testing.expectEqual(@as(u32, 1074), try full_plan.frameCount());
 }
 
 test "xHCI controller DMA plan initializes rings tables and scratchpad pointers" {
@@ -3764,13 +4062,26 @@ test "xHCI controller DMA plan initializes rings tables and scratchpad pointers"
     capabilities.max_device_slots = 1;
     capabilities.max_scratchpad_buffers = 2;
     const plan = try planControllerDma(capabilities, 1, 0x1000);
-    try std.testing.expectEqual(@as(u32, 10), try plan.frameCount());
-    try std.testing.expectEqual(@as(u64, 0xA000), plan.arena.control_transfer_rings_address);
+    try std.testing.expectEqual(@as(u32, 33), try plan.frameCount());
+    const reserved_frames = try controllerDmaFrameCount(capabilities, 1);
+    var saw_worst_case = false;
+    var candidate_base = XHCI_PAGE_BYTES;
+    while (candidate_base <= XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES) : (candidate_base += XHCI_PAGE_BYTES) {
+        const candidate_frames = try (try planControllerDma(
+            capabilities,
+            1,
+            candidate_base,
+        )).frameCount();
+        try std.testing.expect(candidate_frames <= reserved_frames);
+        saw_worst_case = saw_worst_case or candidate_frames == reserved_frames;
+    }
+    try std.testing.expect(saw_worst_case);
+    try std.testing.expectEqual(@as(u64, 0x21000), plan.arena.control_transfer_rings_address);
     try std.testing.expectEqual(@as(u64, 0x2400), plan.event_ring_segment_table_address);
     try std.testing.expectEqual(@as(u32, 64), plan.event_ring_segment_table_bytes);
     try std.testing.expectEqual(@as(u64, 0x3000), plan.arena.base_address);
 
-    var memory = [_]u8{0xA5} ** (10 * @as(usize, XHCI_PAGE_BYTES));
+    var memory = [_]u8{0xA5} ** (33 * @as(usize, XHCI_PAGE_BYTES));
     try std.testing.expectError(
         error.DmaBufferTooSmall,
         initializeControllerDma(plan, memory[0 .. memory.len - 1]),
@@ -3846,10 +4157,10 @@ test "xHCI controller DMA regions preserve page-granular direction isolation" {
     capabilities.max_scratchpad_buffers = 0;
     capabilities.scratchpad_restore = false;
     const compact = try planControllerDma(capabilities, 3, 0x1000);
-    try std.testing.expectEqual(@as(u32, 7), try compact.frameCount());
+    try std.testing.expectEqual(@as(u32, 33), try compact.frameCount());
     const compact_regions = try controllerDmaAccessRegions(compact, &region_storage);
     try std.testing.expectEqual(@as(usize, 5), compact_regions.len);
-    try std.testing.expectEqual(@as(u64, 0x2000), compact_regions[3].bytes);
+    try std.testing.expectEqual(@as(u64, 0x1C000), compact_regions[3].bytes);
     try std.testing.expectEqual(@as(u64, 0x2000), compact_regions[4].bytes);
 }
 

@@ -227,8 +227,11 @@ Use the pinned toolchain and repo entrypoints:
   count while rejecting restore-state claims without scratchpad storage. The typed
   DMA plan reserves a zeroed DCBAA page, page-aligned scratchpad pointer and buffer
   storage, one complete 32-entry Device Context and compact endpoint-zero transfer
-  ring per enabled slot, one shared page-contained enumeration buffer, and one
+  ring per enabled slot, one shared 64 KiB-aligned enumeration buffer, and one
   page-contained reusable 33-entry Input Context.
+  Reservation sizing checks every possible page offset within the 64 KiB alignment
+  boundary, and the realized physical plan must fit the reserved frame count before
+  any DMA memory is cleared or published.
   Checked arithmetic and disjoint-range validation cover the command and event
   pages, ERST, and DMA arena. The
   same page is remapped as a bounded sliding window over the extended-capability chain, and
@@ -271,6 +274,13 @@ Use the pinned toolchain and repo entrypoints:
   reads the complete 18-byte device descriptor, validates its BCD versions, class and
   subclass relationship, USB generation, evaluated packet size, and nonzero
   configuration count, and retains the parsed device identity for the port lifecycle.
+  It next reads the first configuration's nine-byte header and its complete descriptor
+  tree, using the reported total length up to the full 16-bit USB limit. Short-packet
+  interrupts make every descriptor read exact. The streaming parser validates tree
+  framing, reserved configuration attributes, interface and endpoint counts, endpoint
+  addresses, and mandatory SuperSpeed endpoint companions without copying the 64 KiB
+  DMA window onto the kernel stack; the validated configuration summary remains bound
+  to the port until disconnect.
   Completion pointers, endpoint ids, residual lengths, and slot identities are
   validated before state advances, and DCBAA entries are linked or cleared only at the
   specified completion boundary. Reset, command, and control-transfer waits keep the one-shot timer armed and
