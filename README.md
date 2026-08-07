@@ -172,7 +172,9 @@ Use the pinned toolchain and repo entrypoints:
   ownership-indeterminate queues are contained. When present, the
   I225-LM TX/RX descriptor pages plus
   independent 32-page TX and RX buffer regions in an independent domain, and
-  confirms translation on every unit. The I225-LM path attaches to the
+  confirms translation on every unit. VT-d command transitions, queued
+  invalidations, and blocked-DMA proofs use invariant-TSC elapsed deadlines
+  rather than CPU-speed-dependent loop counts. The I225-LM path attaches to the
   firmware-negotiated PHY, publishes the permanent MAC, queues TX without
   completion spinning, contains a stalled oldest TX descriptor after one
   second, and activates only after its requester is confined and the x2APIC is

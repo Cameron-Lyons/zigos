@@ -4,6 +4,7 @@ const pci = @import("../drivers/pci.zig");
 const spin = @import("../utils/spin.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
+const tsc_clock = @import("../timer/tsc_clock.zig");
 const dmar = @import("dmar.zig");
 
 const PAGE_SIZE: u32 = 4096;
@@ -72,7 +73,8 @@ const CONTEXT_ACTUAL_GRANULARITY_MASK: u64 = 0b11 << 59;
 const IOTLB_INVALIDATE: u64 = 1 << 63;
 const IOTLB_GLOBAL_INVALIDATION: u64 = 1 << 60;
 const IOTLB_ACTUAL_GRANULARITY_MASK: u64 = 0b11 << 57;
-const COMMAND_SPIN_LIMIT: u64 = 50_000_000;
+const COMMAND_TIMEOUT_MILLISECONDS: u64 = 1000;
+const FAULT_PROBE_TIMEOUT_MILLISECONDS: u64 = 5000;
 const FAULT_EVENT_INTERRUPT_MASK: u32 = 1 << 31;
 const FAULT_STATUS_INDEX_SHIFT: u5 = 8;
 const FAULT_STATUS_INDEX_MASK: u32 = 0xFF;
@@ -718,18 +720,21 @@ fn globallyInvalidateInterruptEntries(unit: UnitRegisters, queue_base: u64) Erro
     publishTables();
     write64(unit.base + REG_INVALIDATION_QUEUE_TAIL, INVALIDATION_QUEUE_TAIL);
 
-    var spins: u64 = 0;
-    while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
+    const deadline = tsc_clock.afterMilliseconds(COMMAND_TIMEOUT_MILLISECONDS);
+    var completed = false;
+    while (!deadline.expired()) {
         if ((read32(unit.base + REG_FAULT_STATUS) & FAULT_STATUS_INVALIDATION_ERRORS) != 0) {
             return error.InvalidationQueueError;
         }
         if (completion.* == INVALIDATION_STATUS_VALUE and
             read64(unit.base + REG_INVALIDATION_QUEUE_HEAD) == INVALIDATION_QUEUE_TAIL)
         {
+            completed = true;
             break;
         }
         spin.hint();
-    } else return error.CommandTimeout;
+    }
+    if (!completed) return error.CommandTimeout;
 
     writeGlobalCommand(unit.base, 0, GLOBAL_QUEUED_INVALIDATION_ENABLE);
     try waitForStatus(unit.base, GLOBAL_QUEUED_INVALIDATION_ENABLE, false);
@@ -749,8 +754,8 @@ fn invalidationDescriptors(status_address: u64) [2][2]u64 {
 pub fn waitForBlockedWrite(expected_address: u32) Error!FaultRecord {
     if (!faultMonitoringEnabled()) return error.DmaFaultMissing;
     const expected_requester = protectedRequesterId() orelse return error.DmaFaultMissing;
-    var spins: u64 = 0;
-    while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
+    const deadline = tsc_clock.afterMilliseconds(FAULT_PROBE_TIMEOUT_MILLISECONDS);
+    while (!deadline.expired()) {
         if (try pollFault()) |fault| {
             if (!fault.provesBlockedWrite(expected_requester, expected_address)) {
                 return error.UnexpectedDmaFault;
@@ -812,8 +817,8 @@ fn writeGlobalCommand(base: usize, set_bits: u32, clear_bits: u32) void {
 }
 
 fn waitForStatus(base: usize, mask: u32, expected_set: bool) Error!void {
-    var spins: u64 = 0;
-    while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
+    const deadline = tsc_clock.afterMilliseconds(COMMAND_TIMEOUT_MILLISECONDS);
+    while (!deadline.expired()) {
         const set = (read32(base + REG_GLOBAL_STATUS) & mask) != 0;
         if (set == expected_set) return;
         spin.hint();
@@ -822,8 +827,8 @@ fn waitForStatus(base: usize, mask: u32, expected_set: bool) Error!void {
 }
 
 fn waitForCommand(address: usize, pending_mask: u64) Error!void {
-    var spins: u64 = 0;
-    while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
+    const deadline = tsc_clock.afterMilliseconds(COMMAND_TIMEOUT_MILLISECONDS);
+    while (!deadline.expired()) {
         if ((read64(address) & pending_mask) == 0) return;
         spin.hint();
     }
