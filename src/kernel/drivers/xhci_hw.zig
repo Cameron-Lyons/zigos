@@ -2,10 +2,13 @@ const std = @import("std");
 const endian = @import("../utils/endian.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
+const tsc_clock = @import("../timer/tsc_clock.zig");
 const pci = @import("pci.zig");
 const xhci = @import("xhci.zig");
 
 const PAGE_BYTES = mmio_windows.PAGE_BYTES;
+const OWNERSHIP_TIMEOUT_MILLISECONDS: u64 = 1_000;
+const OS_OWNED_BYTE_OFFSET: usize = 3;
 
 comptime {
     if (xhci.CAPABILITY_REGISTERS_BYTES > mmio_windows.xhci.bytes) {
@@ -18,6 +21,7 @@ pub const Error = xhci.Error || error{
     BarUnmappable,
     BarMisaligned,
     BarRangeOverflow,
+    InvariantClockUnavailable,
 };
 
 var active_capabilities: ?xhci.CapabilityRegisters = null;
@@ -36,14 +40,23 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     const capabilities = try xhci.parseCapabilityRegisters(&snapshot);
     try validateExtendedCapabilityRange(bar.address, capabilities.extended_capability_offset);
     var reader = ExtendedCapabilityReader{ .bar_address = bar.address };
-    const legacy_ownership = try xhci.inspectLegacyOwnership(capabilities.extended_capability_offset, &reader);
+    const legacy = try xhci.findLegacySupport(capabilities.extended_capability_offset, &reader);
+    const legacy_ownership = if (legacy) |support| ownership: {
+        if (!tsc_clock.initialized()) return error.InvariantClockUnavailable;
+        break :ownership try xhci.claimLegacyOwnership(
+            support,
+            &reader,
+            tsc_clock.afterMilliseconds(OWNERSHIP_TIMEOUT_MILLISECONDS),
+        );
+    } else xhci.LegacyOwnership.not_present;
     active_capabilities = capabilities;
     active_legacy_ownership = legacy_ownership;
     return capabilities;
 }
 
 pub fn validated() bool {
-    return active_capabilities != null and active_legacy_ownership != null;
+    const ownership = active_legacy_ownership orelse return false;
+    return active_capabilities != null and ownership != .firmware_released;
 }
 
 pub fn probedCapabilities() ?xhci.CapabilityRegisters {
@@ -72,20 +85,41 @@ fn validateExtendedCapabilityRange(bar_address: usize, first_offset: u32) Error!
 const ExtendedCapabilityReader = struct {
     bar_address: usize,
     mapped_page_offset: ?usize = null,
+    mapped_writable: bool = false,
 
     pub fn readDword(self: *@This(), offset: u32) u32 {
         const byte_offset: usize = @intCast(offset);
         const page_offset = byte_offset & ~(PAGE_BYTES - 1);
-        if (self.mapped_page_offset == null or self.mapped_page_offset.? != page_offset) {
-            paging.mapKernelBorrowedPage(
-                mmio_windows.xhci.base,
-                self.bar_address + page_offset,
-                paging.PAGE_PRESENT | paging.PAGE_CACHE_DISABLE,
-            );
-            self.mapped_page_offset = page_offset;
-        }
+        self.mapPage(page_offset, false);
         const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
         return @as(*volatile u32, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).*;
+    }
+
+    pub fn writeOsOwnedByte(self: *@This(), legacy_offset: u32, value: u8) void {
+        const byte_offset = @as(usize, legacy_offset) + OS_OWNED_BYTE_OFFSET;
+        const page_offset = byte_offset & ~(PAGE_BYTES - 1);
+        self.mapPage(page_offset, true);
+        const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
+        @as(*volatile u8, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).* = value;
+        self.mapPage(page_offset, false);
+    }
+
+    fn mapPage(self: *@This(), page_offset: usize, writable: bool) void {
+        if (self.mapped_page_offset != null and
+            self.mapped_page_offset.? == page_offset and
+            self.mapped_writable == writable)
+        {
+            return;
+        }
+        paging.mapKernelBorrowedPage(
+            mmio_windows.xhci.base,
+            self.bar_address + page_offset,
+            paging.PAGE_PRESENT |
+                paging.PAGE_CACHE_DISABLE |
+                (if (writable) paging.PAGE_WRITABLE else 0),
+        );
+        self.mapped_page_offset = page_offset;
+        self.mapped_writable = writable;
     }
 };
 
