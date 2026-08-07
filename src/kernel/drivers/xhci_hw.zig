@@ -26,10 +26,12 @@ pub const Error = xhci.Error || error{
 
 var active_capabilities: ?xhci.CapabilityRegisters = null;
 var active_legacy_ownership: ?xhci.LegacyOwnership = null;
+var active_controller_reset = false;
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_capabilities = null;
     active_legacy_ownership = null;
+    active_controller_reset = false;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -39,24 +41,26 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     const snapshot = readCapabilitySnapshot(mmio_windows.xhci.base);
     const capabilities = try xhci.parseCapabilityRegisters(&snapshot);
     try validateExtendedCapabilityRange(bar.address, capabilities.extended_capability_offset);
+    if (!tsc_clock.initialized()) return error.InvariantClockUnavailable;
     var reader = ExtendedCapabilityReader{ .bar_address = bar.address };
     const legacy = try xhci.findLegacySupport(capabilities.extended_capability_offset, &reader);
     const legacy_ownership = if (legacy) |support| ownership: {
-        if (!tsc_clock.initialized()) return error.InvariantClockUnavailable;
         break :ownership try xhci.claimLegacyOwnership(
             support,
             &reader,
             tsc_clock.afterMilliseconds(OWNERSHIP_TIMEOUT_MILLISECONDS),
         );
     } else xhci.LegacyOwnership.not_present;
+    try xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{});
     active_capabilities = capabilities;
     active_legacy_ownership = legacy_ownership;
+    active_controller_reset = true;
     return capabilities;
 }
 
 pub fn validated() bool {
     const ownership = active_legacy_ownership orelse return false;
-    return active_capabilities != null and ownership != .firmware_released;
+    return active_capabilities != null and ownership != .firmware_released and active_controller_reset;
 }
 
 pub fn probedCapabilities() ?xhci.CapabilityRegisters {
@@ -66,6 +70,16 @@ pub fn probedCapabilities() ?xhci.CapabilityRegisters {
 pub fn probedLegacyOwnership() ?xhci.LegacyOwnership {
     return active_legacy_ownership;
 }
+
+pub fn controllerReset() bool {
+    return active_controller_reset;
+}
+
+const InvariantClock = struct {
+    pub fn afterMilliseconds(_: @This(), milliseconds: u64) tsc_clock.Deadline {
+        return tsc_clock.afterMilliseconds(milliseconds);
+    }
+};
 
 fn validateBar(device_info: pci.PCIDevice) Error!pci.MemoryBar {
     if (!pci.isXhciController(device_info)) return error.NotXhciController;
@@ -101,6 +115,19 @@ const ExtendedCapabilityReader = struct {
         self.mapPage(page_offset, true);
         const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
         @as(*volatile u8, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).* = value;
+        self.mapPage(page_offset, false);
+    }
+
+    pub fn readReg32(self: *@This(), offset: u32) u32 {
+        return self.readDword(offset);
+    }
+
+    pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
+        const byte_offset: usize = @intCast(offset);
+        const page_offset = byte_offset & ~(PAGE_BYTES - 1);
+        self.mapPage(page_offset, true);
+        const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
+        @as(*volatile u32, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).* = value;
         self.mapPage(page_offset, false);
     }
 
