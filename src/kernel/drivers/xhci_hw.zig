@@ -27,11 +27,13 @@ pub const Error = xhci.Error || error{
 var active_capabilities: ?xhci.CapabilityRegisters = null;
 var active_legacy_ownership: ?xhci.LegacyOwnership = null;
 var active_controller_reset = false;
+var active_enabled_slots: u8 = 0;
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_capabilities = null;
     active_legacy_ownership = null;
     active_controller_reset = false;
+    active_enabled_slots = 0;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -52,15 +54,20 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
         );
     } else xhci.LegacyOwnership.not_present;
     try xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{});
+    const enabled_slots = try xhci.configureDeviceSlots(capabilities, &reader);
     active_capabilities = capabilities;
     active_legacy_ownership = legacy_ownership;
     active_controller_reset = true;
+    active_enabled_slots = enabled_slots;
     return capabilities;
 }
 
 pub fn validated() bool {
     const ownership = active_legacy_ownership orelse return false;
-    return active_capabilities != null and ownership != .firmware_released and active_controller_reset;
+    return active_capabilities != null and
+        ownership != .firmware_released and
+        active_controller_reset and
+        active_enabled_slots != 0;
 }
 
 pub fn probedCapabilities() ?xhci.CapabilityRegisters {
@@ -73,6 +80,10 @@ pub fn probedLegacyOwnership() ?xhci.LegacyOwnership {
 
 pub fn controllerReset() bool {
     return active_controller_reset;
+}
+
+pub fn enabledDeviceSlots() u8 {
+    return active_enabled_slots;
 }
 
 const InvariantClock = struct {

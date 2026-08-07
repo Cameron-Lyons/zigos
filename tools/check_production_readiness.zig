@@ -1098,6 +1098,7 @@ fn validateNuc11tnki5KernelProofSources(
         "device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false)",
         "ZIGOS:XHCI:HW:OWNERSHIP_OK",
         "ZIGOS:XHCI:HW:RESET_OK",
+        "ZIGOS:XHCI:HW:SLOTS_OK",
     };
     for (required_boot_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, devices_source, snippet) == null) {
@@ -1878,6 +1879,11 @@ fn validateNuc11tnki5KernelProofSources(
         "CONTROLLER_HALT_TIMEOUT_MILLISECONDS: u64 = 16",
         "ControllerResetTimeout",
         "resetOwnedController",
+        "OPERATIONAL_CONFIGURE_OFFSET: u32 = 0x38",
+        "CONFIG_MAX_DEVICE_SLOTS_ENABLED_MASK: u32 = 0xFF",
+        "ControllerConfigurationUnavailable",
+        "DeviceSlotConfigurationRejected",
+        "configureDeviceSlots",
         "InputEvidenceSource",
         "hardware_event_ring",
         "HardwareInputEvidence",
@@ -1912,6 +1918,7 @@ fn validateNuc11tnki5KernelProofSources(
         "tsc_clock.initialized",
         "tsc_clock.afterMilliseconds",
         "controllerReset",
+        "enabledDeviceSlots",
         "writeReg32",
         "InvariantClock",
     };
