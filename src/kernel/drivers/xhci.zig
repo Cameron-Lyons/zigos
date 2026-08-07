@@ -30,6 +30,7 @@ pub const MAX_CONTROLLER_DMA_REGIONS: usize = 7;
 pub const HID_BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const HID_BOOT_KEY_SLOTS: usize = 6;
 pub const HID_EVENT_QUEUE_CAPACITY: usize = 8;
+pub const USB_DESCRIPTOR_DEVICE: u8 = 0x01;
 pub const USB_DESCRIPTOR_CONFIGURATION: u8 = 0x02;
 pub const USB_DESCRIPTOR_INTERFACE: u8 = 0x04;
 pub const USB_DESCRIPTOR_ENDPOINT: u8 = 0x05;
@@ -44,6 +45,8 @@ pub const DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID: u8 = 1;
 pub const DEFAULT_BOOT_KEYBOARD_PORT_ID: u8 = 1;
 pub const MAX_BOOT_PORTS: usize = 32;
 pub const MAX_DEVICE_SLOTS: usize = 32;
+pub const USB_DEVICE_DESCRIPTOR_PREFIX_BYTES: usize = 8;
+pub const ENDPOINT_ZERO_DCI: u5 = 1;
 
 pub const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
 pub const MAX_EXTENDED_CAPABILITY_OFFSET: u32 = @as(u32, std.math.maxInt(u16)) << 2;
@@ -132,11 +135,19 @@ const ADDRESS_64_BYTE_ALIGNMENT_MASK: u64 = RING_ALIGNMENT_BYTES - 1;
 const EVENT_RING_DEQUEUE_POINTER_MASK: u64 = ~@as(u64, 0xF);
 const LINK_TRB_TYPE: u32 = 6;
 const LINK_TRB_TOGGLE_CYCLE: u32 = 1 << 1;
+const SETUP_STAGE_TRB_TYPE: u32 = 2;
+const DATA_STAGE_TRB_TYPE: u32 = 3;
+const STATUS_STAGE_TRB_TYPE: u32 = 4;
 const ENABLE_SLOT_COMMAND_TRB_TYPE: u32 = 9;
 const DISABLE_SLOT_COMMAND_TRB_TYPE: u32 = 10;
 const ADDRESS_DEVICE_COMMAND_TRB_TYPE: u32 = 11;
+const EVALUATE_CONTEXT_COMMAND_TRB_TYPE: u32 = 13;
 const TRB_TYPE_SHIFT: u5 = 10;
 const TRB_TYPE_MASK: u32 = 0x3F;
+const TRB_INTERRUPT_ON_COMPLETION: u32 = 1 << 5;
+const TRB_IMMEDIATE_DATA: u32 = 1 << 6;
+const CONTROL_TRANSFER_DIRECTION_IN: u32 = 1 << 16;
+const SETUP_TRANSFER_TYPE_IN: u32 = 3 << 16;
 const EVENT_TRB_TRANSFER: u6 = 32;
 const EVENT_TRB_COMMAND_COMPLETION: u6 = 33;
 const EVENT_TRB_PORT_STATUS_CHANGE: u6 = 34;
@@ -152,7 +163,10 @@ const ENDPOINT_TYPE_CONTROL: u32 = 4;
 const DEFAULT_ENDPOINT_ERROR_COUNT: u32 = 3;
 const CONTROL_ENDPOINT_AVERAGE_TRB_LENGTH: u32 = 8;
 const ADDRESS_DEVICE_ADD_CONTEXT_FLAGS: u32 = 0b11;
+const EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS: u32 = 0b10;
 const ADDRESS_DEVICE_CONTEXT_ENTRIES: u32 = 1;
+const USB_DEVICE_DESCRIPTOR_BYTES: u8 = 18;
+const USB_DEVICE_DESCRIPTOR_MAX_PACKET_SIZE_OFFSET: usize = 7;
 const PORT_CURRENT_CONNECT_STATUS: u32 = 1 << 0;
 const PORT_ENABLED_DISABLED: u32 = 1 << 1;
 const PORT_OVER_CURRENT_ACTIVE: u32 = 1 << 3;
@@ -252,6 +266,7 @@ pub const Error = error{
     ControllerStartFailed,
     EventRingStateInvalid,
     CommandRingStateInvalid,
+    TrbRingStateInvalid,
     InvalidPortStatus,
     ControllerConfigurationUnavailable,
     DeviceSlotConfigurationRejected,
@@ -314,10 +329,12 @@ pub const Event = struct {
     parameter: u64,
     kind: EventType,
     type_id: u6,
+    transfer_length: u24,
     completion_code: u8,
     port_id: u8,
     slot_id: u8,
     endpoint_id: u5,
+    event_data: bool,
 
     pub fn succeeded(self: Event) bool {
         return self.completion_code == COMPLETION_CODE_SUCCESS;
@@ -384,10 +401,12 @@ pub fn decodeEvent(words: [4]u32) Event {
         .parameter = @as(u64, words[0]) | (@as(u64, words[1]) << 32),
         .kind = kind,
         .type_id = type_id,
+        .transfer_length = @truncate(words[2]),
         .completion_code = @truncate(words[2] >> 24),
         .port_id = @truncate(words[0] >> 24),
         .slot_id = @truncate(words[3] >> 24),
         .endpoint_id = @truncate(words[3] >> 16),
+        .event_data = (words[3] & (1 << 2)) != 0,
     };
 }
 
@@ -400,6 +419,8 @@ pub const PortProtocol = struct {
     kind: ProtocolKind,
     slot_type: u5,
     speed_ids: u16 = 0,
+    low_speed_ids: u16 = 0,
+    full_speed_ids: u16 = 0,
     high_speed_ids: u16 = 0,
 };
 
@@ -428,34 +449,39 @@ pub const CommandKind = enum(u8) {
     enable_slot,
     disable_slot,
     address_device,
+    evaluate_context,
 };
 
-pub const CommandRingProducer = struct {
+pub const TrbRingProducer = struct {
     enqueue_index: u32 = 0,
     cycle_state: u1 = 1,
 
-    pub fn commandAddress(self: CommandRingProducer, plan: RingPlan) Error!u64 {
-        if (plan.command_ring_trbs < 2 or self.enqueue_index >= plan.command_ring_trbs - 1) {
-            return error.CommandRingStateInvalid;
+    pub fn trbAddress(self: TrbRingProducer, ring_address: u64, ring_trbs: u32) Error!u64 {
+        if (ring_address == 0 or !aligned(ring_address, RING_ALIGNMENT_BYTES) or
+            ring_trbs < 2 or self.enqueue_index >= ring_trbs - 1)
+        {
+            return error.TrbRingStateInvalid;
         }
         const offset = std.math.mul(u64, self.enqueue_index, TRB_BYTES) catch
-            return error.CommandRingStateInvalid;
-        return std.math.add(u64, plan.command_ring_address, offset) catch
-            return error.CommandRingStateInvalid;
+            return error.TrbRingStateInvalid;
+        return std.math.add(u64, ring_address, offset) catch
+            return error.TrbRingStateInvalid;
     }
 
-    pub fn linkAddress(self: CommandRingProducer, plan: RingPlan) Error!u64 {
+    pub fn linkAddress(self: TrbRingProducer, ring_address: u64, ring_trbs: u32) Error!u64 {
         _ = self;
-        if (plan.command_ring_trbs < 2) return error.CommandRingStateInvalid;
-        const offset = std.math.mul(u64, plan.command_ring_trbs - 1, TRB_BYTES) catch
-            return error.CommandRingStateInvalid;
-        return std.math.add(u64, plan.command_ring_address, offset) catch
-            return error.CommandRingStateInvalid;
+        if (ring_address == 0 or !aligned(ring_address, RING_ALIGNMENT_BYTES) or ring_trbs < 2) {
+            return error.TrbRingStateInvalid;
+        }
+        const offset = std.math.mul(u64, ring_trbs - 1, TRB_BYTES) catch
+            return error.TrbRingStateInvalid;
+        return std.math.add(u64, ring_address, offset) catch
+            return error.TrbRingStateInvalid;
     }
 
-    pub fn advance(self: *CommandRingProducer, ring_trbs: u32) Error!bool {
+    pub fn advance(self: *TrbRingProducer, ring_trbs: u32) Error!bool {
         if (ring_trbs < 2 or self.enqueue_index >= ring_trbs - 1) {
-            return error.CommandRingStateInvalid;
+            return error.TrbRingStateInvalid;
         }
         self.enqueue_index += 1;
         if (self.enqueue_index == ring_trbs - 1) {
@@ -527,7 +553,7 @@ pub fn disableSlotCommand(slot_id: u8, cycle_state: u1) Error![4]u32 {
     };
 }
 
-pub fn commandLinkControl(cycle_state: u1) u32 {
+pub fn ringLinkControl(cycle_state: u1) u32 {
     return (LINK_TRB_TYPE << TRB_TYPE_SHIFT) | LINK_TRB_TOGGLE_CYCLE | cycle_state;
 }
 
@@ -539,6 +565,29 @@ pub fn ringCommandDoorbell(capabilities: CapabilityRegisters, mmio: anytype) Err
     mmio.writeReg32(capabilities.doorbell_offset, 0);
 }
 
+pub fn ringDeviceDoorbell(
+    capabilities: CapabilityRegisters,
+    slot_id: u8,
+    endpoint_id: u5,
+    mmio: anytype,
+) Error!void {
+    if (capabilities.doorbell_offset == 0) return error.MissingDoorbellRegisters;
+    if ((capabilities.doorbell_offset & DOORBELL_OFFSET_ALIGNMENT_MASK) != 0) {
+        return error.InvalidDoorbellOffset;
+    }
+    if (slot_id == 0 or slot_id > capabilities.max_device_slots or
+        slot_id > maxDeviceSlotsU8())
+    {
+        return error.InvalidDeviceSlot;
+    }
+    if (endpoint_id == 0) return error.EndpointMismatch;
+    const slot_offset = std.math.mul(u32, slot_id, @sizeOf(u32)) catch
+        return error.InvalidDoorbellOffset;
+    const offset = std.math.add(u32, capabilities.doorbell_offset, slot_offset) catch
+        return error.InvalidDoorbellOffset;
+    mmio.writeReg32(offset, endpoint_id);
+}
+
 pub fn endpointZeroMaxPacketSize(protocol: PortProtocol, speed_id: u4) Error!u16 {
     if (speed_id == 0 or (protocol.speed_ids & (@as(u16, 1) << speed_id)) == 0) {
         return error.InvalidProtocolSpeed;
@@ -546,6 +595,80 @@ pub fn endpointZeroMaxPacketSize(protocol: PortProtocol, speed_id: u4) Error!u16
     return switch (protocol.kind) {
         .usb2 => if ((protocol.high_speed_ids & (@as(u16, 1) << speed_id)) != 0) 64 else 8,
         .usb3 => 512,
+    };
+}
+
+pub fn deviceDescriptorEndpointZeroMaxPacketSize(
+    protocol: PortProtocol,
+    speed_id: u4,
+    descriptor_prefix: []const u8,
+) Error!u16 {
+    _ = try endpointZeroMaxPacketSize(protocol, speed_id);
+    if (descriptor_prefix.len < USB_DEVICE_DESCRIPTOR_PREFIX_BYTES or
+        descriptor_prefix[0] != USB_DEVICE_DESCRIPTOR_BYTES or
+        descriptor_prefix[1] != USB_DESCRIPTOR_DEVICE)
+    {
+        return error.InvalidUsbDescriptor;
+    }
+    const encoded = descriptor_prefix[USB_DEVICE_DESCRIPTOR_MAX_PACKET_SIZE_OFFSET];
+    return switch (protocol.kind) {
+        .usb3 => if (encoded == 9) 512 else error.InvalidUsbDescriptor,
+        .usb2 => packet_size: {
+            const speed_bit = @as(u16, 1) << speed_id;
+            if ((protocol.low_speed_ids & speed_bit) != 0) {
+                if (encoded != 8) return error.InvalidUsbDescriptor;
+                break :packet_size 8;
+            }
+            if ((protocol.high_speed_ids & speed_bit) != 0) {
+                if (encoded != 64) return error.InvalidUsbDescriptor;
+                break :packet_size 64;
+            }
+            if ((protocol.full_speed_ids & speed_bit) == 0) {
+                return error.InvalidProtocolSpeed;
+            }
+            break :packet_size switch (encoded) {
+                8, 16, 32, 64 => encoded,
+                else => return error.InvalidUsbDescriptor,
+            };
+        },
+    };
+}
+
+pub fn deviceDescriptorPrefixSetupStage(cycle_state: u1) [4]u32 {
+    return .{
+        0x0100_0680,
+        0x0008_0000,
+        USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
+        SETUP_TRANSFER_TYPE_IN |
+            (SETUP_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_IMMEDIATE_DATA |
+            cycle_state,
+    };
+}
+
+pub fn deviceDescriptorPrefixDataStage(
+    buffer_address: u64,
+    cycle_state: u1,
+) Error![4]u32 {
+    if (buffer_address == 0) return error.DmaAddressOutsidePlan;
+    return .{
+        @truncate(buffer_address),
+        @truncate(buffer_address >> 32),
+        USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
+        CONTROL_TRANSFER_DIRECTION_IN |
+            (DATA_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
+            cycle_state,
+    };
+}
+
+pub fn deviceDescriptorPrefixStatusStage(cycle_state: u1) [4]u32 {
+    return .{
+        0,
+        0,
+        0,
+        (STATUS_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_INTERRUPT_ON_COMPLETION |
+            cycle_state,
     };
 }
 
@@ -564,6 +687,25 @@ pub fn addressDeviceCommand(
         0,
         (@as(u32, slot_id) << 24) |
             (ADDRESS_DEVICE_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) |
+            cycle_state,
+    };
+}
+
+pub fn evaluateContextCommand(
+    input_context_address: u64,
+    slot_id: u8,
+    cycle_state: u1,
+) Error![4]u32 {
+    if (input_context_address == 0 or (input_context_address & 0xF) != 0) {
+        return error.InvalidInputContext;
+    }
+    if (slot_id == 0) return error.InvalidDeviceSlot;
+    return .{
+        @truncate(input_context_address),
+        @truncate(input_context_address >> 32),
+        0,
+        (@as(u32, slot_id) << 24) |
+            (EVALUATE_CONTEXT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) |
             cycle_state,
     };
 }
@@ -608,6 +750,26 @@ pub fn initializeAddressDeviceInputContext(
     writeU32Le(endpoint_context[16..20], CONTROL_ENDPOINT_AVERAGE_TRB_LENGTH);
 }
 
+pub fn initializeEvaluateEndpointZeroInputContext(
+    context_size: ContextSize,
+    max_packet_size: u16,
+    input_context: []u8,
+) Error!void {
+    if (max_packet_size != 8 and max_packet_size != 16 and
+        max_packet_size != 32 and max_packet_size != 64 and max_packet_size != 512)
+    {
+        return error.InvalidInputContext;
+    }
+    const entry_bytes: usize = context_size.byteCount();
+    const required_bytes = std.math.mul(usize, INPUT_CONTEXT_ENTRIES, entry_bytes) catch
+        return error.InvalidInputContext;
+    if (input_context.len < required_bytes) return error.InvalidInputContext;
+    @memset(input_context[0..required_bytes], 0);
+    writeU32Le(input_context[4..8], EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS);
+    const endpoint_context = input_context[2 * entry_bytes ..][0..entry_bytes];
+    writeU32Le(endpoint_context[4..8], @as(u32, max_packet_size) << 16);
+}
+
 pub const DmaArenaPlan = struct {
     base_address: u64,
     total_bytes: u64,
@@ -621,6 +783,8 @@ pub const DmaArenaPlan = struct {
     device_contexts_address: u64,
     device_context_stride: u32,
     device_contexts_bytes: u64,
+    enumeration_buffer_address: u64,
+    enumeration_buffer_bytes: u32,
     input_context_address: u64,
     input_context_bytes: u32,
     control_transfer_rings_address: u64,
@@ -1395,6 +1559,8 @@ pub fn parseSupportedProtocols(
                 offset + SUPPORTED_PROTOCOL_SLOT_TYPE_OFFSET,
             ));
             var speed_ids: u16 = 0;
+            var low_speed_ids: u16 = 0;
+            var full_speed_ids: u16 = 0;
             var high_speed_ids: u16 = 0;
             if (speed_id_count == 0) {
                 switch (kind) {
@@ -1402,6 +1568,8 @@ pub fn parseSupportedProtocols(
                         speed_ids = (@as(u16, 1) << 1) |
                             (@as(u16, 1) << 2) |
                             (@as(u16, 1) << 3);
+                        full_speed_ids = @as(u16, 1) << 1;
+                        low_speed_ids = @as(u16, 1) << 2;
                         high_speed_ids = @as(u16, 1) << 3;
                     },
                     .usb3 => {
@@ -1459,8 +1627,28 @@ pub fn parseSupportedProtocols(
                     speed_ids |= speed_bit;
                     const scale = ([_]u64{ 1, 1_000, 1_000_000, 1_000_000_000 })[exponent];
                     const bits_per_second = @as(u64, mantissa) * scale;
-                    if (kind == .usb2 and bits_per_second >= 480_000_000) {
-                        high_speed_ids |= speed_bit;
+                    if (kind == .usb2) {
+                        const classified = low_speed_ids | full_speed_ids | high_speed_ids;
+                        const speed_class: enum { low, full, high } =
+                            if (bits_per_second <= 1_500_000)
+                                .low
+                            else if (bits_per_second >= 480_000_000)
+                                .high
+                            else
+                                .full;
+                        if ((classified & speed_bit) != 0) {
+                            const same_class = switch (speed_class) {
+                                .low => (low_speed_ids & speed_bit) != 0,
+                                .full => (full_speed_ids & speed_bit) != 0,
+                                .high => (high_speed_ids & speed_bit) != 0,
+                            };
+                            if (!same_class) return error.InvalidSupportedProtocol;
+                        }
+                        switch (speed_class) {
+                            .low => low_speed_ids |= speed_bit,
+                            .full => full_speed_ids |= speed_bit,
+                            .high => high_speed_ids |= speed_bit,
+                        }
                     }
                 }
                 if (pending_asymmetric_rx != null) return error.InvalidSupportedProtocol;
@@ -1476,6 +1664,8 @@ pub fn parseSupportedProtocols(
                     .kind = kind,
                     .slot_type = slot_type,
                     .speed_ids = speed_ids,
+                    .low_speed_ids = low_speed_ids,
+                    .full_speed_ids = full_speed_ids,
                     .high_speed_ids = high_speed_ids,
                 };
             }
@@ -1876,6 +2066,10 @@ pub fn planDmaArena(
     cursor = checkedAdd(cursor, device_contexts_bytes) catch return error.DmaLayoutOverflow;
     cursor = alignForwardChecked(cursor, XHCI_PAGE_BYTES) catch return error.DmaLayoutOverflow;
 
+    const enumeration_buffer_address = cursor;
+    const enumeration_buffer_bytes: u32 = @intCast(XHCI_PAGE_BYTES);
+    cursor = checkedAdd(cursor, XHCI_PAGE_BYTES) catch return error.DmaLayoutOverflow;
+
     const input_context_address = cursor;
     const input_context_bytes = std.math.mul(
         u32,
@@ -1912,6 +2106,8 @@ pub fn planDmaArena(
         .device_contexts_address = device_contexts_address,
         .device_context_stride = device_context_stride,
         .device_contexts_bytes = device_contexts_bytes,
+        .enumeration_buffer_address = enumeration_buffer_address,
+        .enumeration_buffer_bytes = enumeration_buffer_bytes,
         .input_context_address = input_context_address,
         .input_context_bytes = input_context_bytes,
         .control_transfer_rings_address = control_transfer_rings_address,
@@ -2061,7 +2257,13 @@ pub fn controllerDmaAccessRegions(
         };
         count += 1;
     }
-    if (plan.arena.input_context_address <= plan.arena.device_contexts_address) {
+    const enumeration_buffer_end = checkedAdd(
+        plan.arena.enumeration_buffer_address,
+        plan.arena.enumeration_buffer_bytes,
+    ) catch return error.DmaLayoutOverflow;
+    if (plan.arena.enumeration_buffer_address <= plan.arena.device_contexts_address or
+        enumeration_buffer_end != plan.arena.input_context_address)
+    {
         return error.DmaAddressOutsidePlan;
     }
     storage[count] = .{
@@ -2398,6 +2600,8 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
     try std.testing.expectEqual(@as(u5, 0), protocols.forPort(6).?.slot_type);
     try std.testing.expectEqual(@as(u16, 64), try endpointZeroMaxPacketSize(protocols.forPort(1).?, 3));
     try std.testing.expectEqual(@as(u16, 8), try endpointZeroMaxPacketSize(protocols.forPort(1).?, 1));
+    try std.testing.expectEqual(@as(u16, 1) << 1, protocols.forPort(1).?.full_speed_ids);
+    try std.testing.expectEqual(@as(u16, 1) << 2, protocols.forPort(1).?.low_speed_ids);
     try std.testing.expectEqual(ProtocolKind.usb3, protocols.forPort(7).?.kind);
     try std.testing.expectEqual(@as(u5, 1), protocols.forPort(12).?.slot_type);
     try std.testing.expectEqual(@as(u16, 512), try endpointZeroMaxPacketSize(protocols.forPort(7).?, 4));
@@ -2465,6 +2669,8 @@ test "xHCI supported protocol PSI definitions validate custom USB2 speed ids" {
     try std.testing.expectEqual(@as(u5, 5), protocol.slot_type);
     try std.testing.expectEqual(@as(u16, 8), try endpointZeroMaxPacketSize(protocol, 9));
     try std.testing.expectEqual(@as(u16, 64), try endpointZeroMaxPacketSize(protocol, 10));
+    try std.testing.expectEqual(@as(u16, 1) << 9, protocol.full_speed_ids);
+    try std.testing.expectEqual(@as(u16, 1) << 10, protocol.high_speed_ids);
 
     writeU32Le(
         registers[0x54..0x58],
@@ -2473,6 +2679,53 @@ test "xHCI supported protocol PSI definitions validate custom USB2 speed ids" {
     try std.testing.expectError(
         error.InvalidSupportedProtocol,
         parseSupportedProtocols(capabilities, 0x40, reader),
+    );
+}
+
+test "xHCI device descriptor prefix validates endpoint-zero packet size by speed" {
+    const usb2 = PortProtocol{
+        .kind = .usb2,
+        .slot_type = 0,
+        .speed_ids = (@as(u16, 1) << 1) | (@as(u16, 1) << 2) | (@as(u16, 1) << 3),
+        .full_speed_ids = @as(u16, 1) << 1,
+        .low_speed_ids = @as(u16, 1) << 2,
+        .high_speed_ids = @as(u16, 1) << 3,
+    };
+    var prefix = [_]u8{ 18, USB_DESCRIPTOR_DEVICE, 0, 2, 0, 0, 0, 32 };
+    try std.testing.expectEqual(
+        @as(u16, 32),
+        try deviceDescriptorEndpointZeroMaxPacketSize(usb2, 1, &prefix),
+    );
+    prefix[7] = 8;
+    try std.testing.expectEqual(
+        @as(u16, 8),
+        try deviceDescriptorEndpointZeroMaxPacketSize(usb2, 2, &prefix),
+    );
+    prefix[7] = 64;
+    try std.testing.expectEqual(
+        @as(u16, 64),
+        try deviceDescriptorEndpointZeroMaxPacketSize(usb2, 3, &prefix),
+    );
+    prefix[7] = 16;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        deviceDescriptorEndpointZeroMaxPacketSize(usb2, 3, &prefix),
+    );
+
+    const usb3 = PortProtocol{
+        .kind = .usb3,
+        .slot_type = 1,
+        .speed_ids = @as(u16, 1) << 4,
+    };
+    prefix[7] = 9;
+    try std.testing.expectEqual(
+        @as(u16, 512),
+        try deviceDescriptorEndpointZeroMaxPacketSize(usb3, 4, &prefix),
+    );
+    prefix[0] = 0;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        deviceDescriptorEndpointZeroMaxPacketSize(usb3, 4, &prefix),
     );
 }
 
@@ -2855,6 +3108,8 @@ test "xHCI event consumer follows cycle ownership and wrap" {
     try std.testing.expectEqual(EventType.port_status_change, first.kind);
     try std.testing.expect(first.succeeded());
     try std.testing.expectEqual(@as(u8, 7), first.port_id);
+    try std.testing.expectEqual(@as(u24, 0), first.transfer_length);
+    try std.testing.expect(!first.event_data);
     try std.testing.expectEqual(@as(u32, 1), consumer.dequeue_index);
 
     var command_event = port_event;
@@ -2866,6 +3121,18 @@ test "xHCI event consumer follows cycle ownership and wrap" {
     try std.testing.expectEqual(@as(u64, 7) << 24, second.parameter);
     try std.testing.expectEqual(@as(u32, 0), consumer.dequeue_index);
     try std.testing.expectEqual(@as(u1, 0), consumer.cycle_state);
+
+    const transfer = decodeEvent(.{
+        0x1234_5000,
+        0,
+        (@as(u32, COMPLETION_CODE_SUCCESS) << 24) | 5,
+        (@as(u32, 4) << 24) | (@as(u32, ENDPOINT_ZERO_DCI) << 16) |
+            (@as(u32, EVENT_TRB_TRANSFER) << TRB_TYPE_SHIFT) | (1 << 2),
+    });
+    try std.testing.expectEqual(EventType.transfer, transfer.kind);
+    try std.testing.expectEqual(@as(u24, 5), transfer.transfer_length);
+    try std.testing.expectEqual(@as(u5, ENDPOINT_ZERO_DCI), transfer.endpoint_id);
+    try std.testing.expect(transfer.event_data);
 
     try std.testing.expect((try consumer.consume(port_event, 2)) == null);
     var wrapped = port_event;
@@ -2908,16 +3175,22 @@ test "xHCI PORTSC writes preserve sticky controls and acknowledge only changes" 
     try std.testing.expect((portResetWrite(status_value, .{ .kind = .usb3, .slot_type = 1 }) & (@as(u32, 1) << 31)) != 0);
 }
 
-test "xHCI command producer encodes slot commands and toggles on the link TRB" {
+test "xHCI TRB producer encodes slot commands and toggles on the link TRB" {
     const plan = RingPlan{
         .command_ring_trbs = 4,
         .event_ring_trbs = 4,
         .command_ring_address = 0x1000,
         .event_ring_address = 0x2000,
     };
-    var producer = CommandRingProducer{};
-    try std.testing.expectEqual(@as(u64, 0x1000), try producer.commandAddress(plan));
-    try std.testing.expectEqual(@as(u64, 0x1030), try producer.linkAddress(plan));
+    var producer = TrbRingProducer{};
+    try std.testing.expectEqual(
+        @as(u64, 0x1000),
+        try producer.trbAddress(plan.command_ring_address, plan.command_ring_trbs),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0x1030),
+        try producer.linkAddress(plan.command_ring_address, plan.command_ring_trbs),
+    );
     const enable = enableSlotCommand(7, producer.cycle_state);
     try std.testing.expectEqual(
         (@as(u32, 7) << 16) | (ENABLE_SLOT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) | 1,
@@ -2935,8 +3208,68 @@ test "xHCI command producer encodes slot commands and toggles on the link TRB" {
     );
     try std.testing.expectEqual(
         (LINK_TRB_TYPE << TRB_TYPE_SHIFT) | LINK_TRB_TOGGLE_CYCLE | 1,
-        commandLinkControl(1),
+        ringLinkControl(1),
     );
+}
+
+const MockDoorbellMmio = struct {
+    offset: u32 = 0,
+    value: u32 = 0,
+
+    pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
+        self.offset = offset;
+        self.value = value;
+    }
+};
+
+test "xHCI device descriptor control stages and slot doorbell are exact" {
+    const setup = deviceDescriptorPrefixSetupStage(1);
+    try std.testing.expectEqual(@as(u32, 0x0100_0680), setup[0]);
+    try std.testing.expectEqual(@as(u32, 0x0008_0000), setup[1]);
+    try std.testing.expectEqual(@as(u32, USB_DEVICE_DESCRIPTOR_PREFIX_BYTES), setup[2]);
+    try std.testing.expectEqual(
+        SETUP_TRANSFER_TYPE_IN | (SETUP_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_IMMEDIATE_DATA | 1,
+        setup[3],
+    );
+    const data = try deviceDescriptorPrefixDataStage(0x9000, 0);
+    try std.testing.expectEqual(@as(u32, 0x9000), data[0]);
+    try std.testing.expectEqual(@as(u32, USB_DEVICE_DESCRIPTOR_PREFIX_BYTES), data[2]);
+    try std.testing.expectEqual(
+        CONTROL_TRANSFER_DIRECTION_IN | (DATA_STAGE_TRB_TYPE << TRB_TYPE_SHIFT),
+        data[3],
+    );
+    const status = deviceDescriptorPrefixStatusStage(1);
+    try std.testing.expectEqual(@as(u32, 0), status[0]);
+    try std.testing.expectEqual(
+        (STATUS_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) | TRB_INTERRUPT_ON_COMPLETION | 1,
+        status[3],
+    );
+    var wrapping_producer = TrbRingProducer{ .enqueue_index = TRANSFER_RING_TRBS - 2 };
+    try std.testing.expectEqual(
+        @as(u64, 0x80E0),
+        try wrapping_producer.trbAddress(0x8000, TRANSFER_RING_TRBS),
+    );
+    try std.testing.expect(try wrapping_producer.advance(TRANSFER_RING_TRBS));
+    try std.testing.expectEqual(@as(u1, 0), wrapping_producer.cycle_state);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        (try deviceDescriptorPrefixDataStage(0x9000, wrapping_producer.cycle_state))[3] & 1,
+    );
+
+    var mmio = MockDoorbellMmio{};
+    const capabilities = defaultCapabilityRegisters();
+    try ringCommandDoorbell(capabilities, &mmio);
+    try std.testing.expectEqual(TEST_DOORBELL_OFFSET, mmio.offset);
+    try std.testing.expectEqual(@as(u32, 0), mmio.value);
+    try ringDeviceDoorbell(capabilities, 4, ENDPOINT_ZERO_DCI, &mmio);
+    try std.testing.expectEqual(TEST_DOORBELL_OFFSET + 4 * @sizeOf(u32), mmio.offset);
+    try std.testing.expectEqual(@as(u32, ENDPOINT_ZERO_DCI), mmio.value);
+    try std.testing.expectError(
+        error.InvalidDeviceSlot,
+        ringDeviceDoorbell(capabilities, 0, ENDPOINT_ZERO_DCI, &mmio),
+    );
+    try std.testing.expectError(error.EndpointMismatch, ringDeviceDoorbell(capabilities, 1, 0, &mmio));
 }
 
 test "xHCI Address Device context encodes only slot and endpoint zero authority" {
@@ -3006,6 +3339,31 @@ test "xHCI Address Device context encodes only slot and endpoint zero authority"
     try std.testing.expectError(
         error.InvalidInputContext,
         initializeAddressDeviceInputContext(.bytes_32, 2, 3, 64, 0xA001, &compact_context),
+    );
+}
+
+test "xHCI Evaluate Context updates only endpoint-zero max packet size" {
+    var input_context = [_]u8{0xA5} ** (INPUT_CONTEXT_ENTRIES * 64);
+    try initializeEvaluateEndpointZeroInputContext(.bytes_64, 32, &input_context);
+    try std.testing.expectEqual(
+        EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS,
+        readU32Le(input_context[4..8]),
+    );
+    try std.testing.expectEqual(@as(u32, 32) << 16, readU32Le(input_context[132..136]));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 64), input_context[64..128]);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 48), input_context[144..192]);
+
+    const command = try evaluateContextCommand(0x9000, 5, 1);
+    try std.testing.expectEqual(@as(u32, 0x9000), command[0]);
+    try std.testing.expectEqual(
+        (@as(u32, 5) << 24) | (EVALUATE_CONTEXT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) | 1,
+        command[3],
+    );
+    try std.testing.expectError(error.InvalidInputContext, evaluateContextCommand(0x9001, 5, 1));
+    try std.testing.expectError(error.InvalidDeviceSlot, evaluateContextCommand(0x9000, 0, 1));
+    try std.testing.expectError(
+        error.InvalidInputContext,
+        initializeEvaluateEndpointZeroInputContext(.bytes_64, 12, &input_context),
     );
 }
 
@@ -3184,15 +3542,17 @@ test "xHCI DMA arena packs complete contexts and scratchpads without overlap" {
     try std.testing.expectEqual(@as(u64, 0x36800), try plan.deviceContextAddress(32));
     try std.testing.expectError(error.InvalidDeviceSlot, plan.deviceContextAddress(0));
     try std.testing.expectError(error.InvalidDeviceSlot, plan.deviceContextAddress(33));
-    try std.testing.expectEqual(@as(u64, 0x37000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u64, 0x37000), plan.enumeration_buffer_address);
+    try std.testing.expectEqual(@as(u32, XHCI_PAGE_BYTES), plan.enumeration_buffer_bytes);
+    try std.testing.expectEqual(@as(u64, 0x38000), plan.input_context_address);
     try std.testing.expectEqual(@as(u32, 2112), plan.input_context_bytes);
-    try std.testing.expectEqual(@as(u64, 0x38000), plan.control_transfer_rings_address);
+    try std.testing.expectEqual(@as(u64, 0x39000), plan.control_transfer_rings_address);
     try std.testing.expectEqual(@as(u32, 256), plan.control_transfer_ring_stride);
     try std.testing.expectEqual(@as(u64, 0x2000), plan.control_transfer_rings_bytes);
-    try std.testing.expectEqual(@as(u64, 0x38000), try plan.controlTransferRingAddress(1));
-    try std.testing.expectEqual(@as(u64, 0x39F00), try plan.controlTransferRingAddress(32));
+    try std.testing.expectEqual(@as(u64, 0x39000), try plan.controlTransferRingAddress(1));
+    try std.testing.expectEqual(@as(u64, 0x3AF00), try plan.controlTransferRingAddress(32));
     try std.testing.expectError(error.InvalidDeviceSlot, plan.controlTransferRingAddress(33));
-    try std.testing.expectEqual(@as(u64, 0x36000), plan.total_bytes);
+    try std.testing.expectEqual(@as(u64, 0x37000), plan.total_bytes);
 }
 
 test "xHCI DMA arena handles compact contexts and rejects invalid ranges" {
@@ -3207,11 +3567,12 @@ test "xHCI DMA arena handles compact contexts and rejects invalid ranges" {
     try std.testing.expectEqual(@as(u32, 1024), plan.device_context_stride);
     try std.testing.expectEqual(@as(u64, 0x2000), plan.device_contexts_address);
     try std.testing.expectEqual(@as(u64, 3072), plan.device_contexts_bytes);
-    try std.testing.expectEqual(@as(u64, 0x3000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u64, 0x3000), plan.enumeration_buffer_address);
+    try std.testing.expectEqual(@as(u64, 0x4000), plan.input_context_address);
     try std.testing.expectEqual(@as(u32, 1056), plan.input_context_bytes);
-    try std.testing.expectEqual(@as(u64, 0x4000), plan.control_transfer_rings_address);
+    try std.testing.expectEqual(@as(u64, 0x5000), plan.control_transfer_rings_address);
     try std.testing.expectEqual(@as(u64, XHCI_PAGE_BYTES), plan.control_transfer_rings_bytes);
-    try std.testing.expectEqual(@as(u64, 0x4000), plan.total_bytes);
+    try std.testing.expectEqual(@as(u64, 0x5000), plan.total_bytes);
 
     try std.testing.expectError(error.DmaArenaBaseInvalid, planDmaArena(capabilities, 3, 0));
     try std.testing.expectError(error.DmaArenaBaseInvalid, planDmaArena(capabilities, 3, 0x1800));
@@ -3231,13 +3592,14 @@ test "xHCI DMA arena page-rounds the maximum scratchpad pointer array" {
     try std.testing.expectEqual(@as(u64, 0x4000), plan.scratchpad_buffers_address);
     try std.testing.expectEqual(@as(u64, 1023) * XHCI_PAGE_BYTES, plan.scratchpad_buffers_bytes);
     try std.testing.expectEqual(@as(u64, 0x403000), plan.device_contexts_address);
-    try std.testing.expectEqual(@as(u64, 0x404000), plan.input_context_address);
-    try std.testing.expectEqual(@as(u64, 0x405000), plan.control_transfer_rings_address);
-    try std.testing.expectEqual(@as(u64, 0x405000), plan.total_bytes);
+    try std.testing.expectEqual(@as(u64, 0x404000), plan.enumeration_buffer_address);
+    try std.testing.expectEqual(@as(u64, 0x405000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u64, 0x406000), plan.control_transfer_rings_address);
+    try std.testing.expectEqual(@as(u64, 0x406000), plan.total_bytes);
 
     capabilities.max_device_slots = TEST_MAX_DEVICE_SLOTS;
     const full_plan = try planControllerDma(capabilities, TEST_MAX_DEVICE_SLOTS, 0x1000);
-    try std.testing.expectEqual(@as(u32, 1047), try full_plan.frameCount());
+    try std.testing.expectEqual(@as(u32, 1048), try full_plan.frameCount());
 }
 
 test "xHCI controller DMA plan initializes rings tables and scratchpad pointers" {
@@ -3245,13 +3607,13 @@ test "xHCI controller DMA plan initializes rings tables and scratchpad pointers"
     capabilities.max_device_slots = 1;
     capabilities.max_scratchpad_buffers = 2;
     const plan = try planControllerDma(capabilities, 1, 0x1000);
-    try std.testing.expectEqual(@as(u32, 9), try plan.frameCount());
-    try std.testing.expectEqual(@as(u64, 0x9000), plan.arena.control_transfer_rings_address);
+    try std.testing.expectEqual(@as(u32, 10), try plan.frameCount());
+    try std.testing.expectEqual(@as(u64, 0xA000), plan.arena.control_transfer_rings_address);
     try std.testing.expectEqual(@as(u64, 0x2400), plan.event_ring_segment_table_address);
     try std.testing.expectEqual(@as(u32, 64), plan.event_ring_segment_table_bytes);
     try std.testing.expectEqual(@as(u64, 0x3000), plan.arena.base_address);
 
-    var memory = [_]u8{0xA5} ** (9 * @as(usize, XHCI_PAGE_BYTES));
+    var memory = [_]u8{0xA5} ** (10 * @as(usize, XHCI_PAGE_BYTES));
     try std.testing.expectError(
         error.DmaBufferTooSmall,
         initializeControllerDma(plan, memory[0 .. memory.len - 1]),
@@ -3327,10 +3689,10 @@ test "xHCI controller DMA regions preserve page-granular direction isolation" {
     capabilities.max_scratchpad_buffers = 0;
     capabilities.scratchpad_restore = false;
     const compact = try planControllerDma(capabilities, 3, 0x1000);
-    try std.testing.expectEqual(@as(u32, 6), try compact.frameCount());
+    try std.testing.expectEqual(@as(u32, 7), try compact.frameCount());
     const compact_regions = try controllerDmaAccessRegions(compact, &region_storage);
     try std.testing.expectEqual(@as(usize, 5), compact_regions.len);
-    try std.testing.expectEqual(@as(u64, 0x1000), compact_regions[3].bytes);
+    try std.testing.expectEqual(@as(u64, 0x2000), compact_regions[3].bytes);
     try std.testing.expectEqual(@as(u64, 0x2000), compact_regions[4].bytes);
 }
 

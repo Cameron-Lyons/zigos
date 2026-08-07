@@ -227,7 +227,8 @@ Use the pinned toolchain and repo entrypoints:
   count while rejecting restore-state claims without scratchpad storage. The typed
   DMA plan reserves a zeroed DCBAA page, page-aligned scratchpad pointer and buffer
   storage, one complete 32-entry Device Context and compact endpoint-zero transfer
-  ring per enabled slot, and one page-contained reusable 33-entry Input Context.
+  ring per enabled slot, one shared page-contained enumeration buffer, and one
+  page-contained reusable 33-entry Input Context.
   Checked arithmetic and disjoint-range validation cover the command and event
   pages, ERST, and DMA arena. The
   same page is remapped as a bounded sliding window over the extended-capability chain, and
@@ -259,14 +260,19 @@ Use the pinned toolchain and repo entrypoints:
   resolve to its exact Protocol Slot Type and endpoint-zero packet size. Port-status changes
   preserve only architected sticky controls while acknowledging RW1CS bits;
   connected USB2/USB3 ports receive bounded normal/warm resets as appropriate.
-  A single cycle-tracked command producer submits Enable Slot, Address Device, and
-  disconnect-time Disable Slot commands through doorbell zero. Address Device uses
-  the shared serialized Input Context to publish only Slot and endpoint-zero state,
-  with a slot-private control ring and the negotiated root-port speed. Completion
-  pointers and slot identities are validated before state advances, and DCBAA entries
-  are linked or cleared only at the specified completion boundary. Reset and command waits keep the one-shot timer armed and
+  A single cycle-tracked TRB producer submits Enable Slot, Address Device, Evaluate
+  Context, and disconnect-time Disable Slot commands through doorbell zero. Address
+  Device uses the shared serialized Input Context to publish only Slot and endpoint-zero
+  state, with a slot-private control ring and the negotiated root-port speed. The same
+  serialized lifecycle then rings the slot's endpoint-zero doorbell for an eight-byte
+  device-descriptor read, accepts only the exact Status Stage Transfer Event, validates
+  the descriptor header and speed-specific packet size, and issues Evaluate Context
+  before another transfer when a full-speed device reports 16, 32, or 64 bytes.
+  Completion pointers, endpoint ids, residual lengths, and slot identities are
+  validated before state advances, and DCBAA entries are linked or cleared only at the
+  specified completion boundary. Reset, command, and control-transfer waits keep the one-shot timer armed and
   contain the controller after one second without progress. DMA faults, invalid
-  port or command events, unsupported event types, ERDP rejection, or an
+  port, command, or transfer events, unsupported event types, ERDP rejection, or an
   unexpected halted/error state quiesce the controller and revoke MSI plus bus
   mastering. Input-device
   authority still requires keyboard enumeration and hardware event-ring evidence.
