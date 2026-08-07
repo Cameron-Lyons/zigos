@@ -201,6 +201,7 @@ pub const NativeConnection = struct {
     target_endpoint_id: ids.EndpointId,
     source_task_id: u64,
     target_task_id: u64,
+    target_mac: ?[6]u8,
     connected: bool = true,
     next_sequence: u64 = 1,
     highest_sent_sequence: u64 = 0,
@@ -239,6 +240,7 @@ pub const NativeTransportService = struct {
     harness: Harness = Harness.init(),
     endpoints: endpoint.Table = endpoint.Table.init(),
     capture: PacketCapture = .{},
+    peer_links: network_driver_task.PeerLinkDirectory = .{},
     opened_connections: usize = 0,
     disconnected_connections: usize = 0,
     reconnect_count: usize = 0,
@@ -248,6 +250,7 @@ pub const NativeTransportService = struct {
     congestion_drop_count: usize = 0,
     replay_rejection_count: usize = 0,
     revoked_device_rejection_count: usize = 0,
+    peer_address_miss_count: usize = 0,
     production_attested_sessions_required: bool = false,
     i225_proof_required: bool = false,
     i225_proof_attached: bool = false,
@@ -265,6 +268,14 @@ pub const NativeTransportService = struct {
 
     pub fn bindTrustedDeviceGraph(self: *NativeTransportService, graph: *const device_graph.Graph) void {
         self.trust_graph = graph;
+    }
+
+    pub fn bindPeerLink(
+        self: *NativeTransportService,
+        device: principal.PrincipalId,
+        mac: [6]u8,
+    ) network_driver_task.PeerLinkError!void {
+        try self.peer_links.bind(device, mac);
     }
 
     pub fn requireIntelI225Proof(self: *NativeTransportService) void {
@@ -437,7 +448,12 @@ pub const NativeTransportService = struct {
             false,
         );
         try self.capture.record(encoded);
-        const network_delivered = network_driver_task.sendActiveFrame(encoded);
+        const network_delivered = if (connection.target_mac) |target_mac|
+            network_driver_task.sendActiveFrame(target_mac, encoded)
+        else blk: {
+            self.peer_address_miss_count += 1;
+            break :blk false;
+        };
         self.endpoint_frame_count += 1;
         connection.in_flight_frames += 1;
         markSequenceSent(connection, sequence);
@@ -558,6 +574,7 @@ pub const NativeTransportService = struct {
             .target_endpoint_id = target_endpoint.id,
             .source_task_id = source_task_id,
             .target_task_id = target_task_id,
+            .target_mac = self.peer_links.resolve(session.target_device),
             .connected = true,
         };
     }
@@ -901,10 +918,12 @@ test "native sync transport captures encrypted driver packets and handles replay
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
         var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
+        var last_destination: [6]u8 = [_]u8{0} ** 6;
 
-        fn send(frame: []const u8) bool {
+        fn send(destination: [6]u8, frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
+            last_destination = destination;
             @memcpy(last_frame[0..frame.len], frame);
             return true;
         }
@@ -923,6 +942,7 @@ test "native sync transport captures encrypted driver packets and handles replay
 
     Driver.send_count = 0;
     Driver.last_frame_len = 0;
+    Driver.last_destination = [_]u8{0} ** 6;
     network_driver_task.reset();
     defer network_driver_task.reset();
     const device = network_driver_task.NetworkDevice{
@@ -957,6 +977,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     });
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
     var native_transport = NativeTransportService.init();
+    try native_transport.bindPeerLink(target, .{ 0x02, 0, 0, 0, 0, 0x52 });
     var connection = try native_transport.openRelay(&broker, .{
         .task_id = 95,
         .principal_id = app,
@@ -971,6 +992,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expect(delivered.network_delivered);
     try std.testing.expectEqual(@as(u64, 1), delivered.sequence);
     try std.testing.expectEqual(@as(usize, 1), Driver.send_count);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0, 0, 0, 0, 0x52 }, &Driver.last_destination);
     try std.testing.expectEqual(@as(usize, 1), native_transport.capture.captured_count);
     const captured = native_transport.capture.last().?;
     try std.testing.expect(std.mem.startsWith(u8, captured.slice(), "ZGST"));
@@ -1300,9 +1322,11 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         var authorized_native_frames: usize = 0;
         var allowed_capability_id: u64 = 0;
         var allowed_policy_id: u64 = 0;
+        var last_destination: [6]u8 = [_]u8{0} ** 6;
 
-        fn send(_: []const u8) bool {
+        fn send(destination: [6]u8, _: []const u8) bool {
             send_count += 1;
+            last_destination = destination;
             return true;
         }
 
@@ -1328,6 +1352,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     defer network_driver_task.reset();
     ProductionDriver.send_count = 0;
     ProductionDriver.authorized_native_frames = 0;
+    ProductionDriver.last_destination = [_]u8{0} ** 6;
     ProductionDriver.allowed_capability_id = relay_capability.id;
     ProductionDriver.allowed_policy_id = relay.id;
     const production_device = network_driver_task.NetworkDevice{
@@ -1340,6 +1365,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     network_driver_task.bindEgressCapability(relay_capability.id, relay.id);
 
     var production_transport = NativeTransportService.init();
+    try production_transport.bindPeerLink(target, .{ 0x02, 0x15, 0xF2, 0, 0, 9 });
     production_transport.requireIntelI225Proof();
     try std.testing.expect(!production_transport.intelI225NetworkReady());
     var production_connection = try production_transport.openRelay(&broker, .{
@@ -1490,6 +1516,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     try std.testing.expectEqual(@as(usize, 1), production_transport.capture.captured_count);
     try std.testing.expectEqual(@as(usize, 1), ProductionDriver.authorized_native_frames);
     try std.testing.expectEqual(@as(usize, 1), ProductionDriver.send_count);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0x15, 0xF2, 0, 0, 9 }, &ProductionDriver.last_destination);
     try std.testing.expectEqual(@as(usize, 1), network_driver_task.activeDriverTransmitCount());
 }
 

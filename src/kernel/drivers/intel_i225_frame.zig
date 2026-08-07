@@ -5,6 +5,7 @@ pub const MIN_ETHERNET_FRAME_BYTES: usize = 60;
 pub const MAX_PAYLOAD_BYTES: usize = 1500;
 pub const MAX_ETHERNET_FRAME_BYTES: usize = ETHERNET_HEADER_BYTES + MAX_PAYLOAD_BYTES;
 pub const LOCAL_EXPERIMENTAL_ETHERTYPE: u16 = 0x88B5;
+pub const BROADCAST_MAC: [6]u8 = [_]u8{0xFF} ** 6;
 
 pub const FrameView = struct {
     source: [6]u8,
@@ -18,6 +19,12 @@ pub const ParseError = error{
     DestinationMismatch,
     InvalidSource,
     EtherTypeMismatch,
+};
+
+pub const BuildError = error{
+    InvalidDestination,
+    InvalidSource,
+    InvalidPayload,
 };
 
 pub fn decodeMac(ral: u32, rah: u32) [6]u8 {
@@ -42,11 +49,17 @@ pub fn validUnicastMac(mac: [6]u8) bool {
     return any_nonzero and any_not_ff;
 }
 
-pub fn buildEthernetFrame(output: []u8, source: [6]u8, payload: []const u8) error{InvalidPayload}!usize {
+pub fn validDestinationMac(mac: [6]u8) bool {
+    return std.mem.eql(u8, &mac, &BROADCAST_MAC) or validUnicastMac(mac);
+}
+
+pub fn buildEthernetFrame(output: []u8, destination: [6]u8, source: [6]u8, payload: []const u8) BuildError!usize {
+    if (!validDestinationMac(destination)) return error.InvalidDestination;
+    if (!validUnicastMac(source)) return error.InvalidSource;
     if (payload.len == 0 or payload.len > MAX_PAYLOAD_BYTES or output.len < ETHERNET_HEADER_BYTES + payload.len) {
         return error.InvalidPayload;
     }
-    @memset(output[0..6], 0xFF);
+    @memcpy(output[0..6], &destination);
     @memcpy(output[6..12], &source);
     output[12] = @truncate(LOCAL_EXPERIMENTAL_ETHERTYPE >> 8);
     output[13] = @truncate(LOCAL_EXPERIMENTAL_ETHERTYPE);
@@ -96,7 +109,7 @@ test "I225 permanent MAC decoding rejects invalid addresses" {
 test "I225 Ethernet envelope uses the local experimental EtherType and pads short frames" {
     var frame: [128]u8 = undefined;
     const source = [_]u8{ 0x02, 0x15, 0xF2, 0, 0, 1 };
-    const length = try buildEthernetFrame(&frame, source, "ZGND");
+    const length = try buildEthernetFrame(&frame, BROADCAST_MAC, source, "ZGND");
     try std.testing.expectEqual(@as(usize, MIN_ETHERNET_FRAME_BYTES), length);
     try std.testing.expectEqualSlices(u8, &[_]u8{0xFF} ** 6, frame[0..6]);
     try std.testing.expectEqualSlices(u8, &source, frame[6..12]);
@@ -108,9 +121,23 @@ test "I225 Ethernet envelope uses the local experimental EtherType and pads shor
 test "I225 Ethernet envelope rejects empty and oversized payloads" {
     var frame: [2048]u8 = undefined;
     const source = [_]u8{ 0x02, 0x15, 0xF2, 0, 0, 1 };
-    try std.testing.expectError(error.InvalidPayload, buildEthernetFrame(&frame, source, ""));
+    try std.testing.expectError(error.InvalidPayload, buildEthernetFrame(&frame, BROADCAST_MAC, source, ""));
     const oversized = [_]u8{0xA5} ** (MAX_PAYLOAD_BYTES + 1);
-    try std.testing.expectError(error.InvalidPayload, buildEthernetFrame(&frame, source, &oversized));
+    try std.testing.expectError(error.InvalidPayload, buildEthernetFrame(&frame, BROADCAST_MAC, source, &oversized));
+}
+
+test "I225 Ethernet envelope addresses peer traffic without broadcasting" {
+    var frame: [128]u8 = undefined;
+    const source = [_]u8{ 0x02, 0x15, 0xF2, 0, 0, 1 };
+    const destination = [_]u8{ 0x02, 0x15, 0xF2, 0, 0, 2 };
+    const length = try buildEthernetFrame(&frame, destination, source, "ZGST");
+    try std.testing.expectEqualSlices(u8, &destination, frame[0..6]);
+    try std.testing.expectEqualSlices(u8, &source, frame[6..12]);
+    try std.testing.expectEqual(@as(usize, MIN_ETHERNET_FRAME_BYTES), length);
+
+    try std.testing.expectError(error.InvalidDestination, buildEthernetFrame(&frame, [_]u8{0} ** 6, source, "ZGST"));
+    try std.testing.expectError(error.InvalidDestination, buildEthernetFrame(&frame, .{ 0x01, 0, 0, 0, 0, 1 }, source, "ZGST"));
+    try std.testing.expectError(error.InvalidSource, buildEthernetFrame(&frame, destination, [_]u8{0} ** 6, "ZGST"));
 }
 
 test "I225 receive parser accepts directed and broadcast local frames" {

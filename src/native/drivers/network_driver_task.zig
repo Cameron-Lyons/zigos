@@ -26,14 +26,74 @@ pub fn noNetworkFrame(_: []u8) ReceiveResult {
 }
 
 pub const NetworkDevice = struct {
-    send: *const fn (data: []const u8) bool,
+    send: *const fn (destination: [6]u8, data: []const u8) bool,
     receive: *const fn (output: []u8) ReceiveResult,
     getMacAddress: *const fn () [6]u8,
 };
 
+pub const BROADCAST_MAC: [6]u8 = [_]u8{0xFF} ** 6;
+pub const MAX_PEER_LINKS: usize = 32;
+
+const PeerLink = struct {
+    in_use: bool = false,
+    device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    mac: [6]u8 = [_]u8{0} ** 6,
+};
+
+pub const PeerLinkError = error{
+    InvalidPeerDevice,
+    InvalidPeerAddress,
+    PeerAddressConflict,
+    PeerLinkDirectoryFull,
+};
+
+pub const PeerLinkDirectory = struct {
+    links: [MAX_PEER_LINKS]PeerLink = [_]PeerLink{.{}} ** MAX_PEER_LINKS,
+
+    pub fn bind(self: *PeerLinkDirectory, device: principal.PrincipalId, mac: [6]u8) PeerLinkError!void {
+        if (device.kind != .device or device.serial == 0) return error.InvalidPeerDevice;
+        if (!validUnicastMac(mac)) return error.InvalidPeerAddress;
+
+        var free_index: ?usize = null;
+        for (&self.links, 0..) |*link, index| {
+            if (!link.in_use) {
+                if (free_index == null) free_index = index;
+                continue;
+            }
+            if (link.device.eql(device)) {
+                if (!std.mem.eql(u8, &link.mac, &mac)) return error.PeerAddressConflict;
+                return;
+            }
+            if (std.mem.eql(u8, &link.mac, &mac)) return error.PeerAddressConflict;
+        }
+
+        const index = free_index orelse return error.PeerLinkDirectoryFull;
+        self.links[index] = .{ .in_use = true, .device = device, .mac = mac };
+    }
+
+    pub fn resolve(self: *const PeerLinkDirectory, device: principal.PrincipalId) ?[6]u8 {
+        for (&self.links) |*link| {
+            if (link.in_use and link.device.eql(device)) return link.mac;
+        }
+        return null;
+    }
+};
+
+pub fn validUnicastMac(mac: [6]u8) bool {
+    if ((mac[0] & 1) != 0) return false;
+    var any_nonzero = false;
+    var any_not_ff = false;
+    for (mac) |byte| {
+        any_nonzero = any_nonzero or byte != 0;
+        any_not_ff = any_not_ff or byte != 0xFF;
+    }
+    return any_nonzero and any_not_ff;
+}
+
 pub const EgressRequest = struct {
     frame: []const u8,
     source_mac: [6]u8,
+    destination_mac: [6]u8,
     egress_capability_id: u64,
     network_policy_id: u64,
 };
@@ -57,6 +117,7 @@ pub const Error = error{
     PayloadTooLarge,
     ServiceIdentityTooLong,
     DiscoveryClassTooLong,
+    PeerAddressMissing,
 };
 
 pub const NativeServiceIdentityConnection = struct {
@@ -68,6 +129,7 @@ pub const NativeServiceIdentityConnection = struct {
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
     source_mac: [6]u8,
+    target_mac: [6]u8,
     service_identity_len: usize = 0,
     service_identity: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     peer_root_digest: crypto_hash.Digest,
@@ -155,6 +217,7 @@ pub const NativeLocalDiscoveryFrame = struct {
 };
 
 pub const NativeNetworkStack = struct {
+    peer_links: PeerLinkDirectory = .{},
     next_connection_id: u64 = 1,
     attempted_connections: usize = 0,
     denied_before_transmit: usize = 0,
@@ -164,6 +227,10 @@ pub const NativeNetworkStack = struct {
 
     pub fn init() NativeNetworkStack {
         return .{};
+    }
+
+    pub fn bindPeerLink(self: *NativeNetworkStack, device: principal.PrincipalId, mac: [6]u8) PeerLinkError!void {
+        try self.peer_links.bind(device, mac);
     }
 
     pub fn openServiceIdentity(
@@ -182,6 +249,7 @@ pub const NativeNetworkStack = struct {
 
         const decision = broker.connect(request) catch return self.denyOpen(.policy_denied);
         if (!decision.allowed) return self.denyOpen(decision.reason);
+        const target_mac = self.peer_links.resolve(target_device) orelse return error.PeerAddressMissing;
 
         var connection = NativeServiceIdentityConnection{
             .id = self.nextConnectionId(),
@@ -192,6 +260,7 @@ pub const NativeNetworkStack = struct {
             .source_device = source_device,
             .target_device = target_device,
             .source_mac = device.getMacAddress(),
+            .target_mac = target_mac,
             .peer_root_digest = request.evidence.peer_root_digest,
             .attestation_request_digest = request.evidence.attestation_request_digest,
             .attestation_verifier_metadata_digest = request.evidence.attestation_verifier_metadata_digest,
@@ -321,7 +390,7 @@ pub const NativeNetworkStack = struct {
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeNativeFrame(wire_frame[0..], connection, &frame);
-        if (!device.send(encoded)) return error.TransmitFailed;
+        if (!device.send(connection.target_mac, encoded)) return error.TransmitFailed;
         self.transmitted_packets += 1;
         return frame;
     }
@@ -382,7 +451,7 @@ pub const NativeNetworkStack = struct {
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeDiscoveryFrame(wire_frame[0..], connection, &frame);
-        if (!device.send(encoded)) return error.TransmitFailed;
+        if (!device.send(BROADCAST_MAC, encoded)) return error.TransmitFailed;
         self.transmitted_packets += 1;
         return frame;
     }
@@ -520,23 +589,25 @@ pub fn lastActiveDriverReceivedFrame() []const u8 {
     return last_active_driver_rx_frame[0..last_active_driver_rx_frame_len];
 }
 
-pub fn authorizeDriverTx(frame: []const u8) bool {
+pub fn authorizeDriverTx(destination: [6]u8, frame: []const u8) bool {
+    if (!validUnicastMac(destination) and !std.mem.eql(u8, &destination, &BROADCAST_MAC)) return false;
     const device = active_device orelse return false;
     const broker = egress_broker orelse return false;
     const decision = broker(.{
         .frame = frame,
         .source_mac = device.getMacAddress(),
+        .destination_mac = destination,
         .egress_capability_id = active_egress_capability_id,
         .network_policy_id = active_network_policy_id,
     });
     return decision.allowed and decision.capability_backed;
 }
 
-pub fn sendActiveFrame(frame: []const u8) bool {
+pub fn sendActiveFrame(destination: [6]u8, frame: []const u8) bool {
     if (frame.len > last_active_driver_frame.len) return false;
-    if (!authorizeDriverTx(frame)) return false;
+    if (!authorizeDriverTx(destination, frame)) return false;
     const device = active_device orelse return false;
-    if (!device.send(frame)) return false;
+    if (!device.send(destination, frame)) return false;
     active_driver_tx_count += 1;
     last_active_driver_frame_len = frame.len;
     @memcpy(last_active_driver_frame[0..frame.len], frame);
@@ -588,6 +659,7 @@ fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypt
     updatePrincipal(&hasher, "source", connection.source_device);
     updatePrincipal(&hasher, "target", connection.target_device);
     crypto_hash.updateBytes(&hasher, "source-mac", &connection.source_mac);
+    crypto_hash.updateBytes(&hasher, "target-mac", &connection.target_mac);
     crypto_hash.updateBytes(&hasher, "service-identity", connection.serviceIdentitySlice());
     crypto_hash.updateBytes(&hasher, "peer-root", &connection.peer_root_digest);
     crypto_hash.updateBool(&hasher, "verified-attestation", connection.verified_remote_attestation);
@@ -726,11 +798,46 @@ fn verifiedDriverPeerBoot(generation: u64) !measured_boot.BootRecord {
     return boot;
 }
 
+test "peer link directory binds stable unicast routes and rejects ambiguity" {
+    var directory = PeerLinkDirectory{};
+    const first_device = principal.PrincipalId{ .kind = .device, .serial = 1 };
+    const second_device = principal.PrincipalId{ .kind = .device, .serial = 2 };
+    const first_mac = [_]u8{ 0x02, 0x5A, 0x47, 0, 0, 1 };
+    const second_mac = [_]u8{ 0x02, 0x5A, 0x47, 0, 0, 2 };
+
+    try directory.bind(first_device, first_mac);
+    try directory.bind(first_device, first_mac);
+    const resolved = directory.resolve(first_device).?;
+    try std.testing.expectEqualSlices(u8, &first_mac, &resolved);
+    try std.testing.expect(directory.resolve(second_device) == null);
+
+    try std.testing.expectError(error.InvalidPeerDevice, directory.bind(.{ .kind = .service, .serial = 3 }, second_mac));
+    try std.testing.expectError(error.InvalidPeerAddress, directory.bind(second_device, [_]u8{0} ** 6));
+    try std.testing.expectError(error.InvalidPeerAddress, directory.bind(second_device, .{ 0x01, 0, 0, 0, 0, 2 }));
+    try std.testing.expectError(error.PeerAddressConflict, directory.bind(first_device, second_mac));
+    try std.testing.expectError(error.PeerAddressConflict, directory.bind(second_device, first_mac));
+}
+
+test "peer link directory has a fixed fail-closed capacity" {
+    var directory = PeerLinkDirectory{};
+    for (0..MAX_PEER_LINKS) |index| {
+        try directory.bind(
+            .{ .kind = .device, .serial = @as(u64, @intCast(index + 1)) },
+            .{ 0x02, 0x5A, 0x47, 0, 0, @as(u8, @intCast(index + 1)) },
+        );
+    }
+    try std.testing.expectError(error.PeerLinkDirectoryFull, directory.bind(
+        .{ .kind = .device, .serial = MAX_PEER_LINKS + 1 },
+        .{ 0x02, 0x5A, 0x47, 0, 1, 1 },
+    ));
+}
+
 test "network driver data plane is brokered by explicit egress capability" {
     const Harness = struct {
         var send_count: usize = 0;
+        const expected_destination = [_]u8{ 0x02, 0, 0, 0, 0, 0x41 };
 
-        fn send(_: []const u8) bool {
+        fn send(_: [6]u8, _: []const u8) bool {
             send_count += 1;
             return true;
         }
@@ -741,7 +848,8 @@ test "network driver data plane is brokered by explicit egress capability" {
 
         fn broker(request: EgressRequest) EgressDecision {
             return .{
-                .allowed = request.network_policy_id == 41,
+                .allowed = request.network_policy_id == 41 and
+                    std.mem.eql(u8, &request.destination_mac, &expected_destination),
                 .capability_backed = request.egress_capability_id == 99,
             };
         }
@@ -756,11 +864,13 @@ test "network driver data plane is brokered by explicit egress capability" {
         .getMacAddress = Harness.mac,
     };
     try std.testing.expect(activateDevice(&device, 7));
-    try std.testing.expect(!sendActiveFrame("frame"));
+    const peer_mac = Harness.expected_destination;
+    try std.testing.expect(!sendActiveFrame([_]u8{0} ** 6, "frame"));
+    try std.testing.expect(!sendActiveFrame(peer_mac, "frame"));
     setEgressBroker(Harness.broker);
-    try std.testing.expect(!sendActiveFrame("frame"));
+    try std.testing.expect(!sendActiveFrame(peer_mac, "frame"));
     bindEgressCapability(99, 41);
-    try std.testing.expect(sendActiveFrame("frame"));
+    try std.testing.expect(sendActiveFrame(peer_mac, "frame"));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
     try std.testing.expectEqual(@as(usize, 1), activeDriverTransmitCount());
     try std.testing.expectEqualStrings("frame", lastActiveDriverFrame());
@@ -771,7 +881,7 @@ test "network driver data plane is brokered by explicit egress capability" {
 
 test "network transmit failure is reported without advancing ownership telemetry" {
     const Harness = struct {
-        fn send(_: []const u8) bool {
+        fn send(_: [6]u8, _: []const u8) bool {
             return false;
         }
 
@@ -794,7 +904,7 @@ test "network transmit failure is reported without advancing ownership telemetry
     try std.testing.expect(activateDevice(&device, 8));
     setEgressBroker(Harness.broker);
     bindEgressCapability(100, 42);
-    try std.testing.expect(!sendActiveFrame("frame"));
+    try std.testing.expect(!sendActiveFrame(.{ 0x02, 0, 0, 0, 0, 0x42 }, "frame"));
     try std.testing.expectEqual(@as(usize, 0), activeDriverTransmitCount());
     try std.testing.expectEqual(@as(usize, 0), lastActiveDriverFrame().len);
 }
@@ -804,7 +914,7 @@ test "network receive polling distinguishes empty drop failure and owned frame" 
         const Mode = enum { empty, frame, dropped, failed, malformed };
         var mode: Mode = .empty;
 
-        fn send(_: []const u8) bool {
+        fn send(_: [6]u8, _: []const u8) bool {
             return true;
         }
 
@@ -862,10 +972,12 @@ test "native network stack gates service identity packets on attested policy cap
     const Harness = struct {
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
+        var last_destination: [6]u8 = [_]u8{0} ** 6;
 
-        fn send(frame: []const u8) bool {
+        fn send(destination: [6]u8, frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
+            last_destination = destination;
             return true;
         }
 
@@ -876,6 +988,7 @@ test "native network stack gates service identity packets on attested policy cap
 
     Harness.send_count = 0;
     Harness.last_frame_len = 0;
+    Harness.last_destination = [_]u8{0} ** 6;
     reset();
     defer reset();
 
@@ -1040,6 +1153,21 @@ test "native network stack gates service identity packets on attested policy cap
     }, source, target));
     try std.testing.expectEqual(network_policy.EgressDecisionReason.attestation_required, stack.last_denial_reason);
 
+    try std.testing.expectError(error.PeerAddressMissing, stack.openVerifiedServiceIdentity(&broker, .{
+        .task_id = 70,
+        .principal_id = service_owner,
+        .capability_id = policy_capability.id,
+        .policy_id = policy.id,
+        .service_identity = "overlay.native.identity",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
+        .now_ticks = 10,
+    }, source, target));
+
+    const target_mac = [_]u8{ 0x02, 0, 0, 0, 0, 9 };
+    try stack.bindPeerLink(target, target_mac);
     const connection = try stack.openVerifiedServiceIdentity(&broker, .{
         .task_id = 70,
         .principal_id = service_owner,
@@ -1054,6 +1182,7 @@ test "native network stack gates service identity packets on attested policy cap
     }, source, target);
     try std.testing.expect(connection.attestation_required);
     try std.testing.expect(connection.identity_pinned);
+    try std.testing.expectEqualSlices(u8, &target_mac, &connection.target_mac);
     try std.testing.expect(connection.verified_remote_attestation);
     try std.testing.expect(connection.attestation_request_digest_present);
     try std.testing.expect(std.mem.eql(u8, &request_digest, &connection.attestation_request_digest));
@@ -1062,6 +1191,7 @@ test "native network stack gates service identity packets on attested policy cap
     try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &connection.attestation_verifier_metadata_digest));
 
     const frame = try stack.sendServiceIdentityFrame(&connection, "native payload");
+    try std.testing.expectEqualSlices(u8, &target_mac, &Harness.last_destination);
     try std.testing.expect(frame.encrypted);
     try std.testing.expect(frame.egress_allowed);
     try std.testing.expect(frame.attested);
@@ -1073,7 +1203,7 @@ test "native network stack gates service identity packets on attested policy cap
     try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &frame.attestation_verifier_metadata_digest));
     try std.testing.expect(frame.identity_pinned);
     try std.testing.expect(!std.mem.eql(u8, frame.ciphertextSlice(), "native payload"));
-    try std.testing.expectEqual(@as(usize, 5), stack.attempted_connections);
+    try std.testing.expectEqual(@as(usize, 6), stack.attempted_connections);
     try std.testing.expectEqual(@as(usize, 4), stack.denied_before_transmit);
     try std.testing.expectEqual(@as(usize, 1), stack.opened_connections);
     try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
@@ -1095,10 +1225,12 @@ test "native network stack requires scoped local discovery before discovery broa
     const Harness = struct {
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
+        var last_destination: [6]u8 = [_]u8{0} ** 6;
 
-        fn send(frame: []const u8) bool {
+        fn send(destination: [6]u8, frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
+            last_destination = destination;
             return true;
         }
 
@@ -1109,6 +1241,7 @@ test "native network stack requires scoped local discovery before discovery broa
 
     Harness.send_count = 0;
     Harness.last_frame_len = 0;
+    Harness.last_destination = [_]u8{0} ** 6;
     reset();
     defer reset();
 
@@ -1186,6 +1319,7 @@ test "native network stack requires scoped local discovery before discovery broa
     try std.testing.expectEqualStrings("printer", connection.discoveryClassSlice());
 
     const frame = try stack.sendLocalDiscoveryProbe(&connection, "who-has-printer");
+    try std.testing.expectEqualSlices(u8, &BROADCAST_MAC, &Harness.last_destination);
     try std.testing.expect(frame.encrypted);
     try std.testing.expect(frame.egress_allowed);
     try std.testing.expect(frame.scoped_discovery);
