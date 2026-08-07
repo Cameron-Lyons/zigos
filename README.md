@@ -169,13 +169,16 @@ Use the pinned toolchain and repo entrypoints:
   confirms translation on every unit. The I225-LM path attaches to the
   firmware-negotiated PHY, publishes the permanent MAC, queues TX without
   completion spinning, contains a stalled oldest TX descriptor after one
-  second, and polls RX only after its requester is confined.
+  second, and activates only after its requester is confined and the x2APIC is
+  ready. It installs one exact-requester VT-d interrupt-remapping entry, programs
+  a single-vector MSI message, masks queue causes in the top half, and drains at
+  most 63 TX completions or one RX frame per task-side service pass. Malformed
+  causes and eight consecutive no-progress interrupts fail closed.
   Native payloads are carried in padded Ethernet frames under the local
   experimental EtherType; service and sync traffic resolves a fixed peer-device
   directory to directed unicast frames, while scoped discovery alone uses
   broadcast. Receive polling accepts only directed or broadcast frames for that
-  EtherType. Hardware interrupt delivery remains gated work. NVMe, PCIe
-  ECAM, I225-LM, ACPI, and VT-d cache-disabled mappings are assigned by one
+  EtherType. NVMe, PCIe ECAM, I225-LM, ACPI, and VT-d cache-disabled mappings are assigned by one
   page-aligned, capacity-checked kernel MMIO layout whose pairwise non-overlap is
   enforced at compile time. Before
   normal storage attach, the controller must trigger a primary VT-d

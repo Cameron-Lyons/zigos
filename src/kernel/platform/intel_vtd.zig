@@ -53,6 +53,11 @@ const REG_INVALIDATION_QUEUE_TAIL: usize = 0x088;
 const REG_INVALIDATION_QUEUE_ADDRESS: usize = 0x090;
 const REG_INTERRUPT_REMAP_TABLE_ADDRESS: usize = 0x0B8;
 const INTERRUPT_REMAP_EXTENDED_MODE_ENABLE: u64 = 1 << 11;
+const INTERRUPT_REMAP_TABLE_SIZE_MASK: u64 = 0xF;
+const INTERRUPT_REMAP_TABLE_SIZE: u64 = 7;
+const REMAPPABLE_MSI_BASE: u64 = 0xFEE0_0000;
+const REMAPPABLE_MSI_FORMAT: u64 = 1 << 4;
+const INTERRUPT_REMAP_SOURCE_VALIDATION: u64 = 1 << 18;
 
 const GLOBAL_TRANSLATION_ENABLE: u32 = 1 << 31;
 const GLOBAL_SET_ROOT_TABLE_POINTER: u32 = 1 << 30;
@@ -129,6 +134,14 @@ pub const Error = error{
     InvalidationQueueError,
     DmaFaultMissing,
     UnexpectedDmaFault,
+    InterruptRouteUnavailable,
+    InterruptRouteAlreadyPresent,
+    InvalidInterruptVector,
+};
+
+pub const RemappedMessage = struct {
+    address: u64,
+    data: u16,
 };
 
 const AddressWidth = enum(u3) {
@@ -175,7 +188,9 @@ var fault_monitoring_enabled = false;
 var protected_requester_ids: [MAX_DMA_DOMAINS]u16 = [_]u16{0} ** MAX_DMA_DOMAINS;
 var protected_requester_count: usize = 0;
 var active_units: [dmar.MAX_REMAPPING_UNITS]UnitRegisters = undefined;
+var active_invalidation_queues: [dmar.MAX_REMAPPING_UNITS]u64 = undefined;
 var active_unit_count: usize = 0;
+var active_interrupt_table: ?*InterruptTable = null;
 var blocked_dma_proof: ?FaultRecord = null;
 var deferred_faults: [MAX_DMA_DOMAINS]?FaultRecord = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
 
@@ -268,17 +283,19 @@ pub fn enforceDevices(
 
     may_release_tables = false;
     for (units[0..summary.remapping_unit_count], 0..) |unit, index| {
+        const queue_base = tablePagePhysical(
+            table_base,
+            FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
+        );
         try programUnit(unit, table_base);
         try armFaultMonitoring(unit);
         try programInterruptRemapping(
             unit,
             interrupt_table_base,
-            tablePagePhysical(
-                table_base,
-                FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
-            ),
+            queue_base,
         );
         active_units[index] = unit;
+        active_invalidation_queues[index] = queue_base;
     }
 
     protected_requester_count = domains.len;
@@ -286,6 +303,7 @@ pub fn enforceDevices(
         protected_requester_ids[index] = requesterId(domain.device);
     }
     active_unit_count = summary.remapping_unit_count;
+    active_interrupt_table = interrupt_table;
     interrupt_remapping_enabled = true;
     fault_monitoring_enabled = true;
     blocked_dma_proof = null;
@@ -604,7 +622,8 @@ fn programInterruptRemapping(
     writeGlobalCommand(unit.base, GLOBAL_SET_INTERRUPT_REMAP_TABLE_POINTER, 0);
     try waitForStatus(unit.base, GLOBAL_SET_INTERRUPT_REMAP_TABLE_POINTER, true);
     if ((read64(unit.base + REG_INTERRUPT_REMAP_TABLE_ADDRESS) &
-        (ADDRESS_MASK | INTERRUPT_REMAP_EXTENDED_MODE_ENABLE)) != interrupt_table_address)
+        (ADDRESS_MASK | INTERRUPT_REMAP_EXTENDED_MODE_ENABLE | INTERRUPT_REMAP_TABLE_SIZE_MASK)) !=
+        interrupt_table_address)
     {
         return error.CommandRejected;
     }
@@ -622,7 +641,61 @@ fn programInterruptRemapping(
 }
 
 fn interruptTableAddress(table_base: u64) u64 {
-    return table_base | INTERRUPT_REMAP_EXTENDED_MODE_ENABLE;
+    return table_base | INTERRUPT_REMAP_EXTENDED_MODE_ENABLE | INTERRUPT_REMAP_TABLE_SIZE;
+}
+
+pub fn routeInterrupt(
+    device_info: pci.PCIDevice,
+    vector: u8,
+    destination_id: u32,
+) Error!RemappedMessage {
+    if (!interruptIsolationEnabled()) return error.InterruptRouteUnavailable;
+    if (vector < 32 or vector == 0xFF) return error.InvalidInterruptVector;
+    const source_id = requesterId(device_info);
+    const index = protectedRequesterIndex(source_id) orelse
+        return error.InterruptRouteUnavailable;
+    const table = active_interrupt_table orelse return error.InterruptRouteUnavailable;
+    const entry = &table[index];
+    if ((entry[0] & PRESENT) != 0) return error.InterruptRouteAlreadyPresent;
+
+    const encoded = interruptRemappingEntry(source_id, vector, destination_id);
+    entry[1] = encoded[1];
+    publishTables();
+    entry[0] = encoded[0];
+    publishTables();
+    errdefer {
+        entry[0] = 0;
+        entry[1] = 0;
+        publishTables();
+        for (active_units[0..active_unit_count], 0..) |unit, unit_index| {
+            globallyInvalidateInterruptEntries(
+                unit,
+                active_invalidation_queues[unit_index],
+            ) catch {};
+        }
+    }
+    for (active_units[0..active_unit_count], 0..) |unit, unit_index| {
+        try globallyInvalidateInterruptEntries(unit, active_invalidation_queues[unit_index]);
+    }
+    return remappableMessage(index);
+}
+
+fn interruptRemappingEntry(source_id: u16, vector: u8, destination_id: u32) [2]u64 {
+    return .{
+        PRESENT | (@as(u64, vector) << 16) | (@as(u64, destination_id) << 32),
+        @as(u64, source_id) | INTERRUPT_REMAP_SOURCE_VALIDATION,
+    };
+}
+
+fn remappableMessage(index: usize) RemappedMessage {
+    const handle: u16 = @intCast(index);
+    return .{
+        .address = REMAPPABLE_MSI_BASE |
+            (@as(u64, handle & 0x7FFF) << 5) |
+            REMAPPABLE_MSI_FORMAT |
+            (@as(u64, handle >> 15) << 2),
+        .data = 0,
+    };
 }
 
 fn globallyInvalidateInterruptEntries(unit: UnitRegisters, queue_base: u64) Error!void {
@@ -1023,7 +1096,7 @@ test "VT-d interrupt table denies every interrupt and invalidation is completion
 
     const status_address: u64 = 0x0200_0FFC;
     try std.testing.expectEqual(
-        @as(u64, 0x0200_0800),
+        @as(u64, 0x0200_0807),
         interruptTableAddress(0x0200_0000),
     );
     const descriptors = invalidationDescriptors(status_address);
@@ -1034,6 +1107,25 @@ test "VT-d interrupt table denies every interrupt and invalidation is completion
         descriptors[1][0],
     );
     try std.testing.expectEqual(status_address, descriptors[1][1]);
+}
+
+test "VT-d remapped MSI binds vector destination and exact requester" {
+    const requester: u16 = 0x031A;
+    const destination: u32 = 0x1020_3040;
+    const entry = interruptRemappingEntry(requester, 65, destination);
+    try std.testing.expectEqual(
+        PRESENT | (@as(u64, 65) << 16) | (@as(u64, destination) << 32),
+        entry[0],
+    );
+    try std.testing.expectEqual(
+        @as(u64, requester) | INTERRUPT_REMAP_SOURCE_VALIDATION,
+        entry[1],
+    );
+    const first = remappableMessage(0);
+    try std.testing.expectEqual(@as(u64, 0xFEE0_0010), first.address);
+    try std.testing.expectEqual(@as(u16, 0), first.data);
+    const second = remappableMessage(1);
+    try std.testing.expectEqual(@as(u64, 0xFEE0_0030), second.address);
 }
 
 test "VT-d primary fault parser binds requester address and write direction" {

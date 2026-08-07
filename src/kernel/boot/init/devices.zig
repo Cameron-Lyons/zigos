@@ -16,6 +16,9 @@ const PCI_CLASS_GRAPHICS_ADAPTER: u8 = 0x03;
 const PCI_CLASS_MULTIMEDIA_CONTROLLER: u8 = 0x04;
 const PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER: u8 = 0x07;
 
+var network_prepared = false;
+var storage_attached = false;
+
 pub const kernel_boundary_role = data_plane_boundary.kernel_boundary_role;
 pub const publishes_device_data_planes = data_plane_boundary.publishes_device_data_planes;
 pub const publishes_windowing_data_plane = data_plane_boundary.publishes_windowing_data_plane;
@@ -37,6 +40,8 @@ pub fn init() void {
     console.print("Initializing device drivers...\n");
     bootstrap_driver_port.reset();
     device_inventory.reset();
+    network_prepared = false;
+    storage_attached = false;
     hardware_proof.capturePlatformFirmwareEvidence();
     const ecam_allocation = hardware_proof.pciEcamAllocation() orelse
         @panic("ACPI MCFG is required for PCIe discovery");
@@ -79,6 +84,23 @@ pub fn init() void {
 
 pub fn startDeferredRuntimeInit() void {
     console.print("Deferred runtime keeps device data planes behind userspace drivers...\n");
+    if (network_prepared) {
+        if (!storage_attached and hardware_proof.realTargetDetected()) {
+            @panic("production I225-LM activation requires the confined storage bootstrap");
+        }
+        intel_i225_hw.activate() catch |err| {
+            console.print("ZIGOS:I225:HW:BRINGUP_FAIL ");
+            console.print(@errorName(err));
+            console.print("\n");
+            if (hardware_proof.realTargetDetected()) {
+                @panic("production I225-LM activation failed closed");
+            }
+            return;
+        };
+        console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
+        console.print("ZIGOS:I225:HW:RX_QUEUE_OK\n");
+        console.print("ZIGOS:I225:HW:REMAP_MSI_OK\n");
+    }
     publishDeferredNetworkBootstrap();
 }
 
@@ -93,7 +115,6 @@ fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
 
 fn capturePciInventory() void {
     var network_domain: ?intel_vtd.DmaDomain = null;
-    var network_prepared = false;
     if (pci.firstIntelI225Lm()) |dev| {
         device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .intel_i225_lm_inventory, false);
         intel_i225_hw.prepare(dev) catch |err| {
@@ -122,7 +143,6 @@ fn capturePciInventory() void {
     } else if (pci.firstDeviceByClass(PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);
     }
-    var storage_attached = false;
     if (pci.firstNvmeController()) |dev| {
         device_inventory.registerDetected(.storage_controller, pciDeviceId(dev), .nvme_pci_inventory, false);
         var vtd_summary = if (hardware_proof.realTargetDetected())
@@ -141,22 +161,6 @@ fn capturePciInventory() void {
         };
         if (fault_proof) |proof| hardware_proof.recordVtdIsolationProof(proof);
         storage_attached = true;
-    }
-    if (network_prepared) {
-        if (!storage_attached and hardware_proof.realTargetDetected()) {
-            @panic("production I225-LM activation requires the confined storage bootstrap");
-        }
-        intel_i225_hw.activate() catch |err| {
-            console.print("ZIGOS:I225:HW:BRINGUP_FAIL ");
-            console.print(@errorName(err));
-            console.print("\n");
-            if (hardware_proof.realTargetDetected()) {
-                @panic("production I225-LM activation failed closed");
-            }
-            return;
-        };
-        console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
-        console.print("ZIGOS:I225:HW:RX_QUEUE_OK\n");
     }
 }
 
