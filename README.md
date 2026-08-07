@@ -218,10 +218,12 @@ Use the pinned toolchain and repo entrypoints:
   page and the live capability block reports xHCI 1.1+, nonzero slots, ports,
   and interrupters, plus aligned doorbell and runtime offsets. The same page is
   remapped as a bounded sliding window over the extended-capability chain, and
-  a controller whose USB legacy register is still firmware-owned is rejected;
-  bus mastering and all controller writes remain disabled throughout this probe.
-  This publishes controller inventory only; input-device authority still requires
-  keyboard enumeration and hardware event-ring evidence.
+  ownership is requested with the architected 8-bit OS-semaphore write, and the
+  firmware semaphore must clear within a one-second invariant-TSC deadline. The
+  window is restored read-only immediately after that byte write, while bus
+  mastering and every operational-register write remain disabled. This publishes
+  controller inventory only; input-device authority still requires keyboard
+  enumeration and hardware event-ring evidence.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses

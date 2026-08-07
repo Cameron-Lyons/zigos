@@ -1,5 +1,6 @@
 const std = @import("std");
 const endian = @import("../utils/endian.zig");
+const spin = @import("../utils/spin.zig");
 
 const readU16Le = endian.readU16Le;
 const readU32Le = endian.readU32Le;
@@ -57,6 +58,7 @@ const EXTENDED_CAPABILITY_NEXT_POINTER_MASK: u32 = 0xFF;
 const EXTENDED_CAPABILITY_DWORD_SHIFT = 2;
 const USB_LEGACY_SUPPORT_CAPABILITY_ID: u8 = 1;
 const USB_LEGACY_BIOS_OWNED_SEMAPHORE: u32 = 1 << 16;
+const USB_LEGACY_OS_OWNED_SEMAPHORE: u32 = 1 << 24;
 const TEST_CAPABILITY_LENGTH: u8 = 0x40;
 const TEST_INTERFACE_VERSION: u16 = 0x0110;
 const TEST_UNSUPPORTED_INTERFACE_VERSION: u16 = 0x0080;
@@ -105,6 +107,9 @@ pub const Error = error{
     ExtendedCapabilityOutOfRange,
     ExtendedCapabilityTraversalLimit,
     FirmwareOwnsController,
+    FirmwareOwnershipTimeout,
+    LegacyCapabilityChanged,
+    OwnershipRequestRejected,
     MissingMmioInputEvidence,
 };
 
@@ -127,6 +132,13 @@ pub const CapabilityRegisters = struct {
 pub const LegacyOwnership = enum(u8) {
     not_present,
     firmware_released,
+    os_owned,
+};
+
+pub const LegacySupport = struct {
+    offset: u32,
+    firmware_owned: bool,
+    os_owned: bool,
 };
 
 pub const RingPlan = struct {
@@ -740,8 +752,8 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
     };
 }
 
-pub fn inspectLegacyOwnership(first_offset: u32, reader: anytype) Error!LegacyOwnership {
-    if (first_offset == 0) return .not_present;
+pub fn findLegacySupport(first_offset: u32, reader: anytype) Error!?LegacySupport {
+    if (first_offset == 0) return null;
     if ((first_offset & (@sizeOf(u32) - 1)) != 0 or first_offset > MAX_EXTENDED_CAPABILITY_OFFSET) {
         return error.ExtendedCapabilityOutOfRange;
     }
@@ -752,15 +764,16 @@ pub fn inspectLegacyOwnership(first_offset: u32, reader: anytype) Error!LegacyOw
         const header = reader.readDword(offset);
         const capability_id: u8 = @truncate(header & EXTENDED_CAPABILITY_ID_MASK);
         if (capability_id == USB_LEGACY_SUPPORT_CAPABILITY_ID) {
-            if ((header & USB_LEGACY_BIOS_OWNED_SEMAPHORE) != 0) {
-                return error.FirmwareOwnsController;
-            }
-            return .firmware_released;
+            return .{
+                .offset = offset,
+                .firmware_owned = firmwareOwned(header),
+                .os_owned = osOwned(header),
+            };
         }
 
         const next_dwords = (header >> EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) &
             EXTENDED_CAPABILITY_NEXT_POINTER_MASK;
-        if (next_dwords == 0) return .not_present;
+        if (next_dwords == 0) return null;
         const delta = next_dwords << EXTENDED_CAPABILITY_DWORD_SHIFT;
         if (offset > MAX_EXTENDED_CAPABILITY_OFFSET - delta) {
             return error.ExtendedCapabilityOutOfRange;
@@ -768,6 +781,40 @@ pub fn inspectLegacyOwnership(first_offset: u32, reader: anytype) Error!LegacyOw
         offset += delta;
     }
     return error.ExtendedCapabilityTraversalLimit;
+}
+
+pub fn inspectLegacyOwnership(first_offset: u32, reader: anytype) Error!LegacyOwnership {
+    const legacy = try findLegacySupport(first_offset, reader) orelse return .not_present;
+    if (legacy.firmware_owned) return error.FirmwareOwnsController;
+    return if (legacy.os_owned) .os_owned else .firmware_released;
+}
+
+pub fn claimLegacyOwnership(
+    legacy: LegacySupport,
+    reader: anytype,
+    deadline: anytype,
+) Error!LegacyOwnership {
+    if (!legacy.os_owned) reader.writeOsOwnedByte(legacy.offset, 1);
+
+    while (true) {
+        const header = reader.readDword(legacy.offset);
+        const capability_id: u8 = @truncate(header & EXTENDED_CAPABILITY_ID_MASK);
+        if (capability_id != USB_LEGACY_SUPPORT_CAPABILITY_ID) {
+            return error.LegacyCapabilityChanged;
+        }
+        if (!osOwned(header)) return error.OwnershipRequestRejected;
+        if (!firmwareOwned(header)) return .os_owned;
+        if (deadline.expired()) return error.FirmwareOwnershipTimeout;
+        spin.hint();
+    }
+}
+
+fn firmwareOwned(header: u32) bool {
+    return (header & USB_LEGACY_BIOS_OWNED_SEMAPHORE) != 0;
+}
+
+fn osOwned(header: u32) bool {
+    return (header & USB_LEGACY_OS_OWNED_SEMAPHORE) != 0;
 }
 
 pub fn defaultCapabilityRegisters() CapabilityRegisters {
@@ -897,9 +944,9 @@ test "xHCI legacy ownership accepts absent and firmware-released capabilities" {
     reader = .{ .bytes = &registers };
     try std.testing.expectEqual(LegacyOwnership.firmware_released, try inspectLegacyOwnership(0x40, reader));
 
-    writeU32Le(registers[0x50..0x54], USB_LEGACY_SUPPORT_CAPABILITY_ID | (@as(u32, 1) << 24));
+    writeU32Le(registers[0x50..0x54], USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_OS_OWNED_SEMAPHORE);
     reader = .{ .bytes = &registers };
-    try std.testing.expectEqual(LegacyOwnership.firmware_released, try inspectLegacyOwnership(0x40, reader));
+    try std.testing.expectEqual(LegacyOwnership.os_owned, try inspectLegacyOwnership(0x40, reader));
 }
 
 test "xHCI legacy ownership rejects firmware-owned and malformed chains" {
@@ -919,6 +966,101 @@ test "xHCI legacy ownership rejects firmware-owned and malformed chains" {
     try std.testing.expectError(
         error.ExtendedCapabilityTraversalLimit,
         inspectLegacyOwnership(0x40, terminal_reader),
+    );
+}
+
+const MockOwnershipReader = struct {
+    header: u32,
+    release_after_reads: ?usize = null,
+    accept_os_write: bool = true,
+    read_count: usize = 0,
+    os_write_count: usize = 0,
+    last_write_offset: u32 = 0,
+    last_write_value: u8 = 0,
+
+    pub fn readDword(self: *@This(), _: u32) u32 {
+        self.read_count += 1;
+        if (self.os_write_count != 0) {
+            if (self.release_after_reads) |release_after| {
+                if (self.read_count >= release_after) self.header &= ~USB_LEGACY_BIOS_OWNED_SEMAPHORE;
+            }
+        }
+        return self.header;
+    }
+
+    pub fn writeOsOwnedByte(self: *@This(), offset: u32, value: u8) void {
+        self.os_write_count += 1;
+        self.last_write_offset = offset;
+        self.last_write_value = value;
+        if (self.accept_os_write and value == 1) self.header |= USB_LEGACY_OS_OWNED_SEMAPHORE;
+    }
+};
+
+const MockOwnershipDeadline = struct {
+    remaining_checks: usize,
+
+    pub fn expired(self: *@This()) bool {
+        if (self.remaining_checks == 0) return true;
+        self.remaining_checks -= 1;
+        return false;
+    }
+};
+
+test "xHCI ownership handoff writes only the OS semaphore and waits for firmware release" {
+    var reader = MockOwnershipReader{
+        .header = USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_BIOS_OWNED_SEMAPHORE,
+        .release_after_reads = 3,
+    };
+    const legacy = (try findLegacySupport(0x40, &reader)).?;
+    var deadline = MockOwnershipDeadline{ .remaining_checks = 4 };
+    try std.testing.expectEqual(LegacyOwnership.os_owned, try claimLegacyOwnership(legacy, &reader, &deadline));
+    try std.testing.expectEqual(@as(usize, 1), reader.os_write_count);
+    try std.testing.expectEqual(@as(u32, 0x40), reader.last_write_offset);
+    try std.testing.expectEqual(@as(u8, 1), reader.last_write_value);
+    try std.testing.expect((reader.header & USB_LEGACY_OS_OWNED_SEMAPHORE) != 0);
+    try std.testing.expect((reader.header & USB_LEGACY_BIOS_OWNED_SEMAPHORE) == 0);
+}
+
+test "xHCI ownership handoff accepts an already OS-owned controller" {
+    var reader = MockOwnershipReader{
+        .header = USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_OS_OWNED_SEMAPHORE,
+    };
+    const legacy = (try findLegacySupport(0x40, &reader)).?;
+    var deadline = MockOwnershipDeadline{ .remaining_checks = 0 };
+    try std.testing.expectEqual(LegacyOwnership.os_owned, try claimLegacyOwnership(legacy, &reader, &deadline));
+    try std.testing.expectEqual(@as(usize, 0), reader.os_write_count);
+}
+
+test "xHCI ownership handoff rejects failed requests, changed capabilities, and timeouts" {
+    var rejected_reader = MockOwnershipReader{
+        .header = USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_BIOS_OWNED_SEMAPHORE,
+        .accept_os_write = false,
+    };
+    const rejected_legacy = (try findLegacySupport(0x40, &rejected_reader)).?;
+    var deadline = MockOwnershipDeadline{ .remaining_checks = 0 };
+    try std.testing.expectError(
+        error.OwnershipRequestRejected,
+        claimLegacyOwnership(rejected_legacy, &rejected_reader, &deadline),
+    );
+
+    var changed_reader = MockOwnershipReader{
+        .header = USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_OS_OWNED_SEMAPHORE,
+    };
+    const changed_legacy = (try findLegacySupport(0x40, &changed_reader)).?;
+    changed_reader.header = @as(u32, 2) | USB_LEGACY_OS_OWNED_SEMAPHORE;
+    try std.testing.expectError(
+        error.LegacyCapabilityChanged,
+        claimLegacyOwnership(changed_legacy, &changed_reader, &deadline),
+    );
+
+    var timeout_reader = MockOwnershipReader{
+        .header = USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_BIOS_OWNED_SEMAPHORE,
+    };
+    const timeout_legacy = (try findLegacySupport(0x40, &timeout_reader)).?;
+    deadline = .{ .remaining_checks = 2 };
+    try std.testing.expectError(
+        error.FirmwareOwnershipTimeout,
+        claimLegacyOwnership(timeout_legacy, &timeout_reader, &deadline),
     );
 }
 
