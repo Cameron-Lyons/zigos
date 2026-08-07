@@ -3,6 +3,7 @@ const spin = @import("../utils/spin.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
+const timer = @import("../timer/timer.zig");
 const i225_frame = @import("intel_i225_frame.zig");
 const i225_rx = @import("intel_i225_rx.zig");
 const i225_tx = @import("intel_i225_tx.zig");
@@ -23,6 +24,7 @@ const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
 const BAR_MEMORY_TYPE_32: u32 = 0;
 const BAR_MEMORY_TYPE_64: u32 = 0x4;
 const QUEUE_SPIN_LIMIT: u64 = 5_000_000;
+const TRANSMIT_TIMEOUT_TICKS: u64 = timer.TICKS_PER_SECOND;
 
 const REG_STATUS: usize = 0x00008;
 const REG_CTRL_EXT: usize = 0x00018;
@@ -281,9 +283,11 @@ pub fn sendPayload(payload: []const u8) bool {
         failed_transmit_frames +%= 1;
         return false;
     }
-    reapTransmitCompletions();
+    timer.synchronize();
+    const now_ticks = timer.getTicks();
+    if (!serviceTransmitQueue(now_ticks)) return false;
 
-    const descriptor_index = controller.tx_queue.reserve() catch {
+    const descriptor_index = controller.tx_queue.reserve(now_ticks) catch {
         failed_transmit_frames +%= 1;
         return false;
     };
@@ -306,6 +310,11 @@ pub fn pollReceive(output: []u8) ReceiveResult {
         return .{ .status = .failed };
     }
     if (pollDmaFault()) {
+        failed_receive_polls +%= 1;
+        return .{ .status = .failed };
+    }
+    timer.synchronize();
+    if (!serviceTransmitQueue(timer.getTicks())) {
         failed_receive_polls +%= 1;
         return .{ .status = .failed };
     }
@@ -370,10 +379,18 @@ fn reapTransmitCompletions() void {
         );
         if (!i225_tx.completionDone(descriptor.olinfo_status)) return;
         acquireDescriptor();
-        if (!i225_tx.completionDone(descriptor.olinfo_status)) return;
-        _ = controller.tx_queue.reclaim().?;
+        const completion_status = descriptor.olinfo_status;
+        _ = controller.tx_queue.reclaimCompleted(completion_status) orelse return;
         completed_transmit_frames +%= 1;
     }
+}
+
+fn serviceTransmitQueue(now_ticks: u64) bool {
+    reapTransmitCompletions();
+    if (!controller.tx_queue.oldestSubmissionExpired(now_ticks, TRANSMIT_TIMEOUT_TICKS)) return true;
+    failed_transmit_frames +%= 1;
+    containFailure("ZIGOS:I225:HW:TX_STALL_CONTAINED\n");
+    return false;
 }
 
 fn configureReceiveQueue(pending: *Controller) Error!void {

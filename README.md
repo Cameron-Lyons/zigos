@@ -168,7 +168,8 @@ Use the pinned toolchain and repo entrypoints:
   independent 32-page TX and RX buffer regions in an independent domain, and
   confirms translation on every unit. The I225-LM path attaches to the
   firmware-negotiated PHY, publishes the permanent MAC, queues TX without
-  completion spinning, and polls RX only after its requester is confined.
+  completion spinning, contains a stalled oldest TX descriptor after one
+  second, and polls RX only after its requester is confined.
   Native payloads are carried in padded Ethernet frames under the local
   experimental EtherType; receive polling accepts only directed or broadcast
   frames for that EtherType. Hardware interrupt delivery and peer-addressed
