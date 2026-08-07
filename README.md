@@ -225,9 +225,11 @@ Use the pinned toolchain and repo entrypoints:
   clears Run/Stop and interrupt enables, requires HCHalted within the specified
   16 ms bound, asserts HCRST, and requires reset completion plus a ready,
   halted, error-free final state within bounded elapsed deadlines. The window is
-  restored read-only between each operational write. This publishes controller
-  inventory only; input-device authority still requires keyboard enumeration and
-  hardware event-ring evidence.
+  restored read-only between each operational write. While the controller remains
+  halted, attach then programs CONFIG.MaxSlotsEn to the smaller of the hardware
+  capacity and the kernel's 32-slot table, preserves unrelated CONFIG fields, and
+  requires exact readback before publishing controller inventory. Input-device
+  authority still requires keyboard enumeration and hardware event-ring evidence.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses

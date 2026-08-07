@@ -63,6 +63,7 @@ const USB_LEGACY_BIOS_OWNED_SEMAPHORE: u32 = 1 << 16;
 const USB_LEGACY_OS_OWNED_SEMAPHORE: u32 = 1 << 24;
 const OPERATIONAL_USB_COMMAND_OFFSET: u32 = 0x00;
 const OPERATIONAL_USB_STATUS_OFFSET: u32 = 0x04;
+const OPERATIONAL_CONFIGURE_OFFSET: u32 = 0x38;
 const USB_COMMAND_RUN_STOP: u32 = 1 << 0;
 const USB_COMMAND_HOST_CONTROLLER_RESET: u32 = 1 << 1;
 const USB_COMMAND_INTERRUPTER_ENABLE: u32 = 1 << 2;
@@ -70,6 +71,7 @@ const USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE: u32 = 1 << 3;
 const USB_STATUS_HOST_CONTROLLER_HALTED: u32 = 1 << 0;
 const USB_STATUS_CONTROLLER_NOT_READY: u32 = 1 << 11;
 const USB_STATUS_HOST_CONTROLLER_ERROR: u32 = 1 << 12;
+const CONFIG_MAX_DEVICE_SLOTS_ENABLED_MASK: u32 = 0xFF;
 const TEST_CAPABILITY_LENGTH: u8 = 0x40;
 const TEST_INTERFACE_VERSION: u16 = 0x0110;
 const TEST_UNSUPPORTED_INTERFACE_VERSION: u16 = 0x0080;
@@ -125,6 +127,8 @@ pub const Error = error{
     ControllerHaltTimeout,
     ControllerResetTimeout,
     ControllerResetFailed,
+    ControllerConfigurationUnavailable,
+    DeviceSlotConfigurationRejected,
     MissingMmioInputEvidence,
 };
 
@@ -887,6 +891,32 @@ pub fn resetOwnedController(
     }
 }
 
+pub fn configureDeviceSlots(
+    capabilities: CapabilityRegisters,
+    mmio: anytype,
+) Error!u8 {
+    const operational_base: u32 = capabilities.capability_length;
+    const status = mmio.readReg32(operational_base + OPERATIONAL_USB_STATUS_OFFSET);
+    if ((status & (USB_STATUS_CONTROLLER_NOT_READY | USB_STATUS_HOST_CONTROLLER_ERROR)) != 0 or
+        (status & USB_STATUS_HOST_CONTROLLER_HALTED) == 0)
+    {
+        return error.ControllerConfigurationUnavailable;
+    }
+
+    const enabled_slots = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
+    if (enabled_slots == 0) return error.MissingDeviceSlots;
+
+    const configure_offset = operational_base + OPERATIONAL_CONFIGURE_OFFSET;
+    const current = mmio.readReg32(configure_offset);
+    const desired = (current & ~CONFIG_MAX_DEVICE_SLOTS_ENABLED_MASK) | @as(u32, enabled_slots);
+    mmio.writeReg32(configure_offset, desired);
+    const readback = mmio.readReg32(configure_offset);
+    if ((readback & CONFIG_MAX_DEVICE_SLOTS_ENABLED_MASK) != enabled_slots) {
+        return error.DeviceSlotConfigurationRejected;
+    }
+    return enabled_slots;
+}
+
 fn firmwareOwned(header: u32) bool {
     return (header & USB_LEGACY_BIOS_OWNED_SEMAPHORE) != 0;
 }
@@ -1296,6 +1326,68 @@ test "xHCI reset fails closed on ready, halt, reset, and final-state faults" {
         &mmio,
         &expired,
     ));
+}
+
+const MockConfigurationMmio = struct {
+    status: u32 = USB_STATUS_HOST_CONTROLLER_HALTED,
+    configuration: u32 = 0,
+    accept_write: bool = true,
+    write_count: usize = 0,
+
+    pub fn readReg32(self: *@This(), offset: u32) u32 {
+        const operational_base: u32 = TEST_CAPABILITY_LENGTH;
+        if (offset == operational_base + OPERATIONAL_USB_STATUS_OFFSET) return self.status;
+        if (offset == operational_base + OPERATIONAL_CONFIGURE_OFFSET) return self.configuration;
+        unreachable;
+    }
+
+    pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
+        if (offset != @as(u32, TEST_CAPABILITY_LENGTH) + OPERATIONAL_CONFIGURE_OFFSET) unreachable;
+        self.write_count += 1;
+        if (self.accept_write) self.configuration = value;
+    }
+};
+
+test "xHCI post-reset configuration caps enabled slots to kernel capacity" {
+    const preserved_configuration: u32 = (1 << 8) | (1 << 10) | (1 << 20);
+    var mmio = MockConfigurationMmio{ .configuration = preserved_configuration };
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_device_slots = 64;
+
+    try std.testing.expectEqual(maxDeviceSlotsU8(), try configureDeviceSlots(capabilities, &mmio));
+    try std.testing.expectEqual(@as(usize, 1), mmio.write_count);
+    try std.testing.expectEqual(
+        preserved_configuration | @as(u32, maxDeviceSlotsU8()),
+        mmio.configuration,
+    );
+
+    capabilities.max_device_slots = 16;
+    mmio = .{};
+    try std.testing.expectEqual(@as(u8, 16), try configureDeviceSlots(capabilities, &mmio));
+    try std.testing.expectEqual(@as(u32, 16), mmio.configuration);
+}
+
+test "xHCI post-reset configuration requires a ready halted controller and accepted readback" {
+    const capabilities = defaultCapabilityRegisters();
+    var mmio = MockConfigurationMmio{ .status = 0 };
+    try std.testing.expectError(
+        error.ControllerConfigurationUnavailable,
+        configureDeviceSlots(capabilities, &mmio),
+    );
+    try std.testing.expectEqual(@as(usize, 0), mmio.write_count);
+
+    mmio = .{ .status = USB_STATUS_HOST_CONTROLLER_HALTED | USB_STATUS_CONTROLLER_NOT_READY };
+    try std.testing.expectError(
+        error.ControllerConfigurationUnavailable,
+        configureDeviceSlots(capabilities, &mmio),
+    );
+
+    mmio = .{ .accept_write = false };
+    try std.testing.expectError(
+        error.DeviceSlotConfigurationRejected,
+        configureDeviceSlots(capabilities, &mmio),
+    );
+    try std.testing.expectEqual(@as(usize, 1), mmio.write_count);
 }
 
 test "xHCI capability parser rejects unsupported controllers" {
