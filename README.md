@@ -164,9 +164,12 @@ Use the pinned toolchain and repo entrypoints:
   devices. Boot revokes every discovered PCI bus master, masks INTx and disables
   MSI/MSI-X, installs coherent deny-by-default DMA and interrupt-remapping tables
   across every segment-zero unit, maps only six direction-scoped NVMe regions:
-  four queue pages, an independent 32-page bounce window, and one PRP-list page.
-  NVMe reads and writes batch up to 128 KiB per command, accept completions only
-  when phase, queue, command identifier, and submission-head bounds agree, and
+  four queue pages, one contiguous 64-page bounce region split into two
+  independent slots, and one contiguous two-page PRP-list region. NVMe reads
+  and writes keep up to two 128 KiB commands in flight, overlap host copies with
+  device I/O, accept out-of-order completions only when each CID remains owned
+  by an active slot, validate phase, queue, command identifier, and
+  submission-head bounds on every completion, and
   use invariant-TSC elapsed-time deadlines derived from CRTO/CAP timeout fields
   instead of CPU-speed-dependent loop counts. Fatal, timed-out, failed, or
   ownership-indeterminate queues are contained. The I/O completion queue enables
@@ -174,10 +177,9 @@ Use the pinned toolchain and repo entrypoints:
   the controller receives an exact-requester remapped MSI route on vector 66.
   Runtime I/O waits in `hlt` with a scheduled timer deadline and restores the
   caller's interrupt mask after each wake, while boot-time administration
-  retains the bounded polling path. When present, the
-  I225-LM TX/RX descriptor pages plus
-  independent 32-page TX and RX buffer regions in an independent domain, and
-  confirms translation on every unit. VT-d command transitions, queued
+  retains the bounded polling path. When present, boot maps the I225-LM TX/RX
+  descriptor pages plus independent 32-page TX and RX buffer regions in a
+  separate domain and confirms translation on every unit. VT-d command transitions, queued
   invalidations, and blocked-DMA proofs use invariant-TSC elapsed deadlines
   rather than CPU-speed-dependent loop counts. The I225-LM path attaches to the
   firmware-negotiated PHY, publishes the permanent MAC, queues TX without
