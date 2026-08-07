@@ -10,6 +10,17 @@ pub inline fn sti() void {
     asm volatile ("sti");
 }
 
+pub inline fn stiHlt() void {
+    asm volatile ("sti; hlt");
+}
+
+pub inline fn interruptsEnabled() bool {
+    const flags = asm volatile ("pushfq; pop %[flags]"
+        : [flags] "=r" (-> usize),
+    );
+    return (flags & (1 << 9)) != 0;
+}
+
 pub inline fn outb(port: u16, value: u8) void {
     asm volatile ("outb %[value], %[port]"
         :

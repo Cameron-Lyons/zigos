@@ -169,7 +169,12 @@ Use the pinned toolchain and repo entrypoints:
   when phase, queue, command identifier, and submission-head bounds agree, and
   use invariant-TSC elapsed-time deadlines derived from CRTO/CAP timeout fields
   instead of CPU-speed-dependent loop counts. Fatal, timed-out, failed, or
-  ownership-indeterminate queues are contained. When present, the
+  ownership-indeterminate queues are contained. The I/O completion queue enables
+  single-message vector-zero interrupts; after x2APIC and VT-d initialization,
+  the controller receives an exact-requester remapped MSI route on vector 66.
+  Runtime I/O waits in `hlt` with a scheduled timer deadline and restores the
+  caller's interrupt mask after each wake, while boot-time administration
+  retains the bounded polling path. When present, the
   I225-LM TX/RX descriptor pages plus
   independent 32-page TX and RX buffer regions in an independent domain, and
   confirms translation on every unit. VT-d command transitions, queued

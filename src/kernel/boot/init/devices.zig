@@ -84,6 +84,23 @@ pub fn init() void {
 
 pub fn startDeferredRuntimeInit() void {
     console.print("Deferred runtime keeps device data planes behind userspace drivers...\n");
+    if (storage_attached) {
+        var interrupts_ready = true;
+        nvme_hw.activateInterrupts() catch |err| {
+            interrupts_ready = false;
+            const real_target = hardware_proof.realTargetDetected();
+            console.print(if (real_target)
+                "ZIGOS:NVME:HW:INTERRUPT_BRINGUP_FAIL "
+            else
+                "ZIGOS:NVME:HW:INTERRUPT_UNAVAILABLE ");
+            console.print(@errorName(err));
+            console.print("\n");
+            if (real_target) {
+                @panic("production NVMe interrupt activation failed closed");
+            }
+        };
+        if (interrupts_ready) console.print("ZIGOS:NVME:HW:REMAP_MSI_OK\n");
+    }
     if (network_prepared) {
         if (!storage_attached and hardware_proof.realTargetDetected()) {
             @panic("production I225-LM activation requires the confined storage bootstrap");
