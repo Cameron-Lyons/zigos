@@ -1,7 +1,7 @@
 const console = @import("../utils/console.zig");
 const config = @import("../config.zig");
 
-pub fn printBootMarker(marker: []const u8) void {
+pub noinline fn printBootMarker(marker: []const u8) void {
     console.print(marker);
     console.print("\n");
 }
