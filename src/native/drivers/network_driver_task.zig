@@ -25,9 +25,14 @@ pub fn noNetworkFrame(_: []u8) ReceiveResult {
     return .{ .status = .empty };
 }
 
+pub fn noNetworkWorkPending() bool {
+    return false;
+}
+
 pub const NetworkDevice = struct {
     send: *const fn (destination: [6]u8, data: []const u8) bool,
     receive: *const fn (output: []u8) ReceiveResult,
+    workPending: *const fn () bool = noNetworkWorkPending,
     getMacAddress: *const fn () [6]u8,
 };
 
@@ -107,6 +112,7 @@ pub const EgressBroker = *const fn (request: EgressRequest) EgressDecision;
 pub const MAX_NATIVE_PAYLOAD_BYTES: usize = 160;
 pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
 pub const MAX_RECEIVE_FRAME_BYTES: usize = 1500;
+pub const RECEIVE_QUEUE_CAPACITY: usize = 32;
 const SERVICE_IDENTITY_FRAME_MAGIC = "ZGNI";
 const DISCOVERY_FRAME_MAGIC = "ZGND";
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PayloadTooLarge);
@@ -496,6 +502,7 @@ pub const NativeNetworkStack = struct {
 
 var active_device: ?*const NetworkDevice = null;
 var active_service_id: u64 = 0;
+var active_task_id: u64 = 0;
 var egress_broker: ?EgressBroker = null;
 var active_egress_capability_id: u64 = 0;
 var active_network_policy_id: u64 = 0;
@@ -507,21 +514,45 @@ var active_driver_rx_drop_count: usize = 0;
 var active_driver_rx_failure_count: usize = 0;
 var last_active_driver_rx_frame_len: usize = 0;
 var last_active_driver_rx_frame: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES;
+const QueuedReceiveFrame = struct {
+    length: usize = 0,
+    bytes: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES,
+};
+var receive_queue: [RECEIVE_QUEUE_CAPACITY]QueuedReceiveFrame = [_]QueuedReceiveFrame{.{}} ** RECEIVE_QUEUE_CAPACITY;
+var receive_queue_head: usize = 0;
+var receive_queue_tail: usize = 0;
+var receive_queue_count: usize = 0;
+var receive_overflow_scratch: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES;
+
+pub const ReceiveServiceResult = struct {
+    polls: usize = 0,
+    frames_queued: usize = 0,
+    dropped: usize = 0,
+    failed: bool = false,
+};
 
 pub fn reset() void {
     active_device = null;
     active_service_id = 0;
+    active_task_id = 0;
     egress_broker = null;
     active_egress_capability_id = 0;
     active_network_policy_id = 0;
     clearTransmitTelemetry();
     clearReceiveTelemetry();
+    clearReceiveQueue();
 }
 
 pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
+    return activateDeviceForTask(device, service_id, 0);
+}
+
+pub fn activateDeviceForTask(device: *const NetworkDevice, service_id: u64, task_id: u64) bool {
     if (service_id == 0) return false;
     active_device = device;
     active_service_id = service_id;
+    active_task_id = task_id;
+    clearReceiveQueue();
     return true;
 }
 
@@ -529,12 +560,23 @@ pub fn deactivateDevice(service_id: u64) bool {
     if (active_service_id != service_id) return false;
     active_device = null;
     active_service_id = 0;
+    active_task_id = 0;
+    clearReceiveQueue();
     clearEgressCapability();
     return true;
 }
 
 pub fn hasActiveDevice() bool {
     return active_device != null;
+}
+
+pub fn activeTaskId() u64 {
+    return active_task_id;
+}
+
+pub fn networkWorkPending() bool {
+    const device = active_device orelse return false;
+    return device.workPending();
 }
 
 pub fn setEgressBroker(broker: ?EgressBroker) void {
@@ -565,6 +607,13 @@ pub fn clearReceiveTelemetry() void {
     @memset(last_active_driver_rx_frame[0..], 0);
 }
 
+fn clearReceiveQueue() void {
+    receive_queue_head = 0;
+    receive_queue_tail = 0;
+    receive_queue_count = 0;
+    for (&receive_queue) |*frame| frame.length = 0;
+}
+
 pub fn activeDriverTransmitCount() usize {
     return active_driver_tx_count;
 }
@@ -587,6 +636,10 @@ pub fn activeDriverReceiveFailureCount() usize {
 
 pub fn lastActiveDriverReceivedFrame() []const u8 {
     return last_active_driver_rx_frame[0..last_active_driver_rx_frame_len];
+}
+
+pub fn queuedReceiveFrameCount() usize {
+    return receive_queue_count;
 }
 
 pub fn authorizeDriverTx(destination: [6]u8, frame: []const u8) bool {
@@ -619,36 +672,90 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
         active_driver_rx_failure_count += 1;
         return .{ .status = .failed };
     };
-    const result = device.receive(output);
-    switch (result.status) {
-        .empty => {
-            if (result.length != 0) return invalidReceiveResult();
-            return result;
-        },
-        .dropped => {
-            if (result.length != 0) return invalidReceiveResult();
-            active_driver_rx_drop_count += 1;
-            return result;
-        },
-        .failed => {
-            active_driver_rx_failure_count += 1;
-            return .{ .status = .failed };
-        },
-        .frame => {
-            if (result.length == 0 or result.length > output.len or result.length > MAX_RECEIVE_FRAME_BYTES) {
-                return invalidReceiveResult();
-            }
-            active_driver_rx_count += 1;
-            last_active_driver_rx_frame_len = result.length;
-            @memcpy(last_active_driver_rx_frame[0..result.length], output[0..result.length]);
-            return result;
-        },
+    if (receive_queue_count == 0) {
+        const service = serviceReceiveFrames(device, 1);
+        if (receive_queue_count == 0) {
+            if (service.failed) return .{ .status = .failed };
+            if (service.dropped != 0) return .{ .status = .dropped };
+            return .{ .status = .empty };
+        }
     }
+
+    const frame = &receive_queue[receive_queue_head];
+    defer {
+        frame.length = 0;
+        receive_queue_head = (receive_queue_head + 1) % RECEIVE_QUEUE_CAPACITY;
+        receive_queue_count -= 1;
+    }
+    if (frame.length > output.len) {
+        active_driver_rx_drop_count += 1;
+        return .{ .status = .dropped };
+    }
+    @memcpy(output[0..frame.length], frame.bytes[0..frame.length]);
+    return .{ .status = .frame, .length = frame.length };
 }
 
-fn invalidReceiveResult() ReceiveResult {
-    active_driver_rx_failure_count += 1;
-    return .{ .status = .failed };
+pub fn servicePendingReceiveFrames(budget: usize) ReceiveServiceResult {
+    const device = active_device orelse return .{};
+    if (budget == 0 or !device.workPending()) return .{};
+    return serviceReceiveFrames(device, budget);
+}
+
+fn serviceReceiveFrames(device: *const NetworkDevice, budget: usize) ReceiveServiceResult {
+    var service = ReceiveServiceResult{};
+    while (service.polls < budget) {
+        const queue_has_space = receive_queue_count < RECEIVE_QUEUE_CAPACITY;
+        const output = if (queue_has_space)
+            receive_queue[receive_queue_tail].bytes[0..]
+        else
+            receive_overflow_scratch[0..];
+        const result = device.receive(output);
+        service.polls += 1;
+        switch (result.status) {
+            .empty => {
+                if (result.length != 0) {
+                    active_driver_rx_failure_count += 1;
+                    service.failed = true;
+                }
+                return service;
+            },
+            .dropped => {
+                if (result.length != 0) {
+                    active_driver_rx_failure_count += 1;
+                    service.failed = true;
+                    return service;
+                }
+                active_driver_rx_drop_count += 1;
+                service.dropped += 1;
+            },
+            .failed => {
+                active_driver_rx_failure_count += 1;
+                service.failed = true;
+                return service;
+            },
+            .frame => {
+                if (result.length == 0 or result.length > MAX_RECEIVE_FRAME_BYTES) {
+                    active_driver_rx_failure_count += 1;
+                    service.failed = true;
+                    return service;
+                }
+                if (!queue_has_space) {
+                    active_driver_rx_drop_count += 1;
+                    service.dropped += 1;
+                    continue;
+                }
+                const frame = &receive_queue[receive_queue_tail];
+                frame.length = result.length;
+                receive_queue_tail = (receive_queue_tail + 1) % RECEIVE_QUEUE_CAPACITY;
+                receive_queue_count += 1;
+                active_driver_rx_count += 1;
+                last_active_driver_rx_frame_len = result.length;
+                @memcpy(last_active_driver_rx_frame[0..result.length], frame.bytes[0..result.length]);
+                service.frames_queued += 1;
+            },
+        }
+    }
+    return service;
 }
 
 fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypto_hash.Digest {
@@ -966,6 +1073,107 @@ test "network receive polling distinguishes empty drop failure and owned frame" 
     try std.testing.expectEqual(ReceiveStatus.failed, receiveActiveFrame(&output).status);
     try std.testing.expectEqual(@as(usize, 2), activeDriverReceiveFailureCount());
     try std.testing.expectEqual(@as(usize, 1), activeDriverReceiveCount());
+}
+
+test "pending network work is budgeted into the deferred receive queue" {
+    const Harness = struct {
+        var next_frame: usize = 0;
+        var frame_count: usize = 0;
+
+        fn send(_: [6]u8, _: []const u8) bool {
+            return true;
+        }
+
+        fn receive(output: []u8) ReceiveResult {
+            if (next_frame == frame_count) return .{ .status = .empty };
+            const frame = std.fmt.bufPrint(output, "frame-{d}", .{next_frame}) catch unreachable;
+            next_frame += 1;
+            return .{ .status = .frame, .length = frame.len };
+        }
+
+        fn workPending() bool {
+            return next_frame < frame_count;
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0, 0, 0, 0, 4 };
+        }
+    };
+
+    reset();
+    defer reset();
+    Harness.next_frame = 0;
+    Harness.frame_count = 3;
+    const device = NetworkDevice{
+        .send = Harness.send,
+        .receive = Harness.receive,
+        .workPending = Harness.workPending,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(activateDeviceForTask(&device, 10, 99));
+    try std.testing.expectEqual(@as(u64, 99), activeTaskId());
+    try std.testing.expect(networkWorkPending());
+
+    const first_service = servicePendingReceiveFrames(2);
+    try std.testing.expectEqual(@as(usize, 2), first_service.polls);
+    try std.testing.expectEqual(@as(usize, 2), first_service.frames_queued);
+    try std.testing.expectEqual(@as(usize, 2), queuedReceiveFrameCount());
+
+    var output: [32]u8 = undefined;
+    const first = receiveActiveFrame(&output);
+    try std.testing.expectEqualStrings("frame-0", output[0..first.length]);
+    const second = receiveActiveFrame(&output);
+    try std.testing.expectEqualStrings("frame-1", output[0..second.length]);
+
+    const second_service = servicePendingReceiveFrames(8);
+    try std.testing.expectEqual(@as(usize, 1), second_service.frames_queued);
+    try std.testing.expect(!networkWorkPending());
+    const third = receiveActiveFrame(&output);
+    try std.testing.expectEqualStrings("frame-2", output[0..third.length]);
+    try std.testing.expectEqual(@as(usize, 3), activeDriverReceiveCount());
+    try std.testing.expectEqualStrings("frame-2", lastActiveDriverReceivedFrame());
+}
+
+test "deferred receive service drains hardware when the software queue is full" {
+    const Harness = struct {
+        var remaining: usize = 0;
+
+        fn send(_: [6]u8, _: []const u8) bool {
+            return true;
+        }
+
+        fn receive(output: []u8) ReceiveResult {
+            if (remaining == 0) return .{ .status = .empty };
+            @memcpy(output[0..6], "packet");
+            remaining -= 1;
+            return .{ .status = .frame, .length = 6 };
+        }
+
+        fn workPending() bool {
+            return remaining != 0;
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0, 0, 0, 0, 5 };
+        }
+    };
+
+    reset();
+    defer reset();
+    Harness.remaining = RECEIVE_QUEUE_CAPACITY + 1;
+    const device = NetworkDevice{
+        .send = Harness.send,
+        .receive = Harness.receive,
+        .workPending = Harness.workPending,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(activateDevice(&device, 11));
+    const service = servicePendingReceiveFrames(RECEIVE_QUEUE_CAPACITY + 1);
+    try std.testing.expectEqual(RECEIVE_QUEUE_CAPACITY, service.frames_queued);
+    try std.testing.expectEqual(@as(usize, 1), service.dropped);
+    try std.testing.expectEqual(RECEIVE_QUEUE_CAPACITY, queuedReceiveFrameCount());
+    try std.testing.expectEqual(@as(usize, 1), activeDriverReceiveDropCount());
+    try std.testing.expect(!networkWorkPending());
 }
 
 test "native network stack gates service identity packets on attested policy capability" {

@@ -49,6 +49,7 @@ const i225_bridge = if (builtin.target.os.tag == .freestanding)
             output_capacity: usize,
             output_len: *usize,
         ) callconv(.c) u8;
+        extern fn zigosNetworkBootstrapI225WorkPending() callconv(.c) bool;
         extern fn zigosNetworkBootstrapI225Mac(output: [*]u8) callconv(.c) bool;
 
         pub fn attached() bool {
@@ -73,6 +74,10 @@ const i225_bridge = if (builtin.target.os.tag == .freestanding)
             };
         }
 
+        pub fn workPending() bool {
+            return zigosNetworkBootstrapI225WorkPending();
+        }
+
         pub fn mac() ?[6]u8 {
             var address: [6]u8 = undefined;
             if (!zigosNetworkBootstrapI225Mac(&address)) return null;
@@ -91,6 +96,10 @@ else
 
         pub fn receive(_: []u8) bootstrap_driver_port.ReceiveResult {
             return .{ .status = .empty };
+        }
+
+        pub fn workPending() bool {
+            return false;
         }
 
         pub fn mac() ?[6]u8 {
@@ -112,6 +121,10 @@ const BootedNetworkDataPlane = struct {
         return .{ .status = .failed };
     }
 
+    fn workPending() bool {
+        return i225_bridge.attached() and i225_bridge.workPending();
+    }
+
     fn getMacAddress() [6]u8 {
         if (i225_bridge.mac()) |address| return address;
         return .{ 0x02, 0x5A, 0x47, 0x00, 0x00, 0x01 };
@@ -120,6 +133,7 @@ const BootedNetworkDataPlane = struct {
     const device = bootstrap_driver_port.NetworkDevice{
         .send = send,
         .receive = receive,
+        .workPending = workPending,
         .getMacAddress = getMacAddress,
     };
 

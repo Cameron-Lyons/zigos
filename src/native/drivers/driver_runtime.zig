@@ -117,7 +117,11 @@ pub const Runtime = struct {
                         if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_bootstrap_broker) {
                             return error.KernelBootstrapNotAuthorized;
                         }
-                        if (bootstrap_driver_port.activateNetworkDevice(driver.device_id, driver.service_id)) {
+                        if (bootstrap_driver_port.activateNetworkDeviceForTask(
+                            driver.device_id,
+                            driver.service_id,
+                            driver.owner_task_id,
+                        )) {
                             try recordPublishedActivation(&record, .published_data_plane, publication);
                         }
                     }
