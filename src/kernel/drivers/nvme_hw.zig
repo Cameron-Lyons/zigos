@@ -4,12 +4,16 @@ const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("../platform/dmar.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
+const nvme_prp = @import("nvme_prp.zig");
 const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
 const PAGE_SIZE: u32 = 4096;
 
-const BOUNCE_SECTORS: usize = PAGE_SIZE / SECTOR_BYTES;
+const BOUNCE_FIRST_FRAME: u32 = 4;
+const BOUNCE_PAGE_COUNT: u32 = @intCast(nvme_prp.MAX_DATA_PAGES);
+const PRP_LIST_FRAME: u32 = BOUNCE_FIRST_FRAME + BOUNCE_PAGE_COUNT;
+const BOUNCE_SECTORS: usize = nvme_prp.MAX_TRANSFER_BYTES / SECTOR_BYTES;
 
 const REG_CAP: usize = 0x00;
 const REG_VS: usize = 0x08;
@@ -76,7 +80,8 @@ const NVM_OPC_READ: u32 = 0x02;
 const IO_QUEUE_ID: u16 = 1;
 const IO_QUEUE_ENTRIES: u32 = 32;
 const COMMAND_SPIN_LIMIT: u64 = 50_000_000;
-const DMA_FRAME_COUNT: u32 = 5;
+const DMA_FRAME_COUNT: u32 = PRP_LIST_FRAME + 1;
+const DMA_WINDOW_COUNT: usize = 6;
 
 const Queue = struct {
     sq_phys: u32,
@@ -96,13 +101,19 @@ const DmaFrames = struct {
         return self.base + index * PAGE_SIZE;
     }
 
-    fn windows(self: DmaFrames) [DMA_FRAME_COUNT]intel_vtd.DmaWindow {
+    fn windows(self: DmaFrames) [DMA_WINDOW_COUNT]intel_vtd.DmaWindow {
         return .{
             .{ .base = self.frame(0), .device_readable = true, .device_writable = false },
             .{ .base = self.frame(1), .device_readable = false, .device_writable = true },
             .{ .base = self.frame(2), .device_readable = true, .device_writable = false },
             .{ .base = self.frame(3), .device_readable = false, .device_writable = true },
-            .{ .base = self.frame(4), .device_readable = true, .device_writable = true },
+            .{
+                .base = self.frame(BOUNCE_FIRST_FRAME),
+                .length = @intCast(nvme_prp.MAX_TRANSFER_BYTES),
+                .device_readable = true,
+                .device_writable = true,
+            },
+            .{ .base = self.frame(PRP_LIST_FRAME), .device_readable = true, .device_writable = false },
         };
     }
 };
@@ -116,6 +127,7 @@ pub const Controller = struct {
     nsid: u32 = 1,
     lba_bytes: u32 = SECTOR_BYTES,
     namespace_sectors: u64 = 0,
+    io_prp_list_phys: u32 = 0,
 
     fn reg32(self: *const Controller, offset: usize) u32 {
         return @as(*volatile u32, @ptrFromInt(self.bar + offset)).*;
@@ -244,6 +256,7 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
     var i: usize = 0;
     while (i < 16) : (i += 1) sq_entry[i] = command[i];
     sq_entry[0] = (command[0] & 0x0000_FFFF) | (@as(u32, cid) << 16);
+    publishSubmission();
 
     queue.sq_tail = (queue.sq_tail + 1) % queue.entries;
     self.writeReg32(sqDoorbell(self, queue.qid), queue.sq_tail);
@@ -301,13 +314,25 @@ fn ioCommand(self: *Controller, opcode: u32, lba: u64, buffer_phys: u32, sector_
     if (!self.io_ready) return error.NamespaceMissing;
 
     if (sector_count == 0) return error.EmptyTransfer;
-    if (@as(usize, sector_count) * self.lba_bytes > PAGE_SIZE) return error.TransferTooLarge;
+    const transfer_bytes = @as(usize, sector_count) * self.lba_bytes;
+    const prp = nvme_prp.plan(buffer_phys, self.io_prp_list_phys, transfer_bytes) catch |err| switch (err) {
+        error.EmptyTransfer => return error.EmptyTransfer,
+        error.TransferTooLarge => return error.TransferTooLarge,
+        else => return error.DmaIsolationBypassed,
+    };
+    const prp_list: [*]volatile u64 = @ptrFromInt(self.io_prp_list_phys);
+    for (0..prp.list_entry_count) |index| {
+        prp_list[index] = prp.listEntryAddress(index) orelse return error.DmaIsolationBypassed;
+    }
 
     if (lba > self.namespace_sectors or self.namespace_sectors - lba < sector_count) return error.LbaOutOfRange;
     var cmd = [_]u32{0} ** 16;
     cmd[0] = opcode;
     cmd[1] = self.nsid;
-    cmd[6] = buffer_phys;
+    cmd[6] = @truncate(prp.buffer_address);
+    cmd[7] = @truncate(prp.buffer_address >> 32);
+    cmd[8] = @truncate(prp.second_pointer);
+    cmd[9] = @truncate(prp.second_pointer >> 32);
     cmd[10] = @truncate(lba & 0xFFFF_FFFF);
     cmd[11] = @truncate(lba >> 32);
     cmd[12] = @as(u32, sector_count) - 1;
@@ -333,6 +358,10 @@ pub fn flush(self: *Controller) Error!void {
 fn zeroFrame(phys: u32) void {
     const bytes: [*]u8 = @ptrFromInt(phys);
     @memset(bytes[0..PAGE_SIZE], 0);
+}
+
+fn publishSubmission() void {
+    asm volatile ("mfence" ::: .{ .memory = true });
 }
 
 var active_controller: Controller = undefined;
@@ -380,6 +409,7 @@ fn issueFaultProbe(self: *Controller, guard_phys: u32) void {
     const sq_entry: [*]volatile u32 = @ptrFromInt(queue.sq_phys + queue.sq_tail * SQ_ENTRY_BYTES);
     for (0..command.len) |index| sq_entry[index] = command[index];
     sq_entry[0] = (command[0] & 0x0000_FFFF) | (@as(u32, cid) << 16);
+    publishSubmission();
     queue.sq_tail = (queue.sq_tail + 1) % queue.entries;
     self.writeReg32(sqDoorbell(self, queue.qid), queue.sq_tail);
 }
@@ -460,7 +490,8 @@ pub fn attachAsBackend(
     }
 
     try createIoQueues(&controller, frames);
-    const bounce = frames.frame(4);
+    controller.io_prp_list_phys = frames.frame(PRP_LIST_FRAME);
+    const bounce = frames.frame(BOUNCE_FIRST_FRAME);
     try identifyNamespace(&controller, bounce);
     active_controller = controller;
     active_device = dev;
@@ -565,10 +596,11 @@ export fn zigosStorageBootstrapNvmeDmaWindow(
         2 => .{ .phys = active_controller.io.sq_phys, .readable = true, .writable = false },
         3 => .{ .phys = active_controller.io.cq_phys, .readable = false, .writable = true },
         4 => .{ .phys = bounce_phys, .readable = true, .writable = true },
+        5 => .{ .phys = active_controller.io_prp_list_phys, .readable = true, .writable = false },
         else => return false,
     };
     base_out.* = window.phys;
-    length_out.* = PAGE_SIZE;
+    length_out.* = if (index == 4) nvme_prp.MAX_TRANSFER_BYTES else PAGE_SIZE;
     device_readable_out.* = window.readable;
     device_writable_out.* = window.writable;
     return true;

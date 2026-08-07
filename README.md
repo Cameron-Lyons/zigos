@@ -163,8 +163,10 @@ Use the pinned toolchain and repo entrypoints:
   firmware opt-out, and a segment-zero VT-d unit covering all remaining PCI
   devices. Boot revokes every discovered PCI bus master, masks INTx and disables
   MSI/MSI-X, installs coherent deny-by-default DMA and interrupt-remapping tables
-  across every segment-zero unit, maps only the five direction-scoped NVMe
-  queue/bounce pages and, when present, the I225-LM TX/RX descriptor pages plus
+  across every segment-zero unit, maps only six direction-scoped NVMe regions:
+  four queue pages, an independent 32-page bounce window, and one PRP-list page.
+  NVMe reads and writes batch up to 128 KiB per command. When present, the
+  I225-LM TX/RX descriptor pages plus
   independent 32-page TX and RX buffer regions in an independent domain, and
   confirms translation on every unit. The I225-LM path attaches to the
   firmware-negotiated PHY, publishes the permanent MAC, queues TX without
