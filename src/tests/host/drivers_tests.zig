@@ -9,6 +9,7 @@ const first_target_telemetry = @import("../../kernel/drivers/first_target_teleme
 const intel_i225_tx = @import("../../kernel/drivers/intel_i225_tx.zig");
 const nvme_completion = @import("../../kernel/drivers/nvme_completion.zig");
 const nvme_prp = @import("../../kernel/drivers/nvme_prp.zig");
+const nvme_timing = @import("../../kernel/drivers/nvme_timing.zig");
 const network_driver_task = @import("../../native/drivers/network_driver_task.zig");
 
 test "driver host tests import native driver modules" {
@@ -21,5 +22,6 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(intel_i225_tx);
     std.testing.refAllDecls(nvme_completion);
     std.testing.refAllDecls(nvme_prp);
+    std.testing.refAllDecls(nvme_timing);
     std.testing.refAllDecls(network_driver_task);
 }

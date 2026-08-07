@@ -1,11 +1,13 @@
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
+const tsc_clock = @import("../timer/tsc_clock.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("../platform/dmar.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const nvme_completion = @import("nvme_completion.zig");
 const nvme_prp = @import("nvme_prp.zig");
+const nvme_timing = @import("nvme_timing.zig");
 const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
@@ -18,6 +20,7 @@ const BOUNCE_SECTORS: usize = nvme_prp.MAX_TRANSFER_BYTES / SECTOR_BYTES;
 
 const REG_CAP: usize = 0x00;
 const REG_VS: usize = 0x08;
+const REG_CRTO: usize = 0x68;
 const REG_CC: usize = 0x14;
 const REG_CSTS: usize = 0x1C;
 const REG_AQA: usize = 0x24;
@@ -42,7 +45,6 @@ const BAR_MAP_BYTES: u32 = 0x2000;
 const BAR_IO_SPACE: u32 = 1 << 0;
 const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
 const BAR_MEMORY_TYPE_64: u32 = 0x4;
-const READY_SPIN_LIMIT: u64 = 50_000_000;
 
 comptime {
     if (@as(usize, BAR_MAP_BYTES) > mmio_windows.nvme.bytes) {
@@ -81,7 +83,6 @@ const NVM_OPC_READ: u32 = 0x02;
 
 const IO_QUEUE_ID: u16 = 1;
 const IO_QUEUE_ENTRIES: u32 = 32;
-const COMMAND_SPIN_LIMIT: u64 = 50_000_000;
 const DMA_FRAME_COUNT: u32 = PRP_LIST_FRAME + 1;
 const DMA_WINDOW_COUNT: usize = 6;
 
@@ -161,6 +162,10 @@ pub const Controller = struct {
     pub fn fatal(self: *const Controller) bool {
         return (self.reg32(REG_CSTS) & CSTS_CFS) != 0;
     }
+
+    fn readyTimeoutMilliseconds(self: *const Controller) u64 {
+        return nvme_timing.readyTimeoutMilliseconds(self.capabilities(), self.reg32(REG_CRTO));
+    }
 };
 
 fn barPhysicalAddress(dev: pci.PCIDevice) ?usize {
@@ -192,8 +197,8 @@ fn doorbellStride(cap: u64) usize {
 }
 
 fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
-    var spins: u64 = 0;
-    while (spins < READY_SPIN_LIMIT) : (spins += 1) {
+    const deadline = tsc_clock.afterMilliseconds(controller.readyTimeoutMilliseconds());
+    while (!deadline.expired()) {
         if (controller.fatal()) return false;
         if (controller.ready() == want_ready) return true;
         spin.hint();
@@ -264,9 +269,11 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
     self.writeReg32(sqDoorbell(self, queue.qid), queue.sq_tail);
 
     const cqe: [*]volatile u32 = @ptrFromInt(queue.cq_phys + queue.cq_head * CQ_ENTRY_BYTES);
+    const deadline = tsc_clock.afterMilliseconds(nvme_timing.COMMAND_TIMEOUT_MILLISECONDS);
     var spins: u64 = 0;
-    while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
+    while (true) : (spins +%= 1) {
         if ((spins & 0x3FF) == 0) {
+            if (deadline.expired()) return error.CommandTimeout;
             if (self.fatal()) return error.ControllerFatal;
             if (intel_vtd.faultMonitoringEnabled() and
                 (intel_vtd.pollFault() catch return error.DmaFault) != null)
@@ -294,7 +301,6 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
         }
         spin.hint();
     }
-    return error.CommandTimeout;
 }
 
 pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {

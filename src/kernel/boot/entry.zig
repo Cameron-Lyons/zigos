@@ -9,6 +9,7 @@ const init_core = @import("init/core.zig");
 const init_devices = @import("init/devices.zig");
 const init_runtime = @import("init/runtime.zig");
 const hardware_proof = @import("../platform/hardware_proof.zig");
+const tsc_clock = @import("../timer/tsc_clock.zig");
 
 const QEMU_TSC_FREQUENCY_HZ: u64 = 2_400_000_000;
 
@@ -75,6 +76,7 @@ pub fn kernelMain() void {
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();
+    tsc_clock.init(features.tsc_frequency_hz);
 
     init_core.init();
     common.printBootMarker(boot_markers.cpu_syscall_enabled);
