@@ -6,6 +6,7 @@ const io = @import("../utils/io.zig");
 const timer = @import("../timer/timer.zig");
 const intel_i225_hw = @import("../drivers/intel_i225_hw.zig");
 const nvme_hw = @import("../drivers/nvme_hw.zig");
+const xhci_hw = @import("../drivers/xhci_hw.zig");
 
 const GateHandler = *const fn () callconv(.c) void;
 
@@ -53,6 +54,7 @@ extern fn isr31() void;
 extern fn isr64() void;
 extern fn isr65() void;
 extern fn isr66() void;
+extern fn isr67() void;
 extern fn isr255() void;
 
 const exception_stubs = [_]GateHandler{
@@ -210,6 +212,8 @@ pub fn init() void {
     registerHandler(intel_i225_hw.INTERRUPT_VECTOR, i225Interrupt);
     setKernelGate(nvme_hw.INTERRUPT_VECTOR, &isr66);
     registerHandler(nvme_hw.INTERRUPT_VECTOR, nvmeInterrupt);
+    setKernelGate(xhci_hw.INTERRUPT_VECTOR, &isr67);
+    registerHandler(xhci_hw.INTERRUPT_VECTOR, xhciInterrupt);
     setKernelGate(timer.SPURIOUS_VECTOR, &isr255);
     registerHandler(timer.SPURIOUS_VECTOR, spuriousInterrupt);
 
@@ -234,6 +238,10 @@ fn i225Interrupt(_: *InterruptFrame) void {
 
 fn nvmeInterrupt(_: *InterruptFrame) void {
     nvme_hw.handleInterrupt();
+}
+
+fn xhciInterrupt(_: *InterruptFrame) void {
+    xhci_hw.handleInterrupt();
 }
 
 fn spuriousInterrupt(_: *InterruptFrame) void {
