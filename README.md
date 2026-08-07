@@ -252,9 +252,18 @@ Use the pinned toolchain and repo entrypoints:
   work and acknowledges x2APIC; the native idle loop drains at most one 64-entry
   event ring per pass, follows the consumer cycle bit across wrap, writes ERDP
   to the first unconsumed TRB with EHB acknowledgement, and rechecks the ring
-  before sleeping. DMA faults, invalid port events, unsupported event types,
-  ERDP rejection, or an unexpected halted/error state quiesce the controller and
-  revoke MSI plus bus mastering. Input-device
+  before sleeping. Supported Protocol ranges may be sparse but must not overlap;
+  every serviced port must resolve to its exact Protocol Slot Type. Port-status changes
+  preserve only architected sticky controls while acknowledging RW1CS bits;
+  connected USB2/USB3 ports receive bounded normal/warm resets as appropriate.
+  A single cycle-tracked command producer submits Enable Slot and disconnect-time
+  Disable Slot commands through doorbell zero, validates completion pointers and
+  slot identities, and links or clears DCBAA entries only at the specified
+  completion boundary. Reset and command waits keep the one-shot timer armed and
+  contain the controller after one second without progress. DMA faults, invalid
+  port or command events, unsupported event types, ERDP rejection, or an
+  unexpected halted/error state quiesce the controller and revoke MSI plus bus
+  mastering. Input-device
   authority still requires keyboard enumeration and hardware event-ring evidence.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
