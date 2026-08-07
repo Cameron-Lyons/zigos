@@ -17,7 +17,7 @@ pub fn run() noreturn {
             x86.sti();
             continue;
         }
-        if (session_manager.userspaceSchedulerHasReadyTasks()) {
+        if (session_manager.userspaceSchedulerHasReadyTasks() or xhci_hw.lifecyclePending()) {
             timer.armSchedulerTick();
         } else {
             timer.disarmSchedulerTick();

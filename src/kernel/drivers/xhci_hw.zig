@@ -11,7 +11,10 @@ const xhci = @import("xhci.zig");
 
 const PAGE_BYTES = mmio_windows.PAGE_BYTES;
 const OWNERSHIP_TIMEOUT_MILLISECONDS: u64 = 1_000;
+const PORT_RESET_TIMEOUT_MILLISECONDS: u64 = 1_000;
+const COMMAND_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const OS_OWNED_BYTE_OFFSET: usize = 3;
+const PORT_RESET_COMPLETION_CHANGE_MASK: u7 = (1 << 2) | (1 << 4);
 
 pub const INTERRUPT_VECTOR: u8 = 67;
 
@@ -43,6 +46,7 @@ pub const Error = xhci.Error || error{
 };
 
 var active_capabilities: ?xhci.CapabilityRegisters = null;
+var active_protocols: ?xhci.SupportedProtocols = null;
 var active_legacy_ownership: ?xhci.LegacyOwnership = null;
 var active_controller_reset = false;
 var active_enabled_slots: u8 = 0;
@@ -55,25 +59,59 @@ var active_dma_window_count: usize = 0;
 var active_bar_address: usize = 0;
 var active = false;
 var event_consumer = xhci.EventRingConsumer{};
+var command_producer = xhci.CommandRingProducer{};
 var pending_interrupts: u32 = 0;
 var interrupt_count: u64 = 0;
 var event_count: u64 = 0;
 var port_status_change_count: u64 = 0;
+var command_completion_count: u64 = 0;
+
+const PortAction = enum(u8) {
+    none,
+    enable_slot,
+    disable_slot,
+};
+
+const PortRuntimeState = struct {
+    connected: bool = false,
+    enabled: bool = false,
+    slot_id: u8 = 0,
+    reset_deadline: ?tsc_clock.Deadline = null,
+    action: PortAction = .none,
+};
+
+const OutstandingCommand = struct {
+    kind: xhci.CommandKind,
+    trb_address: u64,
+    port_id: u8,
+    slot_id: u8,
+    deadline: tsc_clock.Deadline,
+};
+
+var ports: [256]PortRuntimeState = [_]PortRuntimeState{.{}} ** 256;
+var outstanding_command: ?OutstandingCommand = null;
+var next_port_scan: u16 = 1;
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     if (active_dma_plan != null) return error.AlreadyPrepared;
     if (pci.busMasteringEnabled(device_info)) return error.BusMasteringNotRevoked;
     active_capabilities = null;
+    active_protocols = null;
     active_legacy_ownership = null;
     active_controller_reset = false;
     active_enabled_slots = 0;
     active_bar_address = 0;
     active = false;
     event_consumer = .{};
+    command_producer = .{};
+    ports = [_]PortRuntimeState{.{}} ** 256;
+    outstanding_command = null;
+    next_port_scan = 1;
     @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
     @atomicStore(u64, &interrupt_count, 0, .seq_cst);
     event_count = 0;
     port_status_change_count = 0;
+    command_completion_count = 0;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -86,6 +124,11 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     try validateControllerRegisterRanges(bar.address, capabilities);
     if (!tsc_clock.initialized()) return error.InvariantClockUnavailable;
     var reader = ExtendedCapabilityReader{ .bar_address = bar.address };
+    const protocols = try xhci.parseSupportedProtocols(
+        capabilities,
+        capabilities.extended_capability_offset,
+        &reader,
+    );
     const legacy = try xhci.findLegacySupport(capabilities.extended_capability_offset, &reader);
     const legacy_ownership = if (legacy) |support| ownership: {
         break :ownership try xhci.claimLegacyOwnership(
@@ -117,6 +160,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_dma_window_count = dma_window_count;
     active_bar_address = bar.address;
     active_capabilities = capabilities;
+    active_protocols = protocols;
     active_legacy_ownership = legacy_ownership;
     active_controller_reset = true;
     active_enabled_slots = enabled_slots;
@@ -127,6 +171,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
 pub fn validated() bool {
     const ownership = active_legacy_ownership orelse return false;
     return active_capabilities != null and
+        active_protocols != null and
         ownership != .firmware_released and
         active_controller_reset and
         active_enabled_slots != 0 and
@@ -210,10 +255,15 @@ pub fn activate() Error!void {
     bus_master_enabled = true;
 
     event_consumer = .{};
+    command_producer = .{};
+    ports = [_]PortRuntimeState{.{}} ** 256;
+    outstanding_command = null;
+    next_port_scan = 1;
     @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
     @atomicStore(u64, &interrupt_count, 0, .seq_cst);
     event_count = 0;
     port_status_change_count = 0;
+    command_completion_count = 0;
     @atomicStore(bool, &active, true, .seq_cst);
     try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
     msi_enabled = false;
@@ -238,6 +288,17 @@ pub fn eventWorkPending() bool {
     return currentEventReady();
 }
 
+pub fn lifecyclePending() bool {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return false;
+    if (outstanding_command != null) return true;
+    const capabilities = active_capabilities orelse return false;
+    var port_id: u16 = 1;
+    while (port_id <= capabilities.max_ports) : (port_id += 1) {
+        if (ports[port_id].reset_deadline != null) return true;
+    }
+    return false;
+}
+
 pub fn servicePendingEvents() usize {
     if (!@atomicLoad(bool, &active, .seq_cst)) return 0;
     const interrupt_wakes = @atomicRmw(
@@ -247,10 +308,14 @@ pub fn servicePendingEvents() usize {
         0,
         .seq_cst,
     );
-    if (interrupt_wakes == 0 and !currentEventReady()) return 0;
+    const event_ready = currentEventReady();
+    if (interrupt_wakes == 0 and !event_ready and !lifecyclePending()) return 0;
     if (pollDmaFault()) return 0;
+    if (lifecycleTimedOut()) return 0;
+    if (interrupt_wakes == 0 and !event_ready) return 0;
 
     const plan = active_dma_plan.?;
+    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
     var processed: usize = 0;
     while (processed < plan.ring_plan.event_ring_trbs) : (processed += 1) {
         const words = readCurrentEvent() orelse break;
@@ -264,21 +329,24 @@ pub fn servicePendingEvents() usize {
         event_count +%= 1;
         switch (event.kind) {
             .port_status_change => {
-                const capabilities = active_capabilities.?;
-                if (!event.succeeded() or event.port_id == 0 or
-                    event.port_id > capabilities.max_ports)
-                {
+                handlePortStatusChange(event, &reader) catch {
                     containFailure("ZIGOS:XHCI:HW:PORT_EVENT_CONTAINED\n");
                     return processed + 1;
-                }
+                };
                 port_status_change_count +%= 1;
+            },
+            .command_completion => {
+                handleCommandCompletion(event) catch {
+                    containFailure("ZIGOS:XHCI:HW:COMMAND_EVENT_CONTAINED\n");
+                    return processed + 1;
+                };
+                command_completion_count +%= 1;
             },
             .host_controller, .vendor_defined, .unknown => {
                 containFailure("ZIGOS:XHCI:HW:CONTROLLER_EVENT_CONTAINED\n");
                 return processed + 1;
             },
             .transfer,
-            .command_completion,
             .bandwidth_request,
             .doorbell,
             .device_notification,
@@ -294,7 +362,6 @@ pub fn servicePendingEvents() usize {
         containFailure("ZIGOS:XHCI:HW:EVENT_RING_STATE_CONTAINED\n");
         return processed;
     };
-    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
     xhci.acknowledgePrimaryEventRing(
         active_capabilities.?,
         dequeue_address,
@@ -305,7 +372,11 @@ pub fn servicePendingEvents() usize {
     };
     if (!xhci.controllerRunningHealthy(active_capabilities.?, &reader)) {
         containFailure("ZIGOS:XHCI:HW:RUN_STATE_CONTAINED\n");
+        return processed;
     }
+    submitNextPortAction(&reader) catch {
+        containFailure("ZIGOS:XHCI:HW:COMMAND_SUBMIT_CONTAINED\n");
+    };
     return processed;
 }
 
@@ -317,8 +388,196 @@ pub fn portStatusChangeEventCount() u64 {
     return port_status_change_count;
 }
 
+pub fn commandCompletionEventCount() u64 {
+    return command_completion_count;
+}
+
 pub fn handledInterruptCount() u64 {
     return @atomicLoad(u64, &interrupt_count, .seq_cst);
+}
+
+fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) Error!void {
+    const capabilities = active_capabilities orelse return error.InvalidPortStatus;
+    const protocols = active_protocols orelse return error.MissingSupportedProtocols;
+    if (!event.succeeded() or event.port_id == 0 or event.port_id > capabilities.max_ports) {
+        return error.InvalidPortStatus;
+    }
+    const protocol = protocols.forPort(event.port_id) orelse return error.MissingPortProtocol;
+    const register_offset = try xhci.portRegisterOffset(capabilities, event.port_id);
+    const raw_status = reader.readReg32(register_offset);
+    const status = xhci.decodePortStatus(raw_status);
+    if (status.change_bits == 0 or status.over_current) return error.InvalidPortStatus;
+
+    const state = &ports[event.port_id];
+    state.connected = status.connected;
+    state.enabled = status.enabled;
+    if (!status.connected) {
+        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        state.reset_deadline = null;
+        state.action = if (state.slot_id != 0) .disable_slot else .none;
+        return;
+    }
+    if (!status.powered) return error.InvalidPortStatus;
+    if (status.enabled) {
+        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        state.reset_deadline = null;
+        if (state.slot_id == 0 and !commandTargets(event.port_id, .enable_slot)) {
+            state.action = .enable_slot;
+        }
+        return;
+    }
+    if ((status.change_bits & PORT_RESET_COMPLETION_CHANGE_MASK) != 0) {
+        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        return error.InvalidPortStatus;
+    }
+    if (status.reset_active) {
+        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        if (state.reset_deadline == null) {
+            state.reset_deadline = tsc_clock.afterMilliseconds(PORT_RESET_TIMEOUT_MILLISECONDS);
+        }
+        return;
+    }
+    if (protocol.kind == .usb3 and !status.cold_attach) return error.InvalidPortStatus;
+
+    reader.writeReg32(register_offset, xhci.portResetWrite(raw_status, protocol));
+    state.reset_deadline = tsc_clock.afterMilliseconds(PORT_RESET_TIMEOUT_MILLISECONDS);
+}
+
+fn handleCommandCompletion(event: xhci.Event) Error!void {
+    const command = outstanding_command orelse return error.CommandRingStateInvalid;
+    if (!event.succeeded() or event.parameter != command.trb_address) {
+        return error.CommandRingStateInvalid;
+    }
+    const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
+    const state = &ports[command.port_id];
+    switch (command.kind) {
+        .enable_slot => {
+            if (event.slot_id == 0 or event.slot_id > active_enabled_slots or state.slot_id != 0) {
+                return error.InvalidDeviceSlot;
+            }
+            var port_id: u16 = 1;
+            while (port_id <= capabilities.max_ports) : (port_id += 1) {
+                if (ports[port_id].slot_id == event.slot_id) return error.InvalidDeviceSlot;
+            }
+            try clearDeviceContext(event.slot_id);
+            try writeDcbaaSlot(event.slot_id, try active_dma_plan.?.arena.deviceContextAddress(event.slot_id));
+            state.slot_id = event.slot_id;
+            state.action = if (state.connected and state.enabled) .none else .disable_slot;
+        },
+        .disable_slot => {
+            if (command.slot_id == 0 or event.slot_id != command.slot_id or
+                state.slot_id != command.slot_id)
+            {
+                return error.InvalidDeviceSlot;
+            }
+            try writeDcbaaSlot(command.slot_id, 0);
+            try clearDeviceContext(command.slot_id);
+            state.slot_id = 0;
+            state.action = if (state.connected and state.enabled) .enable_slot else .none;
+        },
+    }
+    outstanding_command = null;
+}
+
+fn commandTargets(port_id: u8, kind: xhci.CommandKind) bool {
+    const command = outstanding_command orelse return false;
+    return command.port_id == port_id and command.kind == kind;
+}
+
+fn lifecycleTimedOut() bool {
+    if (outstanding_command) |command| {
+        if (command.deadline.expired()) {
+            containFailure("ZIGOS:XHCI:HW:COMMAND_TIMEOUT_CONTAINED\n");
+            return true;
+        }
+    }
+    const capabilities = active_capabilities orelse return false;
+    var port_id: u16 = 1;
+    while (port_id <= capabilities.max_ports) : (port_id += 1) {
+        if (ports[port_id].reset_deadline) |deadline| {
+            if (deadline.expired()) {
+                containFailure("ZIGOS:XHCI:HW:PORT_RESET_TIMEOUT_CONTAINED\n");
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
+    if (outstanding_command != null) return;
+    const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
+    const protocols = active_protocols orelse return error.MissingSupportedProtocols;
+    const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
+    var inspected: u16 = 0;
+    while (inspected < capabilities.max_ports) : (inspected += 1) {
+        const port_id: u8 = @intCast(next_port_scan);
+        next_port_scan = if (next_port_scan >= capabilities.max_ports) 1 else next_port_scan + 1;
+        const state = &ports[port_id];
+        if (state.action == .none) continue;
+
+        const kind: xhci.CommandKind = switch (state.action) {
+            .none => unreachable,
+            .enable_slot => .enable_slot,
+            .disable_slot => .disable_slot,
+        };
+        const words = switch (kind) {
+            .enable_slot => xhci.enableSlotCommand(
+                (protocols.forPort(port_id) orelse return error.MissingPortProtocol).slot_type,
+                command_producer.cycle_state,
+            ),
+            .disable_slot => try xhci.disableSlotCommand(
+                state.slot_id,
+                command_producer.cycle_state,
+            ),
+        };
+        const command_address = try command_producer.commandAddress(plan.ring_plan);
+        const command_cycle = command_producer.cycle_state;
+        const trb: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(command_address)));
+        trb[0] = words[0];
+        trb[1] = words[1];
+        trb[2] = words[2];
+        trb[3] = words[3];
+        if (try command_producer.advance(plan.ring_plan.command_ring_trbs)) {
+            const link_address = try command_producer.linkAddress(plan.ring_plan);
+            const link: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(link_address)));
+            link[3] = xhci.commandLinkControl(command_cycle);
+        }
+        publishDmaStructures();
+        state.action = .none;
+        outstanding_command = .{
+            .kind = kind,
+            .trb_address = command_address,
+            .port_id = port_id,
+            .slot_id = state.slot_id,
+            .deadline = tsc_clock.afterMilliseconds(COMMAND_TIMEOUT_MILLISECONDS),
+        };
+        try xhci.ringCommandDoorbell(capabilities, reader);
+        return;
+    }
+}
+
+fn writeDcbaaSlot(slot_id: u8, address: u64) Error!void {
+    const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
+    if (slot_id == 0 or slot_id > plan.arena.enabled_device_slots) {
+        return error.InvalidDeviceSlot;
+    }
+    const entry_address = std.math.add(
+        u64,
+        plan.arena.dcbaa_address,
+        @as(u64, slot_id) * xhci.DCBAA_ENTRY_BYTES,
+    ) catch return error.DmaAddressOutsidePlan;
+    @as(*volatile u64, @ptrFromInt(@as(usize, @intCast(entry_address)))).* = address;
+    publishDmaStructures();
+}
+
+fn clearDeviceContext(slot_id: u8) Error!void {
+    const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
+    const address = try plan.arena.deviceContextAddress(slot_id);
+    const bytes: usize = @intCast(plan.arena.device_context_stride);
+    const context: [*]u8 = @ptrFromInt(@as(usize, @intCast(address)));
+    @memset(context[0..bytes], 0);
+    publishDmaStructures();
 }
 
 fn currentEventReady() bool {
@@ -363,6 +622,8 @@ fn pollDmaFault() bool {
 fn containFailure(marker: []const u8) void {
     @atomicStore(bool, &active, false, .seq_cst);
     @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
+    outstanding_command = null;
+    ports = [_]PortRuntimeState{.{}} ** 256;
     if (active_capabilities) |capabilities| {
         if (active_bar_address != 0) {
             var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
@@ -425,7 +686,9 @@ fn validateControllerRegisterRanges(
     bar_address: usize,
     capabilities: xhci.CapabilityRegisters,
 ) Error!void {
-    try validateBarRange(bar_address, capabilities.capability_length, 0x40);
+    const operational_bytes = @as(u64, 0x400) +
+        @as(u64, capabilities.max_ports) * 0x10;
+    try validateBarRange(bar_address, capabilities.capability_length, operational_bytes);
     try validateBarRange(bar_address, capabilities.runtime_register_offset, 0x40);
     try validateBarRange(bar_address, capabilities.doorbell_offset, @sizeOf(u32));
 }
