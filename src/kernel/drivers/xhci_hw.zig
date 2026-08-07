@@ -176,7 +176,8 @@ fn validTestSnapshot() [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
     snapshot[0] = 0x40;
     endian.writeU16Le(snapshot[2..4], 0x0110);
     endian.writeU32Le(snapshot[4..8], 32 | (@as(u32, 8) << 8) | (@as(u32, 12) << 24));
-    endian.writeU32Le(snapshot[0x10..0x14], @as(u32, 0x2000) << 16);
+    endian.writeU32Le(snapshot[0x08..0x0C], (@as(u32, 1) << 21) | (@as(u32, 1) << 27));
+    endian.writeU32Le(snapshot[0x10..0x14], 1 | (@as(u32, 1) << 2) | (@as(u32, 0x2000) << 16));
     endian.writeU32Le(snapshot[0x14..0x18], 0x2000);
     endian.writeU32Le(snapshot[0x18..0x1C], 0x1000);
     return snapshot;
@@ -220,6 +221,10 @@ test "xHCI hardware capability snapshot uses the shared modern parser" {
     try std.testing.expectEqual(@as(u16, 0x0110), capabilities.interface_version);
     try std.testing.expectEqual(@as(u8, 32), capabilities.max_device_slots);
     try std.testing.expectEqual(@as(u8, 12), capabilities.max_ports);
+    try std.testing.expect(capabilities.supports_64_bit_addressing);
+    try std.testing.expectEqual(xhci.ContextSize.bytes_64, capabilities.context_size);
+    try std.testing.expectEqual(@as(u16, 33), capabilities.max_scratchpad_buffers);
+    try std.testing.expect(!capabilities.scratchpad_restore);
     try std.testing.expectEqual(@as(u32, 0x8000), capabilities.extended_capability_offset);
 }
 
