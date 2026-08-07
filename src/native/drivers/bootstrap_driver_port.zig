@@ -231,12 +231,12 @@ pub fn clearEgressCapability() void {
     network_driver_task.clearEgressCapability();
 }
 
-pub fn authorizeDriverTx(frame: []const u8) bool {
-    return network_driver_task.authorizeDriverTx(frame);
+pub fn authorizeDriverTx(destination: [6]u8, frame: []const u8) bool {
+    return network_driver_task.authorizeDriverTx(destination, frame);
 }
 
-pub fn sendActiveNetworkFrame(frame: []const u8) bool {
-    return network_driver_task.sendActiveFrame(frame);
+pub fn sendActiveNetworkFrame(destination: [6]u8, frame: []const u8) bool {
+    return network_driver_task.sendActiveFrame(destination, frame);
 }
 
 pub fn receiveActiveNetworkFrame(output: []u8) ReceiveResult {
@@ -540,7 +540,7 @@ test "driver-backed network tx fails closed without capability-backed egress dec
         var saw_policy_id: u64 = 0;
         var saw_capability_id: u64 = 0;
 
-        fn send(_: []const u8) bool {
+        fn send(_: [6]u8, _: []const u8) bool {
             send_count += 1;
             return true;
         }
@@ -570,16 +570,17 @@ test "driver-backed network tx fails closed without capability-backed egress dec
     try std.testing.expect(activateNetworkDevice(i225_device_id, 9));
 
     const frame_with_raw_destination = "GET / HTTP/1.1\r\nHost: relay.zigos.dev\r\nX-IP: 203.0.113.7\r\n\r\n";
-    try std.testing.expect(!sendActiveNetworkFrame(frame_with_raw_destination));
+    const peer_mac = [_]u8{ 0x02, 0, 0, 0, 0, 0x44 };
+    try std.testing.expect(!sendActiveNetworkFrame(peer_mac, frame_with_raw_destination));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
     setEgressBroker(Harness.broker);
-    try std.testing.expect(!sendActiveNetworkFrame(frame_with_raw_destination));
+    try std.testing.expect(!sendActiveNetworkFrame(peer_mac, frame_with_raw_destination));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
     try std.testing.expectEqual(@as(u64, 0), Harness.saw_capability_id);
 
     bindEgressCapability(99, 44);
-    try std.testing.expect(sendActiveNetworkFrame(frame_with_raw_destination));
+    try std.testing.expect(sendActiveNetworkFrame(peer_mac, frame_with_raw_destination));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
     try std.testing.expectEqual(@as(u64, 44), Harness.saw_policy_id);
     try std.testing.expectEqual(@as(u64, 99), Harness.saw_capability_id);
@@ -597,7 +598,7 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
     const Harness = struct {
         var send_count: usize = 0;
 
-        fn send(_: []const u8) bool {
+        fn send(_: [6]u8, _: []const u8) bool {
             send_count += 1;
             return true;
         }
@@ -627,11 +628,12 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
     setEgressBroker(Harness.adversarialBroker);
 
     const forged_frame = "dst=203.0.113.7; host=relay.zigos.dev";
-    try std.testing.expect(!sendActiveNetworkFrame(forged_frame));
+    const peer_mac = [_]u8{ 0x02, 0, 0, 0, 0, 0x45 };
+    try std.testing.expect(!sendActiveNetworkFrame(peer_mac, forged_frame));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
     bindEgressCapability(31337, 5150);
-    try std.testing.expect(sendActiveNetworkFrame(forged_frame));
+    try std.testing.expect(sendActiveNetworkFrame(peer_mac, forged_frame));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 }
 

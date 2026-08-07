@@ -274,8 +274,10 @@ pub fn failedReceivePollCount() u64 {
     return failed_receive_polls;
 }
 
-pub fn sendPayload(payload: []const u8) bool {
-    if (!active or payload.len == 0 or payload.len > MAX_PAYLOAD_BYTES or !controller.linkUp()) {
+pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
+    if (!active or !i225_frame.validDestinationMac(destination) or
+        payload.len == 0 or payload.len > MAX_PAYLOAD_BYTES or !controller.linkUp())
+    {
         failed_transmit_frames +%= 1;
         return false;
     }
@@ -293,7 +295,12 @@ pub fn sendPayload(payload: []const u8) bool {
     };
     const buffer_address = i225_tx.bufferAddress(controller.tx_buffer_phys, descriptor_index).?;
     const buffer: [*]u8 = @ptrFromInt(buffer_address);
-    const frame_len = i225_frame.buildEthernetFrame(buffer[0..i225_tx.BUFFER_BYTES], controller.mac, payload) catch unreachable;
+    const frame_len = i225_frame.buildEthernetFrame(
+        buffer[0..i225_tx.BUFFER_BYTES],
+        destination,
+        controller.mac,
+        payload,
+    ) catch unreachable;
 
     const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
         controller.tx_descriptor_phys + descriptor_index * i225_tx.DESCRIPTOR_BYTES,
@@ -527,8 +534,14 @@ export fn zigosNetworkBootstrapI225Attached() callconv(.c) bool {
     return attached();
 }
 
-export fn zigosNetworkBootstrapI225Send(payload_ptr: [*]const u8, payload_len: usize) callconv(.c) bool {
-    return sendPayload(payload_ptr[0..payload_len]);
+export fn zigosNetworkBootstrapI225Send(
+    destination_ptr: [*]const u8,
+    payload_ptr: [*]const u8,
+    payload_len: usize,
+) callconv(.c) bool {
+    var destination: [6]u8 = undefined;
+    @memcpy(&destination, destination_ptr[0..destination.len]);
+    return sendPayload(destination, payload_ptr[0..payload_len]);
 }
 
 export fn zigosNetworkBootstrapI225Receive(

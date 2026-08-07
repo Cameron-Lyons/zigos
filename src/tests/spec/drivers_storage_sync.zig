@@ -24,7 +24,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
     const FakeNetworkDevice = struct {
         var activation_count: usize = 0;
 
-        fn send(_: []const u8) bool {
+        fn send(_: [6]u8, _: []const u8) bool {
             return true;
         }
 
@@ -889,7 +889,7 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
         var principal_id = spec_support.app(0);
         var live_policy_id: u64 = 0;
 
-        fn send(_: []const u8) bool {
+        fn send(_: [6]u8, _: []const u8) bool {
             send_count += 1;
             return true;
         }
@@ -952,19 +952,20 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
     try std.testing.expect(bootstrap_driver_port.activateNetworkDevice(i225_device_id, 800));
     bootstrap_driver_port.setEgressBroker(Harness.broker);
 
+    const peer_mac = [_]u8{ 0x02, 0x99, 0x88, 0x77, 0x66, 0x56 };
     const frame = "dst=relay.spec.zigos";
-    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(frame));
+    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(peer_mac, frame));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
     bootstrap_driver_port.bindEgressCapability(authority.id + 1, policy.id);
-    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(frame));
+    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(peer_mac, frame));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
     bootstrap_driver_port.bindEgressCapability(authority.id, policy.id + 1);
-    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(frame));
+    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(peer_mac, frame));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
     bootstrap_driver_port.bindEgressCapability(authority.id, policy.id);
-    try std.testing.expect(bootstrap_driver_port.sendActiveNetworkFrame(frame));
+    try std.testing.expect(bootstrap_driver_port.sendActiveNetworkFrame(peer_mac, frame));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 }

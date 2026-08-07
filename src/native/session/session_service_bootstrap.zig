@@ -39,7 +39,11 @@ const booted_storage_image_bytes: usize = @as(usize, @intCast(booted_storage_sec
 const i225_bridge = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn zigosNetworkBootstrapI225Attached() callconv(.c) bool;
-        extern fn zigosNetworkBootstrapI225Send(payload_ptr: [*]const u8, payload_len: usize) callconv(.c) bool;
+        extern fn zigosNetworkBootstrapI225Send(
+            destination_ptr: [*]const u8,
+            payload_ptr: [*]const u8,
+            payload_len: usize,
+        ) callconv(.c) bool;
         extern fn zigosNetworkBootstrapI225Receive(
             output_ptr: [*]u8,
             output_capacity: usize,
@@ -51,8 +55,8 @@ const i225_bridge = if (builtin.target.os.tag == .freestanding)
             return zigosNetworkBootstrapI225Attached();
         }
 
-        pub fn send(payload: []const u8) bool {
-            return zigosNetworkBootstrapI225Send(payload.ptr, payload.len);
+        pub fn send(destination: [6]u8, payload: []const u8) bool {
+            return zigosNetworkBootstrapI225Send(&destination, payload.ptr, payload.len);
         }
 
         pub fn receive(output: []u8) bootstrap_driver_port.ReceiveResult {
@@ -81,7 +85,7 @@ else
             return false;
         }
 
-        pub fn send(_: []const u8) bool {
+        pub fn send(_: [6]u8, _: []const u8) bool {
             return false;
         }
 
@@ -95,8 +99,8 @@ else
     };
 
 const BootedNetworkDataPlane = struct {
-    fn send(data: []const u8) bool {
-        if (i225_bridge.attached()) return i225_bridge.send(data);
+    fn send(destination: [6]u8, data: []const u8) bool {
+        if (i225_bridge.attached()) return i225_bridge.send(destination, data);
         return builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled();
     }
 

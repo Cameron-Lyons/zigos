@@ -171,9 +171,10 @@ Use the pinned toolchain and repo entrypoints:
   completion spinning, contains a stalled oldest TX descriptor after one
   second, and polls RX only after its requester is confined.
   Native payloads are carried in padded Ethernet frames under the local
-  experimental EtherType; receive polling accepts only directed or broadcast
-  frames for that EtherType. Hardware interrupt delivery and peer-addressed
-  transport remain gated work. NVMe, PCIe
+  experimental EtherType; service and sync traffic resolves a fixed peer-device
+  directory to directed unicast frames, while scoped discovery alone uses
+  broadcast. Receive polling accepts only directed or broadcast frames for that
+  EtherType. Hardware interrupt delivery remains gated work. NVMe, PCIe
   ECAM, I225-LM, ACPI, and VT-d cache-disabled mappings are assigned by one
   page-aligned, capacity-checked kernel MMIO layout whose pairwise non-overlap is
   enforced at compile time. Before
