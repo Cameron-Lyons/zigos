@@ -14,6 +14,11 @@ pub const usb_input_data_plane_exports_fail_closed = true;
 pub const TRB_BYTES: u32 = 16;
 pub const RING_ALIGNMENT_BYTES: u64 = 64;
 pub const ERST_ENTRY_BYTES: u32 = 16;
+pub const XHCI_PAGE_BYTES: u64 = 4096;
+pub const DCBAA_ENTRY_BYTES: u32 = 8;
+pub const DEVICE_CONTEXT_ENTRIES: u32 = 32;
+pub const INPUT_CONTEXT_ENTRIES: u32 = 33;
+pub const SCRATCHPAD_ARRAY_ENTRY_BYTES: u32 = 8;
 pub const HID_BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const HID_BOOT_KEY_SLOTS: usize = 6;
 pub const HID_EVENT_QUEUE_CAPACITY: usize = 8;
@@ -116,7 +121,13 @@ pub const Error = error{
     MissingPorts,
     MissingInterrupters,
     RingTooSmall,
+    RingAddressInvalid,
     RingAddressUnaligned,
+    RingAddressOverlap,
+    RingAddressOverflow,
+    DmaArenaBaseInvalid,
+    DmaSlotCountInvalid,
+    DmaLayoutOverflow,
     ReportTooLarge,
     EventRingFull,
     EventRingEmpty,
@@ -189,6 +200,34 @@ pub const RingPlan = struct {
     event_ring_trbs: u32,
     command_ring_address: u64,
     event_ring_address: u64,
+};
+
+pub const DmaArenaPlan = struct {
+    base_address: u64,
+    total_bytes: u64,
+    enabled_device_slots: u8,
+    dcbaa_address: u64,
+    dcbaa_bytes: u32,
+    scratchpad_array_address: u64,
+    scratchpad_array_bytes: u64,
+    scratchpad_buffers_address: u64,
+    scratchpad_buffers_bytes: u64,
+    device_contexts_address: u64,
+    device_context_stride: u32,
+    device_contexts_bytes: u64,
+    input_context_address: u64,
+    input_context_bytes: u32,
+
+    pub fn deviceContextAddress(self: DmaArenaPlan, slot_id: u8) Error!u64 {
+        if (slot_id == 0 or slot_id > self.enabled_device_slots) return error.InvalidDeviceSlot;
+        const offset = std.math.mul(
+            u64,
+            @as(u64, slot_id - 1),
+            @as(u64, self.device_context_stride),
+        ) catch return error.DmaLayoutOverflow;
+        return std.math.add(u64, self.device_contexts_address, offset) catch
+            return error.DmaLayoutOverflow;
+    }
 };
 
 pub const HidBootKeyboardDevice = struct {
@@ -295,7 +334,7 @@ pub const MmioInputProof = struct {
     event_ring_dequeue_count: u32,
     interrupt_events: u32,
     interrupter_id: u16,
-    max_device_slots: u8,
+    enabled_device_slots: u8,
     max_ports: u8,
     hardware_input: HardwareInputEvidence = .{},
 
@@ -308,8 +347,10 @@ pub const MmioInputProof = struct {
             aligned(self.input_context_address, RING_ALIGNMENT_BYTES) and
             aligned(self.transfer_ring_address, RING_ALIGNMENT_BYTES) and
             aligned(self.event_ring_segment_table_address, RING_ALIGNMENT_BYTES) and
-            self.device_context_bytes >= @as(u32, self.max_device_slots) * self.context_size.byteCount() and
-            self.input_context_bytes >= self.context_size.byteCount() * 2 and
+            self.enabled_device_slots > 0 and
+            self.device_context_bytes >= @as(u32, self.enabled_device_slots) *
+                DEVICE_CONTEXT_ENTRIES * self.context_size.byteCount() and
+            self.input_context_bytes >= INPUT_CONTEXT_ENTRIES * self.context_size.byteCount() and
             self.transfer_ring_trbs >= 16 and
             self.event_ring_segment_table_entries > 0 and
             self.command_doorbells >= 3 and
@@ -325,7 +366,7 @@ pub const MmioInputProof = struct {
             keyboard.slot_id != 0 and
             keyboard.port_id != 0 and
             keyboard.endpoint_id != 0 and
-            keyboard.slot_id <= self.max_device_slots and
+            keyboard.slot_id <= self.enabled_device_slots and
             keyboard.port_id <= self.max_ports;
     }
 
@@ -336,12 +377,9 @@ pub const MmioInputProof = struct {
 
 const MmioState = struct {
     capabilities: CapabilityRegisters,
-    device_context_base_address: u64,
-    input_context_address: u64,
+    dma_arena: DmaArenaPlan,
     transfer_ring_address: u64,
     event_ring_segment_table_address: u64,
-    device_context_bytes: u32,
-    input_context_bytes: u32,
     transfer_ring_trbs: u32,
     event_ring_segment_table_entries: u32,
     command_doorbells: u32 = 0,
@@ -359,13 +397,13 @@ const MmioState = struct {
             .runtime_register_offset = self.capabilities.runtime_register_offset,
             .command_ring_address = ring_plan.command_ring_address,
             .event_ring_address = ring_plan.event_ring_address,
-            .device_context_base_address = self.device_context_base_address,
-            .input_context_address = self.input_context_address,
+            .device_context_base_address = self.dma_arena.device_contexts_address,
+            .input_context_address = self.dma_arena.input_context_address,
             .transfer_ring_address = self.transfer_ring_address,
             .event_ring_segment_table_address = self.event_ring_segment_table_address,
             .context_size = self.capabilities.context_size,
-            .device_context_bytes = self.device_context_bytes,
-            .input_context_bytes = self.input_context_bytes,
+            .device_context_bytes = @intCast(self.dma_arena.device_contexts_bytes),
+            .input_context_bytes = self.dma_arena.input_context_bytes,
             .transfer_ring_trbs = self.transfer_ring_trbs,
             .event_ring_segment_table_entries = self.event_ring_segment_table_entries,
             .command_doorbells = self.command_doorbells,
@@ -376,7 +414,7 @@ const MmioState = struct {
             .event_ring_dequeue_count = self.event_ring_dequeue_count,
             .interrupt_events = self.interrupt_events,
             .interrupter_id = self.interrupter_id,
-            .max_device_slots = self.capabilities.max_device_slots,
+            .enabled_device_slots = self.dma_arena.enabled_device_slots,
             .max_ports = self.capabilities.max_ports,
         };
     }
@@ -441,33 +479,43 @@ pub const HidController = struct {
         var controller = try HidController.init(ring_plan);
         controller.port_limit = @min(capabilities.max_ports, maxBootPortsU8());
         controller.device_slot_limit = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
-        const context_bytes = capabilities.context_size.byteCount();
-        const device_context_bytes = @as(u32, capabilities.max_device_slots) * context_bytes;
-        const input_context_bytes = context_bytes * 2;
-        const device_context_base_address = alignForward(
-            ring_plan.command_ring_address + ringByteLength(ring_plan.command_ring_trbs),
-            RING_ALIGNMENT_BYTES,
+        const command_ring_end = try ringEndAddress(
+            ring_plan.command_ring_address,
+            ring_plan.command_ring_trbs,
         );
-        const input_context_address = alignForward(
-            device_context_base_address + device_context_bytes,
-            RING_ALIGNMENT_BYTES,
+        const event_ring_end = try ringEndAddress(
+            ring_plan.event_ring_address,
+            ring_plan.event_ring_trbs,
         );
-        const transfer_ring_address = alignForward(
-            ring_plan.event_ring_address + ringByteLength(ring_plan.event_ring_trbs),
+        const transfer_ring_address = alignForwardChecked(
+            @max(command_ring_end, event_ring_end),
             RING_ALIGNMENT_BYTES,
+        ) catch return error.DmaLayoutOverflow;
+        const transfer_ring_end = try ringEndAddress(
+            transfer_ring_address,
+            DEFAULT_TRANSFER_RING_TRBS,
         );
-        const event_ring_segment_table_address = alignForward(
-            transfer_ring_address + ringByteLength(DEFAULT_TRANSFER_RING_TRBS),
+        const event_ring_segment_table_address = alignForwardChecked(
+            transfer_ring_end,
             RING_ALIGNMENT_BYTES,
-        );
+        ) catch return error.DmaLayoutOverflow;
+        const event_ring_segment_table_bytes = std.math.mul(
+            u64,
+            DEFAULT_ERST_ENTRIES,
+            ERST_ENTRY_BYTES,
+        ) catch return error.DmaLayoutOverflow;
+        const arena_start = checkedAdd(
+            event_ring_segment_table_address,
+            event_ring_segment_table_bytes,
+        ) catch return error.DmaLayoutOverflow;
+        const arena_base = alignForwardChecked(arena_start, XHCI_PAGE_BYTES) catch
+            return error.DmaLayoutOverflow;
+        const dma_arena = try planDmaArena(capabilities, controller.device_slot_limit, arena_base);
         controller.mmio = .{
             .capabilities = capabilities,
-            .device_context_base_address = device_context_base_address,
-            .input_context_address = input_context_address,
+            .dma_arena = dma_arena,
             .transfer_ring_address = transfer_ring_address,
             .event_ring_segment_table_address = event_ring_segment_table_address,
-            .device_context_bytes = device_context_bytes,
-            .input_context_bytes = input_context_bytes,
             .transfer_ring_trbs = DEFAULT_TRANSFER_RING_TRBS,
             .event_ring_segment_table_entries = DEFAULT_ERST_ENTRIES,
         };
@@ -568,6 +616,11 @@ pub const HidController = struct {
 
     pub fn configuredBootKeyboard(self: *const HidController) ?HidBootKeyboardDevice {
         return self.boot_keyboard;
+    }
+
+    pub fn dmaArenaPlan(self: *const HidController) ?DmaArenaPlan {
+        const mmio = self.mmio orelse return null;
+        return mmio.dma_arena;
     }
 
     pub fn inputProof(self: *const HidController) ?InputProof {
@@ -1001,6 +1054,90 @@ pub fn defaultCapabilityRegisters() CapabilityRegisters {
 pub fn validateRingPlan(plan: RingPlan) Error!void {
     try validateRing(plan.command_ring_trbs, plan.command_ring_address);
     try validateRing(plan.event_ring_trbs, plan.event_ring_address);
+    const command_end = try ringEndAddress(plan.command_ring_address, plan.command_ring_trbs);
+    const event_end = try ringEndAddress(plan.event_ring_address, plan.event_ring_trbs);
+    if (plan.command_ring_address < event_end and plan.event_ring_address < command_end) {
+        return error.RingAddressOverlap;
+    }
+}
+
+pub fn planDmaArena(
+    capabilities: CapabilityRegisters,
+    enabled_device_slots: u8,
+    base_address: u64,
+) Error!DmaArenaPlan {
+    if (base_address == 0 or !aligned(base_address, XHCI_PAGE_BYTES)) {
+        return error.DmaArenaBaseInvalid;
+    }
+    const slot_limit = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
+    if (enabled_device_slots == 0 or enabled_device_slots > slot_limit) {
+        return error.DmaSlotCountInvalid;
+    }
+
+    const dcbaa_bytes: u32 = (@as(u32, enabled_device_slots) + 1) * DCBAA_ENTRY_BYTES;
+    var cursor = checkedAdd(base_address, XHCI_PAGE_BYTES) catch return error.DmaLayoutOverflow;
+
+    var scratchpad_array_address: u64 = 0;
+    var scratchpad_array_bytes: u64 = 0;
+    var scratchpad_buffers_address: u64 = 0;
+    var scratchpad_buffers_bytes: u64 = 0;
+    if (capabilities.max_scratchpad_buffers != 0) {
+        scratchpad_array_address = cursor;
+        scratchpad_array_bytes = std.math.mul(
+            u64,
+            capabilities.max_scratchpad_buffers,
+            SCRATCHPAD_ARRAY_ENTRY_BYTES,
+        ) catch return error.DmaLayoutOverflow;
+        cursor = try advancePageRounded(cursor, scratchpad_array_bytes);
+
+        scratchpad_buffers_address = cursor;
+        scratchpad_buffers_bytes = std.math.mul(
+            u64,
+            capabilities.max_scratchpad_buffers,
+            XHCI_PAGE_BYTES,
+        ) catch return error.DmaLayoutOverflow;
+        cursor = checkedAdd(cursor, scratchpad_buffers_bytes) catch return error.DmaLayoutOverflow;
+    }
+
+    const device_context_stride = std.math.mul(
+        u32,
+        DEVICE_CONTEXT_ENTRIES,
+        capabilities.context_size.byteCount(),
+    ) catch return error.DmaLayoutOverflow;
+    const device_contexts_address = cursor;
+    const device_contexts_bytes = std.math.mul(
+        u64,
+        enabled_device_slots,
+        device_context_stride,
+    ) catch return error.DmaLayoutOverflow;
+    cursor = checkedAdd(cursor, device_contexts_bytes) catch return error.DmaLayoutOverflow;
+    cursor = alignForwardChecked(cursor, XHCI_PAGE_BYTES) catch return error.DmaLayoutOverflow;
+
+    const input_context_address = cursor;
+    const input_context_bytes = std.math.mul(
+        u32,
+        INPUT_CONTEXT_ENTRIES,
+        capabilities.context_size.byteCount(),
+    ) catch return error.DmaLayoutOverflow;
+    cursor = checkedAdd(cursor, input_context_bytes) catch return error.DmaLayoutOverflow;
+    cursor = alignForwardChecked(cursor, XHCI_PAGE_BYTES) catch return error.DmaLayoutOverflow;
+
+    return .{
+        .base_address = base_address,
+        .total_bytes = cursor - base_address,
+        .enabled_device_slots = enabled_device_slots,
+        .dcbaa_address = base_address,
+        .dcbaa_bytes = dcbaa_bytes,
+        .scratchpad_array_address = scratchpad_array_address,
+        .scratchpad_array_bytes = scratchpad_array_bytes,
+        .scratchpad_buffers_address = scratchpad_buffers_address,
+        .scratchpad_buffers_bytes = scratchpad_buffers_bytes,
+        .device_contexts_address = device_contexts_address,
+        .device_context_stride = device_context_stride,
+        .device_contexts_bytes = device_contexts_bytes,
+        .input_context_address = input_context_address,
+        .input_context_bytes = input_context_bytes,
+    };
 }
 
 pub fn rejectKernelInputReport(_: InputRequest) Error!void {
@@ -1015,17 +1152,34 @@ pub fn withHardwareInputEvidence(proof: InputProof, evidence: HardwareInputEvide
 
 fn validateRing(trbs: u32, address: u64) Error!void {
     if (trbs < 16) return error.RingTooSmall;
+    if (address == 0) return error.RingAddressInvalid;
     if (!aligned(address, RING_ALIGNMENT_BYTES)) return error.RingAddressUnaligned;
+}
+
+fn ringEndAddress(address: u64, trbs: u32) Error!u64 {
+    return std.math.add(u64, address, ringByteLength(trbs)) catch error.RingAddressOverflow;
 }
 
 fn ringByteLength(trbs: u32) u64 {
     return @as(u64, trbs) * TRB_BYTES;
 }
 
-fn alignForward(address: u64, alignment: u64) u64 {
+fn checkedAdd(left: u64, right: u64) error{Overflow}!u64 {
+    return std.math.add(u64, left, right) catch error.Overflow;
+}
+
+fn alignForwardChecked(address: u64, alignment: u64) error{Overflow}!u64 {
     if (alignment == 0) return address;
     const remainder = address % alignment;
-    return if (remainder == 0) address else address + (alignment - remainder);
+    return if (remainder == 0)
+        address
+    else
+        checkedAdd(address, alignment - remainder);
+}
+
+fn advancePageRounded(address: u64, bytes: u64) Error!u64 {
+    const end = checkedAdd(address, bytes) catch return error.DmaLayoutOverflow;
+    return alignForwardChecked(end, XHCI_PAGE_BYTES) catch error.DmaLayoutOverflow;
 }
 
 fn aligned(address: u64, alignment: u64) bool {
@@ -1557,6 +1711,84 @@ test "xHCI ring plan validates command and event ring alignment" {
         .command_ring_address = TEST_UNALIGNED_COMMAND_RING_ADDRESS,
         .event_ring_address = TEST_EVENT_RING_ADDRESS,
     }));
+
+    try std.testing.expectError(error.RingAddressInvalid, validateRingPlan(.{
+        .command_ring_trbs = TEST_RING_TRBS,
+        .event_ring_trbs = TEST_RING_TRBS,
+        .command_ring_address = 0,
+        .event_ring_address = TEST_EVENT_RING_ADDRESS,
+    }));
+    try std.testing.expectError(error.RingAddressOverlap, validateRingPlan(.{
+        .command_ring_trbs = TEST_RING_TRBS,
+        .event_ring_trbs = TEST_RING_TRBS,
+        .command_ring_address = 0x1000,
+        .event_ring_address = 0x1200,
+    }));
+    try std.testing.expectError(error.RingAddressOverflow, validateRingPlan(.{
+        .command_ring_trbs = 16,
+        .event_ring_trbs = TEST_RING_TRBS,
+        .command_ring_address = std.math.maxInt(u64) - (RING_ALIGNMENT_BYTES - 1),
+        .event_ring_address = TEST_EVENT_RING_ADDRESS,
+    }));
+}
+
+test "xHCI DMA arena packs complete contexts and scratchpads without overlap" {
+    const capabilities = defaultCapabilityRegisters();
+    const plan = try planDmaArena(capabilities, TEST_MAX_DEVICE_SLOTS, 0x4000);
+    try std.testing.expectEqual(@as(u64, 0x4000), plan.dcbaa_address);
+    try std.testing.expectEqual(@as(u32, 33 * DCBAA_ENTRY_BYTES), plan.dcbaa_bytes);
+    try std.testing.expectEqual(@as(u64, 0x5000), plan.scratchpad_array_address);
+    try std.testing.expectEqual(@as(u64, 33 * SCRATCHPAD_ARRAY_ENTRY_BYTES), plan.scratchpad_array_bytes);
+    try std.testing.expectEqual(@as(u64, 0x6000), plan.scratchpad_buffers_address);
+    try std.testing.expectEqual(@as(u64, 33) * XHCI_PAGE_BYTES, plan.scratchpad_buffers_bytes);
+    try std.testing.expectEqual(@as(u32, 2048), plan.device_context_stride);
+    try std.testing.expectEqual(@as(u64, 0x27000), plan.device_contexts_address);
+    try std.testing.expectEqual(@as(u64, 0x10000), plan.device_contexts_bytes);
+    try std.testing.expectEqual(@as(u64, 0x27000), try plan.deviceContextAddress(1));
+    try std.testing.expectEqual(@as(u64, 0x36800), try plan.deviceContextAddress(32));
+    try std.testing.expectError(error.InvalidDeviceSlot, plan.deviceContextAddress(0));
+    try std.testing.expectError(error.InvalidDeviceSlot, plan.deviceContextAddress(33));
+    try std.testing.expectEqual(@as(u64, 0x37000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u32, 2112), plan.input_context_bytes);
+    try std.testing.expectEqual(@as(u64, 0x34000), plan.total_bytes);
+}
+
+test "xHCI DMA arena handles compact contexts and rejects invalid ranges" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.context_size = .bytes_32;
+    capabilities.max_device_slots = 3;
+    capabilities.max_scratchpad_buffers = 0;
+    capabilities.scratchpad_restore = false;
+    const plan = try planDmaArena(capabilities, 3, 0x1000);
+    try std.testing.expectEqual(@as(u64, 0), plan.scratchpad_array_address);
+    try std.testing.expectEqual(@as(u64, 0), plan.scratchpad_buffers_address);
+    try std.testing.expectEqual(@as(u32, 1024), plan.device_context_stride);
+    try std.testing.expectEqual(@as(u64, 0x2000), plan.device_contexts_address);
+    try std.testing.expectEqual(@as(u64, 3072), plan.device_contexts_bytes);
+    try std.testing.expectEqual(@as(u64, 0x3000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u32, 1056), plan.input_context_bytes);
+    try std.testing.expectEqual(@as(u64, 0x3000), plan.total_bytes);
+
+    try std.testing.expectError(error.DmaArenaBaseInvalid, planDmaArena(capabilities, 3, 0));
+    try std.testing.expectError(error.DmaArenaBaseInvalid, planDmaArena(capabilities, 3, 0x1800));
+    try std.testing.expectError(error.DmaSlotCountInvalid, planDmaArena(capabilities, 0, 0x1000));
+    try std.testing.expectError(error.DmaSlotCountInvalid, planDmaArena(capabilities, 4, 0x1000));
+    const final_page = std.math.maxInt(u64) & ~(XHCI_PAGE_BYTES - 1);
+    try std.testing.expectError(error.DmaLayoutOverflow, planDmaArena(capabilities, 1, final_page));
+}
+
+test "xHCI DMA arena page-rounds the maximum scratchpad pointer array" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_device_slots = 1;
+    capabilities.max_scratchpad_buffers = 1023;
+    const plan = try planDmaArena(capabilities, 1, 0x1000);
+    try std.testing.expectEqual(@as(u64, 0x2000), plan.scratchpad_array_address);
+    try std.testing.expectEqual(@as(u64, 8184), plan.scratchpad_array_bytes);
+    try std.testing.expectEqual(@as(u64, 0x4000), plan.scratchpad_buffers_address);
+    try std.testing.expectEqual(@as(u64, 1023) * XHCI_PAGE_BYTES, plan.scratchpad_buffers_bytes);
+    try std.testing.expectEqual(@as(u64, 0x403000), plan.device_contexts_address);
+    try std.testing.expectEqual(@as(u64, 0x404000), plan.input_context_address);
+    try std.testing.expectEqual(@as(u64, 0x404000), plan.total_bytes);
 }
 
 test "xHCI controller binds MMIO command doorbells and event ring input proof" {
@@ -1601,10 +1833,16 @@ test "xHCI controller binds MMIO command doorbells and event ring input proof" {
     try std.testing.expectEqual(@as(u32, 1), proof.mmio.event_ring_segment_table_writes);
     try std.testing.expectEqual(TEST_CONTEXT_SIZE, proof.mmio.context_size);
     try std.testing.expectEqual(
-        @as(u32, TEST_MAX_DEVICE_SLOTS) * TEST_CONTEXT_SIZE.byteCount(),
+        @as(u32, TEST_MAX_DEVICE_SLOTS) * DEVICE_CONTEXT_ENTRIES * TEST_CONTEXT_SIZE.byteCount(),
         proof.mmio.device_context_bytes,
     );
-    try std.testing.expectEqual(TEST_CONTEXT_SIZE.byteCount() * 2, proof.mmio.input_context_bytes);
+    try std.testing.expectEqual(
+        INPUT_CONTEXT_ENTRIES * TEST_CONTEXT_SIZE.byteCount(),
+        proof.mmio.input_context_bytes,
+    );
+    const dma_arena = controller.dmaArenaPlan().?;
+    try std.testing.expectEqual(@as(u64, 0x3000), dma_arena.base_address);
+    try std.testing.expectEqual(TEST_MAX_DEVICE_SLOTS, dma_arena.enabled_device_slots);
     try std.testing.expectEqual(@as(u32, DEFAULT_TRANSFER_RING_TRBS), proof.mmio.transfer_ring_trbs);
     try std.testing.expectEqual(@as(u32, DEFAULT_ERST_ENTRIES), proof.mmio.event_ring_segment_table_entries);
     try std.testing.expectEqual(@as(u32, 1), proof.mmio.event_ring_dequeue_count);
