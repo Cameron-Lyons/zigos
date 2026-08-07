@@ -17,6 +17,7 @@ const intel_vtd = @import("intel_vtd.zig");
 const nvme = @import("../drivers/nvme.zig");
 const pci = @import("../drivers/pci.zig");
 const xhci = @import("../drivers/xhci.zig");
+const xhci_hw = @import("../drivers/xhci_hw.zig");
 const hardware_target = @import("../../native/platform/hardware_target.zig");
 
 const MAX_ACPI_TABLE_BYTES: usize = 1024 * 1024;
@@ -534,7 +535,7 @@ pub fn capturePlatformFirmwareEvidence() void {
 pub fn capturePciEvidence() void {
     facts.nvme_controller = pci.firstNvmeController() != null;
     facts.i225_lm_controller = pci.firstIntelI225Lm() != null;
-    facts.xhci_controller = pci.firstXhciController() != null;
+    facts.xhci_controller = xhci_hw.validated();
     printNewMarkers();
 }
 

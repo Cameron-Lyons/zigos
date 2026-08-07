@@ -803,6 +803,7 @@ fn validateNuc11tnki5KernelProofSources(
     const console_path = "src/kernel/utils/console.zig";
     const legacy_vga_path = "src/kernel/drivers/vga.zig";
     const xhci_path = "src/kernel/drivers/xhci.zig";
+    const xhci_hw_path = "src/kernel/drivers/xhci_hw.zig";
     const nvme_path = "src/kernel/drivers/nvme.zig";
     const i225_path = "src/kernel/drivers/intel_i225.zig";
     const pci_path = "src/kernel/drivers/pci.zig";
@@ -962,6 +963,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 xHCI proof source is missing: {s}", .{xhci_path});
         return;
     }
+    if (!common.pathExists(io, xhci_hw_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 xHCI hardware probe source is missing: {s}", .{xhci_hw_path});
+        return;
+    }
     if (!common.pathExists(io, i225_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 I225 proof source is missing: {s}", .{i225_path});
         return;
@@ -1015,6 +1020,7 @@ fn validateNuc11tnki5KernelProofSources(
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
+    const xhci_hw_source = try common.readFileAlloc(allocator, io, xhci_hw_path, common.source_file_max_bytes);
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
     const pci_source = try common.readFileAlloc(allocator, io, pci_path, common.source_file_max_bytes);
@@ -1088,12 +1094,16 @@ fn validateNuc11tnki5KernelProofSources(
         "pci.firstNvmeController()",
         ".nvme_pci_inventory",
         "pci.firstXhciController()",
-        "device_inventory.registerDetected(.input_device, xhci_device_id, .xhci_inventory, false)",
+        "xhci_hw.probe(dev)",
+        "device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false)",
     };
     for (required_boot_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, devices_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 boot device inventory source must capture target-specific PCI snippet: {s}", .{snippet});
         }
+    }
+    if (std.mem.indexOf(u8, devices_source, "device_inventory.registerDetected(.input_device, xhci_device_id, .xhci_inventory, false)") != null) {
+        try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not publish input authority before keyboard enumeration and hardware event-ring evidence", .{});
     }
     const required_pci_inventory_snippets = [_][]const u8{
         "mcfg.Allocation",
@@ -1118,6 +1128,7 @@ fn validateNuc11tnki5KernelProofSources(
         "pub const nvme = Region",
         "pub const pci_ecam = Region",
         "pub const intel_i225 = Region",
+        "pub const xhci = Region",
         "pub const acpi_root = Region",
         "pub const acpi_entry = Region",
         "pub const intel_vtd = Region",
@@ -1854,6 +1865,9 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_xhci_snippets = [_][]const u8{
+        "MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0110",
+        "InvalidDoorbellOffset",
+        "InvalidRuntimeRegisterOffset",
         "InputEvidenceSource",
         "hardware_event_ring",
         "HardwareInputEvidence",
@@ -1870,6 +1884,19 @@ fn validateNuc11tnki5KernelProofSources(
     for (required_xhci_snippets) |snippet| {
         if (std.mem.indexOf(u8, xhci_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 xHCI proof source must enforce hardware-owned event-ring snippet: {s}", .{snippet});
+        }
+    }
+    const required_xhci_hw_snippets = [_][]const u8{
+        "pci.memoryBar0(device_info)",
+        "bar.address % PAGE_BYTES != 0",
+        "mmio_windows.xhci.base",
+        "paging.PAGE_PRESENT | paging.PAGE_CACHE_DISABLE",
+        "readCapabilitySnapshot",
+        "xhci.parseCapabilityRegisters(&snapshot)",
+    };
+    for (required_xhci_hw_snippets) |snippet| {
+        if (std.mem.indexOf(u8, xhci_hw_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 xHCI hardware probe must retain read-only capability validation snippet: {s}", .{snippet});
         }
     }
     const required_nvme_snippets = [_][]const u8{

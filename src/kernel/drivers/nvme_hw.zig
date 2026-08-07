@@ -52,9 +52,6 @@ const ADMIN_QUEUE_ENTRIES: u32 = 32;
 const SQ_ENTRY_BYTES: usize = 64;
 const CQ_ENTRY_BYTES: usize = 16;
 const BAR_MAP_BYTES: u32 = 0x2000;
-const BAR_IO_SPACE: u32 = 1 << 0;
-const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
-const BAR_MEMORY_TYPE_64: u32 = 0x4;
 
 comptime {
     if (@as(usize, BAR_MAP_BYTES) > mmio_windows.nvme.bytes) {
@@ -201,13 +198,9 @@ pub const Controller = struct {
 };
 
 fn barPhysicalAddress(dev: pci.PCIDevice) ?usize {
-    if ((dev.bar0 & BAR_IO_SPACE) != 0 or
-        (dev.bar0 & BAR_MEMORY_TYPE_MASK) != BAR_MEMORY_TYPE_64)
-    {
-        return null;
-    }
-    return (@as(usize, dev.bar1) << 32) |
-        @as(usize, dev.bar0 & 0xFFFF_FFF0);
+    const bar = pci.memoryBar0(dev) orelse return null;
+    if (bar.width != .bits64) return null;
+    return bar.address;
 }
 
 fn mapBar(phys: usize) usize {

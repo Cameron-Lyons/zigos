@@ -30,6 +30,11 @@ const PCI_STATUS_OFFSET: u16 = 0x06;
 const PCI_COMMAND_MEMORY_SPACE: u16 = 1 << 1;
 const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
 const PCI_COMMAND_INTERRUPT_DISABLE: u16 = 1 << 10;
+const PCI_BAR_IO_SPACE: u32 = 1 << 0;
+const PCI_BAR_MEMORY_TYPE_MASK: u32 = 0x6;
+const PCI_BAR_MEMORY_TYPE_32: u32 = 0;
+const PCI_BAR_MEMORY_TYPE_64: u32 = 0x4;
+const PCI_BAR_ADDRESS_MASK: u32 = 0xFFFF_FFF0;
 const PCI_STATUS_CAPABILITIES_LIST: u16 = 1 << 4;
 const PCI_CAPABILITY_POINTER_OFFSET: u16 = 0x34;
 const PCI_CARDBUS_CAPABILITY_POINTER_OFFSET: u16 = 0x14;
@@ -85,6 +90,16 @@ pub const PCIDevice = struct {
     bar3: u32,
     bar4: u32,
     bar5: u32,
+};
+
+pub const MemoryBarWidth = enum {
+    bits32,
+    bits64,
+};
+
+pub const MemoryBar = struct {
+    address: usize,
+    width: MemoryBarWidth,
 };
 
 pub const PCI_CLASS_STORAGE_CONTROLLER: u8 = 0x01;
@@ -802,6 +817,19 @@ pub fn isXhciController(device_info: PCIDevice) bool {
     return matchesClass(device_info, PCI_CLASS_SERIAL_BUS_CONTROLLER, PCI_SUBCLASS_USB, PCI_PROG_IF_XHCI);
 }
 
+pub fn memoryBar0(device_info: PCIDevice) ?MemoryBar {
+    if ((device_info.bar0 & PCI_BAR_IO_SPACE) != 0) return null;
+    const low = @as(usize, device_info.bar0 & PCI_BAR_ADDRESS_MASK);
+    return switch (device_info.bar0 & PCI_BAR_MEMORY_TYPE_MASK) {
+        PCI_BAR_MEMORY_TYPE_32 => .{ .address = low, .width = .bits32 },
+        PCI_BAR_MEMORY_TYPE_64 => .{
+            .address = (@as(usize, device_info.bar1) << 32) | low,
+            .width = .bits64,
+        },
+        else => null,
+    };
+}
+
 pub fn stableDeviceId(device_info: PCIDevice) u64 {
     return (@as(u64, device_info.vendor_id) << STABLE_VENDOR_ID_SHIFT) |
         (@as(u64, device_info.device_id) << STABLE_DEVICE_ID_SHIFT) |
@@ -979,6 +1007,21 @@ test "PCI helpers identify xHCI USB controllers" {
 
     const ehci = syntheticPciDevice(PCI_VENDOR_INTEL, 0x1E26, PCI_CLASS_SERIAL_BUS_CONTROLLER, PCI_SUBCLASS_USB, 0x20);
     try @import("std").testing.expect(!isXhciController(ehci));
+}
+
+test "PCI BAR0 decoder accepts current memory BARs and rejects I/O or reserved encodings" {
+    var device = syntheticPciDevice(PCI_VENDOR_INTEL, 0xA0ED, PCI_CLASS_SERIAL_BUS_CONTROLLER, PCI_SUBCLASS_USB, PCI_PROG_IF_XHCI);
+    device.bar0 = 0xFEB0_0000;
+    try std.testing.expectEqual(MemoryBar{ .address = 0xFEB0_0000, .width = .bits32 }, memoryBar0(device).?);
+
+    device.bar0 = 0xABC0_0004;
+    device.bar1 = 0x0000_0001;
+    try std.testing.expectEqual(MemoryBar{ .address = 0x1_ABC0_0000, .width = .bits64 }, memoryBar0(device).?);
+
+    device.bar0 = 0xFEB0_0001;
+    try std.testing.expect(memoryBar0(device) == null);
+    device.bar0 = 0xFEB0_0002;
+    try std.testing.expect(memoryBar0(device) == null);
 }
 
 test "PCI inventory queries reuse one discovered device set" {

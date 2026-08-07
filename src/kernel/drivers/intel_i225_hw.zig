@@ -22,10 +22,6 @@ const RX_BUFFER_FRAME_COUNT: u32 = i225_rx.BUFFER_REGION_BYTES / PAGE_SIZE;
 const DMA_FRAME_COUNT: u32 = RX_BUFFER_FIRST_FRAME + RX_BUFFER_FRAME_COUNT;
 const DMA_WINDOW_COUNT: usize = 4;
 const BAR_MAP_BYTES: u32 = 0x1_0000;
-const BAR_IO_SPACE: u32 = 1 << 0;
-const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
-const BAR_MEMORY_TYPE_32: u32 = 0;
-const BAR_MEMORY_TYPE_64: u32 = 0x4;
 const QUEUE_STATE_TIMEOUT_MILLISECONDS: u64 = 1000;
 const TRANSMIT_TIMEOUT_TICKS: u64 = timer.TICKS_PER_SECOND;
 
@@ -584,14 +580,7 @@ fn containFailure(marker: []const u8) void {
 }
 
 fn barPhysicalAddress(device_info: pci.PCIDevice) ?usize {
-    if ((device_info.bar0 & BAR_IO_SPACE) != 0) return null;
-    const memory_type = device_info.bar0 & BAR_MEMORY_TYPE_MASK;
-    const low = @as(usize, device_info.bar0 & 0xFFFF_FFF0);
-    return switch (memory_type) {
-        BAR_MEMORY_TYPE_32 => low,
-        BAR_MEMORY_TYPE_64 => (@as(usize, device_info.bar1) << 32) | low,
-        else => null,
-    };
+    return (pci.memoryBar0(device_info) orelse return null).address;
 }
 
 fn mapBar(physical: usize) usize {
