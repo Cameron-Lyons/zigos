@@ -164,14 +164,15 @@ Use the pinned toolchain and repo entrypoints:
   devices. Boot revokes every discovered PCI bus master, masks INTx and disables
   MSI/MSI-X, installs coherent deny-by-default DMA and interrupt-remapping tables
   across every segment-zero unit, maps only the five direction-scoped NVMe
-  queue/bounce pages and, when present, the I225-LM TX/RX descriptor pages, one
-  TX payload page, and 32-page RX buffer region in an independent domain, and
+  queue/bounce pages and, when present, the I225-LM TX/RX descriptor pages plus
+  independent 32-page TX and RX buffer regions in an independent domain, and
   confirms translation on every unit. The I225-LM path attaches to the
-  firmware-negotiated PHY, publishes the permanent MAC, and uses bounded polled
-  TX/RX queues only after its requester is confined. Native payloads are carried
-  in padded Ethernet frames under the local experimental EtherType; receive
-  polling accepts only directed or broadcast frames for that EtherType. Hardware
-  interrupt delivery and peer-addressed transport remain gated work. NVMe, PCIe
+  firmware-negotiated PHY, publishes the permanent MAC, queues TX without
+  completion spinning, and polls RX only after its requester is confined.
+  Native payloads are carried in padded Ethernet frames under the local
+  experimental EtherType; receive polling accepts only directed or broadcast
+  frames for that EtherType. Hardware interrupt delivery and peer-addressed
+  transport remain gated work. NVMe, PCIe
   ECAM, I225-LM, ACPI, and VT-d cache-disabled mappings are assigned by one
   page-aligned, capacity-checked kernel MMIO layout whose pairwise non-overlap is
   enforced at compile time. Before
