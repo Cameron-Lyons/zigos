@@ -1,11 +1,11 @@
 const std = @import("std");
 const console = @import("../utils/console.zig");
+const x2apic = @import("../interrupts/x2apic.zig");
 const x86 = @import("../../arch/x86.zig");
 const cpu_baseline = @import("../../arch/cpu_baseline.zig");
 
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
 const IA32_TSC_DEADLINE_MSR: u32 = 0x6E0;
-const X2APIC_EOI_MSR: u32 = 0x80B;
 const X2APIC_SPURIOUS_VECTOR_MSR: u32 = 0x80F;
 const X2APIC_LVT_TIMER_MSR: u32 = 0x832;
 const X2APIC_TIMER_INITIAL_COUNT_MSR: u32 = 0x838;
@@ -138,7 +138,7 @@ pub fn handleInterrupt() void {
         },
         .calibrated_countdown => ticks +%= 1,
     }
-    x86.writeMsr(X2APIC_EOI_MSR, 0);
+    x2apic.acknowledge();
 }
 
 pub fn handleSpuriousInterrupt() void {}

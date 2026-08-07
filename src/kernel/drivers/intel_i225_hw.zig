@@ -4,7 +4,9 @@ const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const timer = @import("../timer/timer.zig");
+const x2apic = @import("../interrupts/x2apic.zig");
 const i225_frame = @import("intel_i225_frame.zig");
+const i225_irq = @import("intel_i225_irq.zig");
 const i225_rx = @import("intel_i225_rx.zig");
 const i225_tx = @import("intel_i225_tx.zig");
 const pci = @import("pci.zig");
@@ -37,6 +39,8 @@ const REG_RDLEN0: usize = 0x0C008;
 const REG_RDH0: usize = 0x0C010;
 const REG_RDT0: usize = 0x0C018;
 const REG_RXDCTL0: usize = 0x0C028;
+const REG_ICR: usize = 0x01500;
+const REG_IMS: usize = 0x01508;
 const REG_IMC: usize = 0x0150C;
 const REG_EIMC: usize = 0x01528;
 const REG_RAL0: usize = 0x05400;
@@ -75,14 +79,22 @@ const SRRCTL_PACKET_BUFFER_2048: u32 = 2;
 const SRRCTL_HEADER_BUFFER_256: u32 = 4 << 8;
 const SRRCTL_ADVANCED_ONE_BUFFER: u32 = 1 << 25;
 const RAH_ADDRESS_VALID: u32 = 1 << 31;
+const PENDING_INTERRUPT_EVENT: u32 = 1 << 30;
 
 comptime {
     if (@as(usize, BAR_MAP_BYTES) > mmio_windows.intel_i225.bytes) {
         @compileError("I225 BAR mapping exceeds its reserved MMIO window");
     }
+    if (i225_irq.MAX_TX_COMPLETIONS_PER_SERVICE != i225_tx.CAPACITY) {
+        @compileError("I225 interrupt TX service bound diverged from ring capacity");
+    }
+    if (i225_irq.MAX_RX_FRAMES_PER_SERVICE != 1) {
+        @compileError("I225 receive service must remain one frame per pass");
+    }
 }
 
 pub const MAX_PAYLOAD_BYTES = i225_frame.MAX_PAYLOAD_BYTES;
+pub const INTERRUPT_VECTOR = i225_irq.INTERRUPT_VECTOR;
 
 pub const ReceiveStatus = enum(u8) {
     empty = 0,
@@ -110,6 +122,9 @@ pub const Error = error{
     DmaIsolationBypassed,
     DmaFaultMonitoringUnavailable,
     BusMasterEnableFailed,
+    InterruptIsolationUnavailable,
+    InterruptRouteInstallFailed,
+    MsiEnableFailed,
 };
 
 const Controller = struct {
@@ -145,6 +160,8 @@ var failed_transmit_frames: u64 = 0;
 var received_frames: u64 = 0;
 var dropped_receive_frames: u64 = 0;
 var failed_receive_polls: u64 = 0;
+var pending_interrupt_causes: u32 = 0;
+var empty_interrupt_streak: u8 = 0;
 
 pub fn prepare(device_info: pci.PCIDevice) Error!void {
     if (prepared) return error.AlreadyPrepared;
@@ -223,6 +240,8 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
     received_frames = 0;
     dropped_receive_frames = 0;
     failed_receive_polls = 0;
+    pending_interrupt_causes = 0;
+    empty_interrupt_streak = 0;
     prepared = true;
     committed = true;
 }
@@ -237,12 +256,29 @@ pub fn activate() Error!void {
         return error.DmaIsolationBypassed;
     }
     if (!intel_vtd.faultMonitoringEnabled()) return error.DmaFaultMonitoringUnavailable;
+    if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
+    const remapped = intel_vtd.routeInterrupt(
+        active_device,
+        INTERRUPT_VECTOR,
+        x2apic.localId(),
+    ) catch return error.InterruptRouteInstallFailed;
+    pci.enableSingleMsi(active_device, .{
+        .address = remapped.address,
+        .data = remapped.data,
+    }) catch return error.MsiEnableFailed;
+    var msi_enabled = true;
+    errdefer if (msi_enabled) pci.disableMsi(active_device) catch {};
     pci.enableMemoryBusMastering(active_device);
     if (!pci.busMasteringEnabled(active_device)) {
         pci.disableBusMastering(active_device);
         return error.BusMasterEnableFailed;
     }
+    pending_interrupt_causes = 0;
+    empty_interrupt_streak = 0;
     active = true;
+    _ = controller.reg32(REG_ICR);
+    controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
+    msi_enabled = false;
 }
 
 pub fn attached() bool {
@@ -272,6 +308,21 @@ pub fn droppedReceiveCount() u64 {
 
 pub fn failedReceivePollCount() u64 {
     return failed_receive_polls;
+}
+
+pub fn handleInterrupt() void {
+    if (prepared) {
+        controller.writeReg32(REG_IMC, i225_irq.QUEUE_CAUSES);
+        const cause = controller.reg32(REG_ICR);
+        _ = @atomicRmw(
+            u32,
+            &pending_interrupt_causes,
+            .Or,
+            cause | PENDING_INTERRUPT_EVENT,
+            .seq_cst,
+        );
+    }
+    x2apic.acknowledge();
 }
 
 pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
@@ -325,6 +376,7 @@ pub fn pollReceive(output: []u8) ReceiveResult {
         failed_receive_polls +%= 1;
         return .{ .status = .failed };
     }
+    defer rearmQueueInterrupts();
     if (!controller.linkUp()) return .{ .status = .empty };
 
     const descriptor_index = controller.rx_head;
@@ -377,27 +429,75 @@ fn configureTransmitQueue(pending: *Controller) Error!void {
     }
 }
 
-fn reapTransmitCompletions() void {
-    if (!active) return;
+fn reapTransmitCompletions() u32 {
+    if (!active) return 0;
+    var reaped: u32 = 0;
     while (controller.tx_queue.in_flight != 0) {
         const descriptor_index = controller.tx_queue.head;
         const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
             controller.tx_descriptor_phys + descriptor_index * i225_tx.DESCRIPTOR_BYTES,
         );
-        if (!i225_tx.completionDone(descriptor.olinfo_status)) return;
+        if (!i225_tx.completionDone(descriptor.olinfo_status)) return reaped;
         acquireDescriptor();
         const completion_status = descriptor.olinfo_status;
-        _ = controller.tx_queue.reclaimCompleted(completion_status) orelse return;
+        _ = controller.tx_queue.reclaimCompleted(completion_status) orelse return reaped;
         completed_transmit_frames +%= 1;
+        reaped += 1;
     }
+    return reaped;
 }
 
 fn serviceTransmitQueue(now_ticks: u64) bool {
-    reapTransmitCompletions();
+    if (!servicePendingInterrupt()) return false;
+    _ = reapTransmitCompletions();
     if (!controller.tx_queue.oldestSubmissionExpired(now_ticks, TRANSMIT_TIMEOUT_TICKS)) return true;
     failed_transmit_frames +%= 1;
     containFailure("ZIGOS:I225:HW:TX_STALL_CONTAINED\n");
     return false;
+}
+
+fn servicePendingInterrupt() bool {
+    const pending = @atomicRmw(
+        u32,
+        &pending_interrupt_causes,
+        .Xchg,
+        0,
+        .seq_cst,
+    );
+    if (pending == 0) return true;
+    const cause = pending & ~PENDING_INTERRUPT_EVENT;
+    if (i225_irq.classify(cause) == .invalid) {
+        containFailure("ZIGOS:I225:HW:INTERRUPT_CAUSE_CONTAINED\n");
+        return false;
+    }
+
+    const transmit_progress = reapTransmitCompletions() != 0;
+    const receive_progress = (cause & i225_irq.RECEIVE_CAUSES) != 0 and
+        receiveCompletionReady();
+    empty_interrupt_streak = i225_irq.nextEmptyStreak(
+        empty_interrupt_streak,
+        transmit_progress or receive_progress,
+    );
+    if (i225_irq.shouldContain(empty_interrupt_streak)) {
+        containFailure("ZIGOS:I225:HW:EMPTY_INTERRUPT_STORM_CONTAINED\n");
+        return false;
+    }
+
+    if ((cause & i225_irq.RECEIVE_CAUSES) != 0) {
+        controller.writeReg32(REG_IMS, i225_irq.TRANSMIT_COMPLETE_CAUSE);
+    } else {
+        rearmQueueInterrupts();
+    }
+    return true;
+}
+
+fn receiveCompletionReady() bool {
+    const descriptor: *volatile i225_rx.Descriptor = rxDescriptor(controller.rx_head);
+    return i225_rx.decodeCompletion(descriptor.header_or_writeback).done;
+}
+
+fn rearmQueueInterrupts() void {
+    if (active) controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
 }
 
 fn configureReceiveQueue(pending: *Controller) Error!void {
@@ -465,7 +565,10 @@ fn pollDmaFault() bool {
 }
 
 fn containFailure(marker: []const u8) void {
+    controller.writeReg32(REG_IMC, 0xFFFF_FFFF);
+    controller.writeReg32(REG_EIMC, 0xFFFF_FFFF);
     active = false;
+    pci.disableMsi(active_device) catch {};
     pci.disableBusMastering(active_device);
     controller.writeReg32(REG_TXDCTL0, 0);
     controller.writeReg32(REG_RXDCTL0, 0);

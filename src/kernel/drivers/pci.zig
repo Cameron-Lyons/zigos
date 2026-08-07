@@ -40,6 +40,9 @@ const PCI_CAPABILITY_MAX_OFFSET: u8 = 0xFC;
 const PCI_CAPABILITY_MSI: u8 = 0x05;
 const PCI_CAPABILITY_MSIX: u8 = 0x11;
 const PCI_MSI_ENABLE: u16 = 1 << 0;
+const PCI_MSI_MULTI_MESSAGE_ENABLE_MASK: u16 = 0x7 << 4;
+const PCI_MSI_64_BIT_CAPABLE: u16 = 1 << 7;
+const PCI_MSI_PER_VECTOR_MASK_CAPABLE: u16 = 1 << 8;
 const PCI_MSIX_FUNCTION_MASK: u16 = 1 << 14;
 const PCI_MSIX_ENABLE: u16 = 1 << 15;
 
@@ -106,6 +109,18 @@ pub const InitError = error{InvalidEcamAllocation};
 pub const QuiesceError = error{
     MalformedCapabilityList,
     InterruptDisableFailed,
+};
+pub const MsiError = error{
+    MalformedCapabilityList,
+    MsiCapabilityMissing,
+    MessageAddressUnsupported,
+    MsiEnableFailed,
+    InterruptDisableFailed,
+};
+
+pub const MsiMessage = struct {
+    address: u64,
+    data: u16,
 };
 
 pub fn init(allocation: mcfg.Allocation) InitError!void {
@@ -417,60 +432,240 @@ fn messageInterruptControl(capability_id: u8, control: u16) ?struct { enabled: b
     };
 }
 
-fn inspectMessageSignaledInterrupts(device_info: PCIDevice, disable: bool) QuiesceError!usize {
-    if ((readConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        PCI_STATUS_OFFSET,
-    ) & PCI_STATUS_CAPABILITIES_LIST) == 0) return 0;
+const Capability = struct {
+    id: u8,
+    offset: u8,
+};
 
-    const header_type = readConfigByte(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        PCI_HEADER_TYPE_OFFSET,
-    ) & PCI_HEADER_TYPE_MASK;
-    const pointer_offset: u16 = if (header_type == PCI_HEADER_TYPE_CARDBUS)
-        PCI_CARDBUS_CAPABILITY_POINTER_OFFSET
-    else
-        PCI_CAPABILITY_POINTER_OFFSET;
-    var offset = readConfigByte(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        pointer_offset,
-    );
-    var visited: u64 = 0;
-    var enabled_count: usize = 0;
-    while (offset != 0) {
-        if (offset < PCI_CAPABILITY_MIN_OFFSET or offset > PCI_CAPABILITY_MAX_OFFSET or offset & 3 != 0) {
+const CapabilityIterator = struct {
+    device_info: PCIDevice,
+    offset: u8,
+    visited: u64 = 0,
+
+    fn init(device_info: PCIDevice) CapabilityIterator {
+        if ((readConfigWord(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            PCI_STATUS_OFFSET,
+        ) & PCI_STATUS_CAPABILITIES_LIST) == 0) {
+            return .{ .device_info = device_info, .offset = 0 };
+        }
+        const header_type = readConfigByte(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            PCI_HEADER_TYPE_OFFSET,
+        ) & PCI_HEADER_TYPE_MASK;
+        const pointer_offset: u16 = if (header_type == PCI_HEADER_TYPE_CARDBUS)
+            PCI_CARDBUS_CAPABILITY_POINTER_OFFSET
+        else
+            PCI_CAPABILITY_POINTER_OFFSET;
+        return .{
+            .device_info = device_info,
+            .offset = readConfigByte(
+                device_info.bus,
+                device_info.device,
+                device_info.function,
+                pointer_offset,
+            ),
+        };
+    }
+
+    fn next(self: *CapabilityIterator) error{MalformedCapabilityList}!?Capability {
+        if (self.offset == 0) return null;
+        const offset = self.offset;
+        if (offset < PCI_CAPABILITY_MIN_OFFSET or offset > PCI_CAPABILITY_MAX_OFFSET or
+            offset & 3 != 0)
+        {
             return error.MalformedCapabilityList;
         }
         const slot: u6 = @intCast(offset >> 2);
         const slot_bit = @as(u64, 1) << slot;
-        if ((visited & slot_bit) != 0) return error.MalformedCapabilityList;
-        visited |= slot_bit;
-
-        const capability_id = readConfigByte(
-            device_info.bus,
-            device_info.device,
-            device_info.function,
-            offset,
-        );
-        const next = readConfigByte(
-            device_info.bus,
-            device_info.device,
-            device_info.function,
+        if ((self.visited & slot_bit) != 0) return error.MalformedCapabilityList;
+        self.visited |= slot_bit;
+        self.offset = readConfigByte(
+            self.device_info.bus,
+            self.device_info.device,
+            self.device_info.function,
             @as(u16, offset) + 1,
         );
+        return .{
+            .id = readConfigByte(
+                self.device_info.bus,
+                self.device_info.device,
+                self.device_info.function,
+                offset,
+            ),
+            .offset = offset,
+        };
+    }
+};
+
+const MsiLayout = struct {
+    data_offset: u16,
+    mask_offset: ?u16,
+};
+
+fn msiLayout(capability_offset: u8, control: u16) ?MsiLayout {
+    const base: u16 = capability_offset;
+    const address_bytes: u16 = if ((control & PCI_MSI_64_BIT_CAPABLE) != 0) 12 else 8;
+    const data_offset = base + address_bytes;
+    const mask_offset: ?u16 = if ((control & PCI_MSI_PER_VECTOR_MASK_CAPABLE) != 0)
+        data_offset + 4
+    else
+        null;
+    const end = if (mask_offset) |offset| offset + 4 else data_offset + 2;
+    if (end > 0x100) return null;
+    return .{ .data_offset = data_offset, .mask_offset = mask_offset };
+}
+
+fn findCapabilityOffset(device_info: PCIDevice, wanted_id: u8) MsiError!?u8 {
+    var capabilities = CapabilityIterator.init(device_info);
+    while (try capabilities.next()) |capability| {
+        if (capability.id == wanted_id) return capability.offset;
+    }
+    return null;
+}
+
+pub fn enableSingleMsi(device_info: PCIDevice, message: MsiMessage) MsiError!void {
+    const capability = try findCapabilityOffset(device_info, PCI_CAPABILITY_MSI) orelse
+        return error.MsiCapabilityMissing;
+    const control_offset = @as(u16, capability) + 2;
+    const address_offset = @as(u16, capability) + 4;
+    const control = readConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        control_offset,
+    );
+    const layout = msiLayout(capability, control) orelse
+        return error.MalformedCapabilityList;
+    if ((control & PCI_MSI_64_BIT_CAPABLE) == 0 and message.address >> 32 != 0) {
+        return error.MessageAddressUnsupported;
+    }
+
+    const disabled = control & ~(PCI_MSI_ENABLE | PCI_MSI_MULTI_MESSAGE_ENABLE_MASK);
+    writeConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        control_offset,
+        disabled,
+    );
+    writeConfigDword(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        address_offset,
+        @truncate(message.address),
+    );
+    if ((control & PCI_MSI_64_BIT_CAPABLE) != 0) {
+        writeConfigDword(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            address_offset + 4,
+            @truncate(message.address >> 32),
+        );
+    }
+    writeConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        layout.data_offset,
+        message.data,
+    );
+    if (layout.mask_offset) |mask_offset| {
+        const mask = readConfigDword(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            mask_offset,
+        );
+        writeConfigDword(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            mask_offset,
+            mask & ~@as(u32, 1),
+        );
+    }
+    writeConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        control_offset,
+        disabled | PCI_MSI_ENABLE,
+    );
+    const verified = readConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        control_offset,
+    );
+    if ((verified & PCI_MSI_ENABLE) == 0 or
+        (verified & PCI_MSI_MULTI_MESSAGE_ENABLE_MASK) != 0 or
+        readConfigDword(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            address_offset,
+        ) != @as(u32, @truncate(message.address)) or
+        readConfigWord(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            layout.data_offset,
+        ) != message.data)
+    {
+        writeConfigWord(
+            device_info.bus,
+            device_info.device,
+            device_info.function,
+            control_offset,
+            disabled,
+        );
+        return error.MsiEnableFailed;
+    }
+}
+
+pub fn disableMsi(device_info: PCIDevice) MsiError!void {
+    const capability = try findCapabilityOffset(device_info, PCI_CAPABILITY_MSI) orelse
+        return error.MsiCapabilityMissing;
+    const control_offset = @as(u16, capability) + 2;
+    const control = readConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        control_offset,
+    );
+    writeConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        control_offset,
+        control & ~PCI_MSI_ENABLE,
+    );
+    if ((readConfigWord(
+        device_info.bus,
+        device_info.device,
+        device_info.function,
+        control_offset,
+    ) & PCI_MSI_ENABLE) != 0) return error.InterruptDisableFailed;
+}
+
+fn inspectMessageSignaledInterrupts(device_info: PCIDevice, disable: bool) QuiesceError!usize {
+    var capabilities = CapabilityIterator.init(device_info);
+    var enabled_count: usize = 0;
+    while (try capabilities.next()) |capability| {
         if (messageInterruptControl(
-            capability_id,
+            capability.id,
             readConfigWord(
                 device_info.bus,
                 device_info.device,
                 device_info.function,
-                @as(u16, offset) + 2,
+                @as(u16, capability.offset) + 2,
             ),
         )) |message_control| {
             if (message_control.enabled) enabled_count += 1;
@@ -479,24 +674,23 @@ fn inspectMessageSignaledInterrupts(device_info: PCIDevice, disable: bool) Quies
                     device_info.bus,
                     device_info.device,
                     device_info.function,
-                    @as(u16, offset) + 2,
+                    @as(u16, capability.offset) + 2,
                     message_control.disabled,
                 );
                 const verified = readConfigWord(
                     device_info.bus,
                     device_info.device,
                     device_info.function,
-                    @as(u16, offset) + 2,
+                    @as(u16, capability.offset) + 2,
                 );
-                if (messageInterruptControl(capability_id, verified).?.enabled or
-                    (capability_id == PCI_CAPABILITY_MSIX and
+                if (messageInterruptControl(capability.id, verified).?.enabled or
+                    (capability.id == PCI_CAPABILITY_MSIX and
                         (verified & PCI_MSIX_FUNCTION_MASK) == 0))
                 {
                     return error.InterruptDisableFailed;
                 }
             }
         }
-        offset = next;
     }
     return enabled_count;
 }
@@ -814,6 +1008,20 @@ test "PCI interrupt quiesce disables MSI and masks MSI-X" {
     try std.testing.expect(msix.enabled);
     try std.testing.expectEqual(@as(u16, PCI_MSIX_FUNCTION_MASK | 0x0007), msix.disabled);
     try std.testing.expect(messageInterruptControl(0x10, 0xFFFF) == null);
+}
+
+test "PCI MSI layout supports one 32-bit or 64-bit message" {
+    const simple = msiLayout(0x40, 0).?;
+    try std.testing.expectEqual(@as(u16, 0x48), simple.data_offset);
+    try std.testing.expectEqual(@as(?u16, null), simple.mask_offset);
+
+    const extended = msiLayout(
+        0x40,
+        PCI_MSI_64_BIT_CAPABLE | PCI_MSI_PER_VECTOR_MASK_CAPABLE,
+    ).?;
+    try std.testing.expectEqual(@as(u16, 0x4C), extended.data_offset);
+    try std.testing.expectEqual(@as(?u16, 0x50), extended.mask_offset);
+    try std.testing.expect(msiLayout(0xF8, PCI_MSI_64_BIT_CAPABLE) == null);
 }
 
 pub fn writeConfigDword(bus: u8, device: u8, function: u8, offset: u16, value: u32) void {

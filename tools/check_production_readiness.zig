@@ -1256,7 +1256,7 @@ fn validateNuc11tnki5KernelProofSources(
         "IA32_TSC_DEADLINE_MSR",
         "X2APIC_LVT_TIMER_MSR",
         "X2APIC_TIMER_MODE_TSC_DEADLINE",
-        "x86.writeMsr(X2APIC_EOI_MSR, 0)",
+        "x2apic.acknowledge()",
         "x86.writeMsr(IA32_TSC_DEADLINE_MSR, deadline)",
         "elapsedTicks",
         "nextTickDeadline",
