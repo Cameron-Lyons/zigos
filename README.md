@@ -181,7 +181,8 @@ Use the pinned toolchain and repo entrypoints:
   ready. It installs one exact-requester VT-d interrupt-remapping entry, programs
   a single-vector MSI message, masks queue causes in the top half, and drains at
   most 63 TX completions or one RX frame per task-side service pass. Malformed
-  causes and eight consecutive no-progress interrupts fail closed.
+  causes and eight consecutive no-progress interrupts fail closed. Queue
+  enable and disable transitions use invariant-TSC elapsed deadlines.
   Native payloads are carried in padded Ethernet frames under the local
   experimental EtherType; service and sync traffic resolves a fixed peer-device
   directory to directed unicast frames, while scoped discovery alone uses
