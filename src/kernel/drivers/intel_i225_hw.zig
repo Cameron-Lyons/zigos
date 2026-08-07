@@ -5,26 +5,24 @@ const paging = @import("../memory/paging64.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const i225_frame = @import("intel_i225_frame.zig");
 const i225_rx = @import("intel_i225_rx.zig");
+const i225_tx = @import("intel_i225_tx.zig");
 const pci = @import("pci.zig");
 
 const PAGE_SIZE: u32 = 4096;
 const TX_DESCRIPTOR_FRAME: u32 = 0;
-const TX_BUFFER_FRAME: u32 = 1;
-const RX_DESCRIPTOR_FRAME: u32 = 2;
-const RX_BUFFER_FIRST_FRAME: u32 = 3;
+const TX_BUFFER_FIRST_FRAME: u32 = 1;
+const TX_BUFFER_FRAME_COUNT: u32 = i225_tx.BUFFER_REGION_BYTES / PAGE_SIZE;
+const RX_DESCRIPTOR_FRAME: u32 = TX_BUFFER_FIRST_FRAME + TX_BUFFER_FRAME_COUNT;
+const RX_BUFFER_FIRST_FRAME: u32 = RX_DESCRIPTOR_FRAME + 1;
 const RX_BUFFER_FRAME_COUNT: u32 = i225_rx.BUFFER_REGION_BYTES / PAGE_SIZE;
 const DMA_FRAME_COUNT: u32 = RX_BUFFER_FIRST_FRAME + RX_BUFFER_FRAME_COUNT;
 const DMA_WINDOW_COUNT: usize = 4;
-const TX_DESCRIPTOR_COUNT: u32 = 64;
-const TX_DESCRIPTOR_BYTES: u32 = 16;
-const TX_RING_BYTES: u32 = TX_DESCRIPTOR_COUNT * TX_DESCRIPTOR_BYTES;
 const BAR_MAP_BYTES: u32 = 0x1_0000;
 const BAR_IO_SPACE: u32 = 1 << 0;
 const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
 const BAR_MEMORY_TYPE_32: u32 = 0;
 const BAR_MEMORY_TYPE_64: u32 = 0x4;
 const QUEUE_SPIN_LIMIT: u64 = 5_000_000;
-const TRANSMIT_SPIN_LIMIT: u64 = 50_000_000;
 
 const REG_STATUS: usize = 0x00008;
 const REG_CTRL_EXT: usize = 0x00018;
@@ -76,14 +74,6 @@ const SRRCTL_HEADER_BUFFER_256: u32 = 4 << 8;
 const SRRCTL_ADVANCED_ONE_BUFFER: u32 = 1 << 25;
 const RAH_ADDRESS_VALID: u32 = 1 << 31;
 
-const ADVTXD_TYPE_DATA: u32 = 0x0030_0000;
-const ADVTXD_END_OF_PACKET: u32 = 0x0100_0000;
-const ADVTXD_INSERT_FCS: u32 = 0x0200_0000;
-const ADVTXD_REPORT_STATUS: u32 = 0x0800_0000;
-const ADVTXD_EXTENDED: u32 = 0x2000_0000;
-const ADVTXD_PAYLOAD_LENGTH_SHIFT: u5 = 14;
-const TXD_STATUS_DONE: u32 = 1;
-
 comptime {
     if (@as(usize, BAR_MAP_BYTES) > mmio_windows.intel_i225.bytes) {
         @compileError("I225 BAR mapping exceeds its reserved MMIO window");
@@ -91,16 +81,6 @@ comptime {
 }
 
 pub const MAX_PAYLOAD_BYTES = i225_frame.MAX_PAYLOAD_BYTES;
-
-const TxDescriptor = extern struct {
-    buffer_addr: u64,
-    cmd_type_len: u32,
-    olinfo_status: u32,
-};
-
-comptime {
-    if (@sizeOf(TxDescriptor) != TX_DESCRIPTOR_BYTES) @compileError("I225 TX descriptor layout changed");
-}
 
 pub const ReceiveStatus = enum(u8) {
     empty = 0,
@@ -137,7 +117,7 @@ const Controller = struct {
     rx_descriptor_phys: u32,
     rx_buffer_phys: u32,
     mac: [6]u8,
-    tx_tail: u32 = 0,
+    tx_queue: i225_tx.Queue = .{},
     rx_head: u32 = 0,
 
     fn reg32(self: *const Controller, offset: usize) u32 {
@@ -158,7 +138,7 @@ var active = false;
 var controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var dma_windows: [DMA_WINDOW_COUNT]intel_vtd.DmaWindow = undefined;
-var transmitted_frames: u64 = 0;
+var completed_transmit_frames: u64 = 0;
 var failed_transmit_frames: u64 = 0;
 var received_frames: u64 = 0;
 var dropped_receive_frames: u64 = 0;
@@ -202,7 +182,7 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
     };
     zeroFrames(frames, DMA_FRAME_COUNT);
     pending.tx_descriptor_phys = frameAddress(frames, TX_DESCRIPTOR_FRAME);
-    pending.tx_buffer_phys = frameAddress(frames, TX_BUFFER_FRAME);
+    pending.tx_buffer_phys = frameAddress(frames, TX_BUFFER_FIRST_FRAME);
     pending.rx_descriptor_phys = frameAddress(frames, RX_DESCRIPTOR_FRAME);
     pending.rx_buffer_phys = frameAddress(frames, RX_BUFFER_FIRST_FRAME);
 
@@ -218,6 +198,7 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
         },
         .{
             .base = pending.tx_buffer_phys,
+            .length = i225_tx.BUFFER_REGION_BYTES,
             .device_readable = true,
             .device_writable = false,
         },
@@ -235,7 +216,7 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
     };
     controller = pending;
     active_device = device_info;
-    transmitted_frames = 0;
+    completed_transmit_frames = 0;
     failed_transmit_frames = 0;
     received_frames = 0;
     dropped_receive_frames = 0;
@@ -272,7 +253,7 @@ pub fn macAddress() [6]u8 {
 }
 
 pub fn transmitCount() u64 {
-    return transmitted_frames;
+    return completed_transmit_frames;
 }
 
 pub fn failedTransmitCount() u64 {
@@ -296,46 +277,27 @@ pub fn sendPayload(payload: []const u8) bool {
         failed_transmit_frames +%= 1;
         return false;
     }
+    if (pollDmaFault()) {
+        failed_transmit_frames +%= 1;
+        return false;
+    }
+    reapTransmitCompletions();
 
-    const buffer: [*]u8 = @ptrFromInt(controller.tx_buffer_phys);
-    const frame_len = i225_frame.buildEthernetFrame(buffer[0..PAGE_SIZE], controller.mac, payload) catch {
+    const descriptor_index = controller.tx_queue.reserve() catch {
         failed_transmit_frames +%= 1;
         return false;
     };
+    const buffer_address = i225_tx.bufferAddress(controller.tx_buffer_phys, descriptor_index).?;
+    const buffer: [*]u8 = @ptrFromInt(buffer_address);
+    const frame_len = i225_frame.buildEthernetFrame(buffer[0..i225_tx.BUFFER_BYTES], controller.mac, payload) catch unreachable;
 
-    const descriptor_index = controller.tx_tail;
-    const descriptor: *volatile TxDescriptor = @ptrFromInt(
-        controller.tx_descriptor_phys + descriptor_index * TX_DESCRIPTOR_BYTES,
+    const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
+        controller.tx_descriptor_phys + descriptor_index * i225_tx.DESCRIPTOR_BYTES,
     );
-    descriptor.* = .{
-        .buffer_addr = controller.tx_buffer_phys,
-        .cmd_type_len = ADVTXD_TYPE_DATA | ADVTXD_EXTENDED | ADVTXD_INSERT_FCS |
-            ADVTXD_END_OF_PACKET | ADVTXD_REPORT_STATUS | @as(u32, @intCast(frame_len)),
-        .olinfo_status = @as(u32, @intCast(frame_len)) << ADVTXD_PAYLOAD_LENGTH_SHIFT,
-    };
+    descriptor.* = i225_tx.submissionDescriptor(buffer_address, frame_len) catch unreachable;
     publishDescriptor();
-    controller.tx_tail = (descriptor_index + 1) % TX_DESCRIPTOR_COUNT;
-    controller.writeReg32(REG_TDT0, controller.tx_tail);
-
-    var spins: u64 = 0;
-    while (spins < TRANSMIT_SPIN_LIMIT) : (spins += 1) {
-        if ((descriptor.olinfo_status & TXD_STATUS_DONE) != 0) {
-            if (pollDmaFault()) {
-                failed_transmit_frames +%= 1;
-                return false;
-            }
-            transmitted_frames +%= 1;
-            return true;
-        }
-        if ((spins & 0x3FF) == 0 and pollDmaFault()) {
-            failed_transmit_frames +%= 1;
-            return false;
-        }
-        spin.hint();
-    }
-    failed_transmit_frames +%= 1;
-    containFailure("ZIGOS:I225:HW:TX_TIMEOUT_CONTAINED\n");
-    return false;
+    controller.writeReg32(REG_TDT0, controller.tx_queue.tail);
+    return true;
 }
 
 pub fn pollReceive(output: []u8) ReceiveResult {
@@ -382,7 +344,7 @@ pub fn pollReceive(output: []u8) ReceiveResult {
 }
 
 fn configureTransmitQueue(pending: *Controller) Error!void {
-    pending.writeReg32(REG_TDLEN0, TX_RING_BYTES);
+    pending.writeReg32(REG_TDLEN0, i225_tx.RING_BYTES);
     pending.writeReg32(REG_TDBAL0, pending.tx_descriptor_phys);
     pending.writeReg32(REG_TDBAH0, 0);
     pending.writeReg32(REG_TDH0, 0);
@@ -396,6 +358,21 @@ fn configureTransmitQueue(pending: *Controller) Error!void {
     pending.writeReg32(REG_TXDCTL0, TXDCTL_THRESHOLDS | TXDCTL_QUEUE_ENABLE);
     if (!spinQueueState(pending, REG_TXDCTL0, TXDCTL_QUEUE_ENABLE, true)) {
         return error.TxQueueEnableTimeout;
+    }
+}
+
+fn reapTransmitCompletions() void {
+    if (!active) return;
+    while (controller.tx_queue.in_flight != 0) {
+        const descriptor_index = controller.tx_queue.head;
+        const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
+            controller.tx_descriptor_phys + descriptor_index * i225_tx.DESCRIPTOR_BYTES,
+        );
+        if (!i225_tx.completionDone(descriptor.olinfo_status)) return;
+        acquireDescriptor();
+        if (!i225_tx.completionDone(descriptor.olinfo_status)) return;
+        _ = controller.tx_queue.reclaim().?;
+        completed_transmit_frames +%= 1;
     }
 }
 
