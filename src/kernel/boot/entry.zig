@@ -20,12 +20,15 @@ fn softwareCpuFallbackRequested() bool {
         handoff.commandLineU64(info, "qemu_tsc_frequency_hz") == QEMU_TSC_FREQUENCY_HZ;
 }
 
-pub fn kernelMain() void {
-    x86.enableSse();
-    console.init();
+fn printBootIdentity() void {
     common.printBootMarker(boot_markers.boot_start);
     common.printBootProfile();
     common.printKernelRole();
+}
+
+pub fn kernelMain() void {
+    x86.enableSse();
+    console.init();
     var features = cpu_features.detect();
     if (features.tsc_frequency_hz == 0) {
         if (handoff.capturedInfo()) |info| {
@@ -51,6 +54,7 @@ pub fn kernelMain() void {
         required_features.invariant_tsc = true;
     }
     if (cpu_features.baseline.firstMissing(required_features)) |missing_feature| {
+        printBootIdentity();
         common.printBootMarker(boot_markers.cpu_baseline_rejected);
         console.print("Unsupported CPU: missing ");
         console.print(@tagName(missing_feature));
@@ -58,6 +62,8 @@ pub fn kernelMain() void {
         x86.cli();
         while (true) x86.hlt();
     }
+    tsc_clock.init(features.tsc_frequency_hz);
+    printBootIdentity();
     common.printBootMarker(boot_markers.cpu_baseline_ready);
     cpu_features.enableModernFeatures(
         required_features,
@@ -76,7 +82,6 @@ pub fn kernelMain() void {
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();
-    tsc_clock.init(features.tsc_frequency_hz);
 
     init_core.init();
     common.printBootMarker(boot_markers.cpu_syscall_enabled);
