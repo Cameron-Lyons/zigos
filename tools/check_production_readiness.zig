@@ -1097,6 +1097,7 @@ fn validateNuc11tnki5KernelProofSources(
         "xhci_hw.probe(dev)",
         "device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false)",
         "ZIGOS:XHCI:HW:OWNERSHIP_OK",
+        "ZIGOS:XHCI:HW:RESET_OK",
     };
     for (required_boot_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, devices_source, snippet) == null) {
@@ -1874,6 +1875,9 @@ fn validateNuc11tnki5KernelProofSources(
         "inspectLegacyOwnership",
         "FirmwareOwnershipTimeout",
         "claimLegacyOwnership",
+        "CONTROLLER_HALT_TIMEOUT_MILLISECONDS: u64 = 16",
+        "ControllerResetTimeout",
+        "resetOwnedController",
         "InputEvidenceSource",
         "hardware_event_ring",
         "HardwareInputEvidence",
@@ -1907,6 +1911,9 @@ fn validateNuc11tnki5KernelProofSources(
         "paging.PAGE_WRITABLE",
         "tsc_clock.initialized",
         "tsc_clock.afterMilliseconds",
+        "controllerReset",
+        "writeReg32",
+        "InvariantClock",
     };
     for (required_xhci_hw_snippets) |snippet| {
         if (std.mem.indexOf(u8, xhci_hw_source, snippet) == null) {
