@@ -1868,6 +1868,9 @@ fn validateNuc11tnki5KernelProofSources(
         "MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0110",
         "InvalidDoorbellOffset",
         "InvalidRuntimeRegisterOffset",
+        "MAX_EXTENDED_CAPABILITIES: usize = 64",
+        "FirmwareOwnsController",
+        "inspectLegacyOwnership",
         "InputEvidenceSource",
         "hardware_event_ring",
         "HardwareInputEvidence",
@@ -1893,6 +1896,9 @@ fn validateNuc11tnki5KernelProofSources(
         "paging.PAGE_PRESENT | paging.PAGE_CACHE_DISABLE",
         "readCapabilitySnapshot",
         "xhci.parseCapabilityRegisters(&snapshot)",
+        "validateExtendedCapabilityRange",
+        "ExtendedCapabilityReader",
+        "probedLegacyOwnership",
     };
     for (required_xhci_hw_snippets) |snippet| {
         if (std.mem.indexOf(u8, xhci_hw_source, snippet) == null) {
