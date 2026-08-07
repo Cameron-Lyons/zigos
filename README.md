@@ -211,6 +211,9 @@ Use the pinned toolchain and repo entrypoints:
   and unchanged canary are verified before the controller is reset and reused.
   Every later synchronous command polls the same primary records; a DMA fault
   disables the controller and PCI bus mastering and withdraws the storage backend.
+  The xHCI input lifecycle assigns device slots in constant time, recycles them
+  after disconnects, and clears queued keyboard reports before a reclaimed slot
+  can be assigned to another port.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
