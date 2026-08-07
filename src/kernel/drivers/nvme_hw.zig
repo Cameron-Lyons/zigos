@@ -4,6 +4,7 @@ const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const dmar = @import("../platform/dmar.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
+const nvme_completion = @import("nvme_completion.zig");
 const nvme_prp = @import("nvme_prp.zig");
 const pci = @import("pci.zig");
 
@@ -58,6 +59,7 @@ pub const Error = error{
     BusMasteringNotRevoked,
     CommandTimeout,
     CommandFailed,
+    CompletionOwnershipMismatch,
     TransferTooLarge,
     EmptyTransfer,
     LbaOutOfRange,
@@ -264,12 +266,21 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
     const cqe: [*]volatile u32 = @ptrFromInt(queue.cq_phys + queue.cq_head * CQ_ENTRY_BYTES);
     var spins: u64 = 0;
     while (spins < COMMAND_SPIN_LIMIT) : (spins += 1) {
-        if ((spins & 0x3FF) == 0 and intel_vtd.faultMonitoringEnabled()) {
-            if ((intel_vtd.pollFault() catch return error.DmaFault) != null) return error.DmaFault;
+        if ((spins & 0x3FF) == 0) {
+            if (self.fatal()) return error.ControllerFatal;
+            if (intel_vtd.faultMonitoringEnabled() and
+                (intel_vtd.pollFault() catch return error.DmaFault) != null)
+            {
+                return error.DmaFault;
+            }
         }
         const status_dword = cqe[3];
-        const phase: u1 = @intCast((status_dword >> 16) & 1);
-        if (phase == queue.phase) {
+        if (nvme_completion.phase(status_dword) == queue.phase) {
+            acquireCompletion();
+            const completion = nvme_completion.decode(cqe[2], cqe[3]);
+            if (!completion.belongsTo(queue.qid, cid, queue.entries)) {
+                return error.CompletionOwnershipMismatch;
+            }
             queue.cq_head = (queue.cq_head + 1) % queue.entries;
             if (queue.cq_head == 0) queue.phase ^= 1;
             self.writeReg32(cqDoorbell(self, queue.qid), queue.cq_head);
@@ -278,7 +289,7 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
             {
                 return error.DmaFault;
             }
-            if (((status_dword >> 17) & 0x7FFF) != 0) return error.CommandFailed;
+            if (!completion.succeeded()) return error.CommandFailed;
             return;
         }
         spin.hint();
@@ -362,6 +373,10 @@ fn zeroFrame(phys: u32) void {
 
 fn publishSubmission() void {
     asm volatile ("mfence" ::: .{ .memory = true });
+}
+
+fn acquireCompletion() void {
+    asm volatile ("lfence" ::: .{ .memory = true });
 }
 
 var active_controller: Controller = undefined;
@@ -551,13 +566,24 @@ pub fn backendFlush() callconv(.c) bool {
 }
 
 fn handleBackendError(err: anyerror) void {
-    if (err != error.DmaFault or !active_present) return;
+    if (!backendErrorRequiresContainment(err) or !active_present) return;
     active_present = false;
     bounce_phys = 0;
     active_controller.writeReg32(REG_CC, active_controller.reg32(REG_CC) & ~CC_EN);
     pci.disableBusMastering(active_device);
     _ = spinUntilReady(&active_controller, false);
-    console.print("ZIGOS:NVME:HW:DMA_FAULT_CONTAINED\n");
+    console.print(if (err == error.DmaFault)
+        "ZIGOS:NVME:HW:DMA_FAULT_CONTAINED\n"
+    else
+        "ZIGOS:NVME:HW:COMMAND_FAILURE_CONTAINED\n");
+}
+
+fn backendErrorRequiresContainment(err: anyerror) bool {
+    return err == error.DmaFault or
+        err == error.ControllerFatal or
+        err == error.CommandTimeout or
+        err == error.CommandFailed or
+        err == error.CompletionOwnershipMismatch;
 }
 
 export fn zigosStorageBootstrapNvmeAttached() callconv(.c) bool {

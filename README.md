@@ -165,7 +165,9 @@ Use the pinned toolchain and repo entrypoints:
   MSI/MSI-X, installs coherent deny-by-default DMA and interrupt-remapping tables
   across every segment-zero unit, maps only six direction-scoped NVMe regions:
   four queue pages, an independent 32-page bounce window, and one PRP-list page.
-  NVMe reads and writes batch up to 128 KiB per command. When present, the
+  NVMe reads and writes batch up to 128 KiB per command, accept completions only
+  when phase, queue, command identifier, and submission-head bounds agree, and
+  contain fatal, timed-out, failed, or ownership-indeterminate queues. When present, the
   I225-LM TX/RX descriptor pages plus
   independent 32-page TX and RX buffer regions in an independent domain, and
   confirms translation on every unit. The I225-LM path attaches to the
