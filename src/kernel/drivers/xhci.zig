@@ -101,6 +101,7 @@ const USB_COMMAND_HOST_CONTROLLER_RESET: u32 = 1 << 1;
 const USB_COMMAND_INTERRUPTER_ENABLE: u32 = 1 << 2;
 const USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE: u32 = 1 << 3;
 const USB_STATUS_HOST_CONTROLLER_HALTED: u32 = 1 << 0;
+const USB_STATUS_HOST_SYSTEM_ERROR: u32 = 1 << 2;
 const USB_STATUS_CONTROLLER_NOT_READY: u32 = 1 << 11;
 const USB_STATUS_HOST_CONTROLLER_ERROR: u32 = 1 << 12;
 const PAGE_SIZE_4K_SUPPORTED: u32 = 1 << 0;
@@ -112,13 +113,27 @@ const INTERRUPTER_MODERATION_OFFSET: u32 = 0x04;
 const EVENT_RING_SEGMENT_TABLE_SIZE_OFFSET: u32 = 0x08;
 const EVENT_RING_SEGMENT_TABLE_BASE_OFFSET: u32 = 0x10;
 const EVENT_RING_DEQUEUE_POINTER_OFFSET: u32 = 0x18;
+const INTERRUPTER_PENDING: u32 = 1 << 0;
 const INTERRUPTER_ENABLE: u32 = 1 << 1;
+const EVENT_HANDLER_BUSY: u64 = 1 << 3;
 const INTERRUPTER_MODERATION_INTERVAL_125_MICROSECONDS: u32 = 500;
 const ADDRESS_64_BYTE_ALIGNMENT_MASK: u64 = RING_ALIGNMENT_BYTES - 1;
 const EVENT_RING_DEQUEUE_POINTER_MASK: u64 = ~@as(u64, 0xF);
 const LINK_TRB_TYPE: u32 = 6;
 const LINK_TRB_TOGGLE_CYCLE: u32 = 1 << 1;
 const TRB_TYPE_SHIFT: u5 = 10;
+const TRB_TYPE_MASK: u32 = 0x3F;
+const EVENT_TRB_TRANSFER: u6 = 32;
+const EVENT_TRB_COMMAND_COMPLETION: u6 = 33;
+const EVENT_TRB_PORT_STATUS_CHANGE: u6 = 34;
+const EVENT_TRB_BANDWIDTH_REQUEST: u6 = 35;
+const EVENT_TRB_DOORBELL: u6 = 36;
+const EVENT_TRB_HOST_CONTROLLER: u6 = 37;
+const EVENT_TRB_DEVICE_NOTIFICATION: u6 = 38;
+const EVENT_TRB_MFINDEX_WRAP: u6 = 39;
+const EVENT_TRB_VENDOR_FIRST: u6 = 48;
+const EVENT_TRB_VENDOR_LAST: u6 = 63;
+const COMPLETION_CODE_SUCCESS: u8 = 1;
 const CONFIG_MAX_DEVICE_SLOTS_ENABLED_MASK: u32 = 0xFF;
 const TEST_CAPABILITY_LENGTH: u8 = 0x40;
 const TEST_INTERFACE_VERSION: u16 = 0x0110;
@@ -189,6 +204,10 @@ pub const Error = error{
     ControllerHaltTimeout,
     ControllerResetTimeout,
     ControllerResetFailed,
+    ControllerStartUnavailable,
+    ControllerStartTimeout,
+    ControllerStartFailed,
+    EventRingStateInvalid,
     ControllerConfigurationUnavailable,
     DeviceSlotConfigurationRejected,
     MissingMmioInputEvidence,
@@ -232,6 +251,98 @@ pub const RingPlan = struct {
     command_ring_address: u64,
     event_ring_address: u64,
 };
+
+pub const EventType = enum(u8) {
+    transfer,
+    command_completion,
+    port_status_change,
+    bandwidth_request,
+    doorbell,
+    host_controller,
+    device_notification,
+    mfindex_wrap,
+    vendor_defined,
+    unknown,
+};
+
+pub const Event = struct {
+    kind: EventType,
+    type_id: u6,
+    completion_code: u8,
+    port_id: u8,
+    slot_id: u8,
+    endpoint_id: u5,
+
+    pub fn succeeded(self: Event) bool {
+        return self.completion_code == COMPLETION_CODE_SUCCESS;
+    }
+};
+
+pub const EventRingConsumer = struct {
+    dequeue_index: u32 = 0,
+    cycle_state: u1 = 1,
+
+    pub fn ready(self: EventRingConsumer, control: u32) bool {
+        return @as(u1, @truncate(control)) == self.cycle_state;
+    }
+
+    pub fn consume(
+        self: *EventRingConsumer,
+        words: [4]u32,
+        ring_trbs: u32,
+    ) Error!?Event {
+        if (ring_trbs == 0 or self.dequeue_index >= ring_trbs) {
+            return error.EventRingStateInvalid;
+        }
+        if (!self.ready(words[3])) return null;
+
+        const event = decodeEvent(words);
+        self.dequeue_index += 1;
+        if (self.dequeue_index == ring_trbs) {
+            self.dequeue_index = 0;
+            self.cycle_state ^= 1;
+        }
+        return event;
+    }
+
+    pub fn dequeueAddress(
+        self: EventRingConsumer,
+        ring_address: u64,
+        ring_trbs: u32,
+    ) Error!u64 {
+        if (ring_trbs == 0 or self.dequeue_index >= ring_trbs) {
+            return error.EventRingStateInvalid;
+        }
+        const offset = std.math.mul(u64, self.dequeue_index, TRB_BYTES) catch
+            return error.EventRingStateInvalid;
+        return std.math.add(u64, ring_address, offset) catch
+            return error.EventRingStateInvalid;
+    }
+};
+
+pub fn decodeEvent(words: [4]u32) Event {
+    const type_id: u6 = @truncate((words[3] >> TRB_TYPE_SHIFT) & TRB_TYPE_MASK);
+    const kind: EventType = switch (type_id) {
+        EVENT_TRB_TRANSFER => .transfer,
+        EVENT_TRB_COMMAND_COMPLETION => .command_completion,
+        EVENT_TRB_PORT_STATUS_CHANGE => .port_status_change,
+        EVENT_TRB_BANDWIDTH_REQUEST => .bandwidth_request,
+        EVENT_TRB_DOORBELL => .doorbell,
+        EVENT_TRB_HOST_CONTROLLER => .host_controller,
+        EVENT_TRB_DEVICE_NOTIFICATION => .device_notification,
+        EVENT_TRB_MFINDEX_WRAP => .mfindex_wrap,
+        EVENT_TRB_VENDOR_FIRST...EVENT_TRB_VENDOR_LAST => .vendor_defined,
+        else => .unknown,
+    };
+    return .{
+        .kind = kind,
+        .type_id = type_id,
+        .completion_code = @truncate(words[2] >> 24),
+        .port_id = @truncate(words[0] >> 24),
+        .slot_id = @truncate(words[3] >> 24),
+        .endpoint_id = @truncate(words[3] >> 16),
+    };
+}
 
 pub const DmaArenaPlan = struct {
     base_address: u64,
@@ -1025,6 +1136,115 @@ pub fn resetOwnedController(
         (status & USB_STATUS_HOST_CONTROLLER_ERROR) != 0)
     {
         return error.ControllerResetFailed;
+    }
+}
+
+pub fn startOwnedController(
+    capabilities: CapabilityRegisters,
+    mmio: anytype,
+    clock: anytype,
+) Error!void {
+    const operational_base: u32 = capabilities.capability_length;
+    const command_offset = operational_base + OPERATIONAL_USB_COMMAND_OFFSET;
+    const status_offset = operational_base + OPERATIONAL_USB_STATUS_OFFSET;
+    const fatal_status = USB_STATUS_HOST_SYSTEM_ERROR | USB_STATUS_HOST_CONTROLLER_ERROR;
+    const initial_status = mmio.readReg32(status_offset);
+    if ((initial_status & (USB_STATUS_CONTROLLER_NOT_READY | fatal_status)) != 0 or
+        (initial_status & USB_STATUS_HOST_CONTROLLER_HALTED) == 0)
+    {
+        return error.ControllerStartUnavailable;
+    }
+    errdefer quiesceOwnedController(capabilities, mmio);
+
+    const primary_interrupter = std.math.add(
+        u32,
+        capabilities.runtime_register_offset,
+        PRIMARY_INTERRUPTER_OFFSET,
+    ) catch return error.DmaLayoutOverflow;
+    const iman_offset = primary_interrupter + INTERRUPTER_MANAGEMENT_OFFSET;
+    const iman = mmio.readReg32(iman_offset);
+    mmio.writeReg32(
+        iman_offset,
+        (iman & ~INTERRUPTER_PENDING) | INTERRUPTER_ENABLE,
+    );
+    if ((mmio.readReg32(iman_offset) & INTERRUPTER_ENABLE) == 0) {
+        return error.ControllerStartFailed;
+    }
+
+    const enable_mask = USB_COMMAND_RUN_STOP |
+        USB_COMMAND_INTERRUPTER_ENABLE |
+        USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE;
+    const command = mmio.readReg32(command_offset);
+    mmio.writeReg32(command_offset, command | enable_mask);
+
+    var deadline = clock.afterMilliseconds(CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS);
+    var status = mmio.readReg32(status_offset);
+    while ((status & USB_STATUS_HOST_CONTROLLER_HALTED) != 0) {
+        if ((status & (USB_STATUS_CONTROLLER_NOT_READY | fatal_status)) != 0) {
+            return error.ControllerStartFailed;
+        }
+        if (deadline.expired()) return error.ControllerStartTimeout;
+        spin.hint();
+        status = mmio.readReg32(status_offset);
+    }
+    if ((status & (USB_STATUS_CONTROLLER_NOT_READY | fatal_status)) != 0 or
+        (mmio.readReg32(command_offset) & enable_mask) != enable_mask)
+    {
+        return error.ControllerStartFailed;
+    }
+}
+
+pub fn quiesceOwnedController(
+    capabilities: CapabilityRegisters,
+    mmio: anytype,
+) void {
+    const primary_interrupter = capabilities.runtime_register_offset + PRIMARY_INTERRUPTER_OFFSET;
+    const iman_offset = primary_interrupter + INTERRUPTER_MANAGEMENT_OFFSET;
+    const iman = mmio.readReg32(iman_offset);
+    mmio.writeReg32(
+        iman_offset,
+        iman & ~(INTERRUPTER_PENDING | INTERRUPTER_ENABLE),
+    );
+
+    const command_offset = @as(u32, capabilities.capability_length) + OPERATIONAL_USB_COMMAND_OFFSET;
+    const command = mmio.readReg32(command_offset);
+    const enable_mask = USB_COMMAND_RUN_STOP |
+        USB_COMMAND_INTERRUPTER_ENABLE |
+        USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE;
+    mmio.writeReg32(command_offset, command & ~enable_mask);
+}
+
+pub fn controllerRunningHealthy(
+    capabilities: CapabilityRegisters,
+    mmio: anytype,
+) bool {
+    const operational_base: u32 = capabilities.capability_length;
+    const status = mmio.readReg32(operational_base + OPERATIONAL_USB_STATUS_OFFSET);
+    const fatal_status = USB_STATUS_HOST_SYSTEM_ERROR |
+        USB_STATUS_CONTROLLER_NOT_READY |
+        USB_STATUS_HOST_CONTROLLER_ERROR;
+    if ((status & (USB_STATUS_HOST_CONTROLLER_HALTED | fatal_status)) != 0) return false;
+    return (mmio.readReg32(operational_base + OPERATIONAL_USB_COMMAND_OFFSET) &
+        USB_COMMAND_RUN_STOP) != 0;
+}
+
+pub fn acknowledgePrimaryEventRing(
+    capabilities: CapabilityRegisters,
+    dequeue_address: u64,
+    mmio: anytype,
+) Error!void {
+    if ((dequeue_address & ~EVENT_RING_DEQUEUE_POINTER_MASK) != 0) {
+        return error.EventRingStateInvalid;
+    }
+    const primary_interrupter = std.math.add(
+        u32,
+        capabilities.runtime_register_offset,
+        PRIMARY_INTERRUPTER_OFFSET,
+    ) catch return error.DmaLayoutOverflow;
+    const erdp_offset = primary_interrupter + EVENT_RING_DEQUEUE_POINTER_OFFSET;
+    mmio.writeReg64(erdp_offset, dequeue_address | EVENT_HANDLER_BUSY);
+    if ((mmio.readReg64(erdp_offset) & EVENT_RING_DEQUEUE_POINTER_MASK) != dequeue_address) {
+        return error.DmaRegisterRejected;
     }
 }
 
@@ -1966,6 +2186,143 @@ test "xHCI reset fails closed on ready, halt, reset, and final-state faults" {
         &mmio,
         &expired,
     ));
+}
+
+const MockStartMmio = struct {
+    capabilities: CapabilityRegisters = defaultCapabilityRegisters(),
+    command: u32 = 1 << 14,
+    iman: u32 = 0,
+    erdp: u64 = 0,
+    last_erdp_write: u64 = 0,
+    status_reads: []const u32,
+    status_read_index: usize = 0,
+
+    pub fn readReg32(self: *@This(), offset: u32) u32 {
+        const operational_base: u32 = self.capabilities.capability_length;
+        if (offset == operational_base + OPERATIONAL_USB_COMMAND_OFFSET) return self.command;
+        if (offset == operational_base + OPERATIONAL_USB_STATUS_OFFSET) {
+            const index = @min(self.status_read_index, self.status_reads.len - 1);
+            self.status_read_index += 1;
+            return self.status_reads[index];
+        }
+        const iman_offset = self.capabilities.runtime_register_offset +
+            PRIMARY_INTERRUPTER_OFFSET + INTERRUPTER_MANAGEMENT_OFFSET;
+        if (offset == iman_offset) return self.iman;
+        unreachable;
+    }
+
+    pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
+        const operational_base: u32 = self.capabilities.capability_length;
+        if (offset == operational_base + OPERATIONAL_USB_COMMAND_OFFSET) {
+            self.command = value;
+            return;
+        }
+        const iman_offset = self.capabilities.runtime_register_offset +
+            PRIMARY_INTERRUPTER_OFFSET + INTERRUPTER_MANAGEMENT_OFFSET;
+        if (offset == iman_offset) {
+            self.iman = value;
+            return;
+        }
+        unreachable;
+    }
+
+    pub fn readReg64(self: *@This(), offset: u32) u64 {
+        const erdp_offset = self.capabilities.runtime_register_offset +
+            PRIMARY_INTERRUPTER_OFFSET + EVENT_RING_DEQUEUE_POINTER_OFFSET;
+        if (offset != erdp_offset) unreachable;
+        return self.erdp;
+    }
+
+    pub fn writeReg64(self: *@This(), offset: u32, value: u64) void {
+        const erdp_offset = self.capabilities.runtime_register_offset +
+            PRIMARY_INTERRUPTER_OFFSET + EVENT_RING_DEQUEUE_POINTER_OFFSET;
+        if (offset != erdp_offset) unreachable;
+        self.last_erdp_write = value;
+        self.erdp = value & EVENT_RING_DEQUEUE_POINTER_MASK;
+    }
+};
+
+test "xHCI start enables the primary interrupter before the schedule" {
+    const halted_then_running = [_]u32{
+        USB_STATUS_HOST_CONTROLLER_HALTED,
+        USB_STATUS_HOST_CONTROLLER_HALTED,
+        0,
+    };
+    var mmio = MockStartMmio{ .status_reads = &halted_then_running };
+    var clock = MockResetClock{ .deadline_checks = 2 };
+    try startOwnedController(mmio.capabilities, &mmio, &clock);
+
+    const expected_enable_mask = USB_COMMAND_RUN_STOP |
+        USB_COMMAND_INTERRUPTER_ENABLE |
+        USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE;
+    try std.testing.expectEqual(expected_enable_mask, mmio.command & expected_enable_mask);
+    try std.testing.expectEqual(INTERRUPTER_ENABLE, mmio.iman & INTERRUPTER_ENABLE);
+    try std.testing.expectEqual(@as(usize, 1), clock.request_count);
+    try std.testing.expect(controllerRunningHealthy(mmio.capabilities, &mmio));
+}
+
+test "xHCI start failure restores a quiescent controller" {
+    const halted = [_]u32{USB_STATUS_HOST_CONTROLLER_HALTED};
+    var mmio = MockStartMmio{ .status_reads = &halted };
+    var expired = MockResetClock{ .deadline_checks = 0 };
+    try std.testing.expectError(
+        error.ControllerStartTimeout,
+        startOwnedController(mmio.capabilities, &mmio, &expired),
+    );
+    try std.testing.expectEqual(@as(u32, 0), mmio.command & (USB_COMMAND_RUN_STOP |
+        USB_COMMAND_INTERRUPTER_ENABLE | USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE));
+    try std.testing.expectEqual(@as(u32, 0), mmio.iman & INTERRUPTER_ENABLE);
+
+    const host_error = [_]u32{
+        USB_STATUS_HOST_CONTROLLER_HALTED | USB_STATUS_HOST_SYSTEM_ERROR,
+    };
+    mmio = .{ .status_reads = &host_error };
+    expired = .{ .deadline_checks = 1 };
+    try std.testing.expectError(
+        error.ControllerStartUnavailable,
+        startOwnedController(mmio.capabilities, &mmio, &expired),
+    );
+}
+
+test "xHCI event consumer follows cycle ownership and wrap" {
+    var consumer = EventRingConsumer{};
+    const port_event = [4]u32{
+        @as(u32, 7) << 24,
+        0,
+        @as(u32, COMPLETION_CODE_SUCCESS) << 24,
+        (@as(u32, EVENT_TRB_PORT_STATUS_CHANGE) << TRB_TYPE_SHIFT) | 1,
+    };
+    const first = (try consumer.consume(port_event, 2)).?;
+    try std.testing.expectEqual(EventType.port_status_change, first.kind);
+    try std.testing.expect(first.succeeded());
+    try std.testing.expectEqual(@as(u8, 7), first.port_id);
+    try std.testing.expectEqual(@as(u32, 1), consumer.dequeue_index);
+
+    var command_event = port_event;
+    command_event[3] = (@as(u32, EVENT_TRB_COMMAND_COMPLETION) << TRB_TYPE_SHIFT) |
+        (@as(u32, 3) << 24) | 1;
+    const second = (try consumer.consume(command_event, 2)).?;
+    try std.testing.expectEqual(EventType.command_completion, second.kind);
+    try std.testing.expectEqual(@as(u8, 3), second.slot_id);
+    try std.testing.expectEqual(@as(u32, 0), consumer.dequeue_index);
+    try std.testing.expectEqual(@as(u1, 0), consumer.cycle_state);
+
+    try std.testing.expect((try consumer.consume(port_event, 2)) == null);
+    var wrapped = port_event;
+    wrapped[3] &= ~@as(u32, 1);
+    try std.testing.expect((try consumer.consume(wrapped, 2)) != null);
+    try std.testing.expectEqual(@as(u64, 0x2010), try consumer.dequeueAddress(0x2000, 2));
+}
+
+test "xHCI event acknowledgement clears EHB at the next dequeue address" {
+    const running = [_]u32{0};
+    var mmio = MockStartMmio{ .status_reads = &running };
+    try acknowledgePrimaryEventRing(mmio.capabilities, 0x2040, &mmio);
+    try std.testing.expectEqual(@as(u64, 0x2040) | EVENT_HANDLER_BUSY, mmio.last_erdp_write);
+    try std.testing.expectError(
+        error.EventRingStateInvalid,
+        acknowledgePrimaryEventRing(mmio.capabilities, 0x2041, &mmio),
+    );
 }
 
 const MockConfigurationMmio = struct {

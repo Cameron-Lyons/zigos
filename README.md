@@ -245,7 +245,16 @@ Use the pinned toolchain and repo entrypoints:
   scratchpad pointer array, requires 4 KiB controller pages, and programs DCBAAP,
   CRCR, ERSTSZ, ERSTBA, ERDP, and 125 microsecond interrupt moderation with
   readback validation. Bus mastering and interrupts remain disabled while these
-  structures are added to the VT-d policy. Input-device
+  structures are added to the VT-d policy. Deferred activation then installs an
+  exact-requester remapped MSI route, enables bus mastering only inside that
+  domain, enables the primary interrupter before Run/Stop, and requires HCHalted
+  to clear within a one-second invariant-TSC deadline. Vector 67 only latches
+  work and acknowledges x2APIC; the native idle loop drains at most one 64-entry
+  event ring per pass, follows the consumer cycle bit across wrap, writes ERDP
+  to the first unconsumed TRB with EHB acknowledgement, and rechecks the ring
+  before sleeping. DMA faults, invalid port events, unsupported event types,
+  ERDP rejection, or an unexpected halted/error state quiesce the controller and
+  revoke MSI plus bus mastering. Input-device
   authority still requires keyboard enumeration and hardware event-ring evidence.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint

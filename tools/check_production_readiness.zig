@@ -1102,6 +1102,10 @@ fn validateNuc11tnki5KernelProofSources(
         "xhci_hw.isolationDomain()",
         "isolation_domains[0..isolation_domain_count]",
         "ZIGOS:XHCI:HW:DMA_OK",
+        "xhci_prepared = true",
+        "xhci_hw.activate()",
+        "ZIGOS:XHCI:HW:REMAP_MSI_OK",
+        "ZIGOS:XHCI:HW:RUN_OK",
     };
     for (required_boot_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, devices_source, snippet) == null) {
@@ -1225,6 +1229,7 @@ fn validateNuc11tnki5KernelProofSources(
         "io.outb(PIC_MASTER_DATA_PORT, PIC_MASK_ALL)",
         "io.outb(PIC_SLAVE_DATA_PORT, PIC_MASK_ALL)",
         "setKernelGate(timer.INTERRUPT_VECTOR, &isr64)",
+        "setKernelGate(xhci_hw.INTERRUPT_VECTOR, &isr67)",
         "setKernelGate(timer.SPURIOUS_VECTOR, &isr255)",
     };
     for (required_x2apic_interrupt_snippets) |snippet| {
@@ -1251,6 +1256,7 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_x2apic_stubs = [_][]const u8{
         "ISR_NOERRCODE 64",
+        "ISR_NOERRCODE 67",
         "ISR_NOERRCODE 255",
     };
     for (required_x2apic_stubs) |snippet| {
@@ -1290,6 +1296,8 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_one_shot_scheduler_snippets = [_][]const u8{
         "timer.synchronize()",
+        "xhci_hw.servicePendingEvents()",
+        "xhci_hw.eventWorkPending()",
         "userspaceSchedulerHasReadyTasks",
         "timer.armSchedulerTick()",
         "timer.disarmSchedulerTick()",
@@ -1894,6 +1902,11 @@ fn validateNuc11tnki5KernelProofSources(
         "initializeControllerDma",
         "controllerDmaAccessRegions",
         "programControllerDmaRegisters",
+        "EventRingConsumer",
+        "decodeEvent",
+        "startOwnedController",
+        "acknowledgePrimaryEventRing",
+        "controllerRunningHealthy",
         "EVENT_RING_SEGMENT_TABLE_ENTRIES: u32 = 1",
         "INTERRUPTER_MODERATION_INTERVAL_125_MICROSECONDS: u32 = 500",
         "UnsupportedPageSize",
@@ -1960,6 +1973,13 @@ fn validateNuc11tnki5KernelProofSources(
         "buildDmaWindows",
         "isolationDomain",
         "requesterIsolated",
+        "pub const INTERRUPT_VECTOR: u8 = 67",
+        "intel_vtd.routeInterrupt",
+        "pci.enableSingleMsi",
+        "pci.enableMemoryBusMastering",
+        "servicePendingEvents",
+        "EVENT_RING_STATE_CONTAINED",
+        "intel_vtd.pollFaultForDevice",
     };
     for (required_xhci_hw_snippets) |snippet| {
         if (std.mem.indexOf(u8, xhci_hw_source, snippet) == null) {
