@@ -267,7 +267,10 @@ Use the pinned toolchain and repo entrypoints:
   serialized lifecycle then rings the slot's endpoint-zero doorbell for an eight-byte
   device-descriptor read, accepts only the exact Status Stage Transfer Event, validates
   the descriptor header and speed-specific packet size, and issues Evaluate Context
-  before another transfer when a full-speed device reports 16, 32, or 64 bytes.
+  before another transfer when a full-speed device reports 16, 32, or 64 bytes. It then
+  reads the complete 18-byte device descriptor, validates its BCD versions, class and
+  subclass relationship, USB generation, evaluated packet size, and nonzero
+  configuration count, and retains the parsed device identity for the port lifecycle.
   Completion pointers, endpoint ids, residual lengths, and slot identities are
   validated before state advances, and DCBAA entries are linked or cleared only at the
   specified completion boundary. Reset, command, and control-transfer waits keep the one-shot timer armed and
