@@ -69,11 +69,13 @@ pub fn networkTransportHardeningGate() !void {
         var last_frame_len: usize = 0;
         var expected_network_policy_id: u64 = 0;
         var expected_egress_capability_id: u64 = 0;
+        var last_destination: [6]u8 = [_]u8{0} ** 6;
         var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
 
-        fn send(frame: []const u8) bool {
+        fn send(destination: [6]u8, frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
+            last_destination = destination;
             @memcpy(last_frame[0..frame.len], frame);
             return true;
         }
@@ -92,6 +94,7 @@ pub fn networkTransportHardeningGate() !void {
 
     Driver.send_count = 0;
     Driver.last_frame_len = 0;
+    Driver.last_destination = [_]u8{0} ** 6;
     Driver.expected_network_policy_id = 0;
     Driver.expected_egress_capability_id = 0;
     network_driver_task.reset();
@@ -132,6 +135,8 @@ pub fn networkTransportHardeningGate() !void {
 
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
     var native_transport = sync_transport.NativeTransportService.init();
+    const target_mac = [_]u8{ 0x02, 0x70, 0x71, 0x72, 0x73, 0x75 };
+    try native_transport.bindPeerLink(target, target_mac);
     var connection = try native_transport.openRelay(&broker, .{
         .task_id = 81,
         .principal_id = app,
@@ -144,6 +149,7 @@ pub fn networkTransportHardeningGate() !void {
     try std.testing.expect(signed_delivery.endpoint_delivered);
     try std.testing.expect(signed_delivery.network_delivered);
     try std.testing.expectEqual(@as(usize, 1), Driver.send_count);
+    try std.testing.expectEqualSlices(u8, &target_mac, &Driver.last_destination);
     const captured = try native_transport.assertLastCapturedFrame(.{
         .session_id = connection.session.id,
         .sequence = signed_delivery.sequence,
@@ -941,7 +947,7 @@ fn networkDriverBrokerRevocationGate() !void {
     const Harness = struct {
         var send_count: usize = 0;
 
-        fn send(_: []const u8) bool {
+        fn send(_: [6]u8, _: []const u8) bool {
             send_count += 1;
             return true;
         }
@@ -994,6 +1000,7 @@ fn networkDriverBrokerRevocationGate() !void {
 
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
     var stack = network_driver_task.NativeNetworkStack.init();
+    try stack.bindPeerLink(target_device, .{ 0x02, 0x81, 0x10, 0x0E, 0x00, 0x08 });
     const connection = try stack.openServiceIdentity(&broker, .{
         .task_id = 880,
         .principal_id = service_owner,

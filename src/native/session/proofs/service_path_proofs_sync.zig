@@ -643,7 +643,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
 
-        fn send(frame: []const u8) bool {
+        fn send(_: [6]u8, frame: []const u8) bool {
             send_count += 1;
             last_frame_len = frame.len;
             return true;
@@ -723,6 +723,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     try std.testing.expectEqual(network_policy.EgressDecisionReason.identity_pin_mismatch, stack.last_denial_reason);
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
+    try stack.bindPeerLink(target_device, .{ 0x02, 0x5A, 0x47, 0, 0, 2 });
     const connection = try stack.openServiceIdentity(&broker, .{
         .task_id = network_service_task.id,
         .principal_id = network_service_task.owner,
