@@ -4,8 +4,10 @@ const spin = @import("../utils/spin.zig");
 
 const readU16Le = endian.readU16Le;
 const readU32Le = endian.readU32Le;
+const readU64Le = endian.readU64Le;
 const writeU16Le = endian.writeU16Le;
 const writeU32Le = endian.writeU32Le;
+const writeU64Le = endian.writeU64Le;
 
 pub const kernel_boundary_role = "bootstrap_xhci_input_inventory_shim";
 pub const publishes_full_input_service = false;
@@ -14,11 +16,17 @@ pub const usb_input_data_plane_exports_fail_closed = true;
 pub const TRB_BYTES: u32 = 16;
 pub const RING_ALIGNMENT_BYTES: u64 = 64;
 pub const ERST_ENTRY_BYTES: u32 = 16;
+pub const ERST_TABLE_ALIGNMENT_BYTES: u64 = 64;
 pub const XHCI_PAGE_BYTES: u64 = 4096;
 pub const DCBAA_ENTRY_BYTES: u32 = 8;
 pub const DEVICE_CONTEXT_ENTRIES: u32 = 32;
 pub const INPUT_CONTEXT_ENTRIES: u32 = 33;
 pub const SCRATCHPAD_ARRAY_ENTRY_BYTES: u32 = 8;
+pub const COMMAND_RING_TRBS: u32 = 64;
+pub const EVENT_RING_TRBS: u32 = 64;
+pub const TRANSFER_RING_TRBS: u32 = 16;
+pub const EVENT_RING_SEGMENT_TABLE_ENTRIES: u32 = 1;
+pub const MAX_CONTROLLER_DMA_REGIONS: usize = 7;
 pub const HID_BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const HID_BOOT_KEY_SLOTS: usize = 6;
 pub const HID_EVENT_QUEUE_CAPACITY: usize = 8;
@@ -84,6 +92,9 @@ const USB_LEGACY_BIOS_OWNED_SEMAPHORE: u32 = 1 << 16;
 const USB_LEGACY_OS_OWNED_SEMAPHORE: u32 = 1 << 24;
 const OPERATIONAL_USB_COMMAND_OFFSET: u32 = 0x00;
 const OPERATIONAL_USB_STATUS_OFFSET: u32 = 0x04;
+const OPERATIONAL_PAGE_SIZE_OFFSET: u32 = 0x08;
+const OPERATIONAL_COMMAND_RING_CONTROL_OFFSET: u32 = 0x18;
+const OPERATIONAL_DEVICE_CONTEXT_BASE_ARRAY_POINTER_OFFSET: u32 = 0x30;
 const OPERATIONAL_CONFIGURE_OFFSET: u32 = 0x38;
 const USB_COMMAND_RUN_STOP: u32 = 1 << 0;
 const USB_COMMAND_HOST_CONTROLLER_RESET: u32 = 1 << 1;
@@ -92,6 +103,22 @@ const USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE: u32 = 1 << 3;
 const USB_STATUS_HOST_CONTROLLER_HALTED: u32 = 1 << 0;
 const USB_STATUS_CONTROLLER_NOT_READY: u32 = 1 << 11;
 const USB_STATUS_HOST_CONTROLLER_ERROR: u32 = 1 << 12;
+const PAGE_SIZE_4K_SUPPORTED: u32 = 1 << 0;
+const COMMAND_RING_RUNNING: u64 = 1 << 3;
+const COMMAND_RING_INITIAL_CYCLE_STATE: u64 = 1;
+const PRIMARY_INTERRUPTER_OFFSET: u32 = 0x20;
+const INTERRUPTER_MANAGEMENT_OFFSET: u32 = 0x00;
+const INTERRUPTER_MODERATION_OFFSET: u32 = 0x04;
+const EVENT_RING_SEGMENT_TABLE_SIZE_OFFSET: u32 = 0x08;
+const EVENT_RING_SEGMENT_TABLE_BASE_OFFSET: u32 = 0x10;
+const EVENT_RING_DEQUEUE_POINTER_OFFSET: u32 = 0x18;
+const INTERRUPTER_ENABLE: u32 = 1 << 1;
+const INTERRUPTER_MODERATION_INTERVAL_125_MICROSECONDS: u32 = 500;
+const ADDRESS_64_BYTE_ALIGNMENT_MASK: u64 = RING_ALIGNMENT_BYTES - 1;
+const EVENT_RING_DEQUEUE_POINTER_MASK: u64 = ~@as(u64, 0xF);
+const LINK_TRB_TYPE: u32 = 6;
+const LINK_TRB_TOGGLE_CYCLE: u32 = 1 << 1;
+const TRB_TYPE_SHIFT: u5 = 10;
 const CONFIG_MAX_DEVICE_SLOTS_ENABLED_MASK: u32 = 0xFF;
 const TEST_CAPABILITY_LENGTH: u8 = 0x40;
 const TEST_INTERFACE_VERSION: u16 = 0x0110;
@@ -103,12 +130,10 @@ const TEST_MAX_SCRATCHPAD_BUFFERS: u16 = 33;
 const TEST_CONTEXT_SIZE: ContextSize = .bytes_64;
 const TEST_DOORBELL_OFFSET: u32 = 0x2000;
 const TEST_RUNTIME_REGISTER_OFFSET: u32 = 0x1000;
-const TEST_RING_TRBS: u32 = 64;
+const TEST_RING_TRBS: u32 = COMMAND_RING_TRBS;
 const TEST_COMMAND_RING_ADDRESS: u64 = 0x1000;
 const TEST_EVENT_RING_ADDRESS: u64 = 0x2000;
 const TEST_UNALIGNED_COMMAND_RING_ADDRESS: u64 = TEST_COMMAND_RING_ADDRESS + 1;
-const DEFAULT_TRANSFER_RING_TRBS: u32 = 16;
-const DEFAULT_ERST_ENTRIES: u32 = 1;
 
 pub const Error = error{
     KernelUsbInputDataPlaneDisabled,
@@ -128,6 +153,12 @@ pub const Error = error{
     DmaArenaBaseInvalid,
     DmaSlotCountInvalid,
     DmaLayoutOverflow,
+    DmaBufferTooSmall,
+    DmaAddressOutsidePlan,
+    DmaFrameCountOverflow,
+    UnsupportedPageSize,
+    DmaProgrammingUnavailable,
+    DmaRegisterRejected,
     ReportTooLarge,
     EventRingFull,
     EventRingEmpty,
@@ -228,6 +259,33 @@ pub const DmaArenaPlan = struct {
         return std.math.add(u64, self.device_contexts_address, offset) catch
             return error.DmaLayoutOverflow;
     }
+};
+
+pub const ControllerDmaPlan = struct {
+    base_address: u64,
+    total_bytes: u64,
+    ring_plan: RingPlan,
+    transfer_ring_address: u64,
+    transfer_ring_trbs: u32,
+    event_ring_segment_table_address: u64,
+    event_ring_segment_table_bytes: u32,
+    event_ring_segment_table_entries: u32,
+    arena: DmaArenaPlan,
+
+    pub fn frameCount(self: ControllerDmaPlan) Error!u32 {
+        if (self.total_bytes == 0 or self.total_bytes % XHCI_PAGE_BYTES != 0) {
+            return error.DmaLayoutOverflow;
+        }
+        return std.math.cast(u32, self.total_bytes / XHCI_PAGE_BYTES) orelse
+            error.DmaFrameCountOverflow;
+    }
+};
+
+pub const DmaAccessRegion = struct {
+    address: u64,
+    bytes: u64,
+    device_readable: bool,
+    device_writable: bool,
 };
 
 pub const HidBootKeyboardDevice = struct {
@@ -377,16 +435,12 @@ pub const MmioInputProof = struct {
 
 const MmioState = struct {
     capabilities: CapabilityRegisters,
-    dma_arena: DmaArenaPlan,
-    transfer_ring_address: u64,
-    event_ring_segment_table_address: u64,
-    transfer_ring_trbs: u32,
-    event_ring_segment_table_entries: u32,
+    dma_plan: ControllerDmaPlan,
     command_doorbells: u32 = 0,
     transfer_doorbells: u32 = 0,
     device_context_writes: u32 = 0,
     endpoint_context_writes: u32 = 0,
-    event_ring_segment_table_writes: u32 = DEFAULT_ERST_ENTRIES,
+    event_ring_segment_table_writes: u32 = EVENT_RING_SEGMENT_TABLE_ENTRIES,
     event_ring_dequeue_count: u32 = 0,
     interrupt_events: u32 = 0,
     interrupter_id: u16 = 1,
@@ -397,15 +451,15 @@ const MmioState = struct {
             .runtime_register_offset = self.capabilities.runtime_register_offset,
             .command_ring_address = ring_plan.command_ring_address,
             .event_ring_address = ring_plan.event_ring_address,
-            .device_context_base_address = self.dma_arena.device_contexts_address,
-            .input_context_address = self.dma_arena.input_context_address,
-            .transfer_ring_address = self.transfer_ring_address,
-            .event_ring_segment_table_address = self.event_ring_segment_table_address,
+            .device_context_base_address = self.dma_plan.arena.device_contexts_address,
+            .input_context_address = self.dma_plan.arena.input_context_address,
+            .transfer_ring_address = self.dma_plan.transfer_ring_address,
+            .event_ring_segment_table_address = self.dma_plan.event_ring_segment_table_address,
             .context_size = self.capabilities.context_size,
-            .device_context_bytes = @intCast(self.dma_arena.device_contexts_bytes),
-            .input_context_bytes = self.dma_arena.input_context_bytes,
-            .transfer_ring_trbs = self.transfer_ring_trbs,
-            .event_ring_segment_table_entries = self.event_ring_segment_table_entries,
+            .device_context_bytes = @intCast(self.dma_plan.arena.device_contexts_bytes),
+            .input_context_bytes = self.dma_plan.arena.input_context_bytes,
+            .transfer_ring_trbs = self.dma_plan.transfer_ring_trbs,
+            .event_ring_segment_table_entries = self.dma_plan.event_ring_segment_table_entries,
             .command_doorbells = self.command_doorbells,
             .transfer_doorbells = self.transfer_doorbells,
             .device_context_writes = self.device_context_writes,
@@ -414,7 +468,7 @@ const MmioState = struct {
             .event_ring_dequeue_count = self.event_ring_dequeue_count,
             .interrupt_events = self.interrupt_events,
             .interrupter_id = self.interrupter_id,
-            .enabled_device_slots = self.dma_arena.enabled_device_slots,
+            .enabled_device_slots = self.dma_plan.arena.enabled_device_slots,
             .max_ports = self.capabilities.max_ports,
         };
     }
@@ -479,45 +533,14 @@ pub const HidController = struct {
         var controller = try HidController.init(ring_plan);
         controller.port_limit = @min(capabilities.max_ports, maxBootPortsU8());
         controller.device_slot_limit = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
-        const command_ring_end = try ringEndAddress(
-            ring_plan.command_ring_address,
-            ring_plan.command_ring_trbs,
+        const dma_plan = try planControllerDmaFromRings(
+            capabilities,
+            controller.device_slot_limit,
+            ring_plan,
         );
-        const event_ring_end = try ringEndAddress(
-            ring_plan.event_ring_address,
-            ring_plan.event_ring_trbs,
-        );
-        const transfer_ring_address = alignForwardChecked(
-            @max(command_ring_end, event_ring_end),
-            RING_ALIGNMENT_BYTES,
-        ) catch return error.DmaLayoutOverflow;
-        const transfer_ring_end = try ringEndAddress(
-            transfer_ring_address,
-            DEFAULT_TRANSFER_RING_TRBS,
-        );
-        const event_ring_segment_table_address = alignForwardChecked(
-            transfer_ring_end,
-            RING_ALIGNMENT_BYTES,
-        ) catch return error.DmaLayoutOverflow;
-        const event_ring_segment_table_bytes = std.math.mul(
-            u64,
-            DEFAULT_ERST_ENTRIES,
-            ERST_ENTRY_BYTES,
-        ) catch return error.DmaLayoutOverflow;
-        const arena_start = checkedAdd(
-            event_ring_segment_table_address,
-            event_ring_segment_table_bytes,
-        ) catch return error.DmaLayoutOverflow;
-        const arena_base = alignForwardChecked(arena_start, XHCI_PAGE_BYTES) catch
-            return error.DmaLayoutOverflow;
-        const dma_arena = try planDmaArena(capabilities, controller.device_slot_limit, arena_base);
         controller.mmio = .{
             .capabilities = capabilities,
-            .dma_arena = dma_arena,
-            .transfer_ring_address = transfer_ring_address,
-            .event_ring_segment_table_address = event_ring_segment_table_address,
-            .transfer_ring_trbs = DEFAULT_TRANSFER_RING_TRBS,
-            .event_ring_segment_table_entries = DEFAULT_ERST_ENTRIES,
+            .dma_plan = dma_plan,
         };
         return controller;
     }
@@ -620,7 +643,12 @@ pub const HidController = struct {
 
     pub fn dmaArenaPlan(self: *const HidController) ?DmaArenaPlan {
         const mmio = self.mmio orelse return null;
-        return mmio.dma_arena;
+        return mmio.dma_plan.arena;
+    }
+
+    pub fn controllerDmaPlan(self: *const HidController) ?ControllerDmaPlan {
+        const mmio = self.mmio orelse return null;
+        return mmio.dma_plan;
     }
 
     pub fn inputProof(self: *const HidController) ?InputProof {
@@ -1061,6 +1089,89 @@ pub fn validateRingPlan(plan: RingPlan) Error!void {
     }
 }
 
+pub fn planControllerDma(
+    capabilities: CapabilityRegisters,
+    enabled_device_slots: u8,
+    base_address: u64,
+) Error!ControllerDmaPlan {
+    if (base_address == 0 or !aligned(base_address, XHCI_PAGE_BYTES)) {
+        return error.DmaArenaBaseInvalid;
+    }
+    const event_ring_address = checkedAdd(base_address, XHCI_PAGE_BYTES) catch
+        return error.DmaLayoutOverflow;
+    return planControllerDmaFromRings(capabilities, enabled_device_slots, .{
+        .command_ring_trbs = COMMAND_RING_TRBS,
+        .event_ring_trbs = EVENT_RING_TRBS,
+        .command_ring_address = base_address,
+        .event_ring_address = event_ring_address,
+    });
+}
+
+pub fn controllerDmaFrameCount(
+    capabilities: CapabilityRegisters,
+    enabled_device_slots: u8,
+) Error!u32 {
+    return (try planControllerDma(
+        capabilities,
+        enabled_device_slots,
+        XHCI_PAGE_BYTES,
+    )).frameCount();
+}
+
+fn planControllerDmaFromRings(
+    capabilities: CapabilityRegisters,
+    enabled_device_slots: u8,
+    ring_plan: RingPlan,
+) Error!ControllerDmaPlan {
+    try validateRingPlan(ring_plan);
+    const command_ring_end = try ringEndAddress(
+        ring_plan.command_ring_address,
+        ring_plan.command_ring_trbs,
+    );
+    const event_ring_end = try ringEndAddress(
+        ring_plan.event_ring_address,
+        ring_plan.event_ring_trbs,
+    );
+    const transfer_ring_address = alignForwardChecked(
+        @max(command_ring_end, event_ring_end),
+        RING_ALIGNMENT_BYTES,
+    ) catch return error.DmaLayoutOverflow;
+    const transfer_ring_end = try ringEndAddress(
+        transfer_ring_address,
+        TRANSFER_RING_TRBS,
+    );
+    const event_ring_segment_table_address = alignForwardChecked(
+        transfer_ring_end,
+        ERST_TABLE_ALIGNMENT_BYTES,
+    ) catch return error.DmaLayoutOverflow;
+    const event_ring_segment_table_bytes = std.math.cast(
+        u32,
+        ERST_TABLE_ALIGNMENT_BYTES,
+    ) orelse return error.DmaLayoutOverflow;
+    const arena_start = checkedAdd(
+        event_ring_segment_table_address,
+        event_ring_segment_table_bytes,
+    ) catch return error.DmaLayoutOverflow;
+    const arena_base = alignForwardChecked(arena_start, XHCI_PAGE_BYTES) catch
+        return error.DmaLayoutOverflow;
+    const arena = try planDmaArena(capabilities, enabled_device_slots, arena_base);
+    const plan_base = @min(ring_plan.command_ring_address, ring_plan.event_ring_address);
+    const plan_end = checkedAdd(arena.base_address, arena.total_bytes) catch
+        return error.DmaLayoutOverflow;
+    if (plan_end <= plan_base) return error.DmaLayoutOverflow;
+    return .{
+        .base_address = plan_base,
+        .total_bytes = plan_end - plan_base,
+        .ring_plan = ring_plan,
+        .transfer_ring_address = transfer_ring_address,
+        .transfer_ring_trbs = TRANSFER_RING_TRBS,
+        .event_ring_segment_table_address = event_ring_segment_table_address,
+        .event_ring_segment_table_bytes = event_ring_segment_table_bytes,
+        .event_ring_segment_table_entries = EVENT_RING_SEGMENT_TABLE_ENTRIES,
+        .arena = arena,
+    };
+}
+
 pub fn planDmaArena(
     capabilities: CapabilityRegisters,
     enabled_device_slots: u8,
@@ -1140,6 +1251,243 @@ pub fn planDmaArena(
     };
 }
 
+pub fn initializeControllerDma(
+    plan: ControllerDmaPlan,
+    memory: []u8,
+) Error!void {
+    const total_bytes = std.math.cast(usize, plan.total_bytes) orelse
+        return error.DmaBufferTooSmall;
+    if (memory.len < total_bytes) return error.DmaBufferTooSmall;
+    @memset(memory[0..total_bytes], 0);
+
+    try initializeLinkTrb(
+        plan,
+        memory,
+        plan.ring_plan.command_ring_address,
+        plan.ring_plan.command_ring_trbs,
+    );
+    try initializeLinkTrb(
+        plan,
+        memory,
+        plan.transfer_ring_address,
+        plan.transfer_ring_trbs,
+    );
+
+    const erst = try dmaBytes(
+        plan,
+        memory,
+        plan.event_ring_segment_table_address,
+        plan.event_ring_segment_table_bytes,
+    );
+    writeU64Le(erst[0..8], plan.ring_plan.event_ring_address);
+    writeU32Le(erst[8..12], plan.ring_plan.event_ring_trbs);
+
+    const dcbaa = try dmaBytes(
+        plan,
+        memory,
+        plan.arena.dcbaa_address,
+        plan.arena.dcbaa_bytes,
+    );
+    if (plan.arena.scratchpad_array_address != 0) {
+        writeU64Le(dcbaa[0..8], plan.arena.scratchpad_array_address);
+        const scratchpad_array = try dmaBytes(
+            plan,
+            memory,
+            plan.arena.scratchpad_array_address,
+            plan.arena.scratchpad_array_bytes,
+        );
+        var index: u64 = 0;
+        while (index < plan.arena.scratchpad_array_bytes / SCRATCHPAD_ARRAY_ENTRY_BYTES) : (index += 1) {
+            const entry_offset: usize = @intCast(index * SCRATCHPAD_ARRAY_ENTRY_BYTES);
+            const buffer_address = checkedAdd(
+                plan.arena.scratchpad_buffers_address,
+                index * XHCI_PAGE_BYTES,
+            ) catch return error.DmaLayoutOverflow;
+            writeU64Le(scratchpad_array[entry_offset..][0..8], buffer_address);
+        }
+    }
+}
+
+pub fn controllerDmaAccessRegions(
+    plan: ControllerDmaPlan,
+    storage: *[MAX_CONTROLLER_DMA_REGIONS]DmaAccessRegion,
+) Error![]const DmaAccessRegion {
+    const command_page_end = checkedAdd(plan.ring_plan.command_ring_address, XHCI_PAGE_BYTES) catch
+        return error.DmaLayoutOverflow;
+    const event_page_end = checkedAdd(plan.ring_plan.event_ring_address, XHCI_PAGE_BYTES) catch
+        return error.DmaLayoutOverflow;
+    const command_ring_end = try ringEndAddress(
+        plan.ring_plan.command_ring_address,
+        plan.ring_plan.command_ring_trbs,
+    );
+    const event_ring_end = try ringEndAddress(
+        plan.ring_plan.event_ring_address,
+        plan.ring_plan.event_ring_trbs,
+    );
+    const transfer_ring_end = try ringEndAddress(
+        plan.transfer_ring_address,
+        plan.transfer_ring_trbs,
+    );
+    const erst_end = checkedAdd(
+        plan.event_ring_segment_table_address,
+        plan.event_ring_segment_table_bytes,
+    ) catch return error.DmaLayoutOverflow;
+    if (plan.ring_plan.command_ring_address != plan.base_address or
+        !aligned(plan.ring_plan.command_ring_address, XHCI_PAGE_BYTES) or
+        !aligned(plan.ring_plan.event_ring_address, XHCI_PAGE_BYTES) or
+        command_ring_end > command_page_end or
+        event_ring_end > event_page_end or
+        plan.transfer_ring_address < event_ring_end or
+        transfer_ring_end > event_page_end or
+        plan.event_ring_segment_table_address < transfer_ring_end or
+        erst_end > event_page_end)
+    {
+        return error.DmaAddressOutsidePlan;
+    }
+
+    var count: usize = 0;
+    storage[count] = .{
+        .address = plan.ring_plan.command_ring_address,
+        .bytes = XHCI_PAGE_BYTES,
+        .device_readable = true,
+        .device_writable = false,
+    };
+    count += 1;
+    storage[count] = .{
+        .address = plan.ring_plan.event_ring_address,
+        .bytes = XHCI_PAGE_BYTES,
+        .device_readable = true,
+        .device_writable = true,
+    };
+    count += 1;
+    storage[count] = .{
+        .address = plan.arena.dcbaa_address,
+        .bytes = XHCI_PAGE_BYTES,
+        .device_readable = true,
+        .device_writable = false,
+    };
+    count += 1;
+    if (plan.arena.scratchpad_array_address != 0) {
+        if (plan.arena.scratchpad_buffers_address <= plan.arena.scratchpad_array_address) {
+            return error.DmaAddressOutsidePlan;
+        }
+        storage[count] = .{
+            .address = plan.arena.scratchpad_array_address,
+            .bytes = plan.arena.scratchpad_buffers_address - plan.arena.scratchpad_array_address,
+            .device_readable = true,
+            .device_writable = false,
+        };
+        count += 1;
+        storage[count] = .{
+            .address = plan.arena.scratchpad_buffers_address,
+            .bytes = plan.arena.scratchpad_buffers_bytes,
+            .device_readable = true,
+            .device_writable = true,
+        };
+        count += 1;
+    }
+    if (plan.arena.input_context_address <= plan.arena.device_contexts_address) {
+        return error.DmaAddressOutsidePlan;
+    }
+    storage[count] = .{
+        .address = plan.arena.device_contexts_address,
+        .bytes = plan.arena.input_context_address - plan.arena.device_contexts_address,
+        .device_readable = true,
+        .device_writable = true,
+    };
+    count += 1;
+    storage[count] = .{
+        .address = plan.arena.input_context_address,
+        .bytes = XHCI_PAGE_BYTES,
+        .device_readable = true,
+        .device_writable = false,
+    };
+    count += 1;
+
+    const plan_end = checkedAdd(plan.base_address, plan.total_bytes) catch
+        return error.DmaLayoutOverflow;
+    for (storage[0..count]) |region| {
+        const region_end = checkedAdd(region.address, region.bytes) catch
+            return error.DmaLayoutOverflow;
+        if (!aligned(region.address, XHCI_PAGE_BYTES) or
+            region.bytes == 0 or region.bytes % XHCI_PAGE_BYTES != 0 or
+            region.address < plan.base_address or region_end > plan_end)
+        {
+            return error.DmaAddressOutsidePlan;
+        }
+    }
+    return storage[0..count];
+}
+
+pub fn programControllerDmaRegisters(
+    capabilities: CapabilityRegisters,
+    plan: ControllerDmaPlan,
+    mmio: anytype,
+) Error!void {
+    const operational_base: u32 = capabilities.capability_length;
+    const status = mmio.readReg32(operational_base + OPERATIONAL_USB_STATUS_OFFSET);
+    if ((status & (USB_STATUS_CONTROLLER_NOT_READY | USB_STATUS_HOST_CONTROLLER_ERROR)) != 0 or
+        (status & USB_STATUS_HOST_CONTROLLER_HALTED) == 0)
+    {
+        return error.DmaProgrammingUnavailable;
+    }
+    if ((mmio.readReg32(operational_base + OPERATIONAL_PAGE_SIZE_OFFSET) &
+        PAGE_SIZE_4K_SUPPORTED) == 0)
+    {
+        return error.UnsupportedPageSize;
+    }
+    const command_ring_control_offset = operational_base + OPERATIONAL_COMMAND_RING_CONTROL_OFFSET;
+    if ((mmio.readReg64(command_ring_control_offset) & COMMAND_RING_RUNNING) != 0) {
+        return error.DmaProgrammingUnavailable;
+    }
+
+    const dcbaap_offset = operational_base + OPERATIONAL_DEVICE_CONTEXT_BASE_ARRAY_POINTER_OFFSET;
+    mmio.writeReg64(dcbaap_offset, plan.arena.dcbaa_address);
+    mmio.writeReg64(
+        command_ring_control_offset,
+        plan.ring_plan.command_ring_address | COMMAND_RING_INITIAL_CYCLE_STATE,
+    );
+
+    const primary_interrupter = std.math.add(
+        u32,
+        capabilities.runtime_register_offset,
+        PRIMARY_INTERRUPTER_OFFSET,
+    ) catch return error.DmaLayoutOverflow;
+    const iman_offset = primary_interrupter + INTERRUPTER_MANAGEMENT_OFFSET;
+    mmio.writeReg32(iman_offset, mmio.readReg32(iman_offset) & ~INTERRUPTER_ENABLE);
+    mmio.writeReg32(
+        primary_interrupter + INTERRUPTER_MODERATION_OFFSET,
+        INTERRUPTER_MODERATION_INTERVAL_125_MICROSECONDS,
+    );
+    mmio.writeReg32(
+        primary_interrupter + EVENT_RING_SEGMENT_TABLE_SIZE_OFFSET,
+        plan.event_ring_segment_table_entries,
+    );
+    mmio.writeReg64(
+        primary_interrupter + EVENT_RING_SEGMENT_TABLE_BASE_OFFSET,
+        plan.event_ring_segment_table_address,
+    );
+    mmio.writeReg64(
+        primary_interrupter + EVENT_RING_DEQUEUE_POINTER_OFFSET,
+        plan.ring_plan.event_ring_address,
+    );
+
+    if ((mmio.readReg64(dcbaap_offset) & ~ADDRESS_64_BYTE_ALIGNMENT_MASK) !=
+        plan.arena.dcbaa_address or
+        (mmio.readReg32(iman_offset) & INTERRUPTER_ENABLE) != 0 or
+        (mmio.readReg32(primary_interrupter + INTERRUPTER_MODERATION_OFFSET) & 0xFFFF) !=
+            INTERRUPTER_MODERATION_INTERVAL_125_MICROSECONDS or
+        (mmio.readReg32(primary_interrupter + EVENT_RING_SEGMENT_TABLE_SIZE_OFFSET) & 0xFFFF) !=
+            plan.event_ring_segment_table_entries or
+        (mmio.readReg64(primary_interrupter + EVENT_RING_SEGMENT_TABLE_BASE_OFFSET) &
+            ~ADDRESS_64_BYTE_ALIGNMENT_MASK) != plan.event_ring_segment_table_address or
+        (mmio.readReg64(primary_interrupter + EVENT_RING_DEQUEUE_POINTER_OFFSET) &
+            EVENT_RING_DEQUEUE_POINTER_MASK) != plan.ring_plan.event_ring_address)
+    {
+        return error.DmaRegisterRejected;
+    }
+}
+
 pub fn rejectKernelInputReport(_: InputRequest) Error!void {
     return error.KernelUsbInputDataPlaneDisabled;
 }
@@ -1148,6 +1496,42 @@ pub fn withHardwareInputEvidence(proof: InputProof, evidence: HardwareInputEvide
     var upgraded = proof;
     upgraded.mmio.hardware_input = evidence;
     return upgraded;
+}
+
+fn initializeLinkTrb(
+    plan: ControllerDmaPlan,
+    memory: []u8,
+    ring_address: u64,
+    ring_trbs: u32,
+) Error!void {
+    if (ring_trbs < 2) return error.RingTooSmall;
+    const ring_bytes = std.math.mul(u64, ring_trbs, TRB_BYTES) catch
+        return error.DmaLayoutOverflow;
+    const link_address = checkedAdd(ring_address, ring_bytes - TRB_BYTES) catch
+        return error.DmaLayoutOverflow;
+    const link = try dmaBytes(plan, memory, link_address, TRB_BYTES);
+    writeU64Le(link[0..8], ring_address);
+    writeU32Le(
+        link[12..16],
+        (@as(u32, LINK_TRB_TYPE) << TRB_TYPE_SHIFT) |
+            LINK_TRB_TOGGLE_CYCLE |
+            @as(u32, COMMAND_RING_INITIAL_CYCLE_STATE),
+    );
+}
+
+fn dmaBytes(
+    plan: ControllerDmaPlan,
+    memory: []u8,
+    address: u64,
+    byte_count: u64,
+) Error![]u8 {
+    if (address < plan.base_address) return error.DmaAddressOutsidePlan;
+    const offset = address - plan.base_address;
+    const end = checkedAdd(offset, byte_count) catch return error.DmaLayoutOverflow;
+    if (end > plan.total_bytes or end > memory.len) return error.DmaAddressOutsidePlan;
+    const start_index = std.math.cast(usize, offset) orelse return error.DmaAddressOutsidePlan;
+    const end_index = std.math.cast(usize, end) orelse return error.DmaAddressOutsidePlan;
+    return memory[start_index..end_index];
 }
 
 fn validateRing(trbs: u32, address: u64) Error!void {
@@ -1789,6 +2173,214 @@ test "xHCI DMA arena page-rounds the maximum scratchpad pointer array" {
     try std.testing.expectEqual(@as(u64, 0x403000), plan.device_contexts_address);
     try std.testing.expectEqual(@as(u64, 0x404000), plan.input_context_address);
     try std.testing.expectEqual(@as(u64, 0x404000), plan.total_bytes);
+
+    capabilities.max_device_slots = TEST_MAX_DEVICE_SLOTS;
+    const full_plan = try planControllerDma(capabilities, TEST_MAX_DEVICE_SLOTS, 0x1000);
+    try std.testing.expectEqual(@as(u32, 1045), try full_plan.frameCount());
+}
+
+test "xHCI controller DMA plan initializes rings tables and scratchpad pointers" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_device_slots = 1;
+    capabilities.max_scratchpad_buffers = 2;
+    const plan = try planControllerDma(capabilities, 1, 0x1000);
+    try std.testing.expectEqual(@as(u32, 8), try plan.frameCount());
+    try std.testing.expectEqual(@as(u64, 0x2400), plan.transfer_ring_address);
+    try std.testing.expectEqual(@as(u64, 0x2500), plan.event_ring_segment_table_address);
+    try std.testing.expectEqual(@as(u32, 64), plan.event_ring_segment_table_bytes);
+    try std.testing.expectEqual(@as(u64, 0x3000), plan.arena.base_address);
+
+    var memory = [_]u8{0xA5} ** (8 * @as(usize, XHCI_PAGE_BYTES));
+    try std.testing.expectError(
+        error.DmaBufferTooSmall,
+        initializeControllerDma(plan, memory[0 .. memory.len - 1]),
+    );
+    try initializeControllerDma(plan, &memory);
+
+    const command_link = memory[(COMMAND_RING_TRBS - 1) * TRB_BYTES ..][0..TRB_BYTES];
+    try std.testing.expectEqual(@as(u64, 0x1000), readU64Le(command_link[0..8]));
+    try std.testing.expectEqual(
+        (@as(u32, LINK_TRB_TYPE) << TRB_TYPE_SHIFT) | LINK_TRB_TOGGLE_CYCLE | 1,
+        readU32Le(command_link[12..16]),
+    );
+    const transfer_link_offset: usize = @intCast(
+        plan.transfer_ring_address - plan.base_address +
+            (@as(u64, plan.transfer_ring_trbs) - 1) * TRB_BYTES,
+    );
+    try std.testing.expectEqual(
+        plan.transfer_ring_address,
+        readU64Le(memory[transfer_link_offset..][0..8]),
+    );
+    const erst_offset: usize = @intCast(plan.event_ring_segment_table_address - plan.base_address);
+    try std.testing.expectEqual(
+        plan.ring_plan.event_ring_address,
+        readU64Le(memory[erst_offset..][0..8]),
+    );
+    try std.testing.expectEqual(
+        plan.ring_plan.event_ring_trbs,
+        readU32Le(memory[erst_offset + 8 ..][0..4]),
+    );
+    const dcbaa_offset: usize = @intCast(plan.arena.dcbaa_address - plan.base_address);
+    try std.testing.expectEqual(
+        plan.arena.scratchpad_array_address,
+        readU64Le(memory[dcbaa_offset..][0..8]),
+    );
+    try std.testing.expectEqual(@as(u64, 0), readU64Le(memory[dcbaa_offset + 8 ..][0..8]));
+    const scratchpad_offset: usize = @intCast(
+        plan.arena.scratchpad_array_address - plan.base_address,
+    );
+    try std.testing.expectEqual(
+        plan.arena.scratchpad_buffers_address,
+        readU64Le(memory[scratchpad_offset..][0..8]),
+    );
+    try std.testing.expectEqual(
+        plan.arena.scratchpad_buffers_address + XHCI_PAGE_BYTES,
+        readU64Le(memory[scratchpad_offset + 8 ..][0..8]),
+    );
+}
+
+test "xHCI controller DMA regions preserve page-granular direction isolation" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_device_slots = 1;
+    capabilities.max_scratchpad_buffers = 2;
+    const plan = try planControllerDma(capabilities, 1, 0x1000);
+    var region_storage: [MAX_CONTROLLER_DMA_REGIONS]DmaAccessRegion = undefined;
+    const regions = try controllerDmaAccessRegions(plan, &region_storage);
+    try std.testing.expectEqual(@as(usize, 7), regions.len);
+    try std.testing.expectEqualDeep(DmaAccessRegion{
+        .address = 0x1000,
+        .bytes = XHCI_PAGE_BYTES,
+        .device_readable = true,
+        .device_writable = false,
+    }, regions[0]);
+    try std.testing.expect(regions[1].device_readable and regions[1].device_writable);
+    try std.testing.expectEqual(plan.arena.dcbaa_address, regions[2].address);
+    try std.testing.expect(regions[3].device_readable and !regions[3].device_writable);
+    try std.testing.expectEqual(plan.arena.scratchpad_buffers_bytes, regions[4].bytes);
+    try std.testing.expect(regions[4].device_readable and regions[4].device_writable);
+    try std.testing.expect(regions[5].device_readable and regions[5].device_writable);
+    try std.testing.expect(regions[6].device_readable and !regions[6].device_writable);
+
+    capabilities.context_size = .bytes_32;
+    capabilities.max_device_slots = 3;
+    capabilities.max_scratchpad_buffers = 0;
+    capabilities.scratchpad_restore = false;
+    const compact = try planControllerDma(capabilities, 3, 0x1000);
+    try std.testing.expectEqual(@as(u32, 5), try compact.frameCount());
+    const compact_regions = try controllerDmaAccessRegions(compact, &region_storage);
+    try std.testing.expectEqual(@as(usize, 5), compact_regions.len);
+    try std.testing.expectEqual(@as(u64, 0x1000), compact_regions[3].bytes);
+}
+
+const MockDmaRegisterMmio = struct {
+    registers: [0x1100]u8 = [_]u8{0} ** 0x1100,
+    accept_writes: bool = true,
+
+    fn ready() @This() {
+        var mmio = @This(){};
+        writeU32Le(
+            mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_USB_STATUS_OFFSET ..][0..4],
+            USB_STATUS_HOST_CONTROLLER_HALTED,
+        );
+        writeU32Le(
+            mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_PAGE_SIZE_OFFSET ..][0..4],
+            PAGE_SIZE_4K_SUPPORTED,
+        );
+        return mmio;
+    }
+
+    pub fn readReg32(self: *@This(), offset: u32) u32 {
+        return readU32Le(self.registers[@as(usize, offset)..][0..4]);
+    }
+
+    pub fn readReg64(self: *@This(), offset: u32) u64 {
+        return readU64Le(self.registers[@as(usize, offset)..][0..8]);
+    }
+
+    pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
+        if (self.accept_writes) writeU32Le(self.registers[@as(usize, offset)..][0..4], value);
+    }
+
+    pub fn writeReg64(self: *@This(), offset: u32, value: u64) void {
+        if (self.accept_writes) writeU64Le(self.registers[@as(usize, offset)..][0..8], value);
+    }
+};
+
+test "xHCI halted DMA register programming initializes the primary event ring" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_scratchpad_buffers = 0;
+    capabilities.scratchpad_restore = false;
+    const plan = try planControllerDma(capabilities, TEST_MAX_DEVICE_SLOTS, 0x4000);
+    var mmio = MockDmaRegisterMmio.ready();
+    try programControllerDmaRegisters(capabilities, plan, &mmio);
+
+    const operational_base: u32 = capabilities.capability_length;
+    try std.testing.expectEqual(
+        plan.arena.dcbaa_address,
+        mmio.readReg64(operational_base + OPERATIONAL_DEVICE_CONTEXT_BASE_ARRAY_POINTER_OFFSET),
+    );
+    try std.testing.expectEqual(
+        plan.ring_plan.command_ring_address | COMMAND_RING_INITIAL_CYCLE_STATE,
+        mmio.readReg64(operational_base + OPERATIONAL_COMMAND_RING_CONTROL_OFFSET),
+    );
+    const primary = capabilities.runtime_register_offset + PRIMARY_INTERRUPTER_OFFSET;
+    try std.testing.expectEqual(
+        INTERRUPTER_MODERATION_INTERVAL_125_MICROSECONDS,
+        mmio.readReg32(primary + INTERRUPTER_MODERATION_OFFSET),
+    );
+    try std.testing.expectEqual(
+        EVENT_RING_SEGMENT_TABLE_ENTRIES,
+        mmio.readReg32(primary + EVENT_RING_SEGMENT_TABLE_SIZE_OFFSET),
+    );
+    try std.testing.expectEqual(
+        plan.event_ring_segment_table_address,
+        mmio.readReg64(primary + EVENT_RING_SEGMENT_TABLE_BASE_OFFSET),
+    );
+    try std.testing.expectEqual(
+        plan.ring_plan.event_ring_address,
+        mmio.readReg64(primary + EVENT_RING_DEQUEUE_POINTER_OFFSET),
+    );
+}
+
+test "xHCI DMA register programming rejects unsafe controller states" {
+    const capabilities = defaultCapabilityRegisters();
+    const plan = try planControllerDma(capabilities, TEST_MAX_DEVICE_SLOTS, 0x4000);
+    var mmio = MockDmaRegisterMmio.ready();
+    writeU32Le(
+        mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_USB_STATUS_OFFSET ..][0..4],
+        0,
+    );
+    try std.testing.expectError(
+        error.DmaProgrammingUnavailable,
+        programControllerDmaRegisters(capabilities, plan, &mmio),
+    );
+
+    mmio = MockDmaRegisterMmio.ready();
+    writeU32Le(
+        mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_PAGE_SIZE_OFFSET ..][0..4],
+        0,
+    );
+    try std.testing.expectError(
+        error.UnsupportedPageSize,
+        programControllerDmaRegisters(capabilities, plan, &mmio),
+    );
+
+    mmio = MockDmaRegisterMmio.ready();
+    writeU64Le(
+        mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_COMMAND_RING_CONTROL_OFFSET ..][0..8],
+        COMMAND_RING_RUNNING,
+    );
+    try std.testing.expectError(
+        error.DmaProgrammingUnavailable,
+        programControllerDmaRegisters(capabilities, plan, &mmio),
+    );
+
+    mmio = MockDmaRegisterMmio.ready();
+    mmio.accept_writes = false;
+    try std.testing.expectError(
+        error.DmaRegisterRejected,
+        programControllerDmaRegisters(capabilities, plan, &mmio),
+    );
 }
 
 test "xHCI controller binds MMIO command doorbells and event ring input proof" {
@@ -1843,8 +2435,8 @@ test "xHCI controller binds MMIO command doorbells and event ring input proof" {
     const dma_arena = controller.dmaArenaPlan().?;
     try std.testing.expectEqual(@as(u64, 0x3000), dma_arena.base_address);
     try std.testing.expectEqual(TEST_MAX_DEVICE_SLOTS, dma_arena.enabled_device_slots);
-    try std.testing.expectEqual(@as(u32, DEFAULT_TRANSFER_RING_TRBS), proof.mmio.transfer_ring_trbs);
-    try std.testing.expectEqual(@as(u32, DEFAULT_ERST_ENTRIES), proof.mmio.event_ring_segment_table_entries);
+    try std.testing.expectEqual(TRANSFER_RING_TRBS, proof.mmio.transfer_ring_trbs);
+    try std.testing.expectEqual(EVENT_RING_SEGMENT_TABLE_ENTRIES, proof.mmio.event_ring_segment_table_entries);
     try std.testing.expectEqual(@as(u32, 1), proof.mmio.event_ring_dequeue_count);
     try std.testing.expectEqual(@as(u32, 1), proof.mmio.interrupt_events);
 

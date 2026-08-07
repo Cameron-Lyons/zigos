@@ -1099,6 +1099,9 @@ fn validateNuc11tnki5KernelProofSources(
         "ZIGOS:XHCI:HW:OWNERSHIP_OK",
         "ZIGOS:XHCI:HW:RESET_OK",
         "ZIGOS:XHCI:HW:SLOTS_OK",
+        "xhci_hw.isolationDomain()",
+        "isolation_domains[0..isolation_domain_count]",
+        "ZIGOS:XHCI:HW:DMA_OK",
     };
     for (required_boot_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, devices_source, snippet) == null) {
@@ -1887,6 +1890,14 @@ fn validateNuc11tnki5KernelProofSources(
         "RingAddressOverlap",
         "DmaLayoutOverflow",
         "dmaArenaPlan",
+        "ControllerDmaPlan",
+        "initializeControllerDma",
+        "controllerDmaAccessRegions",
+        "programControllerDmaRegisters",
+        "EVENT_RING_SEGMENT_TABLE_ENTRIES: u32 = 1",
+        "INTERRUPTER_MODERATION_INTERVAL_125_MICROSECONDS: u32 = 500",
+        "UnsupportedPageSize",
+        "DmaRegisterRejected",
         "InvalidDoorbellOffset",
         "InvalidRuntimeRegisterOffset",
         "MAX_EXTENDED_CAPABILITIES: usize = 64",
@@ -1938,7 +1949,17 @@ fn validateNuc11tnki5KernelProofSources(
         "controllerReset",
         "enabledDeviceSlots",
         "writeReg32",
+        "writeReg64",
         "InvariantClock",
+        "BusMasteringNotRevoked",
+        "controllerDmaFrameCount",
+        "paging.alloc_frames(dma_frame_count)",
+        "initializeControllerDma",
+        "publishDmaStructures",
+        "programControllerDmaRegisters",
+        "buildDmaWindows",
+        "isolationDomain",
+        "requesterIsolated",
     };
     for (required_xhci_hw_snippets) |snippet| {
         if (std.mem.indexOf(u8, xhci_hw_source, snippet) == null) {

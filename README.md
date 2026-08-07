@@ -198,11 +198,16 @@ Use the pinned toolchain and repo entrypoints:
   cannot be lost across the sleep boundary. Malformed
   causes and eight consecutive no-progress interrupts fail closed. Queue
   enable and disable transitions use invariant-TSC elapsed deadlines.
+  The halted xHCI controller owns a third requester domain containing only its
+  command, event/transfer/ERST, DCBAA, scratchpad, Device Context, and Input
+  Context pages, with read-only or read/write permissions matching each page's
+  controller access. NVMe bring-up installs all three requester domains in one
+  deny-by-default VT-d transaction before any of them may gain bus mastering.
   Native payloads are carried in padded Ethernet frames under the local
   experimental EtherType; service and sync traffic resolves a fixed peer-device
   directory to directed unicast frames, while scoped discovery alone uses
   broadcast. Receive polling accepts only directed or broadcast frames for that
-  EtherType. NVMe, PCIe ECAM, I225-LM, ACPI, and VT-d cache-disabled mappings are assigned by one
+  EtherType. NVMe, PCIe ECAM, I225-LM, xHCI, ACPI, and VT-d cache-disabled mappings are assigned by one
   page-aligned, capacity-checked kernel MMIO layout whose pairwise non-overlap is
   enforced at compile time. Before
   normal storage attach, the controller must trigger a primary VT-d
@@ -235,7 +240,12 @@ Use the pinned toolchain and repo entrypoints:
   restored read-only between each operational write. While the controller remains
   halted, attach then programs CONFIG.MaxSlotsEn to the smaller of the hardware
   capacity and the kernel's 32-slot table, preserves unrelated CONFIG fields, and
-  requires exact readback before publishing controller inventory. Input-device
+  requires exact readback. It allocates and clears the exact contiguous DMA frame
+  run, installs cycle-one self-link TRBs, builds the primary event-ring table and
+  scratchpad pointer array, requires 4 KiB controller pages, and programs DCBAAP,
+  CRCR, ERSTSZ, ERSTBA, ERDP, and 125 microsecond interrupt moderation with
+  readback validation. Bus mastering and interrupts remain disabled while these
+  structures are added to the VT-d policy. Input-device
   authority still requires keyboard enumeration and hardware event-ring evidence.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint

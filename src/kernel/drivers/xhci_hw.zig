@@ -2,6 +2,7 @@ const std = @import("std");
 const endian = @import("../utils/endian.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
+const intel_vtd = @import("../platform/intel_vtd.zig");
 const tsc_clock = @import("../timer/tsc_clock.zig");
 const pci = @import("pci.zig");
 const xhci = @import("xhci.zig");
@@ -14,6 +15,9 @@ comptime {
     if (xhci.CAPABILITY_REGISTERS_BYTES > mmio_windows.xhci.bytes) {
         @compileError("xHCI capability snapshot exceeds its reserved MMIO window");
     }
+    if (xhci.XHCI_PAGE_BYTES != PAGE_BYTES) {
+        @compileError("xHCI DMA and kernel page sizes must match");
+    }
 }
 
 pub const Error = xhci.Error || error{
@@ -22,14 +26,26 @@ pub const Error = xhci.Error || error{
     BarMisaligned,
     BarRangeOverflow,
     InvariantClockUnavailable,
+    AlreadyPrepared,
+    BusMasteringNotRevoked,
+    DmaAllocationFailed,
+    DmaIsolationPlanInvalid,
 };
 
 var active_capabilities: ?xhci.CapabilityRegisters = null;
 var active_legacy_ownership: ?xhci.LegacyOwnership = null;
 var active_controller_reset = false;
 var active_enabled_slots: u8 = 0;
+var active_device: pci.PCIDevice = undefined;
+var active_dma_plan: ?xhci.ControllerDmaPlan = null;
+var active_dma_base: u32 = 0;
+var active_dma_frame_count: u32 = 0;
+var active_dma_windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
+var active_dma_window_count: usize = 0;
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
+    if (active_dma_plan != null) return error.AlreadyPrepared;
+    if (pci.busMasteringEnabled(device_info)) return error.BusMasteringNotRevoked;
     active_capabilities = null;
     active_legacy_ownership = null;
     active_controller_reset = false;
@@ -43,6 +59,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     const snapshot = readCapabilitySnapshot(mmio_windows.xhci.base);
     const capabilities = try xhci.parseCapabilityRegisters(&snapshot);
     try validateExtendedCapabilityRange(bar.address, capabilities.extended_capability_offset);
+    try validateControllerRegisterRanges(bar.address, capabilities);
     if (!tsc_clock.initialized()) return error.InvariantClockUnavailable;
     var reader = ExtendedCapabilityReader{ .bar_address = bar.address };
     const legacy = try xhci.findLegacySupport(capabilities.extended_capability_offset, &reader);
@@ -55,10 +72,30 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     } else xhci.LegacyOwnership.not_present;
     try xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{});
     const enabled_slots = try xhci.configureDeviceSlots(capabilities, &reader);
+
+    const dma_frame_count = try xhci.controllerDmaFrameCount(capabilities, enabled_slots);
+    const dma_base = paging.alloc_frames(dma_frame_count) orelse return error.DmaAllocationFailed;
+    var retain_dma_frames = false;
+    errdefer if (!retain_dma_frames) paging.release_frames(dma_base, dma_frame_count) catch {};
+    const dma_plan = try xhci.planControllerDma(capabilities, enabled_slots, dma_base);
+    const dma_bytes = std.math.cast(usize, dma_plan.total_bytes) orelse
+        return error.DmaIsolationPlanInvalid;
+    const dma_memory: [*]u8 = @ptrFromInt(dma_base);
+    try xhci.initializeControllerDma(dma_plan, dma_memory[0..dma_bytes]);
+    publishDmaStructures();
+    try xhci.programControllerDmaRegisters(capabilities, dma_plan, &reader);
+    const dma_window_count = try buildDmaWindows(dma_plan, &active_dma_windows);
+
+    active_device = device_info;
+    active_dma_plan = dma_plan;
+    active_dma_base = dma_base;
+    active_dma_frame_count = dma_frame_count;
+    active_dma_window_count = dma_window_count;
     active_capabilities = capabilities;
     active_legacy_ownership = legacy_ownership;
     active_controller_reset = true;
     active_enabled_slots = enabled_slots;
+    retain_dma_frames = true;
     return capabilities;
 }
 
@@ -67,7 +104,9 @@ pub fn validated() bool {
     return active_capabilities != null and
         ownership != .firmware_released and
         active_controller_reset and
-        active_enabled_slots != 0;
+        active_enabled_slots != 0 and
+        active_dma_plan != null and
+        active_dma_window_count != 0;
 }
 
 pub fn probedCapabilities() ?xhci.CapabilityRegisters {
@@ -84,6 +123,56 @@ pub fn controllerReset() bool {
 
 pub fn enabledDeviceSlots() u8 {
     return active_enabled_slots;
+}
+
+pub fn dmaPlan() ?xhci.ControllerDmaPlan {
+    return active_dma_plan;
+}
+
+pub fn dmaFrameCount() u32 {
+    return active_dma_frame_count;
+}
+
+pub fn dmaBaseAddress() u32 {
+    return active_dma_base;
+}
+
+pub fn isolationDomain() ?intel_vtd.DmaDomain {
+    if (active_dma_plan == null or active_dma_window_count == 0) return null;
+    return .{
+        .device = active_device,
+        .windows = active_dma_windows[0..active_dma_window_count],
+    };
+}
+
+pub fn requesterIsolated() bool {
+    return active_dma_plan != null and intel_vtd.requesterProtected(active_device);
+}
+
+fn buildDmaWindows(
+    plan: xhci.ControllerDmaPlan,
+    windows: *[xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow,
+) Error!usize {
+    var region_storage: [xhci.MAX_CONTROLLER_DMA_REGIONS]xhci.DmaAccessRegion = undefined;
+    const regions = try xhci.controllerDmaAccessRegions(plan, &region_storage);
+    for (regions, 0..) |region, index| {
+        const region_end = std.math.add(u64, region.address, region.bytes) catch
+            return error.DmaIsolationPlanInvalid;
+        if (region_end > std.math.maxInt(u32)) return error.DmaIsolationPlanInvalid;
+        windows[index] = .{
+            .base = std.math.cast(u32, region.address) orelse
+                return error.DmaIsolationPlanInvalid,
+            .length = std.math.cast(u32, region.bytes) orelse
+                return error.DmaIsolationPlanInvalid,
+            .device_readable = region.device_readable,
+            .device_writable = region.device_writable,
+        };
+    }
+    return regions.len;
+}
+
+fn publishDmaStructures() void {
+    asm volatile ("mfence" ::: .{ .memory = true });
 }
 
 const InvariantClock = struct {
@@ -105,6 +194,21 @@ fn validateExtendedCapabilityRange(bar_address: usize, first_offset: u32) Error!
     if (bar_address > std.math.maxInt(usize) - @as(usize, xhci.MAX_EXTENDED_CAPABILITY_OFFSET)) {
         return error.BarRangeOverflow;
     }
+}
+
+fn validateControllerRegisterRanges(
+    bar_address: usize,
+    capabilities: xhci.CapabilityRegisters,
+) Error!void {
+    try validateBarRange(bar_address, capabilities.capability_length, 0x40);
+    try validateBarRange(bar_address, capabilities.runtime_register_offset, 0x40);
+    try validateBarRange(bar_address, capabilities.doorbell_offset, @sizeOf(u32));
+}
+
+fn validateBarRange(bar_address: usize, offset: u64, byte_count: u64) Error!void {
+    const end = std.math.add(u64, offset, byte_count) catch return error.BarRangeOverflow;
+    const end_offset = std.math.cast(usize, end) orelse return error.BarRangeOverflow;
+    if (bar_address > std.math.maxInt(usize) - end_offset) return error.BarRangeOverflow;
 }
 
 const ExtendedCapabilityReader = struct {
@@ -133,6 +237,12 @@ const ExtendedCapabilityReader = struct {
         return self.readDword(offset);
     }
 
+    pub fn readReg64(self: *@This(), offset: u32) u64 {
+        const low = self.readDword(offset);
+        const high = self.readDword(offset + @sizeOf(u32));
+        return @as(u64, low) | (@as(u64, high) << 32);
+    }
+
     pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
         const byte_offset: usize = @intCast(offset);
         const page_offset = byte_offset & ~(PAGE_BYTES - 1);
@@ -140,6 +250,11 @@ const ExtendedCapabilityReader = struct {
         const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
         @as(*volatile u32, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).* = value;
         self.mapPage(page_offset, false);
+    }
+
+    pub fn writeReg64(self: *@This(), offset: u32, value: u64) void {
+        self.writeReg32(offset, @truncate(value));
+        self.writeReg32(offset + @sizeOf(u32), @truncate(value >> 32));
     }
 
     fn mapPage(self: *@This(), page_offset: usize, writable: bool) void {
@@ -234,5 +349,42 @@ test "xHCI hardware probe bounds extended capability BAR arithmetic" {
     try std.testing.expectError(
         error.BarRangeOverflow,
         validateExtendedCapabilityRange(std.math.maxInt(usize), 0x8000),
+    );
+
+    const capabilities = xhci.defaultCapabilityRegisters();
+    try validateControllerRegisterRanges(0xFEB0_0000, capabilities);
+    try std.testing.expectError(
+        error.BarRangeOverflow,
+        validateControllerRegisterRanges(std.math.maxInt(usize), capabilities),
+    );
+    try std.testing.expectError(
+        error.BarRangeOverflow,
+        validateBarRange(0, std.math.maxInt(u64), 2),
+    );
+}
+
+test "xHCI hardware DMA windows retain page-granular access directions" {
+    var capabilities = xhci.defaultCapabilityRegisters();
+    capabilities.max_device_slots = 1;
+    capabilities.max_scratchpad_buffers = 2;
+    const plan = try xhci.planControllerDma(capabilities, 1, 0x1000);
+    var windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
+    const count = try buildDmaWindows(plan, &windows);
+    try std.testing.expectEqual(@as(usize, 7), count);
+    try std.testing.expectEqual(@as(u32, 0x1000), windows[0].base);
+    try std.testing.expect(windows[0].device_readable and !windows[0].device_writable);
+    try std.testing.expect(windows[1].device_readable and windows[1].device_writable);
+    try std.testing.expect(windows[2].device_readable and !windows[2].device_writable);
+    try std.testing.expect(windows[4].device_readable and windows[4].device_writable);
+    try std.testing.expect(windows[6].device_readable and !windows[6].device_writable);
+
+    const outside_managed_width = try xhci.planControllerDma(
+        capabilities,
+        1,
+        @as(u64, std.math.maxInt(u32)) & ~(xhci.XHCI_PAGE_BYTES - 1),
+    );
+    try std.testing.expectError(
+        error.DmaIsolationPlanInvalid,
+        buildDmaWindows(outside_managed_width, &windows),
     );
 }
