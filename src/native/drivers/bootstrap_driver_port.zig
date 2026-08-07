@@ -49,6 +49,7 @@ else
 pub const NetworkDevice = network_driver_task.NetworkDevice;
 pub const ReceiveStatus = network_driver_task.ReceiveStatus;
 pub const ReceiveResult = network_driver_task.ReceiveResult;
+pub const ReceiveServiceResult = network_driver_task.ReceiveServiceResult;
 pub const noNetworkFrame = network_driver_task.noNetworkFrame;
 pub const EgressRequest = network_driver_task.EgressRequest;
 pub const EgressDecision = network_driver_task.EgressDecision;
@@ -243,7 +244,23 @@ pub fn receiveActiveNetworkFrame(output: []u8) ReceiveResult {
     return network_driver_task.receiveActiveFrame(output);
 }
 
+pub fn servicePendingNetworkFrames(budget: usize) ReceiveServiceResult {
+    return network_driver_task.servicePendingReceiveFrames(budget);
+}
+
+pub fn networkWorkPending() bool {
+    return network_driver_task.networkWorkPending();
+}
+
+pub fn activeNetworkTaskId() u64 {
+    return network_driver_task.activeTaskId();
+}
+
 pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
+    return activateNetworkDeviceForTask(device_id, service_id, 0);
+}
+
+pub fn activateNetworkDeviceForTask(device_id: u64, service_id: u64, task_id: u64) bool {
     if (!networkPublicationMatchesTargetI225(device_id)) return false;
     if (publicationForActivation(NetworkPublication, &published_network, device_id, service_id)) |publication| {
         if (publication.network_device == null) {
@@ -251,7 +268,7 @@ pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
             publication.network_device = activator(device_id) orelse return false;
         }
         if (!kernel_network_claim.recordDriverClaim(device_id, service_id)) return false;
-        if (!network_driver_task.activateDevice(publication.network_device.?, service_id)) return false;
+        if (!network_driver_task.activateDeviceForTask(publication.network_device.?, service_id, task_id)) return false;
         publication.active_service_id = service_id;
         return true;
     }

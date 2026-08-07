@@ -311,6 +311,12 @@ pub fn failedReceivePollCount() u64 {
     return failed_receive_polls;
 }
 
+pub fn networkWorkPending() bool {
+    if (!active) return false;
+    if (@atomicLoad(u32, &pending_interrupt_causes, .seq_cst) != 0) return true;
+    return receiveCompletionReady();
+}
+
 pub fn handleInterrupt() void {
     if (prepared) {
         controller.writeReg32(REG_IMC, i225_irq.QUEUE_CAUSES);
@@ -657,6 +663,10 @@ export fn zigosNetworkBootstrapI225Receive(
     const result = pollReceive(output_ptr[0..output_capacity]);
     output_len.* = result.length;
     return @intFromEnum(result.status);
+}
+
+export fn zigosNetworkBootstrapI225WorkPending() callconv(.c) bool {
+    return networkWorkPending();
 }
 
 export fn zigosNetworkBootstrapI225Mac(output: [*]u8) callconv(.c) bool {

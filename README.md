@@ -179,8 +179,11 @@ Use the pinned toolchain and repo entrypoints:
   completion spinning, contains a stalled oldest TX descriptor after one
   second, and activates only after its requester is confined and the x2APIC is
   ready. It installs one exact-requester VT-d interrupt-remapping entry, programs
-  a single-vector MSI message, masks queue causes in the top half, and drains at
-  most 63 TX completions or one RX frame per task-side service pass. Malformed
+  a single-vector MSI message, masks queue causes in the top half, and defers
+  descriptor service to the native runtime. Each wake drains at most eight
+  frames into a fixed 32-frame software queue, wakes the network task, and
+  rechecks pending work with interrupts disabled before idle so receive events
+  cannot be lost across the sleep boundary. Malformed
   causes and eight consecutive no-progress interrupts fail closed. Queue
   enable and disable transitions use invariant-TSC elapsed deadlines.
   Native payloads are carried in padded Ethernet frames under the local

@@ -40,6 +40,7 @@ pub const BootstrapState = session_support.BootstrapState;
 pub const ServiceBindings = session_support.ServiceBindings;
 pub const Environment = session_support.Environment;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
+const NETWORK_RECEIVE_SERVICE_BUDGET: usize = 8;
 
 pub const ServiceGraph = service_graph_builder.ServiceGraph;
 
@@ -208,6 +209,26 @@ pub const SessionManager = struct {
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         return self.runtime_context.schedulerHasReadyTasks();
+    }
+
+    pub fn servicePendingNetworkWork(self: *SessionManager, now_ticks: u64) usize {
+        const service = bootstrap_driver_port.servicePendingNetworkFrames(NETWORK_RECEIVE_SERVICE_BUDGET);
+        if (service.frames_queued != 0) {
+            const task_id = bootstrap_driver_port.activeNetworkTaskId();
+            if (task_id != 0) {
+                _ = self.runtime_context.userspace_scheduler.wakeTask(
+                    task_id,
+                    .external_event,
+                    now_ticks,
+                    now_ticks +% 1,
+                );
+            }
+        }
+        return service.frames_queued;
+    }
+
+    pub fn networkWorkPending(_: *const SessionManager) bool {
+        return bootstrap_driver_port.networkWorkPending();
     }
 
     pub fn boot(self: *SessionManager) void {
