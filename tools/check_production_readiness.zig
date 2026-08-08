@@ -1869,6 +1869,15 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_xhci_snippets = [_][]const u8{
         "MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0110",
+        "HCSPARAMS1_MAX_INTERRUPTERS_MASK: u32 = 0x7FF",
+        "HCSPARAMS2_OFFSET: usize = 0x08",
+        "HCCPARAMS1_64_BIT_ADDRESSING: u32 = 1 << 0",
+        "HCCPARAMS1_CONTEXT_SIZE: u32 = 1 << 2",
+        "ContextSize = enum(u8)",
+        "Unsupported32BitAddressing",
+        "InvalidScratchpadRestore",
+        "max_scratchpad_buffers",
+        "context_size.byteCount()",
         "InvalidDoorbellOffset",
         "InvalidRuntimeRegisterOffset",
         "MAX_EXTENDED_CAPABILITIES: usize = 64",
