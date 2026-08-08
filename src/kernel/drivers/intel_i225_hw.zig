@@ -4,6 +4,7 @@ const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const timer = @import("../timer/timer.zig");
+const tsc_clock = @import("../timer/tsc_clock.zig");
 const x2apic = @import("../interrupts/x2apic.zig");
 const i225_frame = @import("intel_i225_frame.zig");
 const i225_irq = @import("intel_i225_irq.zig");
@@ -25,7 +26,7 @@ const BAR_IO_SPACE: u32 = 1 << 0;
 const BAR_MEMORY_TYPE_MASK: u32 = 0x6;
 const BAR_MEMORY_TYPE_32: u32 = 0;
 const BAR_MEMORY_TYPE_64: u32 = 0x4;
-const QUEUE_SPIN_LIMIT: u64 = 5_000_000;
+const QUEUE_STATE_TIMEOUT_MILLISECONDS: u64 = 1000;
 const TRANSMIT_TIMEOUT_TICKS: u64 = timer.TICKS_PER_SECOND;
 
 const REG_STATUS: usize = 0x00008;
@@ -609,8 +610,8 @@ fn readPermanentMac(bar: usize) ?[6]u8 {
 }
 
 fn spinQueueState(pending: *const Controller, register: usize, mask: u32, want_enabled: bool) bool {
-    var spins: u64 = 0;
-    while (spins < QUEUE_SPIN_LIMIT) : (spins += 1) {
+    const deadline = tsc_clock.afterMilliseconds(QUEUE_STATE_TIMEOUT_MILLISECONDS);
+    while (!deadline.expired()) {
         if (((pending.reg32(register) & mask) != 0) == want_enabled) return true;
         spin.hint();
     }
