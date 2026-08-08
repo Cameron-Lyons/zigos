@@ -221,9 +221,13 @@ Use the pinned toolchain and repo entrypoints:
   ownership is requested with the architected 8-bit OS-semaphore write, and the
   firmware semaphore must clear within a one-second invariant-TSC deadline. The
   window is restored read-only immediately after that byte write, while bus
-  mastering and every operational-register write remain disabled. This publishes
-  controller inventory only; input-device authority still requires keyboard
-  enumeration and hardware event-ring evidence.
+  mastering remains disabled. After ownership, attach waits for CNR to clear,
+  clears Run/Stop and interrupt enables, requires HCHalted within the specified
+  16 ms bound, asserts HCRST, and requires reset completion plus a ready,
+  halted, error-free final state within bounded elapsed deadlines. The window is
+  restored read-only between each operational write. This publishes controller
+  inventory only; input-device authority still requires keyboard enumeration and
+  hardware event-ring evidence.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses

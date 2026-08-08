@@ -36,6 +36,8 @@ pub const MAX_DEVICE_SLOTS: usize = 32;
 pub const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
 pub const MAX_EXTENDED_CAPABILITY_OFFSET: u32 = @as(u32, std.math.maxInt(u16)) << 2;
 pub const MAX_EXTENDED_CAPABILITIES: usize = 64;
+pub const CONTROLLER_HALT_TIMEOUT_MILLISECONDS: u64 = 16;
+pub const CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const DEVICE_SLOT_TABLE_ENTRIES: usize = MAX_DEVICE_SLOTS + 1;
 const MIN_CAPABILITY_LENGTH: u8 = 0x20;
 const MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0110;
@@ -59,6 +61,15 @@ const EXTENDED_CAPABILITY_DWORD_SHIFT = 2;
 const USB_LEGACY_SUPPORT_CAPABILITY_ID: u8 = 1;
 const USB_LEGACY_BIOS_OWNED_SEMAPHORE: u32 = 1 << 16;
 const USB_LEGACY_OS_OWNED_SEMAPHORE: u32 = 1 << 24;
+const OPERATIONAL_USB_COMMAND_OFFSET: u32 = 0x00;
+const OPERATIONAL_USB_STATUS_OFFSET: u32 = 0x04;
+const USB_COMMAND_RUN_STOP: u32 = 1 << 0;
+const USB_COMMAND_HOST_CONTROLLER_RESET: u32 = 1 << 1;
+const USB_COMMAND_INTERRUPTER_ENABLE: u32 = 1 << 2;
+const USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE: u32 = 1 << 3;
+const USB_STATUS_HOST_CONTROLLER_HALTED: u32 = 1 << 0;
+const USB_STATUS_CONTROLLER_NOT_READY: u32 = 1 << 11;
+const USB_STATUS_HOST_CONTROLLER_ERROR: u32 = 1 << 12;
 const TEST_CAPABILITY_LENGTH: u8 = 0x40;
 const TEST_INTERFACE_VERSION: u16 = 0x0110;
 const TEST_UNSUPPORTED_INTERFACE_VERSION: u16 = 0x0080;
@@ -110,6 +121,10 @@ pub const Error = error{
     FirmwareOwnershipTimeout,
     LegacyCapabilityChanged,
     OwnershipRequestRejected,
+    ControllerNotReadyTimeout,
+    ControllerHaltTimeout,
+    ControllerResetTimeout,
+    ControllerResetFailed,
     MissingMmioInputEvidence,
 };
 
@@ -714,7 +729,11 @@ pub fn enumerateBootKeyboard(device_id: u64, configuration_descriptor: []const u
 pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
     if (mmio.len < CAPABILITY_REGISTERS_BYTES) return error.TooSmall;
     const capability_length = mmio[CAPABILITY_LENGTH_OFFSET];
-    if (capability_length < MIN_CAPABILITY_LENGTH) return error.InvalidCapabilityLength;
+    if (capability_length < MIN_CAPABILITY_LENGTH or
+        (capability_length & (@sizeOf(u32) - 1)) != 0)
+    {
+        return error.InvalidCapabilityLength;
+    }
 
     const interface_version = readU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES]);
     if (interface_version < MIN_SUPPORTED_INTERFACE_VERSION) return error.UnsupportedVersion;
@@ -806,6 +825,65 @@ pub fn claimLegacyOwnership(
         if (!firmwareOwned(header)) return .os_owned;
         if (deadline.expired()) return error.FirmwareOwnershipTimeout;
         spin.hint();
+    }
+}
+
+pub fn resetOwnedController(
+    capability_length: u8,
+    mmio: anytype,
+    clock: anytype,
+) Error!void {
+    const operational_base: u32 = capability_length;
+    const command_offset = operational_base + OPERATIONAL_USB_COMMAND_OFFSET;
+    const status_offset = operational_base + OPERATIONAL_USB_STATUS_OFFSET;
+
+    var initial_ready_deadline = clock.afterMilliseconds(CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS);
+    var status = mmio.readReg32(status_offset);
+    while ((status & USB_STATUS_CONTROLLER_NOT_READY) != 0) {
+        if (initial_ready_deadline.expired()) return error.ControllerNotReadyTimeout;
+        spin.hint();
+        status = mmio.readReg32(status_offset);
+    }
+
+    const quiesce_mask = USB_COMMAND_RUN_STOP |
+        USB_COMMAND_INTERRUPTER_ENABLE |
+        USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE;
+    if ((status & USB_STATUS_HOST_CONTROLLER_HALTED) == 0) {
+        var halt_deadline = clock.afterMilliseconds(CONTROLLER_HALT_TIMEOUT_MILLISECONDS);
+        const command = mmio.readReg32(command_offset);
+        mmio.writeReg32(command_offset, command & ~quiesce_mask);
+        status = mmio.readReg32(status_offset);
+        while ((status & USB_STATUS_HOST_CONTROLLER_HALTED) == 0) {
+            if (halt_deadline.expired()) return error.ControllerHaltTimeout;
+            spin.hint();
+            status = mmio.readReg32(status_offset);
+        }
+    }
+
+    var reset_deadline = clock.afterMilliseconds(CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS);
+    const command = mmio.readReg32(command_offset);
+    mmio.writeReg32(
+        command_offset,
+        (command & ~quiesce_mask) | USB_COMMAND_HOST_CONTROLLER_RESET,
+    );
+    var reset_command = mmio.readReg32(command_offset);
+    while ((reset_command & USB_COMMAND_HOST_CONTROLLER_RESET) != 0) {
+        if (reset_deadline.expired()) return error.ControllerResetTimeout;
+        spin.hint();
+        reset_command = mmio.readReg32(command_offset);
+    }
+
+    var post_reset_ready_deadline = clock.afterMilliseconds(CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS);
+    status = mmio.readReg32(status_offset);
+    while ((status & USB_STATUS_CONTROLLER_NOT_READY) != 0) {
+        if (post_reset_ready_deadline.expired()) return error.ControllerNotReadyTimeout;
+        spin.hint();
+        status = mmio.readReg32(status_offset);
+    }
+    if ((status & USB_STATUS_HOST_CONTROLLER_HALTED) == 0 or
+        (status & USB_STATUS_HOST_CONTROLLER_ERROR) != 0)
+    {
+        return error.ControllerResetFailed;
     }
 }
 
@@ -1064,8 +1142,168 @@ test "xHCI ownership handoff rejects failed requests, changed capabilities, and 
     );
 }
 
+const ScriptedOperationalMmio = struct {
+    command_offset: u32,
+    status_offset: u32,
+    command_reads: []const u32,
+    status_reads: []const u32,
+    command_read_index: usize = 0,
+    status_read_index: usize = 0,
+    writes: [4]u32 = [_]u32{0} ** 4,
+    write_count: usize = 0,
+
+    pub fn readReg32(self: *@This(), offset: u32) u32 {
+        if (offset == self.command_offset) {
+            const index = @min(self.command_read_index, self.command_reads.len - 1);
+            self.command_read_index += 1;
+            return self.command_reads[index];
+        }
+        if (offset == self.status_offset) {
+            const index = @min(self.status_read_index, self.status_reads.len - 1);
+            self.status_read_index += 1;
+            return self.status_reads[index];
+        }
+        unreachable;
+    }
+
+    pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
+        if (offset != self.command_offset or self.write_count == self.writes.len) unreachable;
+        self.writes[self.write_count] = value;
+        self.write_count += 1;
+    }
+};
+
+fn scriptedOperationalMmio(command_reads: []const u32, status_reads: []const u32) ScriptedOperationalMmio {
+    return .{
+        .command_offset = @as(u32, TEST_CAPABILITY_LENGTH) + OPERATIONAL_USB_COMMAND_OFFSET,
+        .status_offset = @as(u32, TEST_CAPABILITY_LENGTH) + OPERATIONAL_USB_STATUS_OFFSET,
+        .command_reads = command_reads,
+        .status_reads = status_reads,
+    };
+}
+
+const MockResetClock = struct {
+    deadline_checks: usize,
+    requested_milliseconds: [4]u64 = [_]u64{0} ** 4,
+    request_count: usize = 0,
+
+    pub fn afterMilliseconds(self: *@This(), milliseconds: u64) MockOwnershipDeadline {
+        if (self.request_count == self.requested_milliseconds.len) unreachable;
+        self.requested_milliseconds[self.request_count] = milliseconds;
+        self.request_count += 1;
+        return .{ .remaining_checks = self.deadline_checks };
+    }
+};
+
+test "xHCI reset quiesces a running controller and completes bounded handshakes" {
+    const preserved_command_bit: u32 = 1 << 14;
+    const command_reads = [_]u32{
+        preserved_command_bit | USB_COMMAND_RUN_STOP | USB_COMMAND_INTERRUPTER_ENABLE | USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE,
+        preserved_command_bit,
+        USB_COMMAND_HOST_CONTROLLER_RESET,
+        0,
+    };
+    const status_reads = [_]u32{
+        USB_STATUS_CONTROLLER_NOT_READY,
+        0,
+        0,
+        USB_STATUS_HOST_CONTROLLER_HALTED,
+        USB_STATUS_CONTROLLER_NOT_READY,
+        USB_STATUS_HOST_CONTROLLER_HALTED,
+    };
+    var mmio = scriptedOperationalMmio(&command_reads, &status_reads);
+    var clock = MockResetClock{ .deadline_checks = 2 };
+    try resetOwnedController(TEST_CAPABILITY_LENGTH, &mmio, &clock);
+    try std.testing.expectEqual(@as(usize, 2), mmio.write_count);
+    try std.testing.expectEqual(preserved_command_bit, mmio.writes[0]);
+    try std.testing.expectEqual(
+        preserved_command_bit | USB_COMMAND_HOST_CONTROLLER_RESET,
+        mmio.writes[1],
+    );
+    try std.testing.expectEqualSlices(u64, &.{
+        CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS,
+        CONTROLLER_HALT_TIMEOUT_MILLISECONDS,
+        CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS,
+        CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS,
+    }, clock.requested_milliseconds[0..clock.request_count]);
+}
+
+test "xHCI reset skips the halt write when the controller is already stopped" {
+    const command_reads = [_]u32{
+        USB_COMMAND_INTERRUPTER_ENABLE | USB_COMMAND_HOST_SYSTEM_ERROR_ENABLE,
+        USB_COMMAND_HOST_CONTROLLER_RESET,
+        0,
+    };
+    const status_reads = [_]u32{
+        USB_STATUS_HOST_CONTROLLER_HALTED,
+        USB_STATUS_HOST_CONTROLLER_HALTED,
+    };
+    var mmio = scriptedOperationalMmio(&command_reads, &status_reads);
+    var clock = MockResetClock{ .deadline_checks = 2 };
+    try resetOwnedController(TEST_CAPABILITY_LENGTH, &mmio, &clock);
+    try std.testing.expectEqual(@as(usize, 1), mmio.write_count);
+    try std.testing.expectEqual(USB_COMMAND_HOST_CONTROLLER_RESET, mmio.writes[0]);
+}
+
+test "xHCI reset fails closed on ready, halt, reset, and final-state faults" {
+    const no_command = [_]u32{0};
+    const never_ready = [_]u32{USB_STATUS_CONTROLLER_NOT_READY};
+    var mmio = scriptedOperationalMmio(&no_command, &never_ready);
+    var expired = MockResetClock{ .deadline_checks = 0 };
+    try std.testing.expectError(error.ControllerNotReadyTimeout, resetOwnedController(
+        TEST_CAPABILITY_LENGTH,
+        &mmio,
+        &expired,
+    ));
+
+    const running = [_]u32{0};
+    mmio = scriptedOperationalMmio(&no_command, &running);
+    expired = .{ .deadline_checks = 0 };
+    try std.testing.expectError(error.ControllerHaltTimeout, resetOwnedController(
+        TEST_CAPABILITY_LENGTH,
+        &mmio,
+        &expired,
+    ));
+
+    const reset_stuck = [_]u32{ 0, USB_COMMAND_HOST_CONTROLLER_RESET };
+    const halted = [_]u32{USB_STATUS_HOST_CONTROLLER_HALTED};
+    mmio = scriptedOperationalMmio(&reset_stuck, &halted);
+    expired = .{ .deadline_checks = 0 };
+    try std.testing.expectError(error.ControllerResetTimeout, resetOwnedController(
+        TEST_CAPABILITY_LENGTH,
+        &mmio,
+        &expired,
+    ));
+
+    const reset_completes = [_]u32{ 0, USB_COMMAND_HOST_CONTROLLER_RESET, 0 };
+    const ready_then_stuck = [_]u32{ USB_STATUS_HOST_CONTROLLER_HALTED, USB_STATUS_CONTROLLER_NOT_READY };
+    mmio = scriptedOperationalMmio(&reset_completes, &ready_then_stuck);
+    expired = .{ .deadline_checks = 1 };
+    try std.testing.expectError(error.ControllerNotReadyTimeout, resetOwnedController(
+        TEST_CAPABILITY_LENGTH,
+        &mmio,
+        &expired,
+    ));
+
+    const failed_state = [_]u32{
+        USB_STATUS_HOST_CONTROLLER_HALTED,
+        USB_STATUS_HOST_CONTROLLER_HALTED | USB_STATUS_HOST_CONTROLLER_ERROR,
+    };
+    mmio = scriptedOperationalMmio(&reset_completes, &failed_state);
+    expired = .{ .deadline_checks = 1 };
+    try std.testing.expectError(error.ControllerResetFailed, resetOwnedController(
+        TEST_CAPABILITY_LENGTH,
+        &mmio,
+        &expired,
+    ));
+}
+
 test "xHCI capability parser rejects unsupported controllers" {
     var mmio = validCapabilityRegisters();
+    mmio[CAPABILITY_LENGTH_OFFSET] = TEST_CAPABILITY_LENGTH + 1;
+    try std.testing.expectError(error.InvalidCapabilityLength, parseCapabilityRegisters(mmio[0..]));
+
+    mmio = validCapabilityRegisters();
     writeU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], TEST_UNSUPPORTED_INTERFACE_VERSION);
     try std.testing.expectError(error.UnsupportedVersion, parseCapabilityRegisters(mmio[0..]));
 
