@@ -70,6 +70,8 @@ var command_completion_count: u64 = 0;
 var transfer_completion_count: u64 = 0;
 var descriptor_prefix_count: u64 = 0;
 var device_descriptor_count: u64 = 0;
+var configuration_descriptor_header_count: u64 = 0;
+var configuration_descriptor_count: u64 = 0;
 
 const PortAction = enum(u8) {
     none,
@@ -78,6 +80,8 @@ const PortAction = enum(u8) {
     read_device_descriptor_prefix,
     evaluate_endpoint_zero,
     read_device_descriptor,
+    read_configuration_descriptor_header,
+    read_configuration_descriptor,
     disable_slot,
 };
 
@@ -87,6 +91,8 @@ const PortRuntimeState = struct {
     addressed: bool = false,
     descriptor_prefix_valid: bool = false,
     device_descriptor: ?xhci.UsbDeviceDescriptor = null,
+    configuration_descriptor_header: ?xhci.UsbConfigurationDescriptor = null,
+    configuration_descriptor: ?xhci.UsbConfigurationDescriptor = null,
     speed_id: u4 = 0,
     slot_id: u8 = 0,
     endpoint_zero_max_packet_size: u16 = 0,
@@ -106,6 +112,8 @@ const OutstandingCommand = struct {
 const ControlTransferKind = enum(u8) {
     device_descriptor_prefix,
     device_descriptor,
+    configuration_descriptor_header,
+    configuration_descriptor,
 };
 
 const OutstandingTransfer = struct {
@@ -146,6 +154,8 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     transfer_completion_count = 0;
     descriptor_prefix_count = 0;
     device_descriptor_count = 0;
+    configuration_descriptor_header_count = 0;
+    configuration_descriptor_count = 0;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -179,6 +189,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     var retain_dma_frames = false;
     errdefer if (!retain_dma_frames) paging.release_frames(dma_base, dma_frame_count) catch {};
     const dma_plan = try xhci.planControllerDma(capabilities, enabled_slots, dma_base);
+    if (try dma_plan.frameCount() > dma_frame_count) return error.DmaIsolationPlanInvalid;
     const dma_bytes = std.math.cast(usize, dma_plan.total_bytes) orelse
         return error.DmaIsolationPlanInvalid;
     const dma_memory: [*]u8 = @ptrFromInt(dma_base);
@@ -303,6 +314,8 @@ pub fn activate() Error!void {
     transfer_completion_count = 0;
     descriptor_prefix_count = 0;
     device_descriptor_count = 0;
+    configuration_descriptor_header_count = 0;
+    configuration_descriptor_count = 0;
     @atomicStore(bool, &active, true, .seq_cst);
     try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
     msi_enabled = false;
@@ -449,11 +462,26 @@ pub fn deviceDescriptorCount() u64 {
     return device_descriptor_count;
 }
 
+pub fn configurationDescriptorHeaderCount() u64 {
+    return configuration_descriptor_header_count;
+}
+
+pub fn configurationDescriptorCount() u64 {
+    return configuration_descriptor_count;
+}
+
 pub fn deviceDescriptorForPort(port_id: u8) ?xhci.UsbDeviceDescriptor {
     if (!@atomicLoad(bool, &active, .seq_cst)) return null;
     const capabilities = active_capabilities orelse return null;
     if (port_id == 0 or port_id > capabilities.max_ports) return null;
     return ports[port_id].device_descriptor;
+}
+
+pub fn configurationDescriptorForPort(port_id: u8) ?xhci.UsbConfigurationDescriptor {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    const capabilities = active_capabilities orelse return null;
+    if (port_id == 0 or port_id > capabilities.max_ports) return null;
+    return ports[port_id].configuration_descriptor;
 }
 
 pub fn handledInterruptCount() u64 {
@@ -463,6 +491,8 @@ pub fn handledInterruptCount() u64 {
 fn clearPortDescriptorState(state: *PortRuntimeState) void {
     state.descriptor_prefix_valid = false;
     state.device_descriptor = null;
+    state.configuration_descriptor_header = null;
+    state.configuration_descriptor = null;
     state.endpoint_zero_max_packet_size = 0;
     state.pending_endpoint_zero_max_packet_size = 0;
 }
@@ -517,6 +547,16 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
             !transferTargets(event.port_id))
         {
             state.action = .read_device_descriptor;
+        } else if (state.addressed and state.device_descriptor != null and
+            state.configuration_descriptor_header == null and
+            !transferTargets(event.port_id))
+        {
+            state.action = .read_configuration_descriptor_header;
+        } else if (state.addressed and state.configuration_descriptor_header != null and
+            state.configuration_descriptor == null and
+            !transferTargets(event.port_id))
+        {
+            state.action = .read_configuration_descriptor;
         }
         return;
     }
@@ -622,6 +662,10 @@ fn handleTransferCompletion(event: xhci.Event) Error!void {
     const source: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(
         plan.arena.enumeration_buffer_address,
     )));
+    const first_byte: *const u8 = @ptrFromInt(@as(usize, @intCast(
+        plan.arena.enumeration_buffer_address,
+    )));
+    _ = @atomicLoad(u8, first_byte, .acquire);
     const protocol = protocols.forPort(transfer.port_id) orelse
         return error.MissingPortProtocol;
     switch (transfer.kind) {
@@ -666,11 +710,77 @@ fn handleTransferCompletion(event: xhci.Event) Error!void {
                 return error.InvalidUsbDescriptor;
             }
             state.device_descriptor = descriptor;
-            state.action = .none;
+            state.action = .read_configuration_descriptor_header;
             device_descriptor_count +%= 1;
+        },
+        .configuration_descriptor_header => {
+            if (state.device_descriptor == null or
+                state.configuration_descriptor_header != null or
+                state.configuration_descriptor != null)
+            {
+                return error.InvalidDeviceSlot;
+            }
+            var descriptor_bytes: [xhci.USB_CONFIGURATION_DESCRIPTOR_BYTES]u8 = undefined;
+            for (&descriptor_bytes, 0..) |*byte, index| byte.* = source[index];
+            const descriptor = try xhci.parseUsbConfigurationDescriptorHeader(
+                protocol,
+                &descriptor_bytes,
+            );
+            if (descriptor.total_length > plan.arena.enumeration_buffer_bytes) {
+                return error.InvalidUsbDescriptor;
+            }
+            state.configuration_descriptor_header = descriptor;
+            state.action = .read_configuration_descriptor;
+            configuration_descriptor_header_count +%= 1;
+        },
+        .configuration_descriptor => {
+            const expected = state.configuration_descriptor_header orelse
+                return error.InvalidDeviceSlot;
+            if (state.device_descriptor == null or state.configuration_descriptor != null) {
+                return error.InvalidDeviceSlot;
+            }
+            const descriptor = try parseConfigurationDescriptorFromDma(
+                protocol,
+                source,
+                expected.total_length,
+            );
+            if (!std.meta.eql(expected, descriptor)) return error.InvalidUsbDescriptor;
+            state.configuration_descriptor = descriptor;
+            state.action = .none;
+            configuration_descriptor_count +%= 1;
         },
     }
     outstanding_transfer = null;
+}
+
+fn parseConfigurationDescriptorFromDma(
+    protocol: xhci.PortProtocol,
+    source: [*]volatile u8,
+    total_length: u16,
+) Error!xhci.UsbConfigurationDescriptor {
+    if (total_length < xhci.USB_CONFIGURATION_DESCRIPTOR_BYTES or
+        total_length > xhci.USB_ENUMERATION_BUFFER_BYTES)
+    {
+        return error.InvalidUsbDescriptor;
+    }
+    var parser = xhci.ConfigurationDescriptorParser.init(protocol);
+    var descriptor_storage: [std.math.maxInt(u8)]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < total_length) {
+        if (offset + 2 > total_length) return error.InvalidUsbDescriptor;
+        const descriptor_length: usize = source[offset];
+        const end = std.math.add(usize, offset, descriptor_length) catch
+            return error.InvalidUsbDescriptor;
+        if (descriptor_length < 2 or end > total_length) {
+            return error.InvalidUsbDescriptor;
+        }
+        for (descriptor_storage[0..descriptor_length], 0..) |*byte, index| {
+            byte.* = source[offset + index];
+        }
+        try parser.consume(descriptor_storage[0..descriptor_length]);
+        offset = end;
+    }
+    return parser.finish(total_length);
 }
 
 fn commandTargets(port_id: u8, kind: xhci.CommandKind) bool {
@@ -722,7 +832,7 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
         if (state.action == .none) continue;
         switch (state.action) {
             .read_device_descriptor_prefix => {
-                try submitDeviceDescriptor(
+                try submitDescriptorTransfer(
                     .device_descriptor_prefix,
                     port_id,
                     state,
@@ -731,7 +841,25 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
                 return;
             },
             .read_device_descriptor => {
-                try submitDeviceDescriptor(.device_descriptor, port_id, state, reader);
+                try submitDescriptorTransfer(.device_descriptor, port_id, state, reader);
+                return;
+            },
+            .read_configuration_descriptor_header => {
+                try submitDescriptorTransfer(
+                    .configuration_descriptor_header,
+                    port_id,
+                    state,
+                    reader,
+                );
+                return;
+            },
+            .read_configuration_descriptor => {
+                try submitDescriptorTransfer(
+                    .configuration_descriptor,
+                    port_id,
+                    state,
+                    reader,
+                );
                 return;
             },
             else => {},
@@ -743,6 +871,8 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
             .address_device => .address_device,
             .read_device_descriptor_prefix => unreachable,
             .read_device_descriptor => unreachable,
+            .read_configuration_descriptor_header => unreachable,
+            .read_configuration_descriptor => unreachable,
             .evaluate_endpoint_zero => .evaluate_context,
             .disable_slot => .disable_slot,
         };
@@ -813,7 +943,7 @@ fn writeRingTrb(
     return trb_address;
 }
 
-fn submitDeviceDescriptor(
+fn submitDescriptorTransfer(
     kind: ControlTransferKind,
     port_id: u8,
     state: *PortRuntimeState,
@@ -822,7 +952,8 @@ fn submitDeviceDescriptor(
     const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
     const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
     if (!state.connected or !state.enabled or !state.addressed or
-        state.slot_id == 0 or state.endpoint_zero_max_packet_size == 0)
+        state.slot_id == 0 or state.endpoint_zero_max_packet_size == 0 or
+        state.pending_endpoint_zero_max_packet_size != 0)
     {
         return error.InvalidDeviceSlot;
     }
@@ -835,7 +966,20 @@ fn submitDeviceDescriptor(
         },
         .device_descriptor => if (!state.descriptor_prefix_valid or
             state.device_descriptor != null or
-            state.pending_endpoint_zero_max_packet_size != 0)
+            state.configuration_descriptor_header != null or
+            state.configuration_descriptor != null)
+        {
+            return error.InvalidDeviceSlot;
+        },
+        .configuration_descriptor_header => if (state.device_descriptor == null or
+            state.configuration_descriptor_header != null or
+            state.configuration_descriptor != null)
+        {
+            return error.InvalidDeviceSlot;
+        },
+        .configuration_descriptor => if (state.device_descriptor == null or
+            state.configuration_descriptor_header == null or
+            state.configuration_descriptor != null)
         {
             return error.InvalidDeviceSlot;
         },
@@ -843,6 +987,18 @@ fn submitDeviceDescriptor(
     const transfer_bytes: u17 = switch (kind) {
         .device_descriptor_prefix => xhci.USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
         .device_descriptor => xhci.USB_DEVICE_DESCRIPTOR_BYTES,
+        .configuration_descriptor_header => xhci.USB_CONFIGURATION_DESCRIPTOR_BYTES,
+        .configuration_descriptor => state.configuration_descriptor_header.?.total_length,
+    };
+    if (transfer_bytes > plan.arena.enumeration_buffer_bytes or
+        plan.arena.enumeration_buffer_address % xhci.XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES != 0)
+    {
+        return error.DmaAddressOutsidePlan;
+    }
+    const descriptor_type: u8 = switch (kind) {
+        .device_descriptor_prefix, .device_descriptor => xhci.USB_DESCRIPTOR_DEVICE,
+        .configuration_descriptor_header, .configuration_descriptor =>
+        xhci.USB_DESCRIPTOR_CONFIGURATION,
     };
     const buffer: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(
         plan.arena.enumeration_buffer_address,
@@ -852,7 +1008,7 @@ fn submitDeviceDescriptor(
     const ring_address = try plan.arena.controlTransferRingAddress(state.slot_id);
     const producer = &control_producers[state.slot_id];
     const setup = try xhci.getDescriptorSetupStage(
-        xhci.USB_DESCRIPTOR_DEVICE,
+        descriptor_type,
         0,
         @intCast(transfer_bytes),
         producer.cycle_state,
