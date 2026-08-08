@@ -88,6 +88,12 @@ const EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT = 8;
 const EXTENDED_CAPABILITY_NEXT_POINTER_MASK: u32 = 0xFF;
 const EXTENDED_CAPABILITY_DWORD_SHIFT = 2;
 const USB_LEGACY_SUPPORT_CAPABILITY_ID: u8 = 1;
+const SUPPORTED_PROTOCOL_CAPABILITY_ID: u8 = 2;
+const SUPPORTED_PROTOCOL_COMPATIBLE_PORTS_OFFSET: u32 = 0x08;
+const SUPPORTED_PROTOCOL_SLOT_TYPE_OFFSET: u32 = 0x0C;
+const SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT: u5 = 24;
+const SUPPORTED_PROTOCOL_PORT_COUNT_SHIFT: u5 = 8;
+const SUPPORTED_PROTOCOL_SPEED_ID_COUNT_SHIFT: u5 = 28;
 const USB_LEGACY_BIOS_OWNED_SEMAPHORE: u32 = 1 << 16;
 const USB_LEGACY_OS_OWNED_SEMAPHORE: u32 = 1 << 24;
 const OPERATIONAL_USB_COMMAND_OFFSET: u32 = 0x00;
@@ -96,6 +102,8 @@ const OPERATIONAL_PAGE_SIZE_OFFSET: u32 = 0x08;
 const OPERATIONAL_COMMAND_RING_CONTROL_OFFSET: u32 = 0x18;
 const OPERATIONAL_DEVICE_CONTEXT_BASE_ARRAY_POINTER_OFFSET: u32 = 0x30;
 const OPERATIONAL_CONFIGURE_OFFSET: u32 = 0x38;
+const OPERATIONAL_PORT_REGISTER_BASE_OFFSET: u32 = 0x400;
+const OPERATIONAL_PORT_REGISTER_STRIDE: u32 = 0x10;
 const USB_COMMAND_RUN_STOP: u32 = 1 << 0;
 const USB_COMMAND_HOST_CONTROLLER_RESET: u32 = 1 << 1;
 const USB_COMMAND_INTERRUPTER_ENABLE: u32 = 1 << 2;
@@ -121,6 +129,8 @@ const ADDRESS_64_BYTE_ALIGNMENT_MASK: u64 = RING_ALIGNMENT_BYTES - 1;
 const EVENT_RING_DEQUEUE_POINTER_MASK: u64 = ~@as(u64, 0xF);
 const LINK_TRB_TYPE: u32 = 6;
 const LINK_TRB_TOGGLE_CYCLE: u32 = 1 << 1;
+const ENABLE_SLOT_COMMAND_TRB_TYPE: u32 = 9;
+const DISABLE_SLOT_COMMAND_TRB_TYPE: u32 = 10;
 const TRB_TYPE_SHIFT: u5 = 10;
 const TRB_TYPE_MASK: u32 = 0x3F;
 const EVENT_TRB_TRANSFER: u6 = 32;
@@ -134,6 +144,24 @@ const EVENT_TRB_MFINDEX_WRAP: u6 = 39;
 const EVENT_TRB_VENDOR_FIRST: u6 = 48;
 const EVENT_TRB_VENDOR_LAST: u6 = 63;
 const COMPLETION_CODE_SUCCESS: u8 = 1;
+const PORT_CURRENT_CONNECT_STATUS: u32 = 1 << 0;
+const PORT_ENABLED_DISABLED: u32 = 1 << 1;
+const PORT_OVER_CURRENT_ACTIVE: u32 = 1 << 3;
+const PORT_RESET: u32 = 1 << 4;
+const PORT_LINK_STATE_SHIFT: u5 = 5;
+const PORT_LINK_STATE_MASK: u32 = 0xF;
+const PORT_POWER: u32 = 1 << 9;
+const PORT_SPEED_SHIFT: u5 = 10;
+const PORT_SPEED_MASK: u32 = 0xF;
+const PORT_COLD_ATTACH_STATUS: u32 = 1 << 24;
+const PORT_WAKE_ENABLE_MASK: u32 = 0x7 << 25;
+const PORT_INDICATOR_CONTROL_MASK: u32 = 0x3 << 14;
+const PORT_CHANGE_MASK: u32 = 0x7F << 17;
+const PORT_READ_WRITE_STICKY_MASK: u32 =
+    (PORT_LINK_STATE_MASK << PORT_LINK_STATE_SHIFT) |
+    PORT_POWER |
+    PORT_INDICATOR_CONTROL_MASK |
+    PORT_WAKE_ENABLE_MASK;
 const CONFIG_MAX_DEVICE_SLOTS_ENABLED_MASK: u32 = 0xFF;
 const TEST_CAPABILITY_LENGTH: u8 = 0x40;
 const TEST_INTERFACE_VERSION: u16 = 0x0110;
@@ -196,6 +224,10 @@ pub const Error = error{
     InvalidRuntimeRegisterOffset,
     ExtendedCapabilityOutOfRange,
     ExtendedCapabilityTraversalLimit,
+    MissingSupportedProtocols,
+    InvalidSupportedProtocol,
+    OverlappingSupportedProtocolPorts,
+    MissingPortProtocol,
     FirmwareOwnsController,
     FirmwareOwnershipTimeout,
     LegacyCapabilityChanged,
@@ -208,6 +240,8 @@ pub const Error = error{
     ControllerStartTimeout,
     ControllerStartFailed,
     EventRingStateInvalid,
+    CommandRingStateInvalid,
+    InvalidPortStatus,
     ControllerConfigurationUnavailable,
     DeviceSlotConfigurationRejected,
     MissingMmioInputEvidence,
@@ -266,6 +300,7 @@ pub const EventType = enum(u8) {
 };
 
 pub const Event = struct {
+    parameter: u64,
     kind: EventType,
     type_id: u6,
     completion_code: u8,
@@ -335,6 +370,7 @@ pub fn decodeEvent(words: [4]u32) Event {
         else => .unknown,
     };
     return .{
+        .parameter = @as(u64, words[0]) | (@as(u64, words[1]) << 32),
         .kind = kind,
         .type_id = type_id,
         .completion_code = @truncate(words[2] >> 24),
@@ -342,6 +378,151 @@ pub fn decodeEvent(words: [4]u32) Event {
         .slot_id = @truncate(words[3] >> 24),
         .endpoint_id = @truncate(words[3] >> 16),
     };
+}
+
+pub const ProtocolKind = enum(u8) {
+    usb2,
+    usb3,
+};
+
+pub const PortProtocol = struct {
+    kind: ProtocolKind,
+    slot_type: u5,
+};
+
+pub const SupportedProtocols = struct {
+    ports: [256]?PortProtocol = [_]?PortProtocol{null} ** 256,
+
+    pub fn forPort(self: *const SupportedProtocols, port_id: u8) ?PortProtocol {
+        if (port_id == 0) return null;
+        return self.ports[port_id];
+    }
+};
+
+pub const PortStatus = struct {
+    connected: bool,
+    enabled: bool,
+    over_current: bool,
+    reset_active: bool,
+    link_state: u4,
+    powered: bool,
+    speed: u4,
+    cold_attach: bool,
+    change_bits: u7,
+};
+
+pub const CommandKind = enum(u8) {
+    enable_slot,
+    disable_slot,
+};
+
+pub const CommandRingProducer = struct {
+    enqueue_index: u32 = 0,
+    cycle_state: u1 = 1,
+
+    pub fn commandAddress(self: CommandRingProducer, plan: RingPlan) Error!u64 {
+        if (plan.command_ring_trbs < 2 or self.enqueue_index >= plan.command_ring_trbs - 1) {
+            return error.CommandRingStateInvalid;
+        }
+        const offset = std.math.mul(u64, self.enqueue_index, TRB_BYTES) catch
+            return error.CommandRingStateInvalid;
+        return std.math.add(u64, plan.command_ring_address, offset) catch
+            return error.CommandRingStateInvalid;
+    }
+
+    pub fn linkAddress(self: CommandRingProducer, plan: RingPlan) Error!u64 {
+        _ = self;
+        if (plan.command_ring_trbs < 2) return error.CommandRingStateInvalid;
+        const offset = std.math.mul(u64, plan.command_ring_trbs - 1, TRB_BYTES) catch
+            return error.CommandRingStateInvalid;
+        return std.math.add(u64, plan.command_ring_address, offset) catch
+            return error.CommandRingStateInvalid;
+    }
+
+    pub fn advance(self: *CommandRingProducer, ring_trbs: u32) Error!bool {
+        if (ring_trbs < 2 or self.enqueue_index >= ring_trbs - 1) {
+            return error.CommandRingStateInvalid;
+        }
+        self.enqueue_index += 1;
+        if (self.enqueue_index == ring_trbs - 1) {
+            self.enqueue_index = 0;
+            self.cycle_state ^= 1;
+            return true;
+        }
+        return false;
+    }
+};
+
+pub fn decodePortStatus(value: u32) PortStatus {
+    return .{
+        .connected = (value & PORT_CURRENT_CONNECT_STATUS) != 0,
+        .enabled = (value & PORT_ENABLED_DISABLED) != 0,
+        .over_current = (value & PORT_OVER_CURRENT_ACTIVE) != 0,
+        .reset_active = (value & PORT_RESET) != 0,
+        .link_state = @truncate((value >> PORT_LINK_STATE_SHIFT) & PORT_LINK_STATE_MASK),
+        .powered = (value & PORT_POWER) != 0,
+        .speed = @truncate((value >> PORT_SPEED_SHIFT) & PORT_SPEED_MASK),
+        .cold_attach = (value & PORT_COLD_ATTACH_STATUS) != 0,
+        .change_bits = @truncate((value & PORT_CHANGE_MASK) >> 17),
+    };
+}
+
+pub fn portStatusAcknowledge(value: u32) u32 {
+    return (value & PORT_READ_WRITE_STICKY_MASK) | (value & PORT_CHANGE_MASK);
+}
+
+pub fn portResetWrite(value: u32, protocol: PortProtocol) u32 {
+    return portStatusAcknowledge(value) |
+        (if (protocol.kind == .usb2) PORT_RESET else @as(u32, 1) << 31);
+}
+
+pub fn portRegisterOffset(capabilities: CapabilityRegisters, port_id: u8) Error!u32 {
+    if (port_id == 0 or port_id > capabilities.max_ports) return error.InvalidPort;
+    const relative = std.math.mul(
+        u32,
+        @as(u32, port_id - 1),
+        OPERATIONAL_PORT_REGISTER_STRIDE,
+    ) catch return error.InvalidPort;
+    return std.math.add(
+        u32,
+        @as(u32, capabilities.capability_length) + OPERATIONAL_PORT_REGISTER_BASE_OFFSET,
+        relative,
+    ) catch return error.InvalidPort;
+}
+
+pub fn enableSlotCommand(slot_type: u5, cycle_state: u1) [4]u32 {
+    return .{
+        0,
+        0,
+        0,
+        (@as(u32, slot_type) << 16) |
+            (ENABLE_SLOT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) |
+            cycle_state,
+    };
+}
+
+pub fn disableSlotCommand(slot_id: u8, cycle_state: u1) Error![4]u32 {
+    if (slot_id == 0) return error.InvalidDeviceSlot;
+    return .{
+        0,
+        0,
+        0,
+        (@as(u32, slot_id) << 24) |
+            (DISABLE_SLOT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) |
+            cycle_state,
+    };
+}
+
+pub fn commandLinkControl(cycle_state: u1) u32 {
+    return (LINK_TRB_TYPE << TRB_TYPE_SHIFT) | LINK_TRB_TOGGLE_CYCLE | cycle_state;
+}
+
+pub fn ringCommandDoorbell(capabilities: CapabilityRegisters, mmio: anytype) Error!void {
+    if (capabilities.doorbell_offset == 0) return error.MissingDoorbellRegisters;
+    if ((capabilities.doorbell_offset & DOORBELL_OFFSET_ALIGNMENT_MASK) != 0) {
+        return error.InvalidDoorbellOffset;
+    }
+    mmio.writeReg32(capabilities.doorbell_offset, 0);
 }
 
 pub const DmaArenaPlan = struct {
@@ -1052,6 +1233,95 @@ pub fn findLegacySupport(first_offset: u32, reader: anytype) Error!?LegacySuppor
         offset += delta;
     }
     return error.ExtendedCapabilityTraversalLimit;
+}
+
+pub fn parseSupportedProtocols(
+    capabilities: CapabilityRegisters,
+    first_offset: u32,
+    reader: anytype,
+) Error!SupportedProtocols {
+    if (first_offset == 0) return error.MissingSupportedProtocols;
+    if ((first_offset & (@sizeOf(u32) - 1)) != 0 or first_offset > MAX_EXTENDED_CAPABILITY_OFFSET) {
+        return error.ExtendedCapabilityOutOfRange;
+    }
+
+    var protocols = SupportedProtocols{};
+    var found = false;
+    var terminal = false;
+    var offset = first_offset;
+    var visited: usize = 0;
+    while (visited < MAX_EXTENDED_CAPABILITIES) : (visited += 1) {
+        const header = reader.readDword(offset);
+        const capability_id: u8 = @truncate(header & EXTENDED_CAPABILITY_ID_MASK);
+        var minimum_next_dwords: u32 = 1;
+        if (capability_id == SUPPORTED_PROTOCOL_CAPABILITY_ID) {
+            const extent_end = @as(u64, offset) + SUPPORTED_PROTOCOL_SLOT_TYPE_OFFSET +
+                @sizeOf(u32);
+            if (extent_end > @as(u64, MAX_EXTENDED_CAPABILITY_OFFSET) + @sizeOf(u32)) {
+                return error.ExtendedCapabilityOutOfRange;
+            }
+            const major_revision: u8 = @truncate(header >> SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT);
+            const kind: ProtocolKind = switch (major_revision) {
+                2 => .usb2,
+                3 => .usb3,
+                else => return error.InvalidSupportedProtocol,
+            };
+            const compatible_ports = reader.readDword(
+                offset + SUPPORTED_PROTOCOL_COMPATIBLE_PORTS_OFFSET,
+            );
+            const first_port: u8 = @truncate(compatible_ports);
+            const port_count: u8 = @truncate(
+                compatible_ports >> SUPPORTED_PROTOCOL_PORT_COUNT_SHIFT,
+            );
+            const speed_id_count: u8 = @truncate(
+                compatible_ports >> SUPPORTED_PROTOCOL_SPEED_ID_COUNT_SHIFT,
+            );
+            const capability_end = @as(u64, offset) +
+                SUPPORTED_PROTOCOL_SLOT_TYPE_OFFSET + @sizeOf(u32) +
+                @as(u64, speed_id_count) * @sizeOf(u32);
+            if (capability_end > @as(u64, MAX_EXTENDED_CAPABILITY_OFFSET) + @sizeOf(u32)) {
+                return error.ExtendedCapabilityOutOfRange;
+            }
+            minimum_next_dwords = 4 + speed_id_count;
+            if (first_port == 0 or port_count == 0 or
+                @as(u16, first_port) + @as(u16, port_count) - 1 > capabilities.max_ports)
+            {
+                return error.InvalidSupportedProtocol;
+            }
+            const slot_type: u5 = @truncate(reader.readDword(
+                offset + SUPPORTED_PROTOCOL_SLOT_TYPE_OFFSET,
+            ));
+            var port: u16 = first_port;
+            const port_end = @as(u16, first_port) + port_count;
+            while (port < port_end) : (port += 1) {
+                const index: usize = port;
+                if (protocols.ports[index] != null) {
+                    return error.OverlappingSupportedProtocolPorts;
+                }
+                protocols.ports[index] = .{
+                    .kind = kind,
+                    .slot_type = slot_type,
+                };
+            }
+            found = true;
+        }
+
+        const next_dwords = (header >> EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) &
+            EXTENDED_CAPABILITY_NEXT_POINTER_MASK;
+        if (next_dwords == 0) {
+            terminal = true;
+            break;
+        }
+        if (next_dwords < minimum_next_dwords) return error.InvalidSupportedProtocol;
+        const delta = next_dwords << EXTENDED_CAPABILITY_DWORD_SHIFT;
+        if (offset > MAX_EXTENDED_CAPABILITY_OFFSET - delta) {
+            return error.ExtendedCapabilityOutOfRange;
+        }
+        offset += delta;
+    }
+    if (!terminal) return error.ExtendedCapabilityTraversalLimit;
+    if (!found) return error.MissingSupportedProtocols;
+    return protocols;
 }
 
 pub fn inspectLegacyOwnership(first_offset: u32, reader: anytype) Error!LegacyOwnership {
@@ -1917,6 +2187,45 @@ test "xHCI legacy ownership accepts absent and firmware-released capabilities" {
     try std.testing.expectEqual(LegacyOwnership.os_owned, try inspectLegacyOwnership(0x40, reader));
 }
 
+test "xHCI supported protocols cover every root port without overlap" {
+    var registers = [_]u8{0} ** 0x100;
+    writeU32Le(
+        registers[0x40..0x44],
+        SUPPORTED_PROTOCOL_CAPABILITY_ID |
+            (@as(u32, 4) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) |
+            (@as(u32, 2) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT),
+    );
+    writeU32Le(registers[0x48..0x4C], 1 | (@as(u32, 6) << 8));
+    writeU32Le(registers[0x4C..0x50], 0);
+    writeU32Le(
+        registers[0x50..0x54],
+        SUPPORTED_PROTOCOL_CAPABILITY_ID |
+            (@as(u32, 3) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT),
+    );
+    writeU32Le(registers[0x58..0x5C], 7 | (@as(u32, 6) << 8));
+    writeU32Le(registers[0x5C..0x60], 1);
+
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_ports = 12;
+    const reader = TestExtendedCapabilityReader{ .bytes = &registers };
+    const protocols = try parseSupportedProtocols(capabilities, 0x40, reader);
+    try std.testing.expectEqual(ProtocolKind.usb2, protocols.forPort(1).?.kind);
+    try std.testing.expectEqual(@as(u5, 0), protocols.forPort(6).?.slot_type);
+    try std.testing.expectEqual(ProtocolKind.usb3, protocols.forPort(7).?.kind);
+    try std.testing.expectEqual(@as(u5, 1), protocols.forPort(12).?.slot_type);
+    try std.testing.expect(protocols.forPort(0) == null);
+
+    writeU32Le(registers[0x58..0x5C], 6 | (@as(u32, 6) << 8));
+    try std.testing.expectError(
+        error.OverlappingSupportedProtocolPorts,
+        parseSupportedProtocols(capabilities, 0x40, reader),
+    );
+    writeU32Le(registers[0x58..0x5C], 8 | (@as(u32, 5) << 8));
+    const sparse = try parseSupportedProtocols(capabilities, 0x40, reader);
+    try std.testing.expect(sparse.forPort(7) == null);
+    try std.testing.expectEqual(ProtocolKind.usb3, sparse.forPort(8).?.kind);
+}
+
 test "xHCI legacy ownership rejects firmware-owned and malformed chains" {
     var registers = [_]u8{0} ** 0x80;
     writeU32Le(
@@ -2304,6 +2613,7 @@ test "xHCI event consumer follows cycle ownership and wrap" {
     const second = (try consumer.consume(command_event, 2)).?;
     try std.testing.expectEqual(EventType.command_completion, second.kind);
     try std.testing.expectEqual(@as(u8, 3), second.slot_id);
+    try std.testing.expectEqual(@as(u64, 7) << 24, second.parameter);
     try std.testing.expectEqual(@as(u32, 0), consumer.dequeue_index);
     try std.testing.expectEqual(@as(u1, 0), consumer.cycle_state);
 
@@ -2312,6 +2622,71 @@ test "xHCI event consumer follows cycle ownership and wrap" {
     wrapped[3] &= ~@as(u32, 1);
     try std.testing.expect((try consumer.consume(wrapped, 2)) != null);
     try std.testing.expectEqual(@as(u64, 0x2010), try consumer.dequeueAddress(0x2000, 2));
+}
+
+test "xHCI PORTSC writes preserve sticky controls and acknowledge only changes" {
+    const status_value = PORT_CURRENT_CONNECT_STATUS |
+        PORT_ENABLED_DISABLED |
+        PORT_OVER_CURRENT_ACTIVE |
+        PORT_RESET |
+        (@as(u32, 5) << PORT_LINK_STATE_SHIFT) |
+        PORT_POWER |
+        (@as(u32, 3) << PORT_SPEED_SHIFT) |
+        (@as(u32, 2) << 14) |
+        (@as(u32, 0b1010101) << 17) |
+        PORT_COLD_ATTACH_STATUS |
+        (@as(u32, 0b101) << 25) |
+        (@as(u32, 1) << 31);
+    const status = decodePortStatus(status_value);
+    try std.testing.expect(status.connected);
+    try std.testing.expect(status.enabled);
+    try std.testing.expect(status.over_current);
+    try std.testing.expect(status.reset_active);
+    try std.testing.expectEqual(@as(u4, 5), status.link_state);
+    try std.testing.expectEqual(@as(u4, 3), status.speed);
+    try std.testing.expect(status.cold_attach);
+    try std.testing.expectEqual(@as(u7, 0b1010101), status.change_bits);
+
+    const acknowledge = portStatusAcknowledge(status_value);
+    try std.testing.expectEqual(status_value & (PORT_READ_WRITE_STICKY_MASK | PORT_CHANGE_MASK), acknowledge);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        acknowledge & (PORT_ENABLED_DISABLED | PORT_RESET |
+            (@as(u32, 1) << 16) | (@as(u32, 1) << 31)),
+    );
+    try std.testing.expect((portResetWrite(status_value, .{ .kind = .usb2, .slot_type = 0 }) & PORT_RESET) != 0);
+    try std.testing.expect((portResetWrite(status_value, .{ .kind = .usb3, .slot_type = 1 }) & (@as(u32, 1) << 31)) != 0);
+}
+
+test "xHCI command producer encodes slot commands and toggles on the link TRB" {
+    const plan = RingPlan{
+        .command_ring_trbs = 4,
+        .event_ring_trbs = 4,
+        .command_ring_address = 0x1000,
+        .event_ring_address = 0x2000,
+    };
+    var producer = CommandRingProducer{};
+    try std.testing.expectEqual(@as(u64, 0x1000), try producer.commandAddress(plan));
+    try std.testing.expectEqual(@as(u64, 0x1030), try producer.linkAddress(plan));
+    const enable = enableSlotCommand(7, producer.cycle_state);
+    try std.testing.expectEqual(
+        (@as(u32, 7) << 16) | (ENABLE_SLOT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) | 1,
+        enable[3],
+    );
+    try std.testing.expect(!(try producer.advance(plan.command_ring_trbs)));
+    try std.testing.expect(!(try producer.advance(plan.command_ring_trbs)));
+    try std.testing.expect(try producer.advance(plan.command_ring_trbs));
+    try std.testing.expectEqual(@as(u32, 0), producer.enqueue_index);
+    try std.testing.expectEqual(@as(u1, 0), producer.cycle_state);
+    const disable = try disableSlotCommand(4, producer.cycle_state);
+    try std.testing.expectEqual(
+        (@as(u32, 4) << 24) | (DISABLE_SLOT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT),
+        disable[3],
+    );
+    try std.testing.expectEqual(
+        (LINK_TRB_TYPE << TRB_TYPE_SHIFT) | LINK_TRB_TOGGLE_CYCLE | 1,
+        commandLinkControl(1),
+    );
 }
 
 test "xHCI event acknowledgement clears EHB at the next dequeue address" {
