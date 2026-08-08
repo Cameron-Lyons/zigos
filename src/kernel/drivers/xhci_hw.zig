@@ -1,7 +1,9 @@
 const std = @import("std");
+const console = @import("../utils/console.zig");
 const endian = @import("../utils/endian.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
+const x2apic = @import("../interrupts/x2apic.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const tsc_clock = @import("../timer/tsc_clock.zig");
 const pci = @import("pci.zig");
@@ -10,6 +12,8 @@ const xhci = @import("xhci.zig");
 const PAGE_BYTES = mmio_windows.PAGE_BYTES;
 const OWNERSHIP_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const OS_OWNED_BYTE_OFFSET: usize = 3;
+
+pub const INTERRUPT_VECTOR: u8 = 67;
 
 comptime {
     if (xhci.CAPABILITY_REGISTERS_BYTES > mmio_windows.xhci.bytes) {
@@ -30,6 +34,12 @@ pub const Error = xhci.Error || error{
     BusMasteringNotRevoked,
     DmaAllocationFailed,
     DmaIsolationPlanInvalid,
+    DmaIsolationBypassed,
+    DmaFaultMonitoringUnavailable,
+    InterruptIsolationUnavailable,
+    InterruptRouteInstallFailed,
+    MsiEnableFailed,
+    BusMasterEnableFailed,
 };
 
 var active_capabilities: ?xhci.CapabilityRegisters = null;
@@ -42,6 +52,13 @@ var active_dma_base: u32 = 0;
 var active_dma_frame_count: u32 = 0;
 var active_dma_windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
 var active_dma_window_count: usize = 0;
+var active_bar_address: usize = 0;
+var active = false;
+var event_consumer = xhci.EventRingConsumer{};
+var pending_interrupts: u32 = 0;
+var interrupt_count: u64 = 0;
+var event_count: u64 = 0;
+var port_status_change_count: u64 = 0;
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     if (active_dma_plan != null) return error.AlreadyPrepared;
@@ -50,6 +67,13 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_legacy_ownership = null;
     active_controller_reset = false;
     active_enabled_slots = 0;
+    active_bar_address = 0;
+    active = false;
+    event_consumer = .{};
+    @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
+    @atomicStore(u64, &interrupt_count, 0, .seq_cst);
+    event_count = 0;
+    port_status_change_count = 0;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -91,6 +115,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_dma_base = dma_base;
     active_dma_frame_count = dma_frame_count;
     active_dma_window_count = dma_window_count;
+    active_bar_address = bar.address;
     active_capabilities = capabilities;
     active_legacy_ownership = legacy_ownership;
     active_controller_reset = true;
@@ -147,6 +172,206 @@ pub fn isolationDomain() ?intel_vtd.DmaDomain {
 
 pub fn requesterIsolated() bool {
     return active_dma_plan != null and intel_vtd.requesterProtected(active_device);
+}
+
+pub fn activate() Error!void {
+    if (@atomicLoad(bool, &active, .seq_cst)) return;
+    if (!validated() or !intel_vtd.requesterProtected(active_device)) {
+        return error.DmaIsolationBypassed;
+    }
+    if (!intel_vtd.faultMonitoringEnabled()) return error.DmaFaultMonitoringUnavailable;
+    if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
+
+    const capabilities = active_capabilities.?;
+    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
+    const remapped = intel_vtd.routeInterrupt(
+        active_device,
+        INTERRUPT_VECTOR,
+        x2apic.localId(),
+    ) catch return error.InterruptRouteInstallFailed;
+    pci.enableSingleMsi(active_device, .{
+        .address = remapped.address,
+        .data = remapped.data,
+    }) catch return error.MsiEnableFailed;
+    var msi_enabled = true;
+    var bus_master_enabled = false;
+    errdefer {
+        @atomicStore(bool, &active, false, .seq_cst);
+        xhci.quiesceOwnedController(capabilities, &reader);
+        if (msi_enabled) pci.disableMsi(active_device) catch {};
+        if (bus_master_enabled) pci.disableBusMastering(active_device);
+    }
+
+    pci.enableMemoryBusMastering(active_device);
+    if (!pci.busMasteringEnabled(active_device)) {
+        pci.disableBusMastering(active_device);
+        return error.BusMasterEnableFailed;
+    }
+    bus_master_enabled = true;
+
+    event_consumer = .{};
+    @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
+    @atomicStore(u64, &interrupt_count, 0, .seq_cst);
+    event_count = 0;
+    port_status_change_count = 0;
+    @atomicStore(bool, &active, true, .seq_cst);
+    try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
+    msi_enabled = false;
+    bus_master_enabled = false;
+}
+
+pub fn attached() bool {
+    return @atomicLoad(bool, &active, .seq_cst);
+}
+
+pub fn handleInterrupt() void {
+    if (@atomicLoad(bool, &active, .seq_cst)) {
+        _ = @atomicRmw(u32, &pending_interrupts, .Add, 1, .seq_cst);
+        _ = @atomicRmw(u64, &interrupt_count, .Add, 1, .seq_cst);
+    }
+    x2apic.acknowledge();
+}
+
+pub fn eventWorkPending() bool {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return false;
+    if (@atomicLoad(u32, &pending_interrupts, .seq_cst) != 0) return true;
+    return currentEventReady();
+}
+
+pub fn servicePendingEvents() usize {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return 0;
+    const interrupt_wakes = @atomicRmw(
+        u32,
+        &pending_interrupts,
+        .Xchg,
+        0,
+        .seq_cst,
+    );
+    if (interrupt_wakes == 0 and !currentEventReady()) return 0;
+    if (pollDmaFault()) return 0;
+
+    const plan = active_dma_plan.?;
+    var processed: usize = 0;
+    while (processed < plan.ring_plan.event_ring_trbs) : (processed += 1) {
+        const words = readCurrentEvent() orelse break;
+        const event = event_consumer.consume(
+            words,
+            plan.ring_plan.event_ring_trbs,
+        ) catch {
+            containFailure("ZIGOS:XHCI:HW:EVENT_RING_STATE_CONTAINED\n");
+            return processed;
+        } orelse break;
+        event_count +%= 1;
+        switch (event.kind) {
+            .port_status_change => {
+                const capabilities = active_capabilities.?;
+                if (!event.succeeded() or event.port_id == 0 or
+                    event.port_id > capabilities.max_ports)
+                {
+                    containFailure("ZIGOS:XHCI:HW:PORT_EVENT_CONTAINED\n");
+                    return processed + 1;
+                }
+                port_status_change_count +%= 1;
+            },
+            .host_controller, .vendor_defined, .unknown => {
+                containFailure("ZIGOS:XHCI:HW:CONTROLLER_EVENT_CONTAINED\n");
+                return processed + 1;
+            },
+            .transfer,
+            .command_completion,
+            .bandwidth_request,
+            .doorbell,
+            .device_notification,
+            .mfindex_wrap,
+            => {},
+        }
+    }
+
+    const dequeue_address = event_consumer.dequeueAddress(
+        plan.ring_plan.event_ring_address,
+        plan.ring_plan.event_ring_trbs,
+    ) catch {
+        containFailure("ZIGOS:XHCI:HW:EVENT_RING_STATE_CONTAINED\n");
+        return processed;
+    };
+    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
+    xhci.acknowledgePrimaryEventRing(
+        active_capabilities.?,
+        dequeue_address,
+        &reader,
+    ) catch {
+        containFailure("ZIGOS:XHCI:HW:ERDP_REJECTED_CONTAINED\n");
+        return processed;
+    };
+    if (!xhci.controllerRunningHealthy(active_capabilities.?, &reader)) {
+        containFailure("ZIGOS:XHCI:HW:RUN_STATE_CONTAINED\n");
+    }
+    return processed;
+}
+
+pub fn processedEventCount() u64 {
+    return event_count;
+}
+
+pub fn portStatusChangeEventCount() u64 {
+    return port_status_change_count;
+}
+
+pub fn handledInterruptCount() u64 {
+    return @atomicLoad(u64, &interrupt_count, .seq_cst);
+}
+
+fn currentEventReady() bool {
+    const plan = active_dma_plan orelse return false;
+    const control_address = plan.ring_plan.event_ring_address +
+        @as(u64, event_consumer.dequeue_index) * xhci.TRB_BYTES +
+        3 * @sizeOf(u32);
+    const control = @as(*volatile u32, @ptrFromInt(@as(usize, @intCast(control_address)))).*;
+    return event_consumer.ready(control);
+}
+
+fn readCurrentEvent() ?[4]u32 {
+    const plan = active_dma_plan orelse return null;
+    const trb_address = plan.ring_plan.event_ring_address +
+        @as(u64, event_consumer.dequeue_index) * xhci.TRB_BYTES;
+    const trb: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(trb_address)));
+    const control = trb[3];
+    if (!event_consumer.ready(control)) return null;
+    acquireEvent();
+    return .{ trb[0], trb[1], trb[2], control };
+}
+
+fn acquireEvent() void {
+    asm volatile ("lfence" ::: .{ .memory = true });
+}
+
+fn pollDmaFault() bool {
+    if (!intel_vtd.faultMonitoringEnabled()) {
+        containFailure("ZIGOS:XHCI:HW:FAULT_MONITOR_UNAVAILABLE\n");
+        return true;
+    }
+    if ((intel_vtd.pollFaultForDevice(active_device) catch {
+        containFailure("ZIGOS:XHCI:HW:FAULT_MONITOR_FAIL_CLOSED\n");
+        return true;
+    }) != null) {
+        containFailure("ZIGOS:XHCI:HW:DMA_FAULT_CONTAINED\n");
+        return true;
+    }
+    return false;
+}
+
+fn containFailure(marker: []const u8) void {
+    @atomicStore(bool, &active, false, .seq_cst);
+    @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
+    if (active_capabilities) |capabilities| {
+        if (active_bar_address != 0) {
+            var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
+            xhci.quiesceOwnedController(capabilities, &reader);
+        }
+    }
+    pci.disableMsi(active_device) catch {};
+    pci.disableBusMastering(active_device);
+    console.print(marker);
 }
 
 fn buildDmaWindows(

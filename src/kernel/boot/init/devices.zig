@@ -19,6 +19,7 @@ const PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER: u8 = 0x07;
 
 var network_prepared = false;
 var storage_attached = false;
+var xhci_prepared = false;
 
 pub const kernel_boundary_role = data_plane_boundary.kernel_boundary_role;
 pub const publishes_device_data_planes = data_plane_boundary.publishes_device_data_planes;
@@ -43,6 +44,7 @@ pub fn init() void {
     device_inventory.reset();
     network_prepared = false;
     storage_attached = false;
+    xhci_prepared = false;
     hardware_proof.capturePlatformFirmwareEvidence();
     const ecam_allocation = hardware_proof.pciEcamAllocation() orelse
         @panic("ACPI MCFG is required for PCIe discovery");
@@ -101,6 +103,22 @@ pub fn startDeferredRuntimeInit() void {
             }
         };
         if (interrupts_ready) console.print("ZIGOS:NVME:HW:REMAP_MSI_OK\n");
+    }
+    if (xhci_prepared) {
+        if (!storage_attached and hardware_proof.realTargetDetected()) {
+            @panic("production xHCI activation requires the confined storage bootstrap");
+        }
+        xhci_hw.activate() catch |err| {
+            console.print("ZIGOS:XHCI:HW:ACTIVATION_FAIL ");
+            console.print(@errorName(err));
+            console.print("\n");
+            if (hardware_proof.realTargetDetected()) {
+                @panic("production xHCI activation failed closed");
+            }
+            return;
+        };
+        console.print("ZIGOS:XHCI:HW:REMAP_MSI_OK\n");
+        console.print("ZIGOS:XHCI:HW:RUN_OK\n");
     }
     if (network_prepared) {
         if (!storage_attached and hardware_proof.realTargetDetected()) {
@@ -165,6 +183,7 @@ fn capturePciInventory() void {
                 @panic("xHCI preparation omitted its DMA isolation domain");
             isolation_domain_count += 1;
             console.print("ZIGOS:XHCI:HW:DMA_OK\n");
+            xhci_prepared = true;
         } else |err| {
             console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_FAIL ");
             console.print(@errorName(err));
