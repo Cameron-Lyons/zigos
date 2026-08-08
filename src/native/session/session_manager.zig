@@ -115,3 +115,11 @@ pub fn runUserspaceScheduler(now_ticks: u64) bool {
 pub fn userspaceSchedulerHasReadyTasks() bool {
     return default_manager.userspaceSchedulerHasReadyTasks();
 }
+
+pub fn servicePendingNetworkWork(now_ticks: u64) usize {
+    return default_manager.servicePendingNetworkWork(now_ticks);
+}
+
+pub fn networkWorkPending() bool {
+    return default_manager.networkWorkPending();
+}
