@@ -156,6 +156,7 @@ fn capturePciInventory() void {
             const xhci_device_id = pciDeviceId(dev);
             device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false);
             console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_OK\n");
+            console.print("ZIGOS:XHCI:HW:OWNERSHIP_OK\n");
         } else |err| {
             console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_FAIL ");
             console.print(@errorName(err));
