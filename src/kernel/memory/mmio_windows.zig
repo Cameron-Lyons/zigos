@@ -27,6 +27,11 @@ pub const intel_i225 = Region{
     .bytes = 0x1_0000,
 };
 
+pub const xhci = Region{
+    .base = 0xFFFF_8000_1200_0000,
+    .bytes = PAGE_BYTES,
+};
+
 pub const acpi_root = Region{
     .base = 0xFFFF_8000_2000_0000,
     .bytes = 0x101_000,
@@ -46,6 +51,7 @@ pub const all = [_]Region{
     nvme,
     pci_ecam,
     intel_i225,
+    xhci,
     acpi_root,
     acpi_entry,
     intel_vtd,
@@ -78,6 +84,8 @@ test "kernel MMIO windows are page aligned bounded and disjoint" {
     try std.testing.expectEqual(@as(usize, 0xFFFF_8000_1000_1000), pci_ecam.endExclusive().?);
     try std.testing.expectEqual(@as(usize, 0xFFFF_8000_1101_0000), intel_i225.endExclusive().?);
     try std.testing.expect(pci_ecam.endExclusive().? <= intel_i225.base);
+    try std.testing.expect(intel_i225.endExclusive().? <= xhci.base);
+    try std.testing.expect(xhci.endExclusive().? <= acpi_root.base);
 }
 
 test "kernel MMIO layout rejects overlap misalignment and overflow" {

@@ -4,6 +4,7 @@ const first_target_telemetry = @import("../../drivers/first_target_telemetry.zig
 const intel_i225_hw = @import("../../drivers/intel_i225_hw.zig");
 const pci = @import("../../drivers/pci.zig");
 const nvme_hw = @import("../../drivers/nvme_hw.zig");
+const xhci_hw = @import("../../drivers/xhci_hw.zig");
 const intel_vtd = @import("../../platform/intel_vtd.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
@@ -151,9 +152,18 @@ fn capturePciInventory() void {
         device_inventory.registerDetected(.graphics_adapter, pciDeviceId(dev), .pci_inventory, false);
     }
     if (pci.firstXhciController()) |dev| {
-        const xhci_device_id = pciDeviceId(dev);
-        device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false);
-        device_inventory.registerDetected(.input_device, xhci_device_id, .xhci_inventory, false);
+        if (xhci_hw.probe(dev)) |_| {
+            const xhci_device_id = pciDeviceId(dev);
+            device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false);
+            console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_OK\n");
+        } else |err| {
+            console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_FAIL ");
+            console.print(@errorName(err));
+            console.print("\n");
+            if (hardware_proof.realTargetDetected()) {
+                @panic("production xHCI capability probe failed closed");
+            }
+        }
     }
     if (pci.firstDeviceByClass(PCI_CLASS_MULTIMEDIA_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);

@@ -32,15 +32,17 @@ pub const DEFAULT_BOOT_KEYBOARD_PORT_ID: u8 = 1;
 pub const MAX_BOOT_PORTS: usize = 32;
 pub const MAX_DEVICE_SLOTS: usize = 32;
 
-const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
+pub const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
 const DEVICE_SLOT_TABLE_ENTRIES: usize = MAX_DEVICE_SLOTS + 1;
 const MIN_CAPABILITY_LENGTH: u8 = 0x20;
-const MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0090;
+const MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0110;
 const CAPABILITY_LENGTH_OFFSET: usize = 0x00;
 const INTERFACE_VERSION_OFFSET: usize = 0x02;
 const HCSPARAMS1_OFFSET: usize = 0x04;
 const DOORBELL_OFFSET_OFFSET: usize = 0x14;
 const RUNTIME_REGISTER_OFFSET_OFFSET: usize = 0x18;
+const DOORBELL_OFFSET_ALIGNMENT_MASK: u32 = 0x3;
+const RUNTIME_REGISTER_OFFSET_ALIGNMENT_MASK: u32 = 0x1F;
 const U16_REGISTER_BYTES: usize = @sizeOf(u16);
 const U32_REGISTER_BYTES: usize = @sizeOf(u32);
 const HCSPARAMS1_MAX_INTERRUPTERS_SHIFT = 8;
@@ -88,6 +90,8 @@ pub const Error = error{
     EndpointNotConfigured,
     MissingDoorbellRegisters,
     MissingRuntimeRegisters,
+    InvalidDoorbellOffset,
+    InvalidRuntimeRegisterOffset,
     MissingMmioInputEvidence,
 };
 
@@ -350,6 +354,10 @@ pub const HidController = struct {
         if (capabilities.max_interrupters == 0) return error.MissingInterrupters;
         if (capabilities.doorbell_offset == 0) return error.MissingDoorbellRegisters;
         if (capabilities.runtime_register_offset == 0) return error.MissingRuntimeRegisters;
+        if ((capabilities.doorbell_offset & DOORBELL_OFFSET_ALIGNMENT_MASK) != 0) return error.InvalidDoorbellOffset;
+        if ((capabilities.runtime_register_offset & RUNTIME_REGISTER_OFFSET_ALIGNMENT_MASK) != 0) {
+            return error.InvalidRuntimeRegisterOffset;
+        }
         var controller = try HidController.init(ring_plan);
         controller.port_limit = @min(capabilities.max_ports, maxBootPortsU8());
         controller.device_slot_limit = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
@@ -688,14 +696,23 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
     if (max_ports == 0) return error.MissingPorts;
     if (max_interrupters == 0) return error.MissingInterrupters;
 
+    const doorbell_offset = readU32Le(mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES]);
+    if (doorbell_offset == 0) return error.MissingDoorbellRegisters;
+    if ((doorbell_offset & DOORBELL_OFFSET_ALIGNMENT_MASK) != 0) return error.InvalidDoorbellOffset;
+    const runtime_register_offset = readU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES]);
+    if (runtime_register_offset == 0) return error.MissingRuntimeRegisters;
+    if ((runtime_register_offset & RUNTIME_REGISTER_OFFSET_ALIGNMENT_MASK) != 0) {
+        return error.InvalidRuntimeRegisterOffset;
+    }
+
     return .{
         .capability_length = capability_length,
         .interface_version = interface_version,
         .max_device_slots = max_device_slots,
         .max_interrupters = max_interrupters,
         .max_ports = max_ports,
-        .doorbell_offset = readU32Le(mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES]),
-        .runtime_register_offset = readU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES]),
+        .doorbell_offset = doorbell_offset,
+        .runtime_register_offset = runtime_register_offset,
     };
 }
 
@@ -795,6 +812,10 @@ test "xHCI capability parser rejects unsupported controllers" {
     try std.testing.expectError(error.UnsupportedVersion, parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
+    writeU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], 0x0100);
+    try std.testing.expectError(error.UnsupportedVersion, parseCapabilityRegisters(mmio[0..]));
+
+    mmio = validCapabilityRegisters();
     writeU32Le(
         mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES],
         (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
@@ -808,6 +829,14 @@ test "xHCI capability parser rejects unsupported controllers" {
         @as(u32, 32) | (@as(u32, 8) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT),
     );
     try std.testing.expectError(error.MissingPorts, parseCapabilityRegisters(mmio[0..]));
+
+    mmio = validCapabilityRegisters();
+    writeU32Le(mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_DOORBELL_OFFSET + 1);
+    try std.testing.expectError(error.InvalidDoorbellOffset, parseCapabilityRegisters(mmio[0..]));
+
+    mmio = validCapabilityRegisters();
+    writeU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_RUNTIME_REGISTER_OFFSET + 4);
+    try std.testing.expectError(error.InvalidRuntimeRegisterOffset, parseCapabilityRegisters(mmio[0..]));
 }
 
 test "xHCI ring plan validates command and event ring alignment" {
