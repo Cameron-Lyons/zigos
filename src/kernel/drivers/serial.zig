@@ -1,5 +1,7 @@
 const COM1_BASE: u16 = 0x3F8;
 const io = @import("../utils/io.zig");
+const spin = @import("../utils/spin.zig");
+const tsc_clock = @import("../timer/tsc_clock.zig");
 
 const SERIAL_DATA = COM1_BASE + 0;
 const SERIAL_INTERRUPT_ENABLE = COM1_BASE + 1;
@@ -18,7 +20,8 @@ const MODEM_CONTROL_LOOPBACK = 0x1E;
 const MODEM_CONTROL_READY = 0x0F;
 const MODEM_CONTROL_IRQS_ENABLED = 0x0B;
 const LOOPBACK_TEST_BYTE = 0xAE;
-const SERIAL_WAIT_LIMIT: u32 = 10000;
+const SERIAL_WAIT_TIMEOUT_MILLISECONDS: u64 = 100;
+const EARLY_SERIAL_WAIT_LIMIT: u32 = 10_000;
 
 var serial_initialized: bool = false;
 
@@ -56,22 +59,30 @@ fn isDataReady() bool {
     return (io.inb(SERIAL_LINE_STATUS) & LINE_STATUS_DATA_READY) != 0;
 }
 
+fn waitForTransmitEmpty() bool {
+    if (!tsc_clock.initialized()) {
+        var attempts: u32 = EARLY_SERIAL_WAIT_LIMIT;
+        while (!isTransmitEmpty() and attempts > 0) : (attempts -= 1) {
+            spin.hint();
+        }
+        return isTransmitEmpty();
+    }
+
+    const deadline = tsc_clock.afterMilliseconds(SERIAL_WAIT_TIMEOUT_MILLISECONDS);
+    while (!deadline.expired()) {
+        if (isTransmitEmpty()) return true;
+        spin.hint();
+    }
+    return false;
+}
+
 pub fn putChar(c: u8) void {
     if (!serial_initialized) {
         return;
     }
 
-    var timeout: u32 = SERIAL_WAIT_LIMIT;
-    while (!isTransmitEmpty() and timeout > 0) {
-        timeout -= 1;
-    }
-
+    if (!waitForTransmitEmpty()) return;
     io.outb(SERIAL_DATA, c);
-
-    timeout = SERIAL_WAIT_LIMIT;
-    while (!isTransmitEmpty() and timeout > 0) {
-        timeout -= 1;
-    }
 }
 
 pub fn flush() void {
@@ -79,10 +90,7 @@ pub fn flush() void {
         return;
     }
 
-    var timeout: u32 = SERIAL_WAIT_LIMIT;
-    while (!isTransmitEmpty() and timeout > 0) {
-        timeout -= 1;
-    }
+    _ = waitForTransmitEmpty();
 }
 
 pub fn hasChar() bool {

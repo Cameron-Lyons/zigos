@@ -158,6 +158,11 @@ Use the pinned toolchain and repo entrypoints:
   older x86 CPUs instead of weakening its security contract. GRUB Multiboot2
   enters the bootstrap in 32-bit protected mode; the bootstrap immediately
   installs four-level paging and enters the x86-64 Zig kernel.
+- Supported boots initialize the calibrated invariant-TSC clock before emitting
+  their first marker. COM1 transmit readiness uses a 100 ms elapsed deadline,
+  yields to sibling hardware threads while polling, and waits only before
+  enqueueing each byte; unsupported-CPU diagnostics retain a bounded
+  best-effort path because no trustworthy clock is available.
 - Production hardware must expose a checksum-valid ACPI DMAR table with at
   least 39 DMA address bits, x2APIC interrupt remapping, no x2APIC or DMA-remapping
   firmware opt-out, and a segment-zero VT-d unit covering all remaining PCI
