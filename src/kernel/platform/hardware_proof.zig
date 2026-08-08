@@ -543,7 +543,8 @@ pub fn recordVtdIsolationProof(proof: intel_vtd.FaultRecord) void {
     if (facts.real_target_sku and facts.vtdDiscoveryReady() and
         intel_vtd.dmaIsolationEnabled() and
         intel_vtd.interruptIsolationEnabled() and
-        intel_vtd.faultMonitoringEnabled())
+        intel_vtd.faultMonitoringEnabled() and
+        xhci_hw.requesterIsolated())
     {
         facts.vtd_storage_isolation = true;
         facts.vtd_interrupt_isolation = true;

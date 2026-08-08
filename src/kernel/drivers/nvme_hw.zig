@@ -75,6 +75,7 @@ pub const Error = error{
     NamespaceMissing,
     UnsupportedLbaFormat,
     DmaIsolationBypassed,
+    TooManyDmaDomains,
     DmaFault,
     InterruptIsolationUnavailable,
     InterruptRouteInstallFailed,
@@ -95,6 +96,7 @@ const IO_QUEUE_ID: u16 = 1;
 const IO_QUEUE_ENTRIES: u32 = 32;
 const DMA_FRAME_COUNT: u32 = PRP_LIST_FIRST_FRAME + PRP_LIST_PAGE_COUNT;
 const DMA_WINDOW_COUNT: usize = 6;
+const MAX_ADDITIONAL_DMA_DOMAINS: usize = 2;
 
 const Queue = struct {
     sq_phys: u32,
@@ -589,9 +591,12 @@ fn guardPatternIntact(bytes: []const u8) bool {
 pub fn attachAsBackend(
     dev: pci.PCIDevice,
     vtd_summary: ?*const dmar.Summary,
-    additional_domain: ?intel_vtd.DmaDomain,
+    additional_domains: []const intel_vtd.DmaDomain,
 ) !?intel_vtd.FaultRecord {
     if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
+    if (additional_domains.len > MAX_ADDITIONAL_DMA_DOMAINS) {
+        return error.TooManyDmaDomains;
+    }
     @atomicStore(bool, &io_interrupts_active, false, .seq_cst);
     @atomicStore(u64, &completion_interrupt_count, 0, .seq_cst);
     const dma_base = paging.alloc_frames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
@@ -609,12 +614,10 @@ pub fn attachAsBackend(
     };
     const windows = frames.windows();
     if (vtd_summary) |summary| {
-        var domains = [_]intel_vtd.DmaDomain{
-            .{ .device = dev, .windows = &windows },
-            undefined,
-        };
+        var domains: [1 + MAX_ADDITIONAL_DMA_DOMAINS]intel_vtd.DmaDomain = undefined;
+        domains[0] = .{ .device = dev, .windows = &windows };
         var domain_count: usize = 1;
-        if (additional_domain) |domain| {
+        for (additional_domains) |domain| {
             domains[domain_count] = domain;
             domain_count += 1;
         }
@@ -843,9 +846,9 @@ export fn zigosStorageBootstrapNvmeDmaWindow(
 pub fn probeAndReport(
     dev: pci.PCIDevice,
     vtd_summary: ?*const dmar.Summary,
-    additional_domain: ?intel_vtd.DmaDomain,
+    additional_domains: []const intel_vtd.DmaDomain,
 ) !?intel_vtd.FaultRecord {
-    const fault_proof = try attachAsBackend(dev, vtd_summary, additional_domain);
+    const fault_proof = try attachAsBackend(dev, vtd_summary, additional_domains);
     console.print("ZIGOS:NVME:HW:CAP=");
     printHex64(active_controller.capabilities());
     console.print(" VS=");
@@ -864,7 +867,7 @@ const SCRATCH_LBA: u64 = 8;
 const TEST_PATTERN: u8 = 0xA5;
 
 fn roundtripSelfTest(dev: pci.PCIDevice) void {
-    _ = attachAsBackend(dev, null, null) catch |err| {
+    _ = attachAsBackend(dev, null, &.{}) catch |err| {
         console.print("ZIGOS:NVME:HW:IOQ_FAIL ");
         console.print(@errorName(err));
         console.print("\n");

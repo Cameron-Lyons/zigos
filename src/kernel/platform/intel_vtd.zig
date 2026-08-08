@@ -15,7 +15,7 @@ const TABLE_PAGE_COUNT: u32 = 24;
 const INTERRUPT_TABLE_PAGE_COUNT: u32 = 1;
 const ROOT_PAGE: u32 = 0;
 const FIRST_DYNAMIC_TABLE_PAGE: u32 = 1;
-const MAX_DMA_DOMAINS: usize = 2;
+const MAX_DMA_DOMAINS: usize = 3;
 const MAX_DMA_WINDOWS_PER_DOMAIN: usize = 8;
 const INTERRUPT_TABLE_PAGE: u32 = TABLE_PAGE_COUNT;
 const FIRST_INVALIDATION_QUEUE_PAGE: u32 = INTERRUPT_TABLE_PAGE + INTERRUPT_TABLE_PAGE_COUNT;
@@ -928,6 +928,18 @@ fn syntheticI225() pci.PCIDevice {
     return device_info;
 }
 
+fn syntheticXhci() pci.PCIDevice {
+    var device_info = syntheticNvme();
+    device_info.bus = 0;
+    device_info.device = 20;
+    device_info.function = 0;
+    device_info.device_id = 0xA0ED;
+    device_info.class_code = pci.PCI_CLASS_SERIAL_BUS_CONTROLLER;
+    device_info.subclass = pci.PCI_SUBCLASS_USB;
+    device_info.prog_if = pci.PCI_PROG_IF_XHCI;
+    return device_info;
+}
+
 fn tablePageIndex(table_base: u32, entry: u64) usize {
     return @intCast(((entry & ADDRESS_MASK) - table_base) / PAGE_SIZE);
 }
@@ -1048,6 +1060,50 @@ test "VT-d domains isolate NVMe and I225 requesters with multi-page windows" {
     );
 }
 
+test "VT-d tables isolate storage network and xHCI requesters" {
+    var tables: Tables align(PAGE_SIZE) = undefined;
+    const table_base: u32 = 0x0100_0000;
+    const storage_windows = [_]DmaWindow{
+        .{ .base = 0x0200_0000, .device_readable = true, .device_writable = true },
+    };
+    const network_windows = [_]DmaWindow{
+        .{ .base = 0x0240_0000, .length = 2 * PAGE_SIZE, .device_readable = true, .device_writable = false },
+    };
+    const xhci_windows = [_]DmaWindow{
+        .{ .base = 0x0280_0000, .length = 3 * 1024 * 1024, .device_readable = true, .device_writable = true },
+    };
+    const domains = [_]DmaDomain{
+        .{ .device = syntheticNvme(), .windows = &storage_windows },
+        .{ .device = syntheticI225(), .windows = &network_windows },
+        .{ .device = syntheticXhci(), .windows = &xhci_windows },
+    };
+    try validateDomains(&domains);
+    try populateTables(&tables, table_base, &domains, .bits48);
+
+    const xhci_context_page = tablePageIndex(
+        table_base,
+        tables[ROOT_PAGE][@as(usize, syntheticXhci().bus) * 2],
+    );
+    const xhci_context_index = (@as(usize, syntheticXhci().device) * 8 +
+        syntheticXhci().function) * 2;
+    try std.testing.expectEqual(
+        (@as(u64, FIRST_DOMAIN_ID + 2) << 8) | @intFromEnum(AddressWidth.bits48),
+        tables[xhci_context_page][xhci_context_index + 1],
+    );
+    const xhci_l4 = tablePageIndex(
+        table_base,
+        tables[xhci_context_page][xhci_context_index],
+    );
+    const xhci_l3 = tablePageIndex(table_base, tables[xhci_l4][0]);
+    const xhci_l2 = tablePageIndex(table_base, tables[xhci_l3][0]);
+    const first_l2: usize = @intCast(xhci_windows[0].base >> 21 & 0x1FF);
+    const second_l2: usize = @intCast((xhci_windows[0].base + 2 * 1024 * 1024) >> 21 & 0x1FF);
+    try std.testing.expect(tables[xhci_l2][first_l2] != 0);
+    try std.testing.expect(tables[xhci_l2][second_l2] != 0);
+    try std.testing.expect(tablePageIndex(table_base, tables[xhci_l2][first_l2]) !=
+        tablePageIndex(table_base, tables[xhci_l2][second_l2]));
+}
+
 test "VT-d window policy rejects aliases and capability selection prefers fewer walks" {
     const aliased = [_]DmaWindow{
         .{ .base = 0x0200_0000, .device_readable = true, .device_writable = false },
@@ -1071,8 +1127,12 @@ test "VT-d window policy rejects aliases and capability selection prefers fewer 
 }
 
 test "VT-d fault routing retains a record for the owning requester" {
-    protected_requester_ids = .{ requesterId(syntheticNvme()), requesterId(syntheticI225()) };
-    protected_requester_count = 2;
+    protected_requester_ids = .{
+        requesterId(syntheticNvme()),
+        requesterId(syntheticI225()),
+        requesterId(syntheticXhci()),
+    };
+    protected_requester_count = 3;
     deferred_faults = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
     defer {
         protected_requester_ids = [_]u16{0} ** MAX_DMA_DOMAINS;
