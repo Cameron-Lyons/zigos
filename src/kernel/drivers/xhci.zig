@@ -46,6 +46,7 @@ pub const DEFAULT_BOOT_KEYBOARD_PORT_ID: u8 = 1;
 pub const MAX_BOOT_PORTS: usize = 32;
 pub const MAX_DEVICE_SLOTS: usize = 32;
 pub const USB_DEVICE_DESCRIPTOR_PREFIX_BYTES: usize = 8;
+pub const USB_DEVICE_DESCRIPTOR_BYTES: usize = 18;
 pub const ENDPOINT_ZERO_DCI: u5 = 1;
 
 pub const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
@@ -162,10 +163,10 @@ const COMPLETION_CODE_SUCCESS: u8 = 1;
 const ENDPOINT_TYPE_CONTROL: u32 = 4;
 const DEFAULT_ENDPOINT_ERROR_COUNT: u32 = 3;
 const CONTROL_ENDPOINT_AVERAGE_TRB_LENGTH: u32 = 8;
+const USB_SETUP_PACKET_BYTES: u32 = 8;
 const ADDRESS_DEVICE_ADD_CONTEXT_FLAGS: u32 = 0b11;
 const EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS: u32 = 0b10;
 const ADDRESS_DEVICE_CONTEXT_ENTRIES: u32 = 1;
-const USB_DEVICE_DESCRIPTOR_BYTES: u8 = 18;
 const USB_DEVICE_DESCRIPTOR_MAX_PACKET_SIZE_OFFSET: usize = 7;
 const PORT_CURRENT_CONNECT_STATUS: u32 = 1 << 0;
 const PORT_ENABLED_DISABLED: u32 = 1 << 1;
@@ -424,6 +425,21 @@ pub const PortProtocol = struct {
     high_speed_ids: u16 = 0,
 };
 
+pub const UsbDeviceDescriptor = struct {
+    usb_version_bcd: u16,
+    device_class: u8,
+    device_subclass: u8,
+    device_protocol: u8,
+    endpoint_zero_max_packet_size: u16,
+    vendor_id: u16,
+    product_id: u16,
+    device_version_bcd: u16,
+    manufacturer_string_index: u8,
+    product_string_index: u8,
+    serial_number_string_index: u8,
+    configuration_count: u8,
+};
+
 pub const SupportedProtocols = struct {
     ports: [256]?PortProtocol = [_]?PortProtocol{null} ** 256,
 
@@ -634,11 +650,75 @@ pub fn deviceDescriptorEndpointZeroMaxPacketSize(
     };
 }
 
-pub fn deviceDescriptorPrefixSetupStage(cycle_state: u1) [4]u32 {
+pub fn parseUsbDeviceDescriptor(
+    protocol: PortProtocol,
+    speed_id: u4,
+    descriptor: []const u8,
+) Error!UsbDeviceDescriptor {
+    if (descriptor.len < USB_DEVICE_DESCRIPTOR_BYTES or
+        descriptor[0] != USB_DEVICE_DESCRIPTOR_BYTES or
+        descriptor[1] != USB_DESCRIPTOR_DEVICE)
+    {
+        return error.InvalidUsbDescriptor;
+    }
+    const usb_version_bcd = readU16Le(descriptor[2..4]);
+    const device_class = descriptor[4];
+    const device_subclass = descriptor[5];
+    const device_version_bcd = readU16Le(descriptor[12..14]);
+    const configuration_count = descriptor[17];
+    if (!validBcd(usb_version_bcd) or !validBcd(device_version_bcd) or
+        (device_class == 0 and device_subclass != 0) or configuration_count == 0)
+    {
+        return error.InvalidUsbDescriptor;
+    }
+    switch (protocol.kind) {
+        .usb2 => if (usb_version_bcd < 0x0100 or usb_version_bcd >= 0x0300) {
+            return error.InvalidUsbDescriptor;
+        },
+        .usb3 => if (usb_version_bcd < 0x0300 or usb_version_bcd >= 0x0400) {
+            return error.InvalidUsbDescriptor;
+        },
+    }
     return .{
-        0x0100_0680,
-        0x0008_0000,
-        USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
+        .usb_version_bcd = usb_version_bcd,
+        .device_class = device_class,
+        .device_subclass = device_subclass,
+        .device_protocol = descriptor[6],
+        .endpoint_zero_max_packet_size = try deviceDescriptorEndpointZeroMaxPacketSize(
+            protocol,
+            speed_id,
+            descriptor,
+        ),
+        .vendor_id = readU16Le(descriptor[8..10]),
+        .product_id = readU16Le(descriptor[10..12]),
+        .device_version_bcd = device_version_bcd,
+        .manufacturer_string_index = descriptor[14],
+        .product_string_index = descriptor[15],
+        .serial_number_string_index = descriptor[16],
+        .configuration_count = configuration_count,
+    };
+}
+
+fn validBcd(value: u16) bool {
+    return (value & 0x000F) <= 9 and
+        ((value >> 4) & 0x000F) <= 9 and
+        ((value >> 8) & 0x000F) <= 9 and
+        ((value >> 12) & 0x000F) <= 9;
+}
+
+pub fn getDescriptorSetupStage(
+    descriptor_type: u8,
+    descriptor_index: u8,
+    descriptor_length: u16,
+    cycle_state: u1,
+) Error![4]u32 {
+    if (descriptor_type == 0 or descriptor_length == 0) return error.InvalidUsbDescriptor;
+    return .{
+        0x0000_0680 |
+            (@as(u32, descriptor_index) << 16) |
+            (@as(u32, descriptor_type) << 24),
+        @as(u32, descriptor_length) << 16,
+        USB_SETUP_PACKET_BYTES,
         SETUP_TRANSFER_TYPE_IN |
             (SETUP_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
             TRB_IMMEDIATE_DATA |
@@ -646,22 +726,23 @@ pub fn deviceDescriptorPrefixSetupStage(cycle_state: u1) [4]u32 {
     };
 }
 
-pub fn deviceDescriptorPrefixDataStage(
+pub fn controlInDataStage(
     buffer_address: u64,
+    transfer_bytes: u17,
     cycle_state: u1,
 ) Error![4]u32 {
-    if (buffer_address == 0) return error.DmaAddressOutsidePlan;
+    if (buffer_address == 0 or transfer_bytes == 0) return error.DmaAddressOutsidePlan;
     return .{
         @truncate(buffer_address),
         @truncate(buffer_address >> 32),
-        USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
+        transfer_bytes,
         CONTROL_TRANSFER_DIRECTION_IN |
             (DATA_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
             cycle_state,
     };
 }
 
-pub fn deviceDescriptorPrefixStatusStage(cycle_state: u1) [4]u32 {
+pub fn controlOutStatusStage(cycle_state: u1) [4]u32 {
     return .{
         0,
         0,
@@ -2729,6 +2810,60 @@ test "xHCI device descriptor prefix validates endpoint-zero packet size by speed
     );
 }
 
+test "xHCI full device descriptor parser validates identity and USB generation" {
+    const usb2 = PortProtocol{
+        .kind = .usb2,
+        .slot_type = 0,
+        .speed_ids = @as(u16, 1) << 3,
+        .high_speed_ids = @as(u16, 1) << 3,
+    };
+    var bytes = [_]u8{
+        18, USB_DESCRIPTOR_DEVICE,
+        0x10, 0x02,
+        0,  0, 0, 64,
+        0x6B, 0x04,
+        0x01, 0xC3,
+        0x23, 0x01,
+        1, 2, 3, 2,
+    };
+    const descriptor = try parseUsbDeviceDescriptor(usb2, 3, &bytes);
+    try std.testing.expectEqual(@as(u16, 0x0210), descriptor.usb_version_bcd);
+    try std.testing.expectEqual(@as(u16, 64), descriptor.endpoint_zero_max_packet_size);
+    try std.testing.expectEqual(@as(u16, 0x046B), descriptor.vendor_id);
+    try std.testing.expectEqual(@as(u16, 0xC301), descriptor.product_id);
+    try std.testing.expectEqual(@as(u16, 0x0123), descriptor.device_version_bcd);
+    try std.testing.expectEqual(@as(u8, 3), descriptor.serial_number_string_index);
+    try std.testing.expectEqual(@as(u8, 2), descriptor.configuration_count);
+
+    bytes[5] = 1;
+    try std.testing.expectError(error.InvalidUsbDescriptor, parseUsbDeviceDescriptor(usb2, 3, &bytes));
+    bytes[5] = 0;
+    bytes[17] = 0;
+    try std.testing.expectError(error.InvalidUsbDescriptor, parseUsbDeviceDescriptor(usb2, 3, &bytes));
+    bytes[17] = 1;
+    bytes[2] = 0x1A;
+    try std.testing.expectError(error.InvalidUsbDescriptor, parseUsbDeviceDescriptor(usb2, 3, &bytes));
+    bytes[2] = 0x10;
+    try std.testing.expectError(
+        error.InvalidUsbDescriptor,
+        parseUsbDeviceDescriptor(usb2, 3, bytes[0 .. bytes.len - 1]),
+    );
+
+    const usb3 = PortProtocol{
+        .kind = .usb3,
+        .slot_type = 1,
+        .speed_ids = @as(u16, 1) << 4,
+    };
+    bytes[2] = 0x10;
+    bytes[3] = 0x03;
+    bytes[7] = 9;
+    const superspeed = try parseUsbDeviceDescriptor(usb3, 4, &bytes);
+    try std.testing.expectEqual(@as(u16, 0x0310), superspeed.usb_version_bcd);
+    try std.testing.expectEqual(@as(u16, 512), superspeed.endpoint_zero_max_packet_size);
+    bytes[3] = 0x02;
+    try std.testing.expectError(error.InvalidUsbDescriptor, parseUsbDeviceDescriptor(usb3, 4, &bytes));
+}
+
 test "xHCI legacy ownership rejects firmware-owned and malformed chains" {
     var registers = [_]u8{0} ** 0x80;
     writeU32Le(
@@ -3222,8 +3357,13 @@ const MockDoorbellMmio = struct {
     }
 };
 
-test "xHCI device descriptor control stages and slot doorbell are exact" {
-    const setup = deviceDescriptorPrefixSetupStage(1);
+test "xHCI descriptor control stages and slot doorbell are exact" {
+    const setup = try getDescriptorSetupStage(
+        USB_DESCRIPTOR_DEVICE,
+        0,
+        USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
+        1,
+    );
     try std.testing.expectEqual(@as(u32, 0x0100_0680), setup[0]);
     try std.testing.expectEqual(@as(u32, 0x0008_0000), setup[1]);
     try std.testing.expectEqual(@as(u32, USB_DEVICE_DESCRIPTOR_PREFIX_BYTES), setup[2]);
@@ -3232,14 +3372,14 @@ test "xHCI device descriptor control stages and slot doorbell are exact" {
             TRB_IMMEDIATE_DATA | 1,
         setup[3],
     );
-    const data = try deviceDescriptorPrefixDataStage(0x9000, 0);
+    const data = try controlInDataStage(0x9000, USB_DEVICE_DESCRIPTOR_PREFIX_BYTES, 0);
     try std.testing.expectEqual(@as(u32, 0x9000), data[0]);
     try std.testing.expectEqual(@as(u32, USB_DEVICE_DESCRIPTOR_PREFIX_BYTES), data[2]);
     try std.testing.expectEqual(
         CONTROL_TRANSFER_DIRECTION_IN | (DATA_STAGE_TRB_TYPE << TRB_TYPE_SHIFT),
         data[3],
     );
-    const status = deviceDescriptorPrefixStatusStage(1);
+    const status = controlOutStatusStage(1);
     try std.testing.expectEqual(@as(u32, 0), status[0]);
     try std.testing.expectEqual(
         (STATUS_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) | TRB_INTERRUPT_ON_COMPLETION | 1,
@@ -3254,7 +3394,24 @@ test "xHCI device descriptor control stages and slot doorbell are exact" {
     try std.testing.expectEqual(@as(u1, 0), wrapping_producer.cycle_state);
     try std.testing.expectEqual(
         @as(u32, 0),
-        (try deviceDescriptorPrefixDataStage(0x9000, wrapping_producer.cycle_state))[3] & 1,
+        (try controlInDataStage(
+            0x9000,
+            USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
+            wrapping_producer.cycle_state,
+        ))[3] & 1,
+    );
+    const configuration_setup = try getDescriptorSetupStage(
+        USB_DESCRIPTOR_CONFIGURATION,
+        3,
+        0x1234,
+        0,
+    );
+    try std.testing.expectEqual(@as(u32, 0x0203_0680), configuration_setup[0]);
+    try std.testing.expectEqual(@as(u32, 0x1234_0000), configuration_setup[1]);
+    try std.testing.expectError(error.InvalidUsbDescriptor, getDescriptorSetupStage(0, 0, 8, 1));
+    try std.testing.expectError(
+        error.DmaAddressOutsidePlan,
+        controlInDataStage(0x9000, 0, 1),
     );
 
     var mmio = MockDoorbellMmio{};
