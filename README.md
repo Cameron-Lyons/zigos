@@ -227,8 +227,10 @@ Use the pinned toolchain and repo entrypoints:
   count while rejecting restore-state claims without scratchpad storage. The typed
   DMA plan reserves a zeroed DCBAA page, page-aligned scratchpad pointer and buffer
   storage, one complete 32-entry Device Context and compact endpoint-zero transfer
-  ring per enabled slot, one shared 64 KiB-aligned enumeration buffer, and one
-  page-contained reusable 33-entry Input Context.
+  ring per enabled slot, one dedicated interrupt-IN ring and cache-line-separated
+  report buffer per slot, one shared 64 KiB-aligned enumeration buffer, and one
+  page-contained reusable 33-entry Input Context. VT-d exposes command and transfer
+  rings read-only to the controller while report-buffer pages are write-only.
   Reservation sizing checks every possible page offset within the 64 KiB alignment
   boundary, and the realized physical plan must fit the reserved frame count before
   any DMA memory is cleared or published.
@@ -264,7 +266,7 @@ Use the pinned toolchain and repo entrypoints:
   preserve only architected sticky controls while acknowledging RW1CS bits;
   connected USB2/USB3 ports receive bounded normal/warm resets as appropriate.
   A single cycle-tracked TRB producer submits Enable Slot, Address Device, Evaluate
-  Context, and disconnect-time Disable Slot commands through doorbell zero. Address
+  Context, Configure Endpoint, and disconnect-time Disable Slot commands through doorbell zero. Address
   Device uses the shared serialized Input Context to publish only Slot and endpoint-zero
   state, with a slot-private control ring and the negotiated root-port speed. The same
   serialized lifecycle then rings the slot's endpoint-zero doorbell for an eight-byte
@@ -280,15 +282,22 @@ Use the pinned toolchain and repo entrypoints:
   framing, reserved configuration attributes, interface and endpoint counts, endpoint
   addresses, and mandatory SuperSpeed endpoint companions without copying the 64 KiB
   DMA window onto the kernel stack; the validated configuration summary remains bound
-  to the port until disconnect.
+  to the port until disconnect. Selection accepts only an alternate-setting-zero HID
+  boot-keyboard interface with a valid interrupt-IN endpoint, translates USB polling
+  intervals and burst limits into xHCI fields, and retains its exact configuration value,
+  DCI, packet size, and ESIT payload. The lifecycle then completes an exact no-data
+  `SET_CONFIGURATION` transfer before publishing a Configure Endpoint Input Context
+  with only A0 and that DCI set. A matching Configure Endpoint completion is required
+  before the port is marked configured; no interrupt TD is posted early.
   Completion pointers, endpoint ids, residual lengths, and slot identities are
   validated before state advances, and DCBAA entries are linked or cleared only at the
   specified completion boundary. Reset, command, and control-transfer waits keep the one-shot timer armed and
   contain the controller after one second without progress. DMA faults, invalid
   port, command, or transfer events, unsupported event types, ERDP rejection, or an
   unexpected halted/error state quiesce the controller and revoke MSI plus bus
-  mastering. Input-device
-  authority still requires keyboard enumeration and hardware event-ring evidence.
+  mastering. Input-device authority still requires an interface-scoped HID
+  `SET_PROTOCOL(Boot)` transfer, a real interrupt-IN report TD, matching hardware
+  event-ring completion, and validated report bytes.
 - OVMF or edk2-ovmf firmware for every QEMU boot
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
