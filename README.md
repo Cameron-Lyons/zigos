@@ -219,8 +219,12 @@ Use the pinned toolchain and repo entrypoints:
   and interrupters, plus aligned doorbell and runtime offsets. Capability parsing
   masks the architectural 11-bit interrupter field, requires 64-bit DMA addressing,
   decodes 32- or 64-byte contexts, and reconstructs the split 10-bit scratchpad
-  count while rejecting restore-state claims without scratchpad storage. The same
-  page is remapped as a bounded sliding window over the extended-capability chain, and
+  count while rejecting restore-state claims without scratchpad storage. The typed
+  DMA plan reserves a zeroed DCBAA page, page-aligned scratchpad pointer and buffer
+  storage, one complete 32-entry Device Context per enabled slot, and one
+  page-contained 33-entry Input Context. Checked arithmetic and disjoint-range
+  validation cover the command, event, and transfer rings, ERST, and DMA arena. The
+  same page is remapped as a bounded sliding window over the extended-capability chain, and
   ownership is requested with the architected 8-bit OS-semaphore write, and the
   firmware semaphore must clear within a one-second invariant-TSC deadline. The
   window is restored read-only immediately after that byte write, while bus
