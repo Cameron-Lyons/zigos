@@ -335,6 +335,9 @@ pub const HidController = struct {
     input_events_delivered: usize = 0,
     reports: [HID_EVENT_QUEUE_CAPACITY]HidReport = [_]HidReport{emptyHidReport()} ** HID_EVENT_QUEUE_CAPACITY,
     mmio: ?MmioState = null,
+    next_unclaimed_slot: u8 = 1,
+    recycled_slots: [MAX_DEVICE_SLOTS]u8 = [_]u8{0} ** MAX_DEVICE_SLOTS,
+    recycled_slot_count: usize = 0,
 
     pub fn init(ring_plan: RingPlan) Error!HidController {
         try validateRingPlan(ring_plan);
@@ -402,22 +405,34 @@ pub const HidController = struct {
         if (!port.connected or !port.enabled) return error.PortNotConnected;
         if (port.assigned_slot != 0) return error.PortAlreadyAssigned;
 
-        var slot_id: u8 = 1;
-        while (slot_id <= self.device_slot_limit) : (slot_id += 1) {
-            const slot = &self.slots[@as(usize, slot_id)];
-            if (slot.enabled) continue;
-            slot.* = .{
-                .enabled = true,
-                .port_id = port_id,
-            };
-            port.assigned_slot = slot_id;
-            if (self.mmio) |*mmio| {
-                mmio.command_doorbells += 1;
-                mmio.device_context_writes += 1;
-            }
-            return slot_id;
+        const slot_id = self.reserveDeviceSlot() orelse return error.DeviceSlotUnavailable;
+        const slot = &self.slots[@as(usize, slot_id)];
+        slot.* = .{
+            .enabled = true,
+            .port_id = port_id,
+        };
+        port.assigned_slot = slot_id;
+        if (self.mmio) |*mmio| {
+            mmio.command_doorbells += 1;
+            mmio.device_context_writes += 1;
         }
-        return error.DeviceSlotUnavailable;
+        return slot_id;
+    }
+
+    pub fn disconnectPort(self: *HidController, port_id: u8) Error!void {
+        const port = self.portPtr(port_id) orelse return error.InvalidPort;
+        if (!port.connected) return error.PortNotConnected;
+
+        if (port.assigned_slot != 0) {
+            const slot_id = port.assigned_slot;
+            const slot = self.slotPtr(slot_id) orelse return error.InvalidDeviceSlot;
+            if (!slot.enabled or slot.port_id != port_id) return error.InvalidDeviceSlot;
+            if (slot.boot_keyboard != null) self.resetInputQueue();
+            slot.* = .{};
+            self.recycleDeviceSlot(slot_id);
+            if (self.mmio) |*mmio| mmio.command_doorbells += 1;
+        }
+        port.* = .{};
     }
 
     pub fn addressDevice(self: *HidController, slot_id: u8, device_id: u64) Error!void {
@@ -538,6 +553,39 @@ pub const HidController = struct {
     fn slotPtr(self: *HidController, slot_id: u8) ?*DeviceSlot {
         if (slot_id == 0 or slot_id > self.device_slot_limit) return null;
         return &self.slots[slot_id];
+    }
+
+    fn reserveDeviceSlot(self: *HidController) ?u8 {
+        if (self.recycled_slot_count != 0) {
+            self.recycled_slot_count -= 1;
+            const slot_id = self.recycled_slots[self.recycled_slot_count];
+            self.recycled_slots[self.recycled_slot_count] = 0;
+            return slot_id;
+        }
+        if (self.next_unclaimed_slot == 0 or self.next_unclaimed_slot > self.device_slot_limit) return null;
+        const slot_id = self.next_unclaimed_slot;
+        self.next_unclaimed_slot += 1;
+        return slot_id;
+    }
+
+    fn recycleDeviceSlot(self: *HidController, slot_id: u8) void {
+        if (self.recycled_slot_count >= self.recycled_slots.len) unreachable;
+        self.recycled_slots[self.recycled_slot_count] = slot_id;
+        self.recycled_slot_count += 1;
+    }
+
+    fn resetInputQueue(self: *HidController) void {
+        self.boot_keyboard = null;
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
+        self.input_events_delivered = 0;
+        self.reports = [_]HidReport{emptyHidReport()} ** HID_EVENT_QUEUE_CAPACITY;
+        if (self.mmio) |*mmio| {
+            mmio.transfer_doorbells = 0;
+            mmio.event_ring_dequeue_count = 0;
+            mmio.interrupt_events = 0;
+        }
     }
 };
 
@@ -958,6 +1006,40 @@ test "xHCI HID controller exposes all modeled 32 device slot ids" {
     const last_slot_id = maxDeviceSlotsU8();
     try controller.addressDevice(last_slot_id, DEFAULT_BOOT_KEYBOARD_DEVICE_ID + MAX_DEVICE_SLOTS);
     try std.testing.expectError(error.InvalidDeviceSlot, controller.addressDevice(last_slot_id + 1, DEFAULT_BOOT_KEYBOARD_DEVICE_ID));
+}
+
+test "xHCI HID controller reuses disconnected slots and discards stale input" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_device_slots = 2;
+    capabilities.max_ports = 3;
+    var controller = try HidController.initWithMmio(capabilities, .{
+        .command_ring_trbs = TEST_RING_TRBS,
+        .event_ring_trbs = TEST_RING_TRBS,
+        .command_ring_address = TEST_COMMAND_RING_ADDRESS,
+        .event_ring_address = TEST_EVENT_RING_ADDRESS,
+    });
+
+    try controller.connectPort(1, .high);
+    const keyboard_slot = try controller.enableDeviceSlot(1);
+    try controller.addressDevice(keyboard_slot, DEFAULT_BOOT_KEYBOARD_DEVICE_ID);
+    const descriptor = bootKeyboardConfigurationDescriptor(DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
+    const keyboard = try controller.configureBootKeyboardEndpoint(keyboard_slot, descriptor[0..]);
+    const report = try bootKeyboardReport(keyboard.device_id, keyboard.endpoint_id, 0, &.{0x04});
+    try controller.submitKeyboardInterruptEvent(keyboard.slot_id, keyboard.endpoint_id, report.reportSlice());
+
+    try controller.connectPort(2, .super);
+    try std.testing.expectEqual(@as(u8, 2), try controller.enableDeviceSlot(2));
+    try controller.connectPort(3, .full);
+    try std.testing.expectError(error.DeviceSlotUnavailable, controller.enableDeviceSlot(3));
+
+    try controller.disconnectPort(1);
+    try std.testing.expect(controller.configuredBootKeyboard() == null);
+    try std.testing.expect(controller.inputProof() == null);
+    try std.testing.expectError(error.EventRingEmpty, controller.pollHidReport());
+    try std.testing.expectError(error.PortNotConnected, controller.disconnectPort(1));
+    try std.testing.expectEqual(keyboard_slot, try controller.enableDeviceSlot(3));
+    try std.testing.expect(controller.slots[keyboard_slot].enabled);
+    try std.testing.expectEqual(@as(u8, 3), controller.slots[keyboard_slot].port_id);
 }
 
 test "xHCI HID controller clamps ports and slots to MMIO capabilities" {
