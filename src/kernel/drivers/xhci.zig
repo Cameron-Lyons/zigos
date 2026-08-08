@@ -33,12 +33,15 @@ pub const MAX_BOOT_PORTS: usize = 32;
 pub const MAX_DEVICE_SLOTS: usize = 32;
 
 pub const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
+pub const MAX_EXTENDED_CAPABILITY_OFFSET: u32 = @as(u32, std.math.maxInt(u16)) << 2;
+pub const MAX_EXTENDED_CAPABILITIES: usize = 64;
 const DEVICE_SLOT_TABLE_ENTRIES: usize = MAX_DEVICE_SLOTS + 1;
 const MIN_CAPABILITY_LENGTH: u8 = 0x20;
 const MIN_SUPPORTED_INTERFACE_VERSION: u16 = 0x0110;
 const CAPABILITY_LENGTH_OFFSET: usize = 0x00;
 const INTERFACE_VERSION_OFFSET: usize = 0x02;
 const HCSPARAMS1_OFFSET: usize = 0x04;
+const HCCPARAMS1_OFFSET: usize = 0x10;
 const DOORBELL_OFFSET_OFFSET: usize = 0x14;
 const RUNTIME_REGISTER_OFFSET_OFFSET: usize = 0x18;
 const DOORBELL_OFFSET_ALIGNMENT_MASK: u32 = 0x3;
@@ -47,6 +50,13 @@ const U16_REGISTER_BYTES: usize = @sizeOf(u16);
 const U32_REGISTER_BYTES: usize = @sizeOf(u32);
 const HCSPARAMS1_MAX_INTERRUPTERS_SHIFT = 8;
 const HCSPARAMS1_MAX_PORTS_SHIFT = 24;
+const HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT = 16;
+const EXTENDED_CAPABILITY_ID_MASK: u32 = 0xFF;
+const EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT = 8;
+const EXTENDED_CAPABILITY_NEXT_POINTER_MASK: u32 = 0xFF;
+const EXTENDED_CAPABILITY_DWORD_SHIFT = 2;
+const USB_LEGACY_SUPPORT_CAPABILITY_ID: u8 = 1;
+const USB_LEGACY_BIOS_OWNED_SEMAPHORE: u32 = 1 << 16;
 const TEST_CAPABILITY_LENGTH: u8 = 0x40;
 const TEST_INTERFACE_VERSION: u16 = 0x0110;
 const TEST_UNSUPPORTED_INTERFACE_VERSION: u16 = 0x0080;
@@ -92,6 +102,9 @@ pub const Error = error{
     MissingRuntimeRegisters,
     InvalidDoorbellOffset,
     InvalidRuntimeRegisterOffset,
+    ExtendedCapabilityOutOfRange,
+    ExtendedCapabilityTraversalLimit,
+    FirmwareOwnsController,
     MissingMmioInputEvidence,
 };
 
@@ -106,8 +119,14 @@ pub const CapabilityRegisters = struct {
     max_device_slots: u8,
     max_interrupters: u16,
     max_ports: u8,
+    extended_capability_offset: u32,
     doorbell_offset: u32,
     runtime_register_offset: u32,
+};
+
+pub const LegacyOwnership = enum(u8) {
+    not_present,
+    firmware_released,
 };
 
 pub const RingPlan = struct {
@@ -696,6 +715,10 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
     if (max_ports == 0) return error.MissingPorts;
     if (max_interrupters == 0) return error.MissingInterrupters;
 
+    const hccparams1 = readU32Le(mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES]);
+    const extended_capability_offset =
+        (hccparams1 >> HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT) << EXTENDED_CAPABILITY_DWORD_SHIFT;
+
     const doorbell_offset = readU32Le(mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES]);
     if (doorbell_offset == 0) return error.MissingDoorbellRegisters;
     if ((doorbell_offset & DOORBELL_OFFSET_ALIGNMENT_MASK) != 0) return error.InvalidDoorbellOffset;
@@ -711,9 +734,40 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
         .max_device_slots = max_device_slots,
         .max_interrupters = max_interrupters,
         .max_ports = max_ports,
+        .extended_capability_offset = extended_capability_offset,
         .doorbell_offset = doorbell_offset,
         .runtime_register_offset = runtime_register_offset,
     };
+}
+
+pub fn inspectLegacyOwnership(first_offset: u32, reader: anytype) Error!LegacyOwnership {
+    if (first_offset == 0) return .not_present;
+    if ((first_offset & (@sizeOf(u32) - 1)) != 0 or first_offset > MAX_EXTENDED_CAPABILITY_OFFSET) {
+        return error.ExtendedCapabilityOutOfRange;
+    }
+
+    var offset = first_offset;
+    var visited: usize = 0;
+    while (visited < MAX_EXTENDED_CAPABILITIES) : (visited += 1) {
+        const header = reader.readDword(offset);
+        const capability_id: u8 = @truncate(header & EXTENDED_CAPABILITY_ID_MASK);
+        if (capability_id == USB_LEGACY_SUPPORT_CAPABILITY_ID) {
+            if ((header & USB_LEGACY_BIOS_OWNED_SEMAPHORE) != 0) {
+                return error.FirmwareOwnsController;
+            }
+            return .firmware_released;
+        }
+
+        const next_dwords = (header >> EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) &
+            EXTENDED_CAPABILITY_NEXT_POINTER_MASK;
+        if (next_dwords == 0) return .not_present;
+        const delta = next_dwords << EXTENDED_CAPABILITY_DWORD_SHIFT;
+        if (offset > MAX_EXTENDED_CAPABILITY_OFFSET - delta) {
+            return error.ExtendedCapabilityOutOfRange;
+        }
+        offset += delta;
+    }
+    return error.ExtendedCapabilityTraversalLimit;
 }
 
 pub fn defaultCapabilityRegisters() CapabilityRegisters {
@@ -723,6 +777,7 @@ pub fn defaultCapabilityRegisters() CapabilityRegisters {
         .max_device_slots = TEST_MAX_DEVICE_SLOTS,
         .max_interrupters = TEST_MAX_INTERRUPTERS,
         .max_ports = TEST_MAX_PORTS,
+        .extended_capability_offset = 0,
         .doorbell_offset = TEST_DOORBELL_OFFSET,
         .runtime_register_offset = TEST_RUNTIME_REGISTER_OFFSET,
     };
@@ -802,8 +857,69 @@ test "xHCI capability parser extracts controller limits" {
     try std.testing.expectEqual(TEST_MAX_DEVICE_SLOTS, caps.max_device_slots);
     try std.testing.expectEqual(TEST_MAX_INTERRUPTERS, caps.max_interrupters);
     try std.testing.expectEqual(TEST_MAX_PORTS, caps.max_ports);
+    try std.testing.expectEqual(@as(u32, 0), caps.extended_capability_offset);
     try std.testing.expectEqual(TEST_DOORBELL_OFFSET, caps.doorbell_offset);
     try std.testing.expectEqual(TEST_RUNTIME_REGISTER_OFFSET, caps.runtime_register_offset);
+}
+
+const TestExtendedCapabilityReader = struct {
+    bytes: []const u8,
+
+    fn readDword(self: @This(), offset: u32) u32 {
+        const start: usize = @intCast(offset);
+        return readU32Le(self.bytes[start .. start + @sizeOf(u32)]);
+    }
+};
+
+const EndlessExtendedCapabilityReader = struct {
+    fn readDword(_: @This(), _: u32) u32 {
+        return @as(u32, 0x7F) | (@as(u32, 1) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT);
+    }
+};
+
+test "xHCI capability parser extracts the extended capability pointer" {
+    var mmio = validCapabilityRegisters();
+    writeU32Le(
+        mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
+        @as(u32, 0x2000) << HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT,
+    );
+    const caps = try parseCapabilityRegisters(mmio[0..]);
+    try std.testing.expectEqual(@as(u32, 0x8000), caps.extended_capability_offset);
+}
+
+test "xHCI legacy ownership accepts absent and firmware-released capabilities" {
+    var registers = [_]u8{0} ** 0x80;
+    var reader = TestExtendedCapabilityReader{ .bytes = &registers };
+    try std.testing.expectEqual(LegacyOwnership.not_present, try inspectLegacyOwnership(0, reader));
+
+    writeU32Le(registers[0x40..0x44], @as(u32, 0x7F) | (@as(u32, 4) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT));
+    writeU32Le(registers[0x50..0x54], USB_LEGACY_SUPPORT_CAPABILITY_ID);
+    reader = .{ .bytes = &registers };
+    try std.testing.expectEqual(LegacyOwnership.firmware_released, try inspectLegacyOwnership(0x40, reader));
+
+    writeU32Le(registers[0x50..0x54], USB_LEGACY_SUPPORT_CAPABILITY_ID | (@as(u32, 1) << 24));
+    reader = .{ .bytes = &registers };
+    try std.testing.expectEqual(LegacyOwnership.firmware_released, try inspectLegacyOwnership(0x40, reader));
+}
+
+test "xHCI legacy ownership rejects firmware-owned and malformed chains" {
+    var registers = [_]u8{0} ** 0x80;
+    writeU32Le(
+        registers[0x40..0x44],
+        USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_BIOS_OWNED_SEMAPHORE,
+    );
+    const reader = TestExtendedCapabilityReader{ .bytes = &registers };
+    try std.testing.expectError(error.FirmwareOwnsController, inspectLegacyOwnership(0x40, reader));
+
+    const terminal_reader = EndlessExtendedCapabilityReader{};
+    try std.testing.expectError(
+        error.ExtendedCapabilityOutOfRange,
+        inspectLegacyOwnership(MAX_EXTENDED_CAPABILITY_OFFSET, terminal_reader),
+    );
+    try std.testing.expectError(
+        error.ExtendedCapabilityTraversalLimit,
+        inspectLegacyOwnership(0x40, terminal_reader),
+    );
 }
 
 test "xHCI capability parser rejects unsupported controllers" {
@@ -862,6 +978,7 @@ test "xHCI controller binds MMIO command doorbells and event ring input proof" {
         .max_device_slots = TEST_MAX_DEVICE_SLOTS,
         .max_interrupters = TEST_MAX_INTERRUPTERS,
         .max_ports = TEST_MAX_PORTS,
+        .extended_capability_offset = 0,
         .doorbell_offset = 0,
         .runtime_register_offset = TEST_RUNTIME_REGISTER_OFFSET,
     }, .{
