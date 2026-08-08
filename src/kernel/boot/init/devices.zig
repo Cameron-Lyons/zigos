@@ -158,6 +158,7 @@ fn capturePciInventory() void {
             console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_OK\n");
             console.print("ZIGOS:XHCI:HW:OWNERSHIP_OK\n");
             console.print("ZIGOS:XHCI:HW:RESET_OK\n");
+            console.print("ZIGOS:XHCI:HW:SLOTS_OK\n");
         } else |err| {
             console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_FAIL ");
             console.print(@errorName(err));
