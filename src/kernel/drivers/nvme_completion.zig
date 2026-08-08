@@ -13,8 +13,16 @@ pub const Completion = struct {
         expected_command_id: u16,
         queue_entries: u32,
     ) bool {
+        return self.belongsToQueue(expected_queue_id, queue_entries) and
+            self.command_id == expected_command_id;
+    }
+
+    pub fn belongsToQueue(
+        self: Completion,
+        expected_queue_id: u16,
+        queue_entries: u32,
+    ) bool {
         return self.submission_queue_id == expected_queue_id and
-            self.command_id == expected_command_id and
             @as(u32, self.submission_head) < queue_entries;
     }
 
@@ -48,6 +56,7 @@ test "NVMe completion binds queue command phase and success" {
     try std.testing.expectEqual(@as(u1, 1), completion.phase);
     try std.testing.expectEqual(@as(u1, 1), phase((@as(u32, 1) << 16)));
     try std.testing.expect(completion.succeeded());
+    try std.testing.expect(completion.belongsToQueue(1, 32));
     try std.testing.expect(completion.belongsTo(1, 0x1234, 32));
 }
 
@@ -57,6 +66,8 @@ test "NVMe completion rejects stale or malformed ownership" {
         (@as(u32, 9)) | (@as(u32, 1) << 16) | (@as(u32, 0x81) << 17),
     );
     try std.testing.expect(!completion.succeeded());
+    try std.testing.expect(!completion.belongsToQueue(1, 32));
+    try std.testing.expect(completion.belongsToQueue(1, 64));
     try std.testing.expect(!completion.belongsTo(1, 9, 32));
     try std.testing.expect(!completion.belongsTo(2, 9, 64));
     try std.testing.expect(!completion.belongsTo(1, 8, 64));
