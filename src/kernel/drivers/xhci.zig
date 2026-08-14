@@ -41,6 +41,7 @@ pub const USB_CLASS_HID: u8 = 0x03;
 pub const USB_HID_SUBCLASS_BOOT: u8 = 0x01;
 pub const USB_HID_PROTOCOL_KEYBOARD: u8 = 0x01;
 pub const USB_REQUEST_SET_CONFIGURATION: u8 = 0x09;
+pub const USB_REQUEST_SET_PROTOCOL: u8 = 0x0B;
 pub const USB_ENDPOINT_DIRECTION_IN: u8 = 0x80;
 pub const USB_ENDPOINT_TRANSFER_INTERRUPT: u8 = 0x03;
 pub const DEFAULT_BOOT_KEYBOARD_DEVICE_ID: u64 = 0x8086_A0ED_0001;
@@ -175,6 +176,7 @@ const DEFAULT_ENDPOINT_ERROR_COUNT: u32 = 3;
 const CONTROL_ENDPOINT_AVERAGE_TRB_LENGTH: u32 = 8;
 const INTERRUPT_ENDPOINT_AVERAGE_TRB_LENGTH: u32 = 1024;
 const USB_SETUP_PACKET_BYTES: u32 = 8;
+const USB_REQUEST_TYPE_CLASS_INTERFACE_OUT: u8 = 0x21;
 const ADDRESS_DEVICE_ADD_CONTEXT_FLAGS: u32 = 0b11;
 const EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS: u32 = 0b10;
 const ADDRESS_DEVICE_CONTEXT_ENTRIES: u32 = 1;
@@ -1140,6 +1142,18 @@ pub fn setConfigurationSetupStage(
         (@as(u32, configuration_value) << 16) |
             (@as(u32, USB_REQUEST_SET_CONFIGURATION) << 8),
         0,
+        USB_SETUP_PACKET_BYTES,
+        (SETUP_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_IMMEDIATE_DATA |
+            cycle_state,
+    };
+}
+
+pub fn setBootProtocolSetupStage(interface_number: u8, cycle_state: u1) [4]u32 {
+    return .{
+        @as(u32, USB_REQUEST_TYPE_CLASS_INTERFACE_OUT) |
+            (@as(u32, USB_REQUEST_SET_PROTOCOL) << 8),
+        interface_number,
         USB_SETUP_PACKET_BYTES,
         (SETUP_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
             TRB_IMMEDIATE_DATA |
@@ -3424,13 +3438,15 @@ test "xHCI full device descriptor parser validates identity and USB generation" 
         .high_speed_ids = @as(u16, 1) << 3,
     };
     var bytes = [_]u8{
-        18, USB_DESCRIPTOR_DEVICE,
+        18,   USB_DESCRIPTOR_DEVICE,
         0x10, 0x02,
-        0,  0, 0, 64,
+        0,    0,
+        0,    64,
         0x6B, 0x04,
         0x01, 0xC3,
         0x23, 0x01,
-        1, 2, 3, 2,
+        1,    2,
+        3,    2,
     };
     const descriptor = try parseUsbDeviceDescriptor(usb2, 3, &bytes);
     try std.testing.expectEqual(@as(u16, 0x0210), descriptor.usb_version_bcd);
@@ -3568,10 +3584,10 @@ test "xHCI configuration parser validates complete USB2 and USB3 descriptor tree
         .speed_ids = @as(u16, 1) << 4,
     };
     var usb3_bytes = [_]u8{
-        9, USB_DESCRIPTOR_CONFIGURATION, 31, 0, 1, 1, 0, 0xA0, 50,
-        9, USB_DESCRIPTOR_INTERFACE, 0, 0, 1, USB_CLASS_HID, USB_HID_SUBCLASS_BOOT, USB_HID_PROTOCOL_KEYBOARD, 0,
-        7, USB_DESCRIPTOR_ENDPOINT, USB_ENDPOINT_DIRECTION_IN | 1, USB_ENDPOINT_TRANSFER_INTERRUPT, 8, 0, 10,
-        6, USB_DESCRIPTOR_SUPERSPEED_ENDPOINT_COMPANION, 0, 0, 0, 0,
+        9, USB_DESCRIPTOR_CONFIGURATION, 31,                            0,                               1, 1,             0,                     0xA0,                      50,
+        9, USB_DESCRIPTOR_INTERFACE,     0,                             0,                               1, USB_CLASS_HID, USB_HID_SUBCLASS_BOOT, USB_HID_PROTOCOL_KEYBOARD, 0,
+        7, USB_DESCRIPTOR_ENDPOINT,      USB_ENDPOINT_DIRECTION_IN | 1, USB_ENDPOINT_TRANSFER_INTERRUPT, 8, 0,             10,                    6,                         USB_DESCRIPTOR_SUPERSPEED_ENDPOINT_COMPANION,
+        0, 0,                            0,                             0,
     };
     const usb3_descriptor = try parseUsbConfigurationDescriptor(usb3, &usb3_bytes);
     try std.testing.expectEqual(@as(u16, 31), usb3_descriptor.total_length);
@@ -4356,6 +4372,26 @@ test "xHCI Configure Endpoint context grants one interrupt-IN endpoint" {
             0xA000,
             &input_context,
         ),
+    );
+}
+
+test "xHCI HID boot protocol request is interface scoped and has no data stage" {
+    const setup = setBootProtocolSetupStage(7, 1);
+    try std.testing.expectEqual(@as(u32, 0x0000_0B21), setup[0]);
+    try std.testing.expectEqual(@as(u32, 7), setup[1]);
+    try std.testing.expectEqual(USB_SETUP_PACKET_BYTES, setup[2]);
+    try std.testing.expectEqual(
+        (SETUP_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_IMMEDIATE_DATA |
+            1,
+        setup[3],
+    );
+
+    const maximum_interface = setBootProtocolSetupStage(std.math.maxInt(u8), 0);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u8)), maximum_interface[1]);
+    try std.testing.expectEqual(
+        (SETUP_STAGE_TRB_TYPE << TRB_TYPE_SHIFT) | TRB_IMMEDIATE_DATA,
+        maximum_interface[3],
     );
 }
 

@@ -73,6 +73,7 @@ var device_descriptor_count: u64 = 0;
 var configuration_descriptor_header_count: u64 = 0;
 var configuration_descriptor_count: u64 = 0;
 var set_configuration_count: u64 = 0;
+var set_boot_protocol_count: u64 = 0;
 var configure_endpoint_count: u64 = 0;
 
 const PortAction = enum(u8) {
@@ -85,6 +86,7 @@ const PortAction = enum(u8) {
     read_configuration_descriptor_header,
     read_configuration_descriptor,
     set_configuration,
+    set_boot_protocol,
     configure_endpoint,
     disable_slot,
 };
@@ -99,6 +101,7 @@ const PortRuntimeState = struct {
     configuration_descriptor: ?xhci.UsbConfigurationDescriptor = null,
     boot_keyboard: ?xhci.UsbBootKeyboardConfiguration = null,
     configuration_set: bool = false,
+    boot_protocol_set: bool = false,
     endpoint_configured: bool = false,
     speed_id: u4 = 0,
     slot_id: u8 = 0,
@@ -122,6 +125,7 @@ const ControlTransferKind = enum(u8) {
     configuration_descriptor_header,
     configuration_descriptor,
     set_configuration,
+    set_boot_protocol,
 };
 
 const OutstandingTransfer = struct {
@@ -165,6 +169,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     configuration_descriptor_header_count = 0;
     configuration_descriptor_count = 0;
     set_configuration_count = 0;
+    set_boot_protocol_count = 0;
     configure_endpoint_count = 0;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
@@ -327,6 +332,7 @@ pub fn activate() Error!void {
     configuration_descriptor_header_count = 0;
     configuration_descriptor_count = 0;
     set_configuration_count = 0;
+    set_boot_protocol_count = 0;
     configure_endpoint_count = 0;
     @atomicStore(bool, &active, true, .seq_cst);
     try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
@@ -486,6 +492,10 @@ pub fn setConfigurationCount() u64 {
     return set_configuration_count;
 }
 
+pub fn setBootProtocolCount() u64 {
+    return set_boot_protocol_count;
+}
+
 pub fn configureEndpointCount() u64 {
     return configure_endpoint_count;
 }
@@ -529,6 +539,7 @@ fn clearPortDescriptorState(state: *PortRuntimeState) void {
     state.configuration_descriptor = null;
     state.boot_keyboard = null;
     state.configuration_set = false;
+    state.boot_protocol_set = false;
     state.endpoint_configured = false;
     state.endpoint_zero_max_packet_size = 0;
     state.pending_endpoint_zero_max_packet_size = 0;
@@ -600,6 +611,11 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
         {
             state.action = .set_configuration;
         } else if (state.addressed and state.configuration_set and
+            !state.boot_protocol_set and
+            !transferTargets(event.port_id))
+        {
+            state.action = .set_boot_protocol;
+        } else if (state.addressed and state.configuration_set and state.boot_protocol_set and
             !state.endpoint_configured and
             !commandTargets(event.port_id, .configure_endpoint))
         {
@@ -663,7 +679,8 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
             if (command.slot_id == 0 or event.slot_id != command.slot_id or
                 state.slot_id != command.slot_id or !state.addressed or
                 state.configuration_descriptor == null or state.boot_keyboard == null or
-                !state.configuration_set or state.endpoint_configured)
+                !state.configuration_set or !state.boot_protocol_set or
+                state.endpoint_configured)
             {
                 return error.InvalidDeviceSlot;
             }
@@ -814,13 +831,25 @@ fn handleTransferCompletion(event: xhci.Event) Error!void {
         },
         .set_configuration => {
             if (state.configuration_descriptor == null or state.boot_keyboard == null or
-                state.configuration_set or state.endpoint_configured)
+                state.configuration_set or state.boot_protocol_set or
+                state.endpoint_configured)
             {
                 return error.InvalidDeviceSlot;
             }
             state.configuration_set = true;
-            state.action = .configure_endpoint;
+            state.action = .set_boot_protocol;
             set_configuration_count +%= 1;
+        },
+        .set_boot_protocol => {
+            if (state.configuration_descriptor == null or state.boot_keyboard == null or
+                !state.configuration_set or state.boot_protocol_set or
+                state.endpoint_configured)
+            {
+                return error.InvalidDeviceSlot;
+            }
+            state.boot_protocol_set = true;
+            state.action = .configure_endpoint;
+            set_boot_protocol_count +%= 1;
         },
     }
     outstanding_transfer = null;
@@ -940,6 +969,10 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
                 try submitSetConfigurationTransfer(port_id, state, reader);
                 return;
             },
+            .set_boot_protocol => {
+                try submitSetBootProtocolTransfer(port_id, state, reader);
+                return;
+            },
             else => {},
         }
 
@@ -952,6 +985,7 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
             .read_configuration_descriptor_header => unreachable,
             .read_configuration_descriptor => unreachable,
             .set_configuration => unreachable,
+            .set_boot_protocol => unreachable,
             .configure_endpoint => .configure_endpoint,
             .evaluate_endpoint_zero => .evaluate_context,
             .disable_slot => .disable_slot,
@@ -1072,6 +1106,7 @@ fn submitDescriptorTransfer(
             return error.InvalidDeviceSlot;
         },
         .set_configuration => unreachable,
+        .set_boot_protocol => unreachable,
     }
     const transfer_bytes: u17 = switch (kind) {
         .device_descriptor_prefix => xhci.USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
@@ -1079,6 +1114,7 @@ fn submitDescriptorTransfer(
         .configuration_descriptor_header => xhci.USB_CONFIGURATION_DESCRIPTOR_BYTES,
         .configuration_descriptor => state.configuration_descriptor_header.?.total_length,
         .set_configuration => unreachable,
+        .set_boot_protocol => unreachable,
     };
     if (transfer_bytes > plan.arena.enumeration_buffer_bytes or
         plan.arena.enumeration_buffer_address % xhci.XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES != 0)
@@ -1087,9 +1123,9 @@ fn submitDescriptorTransfer(
     }
     const descriptor_type: u8 = switch (kind) {
         .device_descriptor_prefix, .device_descriptor => xhci.USB_DESCRIPTOR_DEVICE,
-        .configuration_descriptor_header, .configuration_descriptor =>
-        xhci.USB_DESCRIPTOR_CONFIGURATION,
+        .configuration_descriptor_header, .configuration_descriptor => xhci.USB_DESCRIPTOR_CONFIGURATION,
         .set_configuration => unreachable,
+        .set_boot_protocol => unreachable,
     };
     const buffer: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(
         plan.arena.enumeration_buffer_address,
@@ -1142,7 +1178,7 @@ fn submitSetConfigurationTransfer(
     const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
     if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
         state.endpoint_zero_max_packet_size == 0 or state.configuration_set or
-        state.endpoint_configured or
+        state.boot_protocol_set or state.endpoint_configured or
         keyboard.configuration_value != configuration.configuration_value)
     {
         return error.InvalidDeviceSlot;
@@ -1165,6 +1201,50 @@ fn submitSetConfigurationTransfer(
     state.action = .none;
     outstanding_transfer = .{
         .kind = .set_configuration,
+        .status_trb_address = status_address,
+        .port_id = port_id,
+        .slot_id = state.slot_id,
+        .deadline = tsc_clock.afterMilliseconds(CONTROL_TRANSFER_TIMEOUT_MILLISECONDS),
+    };
+    try xhci.ringDeviceDoorbell(capabilities, state.slot_id, xhci.ENDPOINT_ZERO_DCI, reader);
+}
+
+fn submitSetBootProtocolTransfer(
+    port_id: u8,
+    state: *PortRuntimeState,
+    reader: *ExtendedCapabilityReader,
+) Error!void {
+    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
+    const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
+    const configuration = state.configuration_descriptor orelse
+        return error.InvalidDeviceSlot;
+    const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
+    if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
+        state.endpoint_zero_max_packet_size == 0 or !state.configuration_set or
+        state.boot_protocol_set or state.endpoint_configured or
+        keyboard.configuration_value != configuration.configuration_value)
+    {
+        return error.InvalidDeviceSlot;
+    }
+
+    const ring_address = try plan.arena.controlTransferRingAddress(state.slot_id);
+    const producer = &control_producers[state.slot_id];
+    _ = try writeRingTrb(
+        producer,
+        ring_address,
+        plan.arena.control_transfer_ring_trbs,
+        xhci.setBootProtocolSetupStage(keyboard.interface_number, producer.cycle_state),
+    );
+    const status_address = try writeRingTrb(
+        producer,
+        ring_address,
+        plan.arena.control_transfer_ring_trbs,
+        xhci.controlInStatusStage(producer.cycle_state),
+    );
+    publishDmaStructures();
+    state.action = .none;
+    outstanding_transfer = .{
+        .kind = .set_boot_protocol,
         .status_trb_address = status_address,
         .port_id = port_id,
         .slot_id = state.slot_id,
@@ -1204,7 +1284,7 @@ fn prepareConfigureBootKeyboardInputContext(state: *const PortRuntimeState) Erro
         return error.InvalidDeviceSlot;
     const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
     if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
-        !state.configuration_set or state.endpoint_configured or
+        !state.configuration_set or !state.boot_protocol_set or state.endpoint_configured or
         keyboard.configuration_value != configuration.configuration_value)
     {
         return error.InvalidDeviceSlot;
