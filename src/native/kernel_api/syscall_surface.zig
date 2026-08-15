@@ -922,7 +922,7 @@ test "syscall surface rejects spoofed subject task ids" {
     try std.testing.expectEqual(abi.DenialReason.scope_violation, zero_subject_result.denial_reason);
 }
 
-test "syscall surface copies and bounds embedded user buffers" {
+test "syscall surface validates and bounds embedded user buffers" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
@@ -969,6 +969,22 @@ test "syscall surface copies and bounds embedded user buffers" {
         0,
     );
     try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, oversized.status);
+
+    const invalid_payload_ptr: [*]const u8 = @ptrFromInt(0x1000);
+    const invalid_payload_request = component_port.EndpointSendRequest{
+        .header = component_port.makeHeader(.endpoint_send, 95, test_kernel.session_task_id),
+        .endpoint_capability_id = test_kernel.authority_capability_id,
+        .payload = invalid_payload_ptr[0..1],
+    };
+    const invalid_payload = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&invalid_payload_request),
+        0,
+        0,
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, invalid_payload.status);
 }
 
 test "address-space range validation requires full mapped coverage and permissions" {

@@ -267,6 +267,21 @@ test "endpoints connect and exchange queued messages" {
     try std.testing.expectEqualStrings("hello", payload[0..received.len]);
 }
 
+test "queued endpoint messages own their payload" {
+    var table = Table.init();
+    const left = try table.create(ids.task(10), "left", .{});
+    const right = try table.create(ids.task(11), "right", .{});
+    try table.connect(left.id, right.id);
+
+    var source = [_]u8{ 'o', 'r', 'i', 'g', 'i', 'n', 'a', 'l' };
+    try table.send(left.id, ids.task(10), 78, &source, null, false);
+    @memset(&source, 'x');
+
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(right.id, &payload)).?;
+    try std.testing.expectEqualStrings("original", payload[0..received.len]);
+}
+
 test "endpoint descriptors track peer links and queue depth" {
     var table = Table.init();
     const left = try table.create(ids.task(10), "left", .{});

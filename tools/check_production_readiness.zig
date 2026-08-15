@@ -3041,6 +3041,8 @@ fn validateUserspaceDriverDataPathTrack(
     const component_port_path = "src/native/kernel_api/component_port.zig";
     const native_kernel_path = "src/native/kernel_api/native_kernel.zig";
     const device_syscalls_path = "src/native/kernel_api/device_syscalls.zig";
+    const endpoint_syscalls_path = "src/native/kernel_api/endpoint_syscalls.zig";
+    const syscall_dispatch_path = "src/native/kernel_api/syscall_dispatch.zig";
     const syscall_surface_path = "src/native/kernel_api/syscall_surface.zig";
     const compositor_session_path = "src/native/platform/compositor_session.zig";
     const session_manager_boot_flow_path = "src/native/session/session_manager_boot_flow.zig";
@@ -3059,6 +3061,8 @@ fn validateUserspaceDriverDataPathTrack(
     const component_port_source = try readRequiredSource(allocator, io, errors, component_port_path) orelse return;
     const native_kernel_source = try readRequiredSource(allocator, io, errors, native_kernel_path) orelse return;
     const device_syscalls_source = try readRequiredSource(allocator, io, errors, device_syscalls_path) orelse return;
+    const endpoint_syscalls_source = try readRequiredSource(allocator, io, errors, endpoint_syscalls_path) orelse return;
+    const syscall_dispatch_source = try readRequiredSource(allocator, io, errors, syscall_dispatch_path) orelse return;
     const syscall_surface_source = try readRequiredSource(allocator, io, errors, syscall_surface_path) orelse return;
     const compositor_session_source = try readRequiredSource(allocator, io, errors, compositor_session_path) orelse return;
     const session_manager_boot_flow_source = try readRequiredSource(allocator, io, errors, session_manager_boot_flow_path) orelse return;
@@ -3144,6 +3148,25 @@ fn validateUserspaceDriverDataPathTrack(
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
             try common.addError(errors, allocator, "Compact endpoint receive ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
+    }
+    const direct_endpoint_send_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "pub fn borrowImmediateUserSlice(" },
+        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "immediate user slice borrow preserves identity and enforces bounds" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "request.payload = dispatch.borrowImmediateUserSlice(memory, request.payload, endpoint.MAX_MESSAGE_BYTES)" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGenerated(.endpoint_send, port, request, now_ticks)" },
+        .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "invalid_payload_ptr[0..1]" },
+    };
+    for (direct_endpoint_send_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Direct endpoint send path must retain snippet in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    if (std.mem.indexOf(u8, endpoint_syscalls_source, "var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8") != null) {
+        try common.addError(errors, allocator, "Endpoint send must not reintroduce the redundant kernel staging buffer", .{});
     }
     const surface_presentation_abi_snippets = [_]struct {
         path: []const u8,

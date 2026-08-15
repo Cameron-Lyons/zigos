@@ -54,6 +54,15 @@ pub fn copyUserSlice(memory: UserMemoryContext, slice: []const u8, dest: []u8) ?
     return dest[0..slice.len];
 }
 
+/// The returned borrow is valid only for a synchronous consumer that copies the
+/// bytes before returning to userspace.
+pub fn borrowImmediateUserSlice(memory: UserMemoryContext, slice: []const u8, max_len: usize) ?[]const u8 {
+    if (slice.len > max_len) return null;
+    if (slice.len == 0) return &[_]u8{};
+    if (!validateUserRange(memory, @intFromPtr(slice.ptr), slice.len, 1, .read)) return null;
+    return slice;
+}
+
 pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, alignment: usize, access: UserMemoryAccess) bool {
     if (len == 0) return true;
     if (addr == 0 or addr < USER_POINTER_FLOOR) return false;
@@ -351,4 +360,17 @@ fn regionAllows(access: task_runtime.SegmentAccess, requested: UserMemoryAccess)
         .read => access.read,
         .write => access.write,
     };
+}
+
+test "immediate user slice borrow preserves identity and enforces bounds" {
+    const memory = UserMemoryContext{ .address_space = null };
+    const payload = "endpoint-payload";
+    const borrowed = borrowImmediateUserSlice(memory, payload, payload.len).?;
+
+    try std.testing.expectEqual(@intFromPtr(payload.ptr), @intFromPtr(borrowed.ptr));
+    try std.testing.expectEqualStrings(payload, borrowed);
+    try std.testing.expect(borrowImmediateUserSlice(memory, payload, payload.len - 1) == null);
+
+    const invalid_ptr: [*]const u8 = @ptrFromInt(0x1000);
+    try std.testing.expect(borrowImmediateUserSlice(memory, invalid_ptr[0..1], 1) == null);
 }

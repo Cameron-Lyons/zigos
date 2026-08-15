@@ -44,8 +44,7 @@ pub fn dispatchEndpointSend(
     _ = response_len;
     _ = response_addr;
     var request = dispatch.readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
-    request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer) orelse return dispatch.invalidRequest();
+    request.payload = dispatch.borrowImmediateUserSlice(memory, request.payload, endpoint.MAX_MESSAGE_BYTES) orelse return dispatch.invalidRequest();
     component_port.invokeGenerated(.endpoint_send, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.success();
 }
