@@ -620,7 +620,8 @@ pub const Service = struct {
 
     pub fn physicalInputReportCount(self: *const Service) usize {
         const focused_count = if (self.focused_input) |router| router.reports_accepted else 0;
-        return focused_count + if (self.modeled_input) |source| source.reportCount() else 0;
+        const modeled_count = if (self.modeled_input) |source| source.reportCount() else 0;
+        return focused_count +| modeled_count;
     }
 
     pub fn physicalInputCommandCount(self: *const Service) usize {
@@ -637,7 +638,7 @@ pub const Service = struct {
             if (source.inputProof()) |proof| proof.event_count else 0
         else
             0;
-        return focused_count + modeled_count;
+        return focused_count +| modeled_count;
     }
 
     pub fn initProfiled(
@@ -1328,6 +1329,13 @@ test "permission input consumes only centrally routed events for its focused tas
     bindSystemInputRouter(&router);
     defer clearSystemInputRouter();
     var service = Service.init(1, 2, &runtime, &.{});
+    var modeled_input = try ModeledInputSource.initDefault();
+    try modeled_input.enqueueTextCommand(
+        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        "deny",
+    );
+    service.bindModeledInput(&modeled_input);
     try std.testing.expect(service.focused_input != null);
     var command_buffer: [MAX_INPUT_LINE]u8 = undefined;
     var bundle = manifest_fixtures.notesBundle();
@@ -1336,6 +1344,8 @@ test "permission input consumes only centrally routed events for its focused tas
         "ok",
         service.readCommandLine(&command_buffer, bundle, bundle.requested_permissions[0], 1),
     );
+    try std.testing.expectEqual(router.reports_accepted + modeled_input.reportCount(), service.physicalInputReportCount());
+    try std.testing.expectEqual(modeled_input.inputProof().?.event_count, service.physicalInputEventCount());
 }
 
 test "hosted modeled xHCI reports still count when a focused router is bound" {

@@ -38,6 +38,16 @@ else
 const include_verification_evidence = kernel_config.includesVerificationEvidence();
 const NxProbeTarget = if (include_verification_evidence) u32 else void;
 
+pub const ExecutionOutcome = enum(u8) {
+    unavailable,
+    yielded,
+    wait_for_event,
+
+    pub fn handedOff(self: ExecutionOutcome) bool {
+        return self != .unavailable;
+    }
+};
+
 const freestanding = if (builtin.target.os.tag == .freestanding)
     struct {
         pub const gdt = @import("../../kernel/interrupts/gdt64.zig");
@@ -285,6 +295,7 @@ pub const Executor = struct {
     last_trap_instruction_pointer: u32 = 0,
     last_trap_stack_pointer: u32 = 0,
     last_trap_counter: u32 = 0,
+    last_yield_disposition: userspace_bootstrap_mailbox.YieldDisposition = .runnable,
     last_fault_task_id: u64 = 0,
     last_fault_address_space_id: u64 = 0,
     last_fault_address: u32 = 0,
@@ -454,19 +465,19 @@ pub const Executor = struct {
         capability_table: *const capability.CapabilityTable,
         task_id: u64,
         now_ticks: u64,
-    ) bool {
-        if (builtin.target.os.tag != .freestanding) return false;
-        if (self.bound_runtime != runtime) return false;
+    ) ExecutionOutcome {
+        if (builtin.target.os.tag != .freestanding) return .unavailable;
+        if (self.bound_runtime != runtime) return .unavailable;
         self.init();
 
-        const task = runtime.find(task_id) orelse return false;
-        if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return false;
+        const task = runtime.find(task_id) orelse return .unavailable;
+        if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
 
-        const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
-        const image = catalog.findById(task.launch.image_id) orelse return false;
-        if (!image.elf_file.isPresent()) return false;
+        const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
+        const image = catalog.findById(task.launch.image_id) orelse return .unavailable;
+        if (!image.elf_file.isPresent()) return .unavailable;
 
-        const mapping = self.ensureMaterialized(address_space, image) catch return false;
+        const mapping = self.ensureMaterialized(address_space, image) catch return .unavailable;
         self.initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
         const trap_stack_top = prepareKernelStack();
@@ -490,7 +501,7 @@ pub const Executor = struct {
 
         const nx_probe_target = if (include_verification_evidence and
             (image.contract_flags & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
-            std.math.cast(u32, image.bootstrap_mailbox_address) orelse return false
+            std.math.cast(u32, image.bootstrap_mailbox_address) orelse return .unavailable
         else
             0;
 
@@ -499,6 +510,7 @@ pub const Executor = struct {
         if (comptime include_verification_evidence) self.active_nx_probe_target = nx_probe_target;
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
+        self.last_yield_disposition = .runnable;
         zigos_userspace_resume_requested = 0;
 
         freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
@@ -529,7 +541,11 @@ pub const Executor = struct {
             self.resume_marker_printed = true;
         }
         self.drainPendingRetirements();
-        return self.handoff_completed;
+        if (!self.handoff_completed) return .unavailable;
+        return switch (self.last_yield_disposition) {
+            .runnable => .yielded,
+            .wait_for_event => .wait_for_event,
+        };
     }
 
     pub fn materializeTaskForProof(
@@ -787,6 +803,8 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
         native_util.impossibleByInvariant("userspace stack pointer exceeds the low-address sandbox");
     const counter = std.math.cast(u32, frame.eax) orelse
         native_util.impossibleByInvariant("userspace trap counter exceeds its ABI width");
+    const disposition_raw = std.math.cast(u32, frame.esi) orelse
+        native_util.impossibleByInvariant("userspace yield disposition exceeds its ABI width");
     @call(.never_inline, recordTrapState, .{
         executor,
         instruction_pointer,
@@ -800,6 +818,7 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     captureUserContext64(mapping, frame);
     mapping.yield_count += 1;
     mapping.last_user_counter = executor.last_trap_counter;
+    executor.last_yield_disposition = userspace_bootstrap_mailbox.yieldDisposition(disposition_raw) orelse .runnable;
 
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;

@@ -115,7 +115,9 @@ observable boot markers.
 - Focused hardware input crosses the native ABI as bounded semantic events.
   The compositor routes each event to one task, the session grants a dedicated
   task-scoped receive capability, and UI processes drain a fixed event budget
-  without sharing router memory or raw HID reports.
+  without sharing router memory or raw HID reports. Once that budget reaches an
+  empty queue, the process yields with an event-wait disposition and stays off
+  the ready queue until focused work wakes it.
 - Identity is passwordless and device-bound. Zigos models
   [FIDO-style passkeys](https://fidoalliance.org/passkeys/), recovery keys,
   hardware roots, and threshold recovery; administration is delegated through
