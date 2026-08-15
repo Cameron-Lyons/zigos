@@ -69,6 +69,13 @@ const InputRecvRequest = extern struct {
     receiver_task_id: u64,
 };
 
+const SurfacePresentRequest = struct {
+    header: abi.RequestHeader,
+    presentation_capability_id: u64,
+    presenter_task_id: u64,
+    presentation: abi.SurfacePresentation,
+};
+
 const INPUT_EVENTS_PER_DISPATCH: usize = 8;
 
 const contract_bindings = if (builtin.target.os.tag == .freestanding)
@@ -89,7 +96,29 @@ var ui_state: ui_surface_state.State = .{};
 
 const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
     struct {
-        extern fn syscall3_asm(request_addr: usize, response_addr: usize, response_len: usize) callconv(.c) usize;
+        const Outcome = extern struct {
+            status: u32,
+            bytes_written: u32,
+            denial_reason: u16,
+            _reserved: u16 = 0,
+        };
+
+        comptime {
+            if (@sizeOf(Outcome) != 12 or
+                @offsetOf(Outcome, "status") != 0 or
+                @offsetOf(Outcome, "bytes_written") != 4 or
+                @offsetOf(Outcome, "denial_reason") != 8)
+            {
+                @compileError("userspace syscall result no longer matches the assembly ABI");
+            }
+        }
+
+        extern fn syscall3_asm(
+            request_addr: usize,
+            response_addr: usize,
+            response_len: usize,
+            outcome: *Outcome,
+        ) callconv(.c) usize;
         extern fn syscall_yield_asm(
             counter: u32,
             disposition: mailbox.YieldDisposition,
@@ -97,14 +126,28 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
         ) callconv(.c) u32;
         extern fn zigos_probe_nx(target: usize) callconv(.c) void;
 
-        fn call(request_addr: usize, response_addr: usize, response_len: usize) abi.SyscallStatus {
-            return @enumFromInt(syscall3_asm(request_addr, response_addr, response_len));
+        fn call(request_addr: usize, response_addr: usize, response_len: usize) struct {
+            status: abi.SyscallStatus,
+            bytes_written: u32,
+            denial_reason: abi.DenialReason,
+        } {
+            var outcome = Outcome{ .status = @intFromEnum(abi.SyscallStatus.internal_error), .bytes_written = 0, .denial_reason = 0 };
+            _ = syscall3_asm(request_addr, response_addr, response_len, &outcome);
+            return .{
+                .status = @enumFromInt(outcome.status),
+                .bytes_written = outcome.bytes_written,
+                .denial_reason = @enumFromInt(outcome.denial_reason),
+            };
         }
     }
 else
     struct {
-        fn call(_: usize, _: usize, _: usize) abi.SyscallStatus {
-            return .unavailable;
+        fn call(_: usize, _: usize, _: usize) struct {
+            status: abi.SyscallStatus,
+            bytes_written: u32,
+            denial_reason: abi.DenialReason,
+        } {
+            return .{ .status = .unavailable, .bytes_written = 0, .denial_reason = .none };
         }
     };
 
@@ -169,10 +212,9 @@ pub fn zigos_userspace_service_main(
     initializeUiState(bundle_id, contract_flags);
     publishState(.descriptor_ready, detail, 1);
 
-    if (zigos_userspace_bootstrap.authority_capability_id != 0 and zigos_userspace_bootstrap.task_id != 0) {
-        publishState(.mailbox_ready, detail, 2);
-        runStartupQueries(detail);
-    }
+    waitForServiceBootstrapAuthority(detail);
+    publishState(.mailbox_ready, detail, 2);
+    runStartupQueries(detail);
 
     publishServiceReady(service_kind, detail);
     runSteadyState(
@@ -180,6 +222,14 @@ pub fn zigos_userspace_service_main(
         descriptor.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
     );
+}
+
+fn waitForServiceBootstrapAuthority(detail: mailbox.Detail) void {
+    var pulse: u16 = 1;
+    while (zigos_userspace_bootstrap.authority_capability_id == 0 or zigos_userspace_bootstrap.task_id == 0) {
+        publishStateWithDisposition(.mailbox_ready, detail, pulse, .runnable);
+        pulse +%= 1;
+    }
 }
 
 fn runStartupQueries(detail: mailbox.Detail) void {
@@ -198,7 +248,8 @@ fn runStartupQueries(detail: mailbox.Detail) void {
 }
 
 fn publishServiceReady(comptime service_kind: ServiceKind, detail: mailbox.Detail) void {
-    const proof = runServiceStartupIpc(service_kind) orelse signalFault(detail, 0x21);
+    var failure_code: u8 = 0x21;
+    const proof = runServiceStartupIpc(service_kind, &failure_code) orelse signalFault(detail, failure_code);
     zigos_userspace_bootstrap.service_kind = @intFromEnum(service_kind);
     zigos_userspace_bootstrap.service_ready = 1;
     zigos_userspace_bootstrap.service_operation_count = proof.operation_count;
@@ -219,24 +270,29 @@ const ServiceStartupProof = struct {
     flags: mailbox.ServiceStatusFlags = .{},
 };
 
-fn runServiceStartupIpc(comptime service_kind: ServiceKind) ?ServiceStartupProof {
+fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?ServiceStartupProof {
     const authority_capability_id = zigos_userspace_bootstrap.authority_capability_id;
     const task_id = zigos_userspace_bootstrap.task_id;
     if (authority_capability_id == 0 or task_id == 0) return null;
 
     const service_plan = service_protocol.planFor(service_kind);
+    failure_code.* = 0x22;
     const service_endpoint = endpointCreate(
         authority_capability_id,
         task_id,
         service_plan.endpoint_label,
         .{ .local_only = true, .service_port = true },
+        failure_code,
     ) orelse return null;
+    failure_code.* = 0x23;
     const peer_endpoint = endpointCreate(
         authority_capability_id,
         task_id,
         "userspace-service-self-check",
         .{ .local_only = true },
+        failure_code,
     ) orelse return null;
+    failure_code.* = 0x24;
     _ = endpointConnect(
         peer_endpoint.capability_id,
         service_endpoint.capability_id,
@@ -254,6 +310,7 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind) ?ServiceStartupProof
     };
 
     for (service_plan.slice(), 0..) |operation, index| {
+        failure_code.* = 0x25;
         var request_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
         const request_payload = service_protocol.encodeRequest(
             &request_buffer,
@@ -261,33 +318,45 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind) ?ServiceStartupProof
             operation,
             index,
         ) catch return null;
+        failure_code.* = 0x26;
         if (!endpointSend(peer_endpoint.capability_id, request_payload)) return null;
 
+        failure_code.* = 0x27;
         const received_request = endpointRecv(service_endpoint.capability_id, task_id) orelse return null;
+        failure_code.* = 0x28;
         if (received_request.present == 0) return null;
         const received_request_len: usize = @intCast(received_request.message.payload_len);
+        failure_code.* = 0x29;
         const decoded_request = service_protocol.decodeRequest(
             received_request.payload[0..received_request_len],
         ) catch return null;
+        failure_code.* = 0x2A;
         if (!service_protocol.requestMatchesOperation(decoded_request, service_kind, operation, index)) return null;
         proof.flags.request_received = true;
 
         proof.state_hash = service_protocol.foldOperation(proof.state_hash, operation, index);
+        failure_code.* = 0x2B;
         var response_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
         const response_payload = service_protocol.encodeResponse(
             &response_buffer,
             decoded_request,
             proof.state_hash,
         ) catch return null;
+        failure_code.* = 0x2C;
         if (!endpointSend(service_endpoint.capability_id, response_payload)) return null;
 
+        failure_code.* = 0x2D;
         const received_response = endpointRecv(peer_endpoint.capability_id, task_id) orelse return null;
+        failure_code.* = 0x2E;
         if (received_response.present == 0) return null;
         const received_response_len: usize = @intCast(received_response.message.payload_len);
+        failure_code.* = 0x2F;
         const decoded_response = service_protocol.decodeResponse(
             received_response.payload[0..received_response_len],
         ) catch return null;
+        failure_code.* = 0x30;
         if (!service_protocol.requestMatchesOperation(decoded_response, service_kind, operation, index)) return null;
+        failure_code.* = 0x31;
         if (decoded_response.state_hash != proof.state_hash) return null;
         proof.flags.response_received = true;
         proof.operation_count += 1;
@@ -295,6 +364,7 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind) ?ServiceStartupProof
     }
 
     proof.flags.all_operations_completed = proof.operation_count == @as(u16, @intCast(service_plan.operation_count));
+    failure_code.* = 0x32;
     if (!proof.flags.all_operations_completed) return null;
     return proof;
 }
@@ -323,7 +393,7 @@ fn invalidSyscallPointerStatus() abi.SyscallStatus {
         mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR,
         @intFromPtr(&response),
         @sizeOf(abi.TimeQueryResponse),
-    );
+    ).status;
 }
 
 fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
@@ -366,6 +436,7 @@ fn endpointCreate(
     task_id: u64,
     label: []const u8,
     flags: EndpointFlags,
+    failure_code: *u8,
 ) ?abi.EndpointCreateResponse {
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
     var request = EndpointCreateRequest{
@@ -375,7 +446,18 @@ fn endpointCreate(
         .label = label,
         .flags = flags,
     };
-    if (trapCall(&request, &response) != .success) return null;
+    const result = freestanding_syscall.call(
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(@TypeOf(response)),
+    );
+    if (result.status != .success) {
+        failure_code.* = if (result.status == .denied)
+            0x90 | @as(u8, @truncate(@intFromEnum(result.denial_reason)))
+        else
+            0x80 | @as(u8, @truncate(@intFromEnum(result.status)));
+        return null;
+    }
     if (response.endpoint.endpoint_id == 0 or response.capability_id == 0) return null;
     return response;
 }
@@ -426,6 +508,30 @@ fn inputRecv(input_capability_id: u64, task_id: u64) ?abi.InputRecvResponse {
     };
     if (trapCall(&request, &response) != .success) return null;
     return response;
+}
+
+const SurfacePresentOutcome = struct {
+    status: abi.SyscallStatus,
+    accepted: bool = false,
+};
+
+fn surfacePresent(
+    presentation_capability_id: u64,
+    task_id: u64,
+    presentation: abi.SurfacePresentation,
+) SurfacePresentOutcome {
+    var response = std.mem.zeroes(abi.BoolResponse);
+    var request = SurfacePresentRequest{
+        .header = makeHeader(.surface_present, nextCorrelationId(), task_id),
+        .presentation_capability_id = presentation_capability_id,
+        .presenter_task_id = task_id,
+        .presentation = presentation,
+    };
+    const status = trapCall(&request, &response);
+    return .{
+        .status = status,
+        .accepted = status == .success and response.value != 0,
+    };
 }
 
 const InputDrain = struct {
@@ -488,12 +594,33 @@ fn publishUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
     state.ui_interaction_hash = surface.interaction_hash;
 }
 
+fn presentUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.State) bool {
+    if (state.ui_presented_revision == surface.revision) return true;
+    if (state.surface_presentation_capability_id == 0 or state.task_id == 0 or state.ui_surface_id == 0) return false;
+
+    const presentation = surface.presentation(state.ui_surface_id);
+    const outcome = surfacePresent(
+        state.surface_presentation_capability_id,
+        state.task_id,
+        presentation,
+    );
+    state.ui_last_presentation_status = @intFromEnum(outcome.status);
+    if (!outcome.accepted) {
+        state.ui_presentation_failures +|= 1;
+        return false;
+    }
+    state.ui_presented_revision = surface.revision;
+    return true;
+}
+
 fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime consumes_input: bool) noreturn {
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
     while (true) {
         const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
-            break :wait if (drainFocusedInput().exhausted) .wait_for_event else .runnable;
+            const input = drainFocusedInput();
+            _ = presentUiState(&zigos_userspace_bootstrap, &ui_state);
+            break :wait if (input.exhausted) .wait_for_event else .runnable;
         } else .runnable;
         publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
@@ -535,11 +662,11 @@ fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
         @intFromPtr(request),
         @intFromPtr(response),
         @sizeOf(@TypeOf(response.*)),
-    );
+    ).status;
 }
 
 fn trapCallNoResponse(request: anytype) abi.SyscallStatus {
-    return freestanding_syscall.call(@intFromPtr(request), 0, 0);
+    return freestanding_syscall.call(@intFromPtr(request), 0, 0).status;
 }
 
 fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
@@ -574,7 +701,7 @@ test "fault codes stay stable for the same message" {
 }
 
 test "focused input telemetry rejects foreign events and records valid semantic input" {
-    var state = mailbox.Mailbox{ .task_id = 41 };
+    var state = mailbox.Mailbox{ .task_id = 41, .ui_surface_id = 13 };
     var surface = ui_surface_state.State.init("app.notes");
     const event = abi.InputEventDescriptor{
         .sequence = 7,
@@ -602,6 +729,20 @@ test "focused input telemetry rejects foreign events and records valid semantic 
     foreign.kind = 0xFF;
     try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
+}
+
+test "hosted UI presentation records unavailable transport without acknowledging revision" {
+    var state = mailbox.Mailbox{
+        .task_id = 41,
+        .surface_presentation_capability_id = 99,
+        .ui_surface_id = 13,
+    };
+    const surface = ui_surface_state.State.init("app.notes");
+
+    try std.testing.expect(!presentUiState(&state, &surface));
+    try std.testing.expectEqual(@as(u64, 0), state.ui_presented_revision);
+    try std.testing.expectEqual(@as(u32, 1), state.ui_presentation_failures);
+    try std.testing.expectEqual(@intFromEnum(abi.SyscallStatus.unavailable), state.ui_last_presentation_status);
 }
 
 test "userspace service startup plans expose domain-specific endpoint operations" {

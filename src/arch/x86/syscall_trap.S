@@ -3,8 +3,12 @@
 .globl syscall3_asm
 .type syscall3_asm, @function
 syscall3_asm:
+    mov %rcx, %r8
     mov $1, %eax
     syscall
+    mov %eax, 0(%r8)
+    mov %edx, 4(%r8)
+    mov %r10w, 8(%r8)
     ret
 
 .globl syscall_yield_asm

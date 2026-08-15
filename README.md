@@ -60,6 +60,9 @@ requests.
   the host verifier is deliberately not one of the signed OS targets or a
   trust bootstrap for itself. It checks signatures, revocation, subjects,
   reproducible digests, measurements, and post-quantum rollout policy.
+  Measured policy roots cover boot service, device, and policy authority while
+  excluding live resource grants and runtime issuance timestamps, so identical
+  cold boots remain reproducible regardless of user activity or timer phase.
   Ed25519 is the classical signing baseline; production PQC is represented
   by a separate ML-DSA-65 provider boundary with FIPS validation metadata
   and fail-closed verifier requirements.
@@ -122,7 +125,11 @@ observable boot markers.
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
   Native ABI v4 also defines a task-scoped, fixed-size surface presentation that
-  is copied into compositor-owned storage with monotonic revision checks.
+  is copied into compositor-owned storage with monotonic revision checks. UI
+  processes coalesce each bounded input drain into one revision submission,
+  acknowledge only accepted revisions, and park when no more focused input is
+  queued. Production boot now proves that the compositor's userspace revision
+  crosses the syscall boundary and is rendered from the compositor-owned copy.
 - Identity is passwordless and device-bound. Zigos models
   [FIDO-style passkeys](https://fidoalliance.org/passkeys/), recovery keys,
   hardware roots, and threshold recovery; administration is delegated through

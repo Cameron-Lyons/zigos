@@ -70,7 +70,9 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
                 .broker_only = true,
             },
             .lease = .{
-                .issued_at_ticks = request.entry.boot_tick,
+                // Contract ticks order the boot graph; they are not the runtime
+                // timer domain used to authorize userspace syscalls.
+                .issued_at_ticks = 0,
                 .expires_at_ticks = std.math.maxInt(u64),
                 .renewable = false,
             },
@@ -108,7 +110,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
             service_task.task_id,
             bootstrap_rights,
             request.entry.boot_correlation_base + 1,
-            request.entry.boot_tick,
+            0,
         );
         break :blk .{ service_task.task_id, derived_authority };
     };

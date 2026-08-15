@@ -447,7 +447,7 @@ pub const Runtime = struct {
         return self.tasks.handleForIndex(slot_index);
     }
 
-    fn findConst(self: *const Runtime, task_id: u64) ?*const TaskRecord {
+    pub fn findConst(self: *const Runtime, task_id: u64) ?*const TaskRecord {
         if (self.indexedTaskSlotConst(task_id)) |slot| return &slot.task;
         self.debugAssertTaskIndexMissAbsent(task_id);
         return null;

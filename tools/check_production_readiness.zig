@@ -1210,6 +1210,7 @@ fn validateNuc11tnki5KernelProofSources(
         "const device_id = try",
         "driver_service.authorityTarget(device_id)",
         ".device_id = device_id",
+        ".issued_at_ticks = 0",
     };
     for (required_service_bootstrap_snippets) |snippet| {
         if (std.mem.indexOf(u8, service_bootstrap_source, snippet) == null) {
@@ -1728,7 +1729,7 @@ fn validateNuc11tnki5KernelProofSources(
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "recordInputEvent" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "publishUiState" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "mailbox.FLAG_OWNS_UI_SURFACE" },
-        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = 512" },
+        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = abi.SURFACE_PRESENTATION_TEXT_BYTES" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn modelForBundle" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "test \"Notes UI state edits and commits document text\"" },
     };
@@ -3043,6 +3044,12 @@ fn validateUserspaceDriverDataPathTrack(
     const syscall_surface_path = "src/native/kernel_api/syscall_surface.zig";
     const compositor_session_path = "src/native/platform/compositor_session.zig";
     const session_manager_boot_flow_path = "src/native/session/session_manager_boot_flow.zig";
+    const userspace_mailbox_path = "src/native/task/userspace_bootstrap_mailbox.zig";
+    const userspace_executor_path = "src/native/task/userspace_executor.zig";
+    const userspace_runtime_path = "src/userspace/runtime.zig";
+    const userspace_ui_state_path = "src/userspace/ui_surface_state.zig";
+    const native_smoke_markers_path = "src/native_smoke_markers.zig";
+    const trust_boot_path = "src/native/session/trust_boot.zig";
     const bootstrap_driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
     const driver_runtime_path = "src/native/drivers/driver_runtime.zig";
     const driver_spec_path = "src/tests/spec/drivers_storage_sync.zig";
@@ -3055,6 +3062,12 @@ fn validateUserspaceDriverDataPathTrack(
     const syscall_surface_source = try readRequiredSource(allocator, io, errors, syscall_surface_path) orelse return;
     const compositor_session_source = try readRequiredSource(allocator, io, errors, compositor_session_path) orelse return;
     const session_manager_boot_flow_source = try readRequiredSource(allocator, io, errors, session_manager_boot_flow_path) orelse return;
+    const userspace_mailbox_source = try readRequiredSource(allocator, io, errors, userspace_mailbox_path) orelse return;
+    const userspace_executor_source = try readRequiredSource(allocator, io, errors, userspace_executor_path) orelse return;
+    const userspace_runtime_source = try readRequiredSource(allocator, io, errors, userspace_runtime_path) orelse return;
+    const userspace_ui_state_source = try readRequiredSource(allocator, io, errors, userspace_ui_state_path) orelse return;
+    const native_smoke_markers_source = try readRequiredSource(allocator, io, errors, native_smoke_markers_path) orelse return;
+    const trust_boot_source = try readRequiredSource(allocator, io, errors, trust_boot_path) orelse return;
     const bootstrap_driver_port_source = try readRequiredSource(allocator, io, errors, bootstrap_driver_port_path) orelse return;
     const driver_runtime_source = try readRequiredSource(allocator, io, errors, driver_runtime_path) orelse return;
     const driver_spec_source = try readRequiredSource(allocator, io, errors, driver_spec_path) orelse return;
@@ -3126,12 +3139,35 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeOperation(.surface_present" },
         .{ .path = compositor_session_path, .source = compositor_session_source, .snippet = "pub fn presentSurface(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 4" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 192" },
+        .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = "selectSurfacePresentationCapability" },
+        .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn presentUiState(" },
+        .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const input = drainFocusedInput();" },
+        .{ .path = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn presentation(" },
+        .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "provisionSurfacePresentationCapabilities" },
+        .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "proveUserspaceSurfacePresentation" },
+        .{ .path = native_smoke_markers_path, .source = native_smoke_markers_source, .snippet = "boot_markers.userspace_surface_presentation_ready" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "syscall surface copies bounded presentations through task-scoped authority" },
     };
     for (surface_presentation_abi_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
             try common.addError(errors, allocator, "Surface presentation ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
+    }
+    const reproducible_policy_measurement_snippets = [_][]const u8{
+        "capabilityTargetAffectsProductionPolicy",
+        ".service, .device, .policy => true",
+        ".task, .endpoint, .shared_memory, .object, .workspace, .network_policy => false",
+        "test \"production policy measurement excludes runtime resource grants\"",
+    };
+    for (reproducible_policy_measurement_snippets) |snippet| {
+        if (std.mem.indexOf(u8, trust_boot_source, snippet) == null) {
+            try common.addError(errors, allocator, "Measured policy roots must exclude runtime resource grants: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, trust_boot_source, "capability-issued-at") != null) {
+        try common.addError(errors, allocator, "Measured policy roots must not include runtime capability issuance timestamps", .{});
     }
     const port_abi_sources = [_]struct {
         path: []const u8,

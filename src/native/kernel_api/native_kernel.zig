@@ -52,7 +52,7 @@ pub const SurfacePresentationReceiver = struct {
     context: *anyopaque,
     present: *const fn (
         context: *anyopaque,
-        task_id: u64,
+        task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
     ) SurfacePresentStatus,
 };
@@ -622,10 +622,11 @@ pub const Kernel = struct {
             .request_task_id = presenter_task_id,
         });
         const task = self.runtime.find(presenter_task_id) orelse return error.TaskNotFound;
+        if (task.state != .active) return error.InvalidSurfacePresentation;
         if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.ScopeViolation;
         if (!abi.isCanonicalSurfacePresentation(presentation)) return error.InvalidSurfacePresentation;
         const receiver = self.surface_presentation_receiver orelse return error.SurfacePresentationUnavailable;
-        return switch (receiver.present(receiver.context, presenter_task_id, presentation)) {
+        return switch (receiver.present(receiver.context, task, presentation)) {
             .accepted, .duplicate => true,
             .stale => error.StaleSurfacePresentation,
             .invalid_surface => error.InvalidSurfacePresentation,

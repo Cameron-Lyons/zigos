@@ -1,12 +1,13 @@
 const std = @import("std");
 
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 pub const MAILBOX_RESERVED_BYTES: usize = 3;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
 pub const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
 pub const PROOF_FOREIGN_MEMORY_ACCESS_FAULT_CODE: u8 = 0x72;
+pub const PRESENTATION_STATUS_NOT_ATTEMPTED: u32 = std.math.maxInt(u32);
 
 const userspace_flags = @import("userspace_flags.zig");
 pub const FLAG_OWNS_UI_SURFACE = userspace_flags.FLAG_OWNS_UI_SURFACE;
@@ -136,13 +137,18 @@ pub const Mailbox = extern struct {
     ui_activation_count: u32 = 0,
     ui_state_revision: u64 = 0,
     ui_interaction_hash: u64 = 0,
+    surface_presentation_capability_id: u64 = 0,
+    ui_surface_id: u64 = 0,
+    ui_presented_revision: u64 = 0,
+    ui_presentation_failures: u32 = 0,
+    ui_last_presentation_status: u32 = PRESENTATION_STATUS_NOT_ATTEMPTED,
 };
 
-pub const ABI_SIZE_BYTES: usize = 160;
+pub const ABI_SIZE_BYTES: usize = 192;
 pub const ABI_ALIGNMENT: usize = 8;
 
 comptime {
-    if (@offsetOf(Mailbox, "ui_interaction_hash") + @sizeOf(@FieldType(Mailbox, "ui_interaction_hash")) != ABI_SIZE_BYTES) {
+    if (@offsetOf(Mailbox, "ui_last_presentation_status") + @sizeOf(@FieldType(Mailbox, "ui_last_presentation_status")) != ABI_SIZE_BYTES) {
         @compileError("userspace bootstrap mailbox fields no longer match the wire ABI");
     }
 }
@@ -218,5 +224,7 @@ test "mailbox records focused input consumption without architecture-dependent p
     try @import("std").testing.expectEqual(@as(usize, 120), @offsetOf(Mailbox, "last_input_kind"));
     try @import("std").testing.expectEqual(@as(usize, 128), @offsetOf(Mailbox, "ui_model_kind"));
     try @import("std").testing.expectEqual(@as(usize, 144), @offsetOf(Mailbox, "ui_state_revision"));
+    try @import("std").testing.expectEqual(@as(usize, 160), @offsetOf(Mailbox, "surface_presentation_capability_id"));
+    try @import("std").testing.expectEqual(@as(usize, 176), @offsetOf(Mailbox, "ui_presented_revision"));
     try @import("std").testing.expectEqual(@as(usize, ABI_SIZE_BYTES), @sizeOf(Mailbox));
 }
