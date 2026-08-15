@@ -1400,6 +1400,9 @@ test "booted rendered system runs input loop compositor prompts task switching r
     const booted = system.dispatchInput(.{ .kind = .boot, .tick = 10 });
     try std.testing.expect(booted.accepted);
     try std.testing.expectEqual(booted_system.BootPhase.running, booted.phase);
+    const text_without_document = system.dispatchKeyboardEvent(.{ .kind = .text, .text = 'X' }, 10);
+    try std.testing.expect(!text_without_document.accepted);
+    try std.testing.expectEqual(HumaneShellStatus.invalid_order, text_without_document.status);
     const blocked = system.dispatchInput(.{ .kind = .open_workspace, .tick = 11 });
     try std.testing.expect(!blocked.accepted);
     try std.testing.expectEqual(HumaneShellStatus.invalid_order, blocked.status);
@@ -1457,6 +1460,23 @@ test "booted rendered system runs input loop compositor prompts task switching r
     try expectContains(recovered_rendered, "diagnostics user_visible=yes privacy=redacted evidence_of_intrusion_capable=yes");
     try expectContains(recovered_rendered, "diagnostic_evidence capability_denials=1");
     try expectContains(recovered_rendered, "error_surface visible=no status=ok");
+
+    const dismissed = system.dispatchKeyboardEvent(.{ .kind = .dismiss_recovery }, 22);
+    try std.testing.expect(dismissed.accepted);
+    try std.testing.expectEqual(booted_system.BootPhase.running, dismissed.phase);
+    const text_before = shell.documentTextSlice().len;
+    try std.testing.expect(system.dispatchKeyboardEvent(.{ .kind = .text, .text = 'X' }, 23).accepted);
+    const rejected_empty_edit = system.dispatchInput(.{ .kind = .text_input, .tick = 24 });
+    try std.testing.expect(!rejected_empty_edit.accepted);
+    try std.testing.expectEqual(HumaneShellStatus.invalid_order, rejected_empty_edit.status);
+    const staged_rendered = try system.render(&render_buffer);
+    try expectContains(staged_rendered, "hardware_text staged_bytes=");
+    try expectContains(staged_rendered, "dirty=yes commit=Ctrl+Enter");
+    const committed = system.dispatchKeyboardEvent(.{ .kind = .commit_text }, 25);
+    try std.testing.expect(committed.accepted);
+    try std.testing.expectEqual(text_before + 1, shell.documentTextSlice().len);
+    try std.testing.expectEqual(@as(u8, 'X'), shell.documentTextSlice()[text_before]);
+    try std.testing.expect(system.dispatchKeyboardEvent(.{ .kind = .focus_next }, 26).accepted);
 }
 
 test "booted notes docs loop edits shares syncs reviews rollback recovery and removes package" {
