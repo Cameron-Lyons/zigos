@@ -20,6 +20,7 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_REASON_BYTES: usize = 128;
 pub const MAX_RESOURCE_BYTES: usize = 96;
 pub const MAX_WINDOW_DETAIL_BYTES: usize = 96;
+pub const MAX_PRESENTED_SURFACES: usize = MAX_WINDOWS;
 pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
 
@@ -45,6 +46,11 @@ pub const SwitchDirection = enum(u8) {
 pub const SwitchResult = struct {
     window: *WindowRecord,
     visible_index: usize,
+};
+
+pub const PresentResult = enum(u8) {
+    accepted,
+    duplicate,
 };
 
 pub const WindowRecord = struct {
@@ -124,6 +130,16 @@ pub const ReviewItemRecord = struct {
     }
 };
 
+pub const SurfaceRecord = struct {
+    task_id: u64 = 0,
+    presentation_count: u64 = 0,
+    presentation: abi.SurfacePresentation = std.mem.zeroes(abi.SurfacePresentation),
+
+    pub fn textSlice(self: *const SurfaceRecord) []const u8 {
+        return self.presentation.textSlice();
+    }
+};
+
 pub const Error = error{
     WindowIdExhausted,
     WindowNotFound,
@@ -137,10 +153,15 @@ pub const Error = error{
     ResponseTooLarge,
     RecoveryStateMissing,
     NoVisibleWindows,
+    SurfaceTableFull,
+    MalformedPresentation,
+    StalePresentation,
+    PresentationConflict,
 };
 
 const WINDOW_INDEX_CAPACITY: usize = MAX_WINDOWS * 2;
 const REVIEW_ITEM_INDEX_CAPACITY: usize = MAX_REVIEW_ITEMS * 2;
+const SURFACE_INDEX_CAPACITY: usize = MAX_PRESENTED_SURFACES * 2;
 const WIRE_MAGIC_REQUEST = [_]u8{ 'Z', 'U', 'X', '1' };
 const WIRE_MAGIC_RESPONSE = [_]u8{ 'Z', 'U', 'R', '1' };
 const RequestWriter = binary_cursor.Writer(Error, error.RequestTooLarge);
@@ -158,8 +179,14 @@ const ReviewItemSlot = struct {
     item: ReviewItemRecord = zeroItem(),
 };
 
+const SurfaceSlot = struct {
+    in_use: bool = false,
+    surface: SurfaceRecord = .{},
+};
+
 const WindowArena = indexed_arena.IndexedArenaWithKey(u64, WindowSlot, MAX_WINDOWS, WINDOW_INDEX_CAPACITY, windowSlotId);
 const ReviewItemArena = indexed_arena.IndexedArenaWithKey(u64, ReviewItemSlot, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY, reviewItemSlotKey);
+const SurfaceArena = indexed_arena.IndexedArenaWithKey(u64, SurfaceSlot, MAX_PRESENTED_SURFACES, SURFACE_INDEX_CAPACITY, surfaceSlotId);
 const TaskBundleIndex = indexed_arena.UniqueIndex(WINDOW_INDEX_CAPACITY);
 const TaskWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
 const WindowReviewItemIndex = indexed_arena.MultimapIndex(MAX_REVIEW_ITEMS, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY);
@@ -227,6 +254,7 @@ pub const SessionSnapshot = struct {
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
     window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
+    surfaces: SurfaceArena = SurfaceArena.init(),
 };
 
 pub const CheckpointStore = struct {
@@ -251,6 +279,7 @@ pub const Session = struct {
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
     window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
+    surfaces: SurfaceArena = SurfaceArena.init(),
 
     pub fn init() Session {
         return .{};
@@ -371,6 +400,45 @@ pub const Session = struct {
         item.decision_has_lease = lease_ticks != null;
         item.decision_lease_ticks = lease_ticks orelse 0;
         return item;
+    }
+
+    pub fn presentSurface(
+        self: *Session,
+        task_id: u64,
+        presentation: *const abi.SurfacePresentation,
+    ) Error!PresentResult {
+        if (task_id == 0 or !abi.isCanonicalSurfacePresentation(presentation)) return error.MalformedPresentation;
+        if (!self.hasWindowForTaskSurface(task_id, presentation.surface_id)) return error.InvalidSurface;
+
+        if (self.surfaces.get(presentation.surface_id)) |slot| {
+            if (slot.surface.task_id != task_id) return error.InvalidSurface;
+            const previous_revision = slot.surface.presentation.revision;
+            if (presentation.revision < previous_revision) return error.StalePresentation;
+            if (presentation.revision == previous_revision) {
+                if (std.meta.eql(slot.surface.presentation, presentation.*)) return .duplicate;
+                return error.PresentationConflict;
+            }
+            slot.surface.presentation = presentation.*;
+            slot.surface.presentation_count +|= 1;
+            return .accepted;
+        }
+
+        const slot_index = self.surfaces.reserveIndex(presentation.surface_id) orelse return error.SurfaceTableFull;
+        self.surfaces.slots[slot_index].surface = .{
+            .task_id = task_id,
+            .presentation_count = 1,
+            .presentation = presentation.*,
+        };
+        return .accepted;
+    }
+
+    pub fn surfacePresentation(self: *const Session, surface_id: u64) ?*const SurfaceRecord {
+        const slot = self.surfaces.getConst(surface_id) orelse return null;
+        return &slot.surface;
+    }
+
+    pub fn presentedSurfaceCount(self: *const Session) usize {
+        return self.surfaces.countInUse();
     }
 
     pub fn findWindow(self: *Session, window_id: u64) ?*WindowRecord {
@@ -507,6 +575,7 @@ pub const Session = struct {
         if (self.findWindowConst(self.active_window_id) == null) {
             self.active_window_id = self.firstVisibleWindowId();
         }
+        self.removeSurfacesForTask(task_id);
         return closed;
     }
 
@@ -532,6 +601,7 @@ pub const Session = struct {
             .task_bundle_index = self.task_bundle_index,
             .task_window_index = self.task_window_index,
             .window_review_item_index = self.window_review_item_index,
+            .surfaces = self.surfaces,
         };
     }
 
@@ -548,6 +618,7 @@ pub const Session = struct {
         self.task_bundle_index = stored.task_bundle_index;
         self.task_window_index = stored.task_window_index;
         self.window_review_item_index = stored.window_review_item_index;
+        self.surfaces = stored.surfaces;
     }
 
     fn createWindow(
@@ -611,6 +682,26 @@ pub const Session = struct {
         if (window.subject_task_id == 0) return;
         if (!self.task_window_index.remove(taskWindowKey(window.subject_task_id), slot_index)) {
             native_util.impossibleByInvariant("task window index missing live window");
+        }
+    }
+
+    fn hasWindowForTaskSurface(self: *const Session, task_id: u64, surface_id: u64) bool {
+        var slot_index = self.task_window_index.head(taskWindowKey(task_id));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.task_window_index.next(slot_index)) {
+            if (slot_index >= MAX_WINDOWS) return false;
+            const slot = &self.windows.slots[slot_index];
+            if (!slot.in_use or slot.window.subject_task_id != task_id) return false;
+            if (slot.window.ui_surface_id == surface_id) return true;
+        }
+        return false;
+    }
+
+    fn removeSurfacesForTask(self: *Session, task_id: u64) void {
+        var index: usize = 0;
+        while (index < self.surfaces.slots.len) : (index += 1) {
+            const slot = &self.surfaces.slots[index];
+            if (!slot.in_use or slot.surface.task_id != task_id) continue;
+            _ = self.surfaces.removeIndex(index);
         }
     }
 
@@ -1046,6 +1137,10 @@ fn reviewItemSlotKey(slot: *const ReviewItemSlot) u64 {
     return slot.key;
 }
 
+fn surfaceSlotId(slot: *const SurfaceSlot) u64 {
+    return slot.surface.presentation.surface_id;
+}
+
 fn taskBundleKey(task_id: u64, bundle_id: []const u8) u64 {
     var hash = native_util.fnv1a64AppendU64LittleEndian(native_util.FNV1A_64_OFFSET_BASIS, task_id);
     hash = native_util.fnv1a64WithSeed(hash, bundle_id);
@@ -1116,9 +1211,9 @@ fn statusForError(err: Error) ServiceStatus {
     return switch (err) {
         error.WindowIdExhausted => .id_exhausted,
         error.WindowNotFound, error.ReviewItemNotFound, error.TaskNotFound => .not_found,
-        error.WindowTableFull, error.ReviewItemTableFull => .table_full,
+        error.WindowTableFull, error.ReviewItemTableFull, error.SurfaceTableFull => .table_full,
         error.RecoveryStateMissing => .recovery_missing,
-        error.InvalidSurface, error.MalformedRequest, error.RequestTooLarge, error.ResponseTooLarge, error.NoVisibleWindows => .invalid_request,
+        error.InvalidSurface, error.MalformedRequest, error.MalformedPresentation, error.StalePresentation, error.PresentationConflict, error.RequestTooLarge, error.ResponseTooLarge, error.NoVisibleWindows => .invalid_request,
     };
 }
 
@@ -1780,4 +1875,55 @@ test "compositor window ids stop at exhaustion" {
     restored.restore(snapshot);
     try std.testing.expectEqual(@as(u64, 0), restored.next_window_id);
     try std.testing.expectError(error.WindowIdExhausted, restored.openTaskView(app_task, "Final Task"));
+}
+
+test "compositor session owns bounded monotonic surface presentations" {
+    var runtime = task_runtime.Runtime.init();
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 81 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 71,
+        .local_only = true,
+    });
+    var session = Session.init();
+    _ = try session.openTaskView(app_task, "Notes");
+
+    var presentation = std.mem.zeroes(abi.SurfacePresentation);
+    presentation.surface_id = 71;
+    presentation.revision = 2;
+    presentation.interaction_hash = 0xA11CE;
+    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
+    @memcpy(presentation.text[0..5], "draft");
+    presentation.text_length = 5;
+    presentation.cursor = 5;
+    presentation.state_flags = @bitCast(abi.SurfaceStateFlags{ .dirty = true });
+
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task.id, &presentation));
+    try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(app_task.id, &presentation));
+    try std.testing.expectEqual(@as(usize, 1), session.presentedSurfaceCount());
+    try std.testing.expectEqualStrings("draft", session.surfacePresentation(71).?.textSlice());
+    try std.testing.expectEqual(@as(u64, 1), session.surfacePresentation(71).?.presentation_count);
+
+    presentation.revision = 3;
+    presentation.text[5] = '!';
+    presentation.text_length = 6;
+    presentation.cursor = 6;
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task.id, &presentation));
+    try std.testing.expectEqual(@as(u64, 2), session.surfacePresentation(71).?.presentation_count);
+
+    const snapshot = session.snapshot();
+    var restored = Session.init();
+    restored.restore(snapshot);
+    try std.testing.expectEqualStrings("draft!", restored.surfacePresentation(71).?.textSlice());
+
+    presentation.revision = 2;
+    try std.testing.expectError(error.StalePresentation, restored.presentSurface(app_task.id, &presentation));
+    presentation.revision = 3;
+    presentation.interaction_hash += 1;
+    try std.testing.expectError(error.PresentationConflict, restored.presentSurface(app_task.id, &presentation));
+    try std.testing.expectError(error.InvalidSurface, restored.presentSurface(app_task.id + 1, &presentation));
+
+    try std.testing.expectEqual(@as(usize, 1), restored.closeWindowsForTask(app_task.id));
+    try std.testing.expectEqual(@as(usize, 0), restored.presentedSurfaceCount());
 }

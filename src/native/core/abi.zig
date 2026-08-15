@@ -1,7 +1,8 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 3;
+pub const ABI_VERSION: u16 = 4;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
+pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512;
 
 pub const NativeOperation = enum(u16) {
     task_create = 0x100,
@@ -25,6 +26,7 @@ pub const NativeOperation = enum(u16) {
     device_describe,
     device_mmio_window,
     input_recv,
+    surface_present,
 };
 
 pub const PolicyOperation = enum(u16) {
@@ -192,6 +194,42 @@ pub const InputRecvResponse = extern struct {
     event: InputEventDescriptor,
 };
 
+pub const SurfaceModelKind = enum(u8) {
+    none,
+    notes,
+    viewer,
+    capture,
+    permission_review,
+    compositor,
+    generic,
+};
+
+pub const SurfaceStateFlags = packed struct(u8) {
+    dirty: bool = false,
+    recovery_visible: bool = false,
+    active: bool = false,
+    input_overflow: bool = false,
+    _reserved: u4 = 0,
+};
+
+pub const SurfacePresentation = extern struct {
+    surface_id: u64,
+    revision: u64,
+    interaction_hash: u64,
+    commit_count: u32,
+    activation_count: u32,
+    focus_index: u16,
+    text_length: u16,
+    cursor: u16,
+    model_kind: u8,
+    state_flags: u8,
+    text: [SURFACE_PRESENTATION_TEXT_BYTES]u8,
+
+    pub fn textSlice(self: *const SurfacePresentation) []const u8 {
+        return self.text[0..@min(self.text_length, self.text.len)];
+    }
+};
+
 pub const ServiceConnectionDescriptor = extern struct {
     service_id: u64,
     endpoint_id: u64,
@@ -286,17 +324,38 @@ pub fn inputEventKind(raw: u8) ?InputEventKind {
     return std.enums.fromInt(InputEventKind, raw);
 }
 
+pub fn surfaceModelKind(raw: u8) ?SurfaceModelKind {
+    return std.enums.fromInt(SurfaceModelKind, raw);
+}
+
+pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) bool {
+    if (presentation.surface_id == 0 or presentation.revision == 0 or presentation.interaction_hash == 0) return false;
+    if (presentation.text_length > presentation.text.len or presentation.cursor > presentation.text_length) return false;
+    const model = surfaceModelKind(presentation.model_kind) orelse return false;
+    if (model == .none) return false;
+    const flags: SurfaceStateFlags = @bitCast(presentation.state_flags);
+    if (flags._reserved != 0) return false;
+    for (presentation.text[0..presentation.text_length]) |byte| {
+        if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
+    }
+    for (presentation.text[presentation.text_length..]) |byte| {
+        if (byte != 0) return false;
+    }
+    return true;
+}
+
 test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 3), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 4), ABI_VERSION);
     try std.testing.expectEqual(@as(usize, 96), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(InputEventDescriptor));
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputRecvResponse));
+    try std.testing.expectEqual(@as(usize, 552), @sizeOf(SurfacePresentation));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(DeviceDescriptor));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
@@ -308,4 +367,18 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(serviceFlagsHas(SERVICE_CONNECTION_FLAG_USERSPACE_OWNER, SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     try std.testing.expectEqual(InputEventKind.commit_text, inputEventKind(@intFromEnum(InputEventKind.commit_text)).?);
     try std.testing.expect(inputEventKind(0xFF) == null);
+    try std.testing.expectEqual(SurfaceModelKind.notes, surfaceModelKind(@intFromEnum(SurfaceModelKind.notes)).?);
+    try std.testing.expect(surfaceModelKind(0xFF) == null);
+
+    var presentation = std.mem.zeroes(SurfacePresentation);
+    presentation.surface_id = 9;
+    presentation.revision = 1;
+    presentation.interaction_hash = 2;
+    presentation.model_kind = @intFromEnum(SurfaceModelKind.notes);
+    presentation.text[0] = 'x';
+    presentation.text_length = 1;
+    presentation.cursor = 1;
+    try std.testing.expect(isCanonicalSurfacePresentation(&presentation));
+    presentation.text[presentation.text.len - 1] = 1;
+    try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
 }

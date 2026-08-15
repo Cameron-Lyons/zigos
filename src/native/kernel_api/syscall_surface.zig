@@ -189,6 +189,9 @@ test "syscall descriptor table covers every native operation with ABI metadata" 
     try std.testing.expectEqual(@sizeOf(component_port.InputRecvRequest), syscallDescriptorFor(.input_recv).?.request_size);
     try std.testing.expectEqual(@sizeOf(abi.InputRecvResponse), syscallDescriptorFor(.input_recv).?.response_size);
     try std.testing.expectEqual(capability.CapabilityRight.input_recv, syscallDescriptorFor(.input_recv).?.required_right);
+    try std.testing.expectEqual(@sizeOf(component_port.SurfacePresentRequest), syscallDescriptorFor(.surface_present).?.request_size);
+    try std.testing.expectEqual(@sizeOf(abi.BoolResponse), syscallDescriptorFor(.surface_present).?.response_size);
+    try std.testing.expectEqual(capability.CapabilityRight.surface_present, syscallDescriptorFor(.surface_present).?.required_right);
     try std.testing.expect(switch (syscallDescriptorFor(.device_describe).?.target_kind) {
         .fixed => |kind| kind == .device,
         else => false,
@@ -267,6 +270,25 @@ const TestInputReceiver = struct {
         const event = self.pending;
         self.pending = null;
         return event;
+    }
+};
+
+const TestSurfaceReceiver = struct {
+    calls: usize = 0,
+    last_task_id: u64 = 0,
+    last_presentation: abi.SurfacePresentation = std.mem.zeroes(abi.SurfacePresentation),
+    status: native_kernel.SurfacePresentStatus = .accepted,
+
+    fn present(
+        context: *anyopaque,
+        task_id: u64,
+        presentation: *const abi.SurfacePresentation,
+    ) native_kernel.SurfacePresentStatus {
+        const self: *TestSurfaceReceiver = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.last_task_id = task_id;
+        self.last_presentation = presentation.*;
+        return self.status;
     }
 };
 
@@ -518,6 +540,150 @@ test "syscall surface delivers focused input only through task-scoped authority"
     try std.testing.expectEqual(abi.DenialReason.scope_violation, foreign.denial_reason);
     try std.testing.expectEqual(@as(u8, 0), response.present);
     try std.testing.expectEqual(@as(usize, 3), receiver.polls);
+}
+
+test "syscall surface copies bounded presentations through task-scoped authority" {
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+
+    const app_task = try test_kernel.runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 12 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = units.kibibytes(2),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = units.kibibytes(1),
+        },
+        .ui_surface_id = 12,
+        .local_only = true,
+    });
+    const presentation_capability = try test_kernel.capabilities.mintBootRoot(.{
+        .holder = app_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = app_task.id },
+        .rights = .{ .task = .{ .surface_present = true } },
+        .scope = .{ .task_id = app_task.id, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
+    });
+    try test_kernel.runtime.grantCapability(app_task.id, presentation_capability.id);
+    test_kernel.runtime.allowHostPointerSyscallsForTask(app_task.id);
+
+    var receiver = TestSurfaceReceiver{};
+    test_kernel.kernel.bindSurfacePresentationReceiver(.{
+        .context = &receiver,
+        .present = TestSurfaceReceiver.present,
+    });
+
+    var presentation = std.mem.zeroes(abi.SurfacePresentation);
+    presentation.surface_id = 12;
+    presentation.revision = 3;
+    presentation.interaction_hash = 0x1234;
+    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
+    @memcpy(presentation.text[0..5], "hello");
+    presentation.text_length = 5;
+    presentation.cursor = 5;
+    const request = component_port.SurfacePresentRequest{
+        .header = component_port.makeHeader(.surface_present, 95, app_task.id),
+        .presentation_capability_id = presentation_capability.id,
+        .presenter_task_id = app_task.id,
+        .presentation = presentation,
+    };
+    var response = std.mem.zeroes(abi.BoolResponse);
+    const presented = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        50,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.BoolResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, presented.status);
+    try std.testing.expectEqual(@as(u8, 1), response.value);
+    try std.testing.expectEqual(@as(usize, 1), receiver.calls);
+    try std.testing.expectEqual(app_task.id, receiver.last_task_id);
+    try std.testing.expectEqualStrings("hello", receiver.last_presentation.textSlice());
+
+    receiver.status = .duplicate;
+    response = std.mem.zeroes(abi.BoolResponse);
+    const duplicate = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        51,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.BoolResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, duplicate.status);
+    try std.testing.expectEqual(@as(u8, 1), response.value);
+
+    receiver.status = .stale;
+    const stale = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        52,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.BoolResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.conflict, stale.status);
+    try std.testing.expectEqual(abi.DenialReason.invalid_target, stale.denial_reason);
+
+    receiver.status = .full;
+    const full = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        53,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.BoolResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.conflict, full.status);
+    try std.testing.expectEqual(abi.DenialReason.budget_exhausted, full.denial_reason);
+
+    receiver.status = .accepted;
+
+    var foreign_surface = request;
+    foreign_surface.presentation.surface_id = 13;
+    response = std.mem.zeroes(abi.BoolResponse);
+    const denied = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        54,
+        @intFromPtr(&foreign_surface),
+        @intFromPtr(&response),
+        @sizeOf(abi.BoolResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.denied, denied.status);
+    try std.testing.expectEqual(abi.DenialReason.scope_violation, denied.denial_reason);
+    try std.testing.expectEqual(@as(usize, 4), receiver.calls);
+
+    var malformed = request;
+    malformed.presentation.text[malformed.presentation.text.len - 1] = 1;
+    const rejected = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        55,
+        @intFromPtr(&malformed),
+        @intFromPtr(&response),
+        @sizeOf(abi.BoolResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, rejected.status);
+    try std.testing.expectEqual(abi.DenialReason.invalid_target, rejected.denial_reason);
+    try std.testing.expectEqual(@as(usize, 4), receiver.calls);
+
+    test_kernel.kernel.clearSurfacePresentationReceiver();
+    const unavailable = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        56,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.BoolResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.unavailable, unavailable.status);
+    try std.testing.expectEqual(abi.DenialReason.unsupported_operation, unavailable.denial_reason);
+    try std.testing.expectEqual(@as(usize, 4), receiver.calls);
 }
 
 test "syscall surface denies task creation without signed userspace launch provenance" {

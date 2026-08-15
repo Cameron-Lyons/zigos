@@ -121,6 +121,8 @@ observable boot markers.
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
+  Native ABI v4 also defines a task-scoped, fixed-size surface presentation that
+  is copied into compositor-owned storage with monotonic revision checks.
 - Identity is passwordless and device-bound. Zigos models
   [FIDO-style passkeys](https://fidoalliance.org/passkeys/), recovery keys,
   hardware roots, and threshold recovery; administration is delegated through

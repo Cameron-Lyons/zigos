@@ -266,7 +266,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 3), abi.ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 4), abi.ABI_VERSION);
     const storage_interface = typed_component_abi.interfaceForService(.storage_object);
     try registry.register(55, 7, 101, 201, storage_interface, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
     const connection = try registry.connect(storage_interface);
