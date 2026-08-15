@@ -619,8 +619,8 @@ pub const Service = struct {
     }
 
     pub fn physicalInputReportCount(self: *const Service) usize {
-        if (self.focused_input) |router| return router.reports_accepted;
-        return if (self.modeled_input) |source| source.reportCount() else 0;
+        const focused_count = if (self.focused_input) |router| router.reports_accepted else 0;
+        return focused_count + if (self.modeled_input) |source| source.reportCount() else 0;
     }
 
     pub fn physicalInputCommandCount(self: *const Service) usize {
@@ -629,11 +629,15 @@ pub const Service = struct {
     }
 
     pub fn physicalInputEventCount(self: *const Service) usize {
-        if (self.focused_input) |router| {
-            return if (router.inputProof()) |proof| proof.event_count else 0;
-        }
-        const source = self.modeled_input orelse return 0;
-        return if (source.inputProof()) |proof| proof.event_count else 0;
+        const focused_count = if (self.focused_input) |router|
+            if (router.inputProof()) |proof| proof.event_count else 0
+        else
+            0;
+        const modeled_count = if (self.modeled_input) |source|
+            if (source.inputProof()) |proof| proof.event_count else 0
+        else
+            0;
+        return focused_count + modeled_count;
     }
 
     pub fn initProfiled(
@@ -1332,6 +1336,55 @@ test "permission input consumes only centrally routed events for its focused tas
         "ok",
         service.readCommandLine(&command_buffer, bundle, bundle.requested_permissions[0], 1),
     );
+}
+
+test "hosted modeled xHCI reports still count when a focused router is bound" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createReviewTestTask(&runtime, 14, 37);
+    var modeled_input = try ModeledInputSource.initDefault();
+    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
+    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
+
+    var compositor = compositor_session.Session.init();
+    var checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(17, 18, &runtime, &compositor, &checkpoint_store);
+    var router = input_router.Router{};
+    router.bindCompositor(&compositor, compositor_service.task_id);
+    bindSystemInputRouter(&router);
+    defer clearSystemInputRouter();
+
+    var service = Service.init(17, 18, &runtime, &[_][]const u8{});
+    service.bindCompositorService(&compositor_service);
+    service.bindModeledInput(&modeled_input);
+    try std.testing.expect(service.focused_input != null);
+
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+            .local_only = true,
+            .max_lease_ticks = 50,
+        },
+        .{
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .rights = .{ .workspace = .{ .clipboard_read = true } },
+            .required = false,
+        },
+    };
+    var bundle = manifest_fixtures.basicNotesBundle(&permissions);
+    bundle.signature = .{
+        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .signer = "zigos-dev-key",
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+
+    const grants = try service.reviewBundle(task.id, bundle, 30, &grants_buffer);
+    try std.testing.expectEqual(@as(usize, 1), grants.len);
+    try std.testing.expectEqual(@as(usize, 2), service.physicalInputCommandCount());
+    try std.testing.expect(service.physicalInputReportCount() >= "allow local lease=25".len + "deny".len + 2);
+    try std.testing.expect(service.physicalInputEventCount() >= service.physicalInputReportCount());
 }
 
 test "physical input command editing honors shift punctuation and backspace" {
