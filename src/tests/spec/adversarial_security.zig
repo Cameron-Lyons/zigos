@@ -101,10 +101,14 @@ pub fn revokedCapabilitiesFailDuringIpc() !void {
         .payload = "revoked-attach",
         .attached_capability_id = stale_transfer.id,
     }, 3));
+    var receive_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    var attached_capability = std.mem.zeroes(abi.CapabilityDescriptor);
     try std.testing.expect((try port.endpointRecv(.{
         .header = component_port.makeHeader(.endpoint_recv, 5, receiver.id),
         .endpoint_capability_id = receiver_endpoint.capability_id,
         .receiver_task_id = receiver.id,
+        .payload_out = &receive_payload,
+        .attached_capability_out = &attached_capability,
     }, 4)) == null);
 }
 

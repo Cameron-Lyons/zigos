@@ -56,6 +56,8 @@ pub const EndpointRecvRequest = struct {
     header: abi.RequestHeader,
     endpoint_capability_id: u64,
     receiver_task_id: u64,
+    payload_out: []u8,
+    attached_capability_out: *abi.CapabilityDescriptor,
 };
 
 pub const CapabilityMintRequest = struct {
@@ -222,11 +224,19 @@ pub const KernelPort = struct {
     ) Error!?native_kernel.EndpointReceiveResult {
         try validateHeader(request.header, .endpoint_recv);
         try validateSubjectTask(request.header, request.receiver_task_id);
-        return self.kernel.endpointRecv(
+        const received = try self.kernel.endpointRecv(
             callContext(request.header, request.endpoint_capability_id, .none),
             request.receiver_task_id,
+            request.payload_out,
             now_ticks,
         );
+        if (received) |message| {
+            if (message.attached_capability) |attached| {
+                request.attached_capability_out.* = attached;
+            }
+            return message;
+        }
+        return null;
     }
 
     pub fn capabilityMint(
@@ -417,7 +427,6 @@ pub const KernelPort = struct {
             now_ticks,
         );
     }
-
 };
 
 pub const GeneratedWrapper = struct {

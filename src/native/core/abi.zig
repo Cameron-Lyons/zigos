@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 4;
+pub const ABI_VERSION: u16 = 5;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
 pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512;
 
@@ -286,6 +286,12 @@ pub const EndpointRecvResponse = extern struct {
     has_attached_capability: u8,
     _reserved: [6]u8,
     message: EndpointMessageDescriptor,
+};
+
+pub const EndpointRecvResult = struct {
+    present: u8,
+    has_attached_capability: u8,
+    message: EndpointMessageDescriptor,
     payload: [ENDPOINT_INLINE_BYTES]u8,
     attached_capability: CapabilityDescriptor,
 };
@@ -348,7 +354,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 4), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 5), ABI_VERSION);
     try std.testing.expectEqual(@as(usize, 96), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
@@ -360,7 +366,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
     try std.testing.expectEqual(@as(usize, 112), @sizeOf(EndpointCreateResponse));
-    try std.testing.expectEqual(@as(usize, 208), @sizeOf(EndpointRecvResponse));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(EndpointRecvResponse));
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(SharedMemoryCreateResponse));
     try std.testing.expect(taskFlagsHas(TASK_FLAG_LOCAL_ONLY, TASK_FLAG_LOCAL_ONLY));
     try std.testing.expectEqual(@as(u8, 3), taskFlagsResourceClass(@as(u16, 3) << TASK_RESOURCE_CLASS_SHIFT));

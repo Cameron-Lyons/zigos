@@ -124,8 +124,12 @@ observable boot markers.
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
-  Native ABI v4 also defines a task-scoped, fixed-size surface presentation that
-  is copied into compositor-owned storage with monotonic revision checks. UI
+  Native ABI v5 streams endpoint receive payloads and optional capability
+  descriptors into prevalidated caller buffers, reducing the fixed receive
+  response from 208 bytes to 48 and leaving queued messages untouched when an
+  output is undersized. It also defines a task-scoped, fixed-size surface
+  presentation that is copied into compositor-owned storage with monotonic
+  revision checks. UI
   processes coalesce each bounded input drain into one revision submission,
   acknowledge only accepted revisions, and park when no more focused input is
   queued. Production boot now proves that the compositor's userspace revision

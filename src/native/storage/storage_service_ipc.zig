@@ -263,7 +263,7 @@ pub const Server = struct {
     fn handleCreateWorkspace(
         self: *Server,
         payload: []const u8,
-        received: abi.EndpointRecvResponse,
+        received: abi.EndpointRecvResult,
         now_ticks: u64,
     ) CreateWorkspaceResult {
         const request = decodeCreateWorkspaceRequest(payload) catch return .{
@@ -356,12 +356,15 @@ fn syscallEndpointRecv(
     caller_task_id: u64,
     endpoint_capability_id: u64,
     now_ticks: u64,
-) Error!abi.EndpointRecvResponse {
+) Error!abi.EndpointRecvResult {
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
+    var received = std.mem.zeroes(abi.EndpointRecvResult);
     var request = component_port.EndpointRecvRequest{
         .header = component_port.makeHeader(.endpoint_recv, 0, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = caller_task_id,
+        .payload_out = &received.payload,
+        .attached_capability_out = &received.attached_capability,
     };
     const result = syscall_surface.dispatch(
         port,
@@ -372,7 +375,10 @@ fn syscallEndpointRecv(
         @sizeOf(abi.EndpointRecvResponse),
     );
     if (result.status != .success) return error.SyscallFailed;
-    return response;
+    received.present = response.present;
+    received.has_attached_capability = response.has_attached_capability;
+    received.message = response.message;
+    return received;
 }
 
 pub fn userspaceCreateWorkspaceRoundTripProof() !void {

@@ -169,6 +169,7 @@ pub const operations = [_]Descriptor{
             .port_method_name = "endpointRecv",
         },
         .domain = .endpoint,
+        .request_copy = .embedded_user_buffers,
         .required_right = .endpoint_recv,
         .target_kind = .{ .fixed = .endpoint },
         .scope_rule = .{ .task_scope_matches_request_task = true },
@@ -402,6 +403,7 @@ test "native operation metadata covers every operation once" {
     try std.testing.expectEqual(Domain.task, declarationFor(.task_create).domain);
     try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, declarationFor(.task_create).request_copy);
     try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, declarationFor(.endpoint_send).request_copy);
+    try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, declarationFor(.endpoint_recv).request_copy);
     try std.testing.expectEqual(capability.CapabilityRight.device_use, declarationFor(.device_describe).required_right);
     try std.testing.expect(switch (declarationFor(.capability_query).target_kind) {
         .same_as_target_capability => true,

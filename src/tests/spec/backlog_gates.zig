@@ -1504,12 +1504,14 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         false,
         13,
     );
+    var received_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     const request_setup = (try kernel.endpointRecv(
         kernelContext(driver_task.task_id, .endpoint_recv, driver_endpoint.capability_id, .{ .endpoint = driver_endpoint.endpoint.endpoint_id }),
         driver_task.task_id,
+        &received_payload,
         14,
     )).?;
-    try std.testing.expectEqualStrings("ring=request", request_setup.payload[0..request_setup.payload_len]);
+    try std.testing.expectEqualStrings("ring=request", received_payload[0..request_setup.message.payload_len]);
     const driver_request_ring_capability = request_setup.attached_capability.?.capability_id;
     _ = try kernel.sharedMemoryMap(
         kernelContext(driver_task.task_id, .shared_memory_map, driver_request_ring_capability, .{ .shared_memory = request_ring.object.object_id }),
@@ -1528,9 +1530,10 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     const completion_setup = (try kernel.endpointRecv(
         kernelContext(driver_task.task_id, .endpoint_recv, driver_endpoint.capability_id, .{ .endpoint = driver_endpoint.endpoint.endpoint_id }),
         driver_task.task_id,
+        &received_payload,
         16,
     )).?;
-    try std.testing.expectEqualStrings("ring=completion", completion_setup.payload[0..completion_setup.payload_len]);
+    try std.testing.expectEqualStrings("ring=completion", received_payload[0..completion_setup.message.payload_len]);
     const driver_completion_ring_capability = completion_setup.attached_capability.?.capability_id;
     _ = try kernel.sharedMemoryMap(
         kernelContext(driver_task.task_id, .shared_memory_map, driver_completion_ring_capability, .{ .shared_memory = completion_ring.object.object_id }),
@@ -1549,9 +1552,10 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     const io_request = (try kernel.endpointRecv(
         kernelContext(driver_task.task_id, .endpoint_recv, driver_endpoint.capability_id, .{ .endpoint = driver_endpoint.endpoint.endpoint_id }),
         driver_task.task_id,
+        &received_payload,
         18,
     )).?;
-    try std.testing.expectEqualStrings("io:read lba=7 sectors=1", io_request.payload[0..io_request.payload_len]);
+    try std.testing.expectEqualStrings("io:read lba=7 sectors=1", received_payload[0..io_request.message.payload_len]);
 
     try kernel.endpointSend(
         kernelContext(driver_task.task_id, .endpoint_send, driver_endpoint.capability_id, .{ .endpoint = driver_endpoint.endpoint.endpoint_id }),
@@ -1564,9 +1568,10 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     const io_completion = (try kernel.endpointRecv(
         kernelContext(control_task.task_id, .endpoint_recv, control_endpoint.capability_id, .{ .endpoint = control_endpoint.endpoint.endpoint_id }),
         control_task.task_id,
+        &received_payload,
         20,
     )).?;
-    try std.testing.expectEqualStrings("io:complete status=ok", io_completion.payload[0..io_completion.payload_len]);
+    try std.testing.expectEqualStrings("io:complete status=ok", received_payload[0..io_completion.message.payload_len]);
 
     try std.testing.expectEqual(@as(u16, 2), shared.mappingsForTask(ids.task(control_task.task_id)));
     try std.testing.expectEqual(@as(u16, 2), shared.mappingsForTask(ids.task(driver_task.task_id)));
@@ -1603,6 +1608,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     try std.testing.expectError(error.CapabilityNotFound, kernel.endpointRecv(
         kernelContext(untrusted_task.task_id, .endpoint_recv, driver_endpoint.capability_id, .{ .endpoint = driver_endpoint.endpoint.endpoint_id }),
         untrusted_task.task_id,
+        &received_payload,
         21,
     ));
     try std.testing.expectError(error.CapabilityNotFound, kernel.deviceDescribe(
@@ -1659,9 +1665,10 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     const restarted_io_request = (try kernel.endpointRecv(
         kernelContext(driver_task.task_id, .endpoint_recv, driver_endpoint.capability_id, .{ .endpoint = driver_endpoint.endpoint.endpoint_id }),
         driver_task.task_id,
+        &received_payload,
         26,
     )).?;
-    try std.testing.expectEqualStrings("io:read after restart", restarted_io_request.payload[0..restarted_io_request.payload_len]);
+    try std.testing.expectEqualStrings("io:read after restart", received_payload[0..restarted_io_request.message.payload_len]);
 }
 
 pub fn uxRenderingGate() !void {

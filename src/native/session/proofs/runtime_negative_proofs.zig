@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const abi = @import("../../core/abi.zig");
 const boot_markers = @import("../../../kernel/boot/markers.zig");
 const capability = @import("../../kernel_api/capability.zig");
 const component_port = @import("../../kernel_api/component_port.zig");
@@ -251,10 +252,14 @@ pub fn syscallSubjectSpoofingIsRejected() bool {
         .flags = .{ .local_only = true },
     }, 1) catch return false;
 
+    var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    var attached_capability = std.mem.zeroes(abi.CapabilityDescriptor);
     _ = port.endpointRecv(.{
         .header = component_port.makeHeader(.endpoint_recv, 2, attacker.id),
         .endpoint_capability_id = receiver_endpoint.capability_id,
         .receiver_task_id = receiver.id,
+        .payload_out = &payload,
+        .attached_capability_out = &attached_capability,
     }, 2) catch |err| return err == error.SubjectTaskMismatch;
     return false;
 }

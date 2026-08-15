@@ -546,7 +546,16 @@ pub const NativeTransportService = struct {
     }
 
     pub fn receive(self: *NativeTransportService, connection: *const NativeConnection) Error!endpoint.Message {
-        return (try self.endpoints.recv(connection.target_endpoint_id)) orelse error.NativeTransportFrameMissing;
+        var message: endpoint.Message = undefined;
+        const received = (try self.endpoints.recvInto(connection.target_endpoint_id, &message.bytes)) orelse
+            return error.NativeTransportFrameMissing;
+        message.sender_task_id = received.sender_task_id;
+        message.correlation_id = received.correlation_id;
+        message.attached_capability_id = received.attached_capability_id;
+        message.move_attached_capability = received.move_attached_capability;
+        message.flags = received.flags;
+        message.len = received.len;
+        return message;
     }
 
     fn openEndpointBackedConnection(

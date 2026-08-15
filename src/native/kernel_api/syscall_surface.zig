@@ -6,6 +6,7 @@ const component_port = @import("component_port.zig");
 const debug_contract = @import("../security/debug_contract.zig");
 const endpoint = @import("endpoint.zig");
 const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
+const ids = @import("../core/ids.zig");
 const operation_metadata = @import("operation_metadata.zig");
 const native_kernel = @import("native_kernel.zig");
 const shared_memory = @import("shared_memory.zig");
@@ -365,7 +366,7 @@ test "syscall surface explains preflight request failures" {
     try std.testing.expect(result.provenance.trace_id != 0);
 }
 
-test "syscall surface returns an explicit empty receive response when no message is queued" {
+test "syscall surface validates compact endpoint receive outputs before dequeue" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
@@ -402,10 +403,14 @@ test "syscall surface returns an explicit empty receive response when no message
     }, 7);
 
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
-    const request = component_port.EndpointRecvRequest{
+    var payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    var attached_capability = std.mem.zeroes(abi.CapabilityDescriptor);
+    var request = component_port.EndpointRecvRequest{
         .header = component_port.makeHeader(.endpoint_recv, 90, app_task.task_id),
         .endpoint_capability_id = created.capability_id,
         .receiver_task_id = app_task.task_id,
+        .payload_out = &payload,
+        .attached_capability_out = &attached_capability,
     };
     test_kernel.runtime.allowHostPointerSyscallsForTask(app_task.task_id);
 
@@ -422,6 +427,50 @@ test "syscall surface returns an explicit empty receive response when no message
     try std.testing.expectEqual(@as(u32, @sizeOf(abi.EndpointRecvResponse)), result.bytes_written);
     try std.testing.expectEqual(@as(u8, 0), response.present);
     try std.testing.expectEqual(@as(u8, 0), response.has_attached_capability);
+
+    const peer = try test_kernel.endpoints.create(ids.task(test_kernel.session_task_id), "receive-peer", .{ .local_only = true });
+    try test_kernel.endpoints.connect(peer.id, ids.endpoint(created.endpoint.endpoint_id));
+    try test_kernel.endpoints.send(peer.id, ids.task(test_kernel.session_task_id), 91, "hello", null, false);
+
+    const short_response = dispatch(
+        &test_kernel.port,
+        app_task.task_id,
+        9,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.EndpointRecvResponse) - 1,
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.buffer_too_small, short_response.status);
+    try std.testing.expectEqual(@as(u16, 1), (try test_kernel.endpoints.descriptor(ids.endpoint(created.endpoint.endpoint_id))).queued_messages);
+
+    var short_payload: [4]u8 = undefined;
+    request.payload_out = &short_payload;
+    const short_payload_result = dispatch(
+        &test_kernel.port,
+        app_task.task_id,
+        10,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.EndpointRecvResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.buffer_too_small, short_payload_result.status);
+    try std.testing.expectEqual(@as(u16, 1), (try test_kernel.endpoints.descriptor(ids.endpoint(created.endpoint.endpoint_id))).queued_messages);
+
+    request.payload_out = &payload;
+    response = std.mem.zeroes(abi.EndpointRecvResponse);
+    const received = dispatch(
+        &test_kernel.port,
+        app_task.task_id,
+        11,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.EndpointRecvResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, received.status);
+    try std.testing.expectEqual(@as(u8, 1), response.present);
+    try std.testing.expectEqual(@as(u16, 5), response.message.payload_len);
+    try std.testing.expectEqualStrings("hello", payload[0..response.message.payload_len]);
+    try std.testing.expectEqual(@as(u16, 0), (try test_kernel.endpoints.descriptor(ids.endpoint(created.endpoint.endpoint_id))).queued_messages);
 }
 
 test "syscall surface delivers focused input only through task-scoped authority" {

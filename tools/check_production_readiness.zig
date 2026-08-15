@@ -3101,7 +3101,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 4",
+        "pub const ABI_VERSION: u16 = 5",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -3126,6 +3126,23 @@ fn validateUserspaceDriverDataPathTrack(
     for (focused_input_abi_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
             try common.addError(errors, allocator, "Userspace input ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    const compact_endpoint_receive_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const EndpointRecvResponse = ex" ++ "tern struct" },
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "try std.testing.expectEqual(@as(usize, 48), @sizeOf(EndpointRecvResponse))" },
+        .{ .path = component_port_path, .source = component_port_source, .snippet = "payload_out: []u8" },
+        .{ .path = component_port_path, .source = component_port_source, .snippet = "attached_capability_out: *abi.CapabilityDescriptor" },
+        .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "self.endpoint_table.recvInto(" },
+        .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "syscall surface validates compact endpoint receive outputs before dequeue" },
+    };
+    for (compact_endpoint_receive_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Compact endpoint receive ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
     }
     const surface_presentation_abi_snippets = [_]struct {
