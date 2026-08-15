@@ -95,6 +95,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:DRIVER:CONTROLLER_REVOKE_REJECTED",
     "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REPUBLISH_AFTER_REVOKE_OK",
     "ZIGOS:COMPOSITOR:SERVICE:READY",
+    "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY",
     "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED",
     "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED",
     "ZIGOS:PERMISSION:REVIEW_PORT:READY",
@@ -153,6 +154,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:NETWORK_READY",
     "ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY",
     "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
+    "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY",
     "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED",
     "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED",
     "ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED",
@@ -800,6 +802,7 @@ fn validateNuc11tnki5KernelProofSources(
     const pcid_allocator_path = "src/kernel/memory/pcid_allocator.zig";
     const userspace_executor_path = "src/native/task/userspace_executor.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
+    const input_router_path = "src/native/platform/input_router.zig";
     const console_path = "src/kernel/utils/console.zig";
     const legacy_vga_path = "src/kernel/drivers/vga.zig";
     const xhci_path = "src/kernel/drivers/xhci.zig";
@@ -948,6 +951,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "NUC11TNKi5 permission review source is missing: {s}", .{permission_review_path});
         return;
     }
+    if (!common.pathExists(io, input_router_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 focused input router source is missing: {s}", .{input_router_path});
+        return;
+    }
     if (!common.pathExists(io, console_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 early console source is missing: {s}", .{console_path});
         return;
@@ -1018,6 +1025,7 @@ fn validateNuc11tnki5KernelProofSources(
     const pcid_allocator_source = try common.readFileAlloc(allocator, io, pcid_allocator_path, common.source_file_max_bytes);
     const userspace_executor_source = try common.readFileAlloc(allocator, io, userspace_executor_path, common.source_file_max_bytes);
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
+    const input_router_source = try common.readFileAlloc(allocator, io, input_router_path, common.source_file_max_bytes);
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
     const xhci_hw_source = try common.readFileAlloc(allocator, io, xhci_hw_path, common.source_file_max_bytes);
@@ -1302,6 +1310,7 @@ fn validateNuc11tnki5KernelProofSources(
         "xhci_hw.pollKeyboardReport()",
         "hardwareInputProof",
         "xhci_hw.inputProof()",
+        "session_manager.servicePendingInputWork(now_ticks)",
         "xhci_hw.eventWorkPending()",
         "xhci_hw.lifecyclePending()",
         "userspaceSchedulerHasReadyTasks",
@@ -1641,20 +1650,42 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_permission_input_snippets = [_][]const u8{
         "const xhci = @import",
-        "HardwareReportSource",
-        "PhysicalInputBackend",
         "const input_driver_task = @import",
+        "const input_router = @import",
         "input_driver_task.Decoder",
         "self.decoder.submit",
-        "consumeKeyboardEvent",
-        "bindSystemHardwareInput",
-        "system_hardware_input",
-        "report.sequence == 0",
-        "error.UnsupportedPhysicalInput",
+        "ModeledInputSource",
+        "controller: xhci.HidController",
+        "focused_input",
+        "router.service",
+        "router.pollForTask(self.task_id)",
+        "focused_commands.submit",
+        "bindSystemInputRouter",
+        "error.UnsupportedTextInput",
     };
     for (required_permission_input_snippets) |snippet| {
         if (std.mem.indexOf(u8, permission_review_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 permission review must retain hardware xHCI input snippet: {s}", .{snippet});
+        }
+    }
+    const required_input_router_snippets = [_][]const u8{
+        "pub const MAX_KEYBOARDS",
+        "pub const MAX_QUEUED_EVENTS",
+        "pub const MAX_EVENTS_PER_INBOX",
+        "KeyboardIdentity",
+        "event_slots",
+        "free_event_head",
+        "report.sequence <= self.last_sequence",
+        "window.modal and window.reviewer_task_id != 0",
+        "window.subject_task_id",
+        "compositor.switchVisible",
+        "self.events_dropped",
+        "pruneStaleInboxes",
+        "pollWakeTarget",
+    };
+    for (required_input_router_snippets) |snippet| {
+        if (std.mem.indexOf(u8, input_router_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 compositor input ownership must retain focused-router snippet: {s}", .{snippet});
         }
     }
     const required_early_console_snippets = [_][]const u8{

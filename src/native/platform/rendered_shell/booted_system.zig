@@ -485,24 +485,10 @@ pub const BootedSystem = struct {
         self.hardware_text_dirty = false;
     }
 
-    fn switchActiveWindow(self: *BootedSystem, direction: SwitchDirection) !void {
-        const session = self.shell.compositor_service.session;
-        const visible_count = session.visibleWindowCount();
-        if (visible_count == 0) return error.NoVisibleWindows;
-
-        const current = activeVisibleIndex(session) orelse 0;
-        const target_index = switch (direction) {
-            .next => (current + 1) % visible_count,
-            .previous => (current + visible_count - 1) % visible_count,
-        };
-        const window_id = visibleWindowIdAt(session, target_index) orelse return error.NoVisibleWindows;
-        const switched = self.shell.compositor_service.dispatch(.{
-            .operation = .switch_view,
-            .window_id = window_id,
-        });
-        if (switched.status != .ok) return error.CompositorRejected;
+    fn switchActiveWindow(self: *BootedSystem, direction: compositor_session.SwitchDirection) !void {
+        const switched = try self.shell.compositor_service.switchVisible(direction);
         self.task_switcher_visible = true;
-        self.task_switcher_index = target_index;
+        self.task_switcher_index = switched.visible_index;
     }
 
     fn result(self: *const BootedSystem, kind: InputKind, accepted: bool) InputResult {
@@ -604,11 +590,6 @@ pub const BootedSystem = struct {
     }
 };
 
-const SwitchDirection = enum {
-    next,
-    previous,
-};
-
 fn inputInvalidatesHardwareText(kind: InputKind) bool {
     return kind == .open_document or kind == .rollback_snapshot or kind == .recover_state;
 }
@@ -637,30 +618,6 @@ fn controlForInput(kind: InputKind) ?HumaneShellControl {
         .remove_package => .remove_package,
         else => null,
     };
-}
-
-fn activeVisibleIndex(session: *const compositor_session.Session) ?usize {
-    var visible_index: usize = 0;
-    var order_index: usize = 0;
-    while (order_index < session.window_count) : (order_index += 1) {
-        const window = session.windowAtOrder(order_index) orelse continue;
-        if (!window.visible) continue;
-        if (window.id == session.active_window_id) return visible_index;
-        visible_index += 1;
-    }
-    return null;
-}
-
-fn visibleWindowIdAt(session: *const compositor_session.Session, target_index: usize) ?u64 {
-    var visible_index: usize = 0;
-    var order_index: usize = 0;
-    while (order_index < session.window_count) : (order_index += 1) {
-        const window = session.windowAtOrder(order_index) orelse continue;
-        if (!window.visible) continue;
-        if (visible_index == target_index) return window.id;
-        visible_index += 1;
-    }
-    return null;
 }
 
 fn statusForBootError(err: anyerror) HumaneShellStatus {

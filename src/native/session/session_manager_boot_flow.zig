@@ -9,11 +9,13 @@ const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const input_router_mod = @import("../platform/input_router.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_util = @import("../core/util.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
+const permission_review_service = @import("../policy/permission_review_service.zig");
 const package_service = @import("../services/package_service.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
 const session_contexts = @import("session_manager_contexts.zig");
@@ -80,6 +82,7 @@ pub const SessionManager = struct {
     service_graph_builder: service_graph_builder.Builder = service_graph_builder.Builder.init(),
     native_store: native_store_mount.NativeStoreMount = native_store_mount.NativeStoreMount.init(),
     recovery_context: session_contexts.RecoveryContext = session_contexts.RecoveryContext.init(),
+    input_router: input_router_mod.Router = .{},
 
     pub fn init() SessionManager {
         return .{};
@@ -90,6 +93,7 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        permission_review_service.clearSystemInputRouter();
         if (self.runtime_context.constructed) {
             self.runtime_context.userspace_scheduler.deinit();
         }
@@ -187,6 +191,10 @@ pub const SessionManager = struct {
         return &self.recovery_context.review_compositor_session;
     }
 
+    pub fn inputRouterPtr(self: *SessionManager) *input_router_mod.Router {
+        return &self.input_router;
+    }
+
     pub fn backgroundDispatchPtr(self: *SessionManager) *background_dispatch.Controller {
         return &self.service_graph_builder.background_dispatcher;
     }
@@ -225,6 +233,27 @@ pub const SessionManager = struct {
             }
         }
         return service.frames_queued;
+    }
+
+    pub fn bindHardwareInput(self: *SessionManager, source: input_router_mod.HardwareReportSource) void {
+        self.input_router.bindHardwareSource(source);
+    }
+
+    pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
+        const result = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
+        while (self.input_router.pollWakeTarget()) |task_id| {
+            _ = self.runtime_context.userspace_scheduler.wakeTask(
+                task_id,
+                .external_event,
+                now_ticks,
+                now_ticks +% 1,
+            );
+        }
+        return result.events_routed;
+    }
+
+    pub fn pollFocusedInput(self: *SessionManager, task_id: u64) ?input_router_mod.RoutedKeyboardEvent {
+        return self.input_router.pollForTask(task_id);
     }
 
     pub fn networkWorkPending(_: *const SessionManager) bool {
@@ -354,6 +383,13 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         }
+        const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
+        self.input_router.bindCompositor(
+            &self.recovery_context.review_compositor_session,
+            compositor_task_id,
+        );
+        permission_review_service.bindSystemInputRouter(&self.input_router);
+        common.printBootMarker(boot_markers.compositor_input_router_ready);
         self.bindProductionStorageService(&graph);
         self.runtime_context.runtime_service.checkpoint(60);
         var trust = self.trustBoot();
@@ -385,6 +421,8 @@ pub const SessionManager = struct {
 
     pub fn failBoot(self: *SessionManager) void {
         self.initialized = false;
+        self.input_router.clearCompositor();
+        permission_review_service.clearSystemInputRouter();
         self.kernel_context.resetPort();
         clearRootKernelPort();
     }
