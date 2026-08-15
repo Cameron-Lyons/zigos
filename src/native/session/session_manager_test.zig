@@ -1,6 +1,8 @@
 const std = @import("std");
 const contract = @import("contract.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
+const abi = @import("../core/abi.zig");
+const component_port = @import("../kernel_api/component_port.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
@@ -287,10 +289,21 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     });
     const wake_count_before = session_manager.testing.userspaceSchedulerPtr().taskDispatchStats(review_task.id).?.wake_event_count;
     try std.testing.expectEqual(@as(usize, 1), session_manager.servicePendingInputWork(200));
-    const focused_input = session_manager.pollFocusedInput(review_task.id).?;
+    const input_capability_id = session_manager.system().focusedInputCapabilityForTask(review_task.id, 200).?;
+    const focused_input = (try session_manager.kernelPort().?.inputRecv(.{
+        .header = component_port.makeHeader(.input_recv, 201, review_task.id),
+        .input_capability_id = input_capability_id,
+        .receiver_task_id = review_task.id,
+    }, 201)).?;
     try std.testing.expectEqual(capture_review.id, focused_input.window_id);
     try std.testing.expectEqual(review_task.id, focused_input.task_id);
-    try std.testing.expectEqual(@as(u8, 'z'), focused_input.event.text);
+    try std.testing.expectEqual(abi.InputEventKind.text, abi.inputEventKind(focused_input.kind).?);
+    try std.testing.expectEqual(@as(u8, 'z'), focused_input.text);
+    try std.testing.expect((try session_manager.kernelPort().?.inputRecv(.{
+        .header = component_port.makeHeader(.input_recv, 202, review_task.id),
+        .input_capability_id = input_capability_id,
+        .receiver_task_id = review_task.id,
+    }, 202)) == null);
     try std.testing.expect(session_manager.testing.userspaceSchedulerPtr().taskDispatchStats(review_task.id).?.wake_event_count > wake_count_before);
 
     try std.testing.expectEqual(@as(usize, 3), app_panel_count);

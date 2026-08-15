@@ -62,6 +62,14 @@ const EndpointRecvRequest = extern struct {
     receiver_task_id: u64,
 };
 
+const InputRecvRequest = extern struct {
+    header: abi.RequestHeader,
+    input_capability_id: u64,
+    receiver_task_id: u64,
+};
+
+const INPUT_EVENTS_PER_DISPATCH: usize = 8;
+
 const contract_bindings = if (builtin.target.os.tag == .freestanding)
     struct {
         extern var zigos_userspace_descriptor: Descriptor;
@@ -133,7 +141,11 @@ pub fn zigos_userspace_contract_main(
         runMmuIsolationProbe(detail);
     }
 
-    runSteadyState(detail, descriptor.heartbeat_increment);
+    runSteadyState(
+        detail,
+        descriptor.heartbeat_increment,
+        (descriptor.contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
+    );
 }
 
 pub fn zigos_userspace_service_main(comptime service_kind: ServiceKind) noreturn {
@@ -149,7 +161,11 @@ pub fn zigos_userspace_service_main(comptime service_kind: ServiceKind) noreturn
     }
 
     publishServiceReady(service_kind, detail);
-    runSteadyState(detail, descriptor.heartbeat_increment);
+    runSteadyState(
+        detail,
+        descriptor.heartbeat_increment,
+        (descriptor.contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
+    );
 }
 
 fn runStartupQueries(detail: mailbox.Detail) void {
@@ -387,10 +403,50 @@ fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResp
     return response;
 }
 
-fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32) noreturn {
+fn inputRecv(input_capability_id: u64, task_id: u64) ?abi.InputRecvResponse {
+    var response = std.mem.zeroes(abi.InputRecvResponse);
+    var request = InputRecvRequest{
+        .header = makeHeader(.input_recv, nextCorrelationId(), task_id),
+        .input_capability_id = input_capability_id,
+        .receiver_task_id = task_id,
+    };
+    if (trapCall(&request, &response) != .success) return null;
+    return response;
+}
+
+fn drainFocusedInput() usize {
+    const input_capability_id = zigos_userspace_bootstrap.input_capability_id;
+    const task_id = zigos_userspace_bootstrap.task_id;
+    if (input_capability_id == 0 or task_id == 0) return 0;
+
+    var count: usize = 0;
+    while (count < INPUT_EVENTS_PER_DISPATCH) : (count += 1) {
+        const response = inputRecv(input_capability_id, task_id) orelse break;
+        if (response.present == 0) break;
+        if (!recordInputEvent(&zigos_userspace_bootstrap, response.event)) break;
+    }
+    return count;
+}
+
+fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor) bool {
+    _ = abi.inputEventKind(event.kind) orelse return false;
+    if (event.sequence == 0 or event.task_id != state.task_id) return false;
+    state.input_event_count +|= 1;
+    state.last_input_sequence = event.sequence;
+    state.last_input_window_id = event.window_id;
+    state.last_input_surface_id = event.surface_id;
+    state.last_input_kind = event.kind;
+    state.last_input_text = event.text;
+    state.last_input_port_id = event.port_id;
+    state.last_input_slot_id = event.slot_id;
+    return true;
+}
+
+fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, consumes_input: bool) noreturn {
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
     while (true) {
+        if (consumes_input) _ = drainFocusedInput();
         publishState(.steady, detail, pulse);
         pulse +%= increment;
     }
@@ -458,6 +514,33 @@ var next_correlation_id: u64 = 1;
 test "fault codes stay stable for the same message" {
     try std.testing.expectEqual(faultCode("panic"), faultCode("panic"));
     try std.testing.expect(faultCode("panic") != faultCode("different"));
+}
+
+test "focused input telemetry rejects foreign events and records valid semantic input" {
+    var state = mailbox.Mailbox{ .task_id = 41 };
+    const event = abi.InputEventDescriptor{
+        .sequence = 7,
+        .tick = 90,
+        .window_id = 12,
+        .task_id = 41,
+        .surface_id = 13,
+        .kind = @intFromEnum(abi.InputEventKind.text),
+        .text = 'x',
+        .port_id = 2,
+        .slot_id = 3,
+    };
+    try std.testing.expect(recordInputEvent(&state, event));
+    try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
+    try std.testing.expectEqual(@as(u64, 7), state.last_input_sequence);
+    try std.testing.expectEqual(@as(u8, 'x'), state.last_input_text);
+
+    var foreign = event;
+    foreign.task_id = 42;
+    try std.testing.expect(!recordInputEvent(&state, foreign));
+    foreign.task_id = 41;
+    foreign.kind = 0xFF;
+    try std.testing.expect(!recordInputEvent(&state, foreign));
+    try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
 }
 
 test "userspace service startup plans expose domain-specific endpoint operations" {

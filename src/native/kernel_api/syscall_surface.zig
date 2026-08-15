@@ -186,6 +186,9 @@ test "syscall descriptor table covers every native operation with ABI metadata" 
     try std.testing.expectEqual(capability.CapabilityRight.endpoint_send, syscallDescriptorFor(.endpoint_send).?.required_right);
     try std.testing.expect(syscallDescriptorFor(.endpoint_create).?.scope_rule.task_scope_matches_request_task);
     try std.testing.expectEqual(@as(usize, 1), syscallDescriptorFor(.shared_memory_create).?.auto_grant_count);
+    try std.testing.expectEqual(@sizeOf(component_port.InputRecvRequest), syscallDescriptorFor(.input_recv).?.request_size);
+    try std.testing.expectEqual(@sizeOf(abi.InputRecvResponse), syscallDescriptorFor(.input_recv).?.response_size);
+    try std.testing.expectEqual(capability.CapabilityRight.input_recv, syscallDescriptorFor(.input_recv).?.required_right);
     try std.testing.expect(switch (syscallDescriptorFor(.device_describe).?.target_kind) {
         .fixed => |kind| kind == .device,
         else => false,
@@ -250,6 +253,20 @@ const TestKernel = struct {
         self.session_task_id = session_task.id;
         self.authority_capability_id = authority.id;
         try self.runtime.grantCapability(self.session_task_id, self.authority_capability_id);
+    }
+};
+
+const TestInputReceiver = struct {
+    pending: ?abi.InputEventDescriptor = null,
+    polls: usize = 0,
+
+    fn poll(context: *anyopaque, task_id: u64) ?abi.InputEventDescriptor {
+        const self: *TestInputReceiver = @ptrCast(@alignCast(context));
+        _ = task_id;
+        self.polls += 1;
+        const event = self.pending;
+        self.pending = null;
+        return event;
     }
 };
 
@@ -383,6 +400,124 @@ test "syscall surface returns an explicit empty receive response when no message
     try std.testing.expectEqual(@as(u32, @sizeOf(abi.EndpointRecvResponse)), result.bytes_written);
     try std.testing.expectEqual(@as(u8, 0), response.present);
     try std.testing.expectEqual(@as(u8, 0), response.has_attached_capability);
+}
+
+test "syscall surface delivers focused input only through task-scoped authority" {
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+
+    const app_task = try test_kernel.runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 11 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = units.kibibytes(1),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = units.kibibytes(1),
+        },
+        .local_only = true,
+    });
+    const input_capability = try test_kernel.capabilities.mintBootRoot(.{
+        .holder = app_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = app_task.id },
+        .rights = .{ .task = .{ .input_recv = true } },
+        .scope = .{ .task_id = app_task.id, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
+    });
+    try test_kernel.runtime.grantCapability(app_task.id, input_capability.id);
+    test_kernel.runtime.allowHostPointerSyscallsForTask(app_task.id);
+
+    var receiver = TestInputReceiver{ .pending = .{
+        .sequence = 9,
+        .tick = 40,
+        .window_id = 7,
+        .task_id = app_task.id,
+        .surface_id = 12,
+        .kind = @intFromEnum(abi.InputEventKind.text),
+        .text = 'x',
+        .port_id = 1,
+        .slot_id = 2,
+    } };
+    test_kernel.kernel.bindFocusedInputReceiver(.{
+        .context = &receiver,
+        .poll = TestInputReceiver.poll,
+    });
+
+    const request = component_port.InputRecvRequest{
+        .header = component_port.makeHeader(.input_recv, 93, app_task.id),
+        .input_capability_id = input_capability.id,
+        .receiver_task_id = app_task.id,
+    };
+    var response = std.mem.zeroes(abi.InputRecvResponse);
+    const delivered = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        40,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.InputRecvResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, delivered.status);
+    try std.testing.expectEqual(@as(u8, 1), response.present);
+    try std.testing.expectEqual(@as(u64, 9), response.event.sequence);
+    try std.testing.expectEqual(app_task.id, response.event.task_id);
+    try std.testing.expectEqual(@as(u8, 'x'), response.event.text);
+
+    response = std.mem.zeroes(abi.InputRecvResponse);
+    const empty = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        41,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.InputRecvResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, empty.status);
+    try std.testing.expectEqual(@as(u8, 0), response.present);
+    try std.testing.expectEqual(@as(usize, 2), receiver.polls);
+
+    const wrong_capability_request = component_port.InputRecvRequest{
+        .header = component_port.makeHeader(.input_recv, 94, app_task.id),
+        .input_capability_id = test_kernel.authority_capability_id,
+        .receiver_task_id = app_task.id,
+    };
+    const denied = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        42,
+        @intFromPtr(&wrong_capability_request),
+        @intFromPtr(&response),
+        @sizeOf(abi.InputRecvResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, denied.status);
+    try std.testing.expectEqual(abi.DenialReason.capability_missing, denied.denial_reason);
+    try std.testing.expectEqual(@as(usize, 2), receiver.polls);
+
+    receiver.pending = .{
+        .sequence = 10,
+        .tick = 43,
+        .window_id = 8,
+        .task_id = app_task.id + 1,
+        .surface_id = 13,
+        .kind = @intFromEnum(abi.InputEventKind.activate),
+        .text = 0,
+        .port_id = 1,
+        .slot_id = 2,
+    };
+    response = std.mem.zeroes(abi.InputRecvResponse);
+    const foreign = dispatch(
+        &test_kernel.port,
+        app_task.id,
+        43,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.InputRecvResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.denied, foreign.status);
+    try std.testing.expectEqual(abi.DenialReason.scope_violation, foreign.denial_reason);
+    try std.testing.expectEqual(@as(u8, 0), response.present);
+    try std.testing.expectEqual(@as(usize, 3), receiver.polls);
 }
 
 test "syscall surface denies task creation without signed userspace launch provenance" {

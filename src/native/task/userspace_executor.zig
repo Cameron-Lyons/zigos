@@ -605,10 +605,19 @@ pub const Executor = struct {
         if (image.bootstrap_mailbox_address == 0) return;
 
         const bootstrap = selectBootstrapCapability(task, capability_table, now_ticks);
+        const input_capability_id = selectInputCapability(task, capability_table, now_ticks);
         freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
         defer freestanding.paging.switchToKernelAddressSpace();
 
         const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
+        if (mapping.resume_valid) {
+            mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
+            mailbox_ptr.authority_capability_id = bootstrap.capability_id;
+            mailbox_ptr.input_capability_id = input_capability_id;
+            mailbox_ptr.task_id = task.id;
+            mailbox_ptr.service_id = bootstrap.service_id;
+            return;
+        }
         mailbox_ptr.* = .{
             .version = userspace_bootstrap_mailbox.VERSION,
             .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
@@ -616,6 +625,7 @@ pub const Executor = struct {
             .fault_code = 0,
             ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
             .authority_capability_id = bootstrap.capability_id,
+            .input_capability_id = input_capability_id,
             .task_id = task.id,
             .service_id = bootstrap.service_id,
             .resource_mask = 0,
@@ -742,11 +752,28 @@ fn selectBootstrapCapability(
 ) struct { capability_id: u64, service_id: u64 } {
     for (task.capabilityIds()) |capability_id| {
         const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
-        if (!granted.rights.has(.time_query) and !granted.rights.has(.resource_query) and !granted.rights.has(.accounting_query)) continue;
+        if (!granted.rights.has(.time_query) and
+            !granted.rights.has(.resource_query) and
+            !granted.rights.has(.accounting_query) and
+            !granted.rights.has(.endpoint_create)) continue;
         const service_id = if (granted.target.kind == .service) granted.target.id else 0;
         return .{ .capability_id = capability_id, .service_id = service_id };
     }
     return .{ .capability_id = 0, .service_id = 0 };
+}
+
+fn selectInputCapability(
+    task: *const task_runtime.TaskRecord,
+    capability_table: *const capability.CapabilityTable,
+    now_ticks: u64,
+) u64 {
+    for (task.capabilityIds()) |capability_id| {
+        const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
+        if (granted.target.kind != .task or granted.target.id != task.id) continue;
+        if (granted.scope.task_id != task.id or !granted.rights.has(.input_recv)) continue;
+        return capability_id;
+    }
+    return 0;
 }
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
@@ -950,6 +977,45 @@ fn publishRootActiveTaskId(task_id: u64) void {
     if (@hasDecl(root, "publishUserspaceActiveTaskId")) {
         root.publishUserspaceActiveTaskId(task_id);
     }
+}
+
+test "executor separates service bootstrap authority from focused input authority" {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 41 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(64),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = units.kibibytes(4),
+        },
+        .local_only = true,
+    });
+    const service_authority = try capabilities.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 9 },
+        .rights = .{ .service = .{ .endpoint_create = true } },
+        .scope = .{ .task_id = task.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    const input_authority = try capabilities.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = task.id },
+        .rights = .{ .task = .{ .input_recv = true } },
+        .scope = .{ .task_id = task.id, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    try runtime.grantCapability(task.id, service_authority.id);
+    try runtime.grantCapability(task.id, input_authority.id);
+
+    const bootstrap = selectBootstrapCapability(task, &capabilities, 10);
+    try std.testing.expectEqual(service_authority.id, bootstrap.capability_id);
+    try std.testing.expectEqual(@as(u64, 9), bootstrap.service_id);
+    try std.testing.expectEqual(input_authority.id, selectInputCapability(task, &capabilities, 10));
 }
 
 test "executor matches userspace counters by stage and pulse" {

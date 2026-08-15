@@ -67,6 +67,7 @@ pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
         manager.failBoot();
         return;
     }
+    manager.bindFocusedInputRouting(&graph);
     runSessionLifecycle(manager, &graph.state, &graph.service_bindings, notes_review);
     common.printBootMarker(boot_markers.task_session_ready);
     common.printBootMarker(boot_markers.native_ready);

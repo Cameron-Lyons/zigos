@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 2;
+pub const ABI_VERSION: u16 = 3;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
 
 pub const NativeOperation = enum(u16) {
@@ -24,6 +24,7 @@ pub const NativeOperation = enum(u16) {
     accounting_query,
     device_describe,
     device_mmio_window,
+    input_recv,
 };
 
 pub const PolicyOperation = enum(u16) {
@@ -159,6 +160,38 @@ pub const AccountingDescriptor = extern struct {
     ui_surface_id: u64,
 };
 
+pub const InputEventKind = enum(u8) {
+    text,
+    backspace,
+    commit_text,
+    focus_next,
+    focus_previous,
+    activate,
+    task_switch_next,
+    task_switch_previous,
+    show_recovery,
+    dismiss_recovery,
+};
+
+pub const InputEventDescriptor = extern struct {
+    sequence: u64,
+    tick: u64,
+    window_id: u64,
+    task_id: u64,
+    surface_id: u64,
+    kind: u8,
+    text: u8,
+    port_id: u8,
+    slot_id: u8,
+    _reserved: [4]u8 = [_]u8{0} ** 4,
+};
+
+pub const InputRecvResponse = extern struct {
+    present: u8,
+    _reserved: [7]u8 = [_]u8{0} ** 7,
+    event: InputEventDescriptor,
+};
+
 pub const ServiceConnectionDescriptor = extern struct {
     service_id: u64,
     endpoint_id: u64,
@@ -249,15 +282,21 @@ pub fn serviceFlagsHas(flags: u16, mask: u16) bool {
     return (flags & mask) != 0;
 }
 
+pub fn inputEventKind(raw: u8) ?InputEventKind {
+    return std.enums.fromInt(InputEventKind, raw);
+}
+
 test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 2), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 3), ABI_VERSION);
     try std.testing.expectEqual(@as(usize, 96), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(InputEventDescriptor));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputRecvResponse));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(DeviceDescriptor));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
@@ -267,4 +306,6 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(taskFlagsHas(TASK_FLAG_LOCAL_ONLY, TASK_FLAG_LOCAL_ONLY));
     try std.testing.expectEqual(@as(u8, 3), taskFlagsResourceClass(@as(u16, 3) << TASK_RESOURCE_CLASS_SHIFT));
     try std.testing.expect(serviceFlagsHas(SERVICE_CONNECTION_FLAG_USERSPACE_OWNER, SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
+    try std.testing.expectEqual(InputEventKind.commit_text, inputEventKind(@intFromEnum(InputEventKind.commit_text)).?);
+    try std.testing.expect(inputEventKind(0xFF) == null);
 }

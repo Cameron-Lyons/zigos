@@ -1,5 +1,5 @@
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const MAILBOX_RESERVED_BYTES: usize = 3;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
@@ -7,7 +7,7 @@ pub const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
 pub const PROOF_FOREIGN_MEMORY_ACCESS_FAULT_CODE: u8 = 0x72;
 
 const userspace_flags = @import("userspace_flags.zig");
-const FLAG_OWNS_UI_SURFACE = userspace_flags.FLAG_OWNS_UI_SURFACE;
+pub const FLAG_OWNS_UI_SURFACE = userspace_flags.FLAG_OWNS_UI_SURFACE;
 const FLAG_PERMISSION_REVIEW = userspace_flags.FLAG_PERMISSION_REVIEW;
 const FLAG_BACKGROUND_ELIGIBLE = userspace_flags.FLAG_BACKGROUND_ELIGIBLE;
 const FLAG_STORAGE_BOUNDARY = userspace_flags.FLAG_STORAGE_BOUNDARY;
@@ -87,13 +87,24 @@ pub const Mailbox = extern struct {
     service_ipc_roundtrips: u16 = 0,
     service_status_flags: u32 = 0,
     last_counter: u32 = 0,
+    _reserved1: [4]u8 = [_]u8{0} ** 4,
+    input_capability_id: u64 = 0,
+    input_event_count: u64 = 0,
+    last_input_sequence: u64 = 0,
+    last_input_window_id: u64 = 0,
+    last_input_surface_id: u64 = 0,
+    last_input_kind: u8 = 0,
+    last_input_text: u8 = 0,
+    last_input_port_id: u8 = 0,
+    last_input_slot_id: u8 = 0,
+    _reserved2: [4]u8 = [_]u8{0} ** 4,
 };
 
-pub const ABI_SIZE_BYTES: usize = 76;
-pub const ABI_ALIGNMENT: usize = 4;
+pub const ABI_SIZE_BYTES: usize = 128;
+pub const ABI_ALIGNMENT: usize = 8;
 
 comptime {
-    if (@offsetOf(Mailbox, "last_counter") + @sizeOf(u32) != ABI_SIZE_BYTES) {
+    if (@offsetOf(Mailbox, "_reserved2") + @sizeOf(@FieldType(Mailbox, "_reserved2")) != ABI_SIZE_BYTES) {
         @compileError("userspace bootstrap mailbox fields no longer match the wire ABI");
     }
 }
@@ -155,4 +166,11 @@ test "mailbox records userspace service readiness separately from generic heartb
     try @import("std").testing.expectEqual(@as(u16, 3), mailbox.service_ipc_roundtrips);
     const flags: ServiceStatusFlags = @bitCast(mailbox.service_status_flags);
     try @import("std").testing.expect(flags.all_operations_completed);
+}
+
+test "mailbox records focused input consumption without architecture-dependent padding" {
+    try @import("std").testing.expectEqual(@as(usize, ABI_ALIGNMENT), @alignOf(Mailbox));
+    try @import("std").testing.expectEqual(@as(usize, 80), @offsetOf(Mailbox, "input_capability_id"));
+    try @import("std").testing.expectEqual(@as(usize, 120), @offsetOf(Mailbox, "last_input_kind"));
+    try @import("std").testing.expectEqual(@as(usize, ABI_SIZE_BYTES), @sizeOf(Mailbox));
 }

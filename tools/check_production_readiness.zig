@@ -96,6 +96,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REPUBLISH_AFTER_REVOKE_OK",
     "ZIGOS:COMPOSITOR:SERVICE:READY",
     "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY",
+    "ZIGOS:USERSPACE:INPUT_ABI:READY",
     "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED",
     "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED",
     "ZIGOS:PERMISSION:REVIEW_PORT:READY",
@@ -155,6 +156,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY",
     "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
     "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY",
+    "ZIGOS:USERSPACE:INPUT_ABI:READY",
     "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED",
     "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED",
     "ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED",
@@ -801,6 +803,7 @@ fn validateNuc11tnki5KernelProofSources(
     const paging_path = "src/kernel/memory/paging64.zig";
     const pcid_allocator_path = "src/kernel/memory/pcid_allocator.zig";
     const userspace_executor_path = "src/native/task/userspace_executor.zig";
+    const userspace_runtime_path = "src/userspace/runtime.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
     const input_router_path = "src/native/platform/input_router.zig";
     const console_path = "src/kernel/utils/console.zig";
@@ -947,6 +950,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "userspace address-space switching source is missing: {s}", .{userspace_executor_path});
         return;
     }
+    if (!common.pathExists(io, userspace_runtime_path)) {
+        try common.addError(errors, allocator, "userspace runtime source is missing: {s}", .{userspace_runtime_path});
+        return;
+    }
     if (!common.pathExists(io, permission_review_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 permission review source is missing: {s}", .{permission_review_path});
         return;
@@ -1024,6 +1031,7 @@ fn validateNuc11tnki5KernelProofSources(
     const paging_source = try common.readFileAlloc(allocator, io, paging_path, common.source_file_max_bytes);
     const pcid_allocator_source = try common.readFileAlloc(allocator, io, pcid_allocator_path, common.source_file_max_bytes);
     const userspace_executor_source = try common.readFileAlloc(allocator, io, userspace_executor_path, common.source_file_max_bytes);
+    const userspace_runtime_source = try common.readFileAlloc(allocator, io, userspace_runtime_path, common.source_file_max_bytes);
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
     const input_router_source = try common.readFileAlloc(allocator, io, input_router_path, common.source_file_max_bytes);
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
@@ -1682,10 +1690,29 @@ fn validateNuc11tnki5KernelProofSources(
         "self.events_dropped",
         "pruneStaleInboxes",
         "pollWakeTarget",
+        "pollAbiForTask",
+        "abi.InputEventDescriptor",
     };
     for (required_input_router_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_router_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 compositor input ownership must retain focused-router snippet: {s}", .{snippet});
+        }
+    }
+    const required_userspace_input_snippets = [_]struct {
+        label: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "selectInputCapability" },
+        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "mailbox_ptr.input_capability_id" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const INPUT_EVENTS_PER_DISPATCH: usize = 8" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput()" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "recordInputEvent" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "mailbox.FLAG_OWNS_UI_SURFACE" },
+    };
+    for (required_userspace_input_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 userspace input delivery must retain snippet in {s}: {s}", .{ required.label, required.snippet });
         }
     }
     const required_early_console_snippets = [_][]const u8{
@@ -3035,7 +3062,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 2",
+        "pub const ABI_VERSION: u16 = 3",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -3043,6 +3070,23 @@ fn validateUserspaceDriverDataPathTrack(
     for (device_abi_snippets) |snippet| {
         if (std.mem.indexOf(u8, native_abi_source, snippet) == null) {
             try common.addError(errors, allocator, "Userspace driver data path must keep the compact PCI/MMIO native ABI snippet: {s}", .{snippet});
+        }
+    }
+    const focused_input_abi_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const InputEventDescriptor = ex" ++ "tern struct" },
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const InputRecvResponse = ex" ++ "tern struct" },
+        .{ .path = component_port_path, .source = component_port_source, .snippet = "pub fn inputRecv(" },
+        .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "pub fn bindFocusedInputReceiver" },
+        .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeOperation(.input_recv" },
+        .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "syscall surface delivers focused input only through task-scoped authority" },
+    };
+    for (focused_input_abi_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Userspace input ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
     }
     const port_abi_sources = [_]struct {
