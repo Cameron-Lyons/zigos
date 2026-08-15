@@ -1297,6 +1297,11 @@ fn validateNuc11tnki5KernelProofSources(
     const required_one_shot_scheduler_snippets = [_][]const u8{
         "timer.synchronize()",
         "xhci_hw.servicePendingEvents()",
+        "session_manager.bindHardwareInput",
+        "pollHardwareKeyboardReport",
+        "xhci_hw.pollKeyboardReport()",
+        "hardwareInputProof",
+        "xhci_hw.inputProof()",
         "xhci_hw.eventWorkPending()",
         "xhci_hw.lifecyclePending()",
         "userspaceSchedulerHasReadyTasks",
@@ -1634,8 +1639,20 @@ fn validateNuc11tnki5KernelProofSources(
             }
         }
     }
-    if (std.mem.indexOf(u8, permission_review_source, "const xhci = @import") == null) {
-        try common.addError(errors, allocator, "NUC11TNKi5 permission review must retain the xHCI HID input source", .{});
+    const required_permission_input_snippets = [_][]const u8{
+        "const xhci = @import",
+        "HardwareReportSource",
+        "PhysicalInputBackend",
+        "bindSystemHardwareInput",
+        "system_hardware_input",
+        "report.sequence == 0",
+        "error.UnsupportedPhysicalInput",
+        "HID_SHIFT_MASK",
+    };
+    for (required_permission_input_snippets) |snippet| {
+        if (std.mem.indexOf(u8, permission_review_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 permission review must retain hardware xHCI input snippet: {s}", .{snippet});
+        }
     }
     const required_early_console_snippets = [_][]const u8{
         "const serial = @import(\"../drivers/serial.zig\")",
