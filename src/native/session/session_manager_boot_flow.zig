@@ -394,6 +394,10 @@ pub const SessionManager = struct {
             self.failBoot();
             return;
         }
+        if (!self.finishUserspaceSurfacePresentation(&graph)) {
+            self.failBoot();
+            return;
+        }
         if (comptime include_verification_evidence) {
             const runtime_negative_proofs = @import("runtime_negative_proofs.zig");
             if (!runtime_negative_proofs.runAndPrint()) {
@@ -550,6 +554,12 @@ pub const SessionManager = struct {
         permission_review_service.bindSystemInputRouter(&self.input_router);
         common.printBootMarker(boot_markers.compositor_input_router_ready);
         common.printBootMarker(boot_markers.userspace_input_abi_ready);
+        return true;
+    }
+
+    fn finishUserspaceSurfacePresentation(self: *SessionManager, graph: *const ServiceGraph) bool {
+        const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
+        const compositor_task = self.runtime_context.runtime.find(compositor_task_id) orelse return false;
         if (builtin.target.os.tag == .freestanding) {
             _ = self.runtime_context.userspace_scheduler.wakeTask(compositor_task_id, .external_event, 0, 1);
             var attempts: usize = 0;
