@@ -3,6 +3,7 @@ pub const std = @import("std");
 const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
 const service_protocol = @import("userspace_service_protocol");
+const ui_surface_state = @import("ui_surface_state.zig");
 const userspace_descriptor = @import("userspace_descriptor");
 
 pub const Descriptor = userspace_descriptor.Descriptor;
@@ -84,11 +85,16 @@ else
 const mailbox_section = if (builtin.target.ofmt == .macho) "__DATA,__zigos_boot" else mailbox.SECTION_NAME;
 
 export var zigos_userspace_bootstrap: mailbox.Mailbox align(mailbox.ABI_ALIGNMENT) linksection(mailbox_section) = .{};
+var ui_state: ui_surface_state.State = .{};
 
 const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn syscall3_asm(request_addr: usize, response_addr: usize, response_len: usize) callconv(.c) usize;
-        extern fn syscall_yield_asm(counter: u32, disposition: mailbox.YieldDisposition) callconv(.c) u32;
+        extern fn syscall_yield_asm(
+            counter: u32,
+            disposition: mailbox.YieldDisposition,
+            ui_revision: u64,
+        ) callconv(.c) u32;
         extern fn zigos_probe_nx(target: usize) callconv(.c) void;
 
         fn call(request_addr: usize, response_addr: usize, response_len: usize) abi.SyscallStatus {
@@ -117,11 +123,14 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
 pub fn zigos_userspace_contract_main(
     comptime run_mmu_isolation_probe: bool,
     comptime run_nx_isolation_probe: bool,
+    comptime bundle_id: []const u8,
+    comptime contract_flags: u32,
 ) noreturn {
     const descriptor = &contract_bindings.zigos_userspace_descriptor;
     userspace_descriptor.validate(descriptor) catch signalFault(.unknown, 1);
 
     const detail = mailbox.classifyDetail(descriptor.component_class, descriptor.contract_flags);
+    initializeUiState(bundle_id, contract_flags);
     publishState(.descriptor_ready, detail, 1);
 
     if (zigos_userspace_bootstrap.authority_capability_id != 0 and zigos_userspace_bootstrap.task_id != 0) {
@@ -144,15 +153,20 @@ pub fn zigos_userspace_contract_main(
     runSteadyState(
         detail,
         descriptor.heartbeat_increment,
-        (descriptor.contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
+        comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
     );
 }
 
-pub fn zigos_userspace_service_main(comptime service_kind: ServiceKind) noreturn {
+pub fn zigos_userspace_service_main(
+    comptime service_kind: ServiceKind,
+    comptime bundle_id: []const u8,
+    comptime contract_flags: u32,
+) noreturn {
     const descriptor = &contract_bindings.zigos_userspace_descriptor;
     userspace_descriptor.validate(descriptor) catch signalFault(.unknown, 1);
 
     const detail = mailbox.classifyDetail(descriptor.component_class, descriptor.contract_flags);
+    initializeUiState(bundle_id, contract_flags);
     publishState(.descriptor_ready, detail, 1);
 
     if (zigos_userspace_bootstrap.authority_capability_id != 0 and zigos_userspace_bootstrap.task_id != 0) {
@@ -164,7 +178,7 @@ pub fn zigos_userspace_service_main(comptime service_kind: ServiceKind) noreturn
     runSteadyState(
         detail,
         descriptor.heartbeat_increment,
-        (descriptor.contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
+        comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
     );
 }
 
@@ -433,9 +447,23 @@ fn drainFocusedInput() InputDrain {
     return .{ .exhausted = false };
 }
 
+fn initializeUiState(comptime bundle_id: []const u8, comptime contract_flags: u32) void {
+    if (comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) == 0) return;
+    ui_state = ui_surface_state.State.init(bundle_id);
+    publishUiState(&zigos_userspace_bootstrap, &ui_state);
+}
+
 fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor) bool {
-    _ = abi.inputEventKind(event.kind) orelse return false;
+    return applyInputEvent(state, &ui_state, event);
+}
+
+fn applyInputEvent(
+    state: *mailbox.Mailbox,
+    surface: *ui_surface_state.State,
+    event: abi.InputEventDescriptor,
+) bool {
     if (event.sequence == 0 or event.task_id != state.task_id) return false;
+    if (surface.apply(event) == .rejected) return false;
     state.input_event_count +|= 1;
     state.last_input_sequence = event.sequence;
     state.last_input_window_id = event.window_id;
@@ -444,17 +472,29 @@ fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor) bo
     state.last_input_text = event.text;
     state.last_input_port_id = event.port_id;
     state.last_input_slot_id = event.slot_id;
+    publishUiState(state, surface);
     return true;
 }
 
-fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, consumes_input: bool) noreturn {
+fn publishUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.State) void {
+    state.ui_model_kind = @intFromEnum(surface.model);
+    state.ui_state_flags = @bitCast(surface.flags);
+    state.ui_focus_index = surface.focus_index;
+    state.ui_text_length = surface.text_length;
+    state.ui_cursor = surface.cursor;
+    state.ui_commit_count = surface.commit_count;
+    state.ui_activation_count = surface.activation_count;
+    state.ui_state_revision = surface.revision;
+    state.ui_interaction_hash = surface.interaction_hash;
+}
+
+fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime consumes_input: bool) noreturn {
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
     while (true) {
-        const disposition: mailbox.YieldDisposition = if (consumes_input and drainFocusedInput().exhausted)
-            .wait_for_event
-        else
-            .runnable;
+        const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
+            break :wait if (drainFocusedInput().exhausted) .wait_for_event else .runnable;
+        } else .runnable;
         publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
     }
@@ -475,7 +515,7 @@ fn publishStateWithDisposition(
     zigos_userspace_bootstrap.detail = @intFromEnum(detail);
     zigos_userspace_bootstrap.last_counter = counter;
     contract_bindings.zigos_userspace_yield_counter = counter;
-    _ = yieldCounter(counter, disposition);
+    _ = yieldCounter(counter, disposition, ui_state.revision);
 }
 
 fn signalFault(detail: mailbox.Detail, code: u8) noreturn {
@@ -485,9 +525,9 @@ fn signalFault(detail: mailbox.Detail, code: u8) noreturn {
     }
 }
 
-fn yieldCounter(value: u32, disposition: mailbox.YieldDisposition) u32 {
+fn yieldCounter(value: u32, disposition: mailbox.YieldDisposition, ui_revision: u64) u32 {
     if (builtin.target.os.tag != .freestanding) return value;
-    return freestanding_syscall.syscall_yield_asm(value, disposition);
+    return freestanding_syscall.syscall_yield_asm(value, disposition, ui_revision);
 }
 
 fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
@@ -535,6 +575,7 @@ test "fault codes stay stable for the same message" {
 
 test "focused input telemetry rejects foreign events and records valid semantic input" {
     var state = mailbox.Mailbox{ .task_id = 41 };
+    var surface = ui_surface_state.State.init("app.notes");
     const event = abi.InputEventDescriptor{
         .sequence = 7,
         .tick = 90,
@@ -546,17 +587,20 @@ test "focused input telemetry rejects foreign events and records valid semantic 
         .port_id = 2,
         .slot_id = 3,
     };
-    try std.testing.expect(recordInputEvent(&state, event));
+    try std.testing.expect(applyInputEvent(&state, &surface, event));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
     try std.testing.expectEqual(@as(u64, 7), state.last_input_sequence);
     try std.testing.expectEqual(@as(u8, 'x'), state.last_input_text);
+    try std.testing.expectEqualStrings("x", surface.textSlice());
+    try std.testing.expectEqual(@as(u16, 1), state.ui_text_length);
+    try std.testing.expectEqual(surface.revision, state.ui_state_revision);
 
     var foreign = event;
     foreign.task_id = 42;
-    try std.testing.expect(!recordInputEvent(&state, foreign));
+    try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
     foreign.task_id = 41;
     foreign.kind = 0xFF;
-    try std.testing.expect(!recordInputEvent(&state, foreign));
+    try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
 }
 

@@ -88,6 +88,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
     "ZIGOS:USERSPACE:SCHEDULER:EVENT_WAIT:READY",
+    "ZIGOS:USERSPACE:UI_STATE:READY",
     "ZIGOS:USERSPACE:EXEC_PROBE:OK",
     "ZIGOS:USERSPACE:RESUME:OK",
     "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
@@ -145,6 +146,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_BLOCKED_DMA_FAULT:OBSERVED",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
     "ZIGOS:USERSPACE:SCHEDULER:EVENT_WAIT:READY",
+    "ZIGOS:USERSPACE:UI_STATE:READY",
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:EXEC_PROBE:OK",
     "ZIGOS:USERSPACE:RESUME:OK",
@@ -807,6 +809,7 @@ fn validateNuc11tnki5KernelProofSources(
     const userspace_executor_path = "src/native/task/userspace_executor.zig";
     const userspace_scheduler_path = "src/native/task/userspace_scheduler.zig";
     const userspace_runtime_path = "src/userspace/runtime.zig";
+    const userspace_ui_state_path = "src/userspace/ui_surface_state.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
     const input_router_path = "src/native/platform/input_router.zig";
     const console_path = "src/kernel/utils/console.zig";
@@ -957,6 +960,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "userspace runtime source is missing: {s}", .{userspace_runtime_path});
         return;
     }
+    if (!common.pathExists(io, userspace_ui_state_path)) {
+        try common.addError(errors, allocator, "userspace UI state source is missing: {s}", .{userspace_ui_state_path});
+        return;
+    }
     if (!common.pathExists(io, permission_review_path)) {
         try common.addError(errors, allocator, "NUC11TNKi5 permission review source is missing: {s}", .{permission_review_path});
         return;
@@ -1036,6 +1043,7 @@ fn validateNuc11tnki5KernelProofSources(
     const userspace_executor_source = try common.readFileAlloc(allocator, io, userspace_executor_path, common.source_file_max_bytes);
     const userspace_scheduler_source = try common.readFileAlloc(allocator, io, userspace_scheduler_path, common.source_file_max_bytes);
     const userspace_runtime_source = try common.readFileAlloc(allocator, io, userspace_runtime_path, common.source_file_max_bytes);
+    const userspace_ui_state_source = try common.readFileAlloc(allocator, io, userspace_ui_state_path, common.source_file_max_bytes);
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
     const input_router_source = try common.readFileAlloc(allocator, io, input_router_path, common.source_file_max_bytes);
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
@@ -1710,13 +1718,19 @@ fn validateNuc11tnki5KernelProofSources(
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "selectInputCapability" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "mailbox_ptr.input_capability_id" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "last_yield_disposition" },
+        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "last_yield_ui_revision" },
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "outcome == .wait_for_event" },
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "executionRemainsReady(outcome)" },
+        .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "ui_revision > slot.last_ui_state_revision" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const INPUT_EVENTS_PER_DISPATCH: usize = 8" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput()" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = ".wait_for_event" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "recordInputEvent" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "publishUiState" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "mailbox.FLAG_OWNS_UI_SURFACE" },
+        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = 512" },
+        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn modelForBundle" },
+        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "test \"Notes UI state edits and commits document text\"" },
     };
     for (required_userspace_input_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
