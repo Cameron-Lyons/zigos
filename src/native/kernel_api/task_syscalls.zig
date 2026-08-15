@@ -78,6 +78,24 @@ pub fn dispatchAccountingQuery(
     return dispatch.invokeAndWriteResponse(.accounting_query, port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
+pub fn dispatchInputRecv(
+    port: *component_port.KernelPort,
+    memory: dispatch.UserMemoryContext,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) dispatch.DispatchResult {
+    const request = dispatch.readRequest(component_port.InputRecvRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    const received = component_port.invokeGenerated(.input_recv, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    var response = @import("std").mem.zeroes(abi.InputRecvResponse);
+    if (received) |event| {
+        response.present = 1;
+        response.event = event;
+    }
+    return dispatch.writeResponse(memory, response_addr, response_len, response);
+}
+
 fn sanitizeTaskCreateRequest(
     memory: dispatch.UserMemoryContext,
     request: *component_port.TaskCreateRequest,

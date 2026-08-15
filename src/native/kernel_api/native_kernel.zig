@@ -35,6 +35,11 @@ pub const SharedMemoryCreateResult = struct {
     capability_id: u64,
 };
 
+pub const FocusedInputReceiver = struct {
+    context: *anyopaque,
+    poll: *const fn (context: *anyopaque, task_id: u64) ?abi.InputEventDescriptor,
+};
+
 pub const AuthorityGraphEdge = debug_contract.AuthorityGraphEdge;
 
 pub const KernelTarget = union(enum) {
@@ -77,6 +82,7 @@ pub const Kernel = struct {
     capability_table: *capability.CapabilityTable,
     endpoint_table: *endpoint.Table,
     shared_memory_table: *shared_memory.Table,
+    focused_input_receiver: ?FocusedInputReceiver = null,
     pub fn init(
         policy_authority: principal.PrincipalId,
         runtime: *task_runtime.Runtime,
@@ -91,6 +97,14 @@ pub const Kernel = struct {
             .endpoint_table = endpoint_table,
             .shared_memory_table = shared_memory_table,
         };
+    }
+
+    pub fn bindFocusedInputReceiver(self: *Kernel, receiver: FocusedInputReceiver) void {
+        self.focused_input_receiver = receiver;
+    }
+
+    pub fn clearFocusedInputReceiver(self: *Kernel) void {
+        self.focused_input_receiver = null;
     }
 
     pub fn taskCreate(
@@ -550,6 +564,22 @@ pub const Kernel = struct {
             .shared_memory_mappings = self.shared_memory_table.mappingsForTask(ids.task(task_id)),
             .ui_surface_id = task.ui_surface_id orelse 0,
         };
+    }
+
+    pub fn inputRecv(
+        self: *Kernel,
+        context: KernelCallContext,
+        receiver_task_id: u64,
+        now_ticks: u64,
+    ) Error!?abi.InputEventDescriptor {
+        _ = try self.authorizeOperation(.input_recv, context, now_ticks, .{
+            .request_task_id = receiver_task_id,
+        });
+        _ = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
+        const receiver = self.focused_input_receiver orelse return null;
+        const event = receiver.poll(receiver.context, receiver_task_id) orelse return null;
+        if (event.task_id != receiver_task_id) return error.ScopeViolation;
+        return event;
     }
 
     pub fn deviceDescribe(

@@ -112,6 +112,10 @@ observable boot markers.
 - Capabilities are the unit of authority. Tasks receive scoped capabilities and
   communicate through typed endpoints, component ports, shared memory, and
   service contracts instead of ambient global namespaces.
+- Focused hardware input crosses the native ABI as bounded semantic events.
+  The compositor routes each event to one task, the session grants a dedicated
+  task-scoped receive capability, and UI processes drain a fixed event budget
+  without sharing router memory or raw HID reports.
 - Identity is passwordless and device-bound. Zigos models
   [FIDO-style passkeys](https://fidoalliance.org/passkeys/), recovery keys,
   hardware roots, and threshold recovery; administration is delegated through
