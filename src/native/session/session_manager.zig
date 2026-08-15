@@ -6,6 +6,7 @@ const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const package_service = @import("../services/package_service.zig");
+const permission_review_service = @import("../policy/permission_review_service.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const supervisor = @import("supervisor.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -20,6 +21,7 @@ var default_manager = SessionManager.init();
 
 pub const testing = struct {
     pub fn resetState() void {
+        permission_review_service.clearSystemHardwareInput();
         default_manager.reset();
     }
 
@@ -102,6 +104,10 @@ pub fn system() *SessionManager {
 
 pub fn boot() void {
     default_manager.boot();
+}
+
+pub fn bindHardwareInput(source: permission_review_service.HardwareReportSource) void {
+    permission_review_service.bindSystemHardwareInput(source);
 }
 
 pub fn kernelPort() ?*component_port.KernelPort {

@@ -2,6 +2,7 @@ const x86 = @import("../../../arch/x86.zig");
 const common = @import("../common.zig");
 const session_manager = @import("root").session_manager;
 const timer = @import("../../timer/timer.zig");
+const xhci = @import("../../drivers/xhci.zig");
 const xhci_hw = @import("../../drivers/xhci_hw.zig");
 const hardware_proof = @import("../../platform/hardware_proof.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
@@ -9,6 +10,10 @@ const device_inventory = @import("../../../native/drivers/device_inventory.zig")
 var recorded_input_report_count: u64 = 0;
 
 pub fn run() noreturn {
+    session_manager.bindHardwareInput(.{
+        .poll_report = pollHardwareKeyboardReport,
+        .input_proof = hardwareInputProof,
+    });
     session_manager.boot();
     while (true) {
         timer.synchronize();
@@ -44,4 +49,12 @@ pub fn run() noreturn {
         x86.sti();
         x86.hlt();
     }
+}
+
+fn pollHardwareKeyboardReport() ?xhci.HardwareBootKeyboardReport {
+    return xhci_hw.pollKeyboardReport();
+}
+
+fn hardwareInputProof() ?xhci.InputProof {
+    return xhci_hw.inputProof();
 }
