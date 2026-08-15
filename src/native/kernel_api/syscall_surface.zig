@@ -281,12 +281,12 @@ const TestSurfaceReceiver = struct {
 
     fn present(
         context: *anyopaque,
-        task_id: u64,
+        task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
     ) native_kernel.SurfacePresentStatus {
         const self: *TestSurfaceReceiver = @ptrCast(@alignCast(context));
         self.calls += 1;
-        self.last_task_id = task_id;
+        self.last_task_id = task.id;
         self.last_presentation = presentation.*;
         return self.status;
     }

@@ -575,6 +575,7 @@ pub const TrustBoot = struct {
 
         for (&self.capability_table.slots.slots) |*slot| {
             if (!slot.in_use) continue;
+            if (!capabilityTargetAffectsProductionPolicy(slot.capability.target.kind)) continue;
             hashCapability(&hasher, "capability", &slot.capability);
         }
         for (&self.service_directory.registry.bindings.slots) |*slot| {
@@ -856,13 +857,33 @@ fn hashCapability(hasher: *crypto_hash.Hasher, tag: []const u8, cap: *const capa
     crypto_hash.updateInt(hasher, "capability-scope-workspace", cap.scope.workspace_id orelse 0);
     crypto_hash.updateBool(hasher, "capability-scope-local-only", cap.scope.local_only);
     crypto_hash.updateBool(hasher, "capability-scope-broker-only", cap.scope.broker_only);
-    crypto_hash.updateInt(hasher, "capability-issued-at", cap.lease.issued_at_ticks);
+    // Issuance is runtime clock state, not part of the declared policy. Keeping
+    // it out makes an equivalent cold boot measure the same authority graph.
     crypto_hash.updateInt(hasher, "capability-expires-at", cap.lease.expires_at_ticks);
     crypto_hash.updateBool(hasher, "capability-renewable", cap.lease.renewable);
     crypto_hash.updateInt(hasher, "capability-revocation-generation", cap.revocation_generation);
     crypto_hash.updateInt(hasher, "capability-policy-generation", cap.audit.policy_generation);
     crypto_hash.updateInt(hasher, "capability-source-task-id", cap.audit.source_task_id);
     crypto_hash.updateInt(hasher, "capability-broker-service-id", cap.audit.broker_service_id);
+}
+
+fn capabilityTargetAffectsProductionPolicy(kind: capability.CapabilityTargetKind) bool {
+    return switch (kind) {
+        .service, .device, .policy => true,
+        .task, .endpoint, .shared_memory, .object, .workspace, .network_policy => false,
+    };
+}
+
+test "production policy measurement excludes runtime resource grants" {
+    try std.testing.expect(!capabilityTargetAffectsProductionPolicy(.task));
+    try std.testing.expect(!capabilityTargetAffectsProductionPolicy(.endpoint));
+    try std.testing.expect(!capabilityTargetAffectsProductionPolicy(.shared_memory));
+    try std.testing.expect(!capabilityTargetAffectsProductionPolicy(.object));
+    try std.testing.expect(!capabilityTargetAffectsProductionPolicy(.workspace));
+    try std.testing.expect(!capabilityTargetAffectsProductionPolicy(.network_policy));
+    try std.testing.expect(capabilityTargetAffectsProductionPolicy(.service));
+    try std.testing.expect(capabilityTargetAffectsProductionPolicy(.device));
+    try std.testing.expect(capabilityTargetAffectsProductionPolicy(.policy));
 }
 
 fn smokeFaultModeIs(comptime mode_name: []const u8) bool {

@@ -45,6 +45,8 @@ pub const ServiceClass = enum(u8) {
     secret_vault,
 };
 
+pub const PERMISSION_REVIEW_UI_SURFACE_ID: u64 = 0x100;
+
 pub const ServiceBoundary = enum(u8) {
     kernel_tcb,
     in_process_bridge,
@@ -421,6 +423,8 @@ pub const catalog = [_]ServiceCatalogEntry{
             },
             .correlation_base = 302,
             .tick = 32,
+            .ui_surface_id = PERMISSION_REVIEW_UI_SURFACE_ID,
+            .grants = &.{.service_task_authority},
         },
     },
     .{

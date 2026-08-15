@@ -452,6 +452,28 @@ pub const Executor = struct {
         return self.last_yield_ui_revision;
     }
 
+    pub fn bootstrapMailboxSnapshot(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *const task_runtime.Runtime,
+        task_id: u64,
+    ) ?userspace_bootstrap_mailbox.Mailbox {
+        if (builtin.target.os.tag != .freestanding) return null;
+        if (self.active_task_id != 0) return null;
+        const task = runtime.findConst(task_id) orelse return null;
+        if (task.state != .active) return null;
+        const mapping = self.findMapping(task.address_space_id) orelse return null;
+        if (mapping.state != .live or mapping.address_space == null) return null;
+        const image = catalog.findById(task.launch.image_id) orelse return null;
+        if (image.bootstrap_mailbox_address == 0) return null;
+
+        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+        defer freestanding.paging.switchToKernelAddressSpace();
+        const mailbox_ptr: *const userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
+        if (mailbox_ptr.version != userspace_bootstrap_mailbox.VERSION) return null;
+        return mailbox_ptr.*;
+    }
+
     pub fn observedUserCounterStagePulse(
         self: *Executor,
         address_space_id: u64,
@@ -628,6 +650,8 @@ pub const Executor = struct {
 
         const bootstrap = selectBootstrapCapability(task, capability_table, now_ticks);
         const input_capability_id = selectInputCapability(task, capability_table, now_ticks);
+        const surface_presentation_capability_id = selectSurfacePresentationCapability(task, capability_table, now_ticks);
+        const ui_surface_id = task.ui_surface_id orelse 0;
         freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
         defer freestanding.paging.switchToKernelAddressSpace();
 
@@ -636,6 +660,8 @@ pub const Executor = struct {
             mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
             mailbox_ptr.authority_capability_id = bootstrap.capability_id;
             mailbox_ptr.input_capability_id = input_capability_id;
+            mailbox_ptr.surface_presentation_capability_id = surface_presentation_capability_id;
+            mailbox_ptr.ui_surface_id = ui_surface_id;
             mailbox_ptr.task_id = task.id;
             mailbox_ptr.service_id = bootstrap.service_id;
             return;
@@ -648,6 +674,8 @@ pub const Executor = struct {
             ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
             .authority_capability_id = bootstrap.capability_id,
             .input_capability_id = input_capability_id,
+            .surface_presentation_capability_id = surface_presentation_capability_id,
+            .ui_surface_id = ui_surface_id,
             .task_id = task.id,
             .service_id = bootstrap.service_id,
             .resource_mask = 0,
@@ -772,16 +800,24 @@ fn selectBootstrapCapability(
     capability_table: *const capability.CapabilityTable,
     now_ticks: u64,
 ) struct { capability_id: u64, service_id: u64 } {
+    var query_fallback: u64 = 0;
+    var query_service_id: u64 = 0;
     for (task.capabilityIds()) |capability_id| {
         const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
-        if (!granted.rights.has(.time_query) and
-            !granted.rights.has(.resource_query) and
-            !granted.rights.has(.accounting_query) and
-            !granted.rights.has(.endpoint_create)) continue;
         const service_id = if (granted.target.kind == .service) granted.target.id else 0;
-        return .{ .capability_id = capability_id, .service_id = service_id };
+        if (granted.target.kind == .service and granted.rights.has(.endpoint_create)) {
+            return .{ .capability_id = capability_id, .service_id = service_id };
+        }
+        if (query_fallback == 0 and
+            (granted.rights.has(.time_query) or
+                granted.rights.has(.resource_query) or
+                granted.rights.has(.accounting_query)))
+        {
+            query_fallback = capability_id;
+            query_service_id = service_id;
+        }
     }
-    return .{ .capability_id = 0, .service_id = 0 };
+    return .{ .capability_id = query_fallback, .service_id = query_service_id };
 }
 
 fn selectInputCapability(
@@ -793,6 +829,22 @@ fn selectInputCapability(
         const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
         if (granted.target.kind != .task or granted.target.id != task.id) continue;
         if (granted.scope.task_id != task.id or !granted.rights.has(.input_recv)) continue;
+        return capability_id;
+    }
+    return 0;
+}
+
+fn selectSurfacePresentationCapability(
+    task: *const task_runtime.TaskRecord,
+    capability_table: *const capability.CapabilityTable,
+    now_ticks: u64,
+) u64 {
+    const surface_id = task.ui_surface_id orelse return 0;
+    if (surface_id == 0) return 0;
+    for (task.capabilityIds()) |capability_id| {
+        const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
+        if (granted.target.kind != .task or granted.target.id != task.id) continue;
+        if (granted.scope.task_id != task.id or !granted.rights.has(.surface_present)) continue;
         return capability_id;
     }
     return 0;
@@ -1006,7 +1058,7 @@ fn publishRootActiveTaskId(task_id: u64) void {
     }
 }
 
-test "executor separates service bootstrap authority from focused input authority" {
+test "executor separates service, input, and surface presentation authority" {
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     const task = try runtime.createTask(.{
@@ -1018,7 +1070,16 @@ test "executor separates service bootstrap authority from focused input authorit
             .endpoint_slots = 2,
             .shared_memory_bytes = units.kibibytes(4),
         },
+        .ui_surface_id = 7,
         .local_only = true,
+    });
+    const query_authority = try capabilities.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 8 },
+        .rights = .{ .service = .{ .resource_query = true } },
+        .scope = .{ .task_id = task.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
     });
     const service_authority = try capabilities.mintBootRoot(.{
         .holder = task.owner,
@@ -1036,13 +1097,24 @@ test "executor separates service bootstrap authority from focused input authorit
         .scope = .{ .task_id = task.id, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
     });
+    const presentation_authority = try capabilities.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = task.id },
+        .rights = .{ .task = .{ .surface_present = true } },
+        .scope = .{ .task_id = task.id, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    try runtime.grantCapability(task.id, query_authority.id);
     try runtime.grantCapability(task.id, service_authority.id);
     try runtime.grantCapability(task.id, input_authority.id);
+    try runtime.grantCapability(task.id, presentation_authority.id);
 
     const bootstrap = selectBootstrapCapability(task, &capabilities, 10);
     try std.testing.expectEqual(service_authority.id, bootstrap.capability_id);
     try std.testing.expectEqual(@as(u64, 9), bootstrap.service_id);
     try std.testing.expectEqual(input_authority.id, selectInputCapability(task, &capabilities, 10));
+    try std.testing.expectEqual(presentation_authority.id, selectSurfacePresentationCapability(task, &capabilities, 10));
 }
 
 test "executor matches userspace counters by stage and pulse" {

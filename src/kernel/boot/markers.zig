@@ -64,6 +64,7 @@ pub const permission_xhci_boot_flow_commands = "ZIGOS:PERMISSION:XHCI_KEYBOARD:B
 pub const compositor_service_ready = "ZIGOS:COMPOSITOR:SERVICE:READY";
 pub const compositor_input_router_ready = "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY";
 pub const userspace_input_abi_ready = "ZIGOS:USERSPACE:INPUT_ABI:READY";
+pub const userspace_surface_presentation_ready = "ZIGOS:USERSPACE:SURFACE_PRESENTATION:READY";
 pub const compositor_framebuffer_presented = "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED";
 pub const compositor_permission_review_rendered = "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED";
 

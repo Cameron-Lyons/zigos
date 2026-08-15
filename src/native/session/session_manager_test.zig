@@ -53,7 +53,7 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqual(@as(usize, 20), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.terminated));
-    try std.testing.expectEqual(@as(usize, 0), compositor.window_count);
+    try std.testing.expectEqual(@as(usize, 1), compositor.window_count);
     try std.testing.expectEqual(@as(usize, 0), compositor.item_count);
 
     const runtime_service_record = supervisor.findByClass(.task_runtime).?;
@@ -103,6 +103,7 @@ test "boot assembles core services without running explicit scenarios" {
     const sync_service_task = session_manager.testing.findTask("sync-service").?;
     const session_task = session_manager.testing.findTask("session-manager").?;
     const review_task = session_manager.testing.findTask("permission-review").?;
+    const compositor_task = session_manager.testing.findTask("compositor-session").?;
     try std.testing.expect(session_manager.testing.findTask("notes") == null);
     try std.testing.expect(session_manager.testing.findTask("sync") == null);
     try std.testing.expect(session_manager.testing.findTask("capture") == null);
@@ -117,6 +118,10 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqualStrings("zigos.system.session-manager", session_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("zigos.system.storage-driver", storage_driver_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
+    try std.testing.expect(session_manager.system().surfacePresentationCapabilityForTask(session_task.id, 0) == null);
+    try std.testing.expect(session_manager.system().surfacePresentationCapabilityForTask(review_task.id, 0) != null);
+    try std.testing.expect(session_manager.system().surfacePresentationCapabilityForTask(compositor_task.id, 0) != null);
+    try std.testing.expectEqual(compositor_task.id, compositor.findWindowConst(compositor.active_window_id).?.subject_task_id);
     try std.testing.expectEqual(storage_driver_task.id, driver_directory.findByClass(.storage_controller).?.owner_task_id);
     try std.testing.expect(storage_driver_task.id != storage_service_task.id);
     try std.testing.expectEqual(@as(usize, 0), dispatcher.activeRecordCount());
@@ -162,7 +167,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(@as(usize, 27), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.terminated));
-    try std.testing.expectEqual(@as(usize, 6), compositor.window_count);
+    try std.testing.expectEqual(@as(usize, 7), compositor.window_count);
     try std.testing.expectEqual(@as(usize, 9), compositor.item_count);
 
     const runtime_service_record = supervisor.findByClass(.task_runtime).?;
@@ -223,10 +228,10 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     const session_task = session_manager.testing.findTask("session-manager").?;
     const review_task = session_manager.testing.findTask("permission-review").?;
     try std.testing.expectEqual(@as(usize, 2), notes_task.execution_component_count);
-    try std.testing.expectEqual(@as(usize, 2), notes_task.capability_count);
+    try std.testing.expectEqual(@as(usize, 3), notes_task.capability_count);
     try std.testing.expectEqual(task_runtime.TaskState.active, sync_task.state);
     try std.testing.expect(sync_task.background_allowed);
-    try std.testing.expectEqual(@as(usize, 4), capture_task.capability_count);
+    try std.testing.expectEqual(@as(usize, 5), capture_task.capability_count);
     try std.testing.expectEqual(task_runtime.TaskState.active, storage_driver_task.state);
     try std.testing.expectEqual(@as(u32, 2), storage_service_task.process_generation);
     try std.testing.expectEqual(@as(u32, 2), sync_service_task.process_generation);
@@ -309,7 +314,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(@as(usize, 3), app_panel_count);
     try std.testing.expectEqual(@as(usize, 1), document_view_count);
     try std.testing.expectEqual(@as(usize, 1), workspace_view_count);
-    try std.testing.expectEqual(@as(usize, 1), task_view_count);
+    try std.testing.expectEqual(@as(usize, 2), task_view_count);
     try std.testing.expectEqual(@as(usize, 0), dispatcher.activeRecordCount());
     const latest_dispatch = dispatcher.latestRecord().?;
     try std.testing.expectEqual(sync_task.id, latest_dispatch.task_id);

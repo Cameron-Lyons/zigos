@@ -456,7 +456,7 @@ test "compositor display framebuffer renders windows switching recovery and perm
     @memcpy(presentation.text[0..11], "hello world");
     presentation.text_length = 11;
     presentation.cursor = 11;
-    _ = try session.presentSurface(app_task.id, &presentation);
+    _ = try session.presentSurface(app_task, &presentation);
     try display.renderSession(&session);
     try expectDisplayContains(&display, "surface_state model=notes revision=2");
     try expectDisplayContains(&display, "hello world");

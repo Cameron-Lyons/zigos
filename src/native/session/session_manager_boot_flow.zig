@@ -9,6 +9,7 @@ const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
+const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const input_router_mod = @import("../platform/input_router.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
@@ -32,6 +33,7 @@ const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
+const userspace_flags = @import("../task/userspace_flags.zig");
 const trust_boot = @import("trust_boot.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
@@ -84,8 +86,10 @@ pub const SessionManager = struct {
     native_store: native_store_mount.NativeStoreMount = native_store_mount.NativeStoreMount.init(),
     recovery_context: session_contexts.RecoveryContext = session_contexts.RecoveryContext.init(),
     input_router: input_router_mod.Router = .{},
-    input_broker_service_id: u64 = 0,
+    compositor_broker_service_id: u64 = 0,
     input_authority_failures: usize = 0,
+    surface_authority_failures: usize = 0,
+    surface_authority_scanned_task_count: usize = 0,
 
     pub fn init() SessionManager {
         return .{};
@@ -215,6 +219,10 @@ pub const SessionManager = struct {
     }
 
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
+        _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(&self.runtime_context.runtime);
+        if (self.runtime_context.runtime.taskCount() != self.surface_authority_scanned_task_count) {
+            _ = self.provisionSurfacePresentationCapabilities(now_ticks);
+        }
         return self.runtime_context.runScheduler(now_ticks);
     }
 
@@ -274,7 +282,7 @@ pub const SessionManager = struct {
     fn ensureFocusedInputCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         if (self.focusedInputCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
         const task = self.runtime_context.runtime.find(task_id) orelse return null;
-        if (self.input_broker_service_id == 0) return null;
+        if (self.compositor_broker_service_id == 0) return null;
         const granted = self.kernel_context.capability_table.mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
@@ -293,7 +301,7 @@ pub const SessionManager = struct {
             .audit = .{
                 .policy_generation = 1,
                 .source_task_id = self.input_router.compositor_task_id,
-                .broker_service_id = self.input_broker_service_id,
+                .broker_service_id = self.compositor_broker_service_id,
                 .user_visible_entitlement = true,
             },
         }) catch return null;
@@ -302,6 +310,70 @@ pub const SessionManager = struct {
             return null;
         };
         return granted.id;
+    }
+
+    pub fn surfacePresentationCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
+        const task = self.runtime_context.runtime.find(task_id) orelse return null;
+        for (task.capabilityIds()) |capability_id| {
+            const granted = self.kernel_context.capability_table.requireUsable(capability_id, now_ticks) catch continue;
+            if (granted.target.kind != .task or granted.target.id != task_id) continue;
+            if (granted.scope.task_id != task_id or !granted.rights.has(.surface_present)) continue;
+            return capability_id;
+        }
+        return null;
+    }
+
+    fn ensureSurfacePresentationCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
+        if (self.surfacePresentationCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
+        const task = self.runtime_context.runtime.find(task_id) orelse return null;
+        if (!self.taskOwnsUiSurface(task) or self.compositor_broker_service_id == 0) return null;
+        const granted = self.kernel_context.capability_table.mintBootRoot(.{
+            .holder = task.owner,
+            .issuer = self.kernel_context.kernel_instance.policy_authority,
+            .target = .{ .kind = .task, .id = task_id },
+            .rights = .{ .task = .{ .surface_present = true } },
+            .scope = .{
+                .task_id = task_id,
+                .local_only = true,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = now_ticks,
+                .expires_at_ticks = std.math.maxInt(u64),
+                .renewable = false,
+            },
+            .audit = .{
+                .policy_generation = 1,
+                .source_task_id = self.input_router.compositor_task_id,
+                .broker_service_id = self.compositor_broker_service_id,
+                .user_visible_entitlement = true,
+            },
+        }) catch return null;
+        self.runtime_context.runtime.grantCapability(task_id, granted.id) catch {
+            self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+            return null;
+        };
+        return granted.id;
+    }
+
+    fn provisionSurfacePresentationCapabilities(self: *SessionManager, now_ticks: u64) bool {
+        var complete = true;
+        var slot_index: usize = 0;
+        while (slot_index < self.runtime_context.runtime.taskSlotCapacity()) : (slot_index += 1) {
+            const slot = self.runtime_context.runtime.taskSlotAt(slot_index);
+            if (!slot.in_use or !self.taskOwnsUiSurface(&slot.task)) continue;
+            if (self.ensureSurfacePresentationCapability(slot.task.id, now_ticks) != null) continue;
+            self.surface_authority_failures += 1;
+            complete = false;
+        }
+        if (complete) self.surface_authority_scanned_task_count = self.runtime_context.runtime.taskCount();
+        return complete;
+    }
+
+    fn taskOwnsUiSurface(self: *SessionManager, task: *const task_runtime.TaskRecord) bool {
+        if (task.state != .active or task.ui_surface_id == null or task.ui_surface_id.? == 0) return false;
+        const image = self.runtime_context.userspace_catalog.findById(task.launch.image_id) orelse return false;
+        return (image.contract_flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
     }
 
     pub fn networkWorkPending(_: *const SessionManager) bool {
@@ -431,7 +503,10 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         }
-        self.bindFocusedInputRouting(&graph);
+        if (!self.bindFocusedInputRouting(&graph)) {
+            self.failBoot();
+            return null;
+        }
         self.bindProductionStorageService(&graph);
         self.runtime_context.runtime_service.checkpoint(60);
         var trust = self.trustBoot();
@@ -452,13 +527,14 @@ pub const SessionManager = struct {
         return graph;
     }
 
-    pub fn bindFocusedInputRouting(self: *SessionManager, graph: *const ServiceGraph) void {
+    pub fn bindFocusedInputRouting(self: *SessionManager, graph: *const ServiceGraph) bool {
         const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
+        const compositor_task = self.runtime_context.runtime.find(compositor_task_id) orelse return false;
         self.input_router.bindCompositor(
             &self.recovery_context.review_compositor_session,
             compositor_task_id,
         );
-        self.input_broker_service_id = graph.state.services.compositor_service.id;
+        self.compositor_broker_service_id = graph.state.services.compositor_service.id;
         self.kernel_context.kernel_instance.bindFocusedInputReceiver(.{
             .context = &self.input_router,
             .poll = pollFocusedInputForKernel,
@@ -467,9 +543,108 @@ pub const SessionManager = struct {
             .context = &self.recovery_context.review_compositor_session,
             .present = presentSurfaceForKernel,
         });
+        if (!sessionHasTaskSurfaceWindow(&self.recovery_context.review_compositor_session, compositor_task)) {
+            _ = self.recovery_context.review_compositor_session.openTaskView(compositor_task, "Zigos") catch return false;
+        }
+        if (!self.provisionSurfacePresentationCapabilities(0)) return false;
         permission_review_service.bindSystemInputRouter(&self.input_router);
         common.printBootMarker(boot_markers.compositor_input_router_ready);
         common.printBootMarker(boot_markers.userspace_input_abi_ready);
+        if (builtin.target.os.tag == .freestanding) {
+            _ = self.runtime_context.userspace_scheduler.wakeTask(compositor_task_id, .external_event, 0, 1);
+            var attempts: usize = 0;
+            const dispatch_budget = self.runtime_context.runtime.taskSlotCapacity() * 8;
+            while (attempts < dispatch_budget and
+                self.recovery_context.review_compositor_session.surfacePresentation(compositor_task.ui_surface_id.?) == null) : (attempts += 1)
+            {
+                if (!self.runtime_context.userspace_scheduler.hasReadyTasks()) break;
+                _ = self.runUserspaceScheduler(@intCast(attempts + 1));
+            }
+            if (!self.proveUserspaceSurfacePresentation(compositor_task)) {
+                self.printSurfacePresentationTelemetry(compositor_task.id);
+                return false;
+            }
+        }
+        common.printBootMarker(boot_markers.userspace_surface_presentation_ready);
+        return true;
+    }
+
+    fn proveUserspaceSurfacePresentation(self: *SessionManager, compositor_task: *const task_runtime.TaskRecord) bool {
+        const surface_id = compositor_task.ui_surface_id orelse return false;
+        const surface = self.recovery_context.review_compositor_session.surfacePresentation(surface_id) orelse return false;
+        if (surface.task_id != compositor_task.id or surface.presentation.revision == 0) return false;
+        const model = abi.surfaceModelKind(surface.presentation.model_kind) orelse return false;
+        if (model != .compositor) return false;
+        const dispatch = self.runtime_context.userspace_scheduler.taskDispatchStats(compositor_task.id) orelse return false;
+        if (dispatch.last_ui_state_revision != surface.presentation.revision) return false;
+        const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
+            &self.runtime_context.userspace_catalog,
+            &self.runtime_context.runtime,
+            compositor_task.id,
+        ) orelse return false;
+        if (mailbox.surface_presentation_capability_id == 0 or
+            mailbox.ui_surface_id != surface_id or
+            mailbox.ui_state_revision != surface.presentation.revision or
+            mailbox.ui_presented_revision != surface.presentation.revision or
+            mailbox.ui_presentation_failures != 0 or
+            mailbox.ui_last_presentation_status != @intFromEnum(abi.SyscallStatus.success)) return false;
+
+        var storage: [compositor_display.MIN_WIDTH * compositor_display.MIN_HEIGHT]u8 = undefined;
+        var framebuffer = compositor_display.Framebuffer.init(&storage, compositor_display.MIN_WIDTH, compositor_display.MIN_HEIGHT) catch return false;
+        framebuffer.renderSession(&self.recovery_context.review_compositor_session) catch return false;
+        var expected_buffer: [96]u8 = undefined;
+        const expected = std.fmt.bufPrint(&expected_buffer, "surface_state model=compositor revision={d}", .{surface.presentation.revision}) catch return false;
+        _ = framebuffer.requirePresentation(
+            expected,
+            self.recovery_context.review_compositor_session.visibleWindowCount(),
+            self.recovery_context.review_compositor_session.active_window_id,
+        ) catch return false;
+        return true;
+    }
+
+    fn printSurfacePresentationTelemetry(self: *SessionManager, task_id: u64) void {
+        const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
+            &self.runtime_context.userspace_catalog,
+            &self.runtime_context.runtime,
+            task_id,
+        ) orelse {
+            console.print("ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing\n");
+            return;
+        };
+        const dispatch = self.runtime_context.userspace_scheduler.taskDispatchStats(task_id);
+        const task = self.runtime_context.runtime.find(task_id);
+        const authority = self.kernel_context.capability_table.query(mailbox.authority_capability_id);
+        var line_buffer: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &line_buffer,
+            "ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL task={d} owner={d}:{d} authority={d} holder={d}:{d} target={d}:{d} rights={x} scope_task={d} capability={d} surface={d} stage={d} counter={d} service_ops={d} service_flags={d} state_revision={d} presented_revision={d} failures={d} status={d} dispatches={d} waits={d} queued={}\n",
+            .{
+                task_id,
+                if (task) |record| @intFromEnum(record.owner.kind) else 0,
+                if (task) |record| record.owner.serial else 0,
+                mailbox.authority_capability_id,
+                if (authority) |granted| @intFromEnum(granted.holder.kind) else 0,
+                if (authority) |granted| granted.holder.serial else 0,
+                if (authority) |granted| @intFromEnum(granted.target.kind) else 0,
+                if (authority) |granted| granted.target.id else 0,
+                if (authority) |granted| granted.rights.toBits() else 0,
+                if (authority) |granted| granted.scope.task_id orelse 0 else 0,
+                mailbox.surface_presentation_capability_id,
+                mailbox.ui_surface_id,
+                mailbox.stage,
+                mailbox.last_counter,
+                mailbox.service_operation_count,
+                mailbox.service_status_flags,
+                mailbox.ui_state_revision,
+                mailbox.ui_presented_revision,
+                mailbox.ui_presentation_failures,
+                mailbox.ui_last_presentation_status,
+                if (dispatch) |stats| stats.dispatch_count else 0,
+                if (dispatch) |stats| stats.event_wait_count else 0,
+                if (dispatch) |stats| stats.queued_ready else false,
+            },
+        ) catch return;
+        console.print(line);
     }
 
     pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) void {
@@ -486,7 +661,8 @@ pub const SessionManager = struct {
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
         self.kernel_context.kernel_instance.clearSurfacePresentationReceiver();
         self.input_router.clearCompositor();
-        self.input_broker_service_id = 0;
+        self.compositor_broker_service_id = 0;
+        self.surface_authority_scanned_task_count = 0;
         permission_review_service.clearSystemInputRouter();
         self.kernel_context.resetPort();
         clearRootKernelPort();
@@ -512,6 +688,19 @@ fn pollFocusedInputForKernel(context: *anyopaque, task_id: u64) ?abi.InputEventD
     return router.pollAbiForTask(task_id);
 }
 
+fn sessionHasTaskSurfaceWindow(
+    session: *const compositor_session.Session,
+    task: *const task_runtime.TaskRecord,
+) bool {
+    const surface_id = task.ui_surface_id orelse return false;
+    var order: usize = 0;
+    while (order < session.window_count) : (order += 1) {
+        const window = session.windowAtOrder(order) orelse continue;
+        if (window.subject_task_id == task.id and window.ui_surface_id == surface_id) return true;
+    }
+    return false;
+}
+
 fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState {
     common.printBootMarker(boot_markers.native_bootstrap);
     common.printBootMarker(boot_markers.tcb_defined);
@@ -532,6 +721,17 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
     common.printBootMarker(boot_markers.policy_ready);
 
     const review_service_task = launchNativeBootstrapService(self, ids, services, .permission_review_ui) catch |err| {
+        self.recordBootFailure(services.review_service_record.id, 0, err);
+        return err;
+    };
+    grantNativeServiceTaskAuthority(
+        self,
+        ids,
+        services,
+        session_task.id,
+        review_service_task,
+        .permission_review_ui,
+    ) catch |err| {
         self.recordBootFailure(services.review_service_record.id, 0, err);
         return err;
     };
@@ -619,7 +819,7 @@ fn mintNativeBootstrapGrant(
         .lease = .{
             .issued_at_ticks = 0,
             .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
+            .renewable = false,
         },
         .audit = .{
             .policy_generation = 1,
@@ -627,6 +827,43 @@ fn mintNativeBootstrapGrant(
             .broker_service_id = broker_service_id,
         },
     });
+}
+
+fn grantNativeServiceTaskAuthority(
+    self: *SessionManager,
+    ids: session_bootstrap.Principals,
+    services: session_bootstrap.CoreServices,
+    source_task_id: u64,
+    task: *task_runtime.TaskRecord,
+    class: service_catalog.ServiceClass,
+) BootstrapError!void {
+    if (!catalogDeclaresGrant(class, .service_task_authority)) return error.MissingBootstrapGrant;
+    const service = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapGrant;
+    const granted = try self.kernel_context.capability_table.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = ids.policy_authority,
+        .target = .{ .kind = .service, .id = service.id },
+        .rights = service_catalog.rightsForBootstrapGrant(.service_task_authority),
+        .scope = .{
+            .task_id = task.id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{
+            .policy_generation = 1,
+            .source_task_id = source_task_id,
+            .broker_service_id = service.id,
+        },
+    });
+    self.runtime_context.runtime.grantCapability(task.id, granted.id) catch |err| {
+        self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+        return err;
+    };
 }
 
 fn catalogDeclaresGrant(class: service_catalog.ServiceClass, grant: service_catalog.BootstrapGrantKind) bool {
@@ -697,11 +934,11 @@ fn clearRootKernelPort() void {
 
 fn presentSurfaceForKernel(
     context: *anyopaque,
-    task_id: u64,
+    task: *const task_runtime.TaskRecord,
     presentation: *const abi.SurfacePresentation,
 ) native_kernel.SurfacePresentStatus {
     const session: *compositor_session.Session = @ptrCast(@alignCast(context));
-    return switch (session.presentSurface(task_id, presentation) catch |err| switch (err) {
+    return switch (session.presentSurface(task, presentation) catch |err| switch (err) {
         error.StalePresentation, error.PresentationConflict => return .stale,
         error.SurfaceTableFull => return .full,
         else => return .invalid_surface,

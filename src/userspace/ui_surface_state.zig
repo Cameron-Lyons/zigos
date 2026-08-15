@@ -2,7 +2,7 @@ const std = @import("std");
 const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
 
-pub const TEXT_CAPACITY: usize = 512;
+pub const TEXT_CAPACITY: usize = abi.SURFACE_PRESENTATION_TEXT_BYTES;
 const INTERACTION_HASH_SEED: u64 = 0xcbf29ce484222325;
 const INTERACTION_HASH_PRIME: u64 = 0x100000001b3;
 
@@ -36,6 +36,27 @@ pub const State = struct {
 
     pub fn textSlice(self: *const State) []const u8 {
         return self.text[0..self.text_length];
+    }
+
+    pub fn presentation(self: *const State, surface_id: u64) abi.SurfacePresentation {
+        var out = std.mem.zeroes(abi.SurfacePresentation);
+        out.surface_id = surface_id;
+        out.revision = self.revision;
+        out.interaction_hash = self.interaction_hash;
+        out.commit_count = self.commit_count;
+        out.activation_count = self.activation_count;
+        out.focus_index = self.focus_index;
+        out.text_length = self.text_length;
+        out.cursor = self.cursor;
+        out.model_kind = @intFromEnum(self.model);
+        out.state_flags = @bitCast(abi.SurfaceStateFlags{
+            .dirty = self.flags.dirty,
+            .recovery_visible = self.flags.recovery_visible,
+            .active = self.flags.active,
+            .input_overflow = self.flags.input_overflow,
+        });
+        @memcpy(out.text[0..self.text_length], self.textSlice());
+        return out;
     }
 
     pub fn apply(self: *State, event: abi.InputEventDescriptor) ApplyResult {
@@ -120,6 +141,19 @@ pub const State = struct {
     }
 };
 
+comptime {
+    if (@sizeOf(mailbox.UiStateFlags) != @sizeOf(abi.SurfaceStateFlags)) {
+        @compileError("mailbox and presentation state flags must remain wire-compatible");
+    }
+    for (std.meta.fields(mailbox.UiModelKind)) |field| {
+        const surface_model = std.enums.fromInt(abi.SurfaceModelKind, field.value) orelse
+            @compileError("mailbox UI model is missing from surface presentation ABI");
+        if (!std.mem.eql(u8, field.name, @tagName(surface_model))) {
+            @compileError("mailbox and presentation UI model ordinals diverged");
+        }
+    }
+}
+
 pub fn modelForBundle(comptime bundle_id: []const u8) mailbox.UiModelKind {
     if (std.mem.startsWith(u8, bundle_id, "app.notes")) return .notes;
     if (std.mem.eql(u8, bundle_id, "app.viewer")) return .viewer;
@@ -177,6 +211,22 @@ test "UI surface state selects application-specific fixed-capacity models" {
     try std.testing.expectEqual(mailbox.UiModelKind.permission_review, modelForBundle("zigos.system.permission-review"));
     try std.testing.expectEqual(mailbox.UiModelKind.compositor, modelForBundle("zigos.system.compositor"));
     try std.testing.expectEqual(mailbox.UiModelKind.generic, modelForBundle("app.unknown"));
+}
+
+test "UI surface state serializes a canonical bounded presentation" {
+    var state = State.init("app.notes");
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, .text, 'x')));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, .activate, 0)));
+
+    const presentation = state.presentation(91);
+    try std.testing.expect(abi.isCanonicalSurfacePresentation(&presentation));
+    try std.testing.expectEqual(@as(u64, 91), presentation.surface_id);
+    try std.testing.expectEqual(state.revision, presentation.revision);
+    try std.testing.expectEqual(state.interaction_hash, presentation.interaction_hash);
+    try std.testing.expectEqualStrings("x\n", presentation.textSlice());
+    try std.testing.expectEqual(abi.SurfaceModelKind.notes, abi.surfaceModelKind(presentation.model_kind).?);
+    const flags: abi.SurfaceStateFlags = @bitCast(presentation.state_flags);
+    try std.testing.expect(flags.dirty);
 }
 
 test "Notes UI state edits and commits document text" {

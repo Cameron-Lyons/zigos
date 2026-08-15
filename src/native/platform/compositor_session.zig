@@ -404,14 +404,14 @@ pub const Session = struct {
 
     pub fn presentSurface(
         self: *Session,
-        task_id: u64,
+        task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
     ) Error!PresentResult {
-        if (task_id == 0 or !abi.isCanonicalSurfacePresentation(presentation)) return error.MalformedPresentation;
-        if (!self.hasWindowForTaskSurface(task_id, presentation.surface_id)) return error.InvalidSurface;
+        if (task.id == 0 or task.state != .active or !abi.isCanonicalSurfacePresentation(presentation)) return error.MalformedPresentation;
+        if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.InvalidSurface;
 
         if (self.surfaces.get(presentation.surface_id)) |slot| {
-            if (slot.surface.task_id != task_id) return error.InvalidSurface;
+            if (slot.surface.task_id != task.id) return error.InvalidSurface;
             const previous_revision = slot.surface.presentation.revision;
             if (presentation.revision < previous_revision) return error.StalePresentation;
             if (presentation.revision == previous_revision) {
@@ -425,7 +425,7 @@ pub const Session = struct {
 
         const slot_index = self.surfaces.reserveIndex(presentation.surface_id) orelse return error.SurfaceTableFull;
         self.surfaces.slots[slot_index].surface = .{
-            .task_id = task_id,
+            .task_id = task.id,
             .presentation_count = 1,
             .presentation = presentation.*,
         };
@@ -439,6 +439,22 @@ pub const Session = struct {
 
     pub fn presentedSurfaceCount(self: *const Session) usize {
         return self.surfaces.countInUse();
+    }
+
+    pub fn pruneSurfacePresentations(self: *Session, runtime: *const task_runtime.Runtime) usize {
+        var removed: usize = 0;
+        var index: usize = 0;
+        while (index < self.surfaces.slots.len) : (index += 1) {
+            const slot = &self.surfaces.slots[index];
+            if (!slot.in_use) continue;
+            const task = runtime.findConst(slot.surface.task_id) orelse {
+                if (self.surfaces.removeIndex(index)) removed += 1;
+                continue;
+            };
+            if (task.state == .active and task.ui_surface_id == slot.surface.presentation.surface_id) continue;
+            if (self.surfaces.removeIndex(index)) removed += 1;
+        }
+        return removed;
     }
 
     pub fn findWindow(self: *Session, window_id: u64) ?*WindowRecord {
@@ -683,17 +699,6 @@ pub const Session = struct {
         if (!self.task_window_index.remove(taskWindowKey(window.subject_task_id), slot_index)) {
             native_util.impossibleByInvariant("task window index missing live window");
         }
-    }
-
-    fn hasWindowForTaskSurface(self: *const Session, task_id: u64, surface_id: u64) bool {
-        var slot_index = self.task_window_index.head(taskWindowKey(task_id));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.task_window_index.next(slot_index)) {
-            if (slot_index >= MAX_WINDOWS) return false;
-            const slot = &self.windows.slots[slot_index];
-            if (!slot.in_use or slot.window.subject_task_id != task_id) return false;
-            if (slot.window.ui_surface_id == surface_id) return true;
-        }
-        return false;
     }
 
     fn removeSurfacesForTask(self: *Session, task_id: u64) void {
@@ -1887,7 +1892,6 @@ test "compositor session owns bounded monotonic surface presentations" {
         .local_only = true,
     });
     var session = Session.init();
-    _ = try session.openTaskView(app_task, "Notes");
 
     var presentation = std.mem.zeroes(abi.SurfacePresentation);
     presentation.surface_id = 71;
@@ -1899,17 +1903,18 @@ test "compositor session owns bounded monotonic surface presentations" {
     presentation.cursor = 5;
     presentation.state_flags = @bitCast(abi.SurfaceStateFlags{ .dirty = true });
 
-    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task.id, &presentation));
-    try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(app_task.id, &presentation));
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
+    try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(@as(usize, 1), session.presentedSurfaceCount());
     try std.testing.expectEqualStrings("draft", session.surfacePresentation(71).?.textSlice());
     try std.testing.expectEqual(@as(u64, 1), session.surfacePresentation(71).?.presentation_count);
+    _ = try session.openTaskView(app_task, "Notes");
 
     presentation.revision = 3;
     presentation.text[5] = '!';
     presentation.text_length = 6;
     presentation.cursor = 6;
-    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task.id, &presentation));
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(@as(u64, 2), session.surfacePresentation(71).?.presentation_count);
 
     const snapshot = session.snapshot();
@@ -1918,12 +1923,21 @@ test "compositor session owns bounded monotonic surface presentations" {
     try std.testing.expectEqualStrings("draft!", restored.surfacePresentation(71).?.textSlice());
 
     presentation.revision = 2;
-    try std.testing.expectError(error.StalePresentation, restored.presentSurface(app_task.id, &presentation));
+    try std.testing.expectError(error.StalePresentation, restored.presentSurface(app_task, &presentation));
     presentation.revision = 3;
     presentation.interaction_hash += 1;
-    try std.testing.expectError(error.PresentationConflict, restored.presentSurface(app_task.id, &presentation));
-    try std.testing.expectError(error.InvalidSurface, restored.presentSurface(app_task.id + 1, &presentation));
+    try std.testing.expectError(error.PresentationConflict, restored.presentSurface(app_task, &presentation));
+    const foreign_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 82 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 72,
+        .local_only = true,
+    });
+    try std.testing.expectError(error.InvalidSurface, restored.presentSurface(foreign_task, &presentation));
 
+    try std.testing.expect(try runtime.terminateTask(app_task.id, 100));
+    try std.testing.expectEqual(@as(usize, 1), restored.pruneSurfacePresentations(&runtime));
     try std.testing.expectEqual(@as(usize, 1), restored.closeWindowsForTask(app_task.id));
     try std.testing.expectEqual(@as(usize, 0), restored.presentedSurfaceCount());
 }
