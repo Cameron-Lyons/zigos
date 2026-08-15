@@ -83,6 +83,8 @@ pub const SessionManager = struct {
     native_store: native_store_mount.NativeStoreMount = native_store_mount.NativeStoreMount.init(),
     recovery_context: session_contexts.RecoveryContext = session_contexts.RecoveryContext.init(),
     input_router: input_router_mod.Router = .{},
+    input_broker_service_id: u64 = 0,
+    input_authority_failures: usize = 0,
 
     pub fn init() SessionManager {
         return .{};
@@ -242,6 +244,11 @@ pub const SessionManager = struct {
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
         const result = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
         while (self.input_router.pollWakeTarget()) |task_id| {
+            if (self.ensureFocusedInputCapability(task_id, now_ticks) == null) {
+                self.input_authority_failures += 1;
+                _ = self.input_router.dropForTask(task_id);
+                continue;
+            }
             _ = self.runtime_context.userspace_scheduler.wakeTask(
                 task_id,
                 .external_event,
@@ -252,8 +259,48 @@ pub const SessionManager = struct {
         return result.events_routed;
     }
 
-    pub fn pollFocusedInput(self: *SessionManager, task_id: u64) ?input_router_mod.RoutedKeyboardEvent {
-        return self.input_router.pollForTask(task_id);
+    pub fn focusedInputCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
+        const task = self.runtime_context.runtime.find(task_id) orelse return null;
+        for (task.capabilityIds()) |capability_id| {
+            const granted = self.kernel_context.capability_table.requireUsable(capability_id, now_ticks) catch continue;
+            if (granted.target.kind != .task or granted.target.id != task_id) continue;
+            if (granted.scope.task_id != task_id or !granted.rights.has(.input_recv)) continue;
+            return capability_id;
+        }
+        return null;
+    }
+
+    fn ensureFocusedInputCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
+        if (self.focusedInputCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
+        const task = self.runtime_context.runtime.find(task_id) orelse return null;
+        if (self.input_broker_service_id == 0) return null;
+        const granted = self.kernel_context.capability_table.mintBootRoot(.{
+            .holder = task.owner,
+            .issuer = self.kernel_context.kernel_instance.policy_authority,
+            .target = .{ .kind = .task, .id = task_id },
+            .rights = .{ .task = .{ .input_recv = true } },
+            .scope = .{
+                .task_id = task_id,
+                .local_only = true,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = now_ticks,
+                .expires_at_ticks = std.math.maxInt(u64),
+                .renewable = false,
+            },
+            .audit = .{
+                .policy_generation = 1,
+                .source_task_id = self.input_router.compositor_task_id,
+                .broker_service_id = self.input_broker_service_id,
+                .user_visible_entitlement = true,
+            },
+        }) catch return null;
+        self.runtime_context.runtime.grantCapability(task_id, granted.id) catch {
+            self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+            return null;
+        };
+        return granted.id;
     }
 
     pub fn networkWorkPending(_: *const SessionManager) bool {
@@ -383,13 +430,7 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         }
-        const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
-        self.input_router.bindCompositor(
-            &self.recovery_context.review_compositor_session,
-            compositor_task_id,
-        );
-        permission_review_service.bindSystemInputRouter(&self.input_router);
-        common.printBootMarker(boot_markers.compositor_input_router_ready);
+        self.bindFocusedInputRouting(&graph);
         self.bindProductionStorageService(&graph);
         self.runtime_context.runtime_service.checkpoint(60);
         var trust = self.trustBoot();
@@ -410,6 +451,22 @@ pub const SessionManager = struct {
         return graph;
     }
 
+    pub fn bindFocusedInputRouting(self: *SessionManager, graph: *const ServiceGraph) void {
+        const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
+        self.input_router.bindCompositor(
+            &self.recovery_context.review_compositor_session,
+            compositor_task_id,
+        );
+        self.input_broker_service_id = graph.state.services.compositor_service.id;
+        self.kernel_context.kernel_instance.bindFocusedInputReceiver(.{
+            .context = &self.input_router,
+            .poll = pollFocusedInputForKernel,
+        });
+        permission_review_service.bindSystemInputRouter(&self.input_router);
+        common.printBootMarker(boot_markers.compositor_input_router_ready);
+        common.printBootMarker(boot_markers.userspace_input_abi_ready);
+    }
+
     pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) void {
         self.native_store.bindProduction(
             graph.state.services.storage_service.id,
@@ -421,7 +478,9 @@ pub const SessionManager = struct {
 
     pub fn failBoot(self: *SessionManager) void {
         self.initialized = false;
+        self.kernel_context.kernel_instance.clearFocusedInputReceiver();
         self.input_router.clearCompositor();
+        self.input_broker_service_id = 0;
         permission_review_service.clearSystemInputRouter();
         self.kernel_context.resetPort();
         clearRootKernelPort();
@@ -441,6 +500,11 @@ pub const SessionManager = struct {
         );
     }
 };
+
+fn pollFocusedInputForKernel(context: *anyopaque, task_id: u64) ?abi.InputEventDescriptor {
+    const router: *input_router_mod.Router = @ptrCast(@alignCast(context));
+    return router.pollAbiForTask(task_id);
+}
 
 fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState {
     common.printBootMarker(boot_markers.native_bootstrap);

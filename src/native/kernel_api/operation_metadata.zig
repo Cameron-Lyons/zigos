@@ -321,6 +321,19 @@ pub const operations = [_]Descriptor{
         .scope_rule = .{ .task_scope_matches_request_task = true },
     },
     .{
+        .operation = .input_recv,
+        .binding = .{
+            .request_type_name = "InputRecvRequest",
+            .response_type_name = "InputRecvResponse",
+            .handler_name = "dispatchInputRecv",
+            .port_method_name = "inputRecv",
+        },
+        .domain = .task,
+        .required_right = .input_recv,
+        .target_kind = .{ .fixed = .task },
+        .scope_rule = .{ .task_scope_matches_request_task = true },
+    },
+    .{
         .operation = .device_describe,
         .binding = .{
             .request_type_name = "DeviceDescribeRequest",

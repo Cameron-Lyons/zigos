@@ -129,6 +129,12 @@ pub const AccountingQueryRequest = struct {
     task_id: u64,
 };
 
+pub const InputRecvRequest = struct {
+    header: abi.RequestHeader,
+    input_capability_id: u64,
+    receiver_task_id: u64,
+};
+
 pub const DeviceDescribeRequest = struct {
     header: abi.RequestHeader,
     device_capability_id: u64,
@@ -350,6 +356,20 @@ pub const KernelPort = struct {
         return self.kernel.accountingQuery(
             callContext(request.header, request.authority_capability_id, .{ .task = request.task_id }),
             request.task_id,
+            now_ticks,
+        );
+    }
+
+    pub fn inputRecv(
+        self: *KernelPort,
+        request: InputRecvRequest,
+        now_ticks: u64,
+    ) Error!?abi.InputEventDescriptor {
+        try validateHeader(request.header, .input_recv);
+        try validateSubjectTask(request.header, request.receiver_task_id);
+        return self.kernel.inputRecv(
+            callContext(request.header, request.input_capability_id, .{ .task = request.receiver_task_id }),
+            request.receiver_task_id,
             now_ticks,
         );
     }

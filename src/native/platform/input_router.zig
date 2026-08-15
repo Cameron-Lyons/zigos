@@ -1,5 +1,6 @@
 const std = @import("std");
 const xhci = @import("../../kernel/drivers/xhci.zig");
+const abi = @import("../core/abi.zig");
 const input_driver_task = @import("../drivers/input_driver_task.zig");
 const compositor_session = @import("compositor_session.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -208,9 +209,33 @@ pub const Router = struct {
         return event;
     }
 
+    pub fn pollAbiForTask(self: *Router, task_id: u64) ?abi.InputEventDescriptor {
+        const routed = self.pollForTask(task_id) orelse return null;
+        return .{
+            .sequence = routed.sequence,
+            .tick = routed.tick,
+            .window_id = routed.window_id,
+            .task_id = routed.task_id,
+            .surface_id = routed.surface_id,
+            .kind = @intFromEnum(abiKind(routed.event.kind)),
+            .text = routed.event.text,
+            .port_id = routed.port_id,
+            .slot_id = routed.slot_id,
+        };
+    }
+
     pub fn queuedForTask(self: *const Router, task_id: u64) usize {
         const inbox = self.findInboxConst(task_id) orelse return 0;
         return @intCast(inbox.count);
+    }
+
+    pub fn dropForTask(self: *Router, task_id: u64) usize {
+        const inbox = self.findInbox(task_id) orelse return 0;
+        const dropped: usize = @intCast(inbox.count);
+        self.releaseInboxEvents(inbox);
+        inbox.* = .{};
+        self.events_dropped += dropped;
+        return dropped;
     }
 
     pub fn pollWakeTarget(self: *Router) ?u64 {
@@ -416,6 +441,21 @@ fn taskOwnsVisibleWindow(compositor: *const compositor_session.Session, task_id:
     return false;
 }
 
+fn abiKind(kind: input_driver_task.EventKind) abi.InputEventKind {
+    return switch (kind) {
+        .text => .text,
+        .backspace => .backspace,
+        .commit_text => .commit_text,
+        .focus_next => .focus_next,
+        .focus_previous => .focus_previous,
+        .activate => .activate,
+        .task_switch_next => .task_switch_next,
+        .task_switch_previous => .task_switch_previous,
+        .show_recovery => .show_recovery,
+        .dismiss_recovery => .dismiss_recovery,
+    };
+}
+
 const TestFeed = struct {
     reports: [8]xhci.HardwareBootKeyboardReport = [_]xhci.HardwareBootKeyboardReport{.{}} ** 8,
     count: usize = 0,
@@ -484,7 +524,12 @@ test "input router gives each keyboard independent transitions and targets modal
     const serviced = router.service(10, DEFAULT_REPORT_BUDGET);
     try std.testing.expectEqual(@as(usize, 2), serviced.reports_accepted);
     try std.testing.expectEqual(@as(usize, 2), router.queuedForTask(77));
-    try std.testing.expectEqual(@as(u8, 'a'), router.pollForTask(77).?.event.text);
+    const wire_event = router.pollAbiForTask(77).?;
+    try std.testing.expectEqual(@as(u64, 1), wire_event.sequence);
+    try std.testing.expectEqual(review.id, wire_event.window_id);
+    try std.testing.expectEqual(@as(u64, 77), wire_event.task_id);
+    try std.testing.expectEqual(abi.InputEventKind.text, abi.inputEventKind(wire_event.kind).?);
+    try std.testing.expectEqual(@as(u8, 'a'), wire_event.text);
     try std.testing.expectEqual(@as(u8, 'a'), router.pollForTask(77).?.event.text);
     try std.testing.expect(router.pollForTask(app.id) == null);
 }
@@ -624,4 +669,9 @@ test "input router keeps compositor switching responsive when a focused inbox is
     try std.testing.expectEqual(@as(u8, MAX_QUEUED_EVENTS), router.queued_event_count);
     try std.testing.expectEqual(@as(usize, 2), router.events_dropped);
     try std.testing.expectEqual(@as(usize, 2), router.focus_switches);
+
+    try std.testing.expectEqual(@as(usize, MAX_EVENTS_PER_INBOX - 1), router.dropForTask(third.id));
+    try std.testing.expectEqual(@as(usize, 0), router.queuedForTask(third.id));
+    try std.testing.expectEqual(@as(u8, MAX_EVENTS_PER_INBOX + 1), router.queued_event_count);
+    try std.testing.expectEqual(@as(usize, MAX_EVENTS_PER_INBOX + 1), router.events_dropped);
 }

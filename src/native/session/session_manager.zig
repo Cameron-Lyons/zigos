@@ -135,10 +135,6 @@ pub fn servicePendingInputWork(now_ticks: u64) usize {
     return default_manager.servicePendingInputWork(now_ticks);
 }
 
-pub fn pollFocusedInput(task_id: u64) ?input_router.RoutedKeyboardEvent {
-    return default_manager.pollFocusedInput(task_id);
-}
-
 pub fn networkWorkPending() bool {
     return default_manager.networkWorkPending();
 }
