@@ -74,8 +74,18 @@ pub const ScriptedPlanEntry = struct {
     command: []const u8,
 };
 
+pub const HardwareReportSource = struct {
+    poll_report: *const fn () ?xhci.HardwareBootKeyboardReport,
+    input_proof: *const fn () ?xhci.InputProof,
+};
+
+const PhysicalInputBackend = union(enum) {
+    modeled: xhci.HidController,
+    hardware: HardwareReportSource,
+};
+
 pub const PhysicalInputSource = struct {
-    controller: xhci.HidController,
+    backend: PhysicalInputBackend,
     pending_line: [MAX_INPUT_LINE]u8 = [_]u8{0} ** MAX_INPUT_LINE,
     pending_line_len: usize = 0,
     pending_commands: [MAX_PHYSICAL_INPUT_COMMANDS][MAX_INPUT_LINE]u8 = [_][MAX_INPUT_LINE]u8{[_]u8{0} ** MAX_INPUT_LINE} ** MAX_PHYSICAL_INPUT_COMMANDS,
@@ -88,22 +98,32 @@ pub const PhysicalInputSource = struct {
 
     pub fn init(plan: xhci.RingPlan) xhci.Error!PhysicalInputSource {
         return .{
-            .controller = try xhci.HidController.init(plan),
+            .backend = .{ .modeled = try xhci.HidController.init(plan) },
         };
     }
 
     pub fn initDefault() xhci.Error!PhysicalInputSource {
         var source = PhysicalInputSource{
-            .controller = try xhci.HidController.initWithMmio(xhci.defaultCapabilityRegisters(), .{
-                .command_ring_trbs = 64,
-                .event_ring_trbs = 64,
-                .command_ring_address = 0x1000,
-                .event_ring_address = 0x2000,
-            }),
+            .backend = .{ .modeled = try xhci.HidController.initWithMmio(
+                xhci.defaultCapabilityRegisters(),
+                .{
+                    .command_ring_trbs = 64,
+                    .event_ring_trbs = 64,
+                    .command_ring_address = 0x1000,
+                    .event_ring_address = 0x2000,
+                },
+            ) },
         };
         const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
-        _ = try source.controller.attachBootKeyboard(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, descriptor[0..]);
+        _ = try source.backend.modeled.attachBootKeyboard(
+            xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+            descriptor[0..],
+        );
         return source;
+    }
+
+    pub fn initHardware(source: HardwareReportSource) PhysicalInputSource {
+        return .{ .backend = .{ .hardware = source } };
     }
 
     pub fn enqueueTextCommand(
@@ -148,7 +168,10 @@ pub const PhysicalInputSource = struct {
     }
 
     pub fn inputProof(self: *const PhysicalInputSource) ?xhci.InputProof {
-        return self.controller.inputProof();
+        return switch (self.backend) {
+            .modeled => |*controller| controller.inputProof(),
+            .hardware => |source| source.input_proof(),
+        };
     }
 
     fn enqueueAsciiKey(
@@ -167,17 +190,18 @@ pub const PhysicalInputSource = struct {
         endpoint_id: u8,
         report: xhci.HidReport,
     ) PhysicalInputError!void {
-        const boot_keyboard = self.controller.configuredBootKeyboard() orelse return error.MissingBootKeyboardInterface;
+        const controller = switch (self.backend) {
+            .modeled => |*modeled| modeled,
+            .hardware => return error.UnsupportedPhysicalInput,
+        };
+        const boot_keyboard = controller.configuredBootKeyboard() orelse return error.MissingBootKeyboardInterface;
         if (boot_keyboard.device_id != device_id) return error.UnknownHidDevice;
-        try self.controller.submitKeyboardInterruptEvent(boot_keyboard.slot_id, endpoint_id, report.reportSlice());
+        try controller.submitKeyboardInterruptEvent(boot_keyboard.slot_id, endpoint_id, report.reportSlice());
     }
 
     fn drainReports(self: *PhysicalInputSource) PhysicalInputError!void {
         while (true) {
-            const report = self.controller.pollHidReport() catch |err| switch (err) {
-                error.EventRingEmpty => return,
-                else => return err,
-            };
+            const report = try self.pollReport() orelse return;
             self.reports_consumed += 1;
             const ch = asciiFromReport(report) orelse continue;
             if (ch == '\n') {
@@ -193,27 +217,161 @@ pub const PhysicalInputSource = struct {
                 @memset(self.pending_line[0..], 0);
                 return;
             }
+            if (ch == 8 or ch == 127) {
+                if (self.pending_line_len != 0) {
+                    self.pending_line_len -= 1;
+                    self.pending_line[self.pending_line_len] = 0;
+                }
+                continue;
+            }
             if (self.pending_line_len >= self.pending_line.len) return error.ReportTooLarge;
             self.pending_line[self.pending_line_len] = ch;
             self.pending_line_len += 1;
         }
     }
+
+    fn pollReport(self: *PhysicalInputSource) PhysicalInputError!?xhci.HidReport {
+        return switch (self.backend) {
+            .modeled => |*controller| controller.pollHidReport() catch |err| switch (err) {
+                error.EventRingEmpty => null,
+                else => return err,
+            },
+            .hardware => |source| hardware: {
+                const report = source.poll_report() orelse break :hardware null;
+                if (report.sequence == 0 or report.port_id == 0 or report.slot_id == 0 or
+                    report.endpoint_id == 0)
+                {
+                    return error.InvalidBootKeyboardReport;
+                }
+                break :hardware .{
+                    .device_id = (@as(u64, report.vendor_id) << 16) | report.product_id,
+                    .endpoint_id = report.endpoint_id,
+                    .report_len = report.bytes.len,
+                    .report = report.bytes,
+                };
+            },
+        };
+    }
 };
+
+fn noHardwareKeyboardReport() ?xhci.HardwareBootKeyboardReport {
+    return null;
+}
+
+fn noHardwareInputProof() ?xhci.InputProof {
+    return null;
+}
+
+var system_hardware_input = PhysicalInputSource.initHardware(.{
+    .poll_report = noHardwareKeyboardReport,
+    .input_proof = noHardwareInputProof,
+});
+var system_hardware_input_bound = false;
+
+pub fn bindSystemHardwareInput(source: HardwareReportSource) void {
+    system_hardware_input = PhysicalInputSource.initHardware(source);
+    system_hardware_input_bound = true;
+}
+
+pub fn clearSystemHardwareInput() void {
+    system_hardware_input_bound = false;
+}
+
+const TestHardwareReportFeed = struct {
+    reports: [3]xhci.HardwareBootKeyboardReport = [_]xhci.HardwareBootKeyboardReport{.{}} ** 3,
+    cursor: usize = 0,
+};
+
+var test_hardware_report_feed = TestHardwareReportFeed{};
+
+fn pollTestHardwareReport() ?xhci.HardwareBootKeyboardReport {
+    if (test_hardware_report_feed.cursor == test_hardware_report_feed.reports.len) return null;
+    defer test_hardware_report_feed.cursor += 1;
+    return test_hardware_report_feed.reports[test_hardware_report_feed.cursor];
+}
+
+fn noTestHardwareInputProof() ?xhci.InputProof {
+    return null;
+}
+
+fn testHardwareKeyboardReport(sequence: u64, usage: u8) xhci.HardwareBootKeyboardReport {
+    return .{
+        .sequence = sequence,
+        .port_id = 2,
+        .slot_id = 3,
+        .interface_number = 1,
+        .endpoint_id = 3,
+        .vendor_id = 0x046D,
+        .product_id = 0xC31C,
+        .bytes = .{ 0, 0, usage, 0, 0, 0, 0, 0 },
+    };
+}
 
 const HidKey = struct {
     usage: u8,
     modifiers: u8 = 0,
 };
 
+const HID_LEFT_SHIFT: u8 = 1 << 1;
+const HID_SHIFT_MASK: u8 = HID_LEFT_SHIFT | (1 << 5);
+
 fn hidKeyForAscii(ch: u8) ?HidKey {
     return switch (ch) {
         'a'...'z' => .{ .usage = 0x04 + (ch - 'a') },
+        'A'...'Z' => .{ .usage = 0x04 + (ch - 'A'), .modifiers = HID_LEFT_SHIFT },
         '1'...'9' => .{ .usage = 0x1e + (ch - '1') },
         '0' => .{ .usage = 0x27 },
         '\n' => .{ .usage = 0x28 },
+        8, 127 => .{ .usage = 0x2a },
+        '\t' => .{ .usage = 0x2b },
         ' ' => .{ .usage = 0x2c },
         '-' => .{ .usage = 0x2d },
         '=' => .{ .usage = 0x2e },
+        '[', ']', '\\', ';', '\'', '`', ',', '.', '/' => .{ .usage = switch (ch) {
+            '[' => 0x2f,
+            ']' => 0x30,
+            '\\' => 0x31,
+            ';' => 0x33,
+            '\'' => 0x34,
+            '`' => 0x35,
+            ',' => 0x36,
+            '.' => 0x37,
+            '/' => 0x38,
+            else => unreachable,
+        } },
+        '!', '@', '#', '$', '%', '^', '&', '*', '(', ')' => .{
+            .usage = switch (ch) {
+                '!' => 0x1e,
+                '@' => 0x1f,
+                '#' => 0x20,
+                '$' => 0x21,
+                '%' => 0x22,
+                '^' => 0x23,
+                '&' => 0x24,
+                '*' => 0x25,
+                '(' => 0x26,
+                ')' => 0x27,
+                else => unreachable,
+            },
+            .modifiers = HID_LEFT_SHIFT,
+        },
+        '_', '+', '{', '}', '|', ':', '"', '~', '<', '>', '?' => .{
+            .usage = switch (ch) {
+                '_' => 0x2d,
+                '+' => 0x2e,
+                '{' => 0x2f,
+                '}' => 0x30,
+                '|' => 0x31,
+                ':' => 0x33,
+                '"' => 0x34,
+                '~' => 0x35,
+                '<' => 0x36,
+                '>' => 0x37,
+                '?' => 0x38,
+                else => unreachable,
+            },
+            .modifiers = HID_LEFT_SHIFT,
+        },
         else => null,
     };
 }
@@ -227,15 +385,30 @@ fn asciiFromReport(report: xhci.HidReport) ?u8 {
 }
 
 fn asciiFromUsage(usage: u8, modifiers: u8) ?u8 {
-    _ = modifiers;
+    const shifted = (modifiers & HID_SHIFT_MASK) != 0;
     return switch (usage) {
-        0x04...0x1d => 'a' + (usage - 0x04),
-        0x1e...0x26 => '1' + (usage - 0x1e),
-        0x27 => '0',
+        0x04...0x1d => (if (shifted) @as(u8, 'A') else @as(u8, 'a')) + (usage - 0x04),
+        0x1e...0x27 => if (shifted)
+            "!@#$%^&*()"[usage - 0x1e]
+        else if (usage == 0x27)
+            '0'
+        else
+            '1' + (usage - 0x1e),
         0x28 => '\n',
+        0x2a => 8,
+        0x2b => '\t',
         0x2c => ' ',
-        0x2d => '-',
-        0x2e => '=',
+        0x2d => if (shifted) '_' else '-',
+        0x2e => if (shifted) '+' else '=',
+        0x2f => if (shifted) '{' else '[',
+        0x30 => if (shifted) '}' else ']',
+        0x31 => if (shifted) '|' else '\\',
+        0x33 => if (shifted) ':' else ';',
+        0x34 => if (shifted) '"' else '\'',
+        0x35 => if (shifted) '~' else '`',
+        0x36 => if (shifted) '<' else ',',
+        0x37 => if (shifted) '>' else '.',
+        0x38 => if (shifted) '?' else '/',
         else => null,
     };
 }
@@ -457,12 +630,14 @@ pub const Service = struct {
         runtime: *task_runtime.Runtime,
         scripted_inputs: []const []const u8,
     ) Service {
-        return .{
+        var service = Service{
             .service_id = service_id,
             .task_id = task_id,
             .runtime = runtime,
             .scripted_inputs = scripted_inputs,
         };
+        if (system_hardware_input_bound) service.physical_input = &system_hardware_input;
+        return service;
     }
 
     pub fn initConfigured(
@@ -1152,6 +1327,75 @@ test "review service consumes xHCI keyboard reports for physical permission comm
     const window = compositor.windowAtOrder(0).?;
     try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(window.id, .object_access, "workspace:notes").?.decision);
     try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(window.id, .clipboard, "clipboard").?.decision);
+}
+
+test "physical input source consumes the hardware xHCI report interface" {
+    test_hardware_report_feed = .{
+        .reports = .{
+            testHardwareKeyboardReport(1, 0x12),
+            testHardwareKeyboardReport(2, 0x0E),
+            testHardwareKeyboardReport(3, 0x28),
+        },
+    };
+    var source = PhysicalInputSource.initHardware(.{
+        .poll_report = pollTestHardwareReport,
+        .input_proof = noTestHardwareInputProof,
+    });
+    var command_buffer: [MAX_INPUT_LINE]u8 = undefined;
+    try std.testing.expectEqualStrings("ok", source.takeCommand(&command_buffer).?);
+    try std.testing.expectEqual(@as(usize, 3), source.reportCount());
+    try std.testing.expectEqual(@as(usize, 1), source.commandCount());
+    try std.testing.expectError(
+        error.UnsupportedPhysicalInput,
+        source.enqueueTextCommand(1, 3, "synthetic"),
+    );
+
+    test_hardware_report_feed = .{
+        .reports = .{
+            testHardwareKeyboardReport(0, 0x04),
+            testHardwareKeyboardReport(2, 0),
+            testHardwareKeyboardReport(3, 0),
+        },
+    };
+    var malformed_source = PhysicalInputSource.initHardware(.{
+        .poll_report = pollTestHardwareReport,
+        .input_proof = noTestHardwareInputProof,
+    });
+    try std.testing.expectError(error.InvalidBootKeyboardReport, malformed_source.drainReports());
+
+    test_hardware_report_feed = .{
+        .reports = .{
+            testHardwareKeyboardReport(1, 0x12),
+            testHardwareKeyboardReport(2, 0x0E),
+            testHardwareKeyboardReport(3, 0x28),
+        },
+    };
+    bindSystemHardwareInput(.{
+        .poll_report = pollTestHardwareReport,
+        .input_proof = noTestHardwareInputProof,
+    });
+    defer clearSystemHardwareInput();
+    var runtime = task_runtime.Runtime.init();
+    var service = Service.init(1, 2, &runtime, &.{});
+    try std.testing.expect(service.physical_input != null);
+    try std.testing.expectEqualStrings("ok", service.physical_input.?.takeCommand(&command_buffer).?);
+}
+
+test "physical input command editing honors shift punctuation and backspace" {
+    var source = try PhysicalInputSource.initDefault();
+    try source.enqueueTextCommand(
+        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        "Allow_Local+1?",
+    );
+    try source.enqueueTextCommand(
+        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        "denyx\x08",
+    );
+    var command_buffer: [MAX_INPUT_LINE]u8 = undefined;
+    try std.testing.expectEqualStrings("Allow_Local+1?", source.takeCommand(&command_buffer).?);
+    try std.testing.expectEqualStrings("deny", source.takeCommand(&command_buffer).?);
 }
 
 test "rendered permission review surface drives allow deny controls through compositor display and policy grants" {
