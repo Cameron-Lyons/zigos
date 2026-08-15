@@ -62,6 +62,10 @@ var active = false;
 var event_consumer = xhci.EventRingConsumer{};
 var command_producer = xhci.TrbRingProducer{};
 var control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
+var interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
+var slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
+var keyboard_reports = xhci.BootKeyboardReportPublisher{};
+var outstanding_interrupt_reports: usize = 0;
 var pending_interrupts: u32 = 0;
 var interrupt_count: u64 = 0;
 var event_count: u64 = 0;
@@ -75,6 +79,8 @@ var configuration_descriptor_count: u64 = 0;
 var set_configuration_count: u64 = 0;
 var set_boot_protocol_count: u64 = 0;
 var configure_endpoint_count: u64 = 0;
+var interrupt_report_submission_count: u64 = 0;
+var keyboard_report_count: u64 = 0;
 
 const PortAction = enum(u8) {
     none,
@@ -88,6 +94,7 @@ const PortAction = enum(u8) {
     set_configuration,
     set_boot_protocol,
     configure_endpoint,
+    post_interrupt_report,
     disable_slot,
 };
 
@@ -107,6 +114,7 @@ const PortRuntimeState = struct {
     slot_id: u8 = 0,
     endpoint_zero_max_packet_size: u16 = 0,
     pending_endpoint_zero_max_packet_size: u16 = 0,
+    interrupt_report_trb_address: u64 = 0,
     reset_deadline: ?tsc_clock.Deadline = null,
     action: PortAction = .none,
 };
@@ -154,6 +162,10 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     event_consumer = .{};
     command_producer = .{};
     control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    keyboard_reports = .{};
+    outstanding_interrupt_reports = 0;
     ports = [_]PortRuntimeState{.{}} ** 256;
     outstanding_command = null;
     outstanding_transfer = null;
@@ -171,6 +183,8 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     set_configuration_count = 0;
     set_boot_protocol_count = 0;
     configure_endpoint_count = 0;
+    interrupt_report_submission_count = 0;
+    keyboard_report_count = 0;
     const bar = try validateBar(device_info);
     paging.mapKernelBorrowedPage(
         mmio_windows.xhci.base,
@@ -279,6 +293,11 @@ pub fn requesterIsolated() bool {
     return active_dma_plan != null and intel_vtd.requesterProtected(active_device);
 }
 
+pub fn controllerDeviceId() ?u64 {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    return pci.stableDeviceId(active_device);
+}
+
 pub fn activate() Error!void {
     if (@atomicLoad(bool, &active, .seq_cst)) return;
     if (!validated() or !intel_vtd.requesterProtected(active_device)) {
@@ -317,6 +336,10 @@ pub fn activate() Error!void {
     event_consumer = .{};
     command_producer = .{};
     control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    keyboard_reports = .{};
+    outstanding_interrupt_reports = 0;
     ports = [_]PortRuntimeState{.{}} ** 256;
     outstanding_command = null;
     outstanding_transfer = null;
@@ -334,6 +357,8 @@ pub fn activate() Error!void {
     set_configuration_count = 0;
     set_boot_protocol_count = 0;
     configure_endpoint_count = 0;
+    interrupt_report_submission_count = 0;
+    keyboard_report_count = 0;
     @atomicStore(bool, &active, true, .seq_cst);
     try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
     msi_enabled = false;
@@ -364,7 +389,7 @@ pub fn lifecyclePending() bool {
     const capabilities = active_capabilities orelse return false;
     var port_id: u16 = 1;
     while (port_id <= capabilities.max_ports) : (port_id += 1) {
-        if (ports[port_id].reset_deadline != null) return true;
+        if (ports[port_id].reset_deadline != null or ports[port_id].action != .none) return true;
     }
     return false;
 }
@@ -382,10 +407,15 @@ pub fn servicePendingEvents() usize {
     if (interrupt_wakes == 0 and !event_ready and !lifecyclePending()) return 0;
     if (pollDmaFault()) return 0;
     if (lifecycleTimedOut()) return 0;
-    if (interrupt_wakes == 0 and !event_ready) return 0;
+    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
+    if (interrupt_wakes == 0 and !event_ready) {
+        submitNextPortAction(&reader) catch {
+            containFailure("ZIGOS:XHCI:HW:COMMAND_SUBMIT_CONTAINED\n");
+        };
+        return 0;
+    }
 
     const plan = active_dma_plan.?;
-    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
     var processed: usize = 0;
     while (processed < plan.ring_plan.event_ring_trbs) : (processed += 1) {
         const words = readCurrentEvent() orelse break;
@@ -413,7 +443,11 @@ pub fn servicePendingEvents() usize {
                 command_completion_count +%= 1;
             },
             .transfer => {
-                handleTransferCompletion(event) catch {
+                const result = if (event.endpoint_id == xhci.ENDPOINT_ZERO_DCI)
+                    handleControlTransferCompletion(event)
+                else
+                    handleInterruptTransferCompletion(event);
+                result catch {
                     containFailure("ZIGOS:XHCI:HW:TRANSFER_EVENT_CONTAINED\n");
                     return processed + 1;
                 };
@@ -500,6 +534,103 @@ pub fn configureEndpointCount() u64 {
     return configure_endpoint_count;
 }
 
+pub fn interruptReportSubmissionCount() u64 {
+    return interrupt_report_submission_count;
+}
+
+pub fn keyboardReportCount() u64 {
+    return keyboard_report_count;
+}
+
+pub fn keyboardReportAfter(observed_sequence: u64) ?xhci.HardwareBootKeyboardReport {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    return keyboard_reports.latestAfter(observed_sequence);
+}
+
+pub fn pollKeyboardReport() ?xhci.HardwareBootKeyboardReport {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    const report = keyboard_reports.poll() orelse return null;
+    scheduleUnarmedInterruptReports();
+    return report;
+}
+
+pub fn inputProof() ?xhci.InputProof {
+    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    const report = keyboard_reports.latestAfter(0) orelse return null;
+    const state = &ports[report.port_id];
+    _ = state.device_descriptor orelse return null;
+    const keyboard = state.boot_keyboard orelse return null;
+    if (!state.endpoint_configured or state.slot_id != report.slot_id or
+        keyboard.endpoint_id != report.endpoint_id)
+    {
+        return null;
+    }
+    const capabilities = active_capabilities orelse return null;
+    const plan = active_dma_plan orelse return null;
+    const delivered_events = std.math.cast(usize, keyboard_report_count) orelse return null;
+    const delivered_events_u32 = saturatingU32(keyboard_report_count);
+    const control_doorbells = descriptor_prefix_count +| device_descriptor_count +|
+        configuration_descriptor_header_count +| configuration_descriptor_count +|
+        set_configuration_count +| set_boot_protocol_count;
+    const input_report_dma_bytes = std.math.mul(
+        u64,
+        keyboard_report_count,
+        xhci.HID_BOOT_KEYBOARD_REPORT_BYTES,
+    ) catch std.math.maxInt(u64);
+    return .{
+        .keyboard = .{
+            .device_id = pci.stableDeviceId(active_device),
+            .port_id = report.port_id,
+            .slot_id = report.slot_id,
+            .interface_number = keyboard.interface_number,
+            .endpoint_id = keyboard.endpoint_id,
+            .max_packet_size = keyboard.max_packet_size,
+            .interval = keyboard.interval,
+        },
+        .event_count = delivered_events,
+        .mmio = .{
+            .doorbell_offset = capabilities.doorbell_offset,
+            .runtime_register_offset = capabilities.runtime_register_offset,
+            .command_ring_address = plan.ring_plan.command_ring_address,
+            .event_ring_address = plan.ring_plan.event_ring_address,
+            .device_context_base_address = plan.arena.device_contexts_address,
+            .input_context_address = plan.arena.input_context_address,
+            .transfer_ring_address = plan.arena.interruptTransferRingAddress(report.slot_id) catch return null,
+            .event_ring_segment_table_address = plan.event_ring_segment_table_address,
+            .context_size = capabilities.context_size,
+            .device_context_bytes = std.math.cast(u32, plan.arena.device_contexts_bytes) orelse
+                return null,
+            .input_context_bytes = plan.arena.input_context_bytes,
+            .transfer_ring_trbs = plan.arena.interrupt_transfer_ring_trbs,
+            .event_ring_segment_table_entries = plan.event_ring_segment_table_entries,
+            .command_doorbells = saturatingU32(command_completion_count),
+            .transfer_doorbells = saturatingU32(control_doorbells +| interrupt_report_submission_count),
+            .device_context_writes = 2,
+            .endpoint_context_writes = saturatingU32(configure_endpoint_count),
+            .event_ring_segment_table_writes = plan.event_ring_segment_table_entries,
+            .event_ring_dequeue_count = saturatingU32(event_count),
+            .interrupt_events = delivered_events_u32,
+            .interrupter_id = INTERRUPT_VECTOR,
+            .enabled_device_slots = active_enabled_slots,
+            .max_ports = capabilities.max_ports,
+            .hardware_input = .{
+                .source = .hardware_event_ring,
+                .controller_event_trbs = delivered_events_u32,
+                .event_ring_dma_writes = delivered_events_u32,
+                .device_context_reads_by_controller = 1,
+                .endpoint_context_reads_by_controller = 1,
+                .interrupt_assertions = saturatingU32(@atomicLoad(u64, &interrupt_count, .seq_cst)),
+                .port_status_change_events = saturatingU32(port_status_change_count),
+                .input_report_dma_bytes = input_report_dma_bytes,
+            },
+        },
+    };
+}
+
+fn saturatingU32(value: u64) u32 {
+    return @intCast(@min(value, std.math.maxInt(u32)));
+}
+
 pub fn deviceDescriptorForPort(port_id: u8) ?xhci.UsbDeviceDescriptor {
     if (!@atomicLoad(bool, &active, .seq_cst)) return null;
     const capabilities = active_capabilities orelse return null;
@@ -543,6 +674,30 @@ fn clearPortDescriptorState(state: *PortRuntimeState) void {
     state.endpoint_configured = false;
     state.endpoint_zero_max_packet_size = 0;
     state.pending_endpoint_zero_max_packet_size = 0;
+    state.interrupt_report_trb_address = 0;
+}
+
+fn scheduleUnarmedInterruptReports() void {
+    const capabilities = active_capabilities orelse return;
+    var reserved = outstanding_interrupt_reports;
+    var existing_port_id: u16 = 1;
+    while (existing_port_id <= capabilities.max_ports) : (existing_port_id += 1) {
+        if (ports[existing_port_id].action == .post_interrupt_report) reserved += 1;
+    }
+    var port_id: u16 = 1;
+    while (port_id <= capabilities.max_ports) : (port_id += 1) {
+        const state = &ports[port_id];
+        if (!state.connected or !state.enabled or !state.addressed or
+            !state.configuration_set or !state.boot_protocol_set or
+            !state.endpoint_configured or state.interrupt_report_trb_address != 0 or
+            state.action != .none)
+        {
+            continue;
+        }
+        if (!keyboard_reports.hasCapacity(reserved + 1)) return;
+        state.action = .post_interrupt_report;
+        reserved += 1;
+    }
 }
 
 fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) Error!void {
@@ -563,7 +718,13 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
     if (!status.connected) {
         reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
         state.addressed = false;
+        if (state.interrupt_report_trb_address != 0) {
+            if (outstanding_interrupt_reports == 0) return error.TrbRingStateInvalid;
+            outstanding_interrupt_reports -= 1;
+        }
+        keyboard_reports.clearPort(event.port_id);
         clearPortDescriptorState(state);
+        scheduleUnarmedInterruptReports();
         state.speed_id = 0;
         state.reset_deadline = null;
         state.action = if (state.slot_id != 0) .disable_slot else .none;
@@ -652,12 +813,15 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
             if (event.slot_id == 0 or event.slot_id > active_enabled_slots or state.slot_id != 0) {
                 return error.InvalidDeviceSlot;
             }
+            if (slot_to_port[event.slot_id] != 0) return error.InvalidDeviceSlot;
             var port_id: u16 = 1;
             while (port_id <= capabilities.max_ports) : (port_id += 1) {
                 if (ports[port_id].slot_id == event.slot_id) return error.InvalidDeviceSlot;
             }
             try clearDeviceContext(event.slot_id);
+            try resetSlotTransferRings(event.slot_id);
             try writeDcbaaSlot(event.slot_id, try active_dma_plan.?.arena.deviceContextAddress(event.slot_id));
+            slot_to_port[event.slot_id] = command.port_id;
             state.slot_id = event.slot_id;
             state.addressed = false;
             clearPortDescriptorState(state);
@@ -685,7 +849,7 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
                 return error.InvalidDeviceSlot;
             }
             state.endpoint_configured = true;
-            state.action = .none;
+            state.action = .post_interrupt_report;
             configure_endpoint_count +%= 1;
         },
         .evaluate_context => {
@@ -709,6 +873,7 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
             }
             try writeDcbaaSlot(command.slot_id, 0);
             try clearDeviceContext(command.slot_id);
+            slot_to_port[command.slot_id] = 0;
             state.slot_id = 0;
             state.addressed = false;
             clearPortDescriptorState(state);
@@ -718,7 +883,7 @@ fn handleCommandCompletion(event: xhci.Event) Error!void {
     outstanding_command = null;
 }
 
-fn handleTransferCompletion(event: xhci.Event) Error!void {
+fn handleControlTransferCompletion(event: xhci.Event) Error!void {
     const transfer = outstanding_transfer orelse return error.TrbRingStateInvalid;
     if (!event.succeeded() or event.parameter != transfer.status_trb_address or
         event.slot_id != transfer.slot_id or
@@ -855,6 +1020,48 @@ fn handleTransferCompletion(event: xhci.Event) Error!void {
     outstanding_transfer = null;
 }
 
+fn handleInterruptTransferCompletion(event: xhci.Event) Error!void {
+    if (event.slot_id == 0 or event.slot_id > active_enabled_slots) {
+        return error.InvalidDeviceSlot;
+    }
+    const port_id = slot_to_port[event.slot_id];
+    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
+    if (port_id == 0 or port_id > capabilities.max_ports) return error.InvalidDeviceSlot;
+    const state = &ports[port_id];
+    const descriptor = state.device_descriptor orelse return error.InvalidDeviceSlot;
+    const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
+    if (!state.connected or !state.enabled or !state.addressed or
+        !state.configuration_set or !state.boot_protocol_set or
+        !state.endpoint_configured or state.slot_id != event.slot_id)
+    {
+        return error.InvalidDeviceSlot;
+    }
+    try xhci.validateInterruptTransferEvent(
+        event,
+        state.interrupt_report_trb_address,
+        state.slot_id,
+        keyboard.device_context_index,
+    );
+
+    const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
+    if (outstanding_interrupt_reports == 0) return error.TrbRingStateInvalid;
+    outstanding_interrupt_reports -= 1;
+    const buffer_address = try plan.arena.interruptReportBufferAddress(state.slot_id);
+    const source: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(buffer_address)));
+    const first_byte: *const u8 = @ptrFromInt(@as(usize, @intCast(buffer_address)));
+    _ = @atomicLoad(u8, first_byte, .acquire);
+    var report: [xhci.HID_BOOT_KEYBOARD_REPORT_BYTES]u8 = undefined;
+    for (&report, 0..) |*byte, index| byte.* = source[index];
+    _ = try keyboard_reports.publish(port_id, state.slot_id, keyboard, descriptor, &report);
+
+    state.interrupt_report_trb_address = 0;
+    state.action = if (keyboard_reports.hasCapacity(outstanding_interrupt_reports + 1))
+        .post_interrupt_report
+    else
+        .none;
+    keyboard_report_count +%= 1;
+}
+
 fn parseConfigurationDescriptorFromDma(
     protocol: xhci.PortProtocol,
     speed_id: u4,
@@ -973,6 +1180,10 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
                 try submitSetBootProtocolTransfer(port_id, state, reader);
                 return;
             },
+            .post_interrupt_report => {
+                try submitInterruptReportTransfer(port_id, state, reader);
+                continue;
+            },
             else => {},
         }
 
@@ -987,6 +1198,7 @@ fn submitNextPortAction(reader: *ExtendedCapabilityReader) Error!void {
             .set_configuration => unreachable,
             .set_boot_protocol => unreachable,
             .configure_endpoint => .configure_endpoint,
+            .post_interrupt_report => unreachable,
             .evaluate_endpoint_zero => .evaluate_context,
             .disable_slot => .disable_slot,
         };
@@ -1063,6 +1275,57 @@ fn writeRingTrb(
         link[3] = xhci.ringLinkControl(cycle_state);
     }
     return trb_address;
+}
+
+fn submitInterruptReportTransfer(
+    port_id: u8,
+    state: *PortRuntimeState,
+    reader: *ExtendedCapabilityReader,
+) Error!void {
+    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
+    const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
+    const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
+    if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
+        slot_to_port[state.slot_id] != port_id or !state.configuration_set or
+        !state.boot_protocol_set or !state.endpoint_configured or
+        state.interrupt_report_trb_address != 0 or
+        keyboard.max_packet_size < xhci.HID_BOOT_KEYBOARD_REPORT_BYTES)
+    {
+        return error.InvalidDeviceSlot;
+    }
+    if (!keyboard_reports.hasCapacity(outstanding_interrupt_reports + 1)) {
+        state.action = .none;
+        return;
+    }
+
+    const buffer_address = try plan.arena.interruptReportBufferAddress(state.slot_id);
+    const buffer: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(buffer_address)));
+    for (0..xhci.HID_BOOT_KEYBOARD_REPORT_BYTES) |index| buffer[index] = 0;
+
+    const ring_address = try plan.arena.interruptTransferRingAddress(state.slot_id);
+    const producer = &interrupt_producers[state.slot_id];
+    const words = try xhci.interruptInTransfer(
+        buffer_address,
+        xhci.HID_BOOT_KEYBOARD_REPORT_BYTES,
+        producer.cycle_state,
+    );
+    const trb_address = try writeRingTrb(
+        producer,
+        ring_address,
+        plan.arena.interrupt_transfer_ring_trbs,
+        words,
+    );
+    publishDmaStructures();
+    state.action = .none;
+    state.interrupt_report_trb_address = trb_address;
+    try xhci.ringDeviceDoorbell(
+        capabilities,
+        state.slot_id,
+        keyboard.device_context_index,
+        reader,
+    );
+    outstanding_interrupt_reports += 1;
+    interrupt_report_submission_count +%= 1;
 }
 
 fn submitDescriptorTransfer(
@@ -1317,6 +1580,28 @@ fn prepareEvaluateEndpointZeroInputContext(state: *const PortRuntimeState) Error
         state.pending_endpoint_zero_max_packet_size,
         input_context[0..plan.arena.input_context_bytes],
     );
+}
+
+fn resetSlotTransferRings(slot_id: u8) Error!void {
+    const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
+    const dma_bytes = std.math.cast(usize, plan.total_bytes) orelse
+        return error.DmaBufferTooSmall;
+    const memory: [*]u8 = @ptrFromInt(@as(usize, @intCast(plan.base_address)));
+    try xhci.resetTransferRing(
+        plan,
+        memory[0..dma_bytes],
+        try plan.arena.controlTransferRingAddress(slot_id),
+        plan.arena.control_transfer_ring_trbs,
+    );
+    try xhci.resetTransferRing(
+        plan,
+        memory[0..dma_bytes],
+        try plan.arena.interruptTransferRingAddress(slot_id),
+        plan.arena.interrupt_transfer_ring_trbs,
+    );
+    control_producers[slot_id] = .{};
+    interrupt_producers[slot_id] = .{};
+    publishDmaStructures();
 }
 
 fn writeDcbaaSlot(slot_id: u8, address: u64) Error!void {

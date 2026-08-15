@@ -31,6 +31,7 @@ pub const MAX_CONTROLLER_DMA_REGIONS: usize = 8;
 pub const HID_BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const HID_BOOT_KEY_SLOTS: usize = 6;
 pub const HID_EVENT_QUEUE_CAPACITY: usize = 8;
+pub const HARDWARE_HID_REPORT_QUEUE_CAPACITY: usize = 64;
 pub const USB_DESCRIPTOR_DEVICE: u8 = 0x01;
 pub const USB_DESCRIPTOR_CONFIGURATION: u8 = 0x02;
 pub const USB_DESCRIPTOR_INTERFACE: u8 = 0x04;
@@ -141,6 +142,7 @@ const EVENT_HANDLER_BUSY: u64 = 1 << 3;
 const INTERRUPTER_MODERATION_INTERVAL_125_MICROSECONDS: u32 = 500;
 const ADDRESS_64_BYTE_ALIGNMENT_MASK: u64 = RING_ALIGNMENT_BYTES - 1;
 const EVENT_RING_DEQUEUE_POINTER_MASK: u64 = ~@as(u64, 0xF);
+const NORMAL_TRB_TYPE: u32 = 1;
 const LINK_TRB_TYPE: u32 = 6;
 const LINK_TRB_TOGGLE_CYCLE: u32 = 1 << 1;
 const SETUP_STAGE_TRB_TYPE: u32 = 2;
@@ -1205,6 +1207,43 @@ pub fn controlInStatusStage(cycle_state: u1) [4]u32 {
     };
 }
 
+pub fn interruptInTransfer(
+    buffer_address: u64,
+    transfer_bytes: u17,
+    cycle_state: u1,
+) Error![4]u32 {
+    if (buffer_address == 0 or transfer_bytes == 0) return error.DmaAddressOutsidePlan;
+    const boundary_offset = buffer_address & (XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES - 1);
+    if (boundary_offset + transfer_bytes > XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES) {
+        return error.DmaAddressOutsidePlan;
+    }
+    return .{
+        @truncate(buffer_address),
+        @truncate(buffer_address >> 32),
+        transfer_bytes,
+        (NORMAL_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_INTERRUPT_ON_SHORT_PACKET |
+            TRB_INTERRUPT_ON_COMPLETION |
+            cycle_state,
+    };
+}
+
+pub fn validateInterruptTransferEvent(
+    event: Event,
+    trb_address: u64,
+    slot_id: u8,
+    endpoint_dci: u5,
+) Error!void {
+    if (event.kind != .transfer or !event.succeeded() or trb_address == 0 or
+        event.parameter != trb_address or slot_id == 0 or event.slot_id != slot_id or
+        endpoint_dci == 0 or endpoint_dci == ENDPOINT_ZERO_DCI or
+        event.endpoint_id != endpoint_dci or
+        event.event_data or event.transfer_length != 0)
+    {
+        return error.TrbRingStateInvalid;
+    }
+}
+
 pub fn addressDeviceCommand(
     input_context_address: u64,
     slot_id: u8,
@@ -1536,7 +1575,7 @@ pub const HardwareInputEvidence = struct {
             self.event_ring_dma_writes >= expected_events and
             self.device_context_reads_by_controller != 0 and
             self.endpoint_context_reads_by_controller != 0 and
-            self.interrupt_assertions >= expected_events and
+            self.interrupt_assertions != 0 and
             self.port_status_change_events != 0 and
             self.input_report_dma_bytes >= expected_report_bytes;
     }
@@ -1682,6 +1721,108 @@ pub const HidReport = struct {
     pub fn keySlots(self: *const HidReport) []const u8 {
         if (self.report_len != HID_BOOT_KEYBOARD_REPORT_BYTES) return &.{};
         return self.report[2..8];
+    }
+};
+
+pub const HardwareBootKeyboardReport = struct {
+    sequence: u64 = 0,
+    port_id: u8 = 0,
+    slot_id: u8 = 0,
+    interface_number: u8 = 0,
+    endpoint_id: u8 = 0,
+    vendor_id: u16 = 0,
+    product_id: u16 = 0,
+    bytes: [HID_BOOT_KEYBOARD_REPORT_BYTES]u8 = [_]u8{0} ** HID_BOOT_KEYBOARD_REPORT_BYTES,
+};
+
+pub const BootKeyboardReportPublisher = struct {
+    sequence: u64 = 0,
+    latest: ?HardwareBootKeyboardReport = null,
+    head: usize = 0,
+    tail: usize = 0,
+    count: usize = 0,
+    reports: [HARDWARE_HID_REPORT_QUEUE_CAPACITY]HardwareBootKeyboardReport =
+        [_]HardwareBootKeyboardReport{.{}} ** HARDWARE_HID_REPORT_QUEUE_CAPACITY,
+
+    pub fn publish(
+        self: *BootKeyboardReportPublisher,
+        port_id: u8,
+        slot_id: u8,
+        keyboard: UsbBootKeyboardConfiguration,
+        descriptor: UsbDeviceDescriptor,
+        report: []const u8,
+    ) Error!HardwareBootKeyboardReport {
+        if (port_id == 0 or slot_id == 0 or keyboard.endpoint_id == 0 or
+            report.len != HID_BOOT_KEYBOARD_REPORT_BYTES or
+            report.len > keyboard.max_packet_size)
+        {
+            return error.InvalidBootKeyboardReport;
+        }
+        if (self.count == self.reports.len) return error.EventRingFull;
+        self.sequence = if (self.sequence == std.math.maxInt(u64)) 1 else self.sequence + 1;
+        var published = HardwareBootKeyboardReport{
+            .sequence = self.sequence,
+            .port_id = port_id,
+            .slot_id = slot_id,
+            .interface_number = keyboard.interface_number,
+            .endpoint_id = keyboard.endpoint_id,
+            .vendor_id = descriptor.vendor_id,
+            .product_id = descriptor.product_id,
+            .bytes = [_]u8{0} ** HID_BOOT_KEYBOARD_REPORT_BYTES,
+        };
+        @memcpy(published.bytes[0..], report);
+        self.reports[self.tail] = published;
+        self.tail = (self.tail + 1) % self.reports.len;
+        self.count += 1;
+        self.latest = published;
+        return published;
+    }
+
+    pub fn poll(self: *BootKeyboardReportPublisher) ?HardwareBootKeyboardReport {
+        if (self.count == 0) return null;
+        const report = self.reports[self.head];
+        self.reports[self.head] = .{};
+        self.head = (self.head + 1) % self.reports.len;
+        self.count -= 1;
+        return report;
+    }
+
+    pub fn pendingCount(self: *const BootKeyboardReportPublisher) usize {
+        return self.count;
+    }
+
+    pub fn hasCapacity(self: *const BootKeyboardReportPublisher, additional: usize) bool {
+        return additional <= self.reports.len - self.count;
+    }
+
+    pub fn latestAfter(
+        self: *const BootKeyboardReportPublisher,
+        observed_sequence: u64,
+    ) ?HardwareBootKeyboardReport {
+        const report = self.latest orelse return null;
+        return if (report.sequence == observed_sequence) null else report;
+    }
+
+    pub fn clearPort(self: *BootKeyboardReportPublisher, port_id: u8) void {
+        var retained_reports = [_]HardwareBootKeyboardReport{.{}} **
+            HARDWARE_HID_REPORT_QUEUE_CAPACITY;
+        var retained: usize = 0;
+        var offset: usize = 0;
+        while (offset < self.count) : (offset += 1) {
+            const report = self.reports[(self.head + offset) % self.reports.len];
+            if (report.port_id == port_id) continue;
+            retained_reports[retained] = report;
+            retained += 1;
+        }
+        self.reports = retained_reports;
+        self.head = 0;
+        self.tail = retained % self.reports.len;
+        self.count = retained;
+        if (self.latest) |report| {
+            if (report.port_id == port_id) {
+                self.latest = if (retained == 0) null else self.reports[retained - 1];
+            }
+        }
     }
 };
 
@@ -2856,6 +2997,20 @@ pub fn initializeControllerDma(
             writeU64Le(scratchpad_array[entry_offset..][0..8], buffer_address);
         }
     }
+}
+
+pub fn resetTransferRing(
+    plan: ControllerDmaPlan,
+    memory: []u8,
+    ring_address: u64,
+    ring_trbs: u32,
+) Error!void {
+    try validateRing(ring_trbs, ring_address);
+    const ring_bytes = std.math.mul(u64, ring_trbs, TRB_BYTES) catch
+        return error.DmaLayoutOverflow;
+    const ring = try dmaBytes(plan, memory, ring_address, ring_bytes);
+    @memset(ring, 0);
+    try initializeLinkTrb(plan, memory, ring_address, ring_trbs);
 }
 
 pub fn controllerDmaAccessRegions(
@@ -4395,6 +4550,56 @@ test "xHCI HID boot protocol request is interface scoped and has no data stage" 
     );
 }
 
+test "xHCI interrupt-IN transfer and completion are bound to one report TD" {
+    const transfer = try interruptInTransfer(0x12_3456_7800, HID_BOOT_KEYBOARD_REPORT_BYTES, 1);
+    try std.testing.expectEqual(@as(u32, 0x3456_7800), transfer[0]);
+    try std.testing.expectEqual(@as(u32, 0x12), transfer[1]);
+    try std.testing.expectEqual(@as(u32, HID_BOOT_KEYBOARD_REPORT_BYTES), transfer[2]);
+    try std.testing.expectEqual(
+        (NORMAL_TRB_TYPE << TRB_TYPE_SHIFT) |
+            TRB_INTERRUPT_ON_SHORT_PACKET |
+            TRB_INTERRUPT_ON_COMPLETION |
+            1,
+        transfer[3],
+    );
+    try std.testing.expectError(error.DmaAddressOutsidePlan, interruptInTransfer(0, 8, 1));
+    try std.testing.expectError(
+        error.DmaAddressOutsidePlan,
+        interruptInTransfer(XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES - 1, 2, 1),
+    );
+
+    const event = Event{
+        .parameter = 0x53000,
+        .kind = .transfer,
+        .type_id = EVENT_TRB_TRANSFER,
+        .transfer_length = 0,
+        .completion_code = COMPLETION_CODE_SUCCESS,
+        .port_id = 0,
+        .slot_id = 3,
+        .endpoint_id = 3,
+        .event_data = false,
+    };
+    try validateInterruptTransferEvent(event, 0x53000, 3, 3);
+    var mismatch = event;
+    mismatch.endpoint_id = ENDPOINT_ZERO_DCI;
+    try std.testing.expectError(
+        error.TrbRingStateInvalid,
+        validateInterruptTransferEvent(mismatch, 0x53000, 3, 3),
+    );
+    mismatch = event;
+    mismatch.transfer_length = 1;
+    try std.testing.expectError(
+        error.TrbRingStateInvalid,
+        validateInterruptTransferEvent(mismatch, 0x53000, 3, 3),
+    );
+    mismatch = event;
+    mismatch.parameter += TRB_BYTES;
+    try std.testing.expectError(
+        error.TrbRingStateInvalid,
+        validateInterruptTransferEvent(mismatch, 0x53000, 3, 3),
+    );
+}
+
 test "xHCI event acknowledgement clears EHB at the next dequeue address" {
     const running = [_]u32{0};
     var mmio = MockStartMmio{ .status_reads = &running };
@@ -4723,6 +4928,36 @@ test "xHCI controller DMA plan initializes rings tables and scratchpad pointers"
     );
 }
 
+test "xHCI transfer ring reset discards stale slot TRBs before reuse" {
+    var capabilities = defaultCapabilityRegisters();
+    capabilities.max_device_slots = 1;
+    capabilities.max_scratchpad_buffers = 2;
+    const plan = try planControllerDma(capabilities, 1, 0x1000);
+    var memory = [_]u8{0} ** (35 * @as(usize, XHCI_PAGE_BYTES));
+    const ring_address = plan.arena.interrupt_transfer_rings_address;
+    const ring_offset: usize = @intCast(ring_address - plan.base_address);
+    const ring_bytes: usize = plan.arena.interrupt_transfer_ring_stride;
+    @memset(memory[ring_offset..][0..ring_bytes], 0xA5);
+
+    try resetTransferRing(
+        plan,
+        &memory,
+        ring_address,
+        plan.arena.interrupt_transfer_ring_trbs,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0} ** TRB_BYTES),
+        memory[ring_offset..][0..TRB_BYTES],
+    );
+    const link_offset = ring_offset + ring_bytes - TRB_BYTES;
+    try std.testing.expectEqual(ring_address, readU64Le(memory[link_offset..][0..8]));
+    try std.testing.expectEqual(
+        ringLinkControl(1),
+        readU32Le(memory[link_offset + 12 ..][0..4]),
+    );
+}
+
 test "xHCI controller DMA regions preserve page-granular direction isolation" {
     var capabilities = defaultCapabilityRegisters();
     capabilities.max_device_slots = 1;
@@ -4947,6 +5182,16 @@ test "xHCI controller binds MMIO command doorbells and event ring input proof" {
     });
     try std.testing.expect(hardware_proof.productionHardwareVerified());
 
+    var coalesced_interrupt = hardware_proof;
+    coalesced_interrupt.event_count = 2;
+    coalesced_interrupt.mmio.event_ring_dequeue_count = 2;
+    coalesced_interrupt.mmio.interrupt_events = 2;
+    coalesced_interrupt.mmio.hardware_input.controller_event_trbs = 2;
+    coalesced_interrupt.mmio.hardware_input.event_ring_dma_writes = 2;
+    coalesced_interrupt.mmio.hardware_input.input_report_dma_bytes =
+        2 * HID_BOOT_KEYBOARD_REPORT_BYTES;
+    try std.testing.expect(coalesced_interrupt.productionHardwareVerified());
+
     var missing_event_dma = hardware_proof;
     missing_event_dma.mmio.hardware_input.event_ring_dma_writes = 0;
     try std.testing.expect(!missing_event_dma.productionHardwareVerified());
@@ -5013,6 +5258,102 @@ test "xHCI HID controller validates configured keyboard interrupt transfers" {
     try std.testing.expectEqual(@as(u8, DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID), polled.endpoint_id);
     try std.testing.expectEqual(@as(u8, 0x02), polled.modifiers());
     try std.testing.expectEqual(@as(u8, 0x04), polled.keySlots()[0]);
+}
+
+test "xHCI hardware keyboard publisher preserves queued port-scoped reports" {
+    const keyboard = UsbBootKeyboardConfiguration{
+        .configuration_value = 1,
+        .interface_number = 4,
+        .endpoint_id = 1,
+        .device_context_index = 3,
+        .max_packet_size = HID_BOOT_KEYBOARD_REPORT_BYTES,
+        .max_burst_size = 0,
+        .interval = 9,
+        .max_esit_payload = HID_BOOT_KEYBOARD_REPORT_BYTES,
+    };
+    const descriptor = UsbDeviceDescriptor{
+        .usb_version_bcd = 0x0200,
+        .device_class = 0,
+        .device_subclass = 0,
+        .device_protocol = 0,
+        .endpoint_zero_max_packet_size = 64,
+        .vendor_id = 0x046D,
+        .product_id = 0xC31C,
+        .device_version_bcd = 0x6400,
+        .manufacturer_string_index = 1,
+        .product_string_index = 2,
+        .serial_number_string_index = 0,
+        .configuration_count = 1,
+    };
+    var publisher = BootKeyboardReportPublisher{};
+    try std.testing.expect(publisher.latestAfter(0) == null);
+
+    const first_bytes = [_]u8{ 0, 0, 0x04, 0, 0, 0, 0, 0 };
+    const first = try publisher.publish(2, 3, keyboard, descriptor, &first_bytes);
+    try std.testing.expectEqual(@as(u64, 1), first.sequence);
+    try std.testing.expectEqual(@as(u8, 4), first.interface_number);
+    try std.testing.expectEqual(@as(u16, 0x046D), first.vendor_id);
+    try std.testing.expectEqualSlices(u8, &first_bytes, &first.bytes);
+    try std.testing.expect(publisher.latestAfter(first.sequence) == null);
+
+    const second_bytes = [_]u8{ 0x02, 0, 0x05, 0, 0, 0, 0, 0 };
+    const second = try publisher.publish(4, 5, keyboard, descriptor, &second_bytes);
+    try std.testing.expectEqual(@as(u64, 2), second.sequence);
+    try std.testing.expectEqual(@as(usize, 2), publisher.pendingCount());
+    try std.testing.expectEqualSlices(
+        u8,
+        &second_bytes,
+        &publisher.latestAfter(first.sequence).?.bytes,
+    );
+    publisher.clearPort(2);
+    try std.testing.expectEqual(@as(usize, 1), publisher.pendingCount());
+    try std.testing.expect(publisher.latestAfter(first.sequence) != null);
+    try std.testing.expectEqual(second.sequence, publisher.poll().?.sequence);
+    try std.testing.expectEqual(@as(usize, 0), publisher.pendingCount());
+    try std.testing.expect(publisher.latestAfter(first.sequence) != null);
+    publisher.clearPort(4);
+    try std.testing.expect(publisher.latestAfter(first.sequence) == null);
+
+    var fallback_publisher = BootKeyboardReportPublisher{};
+    const fallback = try fallback_publisher.publish(2, 3, keyboard, descriptor, &first_bytes);
+    _ = try fallback_publisher.publish(4, 5, keyboard, descriptor, &second_bytes);
+    fallback_publisher.clearPort(4);
+    try std.testing.expectEqual(
+        fallback.sequence,
+        fallback_publisher.latestAfter(0).?.sequence,
+    );
+
+    try std.testing.expectError(
+        error.InvalidBootKeyboardReport,
+        publisher.publish(0, 5, keyboard, descriptor, &second_bytes),
+    );
+    try std.testing.expectError(
+        error.InvalidBootKeyboardReport,
+        publisher.publish(4, 5, keyboard, descriptor, second_bytes[0..7]),
+    );
+
+    for (0..HARDWARE_HID_REPORT_QUEUE_CAPACITY) |_| {
+        _ = try publisher.publish(4, 5, keyboard, descriptor, &second_bytes);
+    }
+    try std.testing.expect(!publisher.hasCapacity(1));
+    try std.testing.expectError(
+        error.EventRingFull,
+        publisher.publish(4, 5, keyboard, descriptor, &second_bytes),
+    );
+    for (0..10) |_| try std.testing.expect(publisher.poll() != null);
+    for (0..10) |_| {
+        _ = try publisher.publish(2, 3, keyboard, descriptor, &first_bytes);
+    }
+    publisher.clearPort(2);
+    try std.testing.expectEqual(
+        @as(usize, HARDWARE_HID_REPORT_QUEUE_CAPACITY - 10),
+        publisher.pendingCount(),
+    );
+    for (0..(HARDWARE_HID_REPORT_QUEUE_CAPACITY - 10)) |_| {
+        try std.testing.expectEqual(@as(u8, 4), publisher.poll().?.port_id);
+    }
+    try std.testing.expect(publisher.poll() == null);
+    try std.testing.expect(publisher.hasCapacity(HARDWARE_HID_REPORT_QUEUE_CAPACITY));
 }
 
 test "xHCI HID controller requires port slot address and event delivery for input proof" {
