@@ -8,6 +8,7 @@ const manifest_fixtures = @import("manifest_fixtures.zig");
 const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const input_driver_task = @import("../drivers/input_driver_task.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const permission_review = @import("permission_review.zig");
 const policy_mediation = @import("policy_mediation.zig");
@@ -57,7 +58,7 @@ pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
-pub const PhysicalInputError = xhci.Error || error{ UnsupportedPhysicalInput, PhysicalInputCommandQueueFull };
+pub const PhysicalInputError = xhci.Error || input_driver_task.Error || error{ UnsupportedPhysicalInput, PhysicalInputCommandQueueFull };
 pub const Error = task_runtime.Error || manifest.ValidationError || compositor_display.Error || event_ledger.Error || permission_review.SessionError || error{
     ReviewCommandTooLong,
     ReviewComplete,
@@ -93,6 +94,7 @@ pub const PhysicalInputSource = struct {
     pending_command_head: usize = 0,
     pending_command_tail: usize = 0,
     pending_command_count: usize = 0,
+    decoder: input_driver_task.Decoder = .{},
     reports_consumed: usize = 0,
     commands_completed: usize = 0,
 
@@ -138,7 +140,7 @@ pub const PhysicalInputSource = struct {
             try self.enqueueAsciiKey(device_id, endpoint_id, ch);
             try self.drainReports();
         }
-        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{0x28}));
+        try self.enqueueAsciiKey(device_id, endpoint_id, '\n');
         try self.drainReports();
     }
 
@@ -182,6 +184,7 @@ pub const PhysicalInputSource = struct {
     ) PhysicalInputError!void {
         const key = hidKeyForAscii(ch) orelse return error.UnsupportedPhysicalInput;
         try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, key.modifiers, &.{key.usage}));
+        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{}));
     }
 
     fn submitKeyboardReport(
@@ -201,33 +204,58 @@ pub const PhysicalInputSource = struct {
 
     fn drainReports(self: *PhysicalInputSource) PhysicalInputError!void {
         while (true) {
+            while (self.decoder.poll()) |event| {
+                if (try self.consumeKeyboardEvent(event)) return;
+            }
             const report = try self.pollReport() orelse return;
             self.reports_consumed += 1;
-            const ch = asciiFromReport(report) orelse continue;
-            if (ch == '\n') {
-                if (self.pending_line_len == 0) continue;
-                if (self.pending_command_count == self.pending_commands.len) return error.PhysicalInputCommandQueueFull;
+            _ = try self.decoder.submit(report.report);
+        }
+    }
+
+    fn consumeKeyboardEvent(
+        self: *PhysicalInputSource,
+        event: input_driver_task.KeyboardEvent,
+    ) PhysicalInputError!bool {
+        switch (event.kind) {
+            .text => {
+                if (self.pending_line_len >= self.pending_line.len) return error.ReportTooLarge;
+                self.pending_line[self.pending_line_len] = event.text;
+                self.pending_line_len += 1;
+            },
+            .backspace => {
+                if (self.pending_line_len != 0) {
+                    self.pending_line_len -= 1;
+                    self.pending_line[self.pending_line_len] = 0;
+                }
+            },
+            .activate, .commit_text => {
+                if (self.pending_line_len == 0) return false;
+                if (self.pending_command_count == self.pending_commands.len) {
+                    return error.PhysicalInputCommandQueueFull;
+                }
                 const index = self.pending_command_tail;
-                @memcpy(self.pending_commands[index][0..self.pending_line_len], self.pending_line[0..self.pending_line_len]);
+                @memcpy(
+                    self.pending_commands[index][0..self.pending_line_len],
+                    self.pending_line[0..self.pending_line_len],
+                );
                 self.pending_command_lens[index] = self.pending_line_len;
                 self.pending_command_tail = (self.pending_command_tail + 1) % self.pending_commands.len;
                 self.pending_command_count += 1;
                 self.commands_completed += 1;
                 self.pending_line_len = 0;
                 @memset(self.pending_line[0..], 0);
-                return;
-            }
-            if (ch == 8 or ch == 127) {
-                if (self.pending_line_len != 0) {
-                    self.pending_line_len -= 1;
-                    self.pending_line[self.pending_line_len] = 0;
-                }
-                continue;
-            }
-            if (self.pending_line_len >= self.pending_line.len) return error.ReportTooLarge;
-            self.pending_line[self.pending_line_len] = ch;
-            self.pending_line_len += 1;
+                return true;
+            },
+            .focus_next,
+            .focus_previous,
+            .task_switch_next,
+            .task_switch_previous,
+            .show_recovery,
+            .dismiss_recovery,
+            => {},
         }
+        return false;
     }
 
     fn pollReport(self: *PhysicalInputSource) PhysicalInputError!?xhci.HidReport {
@@ -313,7 +341,6 @@ const HidKey = struct {
 };
 
 const HID_LEFT_SHIFT: u8 = 1 << 1;
-const HID_SHIFT_MASK: u8 = HID_LEFT_SHIFT | (1 << 5);
 
 fn hidKeyForAscii(ch: u8) ?HidKey {
     return switch (ch) {
@@ -372,43 +399,6 @@ fn hidKeyForAscii(ch: u8) ?HidKey {
             },
             .modifiers = HID_LEFT_SHIFT,
         },
-        else => null,
-    };
-}
-
-fn asciiFromReport(report: xhci.HidReport) ?u8 {
-    for (report.keySlots()) |usage| {
-        if (usage == 0) continue;
-        return asciiFromUsage(usage, report.modifiers());
-    }
-    return null;
-}
-
-fn asciiFromUsage(usage: u8, modifiers: u8) ?u8 {
-    const shifted = (modifiers & HID_SHIFT_MASK) != 0;
-    return switch (usage) {
-        0x04...0x1d => (if (shifted) @as(u8, 'A') else @as(u8, 'a')) + (usage - 0x04),
-        0x1e...0x27 => if (shifted)
-            "!@#$%^&*()"[usage - 0x1e]
-        else if (usage == 0x27)
-            '0'
-        else
-            '1' + (usage - 0x1e),
-        0x28 => '\n',
-        0x2a => 8,
-        0x2b => '\t',
-        0x2c => ' ',
-        0x2d => if (shifted) '_' else '-',
-        0x2e => if (shifted) '+' else '=',
-        0x2f => if (shifted) '{' else '[',
-        0x30 => if (shifted) '}' else ']',
-        0x31 => if (shifted) '|' else '\\',
-        0x33 => if (shifted) ':' else ';',
-        0x34 => if (shifted) '"' else '\'',
-        0x35 => if (shifted) '~' else '`',
-        0x36 => if (shifted) '<' else ',',
-        0x37 => if (shifted) '>' else '.',
-        0x38 => if (shifted) '?' else '/',
         else => null,
     };
 }

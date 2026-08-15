@@ -1,5 +1,6 @@
 const std = @import("std");
 const compositor_session = @import("../compositor_session.zig");
+const input_driver_task = @import("../../drivers/input_driver_task.zig");
 const native_util = @import("../../core/util.zig");
 const humane_shell = @import("humane_shell.zig");
 const rendering = @import("rendering.zig");
@@ -91,6 +92,11 @@ pub const BootedSystem = struct {
     last_status: HumaneShellStatus = .ok,
     last_tick: u64 = 0,
     error_visible: bool = false,
+    hardware_text_initialized: bool = false,
+    hardware_text_dirty: bool = false,
+    hardware_text_len: usize = 0,
+    hardware_text: [humane_shell.MAX_SHELL_TEXT_INPUT_BYTES]u8 =
+        [_]u8{0} ** humane_shell.MAX_SHELL_TEXT_INPUT_BYTES,
 
     pub fn init(shell: *HumaneShell) BootedSystem {
         return .{ .shell = shell };
@@ -100,6 +106,10 @@ pub const BootedSystem = struct {
         self.phase = .booting;
         self.last_tick = tick;
         self.input_loop_running = true;
+        self.hardware_text_initialized = false;
+        self.hardware_text_dirty = false;
+        self.hardware_text_len = 0;
+        @memset(self.hardware_text[0..], 0);
         self.phase = .running;
         self.clearError();
         self.last_input = .boot;
@@ -147,12 +157,16 @@ pub const BootedSystem = struct {
             },
             .text_input,
             .edit_document,
-            => return self.dispatchHumaneInput(input, .{
-                .operation = .click,
-                .control = .edit_document,
-                .tick = input.tick,
-                .text = input.text,
-            }, .edit_document),
+            => {
+                const response = self.dispatchHumaneInput(input, .{
+                    .operation = .click,
+                    .control = .edit_document,
+                    .tick = input.tick,
+                    .text = input.text,
+                }, .edit_document);
+                if (response.accepted) self.invalidateHardwareText();
+                return response;
+            },
             .task_switch_next => {
                 self.switchActiveWindow(.next) catch |err| {
                     self.setError(statusForBootError(err), .start_task);
@@ -183,11 +197,15 @@ pub const BootedSystem = struct {
             },
             else => {
                 const control = controlForInput(input.kind).?;
-                return self.dispatchHumaneInput(input, .{
+                const response = self.dispatchHumaneInput(input, .{
                     .operation = .click,
                     .control = control,
                     .tick = input.tick,
                 }, control);
+                if (response.accepted and inputInvalidatesHardwareText(input.kind)) {
+                    self.invalidateHardwareText();
+                }
+                return response;
             },
         }
     }
@@ -198,6 +216,25 @@ pub const BootedSystem = struct {
             response = self.dispatchInput(input);
         }
         return response;
+    }
+
+    pub fn dispatchKeyboardEvent(
+        self: *BootedSystem,
+        event: input_driver_task.KeyboardEvent,
+        tick: u64,
+    ) InputResult {
+        return switch (event.kind) {
+            .focus_next => self.dispatchInput(.{ .kind = .key_next, .tick = tick }),
+            .focus_previous => self.dispatchInput(.{ .kind = .key_previous, .tick = tick }),
+            .activate => self.dispatchInput(.{ .kind = .key_activate, .tick = tick }),
+            .task_switch_next => self.dispatchInput(.{ .kind = .task_switch_next, .tick = tick }),
+            .task_switch_previous => self.dispatchInput(.{ .kind = .task_switch_previous, .tick = tick }),
+            .show_recovery => self.dispatchInput(.{ .kind = .show_recovery, .tick = tick }),
+            .dismiss_recovery => self.dispatchInput(.{ .kind = .dismiss_recovery, .tick = tick }),
+            .text => self.stageHardwareText(event.text, tick),
+            .backspace => self.backspaceHardwareText(tick),
+            .commit_text => self.commitHardwareText(tick),
+        };
     }
 
     pub fn render(self: *const BootedSystem, buffer: []u8) ![]const u8 {
@@ -224,6 +261,10 @@ pub const BootedSystem = struct {
             @tagName(self.last_status),
         });
         try appendFmt(buffer, &used, "input bindings next=Tab previous=Shift+Tab activate=Enter task_switch=Alt+Tab recovery=Ctrl+R\n", .{});
+        try appendFmt(buffer, &used, "hardware_text staged_bytes={d} dirty={s} commit=Ctrl+Enter\n", .{
+            self.hardware_text_len,
+            yesNo(self.hardware_text_dirty),
+        });
         try appendFmt(buffer, &used, "accessibility keyboard={s} screen_reader={s} visible_focus={s} reduce_motion={s} high_contrast={s}\n", .{
             yesNo(self.shell.accessibility.keyboard_navigation),
             yesNo(self.shell.accessibility.screen_reader_labels),
@@ -352,6 +393,98 @@ pub const BootedSystem = struct {
         return self.result(input.kind, true);
     }
 
+    fn stageHardwareText(self: *BootedSystem, text: u8, tick: u64) InputResult {
+        if (self.hardwareTextInputBlocked(tick)) |blocked| return blocked;
+        self.ensureHardwareTextBuffer();
+        if (text == 0 or self.hardware_text_len == self.hardware_text.len) {
+            self.setError(.invalid_request, .edit_document);
+            return self.result(.text_input, false);
+        }
+        self.hardware_text[self.hardware_text_len] = text;
+        self.hardware_text_len += 1;
+        self.hardware_text_dirty = true;
+        self.clearError();
+        return self.result(.text_input, true);
+    }
+
+    fn backspaceHardwareText(self: *BootedSystem, tick: u64) InputResult {
+        if (self.hardwareTextInputBlocked(tick)) |blocked| return blocked;
+        self.ensureHardwareTextBuffer();
+        if (self.hardware_text_len != 0) {
+            self.hardware_text_len -= 1;
+            self.hardware_text[self.hardware_text_len] = 0;
+            self.hardware_text_dirty = true;
+        }
+        self.clearError();
+        return self.result(.text_input, true);
+    }
+
+    fn commitHardwareText(self: *BootedSystem, tick: u64) InputResult {
+        self.last_input = .text_input;
+        self.last_tick = tick;
+        self.last_control = .edit_document;
+        if (!self.input_loop_running or self.phase == .cold) {
+            self.setError(.invalid_order, .edit_document);
+            return self.result(.text_input, false);
+        }
+        if (!self.shell.state.document_opened) {
+            self.setError(.invalid_order, .edit_document);
+            return self.result(.text_input, false);
+        }
+        self.ensureHardwareTextBuffer();
+        if (!self.hardware_text_dirty) {
+            self.input_event_count += 1;
+            self.clearError();
+            return self.result(.text_input, true);
+        }
+        const response = self.dispatchInput(.{
+            .kind = .text_input,
+            .tick = tick,
+            .text = self.hardware_text[0..self.hardware_text_len],
+        });
+        if (response.accepted) {
+            self.hardware_text_initialized = false;
+            self.hardware_text_dirty = false;
+        } else {
+            self.hardware_text_initialized = true;
+            self.hardware_text_dirty = true;
+        }
+        return response;
+    }
+
+    fn hardwareTextInputBlocked(self: *BootedSystem, tick: u64) ?InputResult {
+        self.last_input = .text_input;
+        self.last_tick = tick;
+        self.last_control = .edit_document;
+        if (!self.input_loop_running or self.phase == .cold) {
+            self.setError(.invalid_order, .edit_document);
+            return self.result(.text_input, false);
+        }
+        if (!self.shell.state.document_opened) {
+            self.setError(.invalid_order, .edit_document);
+            return self.result(.text_input, false);
+        }
+        self.input_event_count += 1;
+        return null;
+    }
+
+    fn ensureHardwareTextBuffer(self: *BootedSystem) void {
+        if (self.hardware_text_initialized) return;
+        const current = self.shell.documentTextSlice();
+        self.hardware_text_len = @min(current.len, self.hardware_text.len);
+        @memcpy(self.hardware_text[0..self.hardware_text_len], current[0..self.hardware_text_len]);
+        if (self.hardware_text_len < self.hardware_text.len) {
+            @memset(self.hardware_text[self.hardware_text_len..], 0);
+        }
+        self.hardware_text_initialized = true;
+        self.hardware_text_dirty = false;
+    }
+
+    fn invalidateHardwareText(self: *BootedSystem) void {
+        self.hardware_text_initialized = false;
+        self.hardware_text_dirty = false;
+    }
+
     fn switchActiveWindow(self: *BootedSystem, direction: SwitchDirection) !void {
         const session = self.shell.compositor_service.session;
         const visible_count = session.visibleWindowCount();
@@ -475,6 +608,10 @@ const SwitchDirection = enum {
     next,
     previous,
 };
+
+fn inputInvalidatesHardwareText(kind: InputKind) bool {
+    return kind == .open_document or kind == .rollback_snapshot or kind == .recover_state;
+}
 
 fn controlForInput(kind: InputKind) ?HumaneShellControl {
     return switch (kind) {

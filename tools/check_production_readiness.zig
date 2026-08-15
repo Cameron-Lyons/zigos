@@ -1643,11 +1643,14 @@ fn validateNuc11tnki5KernelProofSources(
         "const xhci = @import",
         "HardwareReportSource",
         "PhysicalInputBackend",
+        "const input_driver_task = @import",
+        "input_driver_task.Decoder",
+        "self.decoder.submit",
+        "consumeKeyboardEvent",
         "bindSystemHardwareInput",
         "system_hardware_input",
         "report.sequence == 0",
         "error.UnsupportedPhysicalInput",
-        "HID_SHIFT_MASK",
     };
     for (required_permission_input_snippets) |snippet| {
         if (std.mem.indexOf(u8, permission_review_source, snippet) == null) {
