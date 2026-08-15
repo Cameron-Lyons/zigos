@@ -1,4 +1,5 @@
 const std = @import("std");
+const abi = @import("../core/abi.zig");
 const compositor_session = @import("compositor_session.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const principal = @import("../core/principal.zig");
@@ -97,7 +98,7 @@ pub const Framebuffer = struct {
 
         const active_window = session.findWindowConst(session.active_window_id) orelse return error.ActiveWindowMissing;
         try self.drawText(&cursor, "ACTIVE WINDOW");
-        try self.drawActiveWindow(&cursor, active_window);
+        try self.drawActiveWindow(&cursor, session, active_window);
         try self.drawReviewSection(&cursor, session);
     }
 
@@ -191,6 +192,7 @@ pub const Framebuffer = struct {
     fn drawActiveWindow(
         self: *Framebuffer,
         cursor: *usize,
+        session: *const compositor_session.Session,
         window: *const compositor_session.WindowRecord,
     ) Error!void {
         try self.drawFmt(cursor, "active_window={d} active_type={s} title={s} surface={d} modal={s}", .{
@@ -211,6 +213,25 @@ pub const Framebuffer = struct {
                 window.bundleIdSlice(),
                 window.displayNameSlice(),
             });
+        }
+        if (window.ui_surface_id) |surface_id| {
+            if (session.surfacePresentation(surface_id)) |surface| {
+                const presentation = &surface.presentation;
+                const model = abi.surfaceModelKind(presentation.model_kind) orelse .none;
+                try self.drawFmt(cursor, "surface_state model={s} revision={d} focus={d} cursor={d} commits={d} activations={d}", .{
+                    @tagName(model),
+                    presentation.revision,
+                    presentation.focus_index,
+                    presentation.cursor,
+                    presentation.commit_count,
+                    presentation.activation_count,
+                });
+                var text: [abi.SURFACE_PRESENTATION_TEXT_BYTES]u8 = undefined;
+                for (presentation.textSlice(), 0..) |byte, index| {
+                    text[index] = if (byte == '\n') '|' else byte;
+                }
+                try self.drawText(cursor, text[0..presentation.text_length]);
+            }
         }
     }
 
@@ -426,6 +447,19 @@ test "compositor display framebuffer renders windows switching recovery and perm
     try display.renderSession(&session);
     try expectDisplayContains(&display, "active_type=full_screen_task_view");
     try expectDisplayContains(&display, "title=Coordinate Trip");
+
+    var presentation = std.mem.zeroes(abi.SurfacePresentation);
+    presentation.surface_id = 31;
+    presentation.revision = 2;
+    presentation.interaction_hash = 0xC0FFEE;
+    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
+    @memcpy(presentation.text[0..11], "hello world");
+    presentation.text_length = 11;
+    presentation.cursor = 11;
+    _ = try session.presentSurface(app_task.id, &presentation);
+    try display.renderSession(&session);
+    try expectDisplayContains(&display, "surface_state model=notes revision=2");
+    try expectDisplayContains(&display, "hello world");
 
     const snapshot = session.snapshot();
     _ = try session.switchView(workspace_window.id);

@@ -301,6 +301,18 @@ pub fn mapError(err: anyerror) DispatchResult {
         .status = .not_found,
         .denial_reason = .invalid_target,
     };
+    if (err == error.InvalidSurfacePresentation) return .{
+        .status = .not_found,
+        .denial_reason = .invalid_target,
+    };
+    if (err == error.SurfacePresentationUnavailable) return .{
+        .status = .unavailable,
+        .denial_reason = .unsupported_operation,
+    };
+    if (err == error.StaleSurfacePresentation) return .{
+        .status = .conflict,
+        .denial_reason = .invalid_target,
+    };
     if (err == error.DeviceNotFound or err == error.UnsupportedMmioWindow) return .{
         .status = .not_found,
         .denial_reason = .invalid_target,

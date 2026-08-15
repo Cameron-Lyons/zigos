@@ -3041,6 +3041,8 @@ fn validateUserspaceDriverDataPathTrack(
     const native_kernel_path = "src/native/kernel_api/native_kernel.zig";
     const device_syscalls_path = "src/native/kernel_api/device_syscalls.zig";
     const syscall_surface_path = "src/native/kernel_api/syscall_surface.zig";
+    const compositor_session_path = "src/native/platform/compositor_session.zig";
+    const session_manager_boot_flow_path = "src/native/session/session_manager_boot_flow.zig";
     const bootstrap_driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
     const driver_runtime_path = "src/native/drivers/driver_runtime.zig";
     const driver_spec_path = "src/tests/spec/drivers_storage_sync.zig";
@@ -3051,6 +3053,8 @@ fn validateUserspaceDriverDataPathTrack(
     const native_kernel_source = try readRequiredSource(allocator, io, errors, native_kernel_path) orelse return;
     const device_syscalls_source = try readRequiredSource(allocator, io, errors, device_syscalls_path) orelse return;
     const syscall_surface_source = try readRequiredSource(allocator, io, errors, syscall_surface_path) orelse return;
+    const compositor_session_source = try readRequiredSource(allocator, io, errors, compositor_session_path) orelse return;
+    const session_manager_boot_flow_source = try readRequiredSource(allocator, io, errors, session_manager_boot_flow_path) orelse return;
     const bootstrap_driver_port_source = try readRequiredSource(allocator, io, errors, bootstrap_driver_port_path) orelse return;
     const driver_runtime_source = try readRequiredSource(allocator, io, errors, driver_runtime_path) orelse return;
     const driver_spec_source = try readRequiredSource(allocator, io, errors, driver_spec_path) orelse return;
@@ -3084,7 +3088,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 3",
+        "pub const ABI_VERSION: u16 = 4",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -3109,6 +3113,24 @@ fn validateUserspaceDriverDataPathTrack(
     for (focused_input_abi_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
             try common.addError(errors, allocator, "Userspace input ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    const surface_presentation_abi_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512" },
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SurfacePresentation = ex" ++ "tern struct" },
+        .{ .path = component_port_path, .source = component_port_source, .snippet = "pub fn surfacePresent(" },
+        .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeOperation(.surface_present" },
+        .{ .path = compositor_session_path, .source = compositor_session_source, .snippet = "pub fn presentSurface(" },
+        .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
+        .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "syscall surface copies bounded presentations through task-scoped authority" },
+    };
+    for (surface_presentation_abi_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Surface presentation ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
     }
     const port_abi_sources = [_]struct {

@@ -56,6 +56,7 @@ pub const CapabilityRight = enum(u8) {
     screen_capture,
     notification_post,
     process_control,
+    surface_present,
 };
 
 const RightsBits = packed struct(u64) {
@@ -93,7 +94,8 @@ const RightsBits = packed struct(u64) {
     screen_capture: bool = false,
     notification_post: bool = false,
     process_control: bool = false,
-    _reserved: u30 = 0,
+    surface_present: bool = false,
+    _reserved: u29 = 0,
 };
 
 pub const CapabilityRights = union(CapabilityTargetKind) {
@@ -122,6 +124,7 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
         background_run: bool = false,
         notification_post: bool = false,
         process_control: bool = false,
+        surface_present: bool = false,
     };
 
     pub const EndpointRights = packed struct {

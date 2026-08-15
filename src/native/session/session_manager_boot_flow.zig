@@ -4,6 +4,7 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
+const native_kernel = @import("../kernel_api/native_kernel.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
@@ -462,6 +463,10 @@ pub const SessionManager = struct {
             .context = &self.input_router,
             .poll = pollFocusedInputForKernel,
         });
+        self.kernel_context.kernel_instance.bindSurfacePresentationReceiver(.{
+            .context = &self.recovery_context.review_compositor_session,
+            .present = presentSurfaceForKernel,
+        });
         permission_review_service.bindSystemInputRouter(&self.input_router);
         common.printBootMarker(boot_markers.compositor_input_router_ready);
         common.printBootMarker(boot_markers.userspace_input_abi_ready);
@@ -479,6 +484,7 @@ pub const SessionManager = struct {
     pub fn failBoot(self: *SessionManager) void {
         self.initialized = false;
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
+        self.kernel_context.kernel_instance.clearSurfacePresentationReceiver();
         self.input_router.clearCompositor();
         self.input_broker_service_id = 0;
         permission_review_service.clearSystemInputRouter();
@@ -687,6 +693,22 @@ fn clearRootKernelPort() void {
     if (@hasDecl(root, "clearKernelPort")) {
         root.clearKernelPort();
     }
+}
+
+fn presentSurfaceForKernel(
+    context: *anyopaque,
+    task_id: u64,
+    presentation: *const abi.SurfacePresentation,
+) native_kernel.SurfacePresentStatus {
+    const session: *compositor_session.Session = @ptrCast(@alignCast(context));
+    return switch (session.presentSurface(task_id, presentation) catch |err| switch (err) {
+        error.StalePresentation, error.PresentationConflict => return .stale,
+        error.SurfaceTableFull => return .full,
+        else => return .invalid_surface,
+    }) {
+        .accepted => .accepted,
+        .duplicate => .duplicate,
+    };
 }
 
 pub fn printReadyBanner() void {

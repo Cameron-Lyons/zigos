@@ -40,6 +40,23 @@ pub const FocusedInputReceiver = struct {
     poll: *const fn (context: *anyopaque, task_id: u64) ?abi.InputEventDescriptor,
 };
 
+pub const SurfacePresentStatus = enum(u8) {
+    accepted,
+    duplicate,
+    stale,
+    invalid_surface,
+    full,
+};
+
+pub const SurfacePresentationReceiver = struct {
+    context: *anyopaque,
+    present: *const fn (
+        context: *anyopaque,
+        task_id: u64,
+        presentation: *const abi.SurfacePresentation,
+    ) SurfacePresentStatus,
+};
+
 pub const AuthorityGraphEdge = debug_contract.AuthorityGraphEdge;
 
 pub const KernelTarget = union(enum) {
@@ -74,6 +91,9 @@ pub const Error = task_runtime.Error || capability.Error || device_broker.Error 
     ScopeViolation,
     UnexpectedOperation,
     UserspaceLaunchRequired,
+    InvalidSurfacePresentation,
+    StaleSurfacePresentation,
+    SurfacePresentationUnavailable,
 };
 
 pub const Kernel = struct {
@@ -83,6 +103,7 @@ pub const Kernel = struct {
     endpoint_table: *endpoint.Table,
     shared_memory_table: *shared_memory.Table,
     focused_input_receiver: ?FocusedInputReceiver = null,
+    surface_presentation_receiver: ?SurfacePresentationReceiver = null,
     pub fn init(
         policy_authority: principal.PrincipalId,
         runtime: *task_runtime.Runtime,
@@ -105,6 +126,14 @@ pub const Kernel = struct {
 
     pub fn clearFocusedInputReceiver(self: *Kernel) void {
         self.focused_input_receiver = null;
+    }
+
+    pub fn bindSurfacePresentationReceiver(self: *Kernel, receiver: SurfacePresentationReceiver) void {
+        self.surface_presentation_receiver = receiver;
+    }
+
+    pub fn clearSurfacePresentationReceiver(self: *Kernel) void {
+        self.surface_presentation_receiver = null;
     }
 
     pub fn taskCreate(
@@ -580,6 +609,28 @@ pub const Kernel = struct {
         const event = receiver.poll(receiver.context, receiver_task_id) orelse return null;
         if (event.task_id != receiver_task_id) return error.ScopeViolation;
         return event;
+    }
+
+    pub fn surfacePresent(
+        self: *Kernel,
+        context: KernelCallContext,
+        presenter_task_id: u64,
+        presentation: *const abi.SurfacePresentation,
+        now_ticks: u64,
+    ) Error!bool {
+        _ = try self.authorizeOperation(.surface_present, context, now_ticks, .{
+            .request_task_id = presenter_task_id,
+        });
+        const task = self.runtime.find(presenter_task_id) orelse return error.TaskNotFound;
+        if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.ScopeViolation;
+        if (!abi.isCanonicalSurfacePresentation(presentation)) return error.InvalidSurfacePresentation;
+        const receiver = self.surface_presentation_receiver orelse return error.SurfacePresentationUnavailable;
+        return switch (receiver.present(receiver.context, presenter_task_id, presentation)) {
+            .accepted, .duplicate => true,
+            .stale => error.StaleSurfacePresentation,
+            .invalid_surface => error.InvalidSurfacePresentation,
+            .full => error.ResourceBudgetExceeded,
+        };
     }
 
     pub fn deviceDescribe(

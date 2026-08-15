@@ -135,6 +135,13 @@ pub const InputRecvRequest = struct {
     receiver_task_id: u64,
 };
 
+pub const SurfacePresentRequest = struct {
+    header: abi.RequestHeader,
+    presentation_capability_id: u64,
+    presenter_task_id: u64,
+    presentation: abi.SurfacePresentation,
+};
+
 pub const DeviceDescribeRequest = struct {
     header: abi.RequestHeader,
     device_capability_id: u64,
@@ -370,6 +377,21 @@ pub const KernelPort = struct {
         return self.kernel.inputRecv(
             callContext(request.header, request.input_capability_id, .{ .task = request.receiver_task_id }),
             request.receiver_task_id,
+            now_ticks,
+        );
+    }
+
+    pub fn surfacePresent(
+        self: *KernelPort,
+        request: SurfacePresentRequest,
+        now_ticks: u64,
+    ) Error!bool {
+        try validateHeader(request.header, .surface_present);
+        try validateSubjectTask(request.header, request.presenter_task_id);
+        return self.kernel.surfacePresent(
+            callContext(request.header, request.presentation_capability_id, .{ .task = request.presenter_task_id }),
+            request.presenter_task_id,
+            &request.presentation,
             now_ticks,
         );
     }

@@ -334,6 +334,19 @@ pub const operations = [_]Descriptor{
         .scope_rule = .{ .task_scope_matches_request_task = true },
     },
     .{
+        .operation = .surface_present,
+        .binding = .{
+            .request_type_name = "SurfacePresentRequest",
+            .response_type_name = "BoolResponse",
+            .handler_name = "dispatchSurfacePresent",
+            .port_method_name = "surfacePresent",
+        },
+        .domain = .task,
+        .required_right = .surface_present,
+        .target_kind = .{ .fixed = .task },
+        .scope_rule = .{ .task_scope_matches_request_task = true },
+    },
+    .{
         .operation = .device_describe,
         .binding = .{
             .request_type_name = "DeviceDescribeRequest",

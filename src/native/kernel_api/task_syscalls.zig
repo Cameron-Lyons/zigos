@@ -96,6 +96,19 @@ pub fn dispatchInputRecv(
     return dispatch.writeResponse(memory, response_addr, response_len, response);
 }
 
+pub fn dispatchSurfacePresent(
+    port: *component_port.KernelPort,
+    memory: dispatch.UserMemoryContext,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) dispatch.DispatchResult {
+    const request = dispatch.readRequest(component_port.SurfacePresentRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    const presented = component_port.invokeGenerated(.surface_present, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(presented));
+}
+
 fn sanitizeTaskCreateRequest(
     memory: dispatch.UserMemoryContext,
     request: *component_port.TaskCreateRequest,
