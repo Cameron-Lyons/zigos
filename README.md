@@ -117,7 +117,10 @@ observable boot markers.
   task-scoped receive capability, and UI processes drain a fixed event budget
   without sharing router memory or raw HID reports. Once that budget reaches an
   empty queue, the process yields with an event-wait disposition and stays off
-  the ready queue until focused work wakes it.
+  the ready queue until focused work wakes it. Each UI process keeps an
+  allocation-free model for editable text, focus, activation, recovery, and
+  commits; Notes, Viewer, Capture, Permission Review, and the compositor select
+  distinct state roles while the bootstrap mailbox exposes a compact snapshot.
 - Identity is passwordless and device-bound. Zigos models
   [FIDO-style passkeys](https://fidoalliance.org/passkeys/), recovery keys,
   hardware roots, and threshold recovery; administration is delegated through

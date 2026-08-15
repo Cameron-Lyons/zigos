@@ -9,6 +9,7 @@ const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
 const userspace_executor = @import("userspace_executor.zig");
 const userspace_loader = @import("userspace_loader.zig");
+const userspace_flags = @import("userspace_flags.zig");
 const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -69,6 +70,8 @@ pub const TaskDispatchStats = struct {
     queued_ready: bool,
     dispatch_count: u64,
     event_wait_count: u64,
+    ui_state_update_count: u64,
+    last_ui_state_revision: u64,
     delayed_dispatch_count: u64,
     denied_dispatch_count: u64,
     missed_deadline_count: u64,
@@ -92,6 +95,8 @@ const Slot = struct {
     next_ready_index: usize = no_index,
     dispatch_count: u64 = 0,
     event_wait_count: u64 = 0,
+    ui_state_update_count: u64 = 0,
+    last_ui_state_revision: u64 = 0,
     last_dispatch_tick: u64 = 0,
     last_wake_tick: u64 = 0,
     wake_event_count: u64 = 0,
@@ -157,6 +162,7 @@ pub const Scheduler = struct {
     ready_marker_printed: bool = false,
     active_marker_printed: bool = false,
     event_wait_marker_printed: bool = false,
+    ui_state_marker_printed: bool = false,
 
     pub fn init(executor: *userspace_executor.Executor) Scheduler {
         return .{ .executor = executor };
@@ -347,6 +353,8 @@ pub const Scheduler = struct {
             .queued_ready = slot.queued_ready,
             .dispatch_count = slot.dispatch_count,
             .event_wait_count = slot.event_wait_count,
+            .ui_state_update_count = slot.ui_state_update_count,
+            .last_ui_state_revision = slot.last_ui_state_revision,
             .delayed_dispatch_count = slot.delayed_dispatch_count,
             .denied_dispatch_count = slot.denied_dispatch_count,
             .missed_deadline_count = slot.missed_deadline_count,
@@ -491,6 +499,18 @@ pub const Scheduler = struct {
                 if (builtin.target.os.tag == .freestanding and !self.event_wait_marker_printed) {
                     common.printBootMarker(boot_markers.userspace_scheduler_event_wait_ready);
                     self.event_wait_marker_printed = true;
+                }
+            }
+            const ui_revision = self.executor.lastYieldUiRevision();
+            if (outcome.handedOff() and
+                taskOwnsUiSurface(self, task) and
+                ui_revision > slot.last_ui_state_revision)
+            {
+                slot.last_ui_state_revision = ui_revision;
+                slot.ui_state_update_count += 1;
+                if (builtin.target.os.tag == .freestanding and !self.ui_state_marker_printed) {
+                    common.printBootMarker(boot_markers.userspace_ui_state_ready);
+                    self.ui_state_marker_printed = true;
                 }
             }
             slot.last_dispatch_tick = now_ticks;
@@ -1211,6 +1231,12 @@ fn deadlineAfterDispatch(class: accelerator_scheduler.ResourceClass, now_ticks: 
 
 fn executionRemainsReady(outcome: userspace_executor.ExecutionOutcome) bool {
     return outcome != .wait_for_event;
+}
+
+fn taskOwnsUiSurface(self: *const Scheduler, task: *const task_runtime.TaskRecord) bool {
+    const catalog = self.catalog_ptr orelse return false;
+    const image = catalog.findById(task.launch.image_id) orelse return false;
+    return (image.contract_flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
 }
 
 fn expiredReadyCandidateBeats(

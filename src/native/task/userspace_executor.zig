@@ -296,6 +296,7 @@ pub const Executor = struct {
     last_trap_stack_pointer: u32 = 0,
     last_trap_counter: u32 = 0,
     last_yield_disposition: userspace_bootstrap_mailbox.YieldDisposition = .runnable,
+    last_yield_ui_revision: u64 = 0,
     last_fault_task_id: u64 = 0,
     last_fault_address_space_id: u64 = 0,
     last_fault_address: u32 = 0,
@@ -447,6 +448,10 @@ pub const Executor = struct {
         return mapping.last_user_counter == expected_counter;
     }
 
+    pub fn lastYieldUiRevision(self: *const Executor) u64 {
+        return self.last_yield_ui_revision;
+    }
+
     pub fn observedUserCounterStagePulse(
         self: *Executor,
         address_space_id: u64,
@@ -511,6 +516,7 @@ pub const Executor = struct {
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
         self.last_yield_disposition = .runnable;
+        self.last_yield_ui_revision = 0;
         zigos_userspace_resume_requested = 0;
 
         freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
@@ -805,6 +811,7 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
         native_util.impossibleByInvariant("userspace trap counter exceeds its ABI width");
     const disposition_raw = std.math.cast(u32, frame.esi) orelse
         native_util.impossibleByInvariant("userspace yield disposition exceeds its ABI width");
+    const ui_revision: u64 = @intCast(frame.edx);
     @call(.never_inline, recordTrapState, .{
         executor,
         instruction_pointer,
@@ -819,6 +826,7 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     mapping.yield_count += 1;
     mapping.last_user_counter = executor.last_trap_counter;
     executor.last_yield_disposition = userspace_bootstrap_mailbox.yieldDisposition(disposition_raw) orelse .runnable;
+    executor.last_yield_ui_revision = ui_revision;
 
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
