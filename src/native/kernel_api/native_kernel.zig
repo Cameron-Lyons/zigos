@@ -24,8 +24,6 @@ pub const EndpointCreateResult = struct {
 
 pub const EndpointReceiveResult = struct {
     message: abi.EndpointMessageDescriptor,
-    payload_len: usize,
-    payload: [endpoint.MAX_MESSAGE_BYTES]u8,
     attached_capability: ?abi.CapabilityDescriptor = null,
 };
 
@@ -244,13 +242,17 @@ pub const Kernel = struct {
         self: *Kernel,
         context: KernelCallContext,
         receiver_task_id: u64,
+        payload_out: []u8,
         now_ticks: u64,
     ) Error!?EndpointReceiveResult {
         const endpoint_capability = try self.authorizeOperation(.endpoint_recv, context, now_ticks, .{
             .request_task_id = receiver_task_id,
         });
 
-        const message = (try self.endpoint_table.recv(ids.endpoint(endpoint_capability.target.id))) orelse return null;
+        const message = (try self.endpoint_table.recvInto(
+            ids.endpoint(endpoint_capability.target.id),
+            payload_out,
+        )) orelse return null;
         var result = EndpointReceiveResult{
             .message = .{
                 .endpoint_id = endpoint_capability.target.id,
@@ -260,10 +262,7 @@ pub const Kernel = struct {
                 .payload_len = @intCast(message.len),
                 .flags = @bitCast(message.flags),
             },
-            .payload_len = message.len,
-            .payload = [_]u8{0} ** endpoint.MAX_MESSAGE_BYTES,
         };
-        @memcpy(result.payload[0..message.len], message.payload());
 
         if (message.attached_capability_id) |attached_capability_id| {
             const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
@@ -1002,8 +1001,9 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
 
     const shared_result = try kernel.sharedMemoryCreate(testContext(.shared_memory_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, shared_memory.PAGE_SIZE, 9);
     try kernel.endpointSend(testContext(.endpoint_send, app_endpoint.capability_id, .none), 11, "sync-open", shared_result.capability_id, false, 9);
-    const received = (try kernel.endpointRecv(testContext(.endpoint_recv, service_endpoint.capability_id, .none), service_task_desc.task_id, 10)).?;
-    try std.testing.expectEqualStrings("sync-open", received.payload[0..received.payload_len]);
+    var received_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try kernel.endpointRecv(testContext(.endpoint_recv, service_endpoint.capability_id, .none), service_task_desc.task_id, &received_payload, 10)).?;
+    try std.testing.expectEqualStrings("sync-open", received_payload[0..received.message.payload_len]);
     try std.testing.expect(received.attached_capability != null);
 
     _ = try kernel.sharedMemoryMap(testContext(.shared_memory_map, shared_result.capability_id, .none), app_task_desc.task_id, 10);

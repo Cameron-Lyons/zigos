@@ -57,10 +57,12 @@ const EndpointSendRequest = struct {
     move_attached_capability: bool = false,
 };
 
-const EndpointRecvRequest = extern struct {
+const EndpointRecvRequest = struct {
     header: abi.RequestHeader,
     endpoint_capability_id: u64,
     receiver_task_id: u64,
+    payload_out: []u8,
+    attached_capability_out: *abi.CapabilityDescriptor,
 };
 
 const InputRecvRequest = extern struct {
@@ -488,15 +490,21 @@ fn endpointSend(endpoint_capability_id: u64, payload: []const u8) bool {
     return trapCallNoResponse(&request) == .success;
 }
 
-fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResponse {
+fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResult {
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
+    var received = std.mem.zeroes(abi.EndpointRecvResult);
     var request = EndpointRecvRequest{
         .header = makeHeader(.endpoint_recv, nextCorrelationId(), task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = task_id,
+        .payload_out = &received.payload,
+        .attached_capability_out = &received.attached_capability,
     };
     if (trapCall(&request, &response) != .success) return null;
-    return response;
+    received.present = response.present;
+    received.has_attached_capability = response.has_attached_capability;
+    received.message = response.message;
+    return received;
 }
 
 fn inputRecv(input_capability_id: u64, task_id: u64) ?abi.InputRecvResponse {

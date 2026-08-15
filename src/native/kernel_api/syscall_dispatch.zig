@@ -253,6 +253,7 @@ fn defaultDenialReasonForStatus(status: abi.SyscallStatus) abi.DenialReason {
 
 pub fn mapError(err: anyerror) DispatchResult {
     if (err == error.UnsupportedAbiVersion) return .{ .status = .unsupported_abi_version };
+    if (err == error.ReceiveBufferTooSmall) return .{ .status = .buffer_too_small };
     if (err == error.UnexpectedOperation) return .{
         .status = .unsupported_operation,
         .denial_reason = .unsupported_operation,

@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const native_util = @import("../core/util.zig");
 const std = @import("std");
+const abi = @import("../core/abi.zig");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const bootstrap_capabilities = @import("../session/bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -157,13 +158,17 @@ pub fn run(
         .attached_capability_id = transport_probe_shm.capability_id,
         .move_attached_capability = false,
     }, 6) catch |err| native_util.bootProofFailure("transport checks", err);
+    var transport_probe_payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    var transport_probe_attached = std.mem.zeroes(abi.CapabilityDescriptor);
     const transport_probe_received = kernel_port.endpointRecv(.{
         .header = component_port.makeHeader(.endpoint_recv, 9, storage_task_desc.task_id),
         .endpoint_capability_id = storage_endpoint.capability_id,
         .receiver_task_id = storage_task_desc.task_id,
+        .payload_out = &transport_probe_payload,
+        .attached_capability_out = &transport_probe_attached,
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err) orelse
         native_util.impossibleByInvariant("endpointRecv returns the frame sent one step earlier");
-    if (std.mem.eql(u8, transport_probe_received.payload[0..transport_probe_received.payload_len], "workspace-open") and
+    if (std.mem.eql(u8, transport_probe_payload[0..transport_probe_received.message.payload_len], "workspace-open") and
         transport_probe_received.attached_capability != null)
     {
         common.printBootMarker(boot_markers.transport_cap_pass_ok);

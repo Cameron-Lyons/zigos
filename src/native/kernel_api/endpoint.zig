@@ -32,6 +32,15 @@ pub const Message = struct {
     }
 };
 
+pub const ReceivedMessage = struct {
+    sender_task_id: ids.TaskId,
+    correlation_id: u64,
+    attached_capability_id: ?ids.CapabilityId,
+    move_attached_capability: bool,
+    flags: EndpointFlags,
+    len: usize,
+};
+
 pub const Endpoint = struct {
     id: ids.EndpointId,
     owner_task_id: ids.TaskId,
@@ -53,6 +62,7 @@ pub const Error = error{
     EndpointIdExhausted,
     EndpointNotFound,
     MessageTooLarge,
+    ReceiveBufferTooSmall,
     PeerNotConnected,
     QueueFull,
     TableFull,
@@ -140,7 +150,6 @@ pub const Table = struct {
         if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.QueueFull;
 
         const insert_index = (peer.queue_head + peer.queue_len) % MAX_ENDPOINT_QUEUE;
-        peer.queue[insert_index] = zeroMessage();
         peer.queue[insert_index].sender_task_id = sender_task_id;
         peer.queue[insert_index].correlation_id = correlation_id;
         peer.queue[insert_index].attached_capability_id = attached_capability_id;
@@ -155,16 +164,30 @@ pub const Table = struct {
         peer.queue_len += 1;
     }
 
-    pub fn recv(self: *Table, endpoint_id: ids.EndpointId) Error!?Message {
+    pub fn recvInto(
+        self: *Table,
+        endpoint_id: ids.EndpointId,
+        payload_out: []u8,
+    ) Error!?ReceivedMessage {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         if (endpoint.queue_len == 0) return null;
 
         const index = endpoint.queue_head;
-        const message = endpoint.queue[index];
-        endpoint.queue[index] = zeroMessage();
+        const message = &endpoint.queue[index];
+        if (message.len > payload_out.len) return error.ReceiveBufferTooSmall;
+        @memcpy(payload_out[0..message.len], message.payload());
+        const received = ReceivedMessage{
+            .sender_task_id = message.sender_task_id,
+            .correlation_id = message.correlation_id,
+            .attached_capability_id = message.attached_capability_id,
+            .move_attached_capability = message.move_attached_capability,
+            .flags = message.flags,
+            .len = message.len,
+        };
+        message.len = 0;
         endpoint.queue_head = (endpoint.queue_head + 1) % MAX_ENDPOINT_QUEUE;
         endpoint.queue_len -= 1;
-        return message;
+        return received;
     }
 
     pub fn descriptor(self: *const Table, endpoint_id: ids.EndpointId) Error!abi.EndpointDescriptor {
@@ -236,11 +259,12 @@ test "endpoints connect and exchange queued messages" {
     try table.connect(left.id, right.id);
 
     try table.send(left.id, ids.task(10), 77, "hello", null, false);
-    const received = (try table.recv(right.id)).?;
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(right.id, &payload)).?;
 
     try std.testing.expect(received.sender_task_id.eql(ids.task(10)));
     try std.testing.expectEqual(@as(u64, 77), received.correlation_id);
-    try std.testing.expectEqualStrings("hello", received.payload());
+    try std.testing.expectEqualStrings("hello", payload[0..received.len]);
 }
 
 test "endpoint descriptors track peer links and queue depth" {
@@ -292,7 +316,26 @@ test "service ports accept multiple client connections without blocking later bi
     try table.connect(client_b.id, service.id);
     try table.send(client_b.id, ids.task(11), 77, "ping", null, false);
 
-    const received = (try table.recv(service.id)).?;
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(service.id, &payload)).?;
     try std.testing.expect(received.sender_task_id.eql(ids.task(11)));
     try std.testing.expectEqual(service.id.raw(), (try table.descriptor(client_b.id)).peer_endpoint_id);
+}
+
+test "endpoint receive keeps a message queued when the caller buffer is too small" {
+    var table = Table.init();
+    const left = try table.create(ids.task(10), "left", .{});
+    const right = try table.create(ids.task(11), "right", .{});
+    try table.connect(left.id, right.id);
+    try table.send(left.id, ids.task(10), 9, "hello", null, false);
+
+    var short_payload: [4]u8 = undefined;
+    try std.testing.expectError(error.ReceiveBufferTooSmall, table.recvInto(right.id, &short_payload));
+    try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(right.id)).queued_messages);
+
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(right.id, &payload)).?;
+    try std.testing.expectEqual(@as(u64, 9), received.correlation_id);
+    try std.testing.expectEqualStrings("hello", payload[0..received.len]);
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(right.id)).queued_messages);
 }

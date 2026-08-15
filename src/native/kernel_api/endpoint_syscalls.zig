@@ -59,6 +59,28 @@ pub fn dispatchEndpointRecv(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.EndpointRecvRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    if (response_len < @sizeOf(abi.EndpointRecvResponse)) return .{ .status = .buffer_too_small };
+    if (!dispatch.validateUserRange(memory, response_addr, response_len, 1, .write)) {
+        return .{ .status = .invalid_response_buffer };
+    }
+    if (request.payload_out.len > endpoint.MAX_MESSAGE_BYTES or
+        !dispatch.validateUserRange(
+            memory,
+            @intFromPtr(request.payload_out.ptr),
+            request.payload_out.len,
+            1,
+            .write,
+        ) or
+        !dispatch.validateUserRange(
+            memory,
+            @intFromPtr(request.attached_capability_out),
+            @sizeOf(abi.CapabilityDescriptor),
+            @alignOf(abi.CapabilityDescriptor),
+            .write,
+        ))
+    {
+        return .{ .status = .invalid_response_buffer };
+    }
     const received = component_port.invokeGenerated(.endpoint_recv, port, request, now_ticks) catch |err| return dispatch.mapError(err);
 
     var response = @import("std").mem.zeroes(abi.EndpointRecvResponse);
@@ -66,10 +88,6 @@ pub fn dispatchEndpointRecv(
         response.present = 1;
         response.has_attached_capability = @intFromBool(message.attached_capability != null);
         response.message = message.message;
-        @memcpy(response.payload[0..message.payload_len], message.payload[0..message.payload_len]);
-        if (message.attached_capability) |attached| {
-            response.attached_capability = attached;
-        }
     }
     return dispatch.writeResponse(memory, response_addr, response_len, response);
 }
