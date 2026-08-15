@@ -60,6 +60,7 @@ pub const permission_xhci_review_command = "ZIGOS:PERMISSION:XHCI_KEYBOARD:REVIE
 pub const permission_xhci_boot_flow_commands = "ZIGOS:PERMISSION:XHCI_KEYBOARD:BOOT_FLOW_COMMANDS";
 
 pub const compositor_service_ready = "ZIGOS:COMPOSITOR:SERVICE:READY";
+pub const compositor_input_router_ready = "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY";
 pub const compositor_framebuffer_presented = "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED";
 pub const compositor_permission_review_rendered = "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED";
 

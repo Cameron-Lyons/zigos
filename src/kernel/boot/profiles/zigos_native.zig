@@ -34,6 +34,7 @@ pub fn run() noreturn {
                 recorded_input_report_count = input_report_count;
             }
         }
+        _ = session_manager.servicePendingInputWork(now_ticks);
         _ = session_manager.servicePendingNetworkWork(now_ticks);
         _ = session_manager.runUserspaceScheduler(now_ticks);
         x86.cli();
