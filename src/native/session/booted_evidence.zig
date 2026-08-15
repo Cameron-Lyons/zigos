@@ -71,10 +71,10 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         "allow local lease=25",
         "allow local lease=15",
     };
-    var physical_review_input = permission_review_service.PhysicalInputSource.initDefault() catch |err| native_util.bootProofFailure("booted evidence", err);
+    var modeled_review_input = permission_review_service.ModeledInputSource.initDefault() catch |err| native_util.bootProofFailure("booted evidence", err);
     var expected_physical_review_reports: usize = 0;
     for (physical_review_commands) |command| {
-        physical_review_input.enqueueTextCommand(
+        modeled_review_input.enqueueTextCommand(
             xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
             xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
             command,
@@ -90,7 +90,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     );
     review_service.compositor = manager.compositorSessionPtr();
     review_service.ux = manager.reviewUxControllerPtr();
-    review_service.bindPhysicalInput(&physical_review_input);
+    review_service.bindModeledInput(&modeled_review_input);
     var compositor_checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(
         graph.state.services.compositor_service.id,

@@ -9,6 +9,7 @@ const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const input_driver_task = @import("../drivers/input_driver_task.zig");
+const input_router = @import("../platform/input_router.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const permission_review = @import("permission_review.zig");
 const policy_mediation = @import("policy_mediation.zig");
@@ -58,7 +59,7 @@ pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
-pub const PhysicalInputError = xhci.Error || input_driver_task.Error || error{ UnsupportedPhysicalInput, PhysicalInputCommandQueueFull };
+pub const InputError = xhci.Error || input_driver_task.Error || error{ UnsupportedTextInput, InputCommandQueueFull };
 pub const Error = task_runtime.Error || manifest.ValidationError || compositor_display.Error || event_ledger.Error || permission_review.SessionError || error{
     ReviewCommandTooLong,
     ReviewComplete,
@@ -75,148 +76,18 @@ pub const ScriptedPlanEntry = struct {
     command: []const u8,
 };
 
-pub const HardwareReportSource = struct {
-    poll_report: *const fn () ?xhci.HardwareBootKeyboardReport,
-    input_proof: *const fn () ?xhci.InputProof,
-};
-
-const PhysicalInputBackend = union(enum) {
-    modeled: xhci.HidController,
-    hardware: HardwareReportSource,
-};
-
-pub const PhysicalInputSource = struct {
-    backend: PhysicalInputBackend,
+pub const CommandInput = struct {
     pending_line: [MAX_INPUT_LINE]u8 = [_]u8{0} ** MAX_INPUT_LINE,
     pending_line_len: usize = 0,
-    pending_commands: [MAX_PHYSICAL_INPUT_COMMANDS][MAX_INPUT_LINE]u8 = [_][MAX_INPUT_LINE]u8{[_]u8{0} ** MAX_INPUT_LINE} ** MAX_PHYSICAL_INPUT_COMMANDS,
+    pending_commands: [MAX_PHYSICAL_INPUT_COMMANDS][MAX_INPUT_LINE]u8 =
+        [_][MAX_INPUT_LINE]u8{[_]u8{0} ** MAX_INPUT_LINE} ** MAX_PHYSICAL_INPUT_COMMANDS,
     pending_command_lens: [MAX_PHYSICAL_INPUT_COMMANDS]usize = [_]usize{0} ** MAX_PHYSICAL_INPUT_COMMANDS,
     pending_command_head: usize = 0,
     pending_command_tail: usize = 0,
     pending_command_count: usize = 0,
-    decoder: input_driver_task.Decoder = .{},
-    reports_consumed: usize = 0,
     commands_completed: usize = 0,
 
-    pub fn init(plan: xhci.RingPlan) xhci.Error!PhysicalInputSource {
-        return .{
-            .backend = .{ .modeled = try xhci.HidController.init(plan) },
-        };
-    }
-
-    pub fn initDefault() xhci.Error!PhysicalInputSource {
-        var source = PhysicalInputSource{
-            .backend = .{ .modeled = try xhci.HidController.initWithMmio(
-                xhci.defaultCapabilityRegisters(),
-                .{
-                    .command_ring_trbs = 64,
-                    .event_ring_trbs = 64,
-                    .command_ring_address = 0x1000,
-                    .event_ring_address = 0x2000,
-                },
-            ) },
-        };
-        const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
-        _ = try source.backend.modeled.attachBootKeyboard(
-            xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-            descriptor[0..],
-        );
-        return source;
-    }
-
-    pub fn initHardware(source: HardwareReportSource) PhysicalInputSource {
-        return .{ .backend = .{ .hardware = source } };
-    }
-
-    pub fn enqueueTextCommand(
-        self: *PhysicalInputSource,
-        device_id: u64,
-        endpoint_id: u8,
-        command: []const u8,
-    ) PhysicalInputError!void {
-        try self.drainReports();
-        if (self.pending_command_count == self.pending_commands.len) return error.PhysicalInputCommandQueueFull;
-        for (command) |ch| {
-            try self.enqueueAsciiKey(device_id, endpoint_id, ch);
-            try self.drainReports();
-        }
-        try self.enqueueAsciiKey(device_id, endpoint_id, '\n');
-        try self.drainReports();
-    }
-
-    pub fn takeCommand(self: *PhysicalInputSource, buffer: *[MAX_INPUT_LINE]u8) ?[]const u8 {
-        self.drainReports() catch return null;
-        if (self.pending_command_count == 0) return null;
-        const index = self.pending_command_head;
-        const len = self.pending_command_lens[index];
-        @memcpy(buffer[0..len], self.pending_commands[index][0..len]);
-        @memset(self.pending_commands[index][0..], 0);
-        self.pending_command_lens[index] = 0;
-        self.pending_command_head = (self.pending_command_head + 1) % self.pending_commands.len;
-        self.pending_command_count -= 1;
-        return buffer[0..len];
-    }
-
-    pub fn reportCount(self: *const PhysicalInputSource) usize {
-        return self.reports_consumed;
-    }
-
-    pub fn commandCount(self: *const PhysicalInputSource) usize {
-        return self.commands_completed;
-    }
-
-    pub fn queuedCommandCount(self: *const PhysicalInputSource) usize {
-        return self.pending_command_count;
-    }
-
-    pub fn inputProof(self: *const PhysicalInputSource) ?xhci.InputProof {
-        return switch (self.backend) {
-            .modeled => |*controller| controller.inputProof(),
-            .hardware => |source| source.input_proof(),
-        };
-    }
-
-    fn enqueueAsciiKey(
-        self: *PhysicalInputSource,
-        device_id: u64,
-        endpoint_id: u8,
-        ch: u8,
-    ) PhysicalInputError!void {
-        const key = hidKeyForAscii(ch) orelse return error.UnsupportedPhysicalInput;
-        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, key.modifiers, &.{key.usage}));
-        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{}));
-    }
-
-    fn submitKeyboardReport(
-        self: *PhysicalInputSource,
-        device_id: u64,
-        endpoint_id: u8,
-        report: xhci.HidReport,
-    ) PhysicalInputError!void {
-        const controller = switch (self.backend) {
-            .modeled => |*modeled| modeled,
-            .hardware => return error.UnsupportedPhysicalInput,
-        };
-        const boot_keyboard = controller.configuredBootKeyboard() orelse return error.MissingBootKeyboardInterface;
-        if (boot_keyboard.device_id != device_id) return error.UnknownHidDevice;
-        try controller.submitKeyboardInterruptEvent(boot_keyboard.slot_id, endpoint_id, report.reportSlice());
-    }
-
-    fn drainReports(self: *PhysicalInputSource) PhysicalInputError!void {
-        while (true) {
-            while (self.decoder.poll()) |event| {
-                if (try self.consumeKeyboardEvent(event)) return;
-            }
-            const report = try self.pollReport() orelse return;
-            self.reports_consumed += 1;
-            _ = try self.decoder.submit(report.report);
-        }
-    }
-
-    fn consumeKeyboardEvent(
-        self: *PhysicalInputSource,
-        event: input_driver_task.KeyboardEvent,
-    ) PhysicalInputError!bool {
+    pub fn submit(self: *CommandInput, event: input_driver_task.KeyboardEvent) InputError!bool {
         switch (event.kind) {
             .text => {
                 if (self.pending_line_len >= self.pending_line.len) return error.ReportTooLarge;
@@ -232,7 +103,7 @@ pub const PhysicalInputSource = struct {
             .activate, .commit_text => {
                 if (self.pending_line_len == 0) return false;
                 if (self.pending_command_count == self.pending_commands.len) {
-                    return error.PhysicalInputCommandQueueFull;
+                    return error.InputCommandQueueFull;
                 }
                 const index = self.pending_command_tail;
                 @memcpy(
@@ -258,51 +129,137 @@ pub const PhysicalInputSource = struct {
         return false;
     }
 
-    fn pollReport(self: *PhysicalInputSource) PhysicalInputError!?xhci.HidReport {
-        return switch (self.backend) {
-            .modeled => |*controller| controller.pollHidReport() catch |err| switch (err) {
-                error.EventRingEmpty => null,
-                else => return err,
-            },
-            .hardware => |source| hardware: {
-                const report = source.poll_report() orelse break :hardware null;
-                if (report.sequence == 0 or report.port_id == 0 or report.slot_id == 0 or
-                    report.endpoint_id == 0)
-                {
-                    return error.InvalidBootKeyboardReport;
-                }
-                break :hardware .{
-                    .device_id = (@as(u64, report.vendor_id) << 16) | report.product_id,
-                    .endpoint_id = report.endpoint_id,
-                    .report_len = report.bytes.len,
-                    .report = report.bytes,
-                };
-            },
+    pub fn take(self: *CommandInput, buffer: *[MAX_INPUT_LINE]u8) ?[]const u8 {
+        if (self.pending_command_count == 0) return null;
+        const index = self.pending_command_head;
+        const len = self.pending_command_lens[index];
+        @memcpy(buffer[0..len], self.pending_commands[index][0..len]);
+        @memset(self.pending_commands[index][0..], 0);
+        self.pending_command_lens[index] = 0;
+        self.pending_command_head = (self.pending_command_head + 1) % self.pending_commands.len;
+        self.pending_command_count -= 1;
+        return buffer[0..len];
+    }
+};
+
+pub const ModeledInputSource = struct {
+    controller: xhci.HidController,
+    commands: CommandInput = .{},
+    decoder: input_driver_task.Decoder = .{},
+    reports_consumed: usize = 0,
+
+    pub fn init(plan: xhci.RingPlan) xhci.Error!ModeledInputSource {
+        return .{
+            .controller = try xhci.HidController.init(plan),
+        };
+    }
+
+    pub fn initDefault() xhci.Error!ModeledInputSource {
+        var source = ModeledInputSource{
+            .controller = try xhci.HidController.initWithMmio(
+                xhci.defaultCapabilityRegisters(),
+                .{
+                    .command_ring_trbs = 64,
+                    .event_ring_trbs = 64,
+                    .command_ring_address = 0x1000,
+                    .event_ring_address = 0x2000,
+                },
+            ),
+        };
+        const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
+        _ = try source.controller.attachBootKeyboard(
+            xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+            descriptor[0..],
+        );
+        return source;
+    }
+
+    pub fn enqueueTextCommand(
+        self: *ModeledInputSource,
+        device_id: u64,
+        endpoint_id: u8,
+        command: []const u8,
+    ) InputError!void {
+        try self.drainReports();
+        if (self.commands.pending_command_count == self.commands.pending_commands.len) return error.InputCommandQueueFull;
+        for (command) |ch| {
+            try self.enqueueAsciiKey(device_id, endpoint_id, ch);
+            try self.drainReports();
+        }
+        try self.enqueueAsciiKey(device_id, endpoint_id, '\n');
+        try self.drainReports();
+    }
+
+    pub fn takeCommand(self: *ModeledInputSource, buffer: *[MAX_INPUT_LINE]u8) ?[]const u8 {
+        self.drainReports() catch return null;
+        return self.commands.take(buffer);
+    }
+
+    pub fn reportCount(self: *const ModeledInputSource) usize {
+        return self.reports_consumed;
+    }
+
+    pub fn commandCount(self: *const ModeledInputSource) usize {
+        return self.commands.commands_completed;
+    }
+
+    pub fn queuedCommandCount(self: *const ModeledInputSource) usize {
+        return self.commands.pending_command_count;
+    }
+
+    pub fn inputProof(self: *const ModeledInputSource) ?xhci.InputProof {
+        return self.controller.inputProof();
+    }
+
+    fn enqueueAsciiKey(
+        self: *ModeledInputSource,
+        device_id: u64,
+        endpoint_id: u8,
+        ch: u8,
+    ) InputError!void {
+        const key = hidKeyForAscii(ch) orelse return error.UnsupportedTextInput;
+        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, key.modifiers, &.{key.usage}));
+        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{}));
+    }
+
+    fn submitKeyboardReport(
+        self: *ModeledInputSource,
+        device_id: u64,
+        endpoint_id: u8,
+        report: xhci.HidReport,
+    ) InputError!void {
+        const boot_keyboard = self.controller.configuredBootKeyboard() orelse return error.MissingBootKeyboardInterface;
+        if (boot_keyboard.device_id != device_id) return error.UnknownHidDevice;
+        try self.controller.submitKeyboardInterruptEvent(boot_keyboard.slot_id, endpoint_id, report.reportSlice());
+    }
+
+    fn drainReports(self: *ModeledInputSource) InputError!void {
+        while (true) {
+            while (self.decoder.poll()) |event| {
+                if (try self.commands.submit(event)) return;
+            }
+            const report = try self.pollReport() orelse return;
+            self.reports_consumed += 1;
+            _ = try self.decoder.submit(report.report);
+        }
+    }
+
+    fn pollReport(self: *ModeledInputSource) InputError!?xhci.HidReport {
+        return self.controller.pollHidReport() catch |err| switch (err) {
+            error.EventRingEmpty => null,
+            else => return err,
         };
     }
 };
 
-fn noHardwareKeyboardReport() ?xhci.HardwareBootKeyboardReport {
-    return null;
+var system_input_router: ?*input_router.Router = null;
+
+pub fn bindSystemInputRouter(router: *input_router.Router) void {
+    system_input_router = router;
 }
 
-fn noHardwareInputProof() ?xhci.InputProof {
-    return null;
-}
-
-var system_hardware_input = PhysicalInputSource.initHardware(.{
-    .poll_report = noHardwareKeyboardReport,
-    .input_proof = noHardwareInputProof,
-});
-var system_hardware_input_bound = false;
-
-pub fn bindSystemHardwareInput(source: HardwareReportSource) void {
-    system_hardware_input = PhysicalInputSource.initHardware(source);
-    system_hardware_input_bound = true;
-}
-
-pub fn clearSystemHardwareInput() void {
-    system_hardware_input_bound = false;
+pub fn clearSystemInputRouter() void {
+    system_input_router = null;
 }
 
 const TestHardwareReportFeed = struct {
@@ -612,7 +569,9 @@ pub const Service = struct {
     compositor: ?*compositor_session.Session = null,
     compositor_service: ?*compositor_session.Service = null,
     ux: ?*native_ux.Controller = null,
-    physical_input: ?*PhysicalInputSource = null,
+    modeled_input: ?*ModeledInputSource = null,
+    focused_input: ?*input_router.Router = null,
+    focused_commands: CommandInput = .{},
 
     pub fn init(
         service_id: u64,
@@ -626,7 +585,7 @@ pub const Service = struct {
             .runtime = runtime,
             .scripted_inputs = scripted_inputs,
         };
-        if (system_hardware_input_bound) service.physical_input = &system_hardware_input;
+        service.focused_input = system_input_router;
         return service;
     }
 
@@ -651,20 +610,29 @@ pub const Service = struct {
         self.compositor = service.session;
     }
 
-    pub fn bindPhysicalInput(self: *Service, source: *PhysicalInputSource) void {
-        self.physical_input = source;
+    pub fn bindModeledInput(self: *Service, source: *ModeledInputSource) void {
+        self.modeled_input = source;
+    }
+
+    pub fn bindFocusedInput(self: *Service, router: *input_router.Router) void {
+        self.focused_input = router;
     }
 
     pub fn physicalInputReportCount(self: *const Service) usize {
-        return if (self.physical_input) |source| source.reportCount() else 0;
+        if (self.focused_input) |router| return router.reports_accepted;
+        return if (self.modeled_input) |source| source.reportCount() else 0;
     }
 
     pub fn physicalInputCommandCount(self: *const Service) usize {
-        return if (self.physical_input) |source| source.commandCount() else 0;
+        const focused_count = self.focused_commands.commands_completed;
+        return focused_count + if (self.modeled_input) |source| source.commandCount() else 0;
     }
 
     pub fn physicalInputEventCount(self: *const Service) usize {
-        const source = self.physical_input orelse return 0;
+        if (self.focused_input) |router| {
+            return if (router.inputProof()) |proof| proof.event_count else 0;
+        }
+        const source = self.modeled_input orelse return 0;
         return if (source.inputProof()) |proof| proof.event_count else 0;
     }
 
@@ -719,7 +687,7 @@ pub const Service = struct {
 
             while (true) {
                 var input_buffer: [MAX_INPUT_LINE]u8 = undefined;
-                const line = self.readCommandLine(&input_buffer, bundle, request);
+                const line = self.readCommandLine(&input_buffer, bundle, request, now_ticks);
                 if (line.len > MAX_INPUT_LINE) return error.ReviewCommandTooLong;
                 const command = permission_review.parseCommand(line) catch {
                     console.print("    invalid command; expected allow [local] [lease=<ticks>] or deny\n");
@@ -757,8 +725,22 @@ pub const Service = struct {
         buffer: *[MAX_INPUT_LINE]u8,
         bundle: manifest.BundleManifest,
         request: manifest.PermissionRequest,
+        now_ticks: u64,
     ) []const u8 {
-        if (self.physical_input) |source| {
+        if (self.focused_input) |router| {
+            _ = router.service(now_ticks, input_router.DEFAULT_REPORT_BUDGET);
+            while (router.pollForTask(self.task_id)) |routed| {
+                _ = self.focused_commands.submit(routed.event) catch continue;
+            }
+            if (self.focused_commands.take(buffer)) |line| {
+                console.print("    input> ");
+                console.print(line);
+                console.print("\n");
+                return line;
+            }
+        }
+
+        if (self.modeled_input) |source| {
             if (source.takeCommand(buffer)) |line| {
                 console.print("    input> ");
                 console.print(line);
@@ -1273,16 +1255,16 @@ test "review service renders commands from a typed decision profile" {
 test "review service consumes xHCI keyboard reports for physical permission commands" {
     var runtime = task_runtime.Runtime.init();
     const task = try createReviewTestTask(&runtime, 14, 37);
-    var physical_input = try PhysicalInputSource.initDefault();
-    try physical_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
-    try physical_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
+    var modeled_input = try ModeledInputSource.initDefault();
+    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
+    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
 
     var compositor = compositor_session.Session.init();
     var checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(17, 18, &runtime, &compositor, &checkpoint_store);
     var service = Service.init(17, 18, &runtime, &[_][]const u8{});
     service.bindCompositorService(&compositor_service);
-    service.bindPhysicalInput(&physical_input);
+    service.bindModeledInput(&modeled_input);
 
     const permissions = [_]manifest.PermissionRequest{
         .{
@@ -1313,13 +1295,13 @@ test "review service consumes xHCI keyboard reports for physical permission comm
     try std.testing.expectEqual(@as(?u64, 55), grants[0].expires_at_ticks);
     try std.testing.expectEqual(@as(usize, 2), service.physicalInputCommandCount());
     try std.testing.expect(service.physicalInputReportCount() >= "allow local lease=25".len + "deny".len + 2);
-    try std.testing.expect(service.physical_input.?.inputProof().?.event_count >= service.physicalInputReportCount());
+    try std.testing.expect(service.modeled_input.?.inputProof().?.event_count >= service.physicalInputReportCount());
     const window = compositor.windowAtOrder(0).?;
     try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(window.id, .object_access, "workspace:notes").?.decision);
     try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(window.id, .clipboard, "clipboard").?.decision);
 }
 
-test "physical input source consumes the hardware xHCI report interface" {
+test "permission input consumes only centrally routed events for its focused task" {
     test_hardware_report_feed = .{
         .reports = .{
             testHardwareKeyboardReport(1, 0x12),
@@ -1327,52 +1309,33 @@ test "physical input source consumes the hardware xHCI report interface" {
             testHardwareKeyboardReport(3, 0x28),
         },
     };
-    var source = PhysicalInputSource.initHardware(.{
-        .poll_report = pollTestHardwareReport,
-        .input_proof = noTestHardwareInputProof,
-    });
-    var command_buffer: [MAX_INPUT_LINE]u8 = undefined;
-    try std.testing.expectEqualStrings("ok", source.takeCommand(&command_buffer).?);
-    try std.testing.expectEqual(@as(usize, 3), source.reportCount());
-    try std.testing.expectEqual(@as(usize, 1), source.commandCount());
-    try std.testing.expectError(
-        error.UnsupportedPhysicalInput,
-        source.enqueueTextCommand(1, 3, "synthetic"),
-    );
-
-    test_hardware_report_feed = .{
-        .reports = .{
-            testHardwareKeyboardReport(0, 0x04),
-            testHardwareKeyboardReport(2, 0),
-            testHardwareKeyboardReport(3, 0),
-        },
-    };
-    var malformed_source = PhysicalInputSource.initHardware(.{
-        .poll_report = pollTestHardwareReport,
-        .input_proof = noTestHardwareInputProof,
-    });
-    try std.testing.expectError(error.InvalidBootKeyboardReport, malformed_source.drainReports());
-
-    test_hardware_report_feed = .{
-        .reports = .{
-            testHardwareKeyboardReport(1, 0x12),
-            testHardwareKeyboardReport(2, 0x0E),
-            testHardwareKeyboardReport(3, 0x28),
-        },
-    };
-    bindSystemHardwareInput(.{
-        .poll_report = pollTestHardwareReport,
-        .input_proof = noTestHardwareInputProof,
-    });
-    defer clearSystemHardwareInput();
     var runtime = task_runtime.Runtime.init();
+    const task = try createReviewTestTask(&runtime, 44, 71);
+    var compositor = compositor_session.Session.init();
+    const review_window = try compositor.openDocumentView(task, 1, "notes.md");
+    review_window.modal = true;
+    review_window.reviewer_task_id = 2;
+    var router = input_router.Router{};
+    router.bindHardwareSource(.{
+        .poll_report = pollTestHardwareReport,
+        .input_proof = noTestHardwareInputProof,
+    });
+    router.bindCompositor(&compositor, 3);
+    bindSystemInputRouter(&router);
+    defer clearSystemInputRouter();
     var service = Service.init(1, 2, &runtime, &.{});
-    try std.testing.expect(service.physical_input != null);
-    try std.testing.expectEqualStrings("ok", service.physical_input.?.takeCommand(&command_buffer).?);
+    try std.testing.expect(service.focused_input != null);
+    var command_buffer: [MAX_INPUT_LINE]u8 = undefined;
+    var bundle = manifest_fixtures.notesBundle();
+    bundle.requested_permissions = manifest_fixtures.notes_permissions[0..1];
+    try std.testing.expectEqualStrings(
+        "ok",
+        service.readCommandLine(&command_buffer, bundle, bundle.requested_permissions[0], 1),
+    );
 }
 
 test "physical input command editing honors shift punctuation and backspace" {
-    var source = try PhysicalInputSource.initDefault();
+    var source = try ModeledInputSource.initDefault();
     try source.enqueueTextCommand(
         xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
         xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,

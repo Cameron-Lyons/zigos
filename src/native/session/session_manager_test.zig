@@ -5,6 +5,7 @@ const compositor_session = @import("../platform/compositor_session.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
+const xhci = @import("../../kernel/drivers/xhci.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
@@ -15,6 +16,18 @@ const signing = @import("../core/signing.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+
+var focused_input_test_report: ?xhci.HardwareBootKeyboardReport = null;
+
+fn pollFocusedInputTestReport() ?xhci.HardwareBootKeyboardReport {
+    const report = focused_input_test_report;
+    focused_input_test_report = null;
+    return report;
+}
+
+fn noFocusedInputTestProof() ?xhci.InputProof {
+    return null;
+}
 
 test "boot assembles core services without running explicit scenarios" {
     session_manager.testing.resetState();
@@ -254,6 +267,32 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(notes_review.id, .clipboard, "clipboard").?.decision);
     try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(sync_review.id, .background_execution, "sync").?.decision);
     try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(capture_review.id, .mic, "mic.array").?.decision);
+
+    _ = try compositor.switchView(capture_review.id);
+    const compositor_task = session_manager.testing.findTask("compositor-session").?;
+    session_manager.testing.inputRouterPtr().bindCompositor(compositor, compositor_task.id);
+    focused_input_test_report = .{
+        .sequence = 1,
+        .port_id = 1,
+        .slot_id = 1,
+        .interface_number = 0,
+        .endpoint_id = 3,
+        .vendor_id = 0x046D,
+        .product_id = 0xC31C,
+        .bytes = .{ 0, 0, 0x1D, 0, 0, 0, 0, 0 },
+    };
+    session_manager.bindHardwareInput(.{
+        .poll_report = pollFocusedInputTestReport,
+        .input_proof = noFocusedInputTestProof,
+    });
+    const wake_count_before = session_manager.testing.userspaceSchedulerPtr().taskDispatchStats(review_task.id).?.wake_event_count;
+    try std.testing.expectEqual(@as(usize, 1), session_manager.servicePendingInputWork(200));
+    const focused_input = session_manager.pollFocusedInput(review_task.id).?;
+    try std.testing.expectEqual(capture_review.id, focused_input.window_id);
+    try std.testing.expectEqual(review_task.id, focused_input.task_id);
+    try std.testing.expectEqual(@as(u8, 'z'), focused_input.event.text);
+    try std.testing.expect(session_manager.testing.userspaceSchedulerPtr().taskDispatchStats(review_task.id).?.wake_event_count > wake_count_before);
+
     try std.testing.expectEqual(@as(usize, 3), app_panel_count);
     try std.testing.expectEqual(@as(usize, 1), document_view_count);
     try std.testing.expectEqual(@as(usize, 1), workspace_view_count);

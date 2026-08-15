@@ -37,6 +37,16 @@ pub const DecisionState = enum(u8) {
     deny,
 };
 
+pub const SwitchDirection = enum(u8) {
+    next,
+    previous,
+};
+
+pub const SwitchResult = struct {
+    window: *WindowRecord,
+    visible_index: usize,
+};
+
 pub const WindowRecord = struct {
     id: u64,
     reviewer_task_id: u64 = 0,
@@ -126,6 +136,7 @@ pub const Error = error{
     RequestTooLarge,
     ResponseTooLarge,
     RecoveryStateMissing,
+    NoVisibleWindows,
 };
 
 const WINDOW_INDEX_CAPACITY: usize = MAX_WINDOWS * 2;
@@ -439,6 +450,45 @@ pub const Session = struct {
         return self.visible_window_count;
     }
 
+    pub fn activeWindow(self: *const Session) ?*const WindowRecord {
+        return self.findWindowConst(self.active_window_id);
+    }
+
+    pub fn switchVisible(self: *Session, direction: SwitchDirection) Error!SwitchResult {
+        if (self.visible_window_count == 0) return error.NoVisibleWindows;
+
+        var active_visible_index: ?usize = null;
+        var visible_index: usize = 0;
+        for (self.window_order[0..self.window_count]) |window_id| {
+            const window = self.findWindowConst(window_id) orelse continue;
+            if (!window.visible) continue;
+            if (window.id == self.active_window_id) active_visible_index = visible_index;
+            visible_index += 1;
+        }
+
+        const target_index = if (active_visible_index) |current|
+            switch (direction) {
+                .next => (current + 1) % self.visible_window_count,
+                .previous => (current + self.visible_window_count - 1) % self.visible_window_count,
+            }
+        else switch (direction) {
+            .next => 0,
+            .previous => self.visible_window_count - 1,
+        };
+
+        visible_index = 0;
+        for (self.window_order[0..self.window_count]) |window_id| {
+            const window = self.findWindow(window_id) orelse continue;
+            if (!window.visible) continue;
+            if (visible_index == target_index) {
+                self.active_window_id = window.id;
+                return .{ .window = window, .visible_index = target_index };
+            }
+            visible_index += 1;
+        }
+        return error.NoVisibleWindows;
+    }
+
     pub fn closeWindowsForTask(self: *Session, task_id: u64) usize {
         if (task_id == 0) return 0;
 
@@ -722,6 +772,12 @@ pub const Service = struct {
         const request = try decodeRequest(payload);
         const response = self.dispatch(request);
         return encodeResponse(out, response);
+    }
+
+    pub fn switchVisible(self: *Service, direction: SwitchDirection) Error!SwitchResult {
+        const result = try self.session.switchVisible(direction);
+        self.checkpoint();
+        return result;
     }
 
     fn apply(self: *Service, request: ServiceRequest, response: *ServiceResponse) Error!void {
@@ -1062,7 +1118,7 @@ fn statusForError(err: Error) ServiceStatus {
         error.WindowNotFound, error.ReviewItemNotFound, error.TaskNotFound => .not_found,
         error.WindowTableFull, error.ReviewItemTableFull => .table_full,
         error.RecoveryStateMissing => .recovery_missing,
-        error.InvalidSurface, error.MalformedRequest, error.RequestTooLarge, error.ResponseTooLarge => .invalid_request,
+        error.InvalidSurface, error.MalformedRequest, error.RequestTooLarge, error.ResponseTooLarge, error.NoVisibleWindows => .invalid_request,
     };
 }
 

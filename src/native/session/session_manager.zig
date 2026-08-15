@@ -4,6 +4,7 @@ const compositor_session = @import("../platform/compositor_session.zig");
 const driver_runtime = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const input_router = @import("../platform/input_router.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const package_service = @import("../services/package_service.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
@@ -21,7 +22,7 @@ var default_manager = SessionManager.init();
 
 pub const testing = struct {
     pub fn resetState() void {
-        permission_review_service.clearSystemHardwareInput();
+        permission_review_service.clearSystemInputRouter();
         default_manager.reset();
     }
 
@@ -89,6 +90,10 @@ pub const testing = struct {
         return default_manager.compositorSessionPtr();
     }
 
+    pub fn inputRouterPtr() *input_router.Router {
+        return default_manager.inputRouterPtr();
+    }
+
     pub fn backgroundDispatchPtr() *background_dispatch.Controller {
         return default_manager.backgroundDispatchPtr();
     }
@@ -106,8 +111,8 @@ pub fn boot() void {
     default_manager.boot();
 }
 
-pub fn bindHardwareInput(source: permission_review_service.HardwareReportSource) void {
-    permission_review_service.bindSystemHardwareInput(source);
+pub fn bindHardwareInput(source: input_router.HardwareReportSource) void {
+    default_manager.bindHardwareInput(source);
 }
 
 pub fn kernelPort() ?*component_port.KernelPort {
@@ -124,6 +129,14 @@ pub fn userspaceSchedulerHasReadyTasks() bool {
 
 pub fn servicePendingNetworkWork(now_ticks: u64) usize {
     return default_manager.servicePendingNetworkWork(now_ticks);
+}
+
+pub fn servicePendingInputWork(now_ticks: u64) usize {
+    return default_manager.servicePendingInputWork(now_ticks);
+}
+
+pub fn pollFocusedInput(task_id: u64) ?input_router.RoutedKeyboardEvent {
+    return default_manager.pollFocusedInput(task_id);
 }
 
 pub fn networkWorkPending() bool {
