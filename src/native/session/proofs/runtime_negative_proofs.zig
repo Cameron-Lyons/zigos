@@ -127,7 +127,7 @@ pub fn runFreestandingAndPrint(
     var saw_user_nx_fault = false;
     var attempt: usize = 0;
     while (attempt < 8) : (attempt += 1) {
-        const yielded = scheduler.executeTask(task_id, attempt);
+        const outcome = scheduler.executeTask(task_id, attempt);
         const current = runtime.find(task_id) orelse return false;
 
         if (!saw_syscall_pointer_denial and
@@ -164,7 +164,7 @@ pub fn runFreestandingAndPrint(
             return true;
         }
 
-        if (!yielded) return false;
+        if (!outcome.handedOff()) return false;
     }
 
     return false;

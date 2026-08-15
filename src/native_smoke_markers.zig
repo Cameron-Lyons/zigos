@@ -18,6 +18,7 @@ pub const production_required = [_][]const u8{
     boot_markers.native_bootstrap,
     boot_markers.tcb_defined,
     boot_markers.userspace_scheduler_ready,
+    boot_markers.userspace_scheduler_event_wait_ready,
     boot_markers.userspace_artifacts_ready,
     boot_markers.userspace_exec_probe_ok,
     boot_markers.userspace_resume_ok,
@@ -88,6 +89,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.native_bootstrap,
     boot_markers.tcb_defined,
     boot_markers.userspace_scheduler_ready,
+    boot_markers.userspace_scheduler_event_wait_ready,
     boot_markers.userspace_artifacts_ready,
     boot_markers.userspace_exec_probe_ok,
     boot_markers.userspace_resume_ok,
@@ -212,6 +214,7 @@ pub const driver_restart_required = [_][]const u8{
 pub const service_startup_required = [_][]const u8{
     boot_markers.userspace_artifacts_ready,
     boot_markers.userspace_scheduler_ready,
+    boot_markers.userspace_scheduler_event_wait_ready,
     boot_markers.userspace_exec_probe_ok,
     boot_markers.userspace_resume_ok,
     boot_markers.transport_native_kernel_ready,

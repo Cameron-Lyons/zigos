@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
 pub const VERSION: u16 = 2;
 pub const MAILBOX_RESERVED_BYTES: usize = 3;
@@ -37,6 +39,15 @@ pub const ServiceKind = enum(u8) {
     package = 4,
     compositor = 5,
 };
+
+pub const YieldDisposition = enum(u32) {
+    runnable = 0,
+    wait_for_event = 1,
+};
+
+pub fn yieldDisposition(raw: u32) ?YieldDisposition {
+    return std.enums.fromInt(YieldDisposition, raw);
+}
 
 pub const Detail = enum(u8) {
     unknown = 0,
@@ -138,6 +149,12 @@ test "mailbox counter encoding preserves stage and detail" {
     try @import("std").testing.expectEqual(Stage.steady, stageFromCounter(counter));
     try @import("std").testing.expectEqual(@as(u8, @intFromEnum(Detail.network)), @as(u8, @truncate(counter >> 16)));
     try @import("std").testing.expectEqual(@as(u16, 42), @as(u16, @truncate(counter)));
+}
+
+test "userspace yield dispositions reject unknown scheduler requests" {
+    try @import("std").testing.expectEqual(YieldDisposition.runnable, yieldDisposition(0).?);
+    try @import("std").testing.expectEqual(YieldDisposition.wait_for_event, yieldDisposition(1).?);
+    try @import("std").testing.expect(yieldDisposition(2) == null);
 }
 
 test "mailbox records userspace service readiness separately from generic heartbeat" {

@@ -88,7 +88,7 @@ export var zigos_userspace_bootstrap: mailbox.Mailbox align(mailbox.ABI_ALIGNMEN
 const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn syscall3_asm(request_addr: usize, response_addr: usize, response_len: usize) callconv(.c) usize;
-        extern fn syscall_yield_asm(counter: u32) callconv(.c) u32;
+        extern fn syscall_yield_asm(counter: u32, disposition: mailbox.YieldDisposition) callconv(.c) u32;
         extern fn zigos_probe_nx(target: usize) callconv(.c) void;
 
         fn call(request_addr: usize, response_addr: usize, response_len: usize) abi.SyscallStatus {
@@ -414,18 +414,23 @@ fn inputRecv(input_capability_id: u64, task_id: u64) ?abi.InputRecvResponse {
     return response;
 }
 
-fn drainFocusedInput() usize {
+const InputDrain = struct {
+    exhausted: bool = true,
+};
+
+fn drainFocusedInput() InputDrain {
     const input_capability_id = zigos_userspace_bootstrap.input_capability_id;
     const task_id = zigos_userspace_bootstrap.task_id;
-    if (input_capability_id == 0 or task_id == 0) return 0;
+    if (input_capability_id == 0 or task_id == 0) return .{};
 
-    var count: usize = 0;
-    while (count < INPUT_EVENTS_PER_DISPATCH) : (count += 1) {
-        const response = inputRecv(input_capability_id, task_id) orelse break;
-        if (response.present == 0) break;
-        if (!recordInputEvent(&zigos_userspace_bootstrap, response.event)) break;
+    var received: usize = 0;
+    while (received < INPUT_EVENTS_PER_DISPATCH) {
+        const response = inputRecv(input_capability_id, task_id) orelse return .{};
+        if (response.present == 0) return .{};
+        received += 1;
+        _ = recordInputEvent(&zigos_userspace_bootstrap, response.event);
     }
-    return count;
+    return .{ .exhausted = false };
 }
 
 fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor) bool {
@@ -446,19 +451,31 @@ fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, consumes_inp
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
     while (true) {
-        if (consumes_input) _ = drainFocusedInput();
-        publishState(.steady, detail, pulse);
+        const disposition: mailbox.YieldDisposition = if (consumes_input and drainFocusedInput().exhausted)
+            .wait_for_event
+        else
+            .runnable;
+        publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
     }
 }
 
 fn publishState(stage: mailbox.Stage, detail: mailbox.Detail, pulse: u16) void {
+    publishStateWithDisposition(stage, detail, pulse, .runnable);
+}
+
+fn publishStateWithDisposition(
+    stage: mailbox.Stage,
+    detail: mailbox.Detail,
+    pulse: u16,
+    disposition: mailbox.YieldDisposition,
+) void {
     const counter = mailbox.packCounter(stage, detail, pulse);
     zigos_userspace_bootstrap.stage = @intFromEnum(stage);
     zigos_userspace_bootstrap.detail = @intFromEnum(detail);
     zigos_userspace_bootstrap.last_counter = counter;
     contract_bindings.zigos_userspace_yield_counter = counter;
-    _ = yieldCounter(counter);
+    _ = yieldCounter(counter, disposition);
 }
 
 fn signalFault(detail: mailbox.Detail, code: u8) noreturn {
@@ -468,9 +485,9 @@ fn signalFault(detail: mailbox.Detail, code: u8) noreturn {
     }
 }
 
-fn yieldCounter(value: u32) u32 {
+fn yieldCounter(value: u32, disposition: mailbox.YieldDisposition) u32 {
     if (builtin.target.os.tag != .freestanding) return value;
-    return freestanding_syscall.syscall_yield_asm(value);
+    return freestanding_syscall.syscall_yield_asm(value, disposition);
 }
 
 fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {

@@ -68,6 +68,7 @@ pub const TaskDispatchStats = struct {
     resource_class: accelerator_scheduler.ResourceClass,
     queued_ready: bool,
     dispatch_count: u64,
+    event_wait_count: u64,
     delayed_dispatch_count: u64,
     denied_dispatch_count: u64,
     missed_deadline_count: u64,
@@ -90,6 +91,7 @@ const Slot = struct {
     prev_ready_index: usize = no_index,
     next_ready_index: usize = no_index,
     dispatch_count: u64 = 0,
+    event_wait_count: u64 = 0,
     last_dispatch_tick: u64 = 0,
     last_wake_tick: u64 = 0,
     wake_event_count: u64 = 0,
@@ -154,6 +156,7 @@ pub const Scheduler = struct {
     last_dispatch_tick: u64 = 0,
     ready_marker_printed: bool = false,
     active_marker_printed: bool = false,
+    event_wait_marker_printed: bool = false,
 
     pub fn init(executor: *userspace_executor.Executor) Scheduler {
         return .{ .executor = executor };
@@ -343,6 +346,7 @@ pub const Scheduler = struct {
             .resource_class = slot.resource_class,
             .queued_ready = slot.queued_ready,
             .dispatch_count = slot.dispatch_count,
+            .event_wait_count = slot.event_wait_count,
             .delayed_dispatch_count = slot.delayed_dispatch_count,
             .denied_dispatch_count = slot.denied_dispatch_count,
             .missed_deadline_count = slot.missed_deadline_count,
@@ -421,11 +425,11 @@ pub const Scheduler = struct {
         return self.engine_denial_counts[engineIndex(engine)];
     }
 
-    pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) bool {
-        if (!self.initialized) return false;
-        const catalog = self.catalog_ptr orelse return false;
-        const runtime = self.runtime_ptr orelse return false;
-        const capability_table = self.capability_table_ptr orelse return false;
+    pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) userspace_executor.ExecutionOutcome {
+        if (!self.initialized) return .unavailable;
+        const catalog = self.catalog_ptr orelse return .unavailable;
+        const runtime = self.runtime_ptr orelse return .unavailable;
+        const capability_table = self.capability_table_ptr orelse return .unavailable;
         return self.executor.executeTask(catalog, runtime, capability_table, task_id, now_ticks);
     }
 
@@ -478,9 +482,17 @@ pub const Scheduler = struct {
             }
 
             self.accountDeadline(slot, now_ticks);
-            const yielded = self.executeTask(task_id, now_ticks);
+            const outcome = self.executeTask(task_id, now_ticks);
+            const yielded = outcome.handedOff();
             self.last_dispatch_tick = now_ticks;
             slot.dispatch_count += 1;
+            if (outcome == .wait_for_event) {
+                slot.event_wait_count += 1;
+                if (builtin.target.os.tag == .freestanding and !self.event_wait_marker_printed) {
+                    common.printBootMarker(boot_markers.userspace_scheduler_event_wait_ready);
+                    self.event_wait_marker_printed = true;
+                }
+            }
             slot.last_dispatch_tick = now_ticks;
             slot.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
             slot.cpu_budget_remaining_ticks -|= DISPATCH_CPU_TICK_COST;
@@ -503,7 +515,9 @@ pub const Scheduler = struct {
                     slot.resource_class = updated_task.resourceClass();
                     if (!slot.dispatch_request_configured) slot.dispatch_request = deriveDispatchRequest(updated_task);
                     slot.deadline_tick = deadlineAfterDispatch(slot.resource_class, now_ticks);
-                    _ = self.enqueueReadyIndex(index, slot.resource_class);
+                    if (executionRemainsReady(outcome)) {
+                        _ = self.enqueueReadyIndex(index, slot.resource_class);
+                    }
                 }
             }
             return yielded;
@@ -1195,6 +1209,10 @@ fn deadlineAfterDispatch(class: accelerator_scheduler.ResourceClass, now_ticks: 
     return deadlineFromNow(class, next_quantum_tick);
 }
 
+fn executionRemainsReady(outcome: userspace_executor.ExecutionOutcome) bool {
+    return outcome != .wait_for_event;
+}
+
 fn expiredReadyCandidateBeats(
     slot: *const Slot,
     deadline: u64,
@@ -1415,6 +1433,12 @@ test "userspace scheduler unlinks ready queue slots through prev links" {
     try std.testing.expectEqual(third_index, scheduler.ready_heads[queue_index]);
     try std.testing.expectEqual(third_index, scheduler.ready_tails[queue_index]);
     try std.testing.expectEqual(no_index, scheduler.slots.slots[third_index].prev_ready_index);
+}
+
+test "userspace scheduler parks only explicit event-wait yields" {
+    try std.testing.expect(executionRemainsReady(.unavailable));
+    try std.testing.expect(executionRemainsReady(.yielded));
+    try std.testing.expect(!executionRemainsReady(.wait_for_event));
 }
 
 test "userspace scheduler dispatches resource ready queues by priority" {
