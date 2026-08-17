@@ -24,6 +24,7 @@ pub const ReplicaIndex = indexed_arena.UniqueIndex(replica_index_capacity);
 pub const ReplicaScopeIndex = CompactMultimapIndex(state_support.MAX_REPLICA_ENTRIES, state_support.MAX_REPLICA_ENTRIES);
 pub const TransportFramePathIndex = CompactMultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES);
 pub const TransportFrameTargetIndex = CompactMultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES);
+pub const InboundSourceHighWaterIndex = CompactMultimapIndex(state_support.MAX_TRANSPORT_FRAMES, state_support.MAX_TRANSPORT_FRAMES);
 
 pub const WorkspacePolicyLookup = struct {
     workspace_id: u64,
@@ -174,6 +175,19 @@ pub fn transportFrameTargetLookupKey(workspace_id: u64, target_device: principal
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5452_4652_5447_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, target_device);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+pub fn inboundSourceHighWaterLookupKey(
+    workspace_id: u64,
+    source_device: principal.PrincipalId,
+    target_device: principal.PrincipalId,
+) u64 {
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0x5452_4652_4857_0001);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = appendPrincipal(hash, source_device);
     hash = appendPrincipal(hash, target_device);
     return indexed_arena.nonZeroKey(hash);
 }
