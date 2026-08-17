@@ -82,10 +82,13 @@ fn jobSlotId(slot: *const JobSlot) u64 {
 }
 
 const JobArena = indexed_arena.IndexedArenaWithKey(u64, JobSlot, MAX_JOBS, MAX_JOBS * 2, jobSlotId);
+const CompletedJobIndex = indexed_arena.MultimapIndex(MAX_JOBS, 1, 2);
+const COMPLETED_JOB_KEY: u64 = 1;
 
 pub const Service = struct {
     next_job_id: u64 = 1,
     jobs: JobArena = JobArena.init(),
+    completed_job_index: CompletedJobIndex = CompletedJobIndex.init(),
 
     pub fn init() Service {
         return .{};
@@ -144,9 +147,7 @@ pub const Service = struct {
         }
 
         if (retired_job_id != 0) {
-            if (!self.jobs.remove(retired_job_id)) {
-                native_util.impossibleByInvariant("completed print job disappeared before reuse");
-            }
+            self.retireCompletedJob(retired_job_id);
         }
         const slot_index = self.jobs.insertIndex(job_id, .{ .job = job }) orelse
             native_util.impossibleByInvariant("prechecked print job insertion must succeed");
@@ -163,12 +164,13 @@ pub const Service = struct {
         now_ticks: u64,
     ) Error!?u64 {
         const job = self.find(job_id) orelse return error.JobNotFound;
+        if (job.state == .completed) return job.notification_id;
         if (job.visibility == .hidden) {
             if (job.claim_id) |claim_id| {
                 _ = try scheduler.releaseClaim(claim_id, null);
             }
             job.claim_id = null;
-            job.state = .completed;
+            self.markJobCompleted(job_id, job);
             return null;
         }
 
@@ -189,8 +191,8 @@ pub const Service = struct {
             _ = try scheduler.releaseClaim(claim_id, null);
         }
         job.claim_id = null;
-        job.state = .completed;
         job.notification_id = notice.id;
+        self.markJobCompleted(job_id, job);
         return notice.id;
     }
 
@@ -200,13 +202,38 @@ pub const Service = struct {
     }
 
     fn oldestCompletedJobId(self: *const Service) ?u64 {
-        var oldest_job_id: ?u64 = null;
-        for (&self.jobs.slots) |*slot| {
-            if (!slot.in_use or slot.job.state != .completed) continue;
-            if (oldest_job_id != null and slot.job.id >= oldest_job_id.?) continue;
-            oldest_job_id = slot.job.id;
+        const slot_index = self.completed_job_index.head(COMPLETED_JOB_KEY);
+        if (slot_index == indexed_arena.no_index) return null;
+        return self.completedJobSlotAt(slot_index).job.id;
+    }
+
+    fn markJobCompleted(self: *Service, job_id: u64, job: *JobRecord) void {
+        if (job.state != .running) native_util.impossibleByInvariant("only running media and print jobs can complete");
+        const slot_index = self.jobs.slotIndexOf(job_id) orelse
+            native_util.impossibleByInvariant("completing media and print job has an arena slot");
+        if (&self.jobs.slots[slot_index].job != job) native_util.impossibleByInvariant("completion job pointer matches indexed slot");
+        if (!self.completed_job_index.append(COMPLETED_JOB_KEY, slot_index)) {
+            native_util.impossibleByInvariant("completed media and print job index covers job slots");
         }
-        return oldest_job_id;
+        job.state = .completed;
+    }
+
+    fn retireCompletedJob(self: *Service, job_id: u64) void {
+        const slot_index = self.jobs.slotIndexOf(job_id) orelse
+            native_util.impossibleByInvariant("completed media and print job disappeared before reuse");
+        _ = self.completedJobSlotAt(slot_index);
+        if (!self.completed_job_index.remove(COMPLETED_JOB_KEY, slot_index)) {
+            native_util.impossibleByInvariant("completed media and print job index is missing its reusable head");
+        }
+        if (!self.jobs.removeIndex(slot_index)) native_util.impossibleByInvariant("completed media and print job slot remains live until reuse");
+    }
+
+    fn completedJobSlotAt(self: *const Service, slot_index: usize) *const JobSlot {
+        if (slot_index >= MAX_JOBS) native_util.impossibleByInvariant("completed media and print job index points outside slots");
+        const slot = &self.jobs.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("completed media and print job index points at a free slot");
+        if (slot.job.state != .completed) native_util.impossibleByInvariant("completed media and print job index points at an unfinished job");
+        return slot;
     }
 };
 
@@ -279,6 +306,10 @@ test "media print service uses scheduled engines and emits completion notificati
     try std.testing.expectEqual(JobState.completed, print_job.state);
     try std.testing.expectEqual(notification_center.Reason.print_complete, notifications.latestVisible(20).?.reason);
     try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
+    const next_notification_id = notifications.next_notification_id;
+    try std.testing.expectEqual(@as(?u64, completion_id), try service.complete(print_job.id, &scheduler, &notifications, 21));
+    try std.testing.expectEqual(next_notification_id, notifications.next_notification_id);
+    try std.testing.expectEqual(@as(usize, 1), service.completed_job_index.count(COMPLETED_JOB_KEY));
     _ = try service.complete(export_job.id, &scheduler, &notifications, 21);
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
@@ -330,6 +361,9 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
     try std.testing.expectEqual(@as(u64, 1), hidden.id);
     try std.testing.expectEqual(@as(?u64, null), hidden.notification_id);
     try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 9));
+    try std.testing.expectEqual(@as(usize, 1), service.completed_job_index.count(COMPLETED_JOB_KEY));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 10));
+    try std.testing.expectEqual(@as(usize, 1), service.completed_job_index.count(COMPLETED_JOB_KEY));
     try std.testing.expectEqual(@as(usize, 0), notifications.activeCount(9));
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
@@ -395,7 +429,7 @@ test "media print service retains recent completions and recycles the oldest com
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 14 };
 
-    var first_job_id: u64 = 0;
+    var job_ids: [MAX_JOBS]u64 = [_]u64{0} ** MAX_JOBS;
     var job_index: usize = 0;
     while (job_index < MAX_JOBS) : (job_index += 1) {
         const job = try service.submit(.{
@@ -408,12 +442,20 @@ test "media print service retains recent completions and recycles the oldest com
             .local_only = true,
             .visibility = .hidden,
         }, &scheduler, &notifications, 30 + job_index);
-        if (job_index == 0) first_job_id = job.id;
-        try std.testing.expectEqual(@as(?u64, null), try service.complete(job.id, &scheduler, &notifications, 60 + job_index));
+        job_ids[job_index] = job.id;
     }
+    try std.testing.expectEqual(@as(u16, MAX_JOBS), scheduler.activeClaimCount());
+
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[2], &scheduler, &notifications, 60));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[0], &scheduler, &notifications, 61));
+    for (job_ids[3..], 0..) |job_id, completion_index| {
+        try std.testing.expectEqual(@as(?u64, null), try service.complete(job_id, &scheduler, &notifications, 62 + completion_index));
+    }
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[1], &scheduler, &notifications, 90));
 
     try std.testing.expectEqual(@as(usize, MAX_JOBS), service.jobs.countInUse());
-    try std.testing.expectEqual(JobState.completed, service.find(first_job_id).?.state);
+    try std.testing.expectEqual(@as(usize, MAX_JOBS), service.completed_job_index.count(COMPLETED_JOB_KEY));
+    try std.testing.expectEqual(service.jobs.slotIndexOf(job_ids[2]).?, service.completed_job_index.head(COMPLETED_JOB_KEY));
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
     const replacement = try service.submit(.{
         .kind = .print_document,
@@ -426,11 +468,15 @@ test "media print service retains recent completions and recycles the oldest com
         .visibility = .hidden,
     }, &scheduler, &notifications, 99);
     try std.testing.expectEqual(@as(u64, MAX_JOBS + 1), replacement.id);
-    try std.testing.expect(service.find(first_job_id) == null);
-    try std.testing.expect(service.find(first_job_id + 1) != null);
+    try std.testing.expect(service.find(job_ids[2]) == null);
+    try std.testing.expect(service.find(job_ids[0]) != null);
+    try std.testing.expect(service.find(job_ids[1]) != null);
     try std.testing.expectEqual(@as(usize, MAX_JOBS), service.jobs.countInUse());
+    try std.testing.expectEqual(@as(usize, MAX_JOBS - 1), service.completed_job_index.count(COMPLETED_JOB_KEY));
+    try std.testing.expectEqual(service.jobs.slotIndexOf(job_ids[0]).?, service.completed_job_index.head(COMPLETED_JOB_KEY));
     try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
     _ = try service.complete(replacement.id, &scheduler, &notifications, 100);
+    try std.testing.expectEqual(@as(usize, MAX_JOBS), service.completed_job_index.count(COMPLETED_JOB_KEY));
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
