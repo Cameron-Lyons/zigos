@@ -282,9 +282,6 @@ pub const Center = struct {
         const retired_index = self.suppressed_notification_index.head(SUPPRESSED_NOTIFICATION_KEY);
         if (retired_index == indexed_arena.no_index) return null;
         if (retired_index >= MAX_NOTIFICATIONS) native_util.impossibleByInvariant("suppressed notification index points outside slots");
-        if (!self.suppressed_notification_index.remove(SUPPRESSED_NOTIFICATION_KEY, retired_index)) {
-            native_util.impossibleByInvariant("suppressed notification index is missing its reusable head");
-        }
         return self.reuseSuppressedNotificationSlotIndex(notification_id, retired_index);
     }
 
@@ -292,6 +289,9 @@ pub const Center = struct {
         const retired_slot = &self.notifications.slots[retired_index];
         if (!retired_slot.in_use or !retired_slot.notification.suppressed) {
             native_util.impossibleByInvariant("notification replacement slot must be suppressed");
+        }
+        if (!self.suppressed_notification_index.remove(SUPPRESSED_NOTIFICATION_KEY, retired_index)) {
+            native_util.impossibleByInvariant("suppressed notification index is missing its reusable slot");
         }
         const retired_notification = &retired_slot.notification;
         if (!self.source_reason_index.remove(sourceReasonKey(retired_notification.source, retired_notification.reason), retired_index)) {
