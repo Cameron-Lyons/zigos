@@ -435,10 +435,21 @@ pub const Scheduler = struct {
 
     pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) userspace_executor.ExecutionOutcome {
         if (!self.initialized) return .unavailable;
+        const runtime = self.runtime_ptr orelse return .unavailable;
+        const task = runtime.findConst(task_id) orelse return .unavailable;
+        return self.executePreparedTask(task, now_ticks);
+    }
+
+    fn executePreparedTask(
+        self: *Scheduler,
+        task: *const task_runtime.TaskRecord,
+        now_ticks: u64,
+    ) userspace_executor.ExecutionOutcome {
+        if (!self.initialized) return .unavailable;
         const catalog = self.catalog_ptr orelse return .unavailable;
         const runtime = self.runtime_ptr orelse return .unavailable;
         const capability_table = self.capability_table_ptr orelse return .unavailable;
-        return self.executor.executeTask(catalog, runtime, capability_table, task_id, now_ticks);
+        return self.executor.executeTask(catalog, runtime, capability_table, task, now_ticks);
     }
 
     pub fn runNext(self: *Scheduler, now_ticks: u64) bool {
@@ -490,7 +501,7 @@ pub const Scheduler = struct {
             }
 
             self.accountDeadline(slot, now_ticks);
-            const outcome = self.executeTask(task_id, now_ticks);
+            const outcome = self.executePreparedTask(task, now_ticks);
             const yielded = outcome.handedOff();
             self.last_dispatch_tick = now_ticks;
             slot.dispatch_count += 1;
