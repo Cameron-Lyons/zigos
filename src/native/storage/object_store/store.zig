@@ -787,13 +787,13 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             query: ObjectQuery,
             output: []ObjectQueryResult,
         ) []const ObjectQueryResult {
+            if (output.len == 0) return output[0..0];
             var count: usize = 0;
             if (query.object_type) |object_type| {
                 var slot_index = self.object_type_index.head(object_type);
                 while (slot_index != indexed_arena.no_index) : (slot_index = self.object_type_index.next(slot_index)) {
                     const slot = &self.objects.slots[slot_index];
                     self.appendQueryObject(query, output, &count, &slot.object);
-                    if (count >= output.len) break;
                 }
                 std.sort.heap(ObjectQueryResult, output[0..count], {}, compareObjectQueryResults);
                 return output[0..count];
@@ -802,7 +802,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             for (&self.objects.slots) |*slot| {
                 if (!slot.in_use) continue;
                 self.appendQueryObject(query, output, &count, &slot.object);
-                if (count >= output.len) break;
             }
             std.sort.heap(ObjectQueryResult, output[0..count], {}, compareObjectQueryResults);
             return output[0..count];
@@ -822,9 +821,20 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const latest = self.versionConst(object_record.latest_version_id) orelse return;
             if (query.content_type.len != 0 and !std.mem.eql(u8, latest.metadata.contentTypeSlice(), query.content_type)) return;
             if (query.label_contains.len != 0 and indexOfFold(latest.metadata.labelSlice(), query.label_contains) == null) return;
-            if (count.* >= output.len) return;
-            output[count.*] = queryResultFor(object_record, latest);
-            count.* += 1;
+            if (count.* < output.len) {
+                output[count.*] = queryResultFor(object_record, latest);
+                pushQueryResultTowardWorstRoot(output[0 .. count.* + 1], count.*);
+                count.* += 1;
+                return;
+            }
+            if (!queryKeyComesBefore(
+                object_record.provenance.updated_at_ticks,
+                object_record.id.raw(),
+                output[0].updated_at_ticks,
+                output[0].object_id.raw(),
+            )) return;
+            output[0] = queryResultFor(object_record, latest);
+            pushQueryResultAwayFromWorstRoot(output, 0);
         }
 
         pub fn objectHistory(
@@ -1254,8 +1264,44 @@ fn historyEntryFor(version_record: *const VersionRecord) ObjectHistoryEntry {
 }
 
 fn compareObjectQueryResults(_: void, left: ObjectQueryResult, right: ObjectQueryResult) bool {
-    if (left.updated_at_ticks == right.updated_at_ticks) return left.object_id.raw() < right.object_id.raw();
-    return left.updated_at_ticks > right.updated_at_ticks;
+    return queryKeyComesBefore(
+        left.updated_at_ticks,
+        left.object_id.raw(),
+        right.updated_at_ticks,
+        right.object_id.raw(),
+    );
+}
+
+fn queryKeyComesBefore(left_ticks: u64, left_object_id: u64, right_ticks: u64, right_object_id: u64) bool {
+    if (left_ticks == right_ticks) return left_object_id < right_object_id;
+    return left_ticks > right_ticks;
+}
+
+fn pushQueryResultTowardWorstRoot(heap: []ObjectQueryResult, start_index: usize) void {
+    var child_index = start_index;
+    while (child_index != 0) {
+        const parent_index = (child_index - 1) / 2;
+        if (!compareObjectQueryResults({}, heap[parent_index], heap[child_index])) return;
+        std.mem.swap(ObjectQueryResult, &heap[parent_index], &heap[child_index]);
+        child_index = parent_index;
+    }
+}
+
+fn pushQueryResultAwayFromWorstRoot(heap: []ObjectQueryResult, start_index: usize) void {
+    var parent_index = start_index;
+    while (true) {
+        const left_index = parent_index * 2 + 1;
+        if (left_index >= heap.len) return;
+        const right_index = left_index + 1;
+        const worse_child_index = if (right_index < heap.len and
+            compareObjectQueryResults({}, heap[left_index], heap[right_index]))
+            right_index
+        else
+            left_index;
+        if (!compareObjectQueryResults({}, heap[parent_index], heap[worse_child_index])) return;
+        std.mem.swap(ObjectQueryResult, &heap[parent_index], &heap[worse_child_index]);
+        parent_index = worse_child_index;
+    }
 }
 
 fn indexOfFold(haystack: []const u8, needle: []const u8) ?usize {
