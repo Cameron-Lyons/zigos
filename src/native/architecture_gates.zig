@@ -98,6 +98,7 @@ pub const indexed_hot_path_tables = .{
         .supports_direct_capability_slot_insertion = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "insertIndexAt"),
         .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
+        .tracks_mutation_generation = @hasField(capability.CapabilityTable, "mutation_generation"),
     },
     .shared_memory = .{
         .uses_compact_mmu_object_mapping_head = @hasField(shared_memory.Object, "mmu_mapping_head"),
@@ -120,6 +121,7 @@ pub const indexed_hot_path_tables = .{
     },
     .userspace_executor = .{
         .resolves_mailbox_authorities_together = @hasDecl(userspace_executor, "resolveMailboxAuthorities"),
+        .caches_mailbox_authorities = @hasDecl(userspace_executor, "resolveMailboxAuthoritiesCached"),
     },
     .userspace_loader = .{
         .uses_image_arena = @hasDecl(@FieldType(userspace_loader.Catalog, "images"), "reserveIndex"),
@@ -131,6 +133,7 @@ pub const indexed_hot_path_tables = .{
         .uses_initial_component_label_index = @hasField(task_runtime.Runtime, "task_initial_component_label_index"),
         .tracks_task_state_counts = @hasField(task_runtime.Runtime, "task_state_counts"),
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
+        .tracks_task_capability_generation = @hasDecl(task_runtime.TaskRecord, "capabilityGeneration"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
     },
     .accelerator_scheduler = .{
