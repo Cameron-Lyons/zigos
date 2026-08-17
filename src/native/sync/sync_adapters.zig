@@ -429,22 +429,20 @@ pub const TransportQueue = struct {
         target_device: principal.PrincipalId,
         path: []const u8,
     ) ?TransportFrame {
-        var latest: ?TransportFrame = null;
-        var slot_index = self.path_index.head(transportFramePathKey(workspace_id, target_device, path));
+        var slot_index = self.path_index.tail(transportFramePathKey(workspace_id, target_device, path));
         while (slot_index != indexed_arena.no_index) {
             if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport path index points outside frame slots");
             const slot = &self.frames.slots[slot_index];
             if (!slot.in_use) native_util.impossibleByInvariant("transport path index points at a free frame");
             if (slot.frame.workspace_id == workspace_id and
                 slot.frame.target_device.eql(target_device) and
-                std.mem.eql(u8, slot.frame.pathSlice(), path) and
-                (latest == null or slot.frame.id > latest.?.id))
+                std.mem.eql(u8, slot.frame.pathSlice(), path))
             {
-                latest = slot.frame;
+                return slot.frame;
             }
-            slot_index = self.path_index.next(slot_index);
+            slot_index = self.path_index.previous(slot_index);
         }
-        return latest;
+        return null;
     }
 
     fn pendingFrameId(self: *const TransportQueue) Error!u64 {

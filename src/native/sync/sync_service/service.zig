@@ -101,6 +101,14 @@ const TransportFramePathIndex = sync_indexes.TransportFramePathIndex;
 const TransportFrameTargetIndex = sync_indexes.TransportFrameTargetIndex;
 pub const Service = ServiceWith(.{});
 
+fn transportFrameSlotIdLessThan(
+    slots: []const DurableTransportFrameSlot,
+    left_slot_index: usize,
+    right_slot_index: usize,
+) bool {
+    return slots[left_slot_index].frame.id < slots[right_slot_index].frame.id;
+}
+
 const sync_port = @import("port.zig");
 pub const SyncPort = sync_port.SyncPortWith(Service);
 
@@ -1650,18 +1658,33 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.inbound_transport_target_index.reset();
             self.outbound_transport_frame_count = 0;
             self.inbound_transport_frame_count = 0;
-            for (self.stateConst().outbound_transport_frames.slots, 0..) |slot, slot_index| {
+            self.rebuildTransportFrameQueueIndexes(.outbound);
+            self.rebuildTransportFrameQueueIndexes(.inbound);
+        }
+
+        fn rebuildTransportFrameQueueIndexes(self: *Self, queue_kind: TransportQueueKind) void {
+            const slots = self.transportFrameSlotsConst(queue_kind);
+            var ordered_slot_indexes: [MAX_TRANSPORT_FRAMES]usize = undefined;
+            var count: usize = 0;
+            for (slots, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                self.indexTransportFramePathSlot(.outbound, slot_index);
-                self.indexOutboundTransportTargetSlot(slot_index);
-                self.outbound_transport_frame_count += 1;
+                ordered_slot_indexes[count] = slot_index;
+                count += 1;
             }
-            for (self.stateConst().inbound_transport_frames.slots, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
-                self.indexTransportFramePathSlot(.inbound, slot_index);
-                self.indexInboundTransportTargetSlot(slot_index);
-                self.inbound_transport_frame_count += 1;
+            std.sort.insertion(
+                usize,
+                ordered_slot_indexes[0..count],
+                slots,
+                transportFrameSlotIdLessThan,
+            );
+            for (ordered_slot_indexes[0..count]) |slot_index| {
+                self.indexTransportFramePathSlot(queue_kind, slot_index);
+                switch (queue_kind) {
+                    .outbound => self.indexOutboundTransportTargetSlot(slot_index),
+                    .inbound => self.indexInboundTransportTargetSlot(slot_index),
+                }
             }
+            self.transportFrameSlotCountPtr(queue_kind).* = count;
         }
 
         fn allocateConflictIndex(self: *Self, workspace_id: u64, device_id: principal.PrincipalId, path: []const u8) ?usize {
@@ -1898,19 +1921,18 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             target_device: principal.PrincipalId,
             path: []const u8,
         ) ?TransportFrame {
-            var latest: ?TransportFrame = null;
             const key = sync_indexes.transportFramePathLookupKey(workspace_id, target_device, path);
             const index = self.transportFramePathIndexConst(queue_kind);
-            var slot_index = index.head(key);
-            while (slot_index != indexed_arena.no_index) : (slot_index = index.next(slot_index)) {
+            var slot_index = index.tail(key);
+            while (slot_index != indexed_arena.no_index) : (slot_index = index.previous(slot_index)) {
                 if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport frame path index points outside slots");
                 const slot = self.transportFrameSlotsConst(queue_kind)[slot_index];
                 if (!slot.in_use) native_util.impossibleByInvariant("transport frame path index points at a free slot");
                 if (slot.frame.workspace_id != workspace_id or !slot.frame.target_device.eql(target_device)) continue;
                 if (!std.mem.eql(u8, slot.frame.pathSlice(), path)) continue;
-                if (latest == null or slot.frame.id > latest.?.id) latest = slot.frame;
+                return slot.frame;
             }
-            return latest;
+            return null;
         }
 
         fn findDuplicateInboundFrame(self: *Self, request: TransportFrameRequest) ?*DurableTransportFrameSlot {
@@ -2146,4 +2168,48 @@ test "durable transport frame identifiers issue the maximum once and stop" {
     try std.testing.expectEqual(frame_count, service.transportFrameCount());
     try std.testing.expectEqual(next_slot_index, service.next_outbound_transport_frame_slot_index);
     try std.testing.expectEqual(@as(u64, 0), service.stateConst().next_transport_frame_id);
+}
+
+test "durable transport index rebuild restores frame id order after slot reuse" {
+    var service = Service.init(9_920, 9_921, .{ .kind = .service, .serial = 9_920 });
+    const target = principal.PrincipalId{ .kind = .device, .serial = 2 };
+    const path = "documents/rebuilt-order.md";
+    const base_request = TransportFrameRequest{
+        .workspace_id = 42,
+        .object_id = 80,
+        .version_id = 81,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = target,
+        .transport = .relay_assisted,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .path = path,
+    };
+
+    const first = try service.enqueueTransportFrame(.outbound, base_request);
+    var request = base_request;
+    request.object_id = 82;
+    request.version_id = 83;
+    const second = try service.enqueueTransportFrame(.outbound, request);
+    request.object_id = 84;
+    request.version_id = 85;
+    const third = try service.enqueueTransportFrame(.outbound, request);
+
+    try std.testing.expectEqual(@as(usize, 1), try service.ackOutboundTransportFrames(&.{second.id}));
+    service.next_outbound_transport_frame_slot_index = 1;
+    request.object_id = 86;
+    request.version_id = 87;
+    const fourth = try service.enqueueTransportFrame(.outbound, request);
+    try std.testing.expectEqual(@as(?usize, 1), service.stateConst().outbound_transport_frames.slotIndexOf(state_support.transportFrameArenaKey(fourth.id)));
+
+    service.rebuildTransportFrameIndexes();
+    const latest = service.latestTransportFrameForPath(42, target, path).?;
+    try std.testing.expectEqual(fourth.id, latest.id);
+
+    var copied: [4]TransportFrame = undefined;
+    const copied_count = service.copyTransportFramesForSince(42, target, 0, &copied);
+    try std.testing.expectEqual(@as(usize, 3), copied_count);
+    try std.testing.expectEqual(first.id, copied[0].id);
+    try std.testing.expectEqual(third.id, copied[1].id);
+    try std.testing.expectEqual(fourth.id, copied[2].id);
 }

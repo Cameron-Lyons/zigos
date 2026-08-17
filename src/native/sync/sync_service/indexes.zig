@@ -202,6 +202,7 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
     if (link_capacity == 0) @compileError("compact multimap index requires at least one linked slot");
     if (bucket_capacity == 0) @compileError("compact multimap index requires at least one bucket");
     if (link_capacity >= std.math.maxInt(u8)) @compileError("compact multimap index stores links as u8");
+    if (bucket_capacity >= std.math.maxInt(u8)) @compileError("compact multimap index stores bucket indexes as u8");
 
     return struct {
         const Self = @This();
@@ -216,6 +217,8 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
 
         buckets: [bucket_capacity]Bucket = [_]Bucket{Bucket{}} ** bucket_capacity,
         next_by_slot: [link_capacity]u8 = [_]u8{empty_link} ** link_capacity,
+        previous_by_slot: [link_capacity]u8 = [_]u8{empty_link} ** link_capacity,
+        bucket_by_slot: [link_capacity]u8 = [_]u8{empty_link} ** link_capacity,
 
         pub fn init() Self {
             return .{};
@@ -235,16 +238,30 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
             return decode(entry.head);
         }
 
+        pub fn tail(self: *const Self, key: u64) usize {
+            const entry = self.bucketConst(key) orelse return indexed_arena.no_index;
+            return decode(entry.tail);
+        }
+
         pub fn next(self: *const Self, slot_index: usize) usize {
             if (slot_index >= link_capacity) return indexed_arena.no_index;
             return decode(self.next_by_slot[slot_index]);
         }
 
+        pub fn previous(self: *const Self, slot_index: usize) usize {
+            if (slot_index >= link_capacity) return indexed_arena.no_index;
+            return decode(self.previous_by_slot[slot_index]);
+        }
+
         pub fn append(self: *Self, key: u64, slot_index: usize) bool {
             if (key == 0 or slot_index >= link_capacity) return false;
-            const entry = self.findOrCreateBucket(key) orelse return false;
+            if (self.bucket_by_slot[slot_index] != empty_link) return false;
+            const bucket_index = self.findOrCreateBucketIndex(key) orelse return false;
+            const entry = &self.buckets[bucket_index];
             const encoded = encode(slot_index);
             self.next_by_slot[slot_index] = empty_link;
+            self.previous_by_slot[slot_index] = entry.tail;
+            self.bucket_by_slot[slot_index] = encode(bucket_index);
             if (entry.tail == empty_link) {
                 entry.head = encoded;
             } else {
@@ -257,32 +274,28 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
 
         pub fn remove(self: *Self, key: u64, slot_index: usize) bool {
             if (key == 0 or slot_index >= link_capacity) return false;
-            const entry = self.bucket(key) orelse return false;
-            const encoded = encode(slot_index);
-            var previous: u8 = empty_link;
-            var current = entry.head;
-            while (current != empty_link) : (current = self.next_by_slot[decode(current)]) {
-                if (current == encoded) {
-                    const next_link = self.next_by_slot[decode(current)];
-                    if (previous == empty_link) {
-                        entry.head = next_link;
-                    } else {
-                        self.next_by_slot[decode(previous)] = next_link;
-                    }
-                    if (entry.tail == current) entry.tail = previous;
-                    self.next_by_slot[decode(current)] = empty_link;
-                    entry.count -= 1;
-                    if (entry.count == 0) entry.* = .{};
-                    return true;
-                }
-                previous = current;
-            }
-            return false;
-        }
+            const bucket_index = self.bucketIndex(key) orelse return false;
+            if (self.bucket_by_slot[slot_index] != encode(bucket_index)) return false;
 
-        fn bucket(self: *Self, key: u64) ?*Bucket {
-            const index = self.bucketIndex(key) orelse return null;
-            return &self.buckets[index];
+            const entry = &self.buckets[bucket_index];
+            const previous_link = self.previous_by_slot[slot_index];
+            const next_link = self.next_by_slot[slot_index];
+            if (previous_link == empty_link) {
+                entry.head = next_link;
+            } else {
+                self.next_by_slot[decode(previous_link)] = next_link;
+            }
+            if (next_link == empty_link) {
+                entry.tail = previous_link;
+            } else {
+                self.previous_by_slot[decode(next_link)] = previous_link;
+            }
+            self.next_by_slot[slot_index] = empty_link;
+            self.previous_by_slot[slot_index] = empty_link;
+            self.bucket_by_slot[slot_index] = empty_link;
+            entry.count -= 1;
+            if (entry.count == 0) entry.* = .{};
+            return true;
         }
 
         fn bucketConst(self: *const Self, key: u64) ?*const Bucket {
@@ -298,12 +311,12 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
             return null;
         }
 
-        fn findOrCreateBucket(self: *Self, key: u64) ?*Bucket {
-            if (self.bucket(key)) |slot| return slot;
-            for (&self.buckets) |*slot| {
+        fn findOrCreateBucketIndex(self: *Self, key: u64) ?usize {
+            if (self.bucketIndex(key)) |index| return index;
+            for (&self.buckets, 0..) |*slot, index| {
                 if (slot.key != 0) continue;
                 slot.* = .{ .key = key };
-                return slot;
+                return index;
             }
             return null;
         }
@@ -316,4 +329,30 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
             return if (link == empty_link) indexed_arena.no_index else @as(usize, link);
         }
     };
+}
+
+test "compact multimap traverses backward and unlinks arbitrary slots" {
+    const Index = CompactMultimapIndex(5, 3);
+    var index = Index.init();
+
+    try std.testing.expect(index.append(7, 0));
+    try std.testing.expect(index.append(7, 2));
+    try std.testing.expect(index.append(7, 4));
+    try std.testing.expect(index.append(8, 1));
+    try std.testing.expect(!index.append(8, 2));
+    try std.testing.expectEqual(@as(usize, 0), index.head(7));
+    try std.testing.expectEqual(@as(usize, 4), index.tail(7));
+    try std.testing.expectEqual(@as(usize, 2), index.previous(4));
+    try std.testing.expectEqual(@as(usize, 0), index.previous(2));
+    try std.testing.expectEqual(indexed_arena.no_index, index.previous(0));
+
+    try std.testing.expect(!index.remove(8, 2));
+    try std.testing.expect(index.remove(7, 2));
+    try std.testing.expectEqual(@as(usize, 4), index.next(0));
+    try std.testing.expectEqual(@as(usize, 0), index.previous(4));
+    try std.testing.expectEqual(indexed_arena.no_index, index.next(2));
+    try std.testing.expectEqual(indexed_arena.no_index, index.previous(2));
+    try std.testing.expect(index.append(9, 2));
+    try std.testing.expectEqual(@as(usize, 2), index.head(9));
+    try std.testing.expectEqual(@as(usize, 2), index.tail(9));
 }
