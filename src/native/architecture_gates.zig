@@ -10,6 +10,7 @@ const background_dispatch = @import("task/background_dispatch.zig");
 const indexing_service = @import("services/indexing_service.zig");
 const event_ledger = @import("platform/event_ledger.zig");
 const compositor_session = @import("platform/compositor_session.zig");
+const input_router = @import("platform/input_router.zig");
 const native_ux = @import("platform/native_ux.zig");
 const sync_transport_harness = @import("sync/sync_transport_harness.zig");
 const sync_transport = @import("sync/sync_transport.zig");
@@ -235,8 +236,14 @@ pub const indexed_hot_path_tables = .{
         .uses_review_item_arena = @hasField(compositor_session.Session, "items"),
         .uses_task_bundle_index = @hasField(compositor_session.Session, "task_bundle_index"),
         .uses_task_window_index = @hasField(compositor_session.Session, "task_window_index"),
+        .uses_reviewer_window_index = @hasField(compositor_session.Session, "reviewer_window_index"),
         .uses_window_review_item_index = @hasField(compositor_session.Session, "window_review_item_index"),
         .tracks_visible_window_count = @hasField(compositor_session.Session, "visible_window_count"),
+        .supports_indexed_task_window_ownership = @hasDecl(compositor_session.Session, "taskOwnsVisibleWindow"),
+    },
+    .input_router = .{
+        .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
+        .tracks_active_inbox_chain = @hasField(input_router.Router, "active_inbox_head"),
     },
     .native_ux = .{
         .uses_flow_arena = @hasField(native_ux.Controller, "flows"),
