@@ -150,11 +150,14 @@ const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
 pub const USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH: u8 = 1;
 pub const STATIC_HANDOFF_STACK_INSTALLS_PER_BIND: u8 = 1;
 pub const STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS: u8 = 0;
+pub const STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
+pub const MappingHandle = indexed_arena.GenerationalHandle("UserspaceMappingHandle");
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
     ImageExtentInvalid,
     AddressSpaceOwnerInvalid,
     AddressSpaceImageMismatch,
+    AddressSpaceRetiring,
     InitialContextInvalid,
 };
 
@@ -272,6 +275,7 @@ const MappingDispatchMetadata = struct {
 
 const MappingEntry = struct {
     state: MappingState = .free,
+    handle_generation: u32 = 0,
     address_space_id: u64 = 0,
     address_space: ?freestanding.paging.UserAddressSpace = null,
     dispatch_metadata: MappingDispatchMetadata = .{},
@@ -289,6 +293,11 @@ const MappingEntry = struct {
     fn pageDirectory(self: *const MappingEntry) *freestanding.paging.PageDirectory {
         return self.address_space.?.directory;
     }
+};
+
+const MappingResolution = struct {
+    entry: *MappingEntry,
+    handle: MappingHandle,
 };
 
 var trap_handler_registered = false;
@@ -413,7 +422,6 @@ pub const Executor = struct {
         self.last_fault_error_code = 0;
         self.user_page_fault_count = 0;
         if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
-        self.mappings = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
         self.mapping_index.reset();
         zigos_userspace_resume_requested = 0;
         zigos_userspace_resume_esp = 0;
@@ -511,6 +519,7 @@ pub const Executor = struct {
         runtime: *task_runtime.Runtime,
         capability_table: *const capability.CapabilityTable,
         task: *const task_runtime.TaskRecord,
+        mapping_handle: *MappingHandle,
         now_ticks: u64,
     ) ExecutionOutcome {
         if (builtin.target.os.tag != .freestanding) return .unavailable;
@@ -523,12 +532,14 @@ pub const Executor = struct {
         }
         if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
 
-        const mapping = self.findMapping(task.address_space_id) orelse blk: {
+        const mapping = self.resolveMappingForDispatch(mapping_handle, task.address_space_id) orelse blk: {
             const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
             if (address_space.owner_task_id != task.id or address_space.image_id != task.launch.image_id) return .unavailable;
             const image = catalog.findById(task.launch.image_id) orelse return .unavailable;
             if (!image.elf_file.isPresent()) return .unavailable;
-            break :blk self.ensureMaterialized(address_space, image) catch return .unavailable;
+            const resolution = self.ensureMaterialized(address_space, image) catch return .unavailable;
+            mapping_handle.* = resolution.handle;
+            break :blk resolution.entry;
         };
         if (mapping.dispatch_metadata.owner_task_id != task.id or
             mapping.dispatch_metadata.image_id != task.launch.image_id)
@@ -691,7 +702,7 @@ pub const Executor = struct {
         self: *Executor,
         address_space: *const task_runtime.AddressSpaceRecord,
         image: *const userspace_loader.ImageRecord,
-    ) MaterializationError!*MappingEntry {
+    ) MaterializationError!MappingResolution {
         const dispatch_metadata = try prepareMappingDispatchMetadata(
             address_space.owner_task_id,
             address_space.image_id,
@@ -701,11 +712,12 @@ pub const Executor = struct {
             image.bootstrap_mailbox_address,
             image.contract_flags,
         );
-        if (self.findMapping(address_space.id)) |entry| {
-            if (!std.meta.eql(entry.dispatch_metadata, dispatch_metadata)) {
+        if (self.findMappingWithHandle(address_space.id)) |resolution| {
+            if (resolution.entry.state != .live) return error.AddressSpaceRetiring;
+            if (!std.meta.eql(resolution.entry.dispatch_metadata, dispatch_metadata)) {
                 native_util.impossibleByInvariant("materialized userspace dispatch metadata changed without retirement");
             }
-            return entry;
+            return resolution;
         }
 
         var slot_index: ?usize = null;
@@ -717,18 +729,14 @@ pub const Executor = struct {
         }
         const reserved_slot = slot_index orelse return error.MappingTableFull;
         const entry = &self.mappings[reserved_slot];
+        const handle_generation = if (entry.handle_generation == 0) 1 else entry.handle_generation;
         entry.* = .{
             .state = .building,
+            .handle_generation = handle_generation,
             .address_space_id = address_space.id,
             .dispatch_metadata = dispatch_metadata,
         };
-        errdefer {
-            if (entry.address_space) |*space| {
-                freestanding.paging.destroyUserAddressSpace(space) catch
-                    native_util.impossibleByInvariant("failed to roll back an inactive userspace address space");
-            }
-            entry.* = .{};
-        }
+        errdefer self.releaseMapping(entry);
 
         entry.address_space = try freestanding.paging.createUserAddressSpace();
 
@@ -741,10 +749,24 @@ pub const Executor = struct {
 
         entry.state = .live;
         self.mapping_index.insert(address_space.id, reserved_slot);
-        return entry;
+        return .{
+            .entry = entry,
+            .handle = MappingHandle.fromParts(reserved_slot, handle_generation),
+        };
     }
 
     fn findMapping(self: *Executor, address_space_id: u64) ?*MappingEntry {
+        const resolution = self.findMappingWithHandle(address_space_id) orelse return null;
+        return resolution.entry;
+    }
+
+    pub fn mappingHandle(self: *Executor, address_space_id: u64) ?MappingHandle {
+        const resolution = self.findMappingWithHandle(address_space_id) orelse return null;
+        if (resolution.entry.state != .live) return null;
+        return resolution.handle;
+    }
+
+    fn findMappingWithHandle(self: *Executor, address_space_id: u64) ?MappingResolution {
         const slot_index = self.mapping_index.lookup(address_space_id) orelse {
             self.debugAssertMappingIndexMissAbsent(address_space_id);
             return null;
@@ -755,13 +777,41 @@ pub const Executor = struct {
             native_util.impossibleByInvariant("executor mapping index points at a non-live mapping");
         }
         if (entry.address_space_id != address_space_id) native_util.impossibleByInvariant("executor mapping index points at the wrong mapping");
+        if (entry.handle_generation == 0) native_util.impossibleByInvariant("live executor mapping has no handle generation");
+        return .{
+            .entry = entry,
+            .handle = MappingHandle.fromParts(slot_index, entry.handle_generation),
+        };
+    }
+
+    fn findMappingByHandle(self: *Executor, handle: MappingHandle, expected_address_space_id: u64) ?*MappingEntry {
+        if (handle.isZero()) return null;
+        const slot_index = handle.slotIndex();
+        if (slot_index >= self.mappings.len) return null;
+        const entry = &self.mappings[slot_index];
+        if (entry.state != .live) return null;
+        if (entry.handle_generation != handle.generation()) return null;
+        if (entry.address_space_id != expected_address_space_id) return null;
         return entry;
+    }
+
+    fn resolveMappingForDispatch(
+        self: *Executor,
+        cached_handle: *MappingHandle,
+        expected_address_space_id: u64,
+    ) ?*MappingEntry {
+        if (self.findMappingByHandle(cached_handle.*, expected_address_space_id)) |entry| return entry;
+        const resolution = self.findMappingWithHandle(expected_address_space_id) orelse return null;
+        if (resolution.entry.state != .live) return null;
+        cached_handle.* = resolution.handle;
+        return resolution.entry;
     }
 
     fn rebuildMappingIndex(self: *Executor) void {
         self.mapping_index.reset();
-        for (self.mappings, 0..) |entry, slot_index| {
+        for (&self.mappings, 0..) |*entry, slot_index| {
             if ((entry.state == .live or entry.state == .retire_pending) and entry.address_space_id != 0) {
+                if (entry.handle_generation == 0) entry.handle_generation = 1;
                 self.mapping_index.insert(entry.address_space_id, slot_index);
             }
         }
@@ -784,7 +834,8 @@ pub const Executor = struct {
             freestanding.paging.destroyUserAddressSpace(space) catch
                 native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
         }
-        entry.* = .{};
+        const next_generation = nextMappingGeneration(entry.handle_generation);
+        entry.* = .{ .handle_generation = next_generation };
     }
 
     fn releaseAllMappings(self: *Executor) void {
@@ -834,6 +885,11 @@ fn prepareMappingDispatchMetadata(
 
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
+}
+
+fn nextMappingGeneration(current: u32) u32 {
+    const next = current +% 1;
+    return if (next == 0) 1 else next;
 }
 
 pub const MailboxAuthorities = struct {
@@ -1475,6 +1531,15 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
         .mailbox_authority_cache = .{ .initialized = true, .refresh_count = 7 },
     };
     executor.rebuildMappingIndex();
+    const retired_handle = executor.mappingHandle(42).?;
+    try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == &executor.mappings[0]);
+    try std.testing.expect(executor.findMappingByHandle(retired_handle, 43) == null);
+    var cached_handle = MappingHandle{};
+    try std.testing.expect(executor.resolveMappingForDispatch(&cached_handle, 42) == &executor.mappings[0]);
+    try std.testing.expect(cached_handle.eql(retired_handle));
+    executor.mapping_index.reset();
+    try std.testing.expect(executor.resolveMappingForDispatch(&cached_handle, 42) == &executor.mappings[0]);
+    executor.rebuildMappingIndex();
 
     const event = task_runtime.AddressSpaceRetirementEvent{
         .address_space_id = 42,
@@ -1483,25 +1548,39 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
     executor.retireAddressSpace(event);
     try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
     try std.testing.expect(executor.findMapping(42) == null);
+    try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == null);
     try std.testing.expectEqual(MappingDispatchMetadata{}, executor.mappings[0].dispatch_metadata);
     try std.testing.expectEqual(@as(u64, 0), executor.mappings[0].mailbox_authority_cache.refresh_count);
 
     executor.retireAddressSpace(event);
-    executor.mappings[0] = .{ .state = .live, .address_space_id = 43 };
+    const reused_generation = executor.mappings[0].handle_generation;
+    executor.mappings[0] = .{
+        .state = .live,
+        .handle_generation = reused_generation,
+        .address_space_id = 42,
+    };
     executor.rebuildMappingIndex();
-    try std.testing.expect(executor.findMapping(43) == &executor.mappings[0]);
+    const reused_handle = executor.mappingHandle(42).?;
+    try std.testing.expect(!reused_handle.eql(retired_handle));
+    try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == null);
+    try std.testing.expect(executor.findMappingByHandle(reused_handle, 42) == &executor.mappings[0]);
+    try std.testing.expectEqual(@as(u8, 0), STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH);
+    try std.testing.expectEqual(@as(u32, 1), nextMappingGeneration(std.math.maxInt(u32)));
 }
 
 test "executor defers active address-space retirement until kernel handoff" {
     var executor = Executor{};
     executor.mappings[0] = .{ .state = .live, .address_space_id = 42 };
     executor.rebuildMappingIndex();
+    const active_handle = executor.mappingHandle(42).?;
     executor.active_mapping = &executor.mappings[0];
     executor.active_task_id = 7;
 
     executor.retireAddressSpace(.{ .address_space_id = 42, .reason = .terminate });
     try std.testing.expectEqual(MappingState.retire_pending, executor.mappings[0].state);
     try std.testing.expectEqual(@as(usize, 1), executor.materializedCount());
+    try std.testing.expect(executor.mappingHandle(42) == null);
+    try std.testing.expect(executor.findMappingByHandle(active_handle, 42) == null);
     try std.testing.expect(executor.handoff_completed);
     try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
 
@@ -1510,6 +1589,7 @@ test "executor defers active address-space retirement until kernel handoff" {
     executor.drainPendingRetirements();
     try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
     try std.testing.expect(executor.findMapping(42) == null);
+    try std.testing.expect(executor.findMappingByHandle(active_handle, 42) == null);
     executor.reset();
 }
 
