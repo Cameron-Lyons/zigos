@@ -147,6 +147,7 @@ const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
 const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
 const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
+pub const USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH: u8 = 1;
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
     ImageExtentInvalid,
@@ -506,7 +507,7 @@ pub const Executor = struct {
         if (!image.elf_file.isPresent()) return .unavailable;
 
         const mapping = self.ensureMaterialized(address_space, image) catch return .unavailable;
-        self.initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
+        const mailbox_update = self.prepareBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
         const trap_stack_top = prepareKernelStack();
         freestanding.gdt.setKernelStack(trap_stack_top);
@@ -542,7 +543,7 @@ pub const Executor = struct {
         self.last_yield_ui_revision = 0;
         zigos_userspace_resume_requested = 0;
 
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+        activateMappingForDispatch(mapping, mailbox_update);
         _ = @call(.never_inline, enterUserspace, .{
             self,
         });
@@ -638,48 +639,27 @@ pub const Executor = struct {
         return deferred and self.findMapping(retired_address_space_id) == null;
     }
 
-    fn initializeBootstrapMailbox(
+    fn prepareBootstrapMailbox(
         self: *Executor,
         mapping: *MappingEntry,
         image: *const userspace_loader.ImageRecord,
         task: *const task_runtime.TaskRecord,
         capability_table: *const capability.CapabilityTable,
         now_ticks: u64,
-    ) void {
+    ) ?BootstrapMailboxUpdate {
         _ = self;
-        if (image.bootstrap_mailbox_address == 0) return;
+        if (image.bootstrap_mailbox_address == 0) return null;
 
         const authorities = resolveMailboxAuthoritiesCached(task, capability_table, now_ticks, &mapping.mailbox_authority_cache);
-        const ui_surface_id = task.ui_surface_id orelse 0;
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
-        defer freestanding.paging.switchToKernelAddressSpace();
-
-        const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
-        if (mapping.resume_valid) {
-            mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
-            mailbox_ptr.authority_capability_id = authorities.bootstrap_capability_id;
-            mailbox_ptr.input_capability_id = authorities.input_capability_id;
-            mailbox_ptr.surface_presentation_capability_id = authorities.surface_presentation_capability_id;
-            mailbox_ptr.ui_surface_id = ui_surface_id;
-            mailbox_ptr.task_id = task.id;
-            mailbox_ptr.service_id = authorities.bootstrap_service_id;
-            return;
-        }
-        mailbox_ptr.* = .{
-            .version = userspace_bootstrap_mailbox.VERSION,
-            .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
-            .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(task.component_class), image.contract_flags)),
-            .fault_code = 0,
-            ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
-            .authority_capability_id = authorities.bootstrap_capability_id,
-            .input_capability_id = authorities.input_capability_id,
-            .surface_presentation_capability_id = authorities.surface_presentation_capability_id,
-            .ui_surface_id = ui_surface_id,
-            .task_id = task.id,
-            .service_id = authorities.bootstrap_service_id,
-            .resource_mask = 0,
-            .last_counter = 0,
-        };
+        return prepareBootstrapMailboxUpdate(
+            image.bootstrap_mailbox_address,
+            mapping.resume_valid,
+            task.component_class,
+            image.contract_flags,
+            task.id,
+            task.ui_surface_id orelse 0,
+            authorities,
+        );
     }
 
     fn ensureMaterialized(
@@ -800,6 +780,70 @@ pub const MailboxAuthorities = struct {
     input_capability_id: u64 = 0,
     surface_presentation_capability_id: u64 = 0,
 };
+
+const BootstrapMailboxUpdate = struct {
+    address: usize,
+    preserve_runtime_state: bool,
+    detail: u8,
+    authorities: MailboxAuthorities,
+    task_id: u64,
+    ui_surface_id: u64,
+};
+
+fn prepareBootstrapMailboxUpdate(
+    address: u64,
+    preserve_runtime_state: bool,
+    component_class: task_runtime.ComponentClass,
+    contract_flags: u32,
+    task_id: u64,
+    ui_surface_id: u64,
+    authorities: MailboxAuthorities,
+) ?BootstrapMailboxUpdate {
+    if (address == 0) return null;
+    return .{
+        .address = @intCast(address),
+        .preserve_runtime_state = preserve_runtime_state,
+        .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(component_class), contract_flags)),
+        .authorities = authorities,
+        .task_id = task_id,
+        .ui_surface_id = ui_surface_id,
+    };
+}
+
+fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?BootstrapMailboxUpdate) void {
+    freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+    writeBootstrapMailbox(mailbox_update);
+}
+
+fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
+    const update = prepared orelse return;
+    const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(update.address);
+    if (!update.preserve_runtime_state) {
+        mailbox_ptr.* = .{
+            .version = userspace_bootstrap_mailbox.VERSION,
+            .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
+            .detail = update.detail,
+            .fault_code = 0,
+            ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
+            .authority_capability_id = update.authorities.bootstrap_capability_id,
+            .input_capability_id = update.authorities.input_capability_id,
+            .surface_presentation_capability_id = update.authorities.surface_presentation_capability_id,
+            .ui_surface_id = update.ui_surface_id,
+            .task_id = update.task_id,
+            .service_id = update.authorities.bootstrap_service_id,
+            .resource_mask = 0,
+            .last_counter = 0,
+        };
+        return;
+    }
+    mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
+    mailbox_ptr.authority_capability_id = update.authorities.bootstrap_capability_id;
+    mailbox_ptr.input_capability_id = update.authorities.input_capability_id;
+    mailbox_ptr.surface_presentation_capability_id = update.authorities.surface_presentation_capability_id;
+    mailbox_ptr.ui_surface_id = update.ui_surface_id;
+    mailbox_ptr.task_id = update.task_id;
+    mailbox_ptr.service_id = update.authorities.bootstrap_service_id;
+}
 
 pub const MailboxAuthorityCache = struct {
     authorities: MailboxAuthorities = .{},
@@ -1124,6 +1168,59 @@ fn publishRootActiveTaskId(task_id: u64) void {
     if (@hasDecl(root, "publishUserspaceActiveTaskId")) {
         root.publishUserspaceActiveTaskId(task_id);
     }
+}
+
+test "mailbox publication preserves resume state and resets first launch" {
+    var mailbox = userspace_bootstrap_mailbox.Mailbox{
+        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady),
+        .fault_code = 0x72,
+        .resource_mask = 0x7,
+        .service_operation_count = 9,
+        .last_counter = 41,
+        .input_event_count = 12,
+        .ui_state_revision = 15,
+    };
+    const authorities = MailboxAuthorities{
+        .bootstrap_capability_id = 101,
+        .bootstrap_service_id = 102,
+        .input_capability_id = 103,
+        .surface_presentation_capability_id = 104,
+    };
+    const address: u64 = @intCast(@intFromPtr(&mailbox));
+
+    const resumed = prepareBootstrapMailboxUpdate(address, true, .app_component, 0, 105, 106, authorities).?;
+    writeBootstrapMailbox(resumed);
+    try std.testing.expect(resumed.preserve_runtime_state);
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.VERSION, mailbox.version);
+    try std.testing.expectEqual(@as(u64, 101), mailbox.authority_capability_id);
+    try std.testing.expectEqual(@as(u64, 102), mailbox.service_id);
+    try std.testing.expectEqual(@as(u64, 103), mailbox.input_capability_id);
+    try std.testing.expectEqual(@as(u64, 104), mailbox.surface_presentation_capability_id);
+    try std.testing.expectEqual(@as(u64, 105), mailbox.task_id);
+    try std.testing.expectEqual(@as(u64, 106), mailbox.ui_surface_id);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.steady)), mailbox.stage);
+    try std.testing.expectEqual(@as(u8, 0x72), mailbox.fault_code);
+    try std.testing.expectEqual(@as(u32, 0x7), mailbox.resource_mask);
+    try std.testing.expectEqual(@as(u16, 9), mailbox.service_operation_count);
+    try std.testing.expectEqual(@as(u32, 41), mailbox.last_counter);
+    try std.testing.expectEqual(@as(u64, 12), mailbox.input_event_count);
+    try std.testing.expectEqual(@as(u64, 15), mailbox.ui_state_revision);
+
+    const first_launch = prepareBootstrapMailboxUpdate(address, false, .app_component, 0, 107, 108, authorities).?;
+    writeBootstrapMailbox(first_launch);
+    try std.testing.expect(!first_launch.preserve_runtime_state);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.boot)), mailbox.stage);
+    try std.testing.expectEqual(@as(u8, 0), mailbox.fault_code);
+    try std.testing.expectEqual(@as(u32, 0), mailbox.resource_mask);
+    try std.testing.expectEqual(@as(u16, 0), mailbox.service_operation_count);
+    try std.testing.expectEqual(@as(u32, 0), mailbox.last_counter);
+    try std.testing.expectEqual(@as(u64, 0), mailbox.input_event_count);
+    try std.testing.expectEqual(@as(u64, 0), mailbox.ui_state_revision);
+    try std.testing.expectEqual(@as(u64, 107), mailbox.task_id);
+    try std.testing.expectEqual(@as(u64, 108), mailbox.ui_surface_id);
+
+    try std.testing.expect(prepareBootstrapMailboxUpdate(0, false, .app_component, 0, 1, 0, .{}) == null);
+    try std.testing.expectEqual(@as(u8, 1), USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH);
 }
 
 test "executor separates service, input, and surface presentation authority" {
