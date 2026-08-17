@@ -122,6 +122,7 @@ pub const indexed_hot_path_tables = .{
     .userspace_executor = .{
         .resolves_mailbox_authorities_together = @hasDecl(userspace_executor, "resolveMailboxAuthorities"),
         .caches_mailbox_authorities = @hasDecl(userspace_executor, "resolveMailboxAuthoritiesCached"),
+        .activates_one_user_address_space_per_dispatch = userspace_executor.USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH == 1,
     },
     .userspace_loader = .{
         .uses_image_arena = @hasDecl(@FieldType(userspace_loader.Catalog, "images"), "reserveIndex"),
