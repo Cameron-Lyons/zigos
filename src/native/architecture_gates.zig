@@ -157,6 +157,7 @@ pub const indexed_hot_path_tables = .{
     },
     .media_print_service = .{
         .uses_job_arena = @hasDecl(@FieldType(media_print_service.Service, "jobs"), "reserveIndex"),
+        .uses_completed_job_index = @hasField(media_print_service.Service, "completed_job_index"),
     },
     .notification_center = .{
         .uses_notification_arena = @hasDecl(@FieldType(notification_center.Center, "notifications"), "reserveIndex"),
