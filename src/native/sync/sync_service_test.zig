@@ -483,19 +483,34 @@ test "sync service persists durable transport queues and enforces replay and wor
         .path = path,
     };
     const accepted = try port.acceptTransportFrame(authority, &storage, request);
+    const accepted_source_frame_key = sync_indexes.inboundSourceFrameLookupKey(
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        outbound.id,
+    );
     try std.testing.expectEqual(outbound.id, accepted.source_frame_id);
     try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(workspace_record.id.raw(), tablet));
     try std.testing.expectEqual(@as(usize, 1), service.outbound_transport_path_index.count(frame_path_key));
     try std.testing.expectEqual(@as(usize, 1), service.inbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_frame_index.count(accepted_source_frame_key));
 
     const duplicate = try port.acceptTransportFrame(authority, &storage, request);
     try std.testing.expectEqual(accepted.id, duplicate.id);
     try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(workspace_record.id.raw(), tablet));
     try std.testing.expectEqual(@as(usize, 1), service.inbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_frame_index.count(accepted_source_frame_key));
 
     request.source_frame_id = 100;
     _ = try port.acceptTransportFrame(authority, &storage, request);
+    const latest_source_frame_key = sync_indexes.inboundSourceFrameLookupKey(
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        request.source_frame_id,
+    );
     try std.testing.expectEqual(@as(usize, 2), service.inbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_frame_index.count(latest_source_frame_key));
     try std.testing.expectEqual(@as(u64, 100), service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, path).?.source_frame_id);
     request.source_frame_id = 2;
     try std.testing.expectError(error.TransportReplayRejected, port.acceptTransportFrame(authority, &storage, request));
@@ -508,6 +523,8 @@ test "sync service persists durable transport queues and enforces replay and wor
     try std.testing.expectEqual(@as(usize, 3), restarted.transportFrameCountFor(workspace_record.id.raw(), tablet));
     try std.testing.expectEqual(@as(usize, 1), restarted.outbound_transport_path_index.count(frame_path_key));
     try std.testing.expectEqual(@as(usize, 2), restarted.inbound_transport_path_index.count(frame_path_key));
+    try std.testing.expectEqual(@as(usize, 1), restarted.inbound_source_frame_index.count(accepted_source_frame_key));
+    try std.testing.expectEqual(@as(usize, 1), restarted.inbound_source_frame_index.count(latest_source_frame_key));
     try std.testing.expectEqual(@as(u64, 100), restarted.latestTransportFrameForPath(workspace_record.id.raw(), tablet, path).?.source_frame_id);
 
     var saw_duplicate_count = false;
@@ -599,6 +616,18 @@ test "sync service inbound queue evicts out-of-window frames instead of the queu
     }
 
     try std.testing.expect(resident.inboundTransportFrameCount() <= sync_service.MAX_TRANSPORT_FRAMES);
+    try std.testing.expectEqual(@as(usize, 0), service.inbound_source_frame_index.count(sync_indexes.inboundSourceFrameLookupKey(
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        1,
+    )));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_frame_index.count(sync_indexes.inboundSourceFrameLookupKey(
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        total,
+    )));
 
     request.source_frame_id = 1;
     try std.testing.expectError(error.TransportReplayRejected, port.acceptTransportFrame(authority, &storage, request));
