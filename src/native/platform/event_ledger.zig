@@ -264,6 +264,8 @@ const event_kind_count = std.meta.fields(EventKind).len;
 const KindEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, event_kind_count, event_kind_count * 2);
 const SubjectEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
 const TaskEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
+const EventOrderIndex = indexed_arena.MultimapIndex(MAX_EVENTS, 1, 2);
+const EVENT_ORDER_KEY: u64 = 1;
 
 const QueryIndex = enum {
     kind,
@@ -286,6 +288,7 @@ pub const Ledger = struct {
     kind_index: KindEventIndex = KindEventIndex.init(),
     subject_index: SubjectEventIndex = SubjectEventIndex.init(),
     task_index: TaskEventIndex = TaskEventIndex.init(),
+    event_order_index: EventOrderIndex = EventOrderIndex.init(),
     persistence_batch_depth: usize = 0,
     pending_persist_first_sequence: u64 = 0,
     pending_persist_count: usize = 0,
@@ -1736,6 +1739,11 @@ pub const Ledger = struct {
             try self.rebuildIndexes();
             return err;
         };
+        if (!self.event_order_index.append(EVENT_ORDER_KEY, event_index)) {
+            _ = self.events.removeIndex(event_index);
+            try self.rebuildIndexes();
+            return error.EventTableFull;
+        }
         if (self.persistence_batch_depth == 0) {
             try self.persistRange(slot.event.sequence, slot.event.sequence, slot.event.tick);
         } else {
@@ -1744,18 +1752,16 @@ pub const Ledger = struct {
     }
 
     fn evictOldestEvent(self: *Ledger) bool {
-        var oldest_index: ?usize = null;
-        var oldest_sequence: u64 = std.math.maxInt(u64);
-        for (&self.events.slots, 0..) |*slot, index| {
-            if (!slot.in_use) continue;
-            if (slot.event.sequence < oldest_sequence) {
-                oldest_sequence = slot.event.sequence;
-                oldest_index = index;
-            }
+        const index = self.event_order_index.head(EVENT_ORDER_KEY);
+        if (index == indexed_arena.no_index) return false;
+        if (index >= self.events.slots.len) native_util.impossibleByInvariant("event order index points outside slots");
+        if (!self.events.slots[index].in_use) native_util.impossibleByInvariant("event order index points at a free slot");
+        if (!self.event_order_index.remove(EVENT_ORDER_KEY, index)) {
+            native_util.impossibleByInvariant("event order index is missing its oldest event");
         }
-        const index = oldest_index orelse return false;
         self.removeEventIndexes(index, &self.events.slots[index].event);
-        return self.events.removeIndex(index);
+        if (!self.events.removeIndex(index)) native_util.impossibleByInvariant("oldest event slot is live");
+        return true;
     }
 
     fn visitMatching(
@@ -1853,10 +1859,23 @@ pub const Ledger = struct {
         self.kind_index.reset();
         self.subject_index.reset();
         self.task_index.reset();
+        self.event_order_index.reset();
         self.events.rebuildPrimaryIndex();
-        for (self.events.slots, 0..) |slot, index| {
-            if (!slot.in_use) continue;
-            try self.indexEvent(index);
+
+        var indexed_count: usize = 0;
+        var last_sequence: u64 = 0;
+        while (indexed_count < self.events.countInUse()) : (indexed_count += 1) {
+            var selected_index: usize = indexed_arena.no_index;
+            var selected_sequence: u64 = std.math.maxInt(u64);
+            for (self.events.slots, 0..) |slot, slot_index| {
+                if (!slot.in_use or slot.event.sequence <= last_sequence or slot.event.sequence >= selected_sequence) continue;
+                selected_index = slot_index;
+                selected_sequence = slot.event.sequence;
+            }
+            if (selected_index == indexed_arena.no_index) return error.CorruptState;
+            try self.indexEvent(selected_index);
+            if (!self.event_order_index.append(EVENT_ORDER_KEY, selected_index)) return error.EventTableFull;
+            last_sequence = selected_sequence;
         }
     }
 
