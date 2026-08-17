@@ -318,6 +318,62 @@ test "object store supports every native object type and rejects unsigned metada
     }));
 }
 
+test "object queries select globally newest bounded results" {
+    var store = Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "bounded-query-key",
+        .seed = signing.seedFromByte(0x35),
+    };
+    const objects = [_]struct {
+        id: u64,
+        object_type: ObjectType,
+        updated_at_ticks: u64,
+    }{
+        .{ .id = 100, .object_type = .document, .updated_at_ticks = 50 },
+        .{ .id = 101, .object_type = .blob, .updated_at_ticks = 100 },
+        .{ .id = 102, .object_type = .document, .updated_at_ticks = 10 },
+        .{ .id = 105, .object_type = .document, .updated_at_ticks = 40 },
+        .{ .id = 104, .object_type = .blob, .updated_at_ticks = 90 },
+        .{ .id = 103, .object_type = .document, .updated_at_ticks = 40 },
+    };
+
+    for (objects) |object| {
+        const payload = if (object.object_type == .document) "document" else "blob";
+        _ = try store.putVersion(.{
+            .preferred_object_id = ids.object(object.id),
+            .object_type = object.object_type,
+            .payload = payload,
+            .metadata = try signMetadata(
+                signer,
+                "query candidate",
+                "text/plain",
+                object.object_type,
+                payload,
+                object.updated_at_ticks,
+            ),
+        });
+    }
+
+    var newest_buffer: [3]object_store.ObjectQueryResult = undefined;
+    const newest = store.queryObjects(.{}, &newest_buffer);
+    try std.testing.expectEqual(@as(usize, 3), newest.len);
+    try std.testing.expectEqual(ids.object(101), newest[0].object_id);
+    try std.testing.expectEqual(ids.object(104), newest[1].object_id);
+    try std.testing.expectEqual(ids.object(100), newest[2].object_id);
+
+    store.rebuildIndexes();
+    var document_buffer: [2]object_store.ObjectQueryResult = undefined;
+    const newest_documents = store.queryObjects(.{
+        .object_type = .document,
+        .label_contains = "QUERY",
+        .content_type = "text/plain",
+        .updated_since_ticks = 40,
+    }, &document_buffer);
+    try std.testing.expectEqual(@as(usize, 2), newest_documents.len);
+    try std.testing.expectEqual(ids.object(100), newest_documents[0].object_id);
+    try std.testing.expectEqual(ids.object(103), newest_documents[1].object_id);
+}
+
 test "object store rejects tampered metadata signatures" {
     var store = Store.init();
     const signer = signing.SignerIdentity{
