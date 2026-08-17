@@ -182,6 +182,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_lowest_active_generation = @hasField(agent_delegation_service.Service, "lowest_active_generation"),
         .uses_generation_index = @hasField(agent_delegation_service.Service, "delegation_generation_index"),
         .tracks_active_generation_buckets = @hasField(agent_delegation_service.Service, "active_generation_buckets"),
+        .uses_active_generation_bucket_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "active_generation_buckets"), "reserve"),
     },
     .object_resilience_service = .{
         .uses_snapshot_arena = @hasDecl(@FieldType(object_resilience_service.Service, "slots"), "reserve"),
