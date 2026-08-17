@@ -225,23 +225,17 @@ pub const Channel = struct {
     }
 
     pub fn resolveLatest(self: *const Channel, bundle_id: []const u8) Error!ResolvedRelease {
-        var selected: ?usize = null;
         var matching_bundle_seen = false;
-        var slot_index = self.bundle_release_index.head(bundleKey(bundle_id));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.bundle_release_index.next(slot_index)) {
+        var slot_index = self.bundle_release_index.tail(bundleKey(bundle_id));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.bundle_release_index.previous(slot_index)) {
             const record = self.bundleReleaseSlotAt(slot_index);
             if (!std.mem.eql(u8, record.release.bundle.bundle_id, bundle_id)) continue;
             matching_bundle_seen = true;
             if (!self.releaseSignedByTrustedPublisher(record.release.bundle)) continue;
-            if (selected == null or versionGreaterThan(record.release, self.releases.slots[selected.?].release)) {
-                selected = slot_index;
-            }
+            return self.resolveChecked(slot_index);
         }
-        const index = selected orelse {
-            if (matching_bundle_seen) return error.StoreReleasePublisherUntrusted;
-            return error.StoreReleaseMissing;
-        };
-        return self.resolveChecked(index);
+        if (matching_bundle_seen) return error.StoreReleasePublisherUntrusted;
+        return error.StoreReleaseMissing;
     }
 
     pub fn resolveNext(
@@ -250,24 +244,18 @@ pub const Channel = struct {
         current_major: u16,
         current_minor: u16,
     ) Error!ResolvedRelease {
-        var selected: ?usize = null;
         var matching_update_seen = false;
-        var slot_index = self.bundle_release_index.head(bundleKey(bundle_id));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.bundle_release_index.next(slot_index)) {
+        var slot_index = self.bundle_release_index.tail(bundleKey(bundle_id));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.bundle_release_index.previous(slot_index)) {
             const record = self.bundleReleaseSlotAt(slot_index);
             if (!std.mem.eql(u8, record.release.bundle.bundle_id, bundle_id)) continue;
             if (!versionNewerThan(record.release, current_major, current_minor)) continue;
             matching_update_seen = true;
             if (!self.releaseSignedByTrustedPublisher(record.release.bundle)) continue;
-            if (selected == null or versionGreaterThan(record.release, self.releases.slots[selected.?].release)) {
-                selected = slot_index;
-            }
+            return self.resolveChecked(slot_index);
         }
-        const index = selected orelse {
-            if (matching_update_seen) return error.StoreReleasePublisherUntrusted;
-            return error.StoreReleaseMissing;
-        };
-        return self.resolveChecked(index);
+        if (matching_update_seen) return error.StoreReleasePublisherUntrusted;
+        return error.StoreReleaseMissing;
     }
 
     fn findExactIndex(
@@ -493,12 +481,6 @@ fn versionNewerThan(release: Release, current_major: u16, current_minor: u16) bo
         (release.bundle.version_major == current_major and release.bundle.version_minor > current_minor);
 }
 
-fn versionGreaterThan(left: Release, right: Release) bool {
-    return left.bundle.version_major > right.bundle.version_major or
-        (left.bundle.version_major == right.bundle.version_major and
-            left.bundle.version_minor > right.bundle.version_minor);
-}
-
 fn signStoreTestBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
     return signing.signWithDefaultRegistry(
         .ed25519,
@@ -660,6 +642,10 @@ test "public store resolves exact versions through indexed full channel" {
         .label = "public-store-index-test",
         .seed = signing.seedFromByte(0x68),
     };
+    const newest_signer = signing.SignerIdentity{
+        .label = "public-store-newest-index-test",
+        .seed = signing.seedFromByte(0x69),
+    };
     const components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "indexed-ui", .entry = "app.indexed.ui" },
     };
@@ -672,13 +658,15 @@ test "public store resolves exact versions through indexed full channel" {
 
     var channel = Channel.init("store:zigos/public", .stable);
     try channel.trustPublisher("zigos.dev", try signing.publicKey(signer));
+    try channel.trustPublisher("zigos.release", try signing.publicKey(newest_signer));
 
     var version_minor: u16 = 0;
     while (version_minor < MAX_RELEASES_PER_CHANNEL) : (version_minor += 1) {
+        const newest = version_minor == MAX_RELEASES_PER_CHANNEL - 1;
         var bundle = manifest.BundleManifest{
             .bundle_id = "app.indexed",
             .display_name = "Indexed",
-            .publisher = "zigos.dev",
+            .publisher = if (newest) "zigos.release" else "zigos.dev",
             .version_minor = version_minor,
             .components = &components,
             .assets = &declared_assets,
@@ -692,7 +680,7 @@ test "public store resolves exact versions through indexed full channel" {
                 .trusted_builder = true,
             },
         };
-        bundle.signature = try signStoreTestBundle(signer, bundle);
+        bundle.signature = try signStoreTestBundle(if (newest) newest_signer else signer, bundle);
         try channel.publish(channel.prepareRelease(bundle, &release_assets, 1));
 
         const resolved = try channel.resolveVersion("app.indexed", 1, version_minor);
@@ -705,9 +693,20 @@ test "public store resolves exact versions through indexed full channel" {
     const latest = try channel.resolveLatest("app.indexed");
     try std.testing.expectEqual(@as(u16, MAX_RELEASES_PER_CHANNEL - 1), latest.bundle.version_minor);
 
+    try channel.revokePublisher("zigos.release", try signing.publicKey(newest_signer));
+    const latest_trusted = try channel.resolveLatest("app.indexed");
+    try std.testing.expectEqual(@as(u16, MAX_RELEASES_PER_CHANNEL - 2), latest_trusted.bundle.version_minor);
+    const next_trusted = try channel.resolveNext("app.indexed", 1, MAX_RELEASES_PER_CHANNEL - 3);
+    try std.testing.expectEqual(@as(u16, MAX_RELEASES_PER_CHANNEL - 2), next_trusted.bundle.version_minor);
+    try std.testing.expectError(
+        error.StoreReleasePublisherUntrusted,
+        channel.resolveNext("app.indexed", 1, MAX_RELEASES_PER_CHANNEL - 2),
+    );
+    try channel.trustPublisher("zigos.release", try signing.publicKey(newest_signer));
+
     var overflow = latest.bundle;
     overflow.version_minor = MAX_RELEASES_PER_CHANNEL;
-    overflow.signature = try signStoreTestBundle(signer, overflow);
+    overflow.signature = try signStoreTestBundle(newest_signer, overflow);
     try std.testing.expectError(error.StoreChannelFull, channel.publish(channel.prepareRelease(overflow, &release_assets, 1)));
 }
 

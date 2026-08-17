@@ -189,6 +189,11 @@ pub fn MultimapIndex(
             return publicIndex(self.links[slot_index].next);
         }
 
+        pub fn previous(self: *const Self, slot_index: usize) usize {
+            if (slot_index >= link_capacity) return no_index;
+            return publicIndex(self.links[slot_index].previous);
+        }
+
         pub fn append(self: *Self, key: u64, slot_index: usize) bool {
             if (key == 0 or slot_index >= link_capacity) return false;
             const link = &self.links[slot_index];
@@ -1263,8 +1268,11 @@ test "indexed arena supports constant-time arbitrary multimap removal" {
     try std.testing.expectEqual(@as(usize, 3), owner_index.count(7));
     try std.testing.expectEqual(@as(usize, 1), owner_index.count(8));
     try std.testing.expectEqual(@as(usize, 0), owner_index.head(7));
+    try std.testing.expectEqual(no_index, owner_index.previous(0));
     try std.testing.expectEqual(@as(usize, 2), owner_index.next(0));
+    try std.testing.expectEqual(@as(usize, 0), owner_index.previous(2));
     try std.testing.expectEqual(@as(usize, 3), owner_index.next(2));
+    try std.testing.expectEqual(@as(usize, 2), owner_index.previous(3));
     try std.testing.expectEqual(no_index, owner_index.next(3));
     try std.testing.expect(!owner_index.append(9, 2));
     try std.testing.expect(!owner_index.remove(8, 2));
@@ -1272,10 +1280,13 @@ test "indexed arena supports constant-time arbitrary multimap removal" {
     try std.testing.expect(owner_index.remove(7, 2));
     try std.testing.expectEqual(@as(usize, 2), owner_index.count(7));
     try std.testing.expectEqual(@as(usize, 3), owner_index.next(0));
+    try std.testing.expectEqual(@as(usize, 0), owner_index.previous(3));
     try std.testing.expectEqual(@as(usize, 3), owner_index.tail(7));
     try std.testing.expectEqual(no_index, owner_index.next(2));
+    try std.testing.expectEqual(no_index, owner_index.previous(2));
     try std.testing.expect(owner_index.append(7, 2));
     try std.testing.expectEqual(@as(usize, 2), owner_index.tail(7));
+    try std.testing.expectEqual(@as(usize, 3), owner_index.previous(2));
     try std.testing.expect(owner_index.remove(7, 2));
     try std.testing.expectEqual(@as(usize, 3), owner_index.tail(7));
     try std.testing.expectEqual(no_index, owner_index.next(2));
@@ -1371,10 +1382,24 @@ test "multimap index matches an insertion-order model under churn" {
                 traversed += 1;
             }
             try std.testing.expectEqual(expected_count, traversed);
+
+            traversed = 0;
+            cursor = index.tail(model_key);
+            while (cursor != no_index) : (cursor = index.previous(cursor)) {
+                try std.testing.expect(traversed < expected_count);
+                try std.testing.expect(cursor < slot_count);
+                try std.testing.expectEqual(model_order[model_key_index][expected_count - traversed - 1], cursor);
+                try std.testing.expectEqual(model_key, model_slot_keys[cursor]);
+                traversed += 1;
+            }
+            try std.testing.expectEqual(expected_count, traversed);
         }
 
         for (model_slot_keys, 0..) |model_key, slot_index_to_check| {
-            if (model_key == 0) try std.testing.expectEqual(no_index, index.next(slot_index_to_check));
+            if (model_key == 0) {
+                try std.testing.expectEqual(no_index, index.next(slot_index_to_check));
+                try std.testing.expectEqual(no_index, index.previous(slot_index_to_check));
+            }
         }
     }
 }
