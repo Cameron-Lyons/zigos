@@ -3,6 +3,7 @@ const principal = @import("core/principal.zig");
 const service_registry = @import("services/service_registry.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
 const userspace_scheduler = @import("task/userspace_scheduler.zig");
+const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
@@ -116,6 +117,9 @@ pub const indexed_hot_path_tables = .{
         .uses_accelerator_deadline_heads = @hasField(userspace_scheduler.Scheduler, "accelerator_deadline_heads"),
         .uses_accelerator_claim_task_index = @hasField(userspace_scheduler.Scheduler, "accelerator_claim_task_index"),
         .grants_next_accelerator_claim = @hasDecl(userspace_scheduler.Scheduler, "grantNextAcceleratorClaim"),
+    },
+    .userspace_executor = .{
+        .resolves_mailbox_authorities_together = @hasDecl(userspace_executor, "resolveMailboxAuthorities"),
     },
     .userspace_loader = .{
         .uses_image_arena = @hasDecl(@FieldType(userspace_loader.Catalog, "images"), "reserveIndex"),
