@@ -374,6 +374,7 @@ pub fn IndexedArenaWithKeyOptions(
     if (capacity == 0) @compileError("indexed arena requires at least one slot");
     if (index_capacity < capacity) @compileError("indexed arena primary index capacity must cover slots");
     const dirty_capacity = if (options.track_dirty) capacity else 0;
+    const DirtyIdIndex = if (options.track_dirty) UniqueIndex(index_capacity) else struct {};
 
     return struct {
         const Self = @This();
@@ -387,6 +388,7 @@ pub fn IndexedArenaWithKeyOptions(
         used_count: usize = 0,
         dirty_count: usize = 0,
         dirty_ids: [dirty_capacity]Key = [_]Key{ids.zero(Key)} ** dirty_capacity,
+        dirty_id_index: DirtyIdIndex = .{},
 
         pub fn init() Self {
             return .{};
@@ -413,6 +415,7 @@ pub fn IndexedArenaWithKeyOptions(
             self.used_count = 0;
             self.dirty_count = 0;
             @memset(self.dirty_ids[0..dirty_count], ids.zero(Key));
+            if (comptime options.track_dirty) self.dirty_id_index.reset();
         }
 
         pub fn reserve(self: *Self, key: Key) ?*Slot {
@@ -660,11 +663,10 @@ pub fn IndexedArenaWithKeyOptions(
             if (!options.track_dirty) @compileError("this arena does not track dirty ids; instantiate it with DirtyTrackedIndexedArenaWithKey");
             const raw_key = ids.raw(key);
             if (raw_key == 0) return;
-            for (self.dirty_ids[0..self.dirty_count]) |existing| {
-                if (ids.raw(existing) == raw_key) return;
-            }
+            if (self.dirty_id_index.contains(raw_key)) return;
             if (self.dirty_count >= dirty_capacity) native_util.impossibleByInvariant("indexed arena dirty id capacity covers slot capacity");
             self.dirty_ids[self.dirty_count] = key;
+            self.dirty_id_index.insertAbsent(raw_key, self.dirty_count);
             self.dirty_count += 1;
         }
 
@@ -677,6 +679,7 @@ pub fn IndexedArenaWithKeyOptions(
             if (!options.track_dirty) @compileError("this arena does not track dirty ids; instantiate it with DirtyTrackedIndexedArenaWithKey");
             @memset(self.dirty_ids[0..self.dirty_count], ids.zero(Key));
             self.dirty_count = 0;
+            self.dirty_id_index.reset();
         }
 
         fn noteDirty(self: *Self, key: Key) void {
@@ -1118,8 +1121,17 @@ test "indexed arena reserves reuses indexes and tracks dirty ids" {
 
     try std.testing.expectEqualStrings("reused", arena.get(43).?.record.label);
     try std.testing.expectEqual(@as(usize, 2), arena.countInUse());
+    try std.testing.expectEqualSlices(u64, &.{ 41, 42, 44, 43 }, arena.dirtyIds());
+    try std.testing.expectEqual(@as(?usize, 2), arena.dirty_id_index.lookup(44));
     arena.clearDirty();
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
+    try std.testing.expectEqual(@as(?usize, null), arena.dirty_id_index.lookup(44));
+
+    arena.markDirty(44);
+    arena.markDirty(44);
+    try std.testing.expectEqualSlices(u64, &.{44}, arena.dirtyIds());
+    try std.testing.expectEqual(@as(?usize, 0), arena.dirty_id_index.lookup(44));
+    arena.clearDirty();
 
     const restored = arena.reserveClean(45).?;
     restored.record = .{ .id = 45, .owner = 11, .label = "restored" };
@@ -1216,6 +1228,8 @@ test "indexed arena can reset membership while retaining unreachable payloads" {
     try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[0]);
     try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[1]);
     try std.testing.expectEqual(@as(u64, 99), arena.dirty_ids[2]);
+    try std.testing.expectEqual(@as(?usize, null), arena.dirty_id_index.lookup(41));
+    try std.testing.expectEqual(@as(?usize, null), arena.dirty_id_index.lookup(42));
     try std.testing.expect(arena.get(41) == null);
     try std.testing.expect(!arena.slots[slot_index].in_use);
     try std.testing.expectEqualStrings("retained", arena.slots[slot_index].record.label);
