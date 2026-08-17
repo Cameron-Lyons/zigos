@@ -648,9 +648,7 @@ pub const Executor = struct {
         _ = self;
         if (image.bootstrap_mailbox_address == 0) return;
 
-        const bootstrap = selectBootstrapCapability(task, capability_table, now_ticks);
-        const input_capability_id = selectInputCapability(task, capability_table, now_ticks);
-        const surface_presentation_capability_id = selectSurfacePresentationCapability(task, capability_table, now_ticks);
+        const authorities = resolveMailboxAuthorities(task, capability_table, now_ticks);
         const ui_surface_id = task.ui_surface_id orelse 0;
         freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
         defer freestanding.paging.switchToKernelAddressSpace();
@@ -658,12 +656,12 @@ pub const Executor = struct {
         const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
         if (mapping.resume_valid) {
             mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
-            mailbox_ptr.authority_capability_id = bootstrap.capability_id;
-            mailbox_ptr.input_capability_id = input_capability_id;
-            mailbox_ptr.surface_presentation_capability_id = surface_presentation_capability_id;
+            mailbox_ptr.authority_capability_id = authorities.bootstrap_capability_id;
+            mailbox_ptr.input_capability_id = authorities.input_capability_id;
+            mailbox_ptr.surface_presentation_capability_id = authorities.surface_presentation_capability_id;
             mailbox_ptr.ui_surface_id = ui_surface_id;
             mailbox_ptr.task_id = task.id;
-            mailbox_ptr.service_id = bootstrap.service_id;
+            mailbox_ptr.service_id = authorities.bootstrap_service_id;
             return;
         }
         mailbox_ptr.* = .{
@@ -672,12 +670,12 @@ pub const Executor = struct {
             .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(task.component_class), image.contract_flags)),
             .fault_code = 0,
             ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
-            .authority_capability_id = bootstrap.capability_id,
-            .input_capability_id = input_capability_id,
-            .surface_presentation_capability_id = surface_presentation_capability_id,
+            .authority_capability_id = authorities.bootstrap_capability_id,
+            .input_capability_id = authorities.input_capability_id,
+            .surface_presentation_capability_id = authorities.surface_presentation_capability_id,
             .ui_surface_id = ui_surface_id,
             .task_id = task.id,
-            .service_id = bootstrap.service_id,
+            .service_id = authorities.bootstrap_service_id,
             .resource_mask = 0,
             .last_counter = 0,
         };
@@ -795,18 +793,32 @@ fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
 
-fn selectBootstrapCapability(
+pub const MailboxAuthorities = struct {
+    bootstrap_capability_id: u64 = 0,
+    bootstrap_service_id: u64 = 0,
+    input_capability_id: u64 = 0,
+    surface_presentation_capability_id: u64 = 0,
+};
+
+pub fn resolveMailboxAuthorities(
     task: *const task_runtime.TaskRecord,
     capability_table: *const capability.CapabilityTable,
     now_ticks: u64,
-) struct { capability_id: u64, service_id: u64 } {
+) MailboxAuthorities {
+    var resolved = MailboxAuthorities{};
     var query_fallback: u64 = 0;
     var query_service_id: u64 = 0;
+    const accepts_surface_presentation = task.ui_surface_id != null and task.ui_surface_id.? != 0;
+
     for (task.capabilityIds()) |capability_id| {
         const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
         const service_id = if (granted.target.kind == .service) granted.target.id else 0;
-        if (granted.target.kind == .service and granted.rights.has(.endpoint_create)) {
-            return .{ .capability_id = capability_id, .service_id = service_id };
+        if (resolved.bootstrap_capability_id == 0 and
+            granted.target.kind == .service and
+            granted.rights.has(.endpoint_create))
+        {
+            resolved.bootstrap_capability_id = capability_id;
+            resolved.bootstrap_service_id = service_id;
         }
         if (query_fallback == 0 and
             (granted.rights.has(.time_query) or
@@ -816,38 +828,29 @@ fn selectBootstrapCapability(
             query_fallback = capability_id;
             query_service_id = service_id;
         }
+        if (resolved.input_capability_id == 0 and
+            granted.target.kind == .task and
+            granted.target.id == task.id and
+            granted.scope.task_id == task.id and
+            granted.rights.has(.input_recv))
+        {
+            resolved.input_capability_id = capability_id;
+        }
+        if (resolved.surface_presentation_capability_id == 0 and
+            accepts_surface_presentation and
+            granted.target.kind == .task and
+            granted.target.id == task.id and
+            granted.scope.task_id == task.id and
+            granted.rights.has(.surface_present))
+        {
+            resolved.surface_presentation_capability_id = capability_id;
+        }
     }
-    return .{ .capability_id = query_fallback, .service_id = query_service_id };
-}
-
-fn selectInputCapability(
-    task: *const task_runtime.TaskRecord,
-    capability_table: *const capability.CapabilityTable,
-    now_ticks: u64,
-) u64 {
-    for (task.capabilityIds()) |capability_id| {
-        const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
-        if (granted.target.kind != .task or granted.target.id != task.id) continue;
-        if (granted.scope.task_id != task.id or !granted.rights.has(.input_recv)) continue;
-        return capability_id;
+    if (resolved.bootstrap_capability_id == 0) {
+        resolved.bootstrap_capability_id = query_fallback;
+        resolved.bootstrap_service_id = query_service_id;
     }
-    return 0;
-}
-
-fn selectSurfacePresentationCapability(
-    task: *const task_runtime.TaskRecord,
-    capability_table: *const capability.CapabilityTable,
-    now_ticks: u64,
-) u64 {
-    const surface_id = task.ui_surface_id orelse return 0;
-    if (surface_id == 0) return 0;
-    for (task.capabilityIds()) |capability_id| {
-        const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
-        if (granted.target.kind != .task or granted.target.id != task.id) continue;
-        if (granted.scope.task_id != task.id or !granted.rights.has(.surface_present)) continue;
-        return capability_id;
-    }
-    return 0;
+    return resolved;
 }
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
@@ -1110,11 +1113,21 @@ test "executor separates service, input, and surface presentation authority" {
     try runtime.grantCapability(task.id, input_authority.id);
     try runtime.grantCapability(task.id, presentation_authority.id);
 
-    const bootstrap = selectBootstrapCapability(task, &capabilities, 10);
-    try std.testing.expectEqual(service_authority.id, bootstrap.capability_id);
-    try std.testing.expectEqual(@as(u64, 9), bootstrap.service_id);
-    try std.testing.expectEqual(input_authority.id, selectInputCapability(task, &capabilities, 10));
-    try std.testing.expectEqual(presentation_authority.id, selectSurfacePresentationCapability(task, &capabilities, 10));
+    var authorities = resolveMailboxAuthorities(task, &capabilities, 10);
+    try std.testing.expectEqual(service_authority.id, authorities.bootstrap_capability_id);
+    try std.testing.expectEqual(@as(u64, 9), authorities.bootstrap_service_id);
+    try std.testing.expectEqual(input_authority.id, authorities.input_capability_id);
+    try std.testing.expectEqual(presentation_authority.id, authorities.surface_presentation_capability_id);
+
+    try capabilities.revokeGrant(service_authority.id);
+    authorities = resolveMailboxAuthorities(task, &capabilities, 10);
+    try std.testing.expectEqual(query_authority.id, authorities.bootstrap_capability_id);
+    try std.testing.expectEqual(@as(u64, 8), authorities.bootstrap_service_id);
+    try std.testing.expectEqual(input_authority.id, authorities.input_capability_id);
+    try std.testing.expectEqual(presentation_authority.id, authorities.surface_presentation_capability_id);
+
+    authorities = resolveMailboxAuthorities(task, &capabilities, 101);
+    try std.testing.expectEqual(MailboxAuthorities{}, authorities);
 }
 
 test "executor matches userspace counters by stage and pulse" {

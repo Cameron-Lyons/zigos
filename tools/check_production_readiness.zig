@@ -1747,7 +1747,7 @@ fn validateNuc11tnki5KernelProofSources(
         source: []const u8,
         snippet: []const u8,
     }{
-        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "selectInputCapability" },
+        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.input_recv)" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "mailbox_ptr.input_capability_id" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "last_yield_disposition" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "last_yield_ui_revision" },
@@ -3212,7 +3212,7 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 4" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 192" },
-        .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = "selectSurfacePresentationCapability" },
+        .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.surface_present)" },
         .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn presentUiState(" },
         .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const input = drainFocusedInput();" },
         .{ .path = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn presentation(" },
