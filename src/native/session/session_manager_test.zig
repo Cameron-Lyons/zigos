@@ -145,6 +145,45 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqualStrings("stable-b", base_manager.slots[base_manager.inactiveSlotIndex()].labelSlice());
 }
 
+test "surface authority provisioning follows lifecycle generations at stable task count" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+
+    session_manager.boot();
+    const manager = session_manager.system();
+    const runtime = manager.runtimePtr();
+    const review_task = session_manager.testing.findTask("permission-review").?;
+    const review_task_id = review_task.id;
+    const initial_task_count = runtime.taskCount();
+    const initial_capability_id = manager.surfacePresentationCapabilityForTask(review_task_id, 0).?;
+    try std.testing.expectEqual(runtime.taskLifecycleGeneration(), manager.surface_authority_scanned_lifecycle_generation);
+
+    try std.testing.expect(try runtime.revokeCapability(review_task_id, initial_capability_id));
+    try manager.capabilityTablePtr().revokeGrant(initial_capability_id);
+    try std.testing.expect(manager.surfacePresentationCapabilityForTask(review_task_id, 0) == null);
+
+    try std.testing.expect(try runtime.suspendTask(review_task_id, 100));
+    _ = manager.runUserspaceScheduler(100);
+    try std.testing.expectEqual(initial_task_count, runtime.taskCount());
+    try std.testing.expectEqual(runtime.taskLifecycleGeneration(), manager.surface_authority_scanned_lifecycle_generation);
+    try std.testing.expect(manager.surfacePresentationCapabilityForTask(review_task_id, 100) == null);
+
+    try std.testing.expect(try runtime.resumeTask(review_task_id, 101));
+    _ = manager.runUserspaceScheduler(101);
+    try std.testing.expectEqual(initial_task_count, runtime.taskCount());
+    try std.testing.expectEqual(runtime.taskLifecycleGeneration(), manager.surface_authority_scanned_lifecycle_generation);
+    try std.testing.expect(manager.surfacePresentationCapabilityForTask(review_task_id, 101) != null);
+
+    var snapshot = task_runtime.Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    const scanned_generation = manager.surface_authority_scanned_lifecycle_generation;
+    runtime.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(initial_task_count, runtime.taskCount());
+    try std.testing.expect(runtime.taskLifecycleGeneration() != scanned_generation);
+    _ = manager.runUserspaceScheduler(102);
+    try std.testing.expectEqual(runtime.taskLifecycleGeneration(), manager.surface_authority_scanned_lifecycle_generation);
+}
+
 test "bootstrap scenario world wires storage sync recovery and policy flows explicitly" {
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();
