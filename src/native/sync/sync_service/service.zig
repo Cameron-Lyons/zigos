@@ -99,6 +99,7 @@ const ReplicaIndex = sync_indexes.ReplicaIndex;
 const ReplicaScopeIndex = sync_indexes.ReplicaScopeIndex;
 const TransportFramePathIndex = sync_indexes.TransportFramePathIndex;
 const TransportFrameTargetIndex = sync_indexes.TransportFrameTargetIndex;
+const InboundSourceHighWaterIndex = sync_indexes.InboundSourceHighWaterIndex;
 pub const Service = ServiceWith(.{});
 
 fn transportFrameSlotIdLessThan(
@@ -107,6 +108,11 @@ fn transportFrameSlotIdLessThan(
     right_slot_index: usize,
 ) bool {
     return slots[left_slot_index].frame.id < slots[right_slot_index].frame.id;
+}
+
+fn sourceFrameOutsideReplayWindow(source_frame_id: u64, high_water: u64) bool {
+    if (high_water < state_support.TRANSPORT_REPLAY_WINDOW) return false;
+    return source_frame_id <= high_water - state_support.TRANSPORT_REPLAY_WINDOW;
 }
 
 const sync_port = @import("port.zig");
@@ -182,6 +188,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         inbound_transport_path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
         outbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
         inbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
+        inbound_source_high_water_index: InboundSourceHighWaterIndex = InboundSourceHighWaterIndex.init(),
         outbound_transport_frame_count: usize = 0,
         inbound_transport_frame_count: usize = 0,
         next_outbound_transport_frame_slot_index: usize = 0,
@@ -1656,6 +1663,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.inbound_transport_path_index.reset();
             self.outbound_transport_target_index.reset();
             self.inbound_transport_target_index.reset();
+            self.inbound_source_high_water_index.reset();
             self.outbound_transport_frame_count = 0;
             self.inbound_transport_frame_count = 0;
             self.rebuildTransportFrameQueueIndexes(.outbound);
@@ -1681,7 +1689,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 self.indexTransportFramePathSlot(queue_kind, slot_index);
                 switch (queue_kind) {
                     .outbound => self.indexOutboundTransportTargetSlot(slot_index),
-                    .inbound => self.indexInboundTransportTargetSlot(slot_index),
+                    .inbound => {
+                        self.indexInboundTransportTargetSlot(slot_index);
+                        self.indexInboundSourceHighWaterSlot(slot_index);
+                    },
                 }
             }
             self.transportFrameSlotCountPtr(queue_kind).* = count;
@@ -1723,7 +1734,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.indexTransportFramePathSlot(queue_kind, slot_index);
             switch (queue_kind) {
                 .outbound => self.indexOutboundTransportTargetSlot(slot_index),
-                .inbound => self.indexInboundTransportTargetSlot(slot_index),
+                .inbound => {
+                    self.indexInboundTransportTargetSlot(slot_index);
+                    self.indexInboundSourceHighWaterSlot(slot_index);
+                },
             }
             self.incrementTransportFrameSlotCount(queue_kind);
             self.commitTransportFrameId(frame_id);
@@ -1772,6 +1786,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
             const index = victim_index orelse return null;
             self.unindexTransportFramePathSlot(.inbound, index);
+            self.unindexInboundSourceHighWaterSlot(index);
             self.unindexInboundTransportTargetSlot(index);
             _ = frames.removeIndex(index);
             self.decrementTransportFrameSlotCount(.inbound);
@@ -1782,7 +1797,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         fn inboundFrameOutsideReplayWindow(self: *const Self, frame: *const state_support.TransportFrame) bool {
             const high_water = self.latestInboundSourceFrameId(frame.workspace_id, frame.source_device, frame.target_device);
-            return frame.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= high_water;
+            return sourceFrameOutsideReplayWindow(frame.source_frame_id, high_water);
         }
 
         fn transportFrameSlotCount(self: *const Self, queue_kind: TransportQueueKind) usize {
@@ -1958,8 +1973,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         fn replayWindowRejects(self: *const Self, request: TransportFrameRequest) bool {
             if (request.source_frame_id == 0) return false;
             const latest_source_frame_id = self.latestInboundSourceFrameId(request.workspace_id, request.source_device, request.target_device);
-            if (latest_source_frame_id < state_support.TRANSPORT_REPLAY_WINDOW) return false;
-            return request.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= latest_source_frame_id;
+            return sourceFrameOutsideReplayWindow(request.source_frame_id, latest_source_frame_id);
         }
 
         fn latestInboundSourceFrameId(
@@ -1968,14 +1982,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             source_device: principal.PrincipalId,
             target_device: principal.PrincipalId,
         ) u64 {
-            var latest: u64 = 0;
-            var slot_index = self.inbound_transport_target_index.head(sync_indexes.transportFrameTargetLookupKey(workspace_id, target_device));
-            while (slot_index != indexed_arena.no_index) : (slot_index = self.inbound_transport_target_index.next(slot_index)) {
-                const slot = self.inboundTransportTargetIndexSlot(slot_index, workspace_id, target_device);
-                if (!slot.frame.source_device.eql(source_device)) continue;
-                latest = @max(latest, slot.frame.source_frame_id);
-            }
-            return latest;
+            const slot_index = self.inboundSourceHighWaterSlotIndex(workspace_id, source_device, target_device) orelse return 0;
+            return self.stateConst().inbound_transport_frames.slots[slot_index].frame.source_frame_id;
         }
 
         fn transportFrameSlotsConst(self: *const Self, queue_kind: TransportQueueKind) []const DurableTransportFrameSlot {
@@ -2052,6 +2060,75 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             )) {
                 native_util.impossibleByInvariant("inbound transport target index missing live slot");
             }
+        }
+
+        fn indexInboundSourceHighWaterSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("inbound source high-water update points outside slots");
+            const slot = &self.stateConst().inbound_transport_frames.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("inbound source high-water update requires a live slot");
+            const frame = &slot.frame;
+            const key = sync_indexes.inboundSourceHighWaterLookupKey(frame.workspace_id, frame.source_device, frame.target_device);
+            if (self.inboundSourceHighWaterSlotIndex(frame.workspace_id, frame.source_device, frame.target_device)) |current_index| {
+                const current = &self.stateConst().inbound_transport_frames.slots[current_index].frame;
+                if (current.source_frame_id >= frame.source_frame_id) return;
+                if (!self.inbound_source_high_water_index.remove(key, current_index)) {
+                    native_util.impossibleByInvariant("inbound source high-water index missing current slot");
+                }
+            }
+            if (!self.inbound_source_high_water_index.append(key, slot_index)) {
+                native_util.impossibleByInvariant("inbound source high-water index capacity covers inbound source scopes");
+            }
+        }
+
+        fn unindexInboundSourceHighWaterSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("inbound source high-water removal points outside slots");
+            const slot = &self.stateConst().inbound_transport_frames.slots[slot_index];
+            if (!slot.in_use) return;
+            const frame = &slot.frame;
+            const key = sync_indexes.inboundSourceHighWaterLookupKey(frame.workspace_id, frame.source_device, frame.target_device);
+            const current_index = self.inboundSourceHighWaterSlotIndex(frame.workspace_id, frame.source_device, frame.target_device) orelse return;
+            if (current_index != slot_index) return;
+            if (!self.inbound_source_high_water_index.remove(key, slot_index)) {
+                native_util.impossibleByInvariant("inbound source high-water index missing removed slot");
+            }
+
+            var replacement_index: ?usize = null;
+            var target_slot_index = self.inbound_transport_target_index.head(sync_indexes.transportFrameTargetLookupKey(frame.workspace_id, frame.target_device));
+            while (target_slot_index != indexed_arena.no_index) : (target_slot_index = self.inbound_transport_target_index.next(target_slot_index)) {
+                if (target_slot_index == slot_index) continue;
+                const candidate = self.inboundTransportTargetIndexSlot(target_slot_index, frame.workspace_id, frame.target_device);
+                if (!candidate.frame.source_device.eql(frame.source_device)) continue;
+                if (replacement_index) |selected_index| {
+                    const selected = &self.stateConst().inbound_transport_frames.slots[selected_index];
+                    if (selected.frame.source_frame_id >= candidate.frame.source_frame_id) continue;
+                }
+                replacement_index = target_slot_index;
+            }
+            if (replacement_index) |selected_index| {
+                if (!self.inbound_source_high_water_index.append(key, selected_index)) {
+                    native_util.impossibleByInvariant("inbound source high-water replacement fits its existing scope bucket");
+                }
+            }
+        }
+
+        fn inboundSourceHighWaterSlotIndex(
+            self: *const Self,
+            workspace_id: u64,
+            source_device: principal.PrincipalId,
+            target_device: principal.PrincipalId,
+        ) ?usize {
+            const key = sync_indexes.inboundSourceHighWaterLookupKey(workspace_id, source_device, target_device);
+            var slot_index = self.inbound_source_high_water_index.head(key);
+            while (slot_index != indexed_arena.no_index) : (slot_index = self.inbound_source_high_water_index.next(slot_index)) {
+                if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("inbound source high-water index points outside slots");
+                const slot = &self.stateConst().inbound_transport_frames.slots[slot_index];
+                if (!slot.in_use) native_util.impossibleByInvariant("inbound source high-water index points at a free slot");
+                if (slot.frame.workspace_id != workspace_id) continue;
+                if (!slot.frame.source_device.eql(source_device)) continue;
+                if (!slot.frame.target_device.eql(target_device)) continue;
+                return slot_index;
+            }
+            return null;
         }
 
         fn indexTransportFramePathSlot(self: *Self, queue_kind: TransportQueueKind, slot_index: usize) void {
@@ -2212,4 +2289,63 @@ test "durable transport index rebuild restores frame id order after slot reuse" 
     try std.testing.expectEqual(first.id, copied[0].id);
     try std.testing.expectEqual(third.id, copied[1].id);
     try std.testing.expectEqual(fourth.id, copied[2].id);
+}
+
+test "inbound replay high-water index survives maximum identifiers and rebuilds" {
+    var service = Service.init(9_930, 9_931, .{ .kind = .service, .serial = 9_930 });
+    const source = principal.PrincipalId{ .kind = .device, .serial = 1 };
+    const other_source = principal.PrincipalId{ .kind = .device, .serial = 3 };
+    const target = principal.PrincipalId{ .kind = .device, .serial = 2 };
+    const base_request = TransportFrameRequest{
+        .source_frame_id = 100,
+        .workspace_id = 42,
+        .object_id = 80,
+        .version_id = 81,
+        .source_device = source,
+        .target_device = target,
+        .transport = .relay_assisted,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .path = "documents/replay-window.md",
+    };
+
+    _ = try service.enqueueTransportFrame(.inbound, base_request);
+    var request = base_request;
+    request.source_frame_id = 90;
+    request.object_id = 82;
+    request.version_id = 83;
+    _ = try service.enqueueTransportFrame(.inbound, request);
+    request.source_frame_id = std.math.maxInt(u64);
+    request.object_id = 84;
+    request.version_id = 85;
+    const maximum = try service.enqueueTransportFrame(.inbound, request);
+    request.source_frame_id = 77;
+    request.object_id = 86;
+    request.version_id = 87;
+    request.source_device = other_source;
+    _ = try service.enqueueTransportFrame(.inbound, request);
+
+    const source_key = sync_indexes.inboundSourceHighWaterLookupKey(42, source, target);
+    const other_source_key = sync_indexes.inboundSourceHighWaterLookupKey(42, other_source, target);
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_high_water_index.count(source_key));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_high_water_index.count(other_source_key));
+    try std.testing.expectEqual(std.math.maxInt(u64), service.latestInboundSourceFrameId(42, source, target));
+    try std.testing.expectEqual(@as(u64, 77), service.latestInboundSourceFrameId(42, other_source, target));
+
+    request = base_request;
+    request.source_frame_id = std.math.maxInt(u64) - (state_support.TRANSPORT_REPLAY_WINDOW - 1);
+    try std.testing.expect(!service.replayWindowRejects(request));
+    request.source_frame_id = std.math.maxInt(u64) - state_support.TRANSPORT_REPLAY_WINDOW;
+    try std.testing.expect(service.replayWindowRejects(request));
+
+    const maximum_slot_index = service.stateConst().inbound_transport_frames.slotIndexOf(state_support.transportFrameArenaKey(maximum.id)).?;
+    service.unindexInboundSourceHighWaterSlot(maximum_slot_index);
+    try std.testing.expectEqual(@as(u64, 100), service.latestInboundSourceFrameId(42, source, target));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_high_water_index.count(source_key));
+
+    service.rebuildTransportFrameIndexes();
+    try std.testing.expectEqual(std.math.maxInt(u64), service.latestInboundSourceFrameId(42, source, target));
+    try std.testing.expectEqual(@as(u64, 77), service.latestInboundSourceFrameId(42, other_source, target));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_high_water_index.count(source_key));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_source_high_water_index.count(other_source_key));
 }
