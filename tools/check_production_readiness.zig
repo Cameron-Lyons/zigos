@@ -271,6 +271,7 @@ pub fn main(init: std.process.Init) !void {
     try validateProdReadinessManifest(allocator, io, &errors, parsed_prod.value, parsed_coverage.value);
     try validateBenchmarkEnvironmentGate(allocator, io, &errors);
     try validateSyntheticUserspaceImageMarkers(allocator, io, &errors);
+    try validateEventLedgerRollover(allocator, io, &errors);
 
     if (errors.items.len > 0) {
         common.printErrors(errors.items);
@@ -289,6 +290,36 @@ pub fn main(init: std.process.Init) !void {
         "Production readiness OK: {d} tracks, {d} requirement references\n",
         .{ tracks.len, requirement_refs },
     );
+}
+
+fn validateEventLedgerRollover(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const source_path = "src/native/platform/event_ledger.zig";
+    const test_path = "src/native/platform/event_ledger_test.zig";
+    const source = try readRequiredSource(allocator, io, errors, source_path) orelse return;
+    const test_source = try readRequiredSource(allocator, io, errors, test_path) orelse return;
+    const required_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = source_path, .source = source, .snippet = "oldest_retained_sequence: u64 = 0" },
+        .{ .path = source_path, .source = source, .snippet = "self.events.slotIndexOf(oldest_sequence)" },
+        .{ .path = source_path, .source = source, .snippet = "fn nextOldestSequence(" },
+        .{ .path = test_path, .source = test_source, .snippet = "event ledger evicts oldest events instead of jamming past MAX_EVENTS" },
+        .{ .path = test_path, .source = test_source, .snippet = "ledger.oldest_retained_sequence" },
+    };
+    for (required_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Indexed event-ledger rollover must retain snippet in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    if (std.mem.indexOf(u8, source, "for (&self.events.slots, 0..) |*slot, index|") != null) {
+        try common.addError(errors, allocator, "Event-ledger rollover must not restore the full-slot oldest-event scan", .{});
+    }
 }
 
 fn validateBenchmarkEnvironmentGate(
