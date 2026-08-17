@@ -94,6 +94,18 @@ const ActiveGenerationBucket = struct {
     active_count: usize = 0,
 };
 
+fn activeGenerationBucketKey(bucket: *const ActiveGenerationBucket) u64 {
+    return generationKey(bucket.generation);
+}
+
+const ActiveGenerationBucketArena = indexed_arena.IndexedArenaWithKey(
+    u64,
+    ActiveGenerationBucket,
+    MAX_DELEGATIONS,
+    MAX_DELEGATIONS * 2,
+    activeGenerationBucketKey,
+);
+
 pub const Service = struct {
     next_delegation_id: u64 = 1,
     minimum_generation: u32 = 1,
@@ -101,7 +113,7 @@ pub const Service = struct {
     active_delegation_count: usize = 0,
     lowest_active_generation: u32 = NO_ACTIVE_GENERATION,
     delegation_generation_index: DelegationGenerationIndex = DelegationGenerationIndex.init(),
-    active_generation_buckets: [MAX_DELEGATIONS]ActiveGenerationBucket = [_]ActiveGenerationBucket{.{}} ** MAX_DELEGATIONS,
+    active_generation_buckets: ActiveGenerationBucketArena = ActiveGenerationBucketArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -236,12 +248,11 @@ pub const Service = struct {
         if (self.active_delegation_count == 0 or self.lowest_active_generation >= self.minimum_generation) return 0;
 
         var revoked_count: usize = 0;
-        var bucket_index: usize = 0;
-        while (bucket_index < self.active_generation_buckets.len) : (bucket_index += 1) {
-            const bucket = self.active_generation_buckets[bucket_index];
+        for (&self.active_generation_buckets.slots) |*bucket| {
             if (!bucket.in_use) continue;
             if (bucket.generation >= self.minimum_generation) continue;
-            revoked_count += try self.revokeActiveGeneration(bucket.generation, ledger, subject, tick, detail);
+            const generation = bucket.generation;
+            revoked_count += try self.revokeActiveGeneration(generation, ledger, subject, tick, detail);
         }
         return revoked_count;
     }
@@ -320,46 +331,35 @@ pub const Service = struct {
     }
 
     fn accountGeneration(self: *Service, generation: u32) void {
-        if (self.findGenerationBucket(generation)) |bucket| {
+        const key = generationKey(generation);
+        if (self.active_generation_buckets.get(key)) |bucket| {
             bucket.active_count += 1;
             return;
         }
-        for (&self.active_generation_buckets) |*bucket| {
-            if (bucket.in_use) continue;
-            bucket.* = .{
-                .in_use = true,
-                .generation = generation,
-                .active_count = 1,
-            };
-            return;
-        }
-        native_util.impossibleByInvariant("agent delegation active generation buckets cover active delegations");
+        const bucket = self.active_generation_buckets.reserve(key) orelse
+            native_util.impossibleByInvariant("agent delegation active generation buckets cover active delegations");
+        bucket.generation = generation;
+        bucket.active_count = 1;
     }
 
     fn unaccountGeneration(self: *Service, generation: u32) void {
-        const bucket = self.findGenerationBucket(generation) orelse native_util.impossibleByInvariant("agent delegation active generation bucket missing");
+        const key = generationKey(generation);
+        const bucket = self.active_generation_buckets.get(key) orelse native_util.impossibleByInvariant("agent delegation active generation bucket missing");
         if (bucket.active_count == 0) native_util.impossibleByInvariant("agent delegation active generation bucket underflow");
         bucket.active_count -= 1;
-        if (bucket.active_count == 0) bucket.* = .{};
-    }
-
-    fn findGenerationBucket(self: *Service, generation: u32) ?*ActiveGenerationBucket {
-        for (&self.active_generation_buckets) |*bucket| {
-            if (!bucket.in_use or bucket.generation != generation) continue;
-            return bucket;
+        if (bucket.active_count == 0 and !self.active_generation_buckets.remove(key)) {
+            native_util.impossibleByInvariant("agent delegation empty generation bucket remains indexed");
         }
-        return null;
     }
 
     fn refreshLowestActiveGenerationFromBuckets(self: *Service) void {
         var lowest = NO_ACTIVE_GENERATION;
-        for (&self.active_generation_buckets) |*bucket| {
+        for (&self.active_generation_buckets.slots) |*bucket| {
             if (!bucket.in_use) continue;
             lowest = @min(lowest, bucket.generation);
         }
         self.lowest_active_generation = lowest;
     }
-
 };
 
 fn generationKey(generation: u32) u64 {
@@ -726,6 +726,10 @@ test "agent delegation service kill switch walks active generation index" {
     try std.testing.expectEqual(@as(usize, 1), service.delegation_generation_index.count(generationKey(1)));
     try std.testing.expectEqual(@as(usize, 2), service.delegation_generation_index.count(generationKey(2)));
     try std.testing.expectEqual(@as(usize, 1), service.delegation_generation_index.count(generationKey(5)));
+    try std.testing.expectEqual(@as(usize, 3), service.active_generation_buckets.countInUse());
+    try std.testing.expectEqual(@as(usize, 2), service.active_generation_buckets.get(generationKey(2)).?.active_count);
+    const generation_one_bucket_slot = service.active_generation_buckets.slotIndexOf(generationKey(1)).?;
+    const generation_two_bucket_slot = service.active_generation_buckets.slotIndexOf(generationKey(2)).?;
 
     try std.testing.expectEqual(@as(usize, 3), try service.killSwitch(3, &ledger, subject, 41, "private indexed kill switch"));
     try std.testing.expect(stale_one.revoked);
@@ -737,6 +741,29 @@ test "agent delegation service kill switch walks active generation index" {
     try std.testing.expectEqual(@as(usize, 0), service.delegation_generation_index.count(generationKey(1)));
     try std.testing.expectEqual(@as(usize, 0), service.delegation_generation_index.count(generationKey(2)));
     try std.testing.expectEqual(@as(usize, 1), service.delegation_generation_index.count(generationKey(5)));
+    try std.testing.expectEqual(@as(usize, 1), service.active_generation_buckets.countInUse());
+    try std.testing.expect(service.active_generation_buckets.get(generationKey(1)) == null);
+    try std.testing.expect(service.active_generation_buckets.get(generationKey(2)) == null);
+    try std.testing.expectEqual(@as(usize, 1), service.active_generation_buckets.get(generationKey(5)).?.active_count);
+
+    const reused_generation = try service.authorize(&policies, subjects, .{
+        .subject = subject,
+        .task_id = 6105,
+        .session_id = 7105,
+        .autonomous_actions = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 512,
+        .delegation_generation = 7,
+        .user_visible_plan = true,
+    }, null);
+    const generation_seven_bucket_slot = service.active_generation_buckets.slotIndexOf(generationKey(7)).?;
+    try std.testing.expect(generation_seven_bucket_slot == generation_one_bucket_slot or generation_seven_bucket_slot == generation_two_bucket_slot);
+    try std.testing.expect(!reused_generation.revoked);
+    try std.testing.expectEqual(@as(usize, 2), service.active_generation_buckets.countInUse());
+    try std.testing.expectEqual(@as(usize, 2), service.activeCount());
+    try std.testing.expectEqual(@as(u32, 5), service.lowest_active_generation);
 
     const summary = ledger.userVisibleDiagnosticSummary();
     try std.testing.expectEqual(@as(usize, 3), summary.agent_session_events);
