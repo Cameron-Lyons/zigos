@@ -151,6 +151,7 @@ pub const USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH: u8 = 1;
 pub const STATIC_HANDOFF_STACK_INSTALLS_PER_BIND: u8 = 1;
 pub const STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS: u8 = 0;
 pub const STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
+pub const UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH: u8 = 0;
 pub const MappingHandle = indexed_arena.GenerationalHandle("UserspaceMappingHandle");
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
@@ -289,6 +290,7 @@ const MappingEntry = struct {
     last_fault_address: u32 = 0,
     last_fault_error_code: u32 = 0,
     mailbox_authority_cache: MailboxAuthorityCache = .{},
+    mailbox_publication_cache: MailboxPublicationCache = .{},
 
     fn pageDirectory(self: *const MappingEntry) *freestanding.paging.PageDirectory {
         return self.address_space.?.directory;
@@ -687,7 +689,8 @@ pub const Executor = struct {
         if (mapping.dispatch_metadata.bootstrap_mailbox_address == 0) return null;
 
         const authorities = resolveMailboxAuthoritiesCached(task, capability_table, now_ticks, &mapping.mailbox_authority_cache);
-        return prepareBootstrapMailboxUpdate(
+        return prepareCachedBootstrapMailboxUpdate(
+            &mapping.mailbox_publication_cache,
             mapping.dispatch_metadata.bootstrap_mailbox_address,
             mapping.resume_valid,
             task.component_class,
@@ -695,6 +698,7 @@ pub const Executor = struct {
             task.id,
             task.ui_surface_id orelse 0,
             authorities,
+            mapping.mailbox_authority_cache.authority_generation,
         );
     }
 
@@ -908,6 +912,46 @@ const BootstrapMailboxUpdate = struct {
     ui_surface_id: u64,
 };
 
+const MailboxPublicationCache = struct {
+    published_authority_generation: u64 = 0,
+    initialized: bool = false,
+};
+
+fn prepareCachedBootstrapMailboxUpdate(
+    cache: *MailboxPublicationCache,
+    address: u64,
+    preserve_runtime_state: bool,
+    component_class: task_runtime.ComponentClass,
+    contract_flags: u32,
+    task_id: u64,
+    ui_surface_id: u64,
+    authorities: MailboxAuthorities,
+    authority_generation: u64,
+) ?BootstrapMailboxUpdate {
+    if (authority_generation == 0) native_util.impossibleByInvariant("resolved mailbox authorities require a nonzero generation");
+    const update = prepareBootstrapMailboxUpdate(
+        address,
+        preserve_runtime_state,
+        component_class,
+        contract_flags,
+        task_id,
+        ui_surface_id,
+        authorities,
+    ) orelse return null;
+    if (preserve_runtime_state and
+        cache.initialized and
+        cache.published_authority_generation == authority_generation)
+    {
+        return null;
+    }
+
+    cache.* = .{
+        .published_authority_generation = authority_generation,
+        .initialized = true,
+    };
+    return update;
+}
+
 fn prepareBootstrapMailboxUpdate(
     address: u64,
     preserve_runtime_state: bool,
@@ -971,6 +1015,7 @@ pub const MailboxAuthorityCache = struct {
     resolved_at_ticks: u64 = 0,
     valid_until_ticks: u64 = 0,
     refresh_count: u64 = 0,
+    authority_generation: u64 = 0,
     initialized: bool = false,
 };
 
@@ -1007,6 +1052,10 @@ pub fn resolveMailboxAuthoritiesCached(
 
     const refresh_count = cache.refresh_count +| 1;
     const resolution = scanMailboxAuthorities(task, capability_table, now_ticks);
+    const authority_generation = if (cache.initialized and std.meta.eql(cache.authorities, resolution.authorities))
+        cache.authority_generation
+    else
+        nextMailboxAuthorityGeneration(cache.authority_generation);
     cache.* = .{
         .authorities = resolution.authorities,
         .task_id = task.id,
@@ -1015,9 +1064,15 @@ pub fn resolveMailboxAuthoritiesCached(
         .resolved_at_ticks = now_ticks,
         .valid_until_ticks = resolution.valid_until_ticks,
         .refresh_count = refresh_count,
+        .authority_generation = authority_generation,
         .initialized = true,
     };
     return resolution.authorities;
+}
+
+fn nextMailboxAuthorityGeneration(current: u64) u64 {
+    const next = current +% 1;
+    return if (next == 0) 1 else next;
 }
 
 fn scanMailboxAuthorities(
@@ -1381,6 +1436,102 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u8, 1), USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH);
 }
 
+test "mailbox publication cache suppresses unchanged resumed kernel writes" {
+    var mailbox = userspace_bootstrap_mailbox.Mailbox{};
+    var cache = MailboxPublicationCache{};
+    const address: u64 = @intCast(@intFromPtr(&mailbox));
+    const initial_authorities = MailboxAuthorities{
+        .bootstrap_capability_id = 201,
+        .bootstrap_service_id = 202,
+        .input_capability_id = 203,
+        .surface_presentation_capability_id = 204,
+    };
+
+    const first_launch = prepareCachedBootstrapMailboxUpdate(
+        &cache,
+        address,
+        false,
+        .app_component,
+        userspace_flags.FLAG_OWNS_UI_SURFACE,
+        205,
+        206,
+        initial_authorities,
+        1,
+    );
+    try std.testing.expect(first_launch != null);
+    writeBootstrapMailbox(first_launch);
+    try std.testing.expectEqual(@as(u64, 1), cache.published_authority_generation);
+
+    const first_launch_retry = prepareCachedBootstrapMailboxUpdate(
+        &cache,
+        address,
+        false,
+        .app_component,
+        userspace_flags.FLAG_OWNS_UI_SURFACE,
+        205,
+        206,
+        initial_authorities,
+        1,
+    );
+    try std.testing.expect(first_launch_retry != null);
+    writeBootstrapMailbox(first_launch_retry);
+    try std.testing.expectEqual(@as(u64, 1), cache.published_authority_generation);
+
+    mailbox.stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady);
+    mailbox.last_counter = 207;
+    const unchanged_resume = prepareCachedBootstrapMailboxUpdate(
+        &cache,
+        address,
+        true,
+        .app_component,
+        userspace_flags.FLAG_OWNS_UI_SURFACE,
+        205,
+        206,
+        initial_authorities,
+        1,
+    );
+    try std.testing.expect(unchanged_resume == null);
+    writeBootstrapMailbox(unchanged_resume);
+    try std.testing.expectEqual(@as(u64, 1), cache.published_authority_generation);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.steady)), mailbox.stage);
+    try std.testing.expectEqual(@as(u32, 207), mailbox.last_counter);
+
+    var refreshed_authorities = initial_authorities;
+    refreshed_authorities.input_capability_id = 208;
+    const authority_refresh = prepareCachedBootstrapMailboxUpdate(
+        &cache,
+        address,
+        true,
+        .app_component,
+        userspace_flags.FLAG_OWNS_UI_SURFACE,
+        205,
+        206,
+        refreshed_authorities,
+        2,
+    );
+    try std.testing.expect(authority_refresh != null);
+    writeBootstrapMailbox(authority_refresh);
+    try std.testing.expectEqual(@as(u64, 2), cache.published_authority_generation);
+    try std.testing.expectEqual(@as(u64, 208), mailbox.input_capability_id);
+    try std.testing.expectEqual(@as(u32, 207), mailbox.last_counter);
+
+    const unchanged_refreshed_resume = prepareCachedBootstrapMailboxUpdate(
+        &cache,
+        address,
+        true,
+        .app_component,
+        userspace_flags.FLAG_OWNS_UI_SURFACE,
+        205,
+        206,
+        refreshed_authorities,
+        2,
+    );
+    try std.testing.expect(unchanged_refreshed_resume == null);
+    writeBootstrapMailbox(unchanged_refreshed_resume);
+    try std.testing.expectEqual(@as(u64, 2), cache.published_authority_generation);
+    try std.testing.expectEqual(@as(u8, 0), UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH);
+}
+
 test "executor separates service, input, and surface presentation authority" {
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
@@ -1440,9 +1591,11 @@ test "executor separates service, input, and surface presentation authority" {
     try std.testing.expectEqual(input_authority.id, authorities.input_capability_id);
     try std.testing.expectEqual(presentation_authority.id, authorities.surface_presentation_capability_id);
     try std.testing.expectEqual(@as(u64, 1), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 1), cache.authority_generation);
 
     _ = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
     try std.testing.expectEqual(@as(u64, 1), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 1), cache.authority_generation);
 
     try capabilities.revokeGrant(service_authority.id);
     authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
@@ -1451,10 +1604,12 @@ test "executor separates service, input, and surface presentation authority" {
     try std.testing.expectEqual(input_authority.id, authorities.input_capability_id);
     try std.testing.expectEqual(presentation_authority.id, authorities.surface_presentation_capability_id);
     try std.testing.expectEqual(@as(u64, 2), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 2), cache.authority_generation);
 
     authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 101, &cache);
     try std.testing.expectEqual(MailboxAuthorities{}, authorities);
     try std.testing.expectEqual(@as(u64, 3), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 3), cache.authority_generation);
 
     const future_authority = try capabilities.mintBootRoot(.{
         .holder = task.owner,
@@ -1469,18 +1624,23 @@ test "executor separates service, input, and surface presentation authority" {
     try std.testing.expectEqual(MailboxAuthorities{}, authorities);
     try std.testing.expectEqual(@as(u64, 119), cache.valid_until_ticks);
     try std.testing.expectEqual(@as(u64, 4), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 3), cache.authority_generation);
     _ = resolveMailboxAuthoritiesCached(task, &capabilities, 119, &cache);
     try std.testing.expectEqual(@as(u64, 4), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 3), cache.authority_generation);
 
     authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 120, &cache);
     try std.testing.expectEqual(future_authority.id, authorities.bootstrap_capability_id);
     try std.testing.expectEqual(@as(u64, 10), authorities.bootstrap_service_id);
     try std.testing.expectEqual(@as(u64, 5), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 4), cache.authority_generation);
 
     try std.testing.expect(try runtime.revokeCapability(task.id, future_authority.id));
     authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 120, &cache);
     try std.testing.expectEqual(MailboxAuthorities{}, authorities);
     try std.testing.expectEqual(@as(u64, 6), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 5), cache.authority_generation);
+    try std.testing.expectEqual(@as(u64, 1), nextMailboxAuthorityGeneration(std.math.maxInt(u64)));
 }
 
 test "executor matches userspace counters by stage and pulse" {
@@ -1528,7 +1688,8 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
             .bootstrap_mailbox_address = 0x4000_3000,
             .contract_flags = userspace_flags.FLAG_NX_PROOF_PROBE,
         },
-        .mailbox_authority_cache = .{ .initialized = true, .refresh_count = 7 },
+        .mailbox_authority_cache = .{ .initialized = true, .refresh_count = 7, .authority_generation = 7 },
+        .mailbox_publication_cache = .{ .initialized = true, .published_authority_generation = 7 },
     };
     executor.rebuildMappingIndex();
     const retired_handle = executor.mappingHandle(42).?;
@@ -1551,6 +1712,8 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
     try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == null);
     try std.testing.expectEqual(MappingDispatchMetadata{}, executor.mappings[0].dispatch_metadata);
     try std.testing.expectEqual(@as(u64, 0), executor.mappings[0].mailbox_authority_cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 0), executor.mappings[0].mailbox_authority_cache.authority_generation);
+    try std.testing.expectEqual(@as(u64, 0), executor.mappings[0].mailbox_publication_cache.published_authority_generation);
 
     executor.retireAddressSpace(event);
     const reused_generation = executor.mappings[0].handle_generation;
