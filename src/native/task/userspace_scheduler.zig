@@ -92,6 +92,7 @@ const Slot = struct {
     in_use: bool = false,
     task_id: u64 = 0,
     task_handle: task_runtime.TaskHandle = .{},
+    mapping_handle: userspace_executor.MappingHandle = .{},
     resource_class: accelerator_scheduler.ResourceClass = .foreground_interactive,
     queued_ready: bool = false,
     prev_ready_index: usize = no_index,
@@ -331,6 +332,7 @@ pub const Scheduler = struct {
         if (slot.queued_ready and slot.resource_class != task.resourceClass()) {
             self.unlinkReadyIndex(slot_index);
         }
+        if (!slot.task_handle.eql(task_handle)) slot.mapping_handle = .{};
         slot.task_handle = task_handle;
         slot.resource_class = task.resourceClass();
         slot.last_wake_tick = now_ticks;
@@ -448,19 +450,25 @@ pub const Scheduler = struct {
         if (!self.initialized) return .unavailable;
         const runtime = self.runtime_ptr orelse return .unavailable;
         const task = runtime.findConst(task_id) orelse return .unavailable;
-        return self.executePreparedTask(task, now_ticks);
+        var uncached_mapping_handle = userspace_executor.MappingHandle{};
+        const mapping_handle = if (self.slots.get(task_id)) |slot|
+            &slot.mapping_handle
+        else
+            &uncached_mapping_handle;
+        return self.executePreparedTask(task, mapping_handle, now_ticks);
     }
 
     fn executePreparedTask(
         self: *Scheduler,
         task: *const task_runtime.TaskRecord,
+        mapping_handle: *userspace_executor.MappingHandle,
         now_ticks: u64,
     ) userspace_executor.ExecutionOutcome {
         if (!self.initialized) return .unavailable;
         const catalog = self.catalog_ptr orelse return .unavailable;
         const runtime = self.runtime_ptr orelse return .unavailable;
         const capability_table = self.capability_table_ptr orelse return .unavailable;
-        return self.executor.executeTask(catalog, runtime, capability_table, task, now_ticks);
+        return self.executor.executeTask(catalog, runtime, capability_table, task, mapping_handle, now_ticks);
     }
 
     pub fn runNext(self: *Scheduler, now_ticks: u64) bool {
@@ -513,7 +521,7 @@ pub const Scheduler = struct {
 
             const dispatch_memory_bandwidth_units = memoryBandwidthUnitsFor(task);
             self.accountDeadline(slot, now_ticks);
-            const outcome = self.executePreparedTask(task, now_ticks);
+            const outcome = self.executePreparedTask(task, &slot.mapping_handle, now_ticks);
             const yielded = outcome.handedOff();
             self.last_dispatch_tick = now_ticks;
             slot.dispatch_count += 1;
@@ -1505,6 +1513,7 @@ test "userspace scheduler refreshes task handles after runtime restore" {
     try std.testing.expect(scheduler.registerTask(task_id));
     const slot = scheduler.slots.get(task_id).?;
     const original_handle = slot.task_handle;
+    slot.mapping_handle = userspace_executor.MappingHandle.fromParts(3, 9);
 
     var snapshot = task_runtime.Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
@@ -1514,6 +1523,7 @@ test "userspace scheduler refreshes task handles after runtime restore" {
 
     try std.testing.expect(scheduler.wakeTask(task_id, .external_event, 1, 0));
     try std.testing.expect(slot.task_handle.eql(restored_handle));
+    try std.testing.expect(slot.mapping_handle.isZero());
 }
 
 test "userspace scheduler rejects stale handles after task id reuse" {
