@@ -241,6 +241,8 @@ pub const indexed_hot_path_tables = .{
         .tracks_visible_window_count = @hasField(compositor_session.Session, "visible_window_count"),
         .supports_indexed_task_window_ownership = @hasDecl(compositor_session.Session, "taskOwnsVisibleWindow"),
         .supports_indexed_active_window_order = @hasDecl(compositor_session.Session, "activeWindowOrderIndex"),
+        .uses_surface_task_index = @hasField(compositor_session.Session, "surface_task_index"),
+        .tracks_active_surface_chain = @hasField(compositor_session.Session, "active_surface_head"),
     },
     .input_router = .{
         .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
