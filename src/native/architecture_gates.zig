@@ -240,6 +240,7 @@ pub const indexed_hot_path_tables = .{
         .uses_window_review_item_index = @hasField(compositor_session.Session, "window_review_item_index"),
         .tracks_visible_window_count = @hasField(compositor_session.Session, "visible_window_count"),
         .supports_indexed_task_window_ownership = @hasDecl(compositor_session.Session, "taskOwnsVisibleWindow"),
+        .supports_indexed_active_window_order = @hasDecl(compositor_session.Session, "activeWindowOrderIndex"),
     },
     .input_router = .{
         .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
