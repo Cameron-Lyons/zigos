@@ -456,6 +456,18 @@ pub const Runtime = struct {
         return self.tasks.handleForIndex(slot_index);
     }
 
+    pub fn findByHandle(self: *Runtime, handle: TaskHandle, expected_task_id: u64) ?*TaskRecord {
+        const slot = self.tasks.getByHandle(handle) orelse return null;
+        if (slot.task.id != expected_task_id) return null;
+        return &slot.task;
+    }
+
+    pub fn findConstByHandle(self: *const Runtime, handle: TaskHandle, expected_task_id: u64) ?*const TaskRecord {
+        const slot = self.tasks.getConstByHandle(handle) orelse return null;
+        if (slot.task.id != expected_task_id) return null;
+        return &slot.task;
+    }
+
     pub fn findConst(self: *const Runtime, task_id: u64) ?*const TaskRecord {
         if (self.indexedTaskSlotConst(task_id)) |slot| return &slot.task;
         self.debugAssertTaskIndexMissAbsent(task_id);
@@ -1144,6 +1156,35 @@ test "task runtime crosses the first task slab page with indexed handles" {
     try std.testing.expect(runtime.find(last_task_id) != null);
     try std.testing.expectEqual(last_task_id, runtime.findByOwner(last_owner).?.id);
     try std.testing.expect(runtime.taskHandle(last_task_id) != null);
+}
+
+test "task handles reject stale task records across restore and reuse" {
+    var runtime = Runtime.init();
+    const first = try createTaskIdTestTask(&runtime, 1);
+    const task_id = first.id;
+    const first_handle = runtime.taskHandle(task_id).?;
+
+    try std.testing.expectEqual(task_id, runtime.findByHandle(first_handle, task_id).?.id);
+    try std.testing.expectEqual(task_id, runtime.findConstByHandle(first_handle, task_id).?.id);
+    try std.testing.expect(runtime.findByHandle(first_handle, task_id + 1) == null);
+
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    runtime.restoreFromSnapshot(&snapshot);
+
+    try std.testing.expect(runtime.findByHandle(first_handle, task_id) == null);
+    const restored_handle = runtime.taskHandle(task_id).?;
+    try std.testing.expect(!restored_handle.eql(first_handle));
+    try std.testing.expectEqual(task_id, runtime.findByHandle(restored_handle, task_id).?.id);
+
+    runtime.reset();
+    try std.testing.expect(runtime.findByHandle(restored_handle, task_id) == null);
+    const replacement = try createTaskIdTestTask(&runtime, 2);
+    const replacement_handle = runtime.taskHandle(replacement.id).?;
+    try std.testing.expectEqual(task_id, replacement.id);
+    try std.testing.expect(!replacement_handle.eql(restored_handle));
+    try std.testing.expect(runtime.findByHandle(restored_handle, replacement.id) == null);
+    try std.testing.expectEqual(replacement.id, runtime.findByHandle(replacement_handle, replacement.id).?.id);
 }
 
 test "task runtime ids are monotonic and exhaust without wrapping" {
