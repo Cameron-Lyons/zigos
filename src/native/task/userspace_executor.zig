@@ -149,9 +149,13 @@ const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
 const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
 pub const USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH: u8 = 1;
 pub const STATIC_HANDOFF_STACK_INSTALLS_PER_BIND: u8 = 1;
+pub const STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS: u8 = 0;
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
     ImageExtentInvalid,
+    AddressSpaceOwnerInvalid,
+    AddressSpaceImageMismatch,
+    InitialContextInvalid,
 };
 
 var trap_stack: [TRAP_STACK_BYTES]u8 align(PAGE_SIZE) = [_]u8{0} ** TRAP_STACK_BYTES;
@@ -257,10 +261,20 @@ const MappingState = enum(u8) {
     retire_pending,
 };
 
+const MappingDispatchMetadata = struct {
+    owner_task_id: u64 = 0,
+    image_id: u64 = 0,
+    initial_instruction_pointer: u32 = 0,
+    initial_stack_pointer: u32 = 0,
+    bootstrap_mailbox_address: u32 = 0,
+    contract_flags: u32 = 0,
+};
+
 const MappingEntry = struct {
     state: MappingState = .free,
     address_space_id: u64 = 0,
     address_space: ?freestanding.paging.UserAddressSpace = null,
+    dispatch_metadata: MappingDispatchMetadata = .{},
     resume_valid: bool = false,
     resume_instruction_pointer: u32 = 0,
     resume_stack_pointer: u32 = 0,
@@ -509,21 +523,29 @@ pub const Executor = struct {
         }
         if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
 
-        const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
-        const image = catalog.findById(task.launch.image_id) orelse return .unavailable;
-        if (!image.elf_file.isPresent()) return .unavailable;
+        const mapping = self.findMapping(task.address_space_id) orelse blk: {
+            const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
+            if (address_space.owner_task_id != task.id or address_space.image_id != task.launch.image_id) return .unavailable;
+            const image = catalog.findById(task.launch.image_id) orelse return .unavailable;
+            if (!image.elf_file.isPresent()) return .unavailable;
+            break :blk self.ensureMaterialized(address_space, image) catch return .unavailable;
+        };
+        if (mapping.dispatch_metadata.owner_task_id != task.id or
+            mapping.dispatch_metadata.image_id != task.launch.image_id)
+        {
+            native_util.impossibleByInvariant("materialized userspace mapping identity changed without retirement");
+        }
 
-        const mapping = self.ensureMaterialized(address_space, image) catch return .unavailable;
-        const mailbox_update = self.prepareBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
+        const mailbox_update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks);
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
         const instruction_pointer = if (mapping.resume_valid)
             mapping.resume_instruction_pointer
         else
-            @as(u32, @intCast(address_space.entry_point));
+            mapping.dispatch_metadata.initial_instruction_pointer;
         const stack_pointer = if (mapping.resume_valid)
             mapping.resume_stack_pointer
         else
-            @as(u32, @intCast(address_space.stack_pointer - 16));
+            mapping.dispatch_metadata.initial_stack_pointer;
         self.pending_user_context64 = if (mapping.resume_valid)
             mapping.user_context64
         else
@@ -533,8 +555,8 @@ pub const Executor = struct {
             };
 
         const nx_probe_target = if (include_verification_evidence and
-            (image.contract_flags & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
-            std.math.cast(u32, image.bootstrap_mailbox_address) orelse return .unavailable
+            (mapping.dispatch_metadata.contract_flags & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
+            mapping.dispatch_metadata.bootstrap_mailbox_address
         else
             0;
 
@@ -646,20 +668,19 @@ pub const Executor = struct {
     fn prepareBootstrapMailbox(
         self: *Executor,
         mapping: *MappingEntry,
-        image: *const userspace_loader.ImageRecord,
         task: *const task_runtime.TaskRecord,
         capability_table: *const capability.CapabilityTable,
         now_ticks: u64,
     ) ?BootstrapMailboxUpdate {
         _ = self;
-        if (image.bootstrap_mailbox_address == 0) return null;
+        if (mapping.dispatch_metadata.bootstrap_mailbox_address == 0) return null;
 
         const authorities = resolveMailboxAuthoritiesCached(task, capability_table, now_ticks, &mapping.mailbox_authority_cache);
         return prepareBootstrapMailboxUpdate(
-            image.bootstrap_mailbox_address,
+            mapping.dispatch_metadata.bootstrap_mailbox_address,
             mapping.resume_valid,
             task.component_class,
-            image.contract_flags,
+            mapping.dispatch_metadata.contract_flags,
             task.id,
             task.ui_surface_id orelse 0,
             authorities,
@@ -671,7 +692,21 @@ pub const Executor = struct {
         address_space: *const task_runtime.AddressSpaceRecord,
         image: *const userspace_loader.ImageRecord,
     ) MaterializationError!*MappingEntry {
-        if (self.findMapping(address_space.id)) |entry| return entry;
+        const dispatch_metadata = try prepareMappingDispatchMetadata(
+            address_space.owner_task_id,
+            address_space.image_id,
+            address_space.entry_point,
+            address_space.stack_pointer,
+            image.id,
+            image.bootstrap_mailbox_address,
+            image.contract_flags,
+        );
+        if (self.findMapping(address_space.id)) |entry| {
+            if (!std.meta.eql(entry.dispatch_metadata, dispatch_metadata)) {
+                native_util.impossibleByInvariant("materialized userspace dispatch metadata changed without retirement");
+            }
+            return entry;
+        }
 
         var slot_index: ?usize = null;
         for (self.mappings, 0..) |entry, index| {
@@ -685,6 +720,7 @@ pub const Executor = struct {
         entry.* = .{
             .state = .building,
             .address_space_id = address_space.id,
+            .dispatch_metadata = dispatch_metadata,
         };
         errdefer {
             if (entry.address_space) |*space| {
@@ -773,6 +809,28 @@ pub const Executor = struct {
         self.last_fault_error_code = 0;
     }
 };
+
+fn prepareMappingDispatchMetadata(
+    owner_task_id: u64,
+    address_space_image_id: u64,
+    entry_point: u64,
+    stack_pointer: u64,
+    image_id: u64,
+    bootstrap_mailbox_address: u64,
+    contract_flags: u32,
+) MaterializationError!MappingDispatchMetadata {
+    if (owner_task_id == 0) return error.AddressSpaceOwnerInvalid;
+    if (image_id == 0 or address_space_image_id != image_id) return error.AddressSpaceImageMismatch;
+    const initial_stack_pointer = std.math.sub(u64, stack_pointer, 16) catch return error.InitialContextInvalid;
+    return .{
+        .owner_task_id = owner_task_id,
+        .image_id = image_id,
+        .initial_instruction_pointer = std.math.cast(u32, entry_point) orelse return error.InitialContextInvalid,
+        .initial_stack_pointer = std.math.cast(u32, initial_stack_pointer) orelse return error.InitialContextInvalid,
+        .bootstrap_mailbox_address = std.math.cast(u32, bootstrap_mailbox_address) orelse return error.InitialContextInvalid,
+        .contract_flags = contract_flags,
+    };
+}
 
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
@@ -1174,6 +1232,46 @@ fn publishRootActiveTaskId(task_id: u64) void {
     }
 }
 
+test "mapping dispatch metadata is compact and bound to one address-space image" {
+    const metadata = try prepareMappingDispatchMetadata(
+        40,
+        41,
+        0x4000_1000,
+        0x7FFF_F000,
+        41,
+        0x4000_3000,
+        userspace_flags.FLAG_NX_PROOF_PROBE,
+    );
+    try std.testing.expectEqual(@as(u64, 40), metadata.owner_task_id);
+    try std.testing.expectEqual(@as(u64, 41), metadata.image_id);
+    try std.testing.expectEqual(@as(u32, 0x4000_1000), metadata.initial_instruction_pointer);
+    try std.testing.expectEqual(@as(u32, 0x7FFF_EFF0), metadata.initial_stack_pointer);
+    try std.testing.expectEqual(@as(u32, 0x4000_3000), metadata.bootstrap_mailbox_address);
+    try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contract_flags);
+    try std.testing.expectEqual(@as(u8, 0), STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS);
+
+    try std.testing.expectError(
+        error.AddressSpaceOwnerInvalid,
+        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0),
+    );
+    try std.testing.expectError(
+        error.AddressSpaceImageMismatch,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0),
+    );
+    try std.testing.expectError(
+        error.InitialContextInvalid,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0),
+    );
+    try std.testing.expectError(
+        error.InitialContextInvalid,
+        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0),
+    );
+    try std.testing.expectError(
+        error.InitialContextInvalid,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0),
+    );
+}
+
 test "mailbox publication preserves resume state and resets first launch" {
     var mailbox = userspace_bootstrap_mailbox.Mailbox{
         .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady),
@@ -1366,6 +1464,14 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
     executor.mappings[0] = .{
         .state = .live,
         .address_space_id = 42,
+        .dispatch_metadata = .{
+            .owner_task_id = 8,
+            .image_id = 9,
+            .initial_instruction_pointer = 0x4000_1000,
+            .initial_stack_pointer = 0x7FFF_EFF0,
+            .bootstrap_mailbox_address = 0x4000_3000,
+            .contract_flags = userspace_flags.FLAG_NX_PROOF_PROBE,
+        },
         .mailbox_authority_cache = .{ .initialized = true, .refresh_count = 7 },
     };
     executor.rebuildMappingIndex();
@@ -1377,6 +1483,7 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
     executor.retireAddressSpace(event);
     try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
     try std.testing.expect(executor.findMapping(42) == null);
+    try std.testing.expectEqual(MappingDispatchMetadata{}, executor.mappings[0].dispatch_metadata);
     try std.testing.expectEqual(@as(u64, 0), executor.mappings[0].mailbox_authority_cache.refresh_count);
 
     executor.retireAddressSpace(event);

@@ -125,6 +125,7 @@ pub const indexed_hot_path_tables = .{
         .activates_one_user_address_space_per_dispatch = userspace_executor.USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH == 1,
         .accepts_prevalidated_task_records = @typeInfo(@TypeOf(userspace_executor.Executor.executeTask)).@"fn".params[4].type.? == *const task_runtime.TaskRecord,
         .installs_static_handoff_stack_once_per_bind = userspace_executor.STATIC_HANDOFF_STACK_INSTALLS_PER_BIND == 1,
+        .avoids_steady_address_space_image_indexes = userspace_executor.STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS == 0,
     },
     .userspace_loader = .{
         .uses_image_arena = @hasDecl(@FieldType(userspace_loader.Catalog, "images"), "reserveIndex"),
