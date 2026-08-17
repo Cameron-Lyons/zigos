@@ -89,7 +89,7 @@ pub const SessionManager = struct {
     compositor_broker_service_id: u64 = 0,
     input_authority_failures: usize = 0,
     surface_authority_failures: usize = 0,
-    surface_authority_scanned_task_count: usize = 0,
+    surface_authority_scanned_lifecycle_generation: u64 = 0,
 
     pub fn init() SessionManager {
         return .{};
@@ -220,7 +220,7 @@ pub const SessionManager = struct {
 
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
         _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(&self.runtime_context.runtime);
-        if (self.runtime_context.runtime.taskCount() != self.surface_authority_scanned_task_count) {
+        if (self.runtime_context.runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
         return self.runtime_context.runScheduler(now_ticks);
@@ -366,7 +366,7 @@ pub const SessionManager = struct {
             self.surface_authority_failures += 1;
             complete = false;
         }
-        if (complete) self.surface_authority_scanned_task_count = self.runtime_context.runtime.taskCount();
+        if (complete) self.surface_authority_scanned_lifecycle_generation = self.runtime_context.runtime.taskLifecycleGeneration();
         return complete;
     }
 
@@ -672,7 +672,7 @@ pub const SessionManager = struct {
         self.kernel_context.kernel_instance.clearSurfacePresentationReceiver();
         self.input_router.clearCompositor();
         self.compositor_broker_service_id = 0;
-        self.surface_authority_scanned_task_count = 0;
+        self.surface_authority_scanned_lifecycle_generation = 0;
         permission_review_service.clearSystemInputRouter();
         self.kernel_context.resetPort();
         clearRootKernelPort();
