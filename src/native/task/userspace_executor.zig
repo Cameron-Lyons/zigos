@@ -152,6 +152,7 @@ pub const STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS: u8 = 0;
 pub const STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
 pub const COLD_MAPPING_LINEAR_SLOT_SCANS: u8 = 0;
 pub const STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH: u8 = 0;
+pub const UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS: u8 = 0;
 pub const UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH: u8 = 0;
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
@@ -1007,6 +1008,7 @@ pub const MailboxAuthorityCache = struct {
     resolved_at_ticks: u64 = 0,
     valid_until_ticks: u64 = 0,
     refresh_count: u64 = 0,
+    revalidation_count: u64 = 0,
     authority_generation: u64 = 0,
     initialized: bool = false,
 };
@@ -1035,14 +1037,19 @@ pub fn resolveMailboxAuthoritiesCached(
     if (cache.initialized and
         cache.task_id == task.id and
         cache.task_capability_generation == task_capability_generation and
-        cache.table_mutation_generation == table_mutation_generation and
         now_ticks >= cache.resolved_at_ticks and
         now_ticks <= cache.valid_until_ticks)
     {
-        return cache.authorities;
+        if (cache.table_mutation_generation == table_mutation_generation) return cache.authorities;
+        if (cachedMailboxAuthoritiesRemainValid(task, capability_table, now_ticks, cache.authorities)) {
+            cache.table_mutation_generation = table_mutation_generation;
+            cache.revalidation_count +|= 1;
+            return cache.authorities;
+        }
     }
 
     const refresh_count = cache.refresh_count +| 1;
+    const revalidation_count = cache.revalidation_count;
     const resolution = scanMailboxAuthorities(task, capability_table, now_ticks);
     const authority_generation = if (cache.initialized and std.meta.eql(cache.authorities, resolution.authorities))
         cache.authority_generation
@@ -1056,10 +1063,58 @@ pub fn resolveMailboxAuthoritiesCached(
         .resolved_at_ticks = now_ticks,
         .valid_until_ticks = resolution.valid_until_ticks,
         .refresh_count = refresh_count,
+        .revalidation_count = revalidation_count,
         .authority_generation = authority_generation,
         .initialized = true,
     };
     return resolution.authorities;
+}
+
+fn cachedMailboxAuthoritiesRemainValid(
+    task: *const task_runtime.TaskRecord,
+    capability_table: *const capability.CapabilityTable,
+    now_ticks: u64,
+    authorities: MailboxAuthorities,
+) bool {
+    if (authorities.bootstrap_capability_id != 0) {
+        const inspected = capability_table.inspect(authorities.bootstrap_capability_id, now_ticks) orelse return false;
+        if (!inspected.usable) return false;
+        const granted = inspected.capability;
+        const service_id = if (granted.target.kind == .service) granted.target.id else 0;
+        const endpoint_candidate = granted.target.kind == .service and granted.rights.has(.endpoint_create);
+        const query_candidate = granted.rights.has(.time_query) or
+            granted.rights.has(.resource_query) or
+            granted.rights.has(.accounting_query);
+        if ((!endpoint_candidate and !query_candidate) or service_id != authorities.bootstrap_service_id) return false;
+    }
+
+    if (authorities.input_capability_id != 0) {
+        const inspected = capability_table.inspect(authorities.input_capability_id, now_ticks) orelse return false;
+        const granted = inspected.capability;
+        if (!inspected.usable or
+            granted.target.kind != .task or
+            granted.target.id != task.id or
+            granted.scope.task_id != task.id or
+            !granted.rights.has(.input_recv))
+        {
+            return false;
+        }
+    }
+
+    if (authorities.surface_presentation_capability_id != 0) {
+        if (task.ui_surface_id == null or task.ui_surface_id.? == 0) return false;
+        const inspected = capability_table.inspect(authorities.surface_presentation_capability_id, now_ticks) orelse return false;
+        const granted = inspected.capability;
+        if (!inspected.usable or
+            granted.target.kind != .task or
+            granted.target.id != task.id or
+            granted.scope.task_id != task.id or
+            !granted.rights.has(.surface_present))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn nextMailboxAuthorityGeneration(current: u64) u64 {
@@ -1598,15 +1653,51 @@ test "executor separates service, input, and surface presentation authority" {
 
     _ = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
     try std.testing.expectEqual(@as(u64, 1), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 0), cache.revalidation_count);
     try std.testing.expectEqual(@as(u64, 1), cache.authority_generation);
 
-    try capabilities.revokeGrant(service_authority.id);
+    const unrelated_authority = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .service, .serial = 900 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 901 },
+        .rights = .{ .service = .{ .endpoint_create = true } },
+        .scope = .{ .task_id = 902, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
+    try std.testing.expectEqual(service_authority.id, authorities.bootstrap_capability_id);
+    try std.testing.expectEqual(input_authority.id, authorities.input_capability_id);
+    try std.testing.expectEqual(presentation_authority.id, authorities.surface_presentation_capability_id);
+    try std.testing.expectEqual(@as(u64, 1), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 1), cache.revalidation_count);
+    try std.testing.expectEqual(@as(u64, 1), cache.authority_generation);
+
+    try capabilities.revokeGrant(unrelated_authority.id);
+    _ = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
+    try std.testing.expectEqual(@as(u64, 1), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 2), cache.revalidation_count);
+    try std.testing.expectEqual(@as(u64, 1), cache.authority_generation);
+
+    const target_revoker = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .service, .serial = 903 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 9 },
+        .rights = .{ .service = .{ .endpoint_create = true } },
+        .scope = .{ .task_id = 904, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    _ = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
+    try std.testing.expectEqual(@as(u64, 1), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 3), cache.revalidation_count);
+
+    try capabilities.revokeTargetAuthority(target_revoker.id);
     authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
     try std.testing.expectEqual(query_authority.id, authorities.bootstrap_capability_id);
     try std.testing.expectEqual(@as(u64, 8), authorities.bootstrap_service_id);
     try std.testing.expectEqual(input_authority.id, authorities.input_capability_id);
     try std.testing.expectEqual(presentation_authority.id, authorities.surface_presentation_capability_id);
     try std.testing.expectEqual(@as(u64, 2), cache.refresh_count);
+    try std.testing.expectEqual(@as(u64, 3), cache.revalidation_count);
     try std.testing.expectEqual(@as(u64, 2), cache.authority_generation);
 
     authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 101, &cache);
@@ -1643,6 +1734,7 @@ test "executor separates service, input, and surface presentation authority" {
     try std.testing.expectEqual(MailboxAuthorities{}, authorities);
     try std.testing.expectEqual(@as(u64, 6), cache.refresh_count);
     try std.testing.expectEqual(@as(u64, 5), cache.authority_generation);
+    try std.testing.expectEqual(@as(u8, 0), UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS);
     try std.testing.expectEqual(@as(u64, 1), nextMailboxAuthorityGeneration(std.math.maxInt(u64)));
 }
 
