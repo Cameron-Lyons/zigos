@@ -1318,8 +1318,7 @@ test "permission input consumes only centrally routed events for its focused tas
     const task = try createReviewTestTask(&runtime, 44, 71);
     var compositor = compositor_session.Session.init();
     const review_window = try compositor.openDocumentView(task, 1, "notes.md");
-    review_window.modal = true;
-    review_window.reviewer_task_id = 2;
+    _ = try compositor.setModalReviewer(review_window.id, 2);
     var router = input_router.Router{};
     router.bindHardwareSource(.{
         .poll_report = pollTestHardwareReport,
