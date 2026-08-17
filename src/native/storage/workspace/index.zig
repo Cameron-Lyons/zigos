@@ -30,7 +30,7 @@ pub fn pathHash(path: []const u8) u64 {
 pub fn rebuildPathSlots(comptime capacity: usize, slots: *[capacity]EntryIndexSlot, entries: anytype) void {
     slots.* = emptyEntryIndexTable(capacity);
     for (entries, 0..) |entry, slot_index| {
-        insertEntryPathSlot(capacity, slots, entry.pathSlice(), slot_index);
+        insertEntryPathSlot(capacity, slots, entries, entry.pathSlice(), slot_index);
     }
 }
 
@@ -56,10 +56,12 @@ pub fn findIndexedEntryPath(
             .empty => return null,
             .filled => {
                 if (slot.path_hash == key) {
-                    if (slot.slot_index < entries.len and std.mem.eql(u8, entries[slot.slot_index].pathSlice(), path)) {
+                    if (slot.slot_index >= entries.len) {
+                        native_util.impossibleByInvariant("entry path index points outside workspace entries");
+                    }
+                    if (std.mem.eql(u8, entries[slot.slot_index].pathSlice(), path)) {
                         return slot.slot_index;
                     }
-                    return null;
                 }
             },
             .tombstone => {},
@@ -69,7 +71,13 @@ pub fn findIndexedEntryPath(
     return null;
 }
 
-pub fn insertEntryPathSlot(comptime capacity: usize, slots: *[capacity]EntryIndexSlot, path: []const u8, slot_index: usize) void {
+pub fn insertEntryPathSlot(
+    comptime capacity: usize,
+    slots: *[capacity]EntryIndexSlot,
+    entries: anytype,
+    path: []const u8,
+    slot_index: usize,
+) void {
     const key = entryPathIndexKey(path);
     var index = id_index.hash(key, capacity);
     var attempts: usize = 0;
@@ -85,8 +93,14 @@ pub fn insertEntryPathSlot(comptime capacity: usize, slots: *[capacity]EntryInde
             },
             .filled => {
                 if (slots[index].path_hash == key) {
-                    slots[index].slot_index = slot_index;
-                    return;
+                    const existing_index = slots[index].slot_index;
+                    if (existing_index >= entries.len) {
+                        native_util.impossibleByInvariant("entry path index points outside workspace entries");
+                    }
+                    if (std.mem.eql(u8, entries[existing_index].pathSlice(), path)) {
+                        slots[index].slot_index = slot_index;
+                        return;
+                    }
                 }
             },
         }
@@ -150,4 +164,38 @@ fn objectIdIndexKey(object_id: anytype) u64 {
         u64 => object_id,
         else => object_id.raw(),
     };
+}
+
+const TestEntry = struct {
+    path: []const u8,
+
+    fn pathSlice(self: *const TestEntry) []const u8 {
+        return self.path;
+    }
+};
+
+test "entry path index probes through matching hash collisions" {
+    const capacity = 4;
+    const entries = [_]TestEntry{
+        .{ .path = "different-path" },
+        .{ .path = "target-path" },
+    };
+    var slots = emptyEntryIndexTable(capacity);
+    const key = entryPathIndexKey(entries[1].pathSlice());
+    const first_index = id_index.hash(key, capacity);
+    const second_index = (first_index + 1) % capacity;
+    slots[first_index] = .{
+        .state = .filled,
+        .path_hash = key,
+        .slot_index = 0,
+    };
+
+    insertEntryPathSlot(capacity, &slots, &entries, entries[1].pathSlice(), 1);
+
+    try std.testing.expectEqual(@as(usize, 0), slots[first_index].slot_index);
+    try std.testing.expectEqual(@as(usize, 1), slots[second_index].slot_index);
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        findIndexedEntryPath(capacity, &slots, &entries, entries[1].pathSlice()),
+    );
 }

@@ -801,7 +801,7 @@ pub const Directory = struct {
     pub fn recoverDeleted(self: *Directory, workspace_id: ids.WorkspaceId, path: []const u8, tick: u64) Error!bool {
         _ = tick;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
-        if (findEntryIndex(workspace.path_index.entries[0..workspace.path_index.entry_count], path) != null) return false;
+        if (findWorkspaceEntryIndex(workspace, path) != null) return false;
 
         var index = workspace.recoverable_deletes.deleted_count;
         while (index > 0) {
@@ -1292,7 +1292,8 @@ fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
 fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
     const entries = workspace.path_index.entries[0..workspace.path_index.entry_count];
     if (workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, path)) |index| return index;
-    return findEntryIndex(entries, path);
+    debugAssertPathIndexMissAbsent(entries, path);
+    return null;
 }
 
 fn findWorkspaceEntryObjectIndex(workspace: *const WorkspaceRecord, object_id: ids.ObjectId) ?usize {
@@ -1326,6 +1327,13 @@ fn debugAssertObjectIndexMissAbsent(entries: []const Entry, object_id: ids.Objec
         if (entry.object_id.eql(object_id)) {
             native_util.impossibleByInvariant("workspace object index missed a live entry");
         }
+    }
+}
+
+fn debugAssertPathIndexMissAbsent(entries: []const Entry, path: []const u8) void {
+    if (!debugIndexChecksEnabled()) return;
+    if (findEntryIndex(entries, path) != null) {
+        native_util.impossibleByInvariant("workspace path index missed a live entry");
     }
 }
 
