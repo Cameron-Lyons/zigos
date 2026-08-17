@@ -148,6 +148,7 @@ const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
 const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
 pub const USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH: u8 = 1;
+pub const STATIC_HANDOFF_STACK_INSTALLS_PER_BIND: u8 = 1;
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
     ImageExtentInvalid,
@@ -311,12 +312,15 @@ pub const Executor = struct {
     pub fn init(self: *Executor) void {
         if (builtin.target.os.tag != .freestanding) return;
         registered_executor = self;
+        if (self.initialized) return;
         if (!trap_handler_registered) {
             freestanding.isr.registerHandler(USERSPACE_TRAP_VECTOR, userspaceTrapHandler);
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
             trap_handler_registered = true;
         }
-        _ = prepareKernelStack();
+        const trap_stack_top = prepareKernelStack();
+        freestanding.gdt.setKernelStack(trap_stack_top);
+        freestanding.syscall64.setKernelStack(trap_stack_top);
         self.initialized = true;
     }
 
@@ -492,14 +496,17 @@ pub const Executor = struct {
         catalog: *userspace_loader.Catalog,
         runtime: *task_runtime.Runtime,
         capability_table: *const capability.CapabilityTable,
-        task_id: u64,
+        task: *const task_runtime.TaskRecord,
         now_ticks: u64,
     ) ExecutionOutcome {
         if (builtin.target.os.tag != .freestanding) return .unavailable;
+        if (!self.initialized) return .unavailable;
         if (self.bound_runtime != runtime) return .unavailable;
-        self.init();
-
-        const task = runtime.find(task_id) orelse return .unavailable;
+        if (debugIndexChecksEnabled()) {
+            const bound_task = runtime.findConst(task.id) orelse
+                native_util.impossibleByInvariant("prepared userspace task is absent from the bound runtime");
+            if (bound_task != task) native_util.impossibleByInvariant("prepared userspace task does not belong to the bound runtime");
+        }
         if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
 
         const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
@@ -509,9 +516,6 @@ pub const Executor = struct {
         const mapping = self.ensureMaterialized(address_space, image) catch return .unavailable;
         const mailbox_update = self.prepareBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
-        const trap_stack_top = prepareKernelStack();
-        freestanding.gdt.setKernelStack(trap_stack_top);
-        freestanding.syscall64.setKernelStack(trap_stack_top);
         const instruction_pointer = if (mapping.resume_valid)
             mapping.resume_instruction_pointer
         else
@@ -535,9 +539,9 @@ pub const Executor = struct {
             0;
 
         self.active_mapping = mapping;
-        self.active_task_id = task_id;
+        self.active_task_id = task.id;
         if (comptime include_verification_evidence) self.active_nx_probe_target = nx_probe_target;
-        publishRootActiveTaskId(task_id);
+        publishRootActiveTaskId(task.id);
         self.handoff_completed = false;
         self.last_yield_disposition = .runnable;
         self.last_yield_ui_revision = 0;
