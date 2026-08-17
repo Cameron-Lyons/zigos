@@ -125,6 +125,7 @@ pub const indexed_hot_path_tables = .{
         .uses_address_space_arena = @hasDecl(@FieldType(task_runtime.Runtime, "address_spaces"), "reserveIndex"),
         .uses_initial_component_label_index = @hasField(task_runtime.Runtime, "task_initial_component_label_index"),
         .tracks_task_state_counts = @hasField(task_runtime.Runtime, "task_state_counts"),
+        .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
     },
     .accelerator_scheduler = .{
@@ -243,6 +244,7 @@ pub const indexed_hot_path_tables = .{
         .supports_indexed_active_window_order = @hasDecl(compositor_session.Session, "activeWindowOrderIndex"),
         .uses_surface_task_index = @hasField(compositor_session.Session, "surface_task_index"),
         .tracks_active_surface_chain = @hasField(compositor_session.Session, "active_surface_head"),
+        .caches_surface_prune_generation = @hasField(compositor_session.Session, "last_surface_prune_generation"),
     },
     .input_router = .{
         .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
