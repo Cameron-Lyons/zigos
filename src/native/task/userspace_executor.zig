@@ -151,6 +151,7 @@ pub const STATIC_HANDOFF_STACK_INSTALLS_PER_BIND: u8 = 1;
 pub const STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS: u8 = 0;
 pub const STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
 pub const COLD_MAPPING_LINEAR_SLOT_SCANS: u8 = 0;
+pub const STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH: u8 = 0;
 pub const UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH: u8 = 0;
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
@@ -334,6 +335,7 @@ pub const Executor = struct {
     resume_marker_printed: bool = false,
     active_task_id: u64 = 0,
     active_mapping: ?*MappingEntry = null,
+    active_mapping_handle: MappingHandle = .{},
     handoff_completed: bool = false,
     pending_user_context64: UserContext64 = .{},
     last_trap_instruction_pointer: u32 = 0,
@@ -403,6 +405,11 @@ pub const Executor = struct {
         const resolution = self.findMappingWithHandle(event.address_space_id) orelse return;
         const mapping = resolution.entry;
         if (self.active_task_id != 0 and self.active_mapping == mapping) {
+            const active_slot = self.mappings.getByHandle(self.active_mapping_handle) orelse
+                native_util.impossibleByInvariant("active userspace mapping has no live arena handle");
+            if (&active_slot.mapping != mapping) {
+                native_util.impossibleByInvariant("active userspace mapping handle points at a different slot");
+            }
             mapping.state = .retire_pending;
             self.handoff_completed = true;
             zigos_userspace_resume_requested = 1;
@@ -425,6 +432,7 @@ pub const Executor = struct {
         self.resume_marker_printed = false;
         self.active_task_id = 0;
         self.active_mapping = null;
+        self.active_mapping_handle = .{};
         self.handoff_completed = false;
         self.pending_user_context64 = .{};
         self.last_trap_instruction_pointer = 0;
@@ -585,6 +593,7 @@ pub const Executor = struct {
             0;
 
         self.active_mapping = mapping;
+        self.active_mapping_handle = mapping_handle.*;
         self.active_task_id = task.id;
         if (comptime include_verification_evidence) self.active_nx_probe_target = nx_probe_target;
         publishRootActiveTaskId(task.id);
@@ -602,8 +611,10 @@ pub const Executor = struct {
             freestanding.paging.switchToKernelAddressSpace();
         }
 
+        const completed_mapping_handle = self.active_mapping_handle;
         self.active_task_id = 0;
         self.active_mapping = null;
+        self.active_mapping_handle = .{};
         if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
         publishRootActiveTaskId(0);
         zigos_userspace_resume_requested = 0;
@@ -620,7 +631,7 @@ pub const Executor = struct {
             common.printBootMarker(boot_markers.userspace_resume_ok);
             self.resume_marker_printed = true;
         }
-        self.drainPendingRetirements();
+        self.releaseRetiredMappingAfterHandoff(completed_mapping_handle);
         if (!self.handoff_completed) return .unavailable;
         return switch (self.last_yield_disposition) {
             .runnable => .yielded,
@@ -657,7 +668,8 @@ pub const Executor = struct {
         if (self.active_task_id != 0) return false;
         const task = runtime.find(task_id) orelse return false;
         const retired_address_space_id = task.address_space_id;
-        const mapping = self.findMapping(retired_address_space_id) orelse return false;
+        const resolution = self.findMappingWithHandle(retired_address_space_id) orelse return false;
+        const mapping = resolution.entry;
         if (mapping.state != .live) return false;
 
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
@@ -666,6 +678,7 @@ pub const Executor = struct {
         const frames_before = freestanding.paging.frameStats().allocated;
 
         self.active_mapping = mapping;
+        self.active_mapping_handle = resolution.handle;
         self.active_task_id = task_id;
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
@@ -681,11 +694,13 @@ pub const Executor = struct {
             freestanding.paging.frameStats().allocated == frames_before;
 
         freestanding.paging.switchToKernelAddressSpace();
+        const completed_mapping_handle = self.active_mapping_handle;
         self.active_task_id = 0;
         self.active_mapping = null;
+        self.active_mapping_handle = .{};
         publishRootActiveTaskId(0);
         zigos_userspace_resume_requested = 0;
-        self.drainPendingRetirements();
+        self.releaseRetiredMappingAfterHandoff(completed_mapping_handle);
         return deferred and self.findMapping(retired_address_space_id) == null;
     }
 
@@ -830,18 +845,13 @@ pub const Executor = struct {
         }
     }
 
-    fn drainPendingRetirements(self: *Executor) void {
+    fn releaseRetiredMappingAfterHandoff(self: *Executor, completed_mapping_handle: MappingHandle) void {
         if (self.active_task_id != 0) {
-            native_util.impossibleByInvariant("cannot drain userspace retirements while an address space is active");
+            native_util.impossibleByInvariant("cannot release a userspace mapping while an address space is active");
         }
-        const claimed_count = self.mappings.claimedCount();
-        var slot_index: usize = 0;
-        while (slot_index < claimed_count) : (slot_index += 1) {
-            const handle = self.mappings.handleForIndex(slot_index) orelse continue;
-            if (self.mappings.slotAt(slot_index).mapping.state == .retire_pending) {
-                self.releaseMapping(handle);
-            }
-        }
+        const slot = self.mappings.getByHandle(completed_mapping_handle) orelse
+            native_util.impossibleByInvariant("completed userspace mapping handle is no longer live");
+        if (slot.mapping.state == .retire_pending) self.releaseMapping(completed_mapping_handle);
     }
 
     fn clearUserPageFaultObservation(self: *Executor) void {
@@ -1714,6 +1724,8 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
     try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == null);
     try std.testing.expect(executor.findMappingByHandle(reused_handle, 42) == reused_entry);
     try std.testing.expectEqual(@as(u8, 0), STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH);
+    executor.releaseRetiredMappingAfterHandoff(reused_handle);
+    try std.testing.expectEqual(@as(usize, 1), executor.materializedCount());
 }
 
 test "executor defers active address-space retirement until kernel handoff" {
@@ -1721,6 +1733,7 @@ test "executor defers active address-space retirement until kernel handoff" {
     const active_handle = installTestMappingAt(&executor, 0, .{ .state = .live, .address_space_id = 42 });
     const active_entry = &executor.mappings.slotAt(0).mapping;
     executor.active_mapping = active_entry;
+    executor.active_mapping_handle = active_handle;
     executor.active_task_id = 7;
 
     executor.retireAddressSpace(.{ .address_space_id = 42, .reason = .terminate });
@@ -1733,10 +1746,12 @@ test "executor defers active address-space retirement until kernel handoff" {
 
     executor.active_task_id = 0;
     executor.active_mapping = null;
-    executor.drainPendingRetirements();
+    executor.active_mapping_handle = .{};
+    executor.releaseRetiredMappingAfterHandoff(active_handle);
     try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
     try std.testing.expect(executor.findMapping(42) == null);
     try std.testing.expect(executor.findMappingByHandle(active_handle, 42) == null);
+    try std.testing.expectEqual(@as(u8, 0), STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH);
     executor.reset();
 }
 
