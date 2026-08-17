@@ -659,12 +659,14 @@
         "src/native/task/userspace_registry.zig",
         "src/native/task/generated_image_fixtures.zig",
         "src/native/task/userspace_executor.zig",
+        "src/native/kernel_api/task_syscalls.zig",
         "src/native/kernel_api/syscall_surface.zig",
         "tools/generate_userspace_archive.zig"
       ],
       "current_evidence": [
         "The build generates a userspace image archive and production artifact manifest for freestanding boot profiles.",
         "Launch provenance, component ABI metadata, signed bundle state, and syscall-dispatched task creation are enforced in native modules.",
+        "Task-create syscalls read-validate and bound all four embedded launch strings before borrowing them only through the synchronous runtime copy; source identity now rejects invalid or oversized user ranges, while the executable image descriptor remains snapshotted before dispatch.",
         "Negative tests reject unsigned userspace launches and modeled runtime bypasses.",
         "The production-readiness gate rejects unmarked syntheticUserspaceImage fixtures in critical launch and service test paths; existing synthetic fixtures are marked model-only.",
         "The catalog registration path now uses an arena-backed image table with a bundle secondary index, rejects metadata-only executable registration, and rejects generated userspace artifacts when embedded ELF bytes are missing or malformed, when precomputed digests no longer match, or when generated ELF metadata and manifest state become stale.",

@@ -12,18 +12,8 @@ pub fn dispatchTaskCreate(
     response_len: usize,
 ) dispatch.DispatchResult {
     var request = dispatch.readRequest(component_port.TaskCreateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    var bundle_id_buffer: [task_runtime.MAX_TASK_BUNDLE_ID_BYTES]u8 = undefined;
-    var component_label_buffer: [task_runtime.MAX_COMPONENT_LABEL_BYTES]u8 = undefined;
-    var component_entry_buffer: [task_runtime.MAX_COMPONENT_ENTRY_BYTES]u8 = undefined;
     var image_copy = task_runtime.ExecutableImageSpec{};
-    if (!sanitizeTaskCreateRequest(
-        memory,
-        &request,
-        &bundle_id_buffer,
-        &component_label_buffer,
-        &component_entry_buffer,
-        &image_copy,
-    )) return dispatch.invalidRequest();
+    if (!sanitizeTaskCreateRequest(memory, &request, &image_copy)) return dispatch.invalidRequest();
     const task = component_port.invokeGenerated(.task_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, task);
 }
@@ -112,25 +102,27 @@ pub fn dispatchSurfacePresent(
 fn sanitizeTaskCreateRequest(
     memory: dispatch.UserMemoryContext,
     request: *component_port.TaskCreateRequest,
-    bundle_id_buffer: []u8,
-    component_label_buffer: []u8,
-    component_entry_buffer: []u8,
     image_copy: *task_runtime.ExecutableImageSpec,
 ) bool {
-    request.request.launch.bundle_id = dispatch.copyUserSlice(
+    request.request.launch.bundle_id = dispatch.borrowImmediateUserSlice(
         memory,
         request.request.launch.bundle_id,
-        bundle_id_buffer,
+        task_runtime.MAX_TASK_BUNDLE_ID_BYTES,
     ) orelse return false;
-    request.request.initial_component.label = dispatch.copyUserSlice(
+    request.request.launch.source_identity = dispatch.borrowImmediateUserSlice(
+        memory,
+        request.request.launch.source_identity,
+        task_runtime.MAX_TASK_SOURCE_IDENTITY_BYTES,
+    ) orelse return false;
+    request.request.initial_component.label = dispatch.borrowImmediateUserSlice(
         memory,
         request.request.initial_component.label,
-        component_label_buffer,
+        task_runtime.MAX_COMPONENT_LABEL_BYTES,
     ) orelse return false;
-    request.request.initial_component.entry = dispatch.copyUserSlice(
+    request.request.initial_component.entry = dispatch.borrowImmediateUserSlice(
         memory,
         request.request.initial_component.entry,
-        component_entry_buffer,
+        task_runtime.MAX_COMPONENT_ENTRY_BYTES,
     ) orelse return false;
 
     if (request.request.userspace_image) |image_ptr| {
