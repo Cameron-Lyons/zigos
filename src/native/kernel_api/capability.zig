@@ -165,9 +165,14 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         target_index: TargetIndex = TargetIndex.init(),
         target_generations: TargetGenerationArena = TargetGenerationArena.init(),
         active_capability_count: usize = 0,
+        mutation_generation: u64 = 1,
 
         pub fn init() Self {
             return Self{};
+        }
+
+        pub fn mutationGeneration(self: *const Self) u64 {
+            return self.mutation_generation;
         }
 
         pub fn mintBootRoot(self: *Self, request: MintRequest) Error!Capability {
@@ -375,7 +380,13 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         fn commitInsertedSlot(self: *Self, slot_index: usize) *const Capability {
             self.indexSlot(slot_index);
             self.active_capability_count += 1;
+            self.advanceMutationGeneration();
             return &self.slots.slots[slot_index].capability;
+        }
+
+        fn advanceMutationGeneration(self: *Self) void {
+            self.mutation_generation +%= 1;
+            if (self.mutation_generation == 0) self.mutation_generation = 1;
         }
 
         fn findConstSlot(self: *const Self, capability_id: u64) ?*const CapabilitySlot {
@@ -560,6 +571,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             self.unlinkTarget(slot_index, targetKey(removed.target));
             if (self.slots.removeIndex(slot_index)) {
                 self.active_capability_count -= 1;
+                self.advanceMutationGeneration();
             }
         }
 
@@ -727,6 +739,30 @@ fn fullSessionRights() CapabilityRights {
         .resource_query = true,
         .accounting_query = true,
     } };
+}
+
+test "capability table mutation generation tracks insert removal and wrap" {
+    var table = CapabilityTable.init();
+    const request = MintRequest{
+        .holder = .{ .kind = .service, .serial = 1 },
+        .issuer = .{ .kind = .policy_authority, .serial = 2 },
+        .target = .{ .kind = .service, .id = 3 },
+        .rights = .{ .service = .{ .endpoint_create = true } },
+        .scope = .{ .task_id = 4, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    };
+
+    try std.testing.expectEqual(@as(u64, 1), table.mutationGeneration());
+    const first = try table.mintBootRoot(request);
+    try std.testing.expectEqual(@as(u64, 2), table.mutationGeneration());
+    try table.revokeGrant(first.id);
+    try std.testing.expectEqual(@as(u64, 3), table.mutationGeneration());
+
+    table.mutation_generation = std.math.maxInt(u64);
+    const second = try table.mintBootRoot(request);
+    try std.testing.expectEqual(@as(u64, 1), table.mutationGeneration());
+    try table.revokeGrant(second.id);
+    try std.testing.expectEqual(@as(u64, 2), table.mutationGeneration());
 }
 
 test "capabilities derive narrower rights and grant revocation leaves sibling authority usable" {

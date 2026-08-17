@@ -664,6 +664,7 @@ pub const Runtime = struct {
         cold.capability_ids[task.capability_count] = capability_id;
         cold.capability_index.insert(capability_id, task.capability_count);
         task.capability_count += 1;
+        advanceTaskCapabilityGeneration(task);
         appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task_id, capability_id, 0));
     }
 
@@ -709,6 +710,7 @@ pub const Runtime = struct {
 
             task.capability_count -= 1;
             cold.capability_ids[task.capability_count] = 0;
+            advanceTaskCapabilityGeneration(task);
             appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task_id, capability_id, 0));
             return true;
         }
@@ -948,6 +950,12 @@ pub const Runtime = struct {
         }
     }
 };
+
+fn advanceTaskCapabilityGeneration(task: *TaskRecord) void {
+    const cold = taskCold(task);
+    cold.capability_generation +%= 1;
+    if (cold.capability_generation == 0) cold.capability_generation = 1;
+}
 
 const AddressSpaceRetirementBatch = struct {
     events: [MAX_TASKS]AddressSpaceRetirementEvent = undefined,
@@ -1253,9 +1261,15 @@ test "granting and revoking capabilities updates the task table" {
         },
     });
 
+    try std.testing.expectEqual(@as(u64, 1), task.capabilityGeneration());
     try runtime.grantCapability(task.id, 11);
+    try std.testing.expectEqual(@as(u64, 2), task.capabilityGeneration());
     try runtime.grantCapability(task.id, 12);
+    try std.testing.expectEqual(@as(u64, 3), task.capabilityGeneration());
     try runtime.grantCapability(task.id, 13);
+    try std.testing.expectEqual(@as(u64, 4), task.capabilityGeneration());
+    try runtime.grantCapability(task.id, 13);
+    try std.testing.expectEqual(@as(u64, 4), task.capabilityGeneration());
     try std.testing.expectEqual(@as(usize, 3), task.capability_count);
     try std.testing.expectEqual(@as(usize, 4), task.provenance_count);
     try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_grant, task.latestProvenanceEvent().?.kind);
@@ -1263,6 +1277,7 @@ test "granting and revoking capabilities updates the task table" {
     try std.testing.expectEqual(accelerator_scheduler.ResourceClass.background_light, task.resourceClass());
 
     try std.testing.expect(try runtime.revokeCapability(task.id, 12));
+    try std.testing.expectEqual(@as(u64, 5), task.capabilityGeneration());
     try std.testing.expectEqual(@as(usize, 2), task.capability_count);
     try std.testing.expect(runtime.hasCapability(task.id, 11));
     try std.testing.expect(!runtime.hasCapability(task.id, 12));
@@ -1271,6 +1286,17 @@ test "granting and revoking capabilities updates the task table" {
     try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_revoke, task.latestProvenanceEvent().?.kind);
     try std.testing.expectEqual(@as(u64, 12), task.latestProvenanceEvent().?.capability_id);
     try std.testing.expect(!try runtime.revokeCapability(task.id, 99));
+    try std.testing.expectEqual(@as(u64, 5), task.capabilityGeneration());
+
+    taskCold(task).capability_generation = std.math.maxInt(u64);
+    try runtime.grantCapability(task.id, 14);
+    try std.testing.expectEqual(@as(u64, 1), task.capabilityGeneration());
+
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    var restored = Runtime.init();
+    restored.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(@as(u64, 1), restored.find(task.id).?.capabilityGeneration());
 }
 
 test "task runtime records redacted crash report provenance" {
