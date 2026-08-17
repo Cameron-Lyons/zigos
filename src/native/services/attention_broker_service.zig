@@ -39,9 +39,15 @@ pub const QueryRequest = struct {
 };
 
 pub const QueryResult = struct {
-    latest: ?notification_center.Notification = null,
+    /// Borrowed from the service center until its next mutation.
+    latest: ?*const notification_center.Notification = null,
     active_visible: u16 = 0,
     active_interruptions: u16 = 0,
+};
+
+const ActiveCounts = struct {
+    visible: u16,
+    interruptions: u16,
 };
 
 pub const Service = struct {
@@ -60,20 +66,20 @@ pub const Service = struct {
     ) Error!*notification_center.Notification {
         const notification_task_id = request.notification_task_id orelse request.task_id;
         if (request.task_id == 0 or notification_task_id == 0) {
-            try recordAttention(ledger, request.subject, request.task_id, false, false, self.activeVisible(request.now_ticks), self.activeInterruptions(request.now_ticks), request.now_ticks, request.detail);
+            const counts = self.activeCounts(request.now_ticks);
+            try recordAttention(ledger, request.subject, request.task_id, false, false, counts.visible, counts.interruptions, request.now_ticks, request.detail);
             return error.MissingTaskBinding;
         }
-        const visible = self.activeVisible(request.now_ticks);
-        const interruptions = self.activeInterruptions(request.now_ticks);
+        const counts = self.activeCounts(request.now_ticks);
         const interruptive = notification_center.isInterruptive(request.urgency);
         const decision = policies.attentionDecision(subjects, .{
             .now_tick = request.now_ticks,
-            .visible_notifications = visible,
-            .interruptive_notifications = interruptions,
+            .visible_notifications = counts.visible,
+            .interruptive_notifications = counts.interruptions,
             .requests_interruption = interruptive,
             .critical = request.urgency == .critical,
         });
-        try recordAttention(ledger, request.subject, request.task_id, decision.allowed, interruptive, visible, interruptions, request.now_ticks, request.detail);
+        try recordAttention(ledger, request.subject, request.task_id, decision.allowed, interruptive, counts.visible, counts.interruptions, request.now_ticks, request.detail);
         if (!decision.allowed) return error.PolicyDenied;
 
         const notification = try self.center.post(.{
@@ -94,46 +100,52 @@ pub const Service = struct {
         request: DismissRequest,
         ledger: ?*event_ledger.Ledger,
     ) Error!*notification_center.Notification {
-        const visible = self.activeVisible(request.now_ticks);
-        const interruptions = self.activeInterruptions(request.now_ticks);
+        const counts = self.activeCounts(request.now_ticks);
         const notification = self.center.find(request.notification_id) orelse {
-            try recordAttention(ledger, request.subject, request.task_id, false, false, visible, interruptions, request.now_ticks, request.detail);
+            try recordAttention(ledger, request.subject, request.task_id, false, false, counts.visible, counts.interruptions, request.now_ticks, request.detail);
             return error.NotificationNotFound;
         };
         if (!notification.source.eql(request.subject)) {
-            try recordAttention(ledger, request.subject, request.task_id, false, false, visible, interruptions, request.now_ticks, request.detail);
+            try recordAttention(ledger, request.subject, request.task_id, false, false, counts.visible, counts.interruptions, request.now_ticks, request.detail);
             return error.SourceMismatch;
         }
         if (notification.task_id) |task_id| {
             if (task_id != request.task_id) {
-                try recordAttention(ledger, request.subject, request.task_id, false, false, visible, interruptions, request.now_ticks, request.detail);
+                try recordAttention(ledger, request.subject, request.task_id, false, false, counts.visible, counts.interruptions, request.now_ticks, request.detail);
                 return error.NotificationTaskMismatch;
             }
         }
 
         const dismissed = try self.center.dismiss(request.notification_id);
-        try recordAttention(ledger, request.subject, request.task_id, true, false, visible, interruptions, request.now_ticks, request.detail);
+        try recordAttention(ledger, request.subject, request.task_id, true, false, counts.visible, counts.interruptions, request.now_ticks, request.detail);
         try recordNotification(ledger, dismissed.*, request.now_ticks);
         return dismissed;
     }
 
     pub fn query(self: *const Service, request: QueryRequest, ledger: ?*event_ledger.Ledger) event_ledger.Error!QueryResult {
-        const visible = self.activeVisible(request.now_ticks);
-        const interruptions = self.activeInterruptions(request.now_ticks);
-        try recordAttention(ledger, request.subject, request.task_id, true, false, visible, interruptions, request.now_ticks, request.detail);
+        const counts = self.activeCounts(request.now_ticks);
+        try recordAttention(ledger, request.subject, request.task_id, true, false, counts.visible, counts.interruptions, request.now_ticks, request.detail);
         return .{
             .latest = self.center.latestVisible(request.now_ticks),
-            .active_visible = visible,
-            .active_interruptions = interruptions,
+            .active_visible = counts.visible,
+            .active_interruptions = counts.interruptions,
         };
     }
 
     pub fn activeVisible(self: *const Service, now_ticks: u64) u16 {
-        return boundedU16(self.center.activeCount(now_ticks));
+        return self.activeCounts(now_ticks).visible;
     }
 
     pub fn activeInterruptions(self: *const Service, now_ticks: u64) u16 {
-        return boundedU16(self.center.activeInterruptionCount(now_ticks));
+        return self.activeCounts(now_ticks).interruptions;
+    }
+
+    fn activeCounts(self: *const Service, now_ticks: u64) ActiveCounts {
+        const counts = self.center.activeAttentionCounts(now_ticks);
+        return .{
+            .visible = boundedU16(counts.active_visible),
+            .interruptions = boundedU16(counts.active_interruptions),
+        };
     }
 };
 
@@ -256,6 +268,7 @@ test "attention broker gates posts dismisses notifications and redacts policy de
         .now_ticks = 62,
         .detail = "query latest visible",
     }, &ledger);
+    try std.testing.expect(query.latest.? == high);
     try std.testing.expectEqual(high.id, query.latest.?.id);
     try std.testing.expectEqual(@as(u16, 2), query.active_visible);
 
