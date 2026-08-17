@@ -134,6 +134,7 @@ pub const indexed_hot_path_tables = .{
         .uses_mapping_arena = @hasDecl(@FieldType(userspace_executor.Executor, "mappings"), "reserveHandle"),
         .avoids_cold_mapping_slot_scans = userspace_executor.COLD_MAPPING_LINEAR_SLOT_SCANS == 0,
         .avoids_steady_retirement_slot_scans = userspace_executor.STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH == 0,
+        .avoids_unrelated_capability_mutation_authority_scans = userspace_executor.UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS == 0,
         .avoids_unchanged_resume_mailbox_writes = userspace_executor.UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH == 0,
     },
     .userspace_loader = .{
