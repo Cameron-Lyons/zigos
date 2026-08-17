@@ -189,6 +189,7 @@ const ReviewItemArena = indexed_arena.IndexedArenaWithKey(u64, ReviewItemSlot, M
 const SurfaceArena = indexed_arena.IndexedArenaWithKey(u64, SurfaceSlot, MAX_PRESENTED_SURFACES, SURFACE_INDEX_CAPACITY, surfaceSlotId);
 const TaskBundleIndex = indexed_arena.UniqueIndex(WINDOW_INDEX_CAPACITY);
 const TaskWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
+const ReviewerWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
 const WindowReviewItemIndex = indexed_arena.MultimapIndex(MAX_REVIEW_ITEMS, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY);
 
 pub const Operation = enum(u8) {
@@ -253,6 +254,7 @@ pub const SessionSnapshot = struct {
     item_count: usize = 0,
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
+    reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
     window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
     surfaces: SurfaceArena = SurfaceArena.init(),
 };
@@ -278,6 +280,7 @@ pub const Session = struct {
     item_count: usize = 0,
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
+    reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
     window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
     surfaces: SurfaceArena = SurfaceArena.init(),
 
@@ -314,6 +317,7 @@ pub const Session = struct {
         window.title_len = title.len;
         self.indexWindowForTaskBundle(window);
         self.indexWindowForTask(window);
+        self.indexWindowForReviewer(window);
         self.active_window_id = window.id;
         return window;
     }
@@ -485,6 +489,18 @@ pub const Session = struct {
         return &slot.window;
     }
 
+    pub fn setModalReviewer(self: *Session, window_id: u64, reviewer_task_id: u64) Error!*WindowRecord {
+        if (reviewer_task_id == 0) return error.MalformedRequest;
+        const slot_index = self.windows.slotIndexOf(window_id) orelse return error.WindowNotFound;
+        const window = &self.windows.slots[slot_index].window;
+        if (window.modal and window.reviewer_task_id == reviewer_task_id) return window;
+        self.removeWindowFromReviewerIndex(slot_index, window);
+        window.modal = true;
+        window.reviewer_task_id = reviewer_task_id;
+        self.indexWindowForReviewer(window);
+        return window;
+    }
+
     pub fn probeVisibleWindow(self: *const Session, buffer: []u8) bool {
         for (self.window_order[0..self.window_count]) |window_id| {
             const window = self.findWindowConst(window_id) orelse continue;
@@ -532,6 +548,12 @@ pub const Session = struct {
 
     pub fn visibleWindowCount(self: *const Session) usize {
         return self.visible_window_count;
+    }
+
+    pub fn taskOwnsVisibleWindow(self: *const Session, task_id: u64) bool {
+        if (task_id == 0) return false;
+        return self.indexHasVisibleWindow(&self.task_window_index, taskWindowKey(task_id), task_id, false) or
+            self.indexHasVisibleWindow(&self.reviewer_window_index, taskWindowKey(task_id), task_id, true);
     }
 
     pub fn activeWindow(self: *const Session) ?*const WindowRecord {
@@ -616,6 +638,7 @@ pub const Session = struct {
             .item_count = self.item_count,
             .task_bundle_index = self.task_bundle_index,
             .task_window_index = self.task_window_index,
+            .reviewer_window_index = self.reviewer_window_index,
             .window_review_item_index = self.window_review_item_index,
             .surfaces = self.surfaces,
         };
@@ -633,6 +656,7 @@ pub const Session = struct {
         self.item_count = stored.item_count;
         self.task_bundle_index = stored.task_bundle_index;
         self.task_window_index = stored.task_window_index;
+        self.reviewer_window_index = stored.reviewer_window_index;
         self.window_review_item_index = stored.window_review_item_index;
         self.surfaces = stored.surfaces;
     }
@@ -694,11 +718,44 @@ pub const Session = struct {
         }
     }
 
+    fn indexWindowForReviewer(self: *Session, window: *const WindowRecord) void {
+        if (!window.modal or window.reviewer_task_id == 0) return;
+        const slot_index = self.windows.slotIndexOf(window.id) orelse
+            native_util.impossibleByInvariant("window must be indexed before reviewer indexing");
+        if (!self.reviewer_window_index.append(taskWindowKey(window.reviewer_task_id), slot_index)) {
+            native_util.impossibleByInvariant("reviewer window index capacity covers window slots");
+        }
+    }
+
     fn removeWindowFromTaskIndex(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (window.subject_task_id == 0) return;
         if (!self.task_window_index.remove(taskWindowKey(window.subject_task_id), slot_index)) {
             native_util.impossibleByInvariant("task window index missing live window");
         }
+    }
+
+    fn removeWindowFromReviewerIndex(self: *Session, slot_index: usize, window: *const WindowRecord) void {
+        if (!window.modal or window.reviewer_task_id == 0) return;
+        if (!self.reviewer_window_index.remove(taskWindowKey(window.reviewer_task_id), slot_index)) {
+            native_util.impossibleByInvariant("reviewer window index missing live review window");
+        }
+    }
+
+    fn indexHasVisibleWindow(
+        self: *const Session,
+        index: *const TaskWindowIndex,
+        key: u64,
+        task_id: u64,
+        reviewer: bool,
+    ) bool {
+        const slot_index = index.head(key);
+        if (slot_index == indexed_arena.no_index) return false;
+        if (slot_index >= MAX_WINDOWS) native_util.impossibleByInvariant("task ownership index points outside window slots");
+        const slot = &self.windows.slots[slot_index];
+        if (!slot.in_use or !slot.window.visible) native_util.impossibleByInvariant("task ownership index points at an inactive window");
+        const indexed_task_id = if (reviewer) slot.window.reviewer_task_id else slot.window.subject_task_id;
+        if (indexed_task_id != task_id) native_util.impossibleByInvariant("task ownership index points at the wrong task");
+        return true;
     }
 
     fn removeSurfacesForTask(self: *Session, task_id: u64) void {
@@ -722,6 +779,7 @@ pub const Session = struct {
             self.task_bundle_index.remove(taskBundleKey(window.subject_task_id, window.bundleIdSlice()));
         }
         self.removeWindowFromTaskIndex(slot_index, window);
+        self.removeWindowFromReviewerIndex(slot_index, window);
         if (window.visible and self.visible_window_count != 0) self.visible_window_count -= 1;
         _ = self.windows.removeIndex(slot_index);
         self.removeWindowOrderById(window_id);
@@ -1529,10 +1587,17 @@ test "compositor task window index survives restore and closes only matching tas
     try std.testing.expectEqual(@as(usize, 5), session.visibleWindowCount());
     try std.testing.expectEqual(@as(usize, 3), session.item_count);
     try std.testing.expectEqual(first_review.id, session.findWindowForTaskBundleConst(first_task.id, bundle.bundle_id).?.id);
+    try std.testing.expect(session.taskOwnsVisibleWindow(first_task.id));
+    try std.testing.expect(session.taskOwnsVisibleWindow(second_task.id));
+    try std.testing.expect(session.taskOwnsVisibleWindow(77));
+    try std.testing.expect(session.taskOwnsVisibleWindow(78));
+    try std.testing.expect(!session.taskOwnsVisibleWindow(79));
 
     const snapshot = session.snapshot();
     var restored = Session.init();
     restored.restore(snapshot);
+    try std.testing.expect(restored.taskOwnsVisibleWindow(first_task.id));
+    try std.testing.expect(restored.taskOwnsVisibleWindow(77));
 
     try std.testing.expectEqual(@as(usize, 2), restored.closeWindowsForTask(first_task.id));
     try std.testing.expect(restored.findWindowConst(first_document_id) == null);
@@ -1542,12 +1607,18 @@ test "compositor task window index survives restore and closes only matching tas
     try std.testing.expectEqual(@as(usize, 3), restored.window_count);
     try std.testing.expectEqual(@as(usize, 3), restored.visibleWindowCount());
     try std.testing.expectEqual(@as(usize, 1), restored.item_count);
+    try std.testing.expect(!restored.taskOwnsVisibleWindow(first_task.id));
+    try std.testing.expect(!restored.taskOwnsVisibleWindow(77));
+    try std.testing.expect(restored.taskOwnsVisibleWindow(second_task.id));
+    try std.testing.expect(restored.taskOwnsVisibleWindow(78));
 
     try std.testing.expectEqual(@as(usize, 3), restored.closeWindowsForTask(second_task.id));
     try std.testing.expectEqual(@as(usize, 0), restored.window_count);
     try std.testing.expectEqual(@as(usize, 0), restored.visibleWindowCount());
     try std.testing.expectEqual(@as(usize, 0), restored.item_count);
     try std.testing.expectEqual(@as(u64, 0), restored.active_window_id);
+    try std.testing.expect(!restored.taskOwnsVisibleWindow(second_task.id));
+    try std.testing.expect(!restored.taskOwnsVisibleWindow(78));
 }
 
 test "compositor service rejects tasks without valid display surfaces" {
