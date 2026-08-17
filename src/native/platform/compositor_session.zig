@@ -295,6 +295,7 @@ pub const Session = struct {
     surface_task_index: SurfaceTaskIndex = SurfaceTaskIndex.init(),
     active_surface_head: u16 = NO_SURFACE_SLOT_INDEX,
     active_surface_tail: u16 = NO_SURFACE_SLOT_INDEX,
+    last_surface_prune_generation: u64 = 0,
 
     pub fn init() Session {
         return .{};
@@ -468,6 +469,9 @@ pub const Session = struct {
     }
 
     pub fn pruneSurfacePresentations(self: *Session, runtime: *const task_runtime.Runtime) usize {
+        const lifecycle_generation = runtime.taskLifecycleGeneration();
+        if (self.last_surface_prune_generation == lifecycle_generation) return 0;
+
         var removed: usize = 0;
         var index: usize = self.active_surface_head;
         while (index != NO_SURFACE_SLOT_INDEX) {
@@ -485,6 +489,7 @@ pub const Session = struct {
             }
             index = next_index;
         }
+        self.last_surface_prune_generation = lifecycle_generation;
         return removed;
     }
 
@@ -696,6 +701,7 @@ pub const Session = struct {
         self.surface_task_index = stored.surface_task_index;
         self.active_surface_head = stored.active_surface_head;
         self.active_surface_tail = stored.active_surface_tail;
+        self.last_surface_prune_generation = 0;
     }
 
     fn createWindow(
@@ -2188,6 +2194,43 @@ test "compositor session owns bounded monotonic surface presentations" {
     try std.testing.expectEqual(NO_SURFACE_SLOT_INDEX, restored.active_surface_tail);
     try std.testing.expectEqual(@as(usize, 1), restored.closeWindowsForTask(app_task.id));
     try std.testing.expectEqual(@as(usize, 0), restored.presentedSurfaceCount());
+}
+
+test "compositor surface pruning caches unchanged task lifecycle generations" {
+    var runtime = task_runtime.Runtime.init();
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 83 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 73,
+        .local_only = true,
+    });
+    const app_task_id = app_task.id;
+    var session = Session.init();
+    const presentation = testSurfacePresentation(73, 30_000);
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
+
+    try std.testing.expectEqual(@as(u64, 0), session.last_surface_prune_generation);
+    try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
+    try std.testing.expectEqual(runtime.taskLifecycleGeneration(), session.last_surface_prune_generation);
+    try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
+    try std.testing.expect(session.surfacePresentation(73) != null);
+
+    try std.testing.expect(try runtime.suspendTask(app_task_id, 110));
+    try std.testing.expectEqual(@as(usize, 1), session.pruneSurfacePresentations(&runtime));
+    try std.testing.expect(session.surfacePresentation(73) == null);
+
+    try std.testing.expect(try runtime.resumeTask(app_task_id, 111));
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(runtime.find(app_task_id).?, &presentation));
+    try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
+    const snapshot = session.snapshot();
+    session.restore(snapshot);
+    try std.testing.expectEqual(@as(u64, 0), session.last_surface_prune_generation);
+    try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
+
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 1), session.pruneSurfacePresentations(&runtime));
+    try std.testing.expect(session.surfacePresentation(73) == null);
 }
 
 test "compositor surface indexes saturate prune restore and reuse exact slots" {
