@@ -282,6 +282,7 @@ pub const Ledger = struct {
     loaded_existing_state: bool = false,
     header_version_id: u64 = 0,
     next_sequence: u64 = 1,
+    oldest_retained_sequence: u64 = 0,
     events: EventArena = EventArena.init(),
     kind_index: KindEventIndex = KindEventIndex.init(),
     subject_index: SubjectEventIndex = SubjectEventIndex.init(),
@@ -1736,6 +1737,7 @@ pub const Ledger = struct {
             try self.rebuildIndexes();
             return err;
         };
+        if (self.oldest_retained_sequence == 0) self.oldest_retained_sequence = sequence;
         if (self.persistence_batch_depth == 0) {
             try self.persistRange(slot.event.sequence, slot.event.sequence, slot.event.tick);
         } else {
@@ -1744,18 +1746,16 @@ pub const Ledger = struct {
     }
 
     fn evictOldestEvent(self: *Ledger) bool {
-        var oldest_index: ?usize = null;
-        var oldest_sequence: u64 = std.math.maxInt(u64);
-        for (&self.events.slots, 0..) |*slot, index| {
-            if (!slot.in_use) continue;
-            if (slot.event.sequence < oldest_sequence) {
-                oldest_sequence = slot.event.sequence;
-                oldest_index = index;
-            }
-        }
-        const index = oldest_index orelse return false;
+        const oldest_sequence = self.oldest_retained_sequence;
+        if (oldest_sequence == 0) return false;
+        const index = self.events.slotIndexOf(oldest_sequence) orelse
+            native_util.impossibleByInvariant("event ledger oldest sequence index is missing");
         self.removeEventIndexes(index, &self.events.slots[index].event);
-        return self.events.removeIndex(index);
+        if (!self.events.removeIndex(index)) {
+            native_util.impossibleByInvariant("event ledger oldest sequence index points at a free slot");
+        }
+        self.oldest_retained_sequence = self.nextOldestSequence(oldest_sequence);
+        return true;
     }
 
     fn visitMatching(
@@ -1854,10 +1854,32 @@ pub const Ledger = struct {
         self.subject_index.reset();
         self.task_index.reset();
         self.events.rebuildPrimaryIndex();
+        self.oldest_retained_sequence = 0;
         for (self.events.slots, 0..) |slot, index| {
             if (!slot.in_use) continue;
+            if (self.oldest_retained_sequence == 0 or slot.event.sequence < self.oldest_retained_sequence) {
+                self.oldest_retained_sequence = slot.event.sequence;
+            }
             try self.indexEvent(index);
         }
+    }
+
+    fn nextOldestSequence(self: *const Ledger, removed_sequence: u64) u64 {
+        if (self.events.countInUse() == 0) return 0;
+        const contiguous_sequence = std.math.add(u64, removed_sequence, 1) catch return self.scanOldestSequence();
+        if (self.events.getConst(contiguous_sequence) != null) return contiguous_sequence;
+        return self.scanOldestSequence();
+    }
+
+    fn scanOldestSequence(self: *const Ledger) u64 {
+        var oldest_sequence: u64 = 0;
+        for (self.events.slots) |slot| {
+            if (!slot.in_use) continue;
+            if (oldest_sequence == 0 or slot.event.sequence < oldest_sequence) {
+                oldest_sequence = slot.event.sequence;
+            }
+        }
+        return oldest_sequence;
     }
 
     fn markPendingPersistence(self: *Ledger, event: *const Event) void {
@@ -1952,6 +1974,7 @@ pub const Ledger = struct {
         self.events.reset();
         try self.rebuildIndexes();
         self.next_sequence = 1;
+        self.oldest_retained_sequence = 0;
         self.header_version_id = 0;
 
         if (storage.resolve(self.workspace_id, state_entry_path)) |entry| {

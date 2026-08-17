@@ -543,6 +543,7 @@ test "event ledger evicts oldest events instead of jamming past MAX_EVENTS" {
     try std.testing.expectEqual(event_ledger.MAX_EVENTS, ledger.countMatching(.{ .subject = user }));
 
     const oldest_retained = total - event_ledger.MAX_EVENTS + 1;
+    try std.testing.expectEqual(oldest_retained, ledger.oldest_retained_sequence);
     try std.testing.expectEqual(@as(usize, 0), ledger.countMatching(.{ .task_id = 1 }));
     try std.testing.expectEqual(@as(usize, 0), ledger.countMatching(.{ .task_id = oldest_retained - 1 }));
     try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .task_id = oldest_retained }));
@@ -560,6 +561,7 @@ test "event ledger evicts oldest events instead of jamming past MAX_EVENTS" {
         try recycled_task_ledger.recordPermissionDecision(user, recycled_task_id, .screen_capture, false, .policy_denied, sequence, "denied", true);
     }
 
+    try std.testing.expectEqual(@as(u64, 2), recycled_task_ledger.oldest_retained_sequence);
     try std.testing.expectEqual(@as(usize, 1), recycled_task_ledger.countMatching(.{ .task_id = 1 }));
     var records: [QUERY_EVENT_RECORD_CAPACITY]Event = undefined;
     const recycled_matches = recycled_task_ledger.queryEvents(.{ .task_id = 1 }, &records);
