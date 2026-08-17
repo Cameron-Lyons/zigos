@@ -16,7 +16,6 @@ pub const DEFAULT_REPORT_BUDGET: usize = 16;
 const NO_EVENT_INDEX: u8 = std.math.maxInt(u8);
 const NO_INBOX_INDEX: u8 = std.math.maxInt(u8);
 const INBOX_INDEX_CAPACITY: usize = MAX_INBOXES * 2;
-const InboxIndex = indexed_arena.UniqueIndex(INBOX_INDEX_CAPACITY);
 
 comptime {
     std.debug.assert(MAX_QUEUED_EVENTS <= NO_EVENT_INDEX);
@@ -99,15 +98,20 @@ const Inbox = struct {
     wake_queued: bool = false,
     previous_wake_index: u8 = NO_INBOX_INDEX,
     next_wake_index: u8 = NO_INBOX_INDEX,
+    previous_active_index: u8 = NO_INBOX_INDEX,
+    next_active_index: u8 = NO_INBOX_INDEX,
 };
+
+const InboxArena = indexed_arena.IndexedArenaWithKey(u64, Inbox, MAX_INBOXES, INBOX_INDEX_CAPACITY, inboxTaskId);
 
 pub const Router = struct {
     source: ?HardwareReportSource = null,
     compositor: ?*compositor_session.Session = null,
     compositor_task_id: u64 = 0,
     keyboards: [MAX_KEYBOARDS]KeyboardSlot = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS,
-    inboxes: [MAX_INBOXES]Inbox = [_]Inbox{.{}} ** MAX_INBOXES,
-    inbox_index: InboxIndex = InboxIndex.init(),
+    inboxes: InboxArena = InboxArena.init(),
+    active_inbox_head: u8 = NO_INBOX_INDEX,
+    active_inbox_tail: u8 = NO_INBOX_INDEX,
     wake_head: u8 = NO_INBOX_INDEX,
     wake_tail: u8 = NO_INBOX_INDEX,
     event_slots: [MAX_QUEUED_EVENTS]EventSlot = [_]EventSlot{.{}} ** MAX_QUEUED_EVENTS,
@@ -207,7 +211,7 @@ pub const Router = struct {
 
     pub fn pollForTask(self: *Router, task_id: u64) ?RoutedKeyboardEvent {
         const inbox_index = self.findInboxIndex(task_id) orelse return null;
-        const inbox = &self.inboxes[inbox_index];
+        const inbox = &self.inboxes.slots[inbox_index];
         if (inbox.count == 0) return null;
         const event_index = inbox.head;
         const event_slot = &self.event_slots[event_index];
@@ -240,17 +244,17 @@ pub const Router = struct {
 
     pub fn queuedForTask(self: *const Router, task_id: u64) usize {
         const inbox_index = self.findInboxIndex(task_id) orelse return 0;
-        return @intCast(self.inboxes[inbox_index].count);
+        return @intCast(self.inboxes.slots[inbox_index].count);
     }
 
     pub fn dropForTask(self: *Router, task_id: u64) usize {
         const inbox_index = self.findInboxIndex(task_id) orelse return 0;
-        const inbox = &self.inboxes[inbox_index];
+        const inbox = &self.inboxes.slots[inbox_index];
         const dropped: usize = @intCast(inbox.count);
         self.releaseInboxEvents(inbox);
         self.unlinkWake(inbox_index);
-        self.inbox_index.remove(task_id);
-        inbox.* = .{};
+        self.unlinkActiveInbox(inbox_index);
+        if (!self.inboxes.removeIndex(inbox_index)) native_util.impossibleByInvariant("indexed input inbox remains live until task drop");
         self.events_dropped += dropped;
         return dropped;
     }
@@ -259,7 +263,7 @@ pub const Router = struct {
         if (self.wake_head == NO_INBOX_INDEX) return null;
         const inbox_index: usize = self.wake_head;
         if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("input wake queue head points outside inbox slots");
-        const inbox = &self.inboxes[inbox_index];
+        const inbox = &self.inboxes.slots[inbox_index];
         if (!inbox.in_use or !inbox.wake_pending) native_util.impossibleByInvariant("input wake queue points at an inactive inbox");
         self.unlinkWake(inbox_index);
         inbox.wake_pending = false;
@@ -324,7 +328,7 @@ pub const Router = struct {
             self.events_dropped += 1;
             return false;
         };
-        const inbox = &self.inboxes[inbox_index];
+        const inbox = &self.inboxes.slots[inbox_index];
         if (inbox.count == MAX_EVENTS_PER_INBOX) {
             self.events_dropped += 1;
             return false;
@@ -363,20 +367,18 @@ pub const Router = struct {
     fn inboxForIndex(self: *Router, task_id: u64) ?usize {
         if (self.findInboxIndex(task_id)) |inbox_index| return inbox_index;
         if (task_id == 0) return null;
-        for (&self.inboxes, 0..) |*inbox, inbox_index| {
-            if (inbox.in_use) continue;
-            inbox.* = .{ .in_use = true, .task_id = task_id };
-            self.inbox_index.insert(task_id, inbox_index);
-            return inbox_index;
-        }
-        return null;
+        const inbox_index = self.inboxes.reserveIndex(task_id) orelse return null;
+        const inbox = &self.inboxes.slots[inbox_index];
+        inbox.task_id = task_id;
+        self.linkActiveInbox(inbox_index);
+        return inbox_index;
     }
 
     fn findInboxIndex(self: *const Router, task_id: u64) ?usize {
         if (task_id == 0) return null;
-        const inbox_index = self.inbox_index.lookup(task_id) orelse return null;
+        const inbox_index = self.inboxes.slotIndexOf(task_id) orelse return null;
         if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("input inbox index points outside slots");
-        const inbox = &self.inboxes[inbox_index];
+        const inbox = &self.inboxes.slots[inbox_index];
         if (!inbox.in_use or inbox.task_id != task_id) native_util.impossibleByInvariant("input inbox index points at the wrong slot");
         return inbox_index;
     }
@@ -389,7 +391,7 @@ pub const Router = struct {
 
     fn queueWake(self: *Router, inbox_index: usize) void {
         if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("input wake enqueue points outside inbox slots");
-        const inbox = &self.inboxes[inbox_index];
+        const inbox = &self.inboxes.slots[inbox_index];
         if (!inbox.in_use) native_util.impossibleByInvariant("input wake enqueue requires a live inbox");
         inbox.wake_pending = true;
         if (inbox.wake_queued) return;
@@ -402,14 +404,14 @@ pub const Router = struct {
             self.wake_head = encoded_index;
         } else {
             if (self.wake_tail >= MAX_INBOXES) native_util.impossibleByInvariant("input wake queue tail points outside inbox slots");
-            self.inboxes[self.wake_tail].next_wake_index = encoded_index;
+            self.inboxes.slots[self.wake_tail].next_wake_index = encoded_index;
         }
         self.wake_tail = encoded_index;
     }
 
     fn unlinkWake(self: *Router, inbox_index: usize) void {
         if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("input wake unlink points outside inbox slots");
-        const inbox = &self.inboxes[inbox_index];
+        const inbox = &self.inboxes.slots[inbox_index];
         if (!inbox.wake_queued) return;
 
         const previous = inbox.previous_wake_index;
@@ -418,13 +420,13 @@ pub const Router = struct {
             self.wake_head = next;
         } else {
             if (previous >= MAX_INBOXES) native_util.impossibleByInvariant("input wake previous link points outside inbox slots");
-            self.inboxes[previous].next_wake_index = next;
+            self.inboxes.slots[previous].next_wake_index = next;
         }
         if (next == NO_INBOX_INDEX) {
             self.wake_tail = previous;
         } else {
             if (next >= MAX_INBOXES) native_util.impossibleByInvariant("input wake next link points outside inbox slots");
-            self.inboxes[next].previous_wake_index = previous;
+            self.inboxes.slots[next].previous_wake_index = previous;
         }
         inbox.wake_queued = false;
         inbox.previous_wake_index = NO_INBOX_INDEX;
@@ -432,23 +434,37 @@ pub const Router = struct {
     }
 
     fn pruneStaleInboxes(self: *Router, compositor: *const compositor_session.Session) void {
-        for (&self.inboxes, 0..) |*inbox, inbox_index| {
-            if (!inbox.in_use or inbox.task_id == self.compositor_task_id) continue;
-            if (taskOwnsVisibleWindow(compositor, inbox.task_id)) continue;
+        var inbox_index: usize = self.active_inbox_head;
+        while (inbox_index != NO_INBOX_INDEX) {
+            if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox chain points outside slots");
+            const inbox = &self.inboxes.slots[inbox_index];
+            if (!inbox.in_use) native_util.impossibleByInvariant("active input inbox chain points at a free slot");
+            const next_index = inbox.next_active_index;
+            if (inbox.task_id == self.compositor_task_id or compositor.taskOwnsVisibleWindow(inbox.task_id)) {
+                inbox_index = next_index;
+                continue;
+            }
             self.stale_events_dropped += inbox.count;
             self.releaseInboxEvents(inbox);
             self.unlinkWake(inbox_index);
-            self.inbox_index.remove(inbox.task_id);
-            inbox.* = .{};
+            self.unlinkActiveInbox(inbox_index);
+            if (!self.inboxes.removeIndex(inbox_index)) native_util.impossibleByInvariant("stale input inbox remains live until pruning");
+            inbox_index = next_index;
         }
     }
 
     fn dropAllInboxes(self: *Router) void {
-        for (&self.inboxes) |*inbox| {
+        var inbox_index: usize = self.active_inbox_head;
+        while (inbox_index != NO_INBOX_INDEX) {
+            if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox reset points outside slots");
+            const inbox = &self.inboxes.slots[inbox_index];
+            if (!inbox.in_use) native_util.impossibleByInvariant("active input inbox reset points at a free slot");
             self.stale_events_dropped += inbox.count;
-            inbox.* = .{};
+            inbox_index = inbox.next_active_index;
         }
-        self.inbox_index.reset();
+        self.inboxes.reset();
+        self.active_inbox_head = NO_INBOX_INDEX;
+        self.active_inbox_tail = NO_INBOX_INDEX;
         self.wake_head = NO_INBOX_INDEX;
         self.wake_tail = NO_INBOX_INDEX;
         self.resetEventPool();
@@ -490,6 +506,46 @@ pub const Router = struct {
         self.queued_event_count = 0;
         self.event_pool_initialized = true;
     }
+
+    fn linkActiveInbox(self: *Router, inbox_index: usize) void {
+        if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox append points outside slots");
+        const inbox = &self.inboxes.slots[inbox_index];
+        if (!inbox.in_use) native_util.impossibleByInvariant("active input inbox append requires a live slot");
+        const encoded_index: u8 = @intCast(inbox_index);
+        inbox.previous_active_index = self.active_inbox_tail;
+        inbox.next_active_index = NO_INBOX_INDEX;
+        if (self.active_inbox_tail == NO_INBOX_INDEX) {
+            self.active_inbox_head = encoded_index;
+        } else {
+            if (self.active_inbox_tail >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox tail points outside slots");
+            self.inboxes.slots[self.active_inbox_tail].next_active_index = encoded_index;
+        }
+        self.active_inbox_tail = encoded_index;
+    }
+
+    fn unlinkActiveInbox(self: *Router, inbox_index: usize) void {
+        if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox unlink points outside slots");
+        const inbox = &self.inboxes.slots[inbox_index];
+        if (!inbox.in_use) native_util.impossibleByInvariant("active input inbox unlink requires a live slot");
+        const previous = inbox.previous_active_index;
+        const next = inbox.next_active_index;
+        if (previous == NO_INBOX_INDEX) {
+            if (self.active_inbox_head != inbox_index) native_util.impossibleByInvariant("active input inbox head matches its first link");
+            self.active_inbox_head = next;
+        } else {
+            if (previous >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox previous link points outside slots");
+            self.inboxes.slots[previous].next_active_index = next;
+        }
+        if (next == NO_INBOX_INDEX) {
+            if (self.active_inbox_tail != inbox_index) native_util.impossibleByInvariant("active input inbox tail matches its final link");
+            self.active_inbox_tail = previous;
+        } else {
+            if (next >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox next link points outside slots");
+            self.inboxes.slots[next].previous_active_index = previous;
+        }
+        inbox.previous_active_index = NO_INBOX_INDEX;
+        inbox.next_active_index = NO_INBOX_INDEX;
+    }
 };
 
 fn validTopology(report: xhci.HardwareBootKeyboardReport) bool {
@@ -497,14 +553,8 @@ fn validTopology(report: xhci.HardwareBootKeyboardReport) bool {
         report.endpoint_id != 0;
 }
 
-fn taskOwnsVisibleWindow(compositor: *const compositor_session.Session, task_id: u64) bool {
-    for (0..compositor.window_count) |index| {
-        const window = compositor.windowAtOrder(index) orelse continue;
-        if (!window.visible) continue;
-        if (window.subject_task_id == task_id or
-            (window.modal and window.reviewer_task_id == task_id)) return true;
-    }
-    return false;
+fn inboxTaskId(inbox: *const Inbox) u64 {
+    return inbox.task_id;
 }
 
 fn abiKind(kind: input_driver_task.EventKind) abi.InputEventKind {
@@ -576,8 +626,7 @@ test "input router gives each keyboard independent transitions and targets modal
     });
     var compositor = compositor_session.Session.init();
     const review = try compositor.openDocumentView(app, 7, "review.md");
-    review.modal = true;
-    review.reviewer_task_id = 77;
+    _ = try compositor.setModalReviewer(review.id, 77);
 
     test_feed = .{};
     test_feed.reports[0] = makeTestReport(1, 1, 0, &.{0x04});
@@ -604,14 +653,18 @@ test "input router indexes inboxes and unlinks reused wake slots" {
     var router = Router{};
     const first_index = router.inboxForIndex(11).?;
     const second_index = router.inboxForIndex(22).?;
-    try std.testing.expectEqual(@as(?usize, first_index), router.inbox_index.lookup(11));
-    try std.testing.expectEqual(@as(?usize, second_index), router.inbox_index.lookup(22));
+    try std.testing.expectEqual(@as(?usize, first_index), router.inboxes.slotIndexOf(11));
+    try std.testing.expectEqual(@as(?usize, second_index), router.inboxes.slotIndexOf(22));
+    try std.testing.expectEqual(@as(usize, 2), router.inboxes.countInUse());
+    try std.testing.expectEqual(@as(u8, @intCast(first_index)), router.active_inbox_head);
+    try std.testing.expectEqual(@as(u8, @intCast(second_index)), router.active_inbox_tail);
 
     router.queueWake(first_index);
     router.queueWake(first_index);
     router.queueWake(second_index);
     try std.testing.expectEqual(@as(usize, 0), router.dropForTask(11));
-    try std.testing.expect(router.inbox_index.lookup(11) == null);
+    try std.testing.expect(router.inboxes.slotIndexOf(11) == null);
+    try std.testing.expectEqual(@as(usize, 1), router.inboxes.countInUse());
 
     const replacement_index = router.inboxForIndex(33).?;
     try std.testing.expectEqual(first_index, replacement_index);
@@ -619,6 +672,47 @@ test "input router indexes inboxes and unlinks reused wake slots" {
     try std.testing.expectEqual(@as(?u64, 22), router.pollWakeTarget());
     try std.testing.expectEqual(@as(?u64, 33), router.pollWakeTarget());
     try std.testing.expect(router.pollWakeTarget() == null);
+    try std.testing.expectEqual(@as(u8, @intCast(second_index)), router.active_inbox_head);
+    try std.testing.expectEqual(@as(u8, @intCast(replacement_index)), router.active_inbox_tail);
+}
+
+test "input router saturates its inbox arena and preserves the active chain across reuse" {
+    var router = Router{};
+    var slot_indexes: [MAX_INBOXES]usize = [_]usize{0} ** MAX_INBOXES;
+    for (&slot_indexes, 0..) |*slot_index, task_offset| {
+        slot_index.* = router.inboxForIndex(@intCast(task_offset + 1)).?;
+    }
+
+    try std.testing.expectEqual(@as(usize, MAX_INBOXES), router.inboxes.countInUse());
+    try std.testing.expect(router.inboxForIndex(MAX_INBOXES + 1) == null);
+    try std.testing.expectEqual(@as(u8, @intCast(slot_indexes[0])), router.active_inbox_head);
+    try std.testing.expectEqual(@as(u8, @intCast(slot_indexes[MAX_INBOXES - 1])), router.active_inbox_tail);
+
+    const removed_offset = MAX_INBOXES / 2;
+    const removed_slot_index = slot_indexes[removed_offset];
+    try std.testing.expectEqual(@as(usize, 0), router.dropForTask(@intCast(removed_offset + 1)));
+    const replacement_index = router.inboxForIndex(MAX_INBOXES + 1).?;
+    try std.testing.expectEqual(removed_slot_index, replacement_index);
+    try std.testing.expectEqual(@as(usize, MAX_INBOXES), router.inboxes.countInUse());
+    try std.testing.expectEqual(@as(u8, @intCast(replacement_index)), router.active_inbox_tail);
+
+    var seen: [MAX_INBOXES]bool = [_]bool{false} ** MAX_INBOXES;
+    var previous = NO_INBOX_INDEX;
+    var active_index: usize = router.active_inbox_head;
+    var active_count: usize = 0;
+    while (active_index != NO_INBOX_INDEX) {
+        try std.testing.expect(active_index < MAX_INBOXES);
+        try std.testing.expect(!seen[active_index]);
+        seen[active_index] = true;
+        const inbox = &router.inboxes.slots[active_index];
+        try std.testing.expect(inbox.in_use);
+        try std.testing.expectEqual(previous, inbox.previous_active_index);
+        previous = @intCast(active_index);
+        active_index = inbox.next_active_index;
+        active_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, MAX_INBOXES), active_count);
+    try std.testing.expectEqual(router.active_inbox_tail, previous);
 }
 
 test "input router applies task switching before routing later reports" {
@@ -697,10 +791,29 @@ test "input router rejects stale and malformed reports and prunes closed-window 
     try std.testing.expectEqual(@as(usize, 1), router.invalid_reports);
     try std.testing.expectEqual(@as(usize, 1), router.queuedForTask(app.id));
 
+    const compositor_inbox_index = router.inboxForIndex(99).?;
+    const stale_inbox_index = router.inboxForIndex(404).?;
+    router.queueWake(compositor_inbox_index);
+    router.queueWake(stale_inbox_index);
+    try std.testing.expectEqual(@as(usize, 3), router.inboxes.countInUse());
+
     try std.testing.expectEqual(@as(usize, 1), compositor.closeWindowsForTask(app.id));
     _ = router.service(31, DEFAULT_REPORT_BUDGET);
     try std.testing.expectEqual(@as(usize, 0), router.queuedForTask(app.id));
     try std.testing.expectEqual(@as(usize, 1), router.stale_events_dropped);
+    try std.testing.expect(router.inboxes.slotIndexOf(app.id) == null);
+    try std.testing.expect(router.inboxes.slotIndexOf(404) == null);
+    try std.testing.expectEqual(@as(?usize, compositor_inbox_index), router.inboxes.slotIndexOf(99));
+    try std.testing.expectEqual(@as(usize, 1), router.inboxes.countInUse());
+    try std.testing.expectEqual(@as(u8, @intCast(compositor_inbox_index)), router.active_inbox_head);
+    try std.testing.expectEqual(@as(u8, @intCast(compositor_inbox_index)), router.active_inbox_tail);
+    try std.testing.expectEqual(@as(?u64, 99), router.pollWakeTarget());
+    try std.testing.expect(router.pollWakeTarget() == null);
+
+    const replacement_index = router.inboxForIndex(505).?;
+    try std.testing.expectEqual(stale_inbox_index, replacement_index);
+    try std.testing.expectEqual(@as(usize, 2), router.inboxes.countInUse());
+    try std.testing.expectEqual(@as(u8, @intCast(replacement_index)), router.active_inbox_tail);
 }
 
 test "input router keeps compositor switching responsive when a focused inbox is full" {
