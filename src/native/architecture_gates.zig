@@ -45,6 +45,7 @@ const network_policy = @import("sync/network_policy.zig");
 const supervisor = @import("session/supervisor.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
+const session_manager_boot_flow = @import("session/session_manager_boot_flow.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
 const session_service_bootstrap = @import("session/session_service_bootstrap.zig");
 
@@ -382,5 +383,6 @@ pub const indexed_hot_path_tables = .{
     },
     .session_manager_boot_flow = .{
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
+        .caches_surface_authority_lifecycle_generation = @hasField(session_manager_boot_flow.SessionManager, "surface_authority_scanned_lifecycle_generation"),
     },
 };
