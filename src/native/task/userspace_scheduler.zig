@@ -35,6 +35,7 @@ const TEST_ACCELERATOR_SHARED_MEMORY_BYTES: usize = 4096;
 const TEST_ACCELERATOR_DEADLINE_TICKS: u64 = 20;
 const MEMORY_BANDWIDTH_UNIT_BYTES: usize = 1024;
 const no_index = indexed_arena.no_index;
+pub const STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS: u8 = 0;
 
 pub const WakeReason = enum(u8) {
     registered,
@@ -97,6 +98,7 @@ const Slot = struct {
     event_wait_count: u64 = 0,
     ui_state_update_count: u64 = 0,
     last_ui_state_revision: u64 = 0,
+    owns_ui_surface: bool = false,
     last_dispatch_tick: u64 = 0,
     last_wake_tick: u64 = 0,
     wake_event_count: u64 = 0,
@@ -262,6 +264,8 @@ pub const Scheduler = struct {
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
+        const catalog = self.catalog_ptr orelse return false;
+        const owns_ui_surface = taskUiPresentationEligible(catalog, task);
         const slot_index = self.slots.reserveIndex(task_id) orelse return false;
         const slot = &self.slots.slots[slot_index];
         slot.task_id = task_id;
@@ -269,6 +273,7 @@ pub const Scheduler = struct {
         slot.dispatch_request = deriveDispatchRequest(task);
         slot.dispatch_request_configured = false;
         slot.require_accelerator = false;
+        slot.owns_ui_surface = owns_ui_surface;
         slot.cpu_budget_remaining_ticks = task.budget.cpu_time_ticks;
         slot.deadline_tick = deadlineFromNow(slot.resource_class, 0);
         slot.last_wake_tick = 0;
@@ -514,7 +519,7 @@ pub const Scheduler = struct {
             }
             const ui_revision = self.executor.lastYieldUiRevision();
             if (outcome.handedOff() and
-                taskOwnsUiSurface(self, task) and
+                slot.owns_ui_surface and
                 ui_revision > slot.last_ui_state_revision)
             {
                 slot.last_ui_state_revision = ui_revision;
@@ -1129,6 +1134,14 @@ fn acceleratorClaimSlotId(slot: *const AcceleratorClaimSlot) u64 {
     return slot.record.id;
 }
 
+test "scheduler caches immutable UI presentation eligibility" {
+    try std.testing.expect(contractOwnsUiSurface(userspace_flags.FLAG_OWNS_UI_SURFACE));
+    try std.testing.expect(contractOwnsUiSurface(userspace_flags.FLAG_OWNS_UI_SURFACE | userspace_flags.FLAG_BACKGROUND_ELIGIBLE));
+    try std.testing.expect(!contractOwnsUiSurface(0));
+    try std.testing.expect(!contractOwnsUiSurface(userspace_flags.FLAG_BACKGROUND_ELIGIBLE));
+    try std.testing.expectEqual(@as(u8, 0), STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS);
+}
+
 fn acceleratorClaimTaskKey(task_id: u64) u64 {
     return task_id;
 }
@@ -1244,10 +1257,16 @@ fn executionRemainsReady(outcome: userspace_executor.ExecutionOutcome) bool {
     return outcome != .wait_for_event;
 }
 
-fn taskOwnsUiSurface(self: *const Scheduler, task: *const task_runtime.TaskRecord) bool {
-    const catalog = self.catalog_ptr orelse return false;
+fn taskUiPresentationEligible(
+    catalog: *userspace_loader.Catalog,
+    task: *const task_runtime.TaskRecord,
+) bool {
     const image = catalog.findById(task.launch.image_id) orelse return false;
-    return (image.contract_flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
+    return contractOwnsUiSurface(image.contract_flags);
+}
+
+fn contractOwnsUiSurface(contract_flags: u32) bool {
+    return (contract_flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
 }
 
 fn expiredReadyCandidateBeats(
@@ -1395,6 +1414,8 @@ test "userspace scheduler registers tasks through indexed arena slots" {
     try std.testing.expectEqual(@as(usize, 1), scheduler.slots.countInUse());
 
     const first_index = scheduler.slots.slotIndexOf(first_task.id).?;
+    try std.testing.expect(!scheduler.slots.slots[first_index].owns_ui_surface);
+    scheduler.slots.slots[first_index].owns_ui_surface = true;
     try std.testing.expect(scheduler.unregisterTask(first_task.id));
     try std.testing.expect(!scheduler.hasReadyTasks());
     try std.testing.expectEqual(@as(usize, 0), scheduler.slots.countInUse());
@@ -1402,6 +1423,7 @@ test "userspace scheduler registers tasks through indexed arena slots" {
     try std.testing.expect(scheduler.registerTask(second_task.id));
     try std.testing.expect(scheduler.hasReadyTasks());
     try std.testing.expectEqual(first_index, scheduler.slots.slotIndexOf(second_task.id).?);
+    try std.testing.expect(!scheduler.slots.slots[first_index].owns_ui_surface);
 }
 
 test "userspace scheduler unlinks ready queue slots through prev links" {
