@@ -131,6 +131,7 @@ pub const indexed_hot_path_tables = .{
         .avoids_steady_address_space_image_indexes = userspace_executor.STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS == 0,
         .avoids_steady_mapping_index_lookups = @hasDecl(userspace_executor.Executor, "mappingHandle") and
             userspace_executor.STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH == 0,
+        .avoids_unchanged_resume_mailbox_writes = userspace_executor.UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH == 0,
     },
     .userspace_loader = .{
         .uses_image_arena = @hasDecl(@FieldType(userspace_loader.Catalog, "images"), "reserveIndex"),
