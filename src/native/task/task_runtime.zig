@@ -191,6 +191,7 @@ pub const Runtime = struct {
     task_owner_index: TaskOwnerIndex = TaskOwnerIndex.init(),
     task_initial_component_label_index: TaskInitialComponentLabelIndex = TaskInitialComponentLabelIndex.init(),
     task_state_counts: [TASK_STATE_COUNT]usize = [_]usize{0} ** TASK_STATE_COUNT,
+    task_lifecycle_generation: u64 = 1,
     task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
     address_spaces: model.AddressSpaceArena = model.AddressSpaceArena.init(),
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
@@ -231,6 +232,7 @@ pub const Runtime = struct {
             cold.* = zeroTaskCold();
         }
         self.address_spaces.reset();
+        self.advanceTaskLifecycleGeneration();
         self.notifyAddressSpaceRetirements(&retirements);
     }
 
@@ -296,6 +298,7 @@ pub const Runtime = struct {
             self.address_spaces.slots[slot_index].address_space = state.address_spaces[address_space_index].address_space;
         }
         self.debugAssertIndexIntegrity();
+        self.advanceTaskLifecycleGeneration();
         self.notifyAddressSpaceRetirements(&retirements);
     }
 
@@ -413,6 +416,7 @@ pub const Runtime = struct {
         self.task_state_counts[taskStateIndex(slot.task.state)] += 1;
         self.advanceNextComponentIdFrom(initial_component.id);
         self.advanceNextTaskIdFrom(task_id);
+        self.advanceTaskLifecycleGeneration();
         return &slot.task;
     }
 
@@ -433,6 +437,10 @@ pub const Runtime = struct {
 
     pub fn countTasksInState(self: *const Runtime, state: TaskState) usize {
         return self.task_state_counts[taskStateIndex(state)];
+    }
+
+    pub fn taskLifecycleGeneration(self: *const Runtime) u64 {
+        return self.task_lifecycle_generation;
     }
 
     pub fn taskSlotAt(self: *Runtime, slot_index: usize) *TaskSlot {
@@ -915,6 +923,12 @@ pub const Runtime = struct {
         self.task_state_counts[old_index] -= 1;
         task.state = state;
         self.task_state_counts[taskStateIndex(state)] += 1;
+        self.advanceTaskLifecycleGeneration();
+    }
+
+    fn advanceTaskLifecycleGeneration(self: *Runtime) void {
+        self.task_lifecycle_generation +%= 1;
+        if (self.task_lifecycle_generation == 0) self.task_lifecycle_generation = 1;
     }
 
     fn appendInitialComponentLabelIndex(self: *Runtime, slot_index: usize, task: *const TaskRecord) bool {
@@ -1894,6 +1908,7 @@ test "address-space retirement on snapshot restore replaces only runtime state a
 
 test "task state counts track lifecycle transitions and snapshot restore" {
     var runtime = Runtime.init();
+    try std.testing.expectEqual(@as(u64, 1), runtime.taskLifecycleGeneration());
     const first = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 9 },
         .component_class = .service_component,
@@ -1905,6 +1920,7 @@ test "task state counts track lifecycle transitions and snapshot restore" {
         },
     });
     const first_task_id = first.id;
+    try std.testing.expectEqual(@as(u64, 2), runtime.taskLifecycleGeneration());
     const second = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 10 },
         .component_class = .service_component,
@@ -1916,6 +1932,7 @@ test "task state counts track lifecycle transitions and snapshot restore" {
         },
     });
     const second_task_id = second.id;
+    try std.testing.expectEqual(@as(u64, 3), runtime.taskLifecycleGeneration());
 
     try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.staged));
     try std.testing.expectEqual(@as(usize, 2), runtime.countTasksInState(.active));
@@ -1923,14 +1940,21 @@ test "task state counts track lifecycle transitions and snapshot restore" {
     try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.terminated));
 
     try std.testing.expect(try runtime.suspendTask(first_task_id, 11));
+    try std.testing.expectEqual(@as(u64, 4), runtime.taskLifecycleGeneration());
+    try std.testing.expect(!try runtime.suspendTask(first_task_id, 11));
+    try std.testing.expectEqual(@as(u64, 4), runtime.taskLifecycleGeneration());
     try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.suspended));
 
     try std.testing.expect(try runtime.resumeTask(first_task_id, 12));
+    try std.testing.expectEqual(@as(u64, 5), runtime.taskLifecycleGeneration());
     try std.testing.expectEqual(@as(usize, 2), runtime.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.suspended));
 
     try std.testing.expect(try runtime.terminateTask(second_task_id, 13));
+    try std.testing.expectEqual(@as(u64, 6), runtime.taskLifecycleGeneration());
+    try std.testing.expect(!try runtime.terminateTask(second_task_id, 13));
+    try std.testing.expectEqual(@as(u64, 6), runtime.taskLifecycleGeneration());
     try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.terminated));
 
@@ -1938,13 +1962,22 @@ test "task state counts track lifecycle transitions and snapshot restore" {
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
     restored.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(@as(u64, 2), restored.taskLifecycleGeneration());
 
     try std.testing.expectEqual(@as(usize, 1), restored.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 1), restored.countTasksInState(.terminated));
 
     restored.reset();
+    try std.testing.expectEqual(@as(u64, 3), restored.taskLifecycleGeneration());
     try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.terminated));
+
+    restored.task_lifecycle_generation = std.math.maxInt(u64);
+    restored.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(@as(u64, 1), restored.taskLifecycleGeneration());
+    restored.task_lifecycle_generation = std.math.maxInt(u64);
+    restored.reset();
+    try std.testing.expectEqual(@as(u64, 1), restored.taskLifecycleGeneration());
 }
 
 test "initial component label lookup is indexed across lifecycle and restore" {
