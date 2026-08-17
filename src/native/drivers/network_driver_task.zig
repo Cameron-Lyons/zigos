@@ -2,6 +2,7 @@ const std = @import("std");
 const attestation_service = @import("../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
@@ -38,9 +39,10 @@ pub const NetworkDevice = struct {
 
 pub const BROADCAST_MAC: [6]u8 = [_]u8{0xFF} ** 6;
 pub const MAX_PEER_LINKS: usize = 32;
+const PEER_LINK_INDEX_CAPACITY: usize = MAX_PEER_LINKS * 2;
+const PeerLinkIndex = indexed_arena.UniqueIndex(PEER_LINK_INDEX_CAPACITY);
 
 const PeerLink = struct {
-    in_use: bool = false,
     device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
     mac: [6]u8 = [_]u8{0} ** 6,
 };
@@ -54,35 +56,46 @@ pub const PeerLinkError = error{
 
 pub const PeerLinkDirectory = struct {
     links: [MAX_PEER_LINKS]PeerLink = [_]PeerLink{.{}} ** MAX_PEER_LINKS,
+    link_count: usize = 0,
+    device_index: PeerLinkIndex = PeerLinkIndex.init(),
+    mac_index: PeerLinkIndex = PeerLinkIndex.init(),
 
     pub fn bind(self: *PeerLinkDirectory, device: principal.PrincipalId, mac: [6]u8) PeerLinkError!void {
         if (device.kind != .device or device.serial == 0) return error.InvalidPeerDevice;
         if (!validUnicastMac(mac)) return error.InvalidPeerAddress;
 
-        var free_index: ?usize = null;
-        for (&self.links, 0..) |*link, index| {
-            if (!link.in_use) {
-                if (free_index == null) free_index = index;
-                continue;
-            }
-            if (link.device.eql(device)) {
-                if (!std.mem.eql(u8, &link.mac, &mac)) return error.PeerAddressConflict;
-                return;
-            }
-            if (std.mem.eql(u8, &link.mac, &mac)) return error.PeerAddressConflict;
+        if (self.device_index.lookup(device.serial)) |index| {
+            if (index >= self.link_count) native_util.impossibleByInvariant("peer device index points outside live links");
+            const link = &self.links[index];
+            if (!link.device.eql(device)) native_util.impossibleByInvariant("peer device index points at the wrong link");
+            if (!std.mem.eql(u8, &link.mac, &mac)) return error.PeerAddressConflict;
+            return;
         }
+        if (self.mac_index.contains(macIndexKey(mac))) return error.PeerAddressConflict;
+        if (self.link_count == MAX_PEER_LINKS) return error.PeerLinkDirectoryFull;
 
-        const index = free_index orelse return error.PeerLinkDirectoryFull;
-        self.links[index] = .{ .in_use = true, .device = device, .mac = mac };
+        const index = self.link_count;
+        self.links[index] = .{ .device = device, .mac = mac };
+        self.device_index.insert(device.serial, index);
+        self.mac_index.insert(macIndexKey(mac), index);
+        self.link_count += 1;
     }
 
     pub fn resolve(self: *const PeerLinkDirectory, device: principal.PrincipalId) ?[6]u8 {
-        for (&self.links) |*link| {
-            if (link.in_use and link.device.eql(device)) return link.mac;
-        }
-        return null;
+        if (device.kind != .device or device.serial == 0) return null;
+        const index = self.device_index.lookup(device.serial) orelse return null;
+        if (index >= self.link_count) native_util.impossibleByInvariant("peer device index points outside live links");
+        const link = &self.links[index];
+        if (!link.device.eql(device)) native_util.impossibleByInvariant("peer device index points at the wrong link");
+        return link.mac;
     }
 };
+
+fn macIndexKey(mac: [6]u8) u64 {
+    var key: u64 = 0;
+    for (mac) |byte| key = (key << 8) | byte;
+    return key;
+}
 
 pub fn validUnicastMac(mac: [6]u8) bool {
     if ((mac[0] & 1) != 0) return false;
@@ -914,15 +927,20 @@ test "peer link directory binds stable unicast routes and rejects ambiguity" {
 
     try directory.bind(first_device, first_mac);
     try directory.bind(first_device, first_mac);
+    try std.testing.expectEqual(@as(usize, 1), directory.link_count);
+    try std.testing.expectEqual(@as(?usize, 0), directory.device_index.lookup(first_device.serial));
+    try std.testing.expectEqual(@as(?usize, 0), directory.mac_index.lookup(macIndexKey(first_mac)));
     const resolved = directory.resolve(first_device).?;
     try std.testing.expectEqualSlices(u8, &first_mac, &resolved);
     try std.testing.expect(directory.resolve(second_device) == null);
+    try std.testing.expect(directory.resolve(.{ .kind = .service, .serial = first_device.serial }) == null);
 
     try std.testing.expectError(error.InvalidPeerDevice, directory.bind(.{ .kind = .service, .serial = 3 }, second_mac));
     try std.testing.expectError(error.InvalidPeerAddress, directory.bind(second_device, [_]u8{0} ** 6));
     try std.testing.expectError(error.InvalidPeerAddress, directory.bind(second_device, .{ 0x01, 0, 0, 0, 0, 2 }));
     try std.testing.expectError(error.PeerAddressConflict, directory.bind(first_device, second_mac));
     try std.testing.expectError(error.PeerAddressConflict, directory.bind(second_device, first_mac));
+    try std.testing.expectEqual(@as(usize, 1), directory.link_count);
 }
 
 test "peer link directory has a fixed fail-closed capacity" {
@@ -937,6 +955,10 @@ test "peer link directory has a fixed fail-closed capacity" {
         .{ .kind = .device, .serial = MAX_PEER_LINKS + 1 },
         .{ 0x02, 0x5A, 0x47, 0, 1, 1 },
     ));
+    try std.testing.expectEqual(MAX_PEER_LINKS, directory.link_count);
+    const last_device = principal.PrincipalId{ .kind = .device, .serial = MAX_PEER_LINKS };
+    const last_mac = [_]u8{ 0x02, 0x5A, 0x47, 0, 0, MAX_PEER_LINKS };
+    try std.testing.expectEqualSlices(u8, &last_mac, &directory.resolve(last_device).?);
 }
 
 test "network driver data plane is brokered by explicit egress capability" {
