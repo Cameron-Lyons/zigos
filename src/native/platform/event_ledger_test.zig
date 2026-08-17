@@ -736,6 +736,38 @@ test "event ledger persists user visible policy ux history across restart and qu
     storage_checkpoint_store.resetPersistent();
 }
 
+test "event ledger rebuilds eviction order across restart" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 48 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 49 };
+    const signer = signing.SignerIdentity{
+        .label = "diagnostic-ledger-eviction-order",
+        .seed = signing.seedFromByte(0xAB),
+    };
+
+    var storage = storage_service.Service.initWithStore(905, 309, owner, &storage_checkpoint_store);
+    var ledger = try Ledger.initPersistent(&storage, owner, signer);
+    ledger.beginPersistenceBatch();
+    var sequence: u64 = 1;
+    while (sequence <= event_ledger.MAX_EVENTS) : (sequence += 1) {
+        try ledger.recordPermissionDecision(user, sequence, .screen_capture, false, .policy_denied, sequence, "denied", true);
+    }
+    try ledger.flushPersistenceBatch();
+
+    var restarted_storage = storage_service.Service.initWithStore(905, 310, owner, &storage_checkpoint_store);
+    var restarted = try Ledger.initPersistent(&restarted_storage, owner, signer);
+    try restarted.recordPermissionDecision(user, event_ledger.MAX_EVENTS + 1, .screen_capture, false, .policy_denied, event_ledger.MAX_EVENTS + 1, "denied", true);
+
+    try std.testing.expectEqual(@as(usize, 0), restarted.countMatching(.{ .task_id = 1 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .task_id = 2 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .task_id = event_ledger.MAX_EVENTS + 1 }));
+    try std.testing.expectEqual(@as(u64, event_ledger.MAX_EVENTS + 1), restarted.latestKind(.permission_decision).?.sequence);
+
+    storage_checkpoint_store.resetPersistent();
+}
+
 test "event ledger persistence retains full in-memory history and detail payloads" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
