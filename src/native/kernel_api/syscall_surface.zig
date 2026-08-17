@@ -319,6 +319,7 @@ test "syscall surface dispatches typed task creation requests" {
                 .component_abi_version = 1,
                 .signed = true,
                 .bundle_id = "app.example.syscall",
+                .source_identity = "store://release/app.example.syscall/1",
             },
             .userspace_image = &syscall_test_image,
         },
@@ -343,6 +344,9 @@ test "syscall surface dispatches typed task creation requests" {
     try std.testing.expect(abi.taskFlagsHas(response.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
     try std.testing.expect(abi.taskFlagsHas(response.flags, abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED));
     try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(response.flags));
+    const created_task = test_kernel.runtime.find(response.task_id).?;
+    try std.testing.expectEqualStrings("app.example.syscall", created_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("store://release/app.example.syscall/1", created_task.launchSourceIdentitySlice());
 }
 
 test "syscall surface explains preflight request failures" {
@@ -953,6 +957,55 @@ test "syscall surface validates and bounds embedded user buffers" {
         @sizeOf(abi.TaskDescriptor),
     );
     try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, bad_image.status);
+
+    const valid_image = try generated_image_fixtures.appImage();
+    const invalid_source_ptr: [*]const u8 = @ptrFromInt(0x1000);
+    const bad_source_request = component_port.TaskCreateRequest{
+        .header = component_port.makeHeader(.task_create, 94, test_kernel.session_task_id),
+        .authority_capability_id = test_kernel.authority_capability_id,
+        .request = .{
+            .owner = .{ .kind = .app, .serial = 101 },
+            .component_class = .app_component,
+            .budget = .{
+                .cpu_time_ticks = 1_000,
+                .memory_bytes = units.kibibytes(1),
+                .endpoint_slots = 4,
+                .shared_memory_bytes = units.kibibytes(1),
+            },
+            .local_only = true,
+            .launch = .{
+                .boundary = .userspace_process,
+                .image_id = 25,
+                .component_abi_version = 1,
+                .signed = true,
+                .bundle_id = "app.example.invalid-source",
+                .source_identity = invalid_source_ptr[0..1],
+            },
+            .userspace_image = &valid_image,
+        },
+    };
+    const bad_source = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&bad_source_request),
+        @intFromPtr(&response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, bad_source.status);
+
+    const oversized_source = [_]u8{'x'} ** (task_runtime.MAX_TASK_SOURCE_IDENTITY_BYTES + 1);
+    var oversized_source_request = bad_source_request;
+    oversized_source_request.request.launch.source_identity = &oversized_source;
+    const oversized_identity = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&oversized_source_request),
+        @intFromPtr(&response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, oversized_identity.status);
 
     const oversized_payload = [_]u8{0xAB} ** (endpoint.MAX_MESSAGE_BYTES + 1);
     const send_request = component_port.EndpointSendRequest{
