@@ -379,6 +379,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_staging_state = @hasField(workspace.WorkspaceRecord, "staging"),
         .reuses_mutation_log_tail_for_staging = !@hasField(workspace.WorkspaceStagingState, "staged_entries"),
         .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),
+        .uses_compact_path_lengths = @sizeOf(workspace.WorkspacePathLength) == 1,
         .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
         .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),
         .supports_indexed_path_lookup = @hasField(workspace.WorkspacePathIndex, "path_slots"),
