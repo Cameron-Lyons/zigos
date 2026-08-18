@@ -104,6 +104,7 @@ pub const SessionManager = struct {
         if (self.runtime_context.constructed) {
             self.runtime_context.userspace_scheduler.deinit();
         }
+        self.runtime_context.runtime_checkpoint_store.reset();
         self.native_store.resetPersistent();
         self.* = SessionManager.init();
         bootstrap_driver_port.reset();
@@ -512,7 +513,10 @@ pub const SessionManager = struct {
             return null;
         }
         self.bindProductionStorageService(&graph);
-        self.runtime_context.runtime_service.checkpoint(60);
+        self.runtime_context.runtime_service.checkpoint(60) catch {
+            self.failBoot();
+            return null;
+        };
         var trust = self.trustBoot();
         if (comptime include_verification_evidence) {
             if (!trust.proveProductionAbImageRollback(&graph)) {
