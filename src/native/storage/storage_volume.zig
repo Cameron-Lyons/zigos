@@ -23,10 +23,17 @@ pub const image_bytes = volume_layout.image_bytes;
 pub const max_payload_bytes = volume_layout.max_payload_bytes;
 pub const required_device_sectors = volume_layout.required_device_sectors;
 pub const max_signer_bytes = volume_layout.max_signer_bytes;
+pub const SIGNER_TEXT_POOL_BYTES: usize = 12 * 1024;
 pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
+
+comptime {
+    if (SIGNER_TEXT_POOL_BYTES > std.math.maxInt(u16)) {
+        @compileError("signer text pool exceeds its compact length field");
+    }
+}
 
 const data_start_byte = volume_layout.data_start_byte;
 const data_region_bytes = DATA_REGION_BYTES;
@@ -92,12 +99,8 @@ pub const Volume = struct {
     attached_backend_write: *const fn (u64, [*]const u8, usize) callconv(.c) bool = volume_backend.unattachedWrite,
     attached_backend_flush: *const fn () callconv(.c) bool = volume_backend.unattachedFlush,
     attached_backend_kind: volume_backend.AttachedBackendKind = .none,
-    version_signers: [object_store.MAX_VERSIONS][max_signer_bytes]u8 =
-        [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_VERSIONS,
-    object_signers: [object_store.MAX_OBJECTS][max_signer_bytes]u8 =
-        [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_OBJECTS,
-    snapshot_signers: [workspace.MAX_SNAPSHOTS][max_signer_bytes]u8 =
-        [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** workspace.MAX_SNAPSHOTS,
+    signer_text_len: u16 = 0,
+    signer_text_pool: [SIGNER_TEXT_POOL_BYTES]u8 = [_]u8{0} ** SIGNER_TEXT_POOL_BYTES,
     workspace_state_hashes: WorkspaceStateHashCache = .{},
 
     pub fn init() Volume {
@@ -114,10 +117,41 @@ pub const Volume = struct {
         self.attached_backend_write = volume_backend.unattachedWrite;
         self.attached_backend_flush = volume_backend.unattachedFlush;
         self.attached_backend_kind = .none;
-        @memset(std.mem.sliceAsBytes(self.version_signers[0..]), 0);
-        @memset(std.mem.sliceAsBytes(self.object_signers[0..]), 0);
-        @memset(std.mem.sliceAsBytes(self.snapshot_signers[0..]), 0);
+        self.resetSignerText();
         self.workspace_state_hashes = .{};
+    }
+
+    fn resetSignerText(self: *Volume) void {
+        self.signer_text_len = 0;
+        @memset(&self.signer_text_pool, 0);
+    }
+
+    fn internSigner(self: *Volume, signer: []const u8) Error![]const u8 {
+        if (signer.len == 0) return "";
+        if (signer.len > max_signer_bytes or signer.len > std.math.maxInt(u8)) {
+            return error.InvalidSignatureEncoding;
+        }
+
+        const used: usize = self.signer_text_len;
+        var offset: usize = 0;
+        while (offset < used) {
+            const stored_len: usize = self.signer_text_pool[offset];
+            const start = offset + 1;
+            const end = start + stored_len;
+            if (end > used) return error.InvalidSignatureEncoding;
+            if (std.mem.eql(u8, self.signer_text_pool[start..end], signer)) {
+                return self.signer_text_pool[start..end];
+            }
+            offset = end;
+        }
+
+        const start = used + 1;
+        const end = start + signer.len;
+        if (end > self.signer_text_pool.len) return error.InvalidSignatureEncoding;
+        self.signer_text_pool[used] = @intCast(signer.len);
+        @memcpy(self.signer_text_pool[start..end], signer);
+        self.signer_text_len = @intCast(end);
+        return self.signer_text_pool[start..end];
     }
 
     pub fn attachBackend(self: *Volume, backend: Backend) void {
@@ -440,6 +474,7 @@ fn loadLatestValidImageRoot(
 
     store.reset();
     workspaces.reset();
+    self.resetSignerText();
     return last_error orelse error.CorruptImage;
 }
 
@@ -468,6 +503,7 @@ fn loadLatestValidBackendRoot(
 
     store.reset();
     workspaces.reset();
+    self.resetSignerText();
     return last_error orelse error.CorruptImage;
 }
 
@@ -771,6 +807,7 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     if (!volume_root_slot.hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     store.reset();
     workspaces.reset();
+    self.resetSignerText();
 
     self.workspace_state_hashes.reset();
     if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
@@ -983,7 +1020,7 @@ fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const
         .latest_version_id = latest_version_id,
         .version_count = version_count,
     };
-    try readObjectUserDataTail(&reader, &object_record, &self.object_signers[slot_index]);
+    try readObjectUserDataTail(self, &reader, &object_record);
     store.objects.slots[slot_index].object = object_record;
 }
 
@@ -1004,7 +1041,7 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     var blob_address: object_store.BlobAddress = undefined;
     try reader.readBytes(&blob_address);
     try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
-    store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
+    store.versions.slots[slot_index].version.metadata = try readMetadata(self, &reader);
     const payload_len: usize = @intCast(try reader.readU32());
     if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
     const chunk_count_value = try reader.readU16();
@@ -1141,7 +1178,7 @@ fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload:
     workspaces.snapshots.slots[slot_index].snapshot.generation = try reader.readU32();
     readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
     try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
-    workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
+    workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
     workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
     if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
 }
@@ -1246,7 +1283,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         slot.object.object_type = try parseObjectType(try reader.readByte());
         slot.object.latest_version_id = ids.version(try reader.readU64());
         slot.object.version_count = try reader.readU16();
-        try readObjectUserDataTail(&reader, &slot.object, &self.object_signers[slot_index]);
+        try readObjectUserDataTail(self, &reader, &slot.object);
     }
 
     for (0..@as(usize, chunk_count)) |_| {
@@ -1292,7 +1329,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         var blob_address: object_store.BlobAddress = undefined;
         try reader.readBytes(&blob_address);
         try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
-        store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
+        store.versions.slots[slot_index].version.metadata = try readMetadata(self, &reader);
         const payload_len: usize = @intCast(try reader.readU32());
         if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
         const chunk_count_value = try reader.readU16();
@@ -1343,7 +1380,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         workspaces.snapshots.slots[slot_index].snapshot.generation = try reader.readU32();
         readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
         try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
-        workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
+        workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
         workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
         if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
     }
@@ -1356,23 +1393,23 @@ fn writeMetadata(writer: *CursorWriter, metadata: object_store.SignedMetadata) E
     try writeSignature(writer, metadata.signature);
 }
 
-fn readMetadata(reader: *CursorReader, signer_storage: *[max_signer_bytes]u8) Error!object_store.SignedMetadata {
+fn readMetadata(self: *Volume, reader: *CursorReader) Error!object_store.SignedMetadata {
     var metadata = object_store.SignedMetadata{};
     readTextInto(reader, &metadata.label, &metadata.label_len) catch return error.CorruptImage;
     readTextInto(reader, &metadata.content_type, &metadata.content_type_len) catch return error.CorruptImage;
     metadata.created_at_ticks = try reader.readU64();
-    metadata.signature = try readSignature(reader, signer_storage);
+    metadata.signature = try readSignature(self, reader);
     return metadata;
 }
 
 fn readObjectUserDataTail(
+    self: *Volume,
     reader: *CursorReader,
     record: *object_store.ObjectRecord,
-    signer_storage: *[max_signer_bytes]u8,
 ) Error!void {
     record.provenance.created_at_ticks = try reader.readU64();
     record.provenance.updated_at_ticks = try reader.readU64();
-    record.provenance.creator_signature = try readSignature(reader, signer_storage);
+    record.provenance.creator_signature = try readSignature(self, reader);
     record.provenance.latest_version_addressed = (try reader.readByte()) != 0;
     record.snapshot_state.snapshot_count = try reader.readU16();
     record.snapshot_state.latest_snapshot_version_id = ids.version(try reader.readU64());
@@ -1406,19 +1443,20 @@ fn writeSignature(writer: *CursorWriter, signature: anytype) Error!void {
     try writer.writeByte(0);
 }
 
-fn readSignature(reader: *CursorReader, signer_storage: *[max_signer_bytes]u8) Error!@import("../policy/manifest.zig").Signature {
+fn readSignature(self: *Volume, reader: *CursorReader) Error!@import("../policy/manifest.zig").Signature {
     const manifest = @import("../policy/manifest.zig");
     const present = try reader.readByte();
     if (present == 0) return .{};
 
     const signer_len = try reader.readU16();
     if (signer_len > max_signer_bytes) return error.InvalidSignatureEncoding;
-    @memset(signer_storage[0..], 0);
+    var signer_storage: [max_signer_bytes]u8 = undefined;
     try reader.readBytes(signer_storage[0..signer_len]);
+    const signer = try self.internSigner(signer_storage[0..signer_len]);
 
     var signature = manifest.Signature{
         .format = manifest.SIGNATURE_FORMAT_ED25519,
-        .signer = signer_storage[0..signer_len],
+        .signer = signer,
     };
     signature.public_key_len = try reader.readU16();
     if (signature.public_key_len > signature.public_key.len) return error.InvalidSignatureEncoding;
@@ -1767,7 +1805,34 @@ test "storage append rejects issuance watermark rewind" {
     }, store, workspaces));
 }
 
+test "storage volume interns repeated signer labels within a bounded pool" {
+    var volume = Volume.init();
+    const first = try volume.internSigner("persistent-key");
+    const repeated = try volume.internSigner("persistent-key");
+    try std.testing.expect(first.ptr == repeated.ptr);
+    try std.testing.expectEqualStrings(first, repeated);
+    try std.testing.expectEqual(@as(u16, 1 + "persistent-key".len), volume.signer_text_len);
+
+    var overflowed = false;
+    const attempts = SIGNER_TEXT_POOL_BYTES / (max_signer_bytes + 1) + 2;
+    for (0..attempts) |index| {
+        var signer = [_]u8{'s'} ** max_signer_bytes;
+        std.mem.writeInt(u32, signer[0..@sizeOf(u32)], @intCast(index), .little);
+        _ = volume.internSigner(&signer) catch |err| {
+            try std.testing.expect(err == error.InvalidSignatureEncoding);
+            overflowed = true;
+            break;
+        };
+    }
+    try std.testing.expect(overflowed);
+    try std.testing.expect(@as(usize, volume.signer_text_len) <= volume.signer_text_pool.len);
+}
+
 pub const testing = struct {
+    pub fn signerTextBytes() usize {
+        return default_volume.signer_text_len;
+    }
+
     pub fn latestImageLogBytes(image: []const u8) Error!u32 {
         return (try volume_root_slot.findLatestImageRoot(image)).?.root.log_bytes;
     }
