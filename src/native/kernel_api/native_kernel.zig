@@ -164,6 +164,7 @@ pub const Kernel = struct {
         if (!terminated) return false;
         _ = self.capability_table.retireTaskAuthority(task_id, held_capability_ids[0..held_capability_count]);
         _ = self.endpoint_table.retireTask(ids.task(task_id));
+        _ = self.shared_memory_table.retireTask(ids.task(task_id));
         return true;
     }
 
@@ -1244,6 +1245,13 @@ test "capability mint query revoke and task termination are exposed by the nativ
     });
     const task_endpoint = try endpoints.create(ids.task(target_task.id), "terminated-task", .{});
     try std.testing.expectEqual(@as(u16, 1), endpoints.activeForTask(ids.task(target_task.id)));
+    const owned_shared = try shared.create(ids.task(target_task.id), shared_memory.PAGE_SIZE);
+    const peer_shared = try shared.create(ids.task(999), shared_memory.PAGE_SIZE);
+    try shared.map(owned_shared.id, ids.task(target_task.id));
+    try shared.map(owned_shared.id, ids.task(999));
+    try shared.map(peer_shared.id, ids.task(target_task.id));
+    try shared.map(peer_shared.id, ids.task(999));
+    try std.testing.expectEqual(@as(u16, 2), shared.mappingsForTask(ids.task(target_task.id)));
 
     const minted = try kernel.capabilityMint(testContext(.capability_mint, admin_capability.id, .{ .policy = 1 }), .{
         .holder = target_task.owner,
@@ -1289,6 +1297,11 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try std.testing.expect(capabilities.query(admin_capability.id) != null);
     try std.testing.expectEqual(@as(u16, 0), endpoints.activeForTask(ids.task(target_task.id)));
     try std.testing.expectError(error.EndpointNotFound, endpoints.descriptor(task_endpoint.id));
+    try std.testing.expectEqual(@as(u16, 0), shared.mappingsForTask(ids.task(target_task.id)));
+    try std.testing.expectEqual(@as(u16, 1), (try shared.descriptor(owned_shared.id)).flags);
+    try std.testing.expectEqual(@as(u16, 0), (try shared.descriptor(peer_shared.id)).flags);
+    try std.testing.expect(!shared.hasMapping(peer_shared.id, ids.task(target_task.id)));
+    try std.testing.expect(shared.hasMapping(peer_shared.id, ids.task(999)));
 }
 
 test "task authority graph marks target-revoked capabilities unusable" {

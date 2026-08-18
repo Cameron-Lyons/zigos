@@ -116,6 +116,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_mmu_object_mapping_count = @hasField(shared_memory.Object, "mmu_mapping_count"),
         .uses_object_owner_index = @hasField(shared_memory.Table, "object_owner_index"),
         .uses_object_task_mapping_index = @hasField(shared_memory.Table, "object_task_mapping_index"),
+        .retires_task_owned_objects_and_peer_mappings = @hasDecl(shared_memory.Table, "retireTask"),
     },
     .userspace_scheduler = .{
         .uses_scheduler_slot_arena = @hasField(userspace_scheduler.Scheduler, "slots"),
