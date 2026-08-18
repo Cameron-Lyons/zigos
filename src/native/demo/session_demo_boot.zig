@@ -7,6 +7,7 @@ const permission_review_service = @import("../policy/permission_review_service.z
 const policy_component_port = @import("../policy/policy_component_port.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
 const scenario_world = @import("scenario_world.zig");
@@ -127,7 +128,7 @@ fn runSessionLifecycle(
         .driver_directory = manager.driverDirectoryPtr(),
         .storage_service_instance = manager.storageServicePtr(),
         .storage_checkpoint_store = manager.storageCheckpointStorePtr(),
-        .export_package = manager.exportPackagePtr(),
+        .export_package = manager.exportPackagePtr() catch |err| native_util.bootProofFailure("scenario export package", err),
         .policy_authority = state.ids.policy_authority,
         .session_service = state.ids.session_service,
         .session_user = state.ids.session_user,
