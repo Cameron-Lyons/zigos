@@ -163,6 +163,7 @@ const WINDOW_INDEX_CAPACITY: usize = MAX_WINDOWS * 2;
 const NO_WINDOW_ORDER_INDEX: usize = MAX_WINDOWS;
 const REVIEW_ITEM_INDEX_CAPACITY: usize = MAX_REVIEW_ITEMS * 2;
 const SURFACE_INDEX_CAPACITY: usize = MAX_PRESENTED_SURFACES * 2;
+const NO_SURFACE_SLOT_INDEX: u16 = std.math.maxInt(u16);
 const WIRE_MAGIC_REQUEST = [_]u8{ 'Z', 'U', 'X', '1' };
 const WIRE_MAGIC_RESPONSE = [_]u8{ 'Z', 'U', 'R', '1' };
 const RequestWriter = binary_cursor.Writer(Error, error.RequestTooLarge);
@@ -183,12 +184,15 @@ const ReviewItemSlot = struct {
 
 const SurfaceSlot = struct {
     in_use: bool = false,
+    previous_active_index: u16 = NO_SURFACE_SLOT_INDEX,
+    next_active_index: u16 = NO_SURFACE_SLOT_INDEX,
     surface: SurfaceRecord = .{},
 };
 
 const WindowArena = indexed_arena.IndexedArenaWithKey(u64, WindowSlot, MAX_WINDOWS, WINDOW_INDEX_CAPACITY, windowSlotId);
 const ReviewItemArena = indexed_arena.IndexedArenaWithKey(u64, ReviewItemSlot, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY, reviewItemSlotKey);
 const SurfaceArena = indexed_arena.IndexedArenaWithKey(u64, SurfaceSlot, MAX_PRESENTED_SURFACES, SURFACE_INDEX_CAPACITY, surfaceSlotId);
+const SurfaceTaskIndex = indexed_arena.UniqueIndex(SURFACE_INDEX_CAPACITY);
 const TaskBundleIndex = indexed_arena.UniqueIndex(WINDOW_INDEX_CAPACITY);
 const TaskWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
 const ReviewerWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
@@ -259,6 +263,9 @@ pub const SessionSnapshot = struct {
     reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
     window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
     surfaces: SurfaceArena = SurfaceArena.init(),
+    surface_task_index: SurfaceTaskIndex = SurfaceTaskIndex.init(),
+    active_surface_head: u16 = NO_SURFACE_SLOT_INDEX,
+    active_surface_tail: u16 = NO_SURFACE_SLOT_INDEX,
 };
 
 pub const CheckpointStore = struct {
@@ -285,6 +292,10 @@ pub const Session = struct {
     reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
     window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
     surfaces: SurfaceArena = SurfaceArena.init(),
+    surface_task_index: SurfaceTaskIndex = SurfaceTaskIndex.init(),
+    active_surface_head: u16 = NO_SURFACE_SLOT_INDEX,
+    active_surface_tail: u16 = NO_SURFACE_SLOT_INDEX,
+    last_surface_prune_generation: u64 = 0,
 
     pub fn init() Session {
         return .{};
@@ -418,6 +429,11 @@ pub const Session = struct {
 
         if (self.surfaces.get(presentation.surface_id)) |slot| {
             if (slot.surface.task_id != task.id) return error.InvalidSurface;
+            const slot_index = self.surfaces.slotIndexOf(presentation.surface_id) orelse
+                native_util.impossibleByInvariant("presented surface remains indexed by surface id");
+            if (self.surface_task_index.lookup(surfaceTaskKey(task.id)) != slot_index) {
+                native_util.impossibleByInvariant("presented surface task index points at the matching slot");
+            }
             const previous_revision = slot.surface.presentation.revision;
             if (presentation.revision < previous_revision) return error.StalePresentation;
             if (presentation.revision == previous_revision) {
@@ -429,12 +445,17 @@ pub const Session = struct {
             return .accepted;
         }
 
+        if (self.surface_task_index.lookup(surfaceTaskKey(task.id)) != null) {
+            native_util.impossibleByInvariant("active task owns at most one presented surface");
+        }
         const slot_index = self.surfaces.reserveIndex(presentation.surface_id) orelse return error.SurfaceTableFull;
         self.surfaces.slots[slot_index].surface = .{
             .task_id = task.id,
             .presentation_count = 1,
             .presentation = presentation.*,
         };
+        self.surface_task_index.insertAbsent(surfaceTaskKey(task.id), slot_index);
+        self.linkActiveSurface(slot_index);
         return .accepted;
     }
 
@@ -448,18 +469,27 @@ pub const Session = struct {
     }
 
     pub fn pruneSurfacePresentations(self: *Session, runtime: *const task_runtime.Runtime) usize {
+        const lifecycle_generation = runtime.taskLifecycleGeneration();
+        if (self.last_surface_prune_generation == lifecycle_generation) return 0;
+
         var removed: usize = 0;
-        var index: usize = 0;
-        while (index < self.surfaces.slots.len) : (index += 1) {
+        var index: usize = self.active_surface_head;
+        while (index != NO_SURFACE_SLOT_INDEX) {
+            if (index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface chain points outside slots");
             const slot = &self.surfaces.slots[index];
-            if (!slot.in_use) continue;
+            if (!slot.in_use) native_util.impossibleByInvariant("active surface chain points at a free slot");
+            const next_index = slot.next_active_index;
             const task = runtime.findConst(slot.surface.task_id) orelse {
-                if (self.surfaces.removeIndex(index)) removed += 1;
+                if (self.removeSurfaceSlot(index)) removed += 1;
+                index = next_index;
                 continue;
             };
-            if (task.state == .active and task.ui_surface_id == slot.surface.presentation.surface_id) continue;
-            if (self.surfaces.removeIndex(index)) removed += 1;
+            if (task.state != .active or task.ui_surface_id != slot.surface.presentation.surface_id) {
+                if (self.removeSurfaceSlot(index)) removed += 1;
+            }
+            index = next_index;
         }
+        self.last_surface_prune_generation = lifecycle_generation;
         return removed;
     }
 
@@ -647,6 +677,9 @@ pub const Session = struct {
             .reviewer_window_index = self.reviewer_window_index,
             .window_review_item_index = self.window_review_item_index,
             .surfaces = self.surfaces,
+            .surface_task_index = self.surface_task_index,
+            .active_surface_head = self.active_surface_head,
+            .active_surface_tail = self.active_surface_tail,
         };
     }
 
@@ -665,6 +698,10 @@ pub const Session = struct {
         self.reviewer_window_index = stored.reviewer_window_index;
         self.window_review_item_index = stored.window_review_item_index;
         self.surfaces = stored.surfaces;
+        self.surface_task_index = stored.surface_task_index;
+        self.active_surface_head = stored.active_surface_head;
+        self.active_surface_tail = stored.active_surface_tail;
+        self.last_surface_prune_generation = 0;
     }
 
     fn createWindow(
@@ -766,12 +803,65 @@ pub const Session = struct {
     }
 
     fn removeSurfacesForTask(self: *Session, task_id: u64) void {
-        var index: usize = 0;
-        while (index < self.surfaces.slots.len) : (index += 1) {
-            const slot = &self.surfaces.slots[index];
-            if (!slot.in_use or slot.surface.task_id != task_id) continue;
-            _ = self.surfaces.removeIndex(index);
+        if (task_id == 0) return;
+        const slot_index = self.surface_task_index.lookup(surfaceTaskKey(task_id)) orelse return;
+        if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("surface task index points outside slots");
+        const slot = &self.surfaces.slots[slot_index];
+        if (!slot.in_use or slot.surface.task_id != task_id) native_util.impossibleByInvariant("surface task index points at the wrong task");
+        if (!self.removeSurfaceSlot(slot_index)) native_util.impossibleByInvariant("task-owned surface remains live until task teardown");
+    }
+
+    fn linkActiveSurface(self: *Session, slot_index: usize) void {
+        if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface append points outside slots");
+        const slot = &self.surfaces.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("active surface append requires a live slot");
+        const encoded_index: u16 = @intCast(slot_index);
+        slot.previous_active_index = self.active_surface_tail;
+        slot.next_active_index = NO_SURFACE_SLOT_INDEX;
+        if (self.active_surface_tail == NO_SURFACE_SLOT_INDEX) {
+            self.active_surface_head = encoded_index;
+        } else {
+            if (self.active_surface_tail >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface tail points outside slots");
+            self.surfaces.slots[self.active_surface_tail].next_active_index = encoded_index;
         }
+        self.active_surface_tail = encoded_index;
+    }
+
+    fn unlinkActiveSurface(self: *Session, slot_index: usize) void {
+        if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface unlink points outside slots");
+        const slot = &self.surfaces.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("active surface unlink requires a live slot");
+        const previous = slot.previous_active_index;
+        const next = slot.next_active_index;
+        if (previous == NO_SURFACE_SLOT_INDEX) {
+            if (self.active_surface_head != slot_index) native_util.impossibleByInvariant("active surface head matches its first link");
+            self.active_surface_head = next;
+        } else {
+            if (previous >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface previous link points outside slots");
+            self.surfaces.slots[previous].next_active_index = next;
+        }
+        if (next == NO_SURFACE_SLOT_INDEX) {
+            if (self.active_surface_tail != slot_index) native_util.impossibleByInvariant("active surface tail matches its final link");
+            self.active_surface_tail = previous;
+        } else {
+            if (next >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface next link points outside slots");
+            self.surfaces.slots[next].previous_active_index = previous;
+        }
+        slot.previous_active_index = NO_SURFACE_SLOT_INDEX;
+        slot.next_active_index = NO_SURFACE_SLOT_INDEX;
+    }
+
+    fn removeSurfaceSlot(self: *Session, slot_index: usize) bool {
+        if (slot_index >= MAX_PRESENTED_SURFACES) return false;
+        const slot = &self.surfaces.slots[slot_index];
+        if (!slot.in_use) return false;
+        const task_key = surfaceTaskKey(slot.surface.task_id);
+        if (self.surface_task_index.lookup(task_key) != slot_index) {
+            native_util.impossibleByInvariant("removed surface task index points at the matching slot");
+        }
+        self.surface_task_index.remove(task_key);
+        self.unlinkActiveSurface(slot_index);
+        return self.surfaces.removeIndex(slot_index);
     }
 
     fn closeWindowSlot(self: *Session, slot_index: usize) bool {
@@ -1210,6 +1300,10 @@ fn surfaceSlotId(slot: *const SurfaceSlot) u64 {
     return slot.surface.presentation.surface_id;
 }
 
+fn surfaceTaskKey(task_id: u64) u64 {
+    return indexed_arena.nonZeroKey(task_id);
+}
+
 fn taskBundleKey(task_id: u64, bundle_id: []const u8) u64 {
     var hash = native_util.fnv1a64AppendU64LittleEndian(native_util.FNV1A_64_OFFSET_BASIS, task_id);
     hash = native_util.fnv1a64WithSeed(hash, bundle_id);
@@ -1407,6 +1501,15 @@ fn compositorTestBudget(endpoint_slots: u16) task_runtime.ResourceBudget {
         .endpoint_slots = endpoint_slots,
         .shared_memory_bytes = units.kibibytes(1),
     };
+}
+
+fn testSurfacePresentation(surface_id: u64, interaction_hash: u64) abi.SurfacePresentation {
+    var presentation = std.mem.zeroes(abi.SurfacePresentation);
+    presentation.surface_id = surface_id;
+    presentation.revision = 1;
+    presentation.interaction_hash = interaction_hash;
+    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
+    return presentation;
 }
 
 const EPHEMERAL_TEST_SHARED_MEMORY_BYTES: usize = 512;
@@ -2048,6 +2151,10 @@ test "compositor session owns bounded monotonic surface presentations" {
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(@as(usize, 1), session.presentedSurfaceCount());
+    const surface_slot_index = session.surfaces.slotIndexOf(71).?;
+    try std.testing.expectEqual(@as(?usize, surface_slot_index), session.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
+    try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), session.active_surface_head);
+    try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), session.active_surface_tail);
     try std.testing.expectEqualStrings("draft", session.surfacePresentation(71).?.textSlice());
     try std.testing.expectEqual(@as(u64, 1), session.surfacePresentation(71).?.presentation_count);
     _ = try session.openTaskView(app_task, "Notes");
@@ -2063,6 +2170,8 @@ test "compositor session owns bounded monotonic surface presentations" {
     var restored = Session.init();
     restored.restore(snapshot);
     try std.testing.expectEqualStrings("draft!", restored.surfacePresentation(71).?.textSlice());
+    try std.testing.expectEqual(@as(?usize, surface_slot_index), restored.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
+    try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), restored.active_surface_head);
 
     presentation.revision = 2;
     try std.testing.expectError(error.StalePresentation, restored.presentSurface(app_task, &presentation));
@@ -2080,6 +2189,125 @@ test "compositor session owns bounded monotonic surface presentations" {
 
     try std.testing.expect(try runtime.terminateTask(app_task.id, 100));
     try std.testing.expectEqual(@as(usize, 1), restored.pruneSurfacePresentations(&runtime));
+    try std.testing.expect(restored.surface_task_index.lookup(surfaceTaskKey(app_task.id)) == null);
+    try std.testing.expectEqual(NO_SURFACE_SLOT_INDEX, restored.active_surface_head);
+    try std.testing.expectEqual(NO_SURFACE_SLOT_INDEX, restored.active_surface_tail);
     try std.testing.expectEqual(@as(usize, 1), restored.closeWindowsForTask(app_task.id));
     try std.testing.expectEqual(@as(usize, 0), restored.presentedSurfaceCount());
+}
+
+test "compositor surface pruning caches unchanged task lifecycle generations" {
+    var runtime = task_runtime.Runtime.init();
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 83 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 73,
+        .local_only = true,
+    });
+    const app_task_id = app_task.id;
+    var session = Session.init();
+    const presentation = testSurfacePresentation(73, 30_000);
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
+
+    try std.testing.expectEqual(@as(u64, 0), session.last_surface_prune_generation);
+    try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
+    try std.testing.expectEqual(runtime.taskLifecycleGeneration(), session.last_surface_prune_generation);
+    try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
+    try std.testing.expect(session.surfacePresentation(73) != null);
+
+    try std.testing.expect(try runtime.suspendTask(app_task_id, 110));
+    try std.testing.expectEqual(@as(usize, 1), session.pruneSurfacePresentations(&runtime));
+    try std.testing.expect(session.surfacePresentation(73) == null);
+
+    try std.testing.expect(try runtime.resumeTask(app_task_id, 111));
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(runtime.find(app_task_id).?, &presentation));
+    try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
+    const snapshot = session.snapshot();
+    session.restore(snapshot);
+    try std.testing.expectEqual(@as(u64, 0), session.last_surface_prune_generation);
+    try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
+
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 1), session.pruneSurfacePresentations(&runtime));
+    try std.testing.expect(session.surfacePresentation(73) == null);
+}
+
+test "compositor surface indexes saturate prune restore and reuse exact slots" {
+    var runtime = task_runtime.Runtime.init();
+    var session = Session.init();
+    var task_ids: [MAX_PRESENTED_SURFACES]u64 = [_]u64{0} ** MAX_PRESENTED_SURFACES;
+    var surface_ids: [MAX_PRESENTED_SURFACES]u64 = [_]u64{0} ** MAX_PRESENTED_SURFACES;
+    var slot_indexes: [MAX_PRESENTED_SURFACES]usize = [_]usize{0} ** MAX_PRESENTED_SURFACES;
+
+    for (0..MAX_PRESENTED_SURFACES) |index| {
+        const surface_id: u64 = 1_000 + @as(u64, @intCast(index));
+        const task = try runtime.createTask(.{
+            .owner = .{ .kind = .app, .serial = surface_id },
+            .component_class = .app_component,
+            .budget = compositorTestBudget(4),
+            .ui_surface_id = surface_id,
+            .local_only = true,
+        });
+        const presentation = testSurfacePresentation(surface_id, 10_000 + @as(u64, @intCast(index)));
+        try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(task, &presentation));
+        task_ids[index] = task.id;
+        surface_ids[index] = surface_id;
+        slot_indexes[index] = session.surfaces.slotIndexOf(surface_id).?;
+        try std.testing.expectEqual(@as(?usize, slot_indexes[index]), session.surface_task_index.lookup(surfaceTaskKey(task.id)));
+    }
+
+    try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES), session.presentedSurfaceCount());
+    try std.testing.expectEqual(@as(u16, @intCast(slot_indexes[0])), session.active_surface_head);
+    try std.testing.expectEqual(@as(u16, @intCast(slot_indexes[MAX_PRESENTED_SURFACES - 1])), session.active_surface_tail);
+    const overflow_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 2_000 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 2_000,
+        .local_only = true,
+    });
+    const overflow_presentation = testSurfacePresentation(2_000, 20_000);
+    try std.testing.expectError(error.SurfaceTableFull, session.presentSurface(overflow_task, &overflow_presentation));
+
+    const removed_index = MAX_PRESENTED_SURFACES / 2;
+    const removed_slot_index = slot_indexes[removed_index];
+    try std.testing.expectEqual(@as(usize, 0), session.closeWindowsForTask(task_ids[removed_index]));
+    try std.testing.expect(session.surfacePresentation(surface_ids[removed_index]) == null);
+    try std.testing.expect(session.surface_task_index.lookup(surfaceTaskKey(task_ids[removed_index])) == null);
+    try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES - 1), session.presentedSurfaceCount());
+
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(overflow_task, &overflow_presentation));
+    try std.testing.expectEqual(removed_slot_index, session.surfaces.slotIndexOf(2_000).?);
+    try std.testing.expectEqual(@as(u16, @intCast(removed_slot_index)), session.active_surface_tail);
+    try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES), session.presentedSurfaceCount());
+
+    const snapshot = session.snapshot();
+    var restored = Session.init();
+    restored.restore(snapshot);
+    try std.testing.expect(try runtime.terminateTask(task_ids[1], 101));
+    try std.testing.expect(try runtime.terminateTask(task_ids[MAX_PRESENTED_SURFACES - 2], 102));
+    try std.testing.expectEqual(@as(usize, 2), restored.pruneSurfacePresentations(&runtime));
+    try std.testing.expect(restored.surface_task_index.lookup(surfaceTaskKey(task_ids[1])) == null);
+    try std.testing.expect(restored.surface_task_index.lookup(surfaceTaskKey(task_ids[MAX_PRESENTED_SURFACES - 2])) == null);
+    try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES - 2), restored.presentedSurfaceCount());
+
+    var previous = NO_SURFACE_SLOT_INDEX;
+    var active_index: usize = restored.active_surface_head;
+    var active_count: usize = 0;
+    var seen: [MAX_PRESENTED_SURFACES]bool = [_]bool{false} ** MAX_PRESENTED_SURFACES;
+    while (active_index != NO_SURFACE_SLOT_INDEX) {
+        try std.testing.expect(active_index < MAX_PRESENTED_SURFACES);
+        try std.testing.expect(!seen[active_index]);
+        seen[active_index] = true;
+        const slot = &restored.surfaces.slots[active_index];
+        try std.testing.expect(slot.in_use);
+        try std.testing.expectEqual(previous, slot.previous_active_index);
+        try std.testing.expectEqual(@as(?usize, active_index), restored.surface_task_index.lookup(surfaceTaskKey(slot.surface.task_id)));
+        previous = @intCast(active_index);
+        active_index = slot.next_active_index;
+        active_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES - 2), active_count);
+    try std.testing.expectEqual(restored.active_surface_tail, previous);
 }

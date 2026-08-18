@@ -300,6 +300,7 @@ pub const TaskColdRecord = struct {
     execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
     capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
     capability_index: CapabilityIndex = CapabilityIndex.init(),
+    capability_generation: u64 = 1,
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
     provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]ProvenanceRecord = [_]ProvenanceRecord{ProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
     userspace_image: ExecutableImageSpec = .{},
@@ -366,6 +367,10 @@ pub const TaskRecord = struct {
 
     pub fn capabilityIds(self: *const TaskRecord) []const u64 {
         return taskColdConst(self).capability_ids[0..self.capability_count];
+    }
+
+    pub fn capabilityGeneration(self: *const TaskRecord) u64 {
+        return taskColdConst(self).capability_generation;
     }
 
     pub fn userspaceImage(self: *const TaskRecord) *const ExecutableImageSpec {
@@ -561,12 +566,14 @@ pub fn zeroTaskCold() TaskColdRecord {
 
 pub fn resetTaskCold(dest: *TaskColdRecord) void {
     zeroBytes(std.mem.asBytes(dest));
+    dest.capability_generation = 1;
 }
 
 pub fn copyTaskColdForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
     copySlots(ExecutionComponentRecord, dest.execution_components[0..task.execution_component_count], src.execution_components[0..task.execution_component_count]);
     copySlots(u64, dest.capability_ids[0..task.capability_count], src.capability_ids[0..task.capability_count]);
     dest.capability_index = src.capability_index;
+    dest.capability_generation = src.capability_generation;
     copyAuditTrailForTask(dest, src, task);
     copyProvenanceTrailForTask(dest, src, task);
     dest.userspace_image = src.userspace_image;

@@ -147,9 +147,15 @@ const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
 const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
 const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
+pub const USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH: u8 = 1;
+pub const STATIC_HANDOFF_STACK_INSTALLS_PER_BIND: u8 = 1;
+pub const STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS: u8 = 0;
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
     ImageExtentInvalid,
+    AddressSpaceOwnerInvalid,
+    AddressSpaceImageMismatch,
+    InitialContextInvalid,
 };
 
 var trap_stack: [TRAP_STACK_BYTES]u8 align(PAGE_SIZE) = [_]u8{0} ** TRAP_STACK_BYTES;
@@ -255,10 +261,20 @@ const MappingState = enum(u8) {
     retire_pending,
 };
 
+const MappingDispatchMetadata = struct {
+    owner_task_id: u64 = 0,
+    image_id: u64 = 0,
+    initial_instruction_pointer: u32 = 0,
+    initial_stack_pointer: u32 = 0,
+    bootstrap_mailbox_address: u32 = 0,
+    contract_flags: u32 = 0,
+};
+
 const MappingEntry = struct {
     state: MappingState = .free,
     address_space_id: u64 = 0,
     address_space: ?freestanding.paging.UserAddressSpace = null,
+    dispatch_metadata: MappingDispatchMetadata = .{},
     resume_valid: bool = false,
     resume_instruction_pointer: u32 = 0,
     resume_stack_pointer: u32 = 0,
@@ -268,6 +284,7 @@ const MappingEntry = struct {
     page_fault_count: u64 = 0,
     last_fault_address: u32 = 0,
     last_fault_error_code: u32 = 0,
+    mailbox_authority_cache: MailboxAuthorityCache = .{},
 
     fn pageDirectory(self: *const MappingEntry) *freestanding.paging.PageDirectory {
         return self.address_space.?.directory;
@@ -309,12 +326,15 @@ pub const Executor = struct {
     pub fn init(self: *Executor) void {
         if (builtin.target.os.tag != .freestanding) return;
         registered_executor = self;
+        if (self.initialized) return;
         if (!trap_handler_registered) {
             freestanding.isr.registerHandler(USERSPACE_TRAP_VECTOR, userspaceTrapHandler);
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
             trap_handler_registered = true;
         }
-        _ = prepareKernelStack();
+        const trap_stack_top = prepareKernelStack();
+        freestanding.gdt.setKernelStack(trap_stack_top);
+        freestanding.syscall64.setKernelStack(trap_stack_top);
         self.initialized = true;
     }
 
@@ -490,34 +510,42 @@ pub const Executor = struct {
         catalog: *userspace_loader.Catalog,
         runtime: *task_runtime.Runtime,
         capability_table: *const capability.CapabilityTable,
-        task_id: u64,
+        task: *const task_runtime.TaskRecord,
         now_ticks: u64,
     ) ExecutionOutcome {
         if (builtin.target.os.tag != .freestanding) return .unavailable;
+        if (!self.initialized) return .unavailable;
         if (self.bound_runtime != runtime) return .unavailable;
-        self.init();
-
-        const task = runtime.find(task_id) orelse return .unavailable;
+        if (debugIndexChecksEnabled()) {
+            const bound_task = runtime.findConst(task.id) orelse
+                native_util.impossibleByInvariant("prepared userspace task is absent from the bound runtime");
+            if (bound_task != task) native_util.impossibleByInvariant("prepared userspace task does not belong to the bound runtime");
+        }
         if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
 
-        const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
-        const image = catalog.findById(task.launch.image_id) orelse return .unavailable;
-        if (!image.elf_file.isPresent()) return .unavailable;
+        const mapping = self.findMapping(task.address_space_id) orelse blk: {
+            const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
+            if (address_space.owner_task_id != task.id or address_space.image_id != task.launch.image_id) return .unavailable;
+            const image = catalog.findById(task.launch.image_id) orelse return .unavailable;
+            if (!image.elf_file.isPresent()) return .unavailable;
+            break :blk self.ensureMaterialized(address_space, image) catch return .unavailable;
+        };
+        if (mapping.dispatch_metadata.owner_task_id != task.id or
+            mapping.dispatch_metadata.image_id != task.launch.image_id)
+        {
+            native_util.impossibleByInvariant("materialized userspace mapping identity changed without retirement");
+        }
 
-        const mapping = self.ensureMaterialized(address_space, image) catch return .unavailable;
-        self.initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
+        const mailbox_update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks);
         const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
-        const trap_stack_top = prepareKernelStack();
-        freestanding.gdt.setKernelStack(trap_stack_top);
-        freestanding.syscall64.setKernelStack(trap_stack_top);
         const instruction_pointer = if (mapping.resume_valid)
             mapping.resume_instruction_pointer
         else
-            @as(u32, @intCast(address_space.entry_point));
+            mapping.dispatch_metadata.initial_instruction_pointer;
         const stack_pointer = if (mapping.resume_valid)
             mapping.resume_stack_pointer
         else
-            @as(u32, @intCast(address_space.stack_pointer - 16));
+            mapping.dispatch_metadata.initial_stack_pointer;
         self.pending_user_context64 = if (mapping.resume_valid)
             mapping.user_context64
         else
@@ -527,21 +555,21 @@ pub const Executor = struct {
             };
 
         const nx_probe_target = if (include_verification_evidence and
-            (image.contract_flags & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
-            std.math.cast(u32, image.bootstrap_mailbox_address) orelse return .unavailable
+            (mapping.dispatch_metadata.contract_flags & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
+            mapping.dispatch_metadata.bootstrap_mailbox_address
         else
             0;
 
         self.active_mapping = mapping;
-        self.active_task_id = task_id;
+        self.active_task_id = task.id;
         if (comptime include_verification_evidence) self.active_nx_probe_target = nx_probe_target;
-        publishRootActiveTaskId(task_id);
+        publishRootActiveTaskId(task.id);
         self.handoff_completed = false;
         self.last_yield_disposition = .runnable;
         self.last_yield_ui_revision = 0;
         zigos_userspace_resume_requested = 0;
 
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+        activateMappingForDispatch(mapping, mailbox_update);
         _ = @call(.never_inline, enterUserspace, .{
             self,
         });
@@ -637,50 +665,26 @@ pub const Executor = struct {
         return deferred and self.findMapping(retired_address_space_id) == null;
     }
 
-    fn initializeBootstrapMailbox(
+    fn prepareBootstrapMailbox(
         self: *Executor,
-        mapping: *const MappingEntry,
-        image: *const userspace_loader.ImageRecord,
+        mapping: *MappingEntry,
         task: *const task_runtime.TaskRecord,
         capability_table: *const capability.CapabilityTable,
         now_ticks: u64,
-    ) void {
+    ) ?BootstrapMailboxUpdate {
         _ = self;
-        if (image.bootstrap_mailbox_address == 0) return;
+        if (mapping.dispatch_metadata.bootstrap_mailbox_address == 0) return null;
 
-        const bootstrap = selectBootstrapCapability(task, capability_table, now_ticks);
-        const input_capability_id = selectInputCapability(task, capability_table, now_ticks);
-        const surface_presentation_capability_id = selectSurfacePresentationCapability(task, capability_table, now_ticks);
-        const ui_surface_id = task.ui_surface_id orelse 0;
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
-        defer freestanding.paging.switchToKernelAddressSpace();
-
-        const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
-        if (mapping.resume_valid) {
-            mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
-            mailbox_ptr.authority_capability_id = bootstrap.capability_id;
-            mailbox_ptr.input_capability_id = input_capability_id;
-            mailbox_ptr.surface_presentation_capability_id = surface_presentation_capability_id;
-            mailbox_ptr.ui_surface_id = ui_surface_id;
-            mailbox_ptr.task_id = task.id;
-            mailbox_ptr.service_id = bootstrap.service_id;
-            return;
-        }
-        mailbox_ptr.* = .{
-            .version = userspace_bootstrap_mailbox.VERSION,
-            .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
-            .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(task.component_class), image.contract_flags)),
-            .fault_code = 0,
-            ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
-            .authority_capability_id = bootstrap.capability_id,
-            .input_capability_id = input_capability_id,
-            .surface_presentation_capability_id = surface_presentation_capability_id,
-            .ui_surface_id = ui_surface_id,
-            .task_id = task.id,
-            .service_id = bootstrap.service_id,
-            .resource_mask = 0,
-            .last_counter = 0,
-        };
+        const authorities = resolveMailboxAuthoritiesCached(task, capability_table, now_ticks, &mapping.mailbox_authority_cache);
+        return prepareBootstrapMailboxUpdate(
+            mapping.dispatch_metadata.bootstrap_mailbox_address,
+            mapping.resume_valid,
+            task.component_class,
+            mapping.dispatch_metadata.contract_flags,
+            task.id,
+            task.ui_surface_id orelse 0,
+            authorities,
+        );
     }
 
     fn ensureMaterialized(
@@ -688,7 +692,21 @@ pub const Executor = struct {
         address_space: *const task_runtime.AddressSpaceRecord,
         image: *const userspace_loader.ImageRecord,
     ) MaterializationError!*MappingEntry {
-        if (self.findMapping(address_space.id)) |entry| return entry;
+        const dispatch_metadata = try prepareMappingDispatchMetadata(
+            address_space.owner_task_id,
+            address_space.image_id,
+            address_space.entry_point,
+            address_space.stack_pointer,
+            image.id,
+            image.bootstrap_mailbox_address,
+            image.contract_flags,
+        );
+        if (self.findMapping(address_space.id)) |entry| {
+            if (!std.meta.eql(entry.dispatch_metadata, dispatch_metadata)) {
+                native_util.impossibleByInvariant("materialized userspace dispatch metadata changed without retirement");
+            }
+            return entry;
+        }
 
         var slot_index: ?usize = null;
         for (self.mappings, 0..) |entry, index| {
@@ -702,6 +720,7 @@ pub const Executor = struct {
         entry.* = .{
             .state = .building,
             .address_space_id = address_space.id,
+            .dispatch_metadata = dispatch_metadata,
         };
         errdefer {
             if (entry.address_space) |*space| {
@@ -791,63 +810,218 @@ pub const Executor = struct {
     }
 };
 
+fn prepareMappingDispatchMetadata(
+    owner_task_id: u64,
+    address_space_image_id: u64,
+    entry_point: u64,
+    stack_pointer: u64,
+    image_id: u64,
+    bootstrap_mailbox_address: u64,
+    contract_flags: u32,
+) MaterializationError!MappingDispatchMetadata {
+    if (owner_task_id == 0) return error.AddressSpaceOwnerInvalid;
+    if (image_id == 0 or address_space_image_id != image_id) return error.AddressSpaceImageMismatch;
+    const initial_stack_pointer = std.math.sub(u64, stack_pointer, 16) catch return error.InitialContextInvalid;
+    return .{
+        .owner_task_id = owner_task_id,
+        .image_id = image_id,
+        .initial_instruction_pointer = std.math.cast(u32, entry_point) orelse return error.InitialContextInvalid,
+        .initial_stack_pointer = std.math.cast(u32, initial_stack_pointer) orelse return error.InitialContextInvalid,
+        .bootstrap_mailbox_address = std.math.cast(u32, bootstrap_mailbox_address) orelse return error.InitialContextInvalid,
+        .contract_flags = contract_flags,
+    };
+}
+
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
 
-fn selectBootstrapCapability(
+pub const MailboxAuthorities = struct {
+    bootstrap_capability_id: u64 = 0,
+    bootstrap_service_id: u64 = 0,
+    input_capability_id: u64 = 0,
+    surface_presentation_capability_id: u64 = 0,
+};
+
+const BootstrapMailboxUpdate = struct {
+    address: usize,
+    preserve_runtime_state: bool,
+    detail: u8,
+    authorities: MailboxAuthorities,
+    task_id: u64,
+    ui_surface_id: u64,
+};
+
+fn prepareBootstrapMailboxUpdate(
+    address: u64,
+    preserve_runtime_state: bool,
+    component_class: task_runtime.ComponentClass,
+    contract_flags: u32,
+    task_id: u64,
+    ui_surface_id: u64,
+    authorities: MailboxAuthorities,
+) ?BootstrapMailboxUpdate {
+    if (address == 0) return null;
+    return .{
+        .address = @intCast(address),
+        .preserve_runtime_state = preserve_runtime_state,
+        .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(component_class), contract_flags)),
+        .authorities = authorities,
+        .task_id = task_id,
+        .ui_surface_id = ui_surface_id,
+    };
+}
+
+fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?BootstrapMailboxUpdate) void {
+    freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+    writeBootstrapMailbox(mailbox_update);
+}
+
+fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
+    const update = prepared orelse return;
+    const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(update.address);
+    if (!update.preserve_runtime_state) {
+        mailbox_ptr.* = .{
+            .version = userspace_bootstrap_mailbox.VERSION,
+            .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
+            .detail = update.detail,
+            .fault_code = 0,
+            ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
+            .authority_capability_id = update.authorities.bootstrap_capability_id,
+            .input_capability_id = update.authorities.input_capability_id,
+            .surface_presentation_capability_id = update.authorities.surface_presentation_capability_id,
+            .ui_surface_id = update.ui_surface_id,
+            .task_id = update.task_id,
+            .service_id = update.authorities.bootstrap_service_id,
+            .resource_mask = 0,
+            .last_counter = 0,
+        };
+        return;
+    }
+    mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
+    mailbox_ptr.authority_capability_id = update.authorities.bootstrap_capability_id;
+    mailbox_ptr.input_capability_id = update.authorities.input_capability_id;
+    mailbox_ptr.surface_presentation_capability_id = update.authorities.surface_presentation_capability_id;
+    mailbox_ptr.ui_surface_id = update.ui_surface_id;
+    mailbox_ptr.task_id = update.task_id;
+    mailbox_ptr.service_id = update.authorities.bootstrap_service_id;
+}
+
+pub const MailboxAuthorityCache = struct {
+    authorities: MailboxAuthorities = .{},
+    task_id: u64 = 0,
+    task_capability_generation: u64 = 0,
+    table_mutation_generation: u64 = 0,
+    resolved_at_ticks: u64 = 0,
+    valid_until_ticks: u64 = 0,
+    refresh_count: u64 = 0,
+    initialized: bool = false,
+};
+
+const MailboxAuthorityResolution = struct {
+    authorities: MailboxAuthorities = .{},
+    valid_until_ticks: u64 = std.math.maxInt(u64),
+};
+
+pub fn resolveMailboxAuthorities(
     task: *const task_runtime.TaskRecord,
     capability_table: *const capability.CapabilityTable,
     now_ticks: u64,
-) struct { capability_id: u64, service_id: u64 } {
+) MailboxAuthorities {
+    return scanMailboxAuthorities(task, capability_table, now_ticks).authorities;
+}
+
+pub fn resolveMailboxAuthoritiesCached(
+    task: *const task_runtime.TaskRecord,
+    capability_table: *const capability.CapabilityTable,
+    now_ticks: u64,
+    cache: *MailboxAuthorityCache,
+) MailboxAuthorities {
+    const task_capability_generation = task.capabilityGeneration();
+    const table_mutation_generation = capability_table.mutationGeneration();
+    if (cache.initialized and
+        cache.task_id == task.id and
+        cache.task_capability_generation == task_capability_generation and
+        cache.table_mutation_generation == table_mutation_generation and
+        now_ticks >= cache.resolved_at_ticks and
+        now_ticks <= cache.valid_until_ticks)
+    {
+        return cache.authorities;
+    }
+
+    const refresh_count = cache.refresh_count +| 1;
+    const resolution = scanMailboxAuthorities(task, capability_table, now_ticks);
+    cache.* = .{
+        .authorities = resolution.authorities,
+        .task_id = task.id,
+        .task_capability_generation = task_capability_generation,
+        .table_mutation_generation = table_mutation_generation,
+        .resolved_at_ticks = now_ticks,
+        .valid_until_ticks = resolution.valid_until_ticks,
+        .refresh_count = refresh_count,
+        .initialized = true,
+    };
+    return resolution.authorities;
+}
+
+fn scanMailboxAuthorities(
+    task: *const task_runtime.TaskRecord,
+    capability_table: *const capability.CapabilityTable,
+    now_ticks: u64,
+) MailboxAuthorityResolution {
+    var resolution = MailboxAuthorityResolution{};
+    const resolved = &resolution.authorities;
     var query_fallback: u64 = 0;
     var query_service_id: u64 = 0;
+    const accepts_surface_presentation = task.ui_surface_id != null and task.ui_surface_id.? != 0;
+
     for (task.capabilityIds()) |capability_id| {
-        const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
+        const inspected = capability_table.inspect(capability_id, now_ticks) orelse continue;
+        const granted = inspected.capability;
         const service_id = if (granted.target.kind == .service) granted.target.id else 0;
-        if (granted.target.kind == .service and granted.rights.has(.endpoint_create)) {
-            return .{ .capability_id = capability_id, .service_id = service_id };
+        const endpoint_candidate = granted.target.kind == .service and granted.rights.has(.endpoint_create);
+        const query_candidate = granted.rights.has(.time_query) or
+            granted.rights.has(.resource_query) or
+            granted.rights.has(.accounting_query);
+        const input_candidate = granted.target.kind == .task and
+            granted.target.id == task.id and
+            granted.scope.task_id == task.id and
+            granted.rights.has(.input_recv);
+        const surface_candidate = accepts_surface_presentation and
+            granted.target.kind == .task and
+            granted.target.id == task.id and
+            granted.scope.task_id == task.id and
+            granted.rights.has(.surface_present);
+
+        if (endpoint_candidate or query_candidate or input_candidate or surface_candidate) {
+            if (now_ticks < granted.lease.issued_at_ticks) {
+                resolution.valid_until_ticks = @min(resolution.valid_until_ticks, granted.lease.issued_at_ticks - 1);
+            } else if (now_ticks <= granted.lease.expires_at_ticks) {
+                resolution.valid_until_ticks = @min(resolution.valid_until_ticks, granted.lease.expires_at_ticks);
+            }
         }
-        if (query_fallback == 0 and
-            (granted.rights.has(.time_query) or
-                granted.rights.has(.resource_query) or
-                granted.rights.has(.accounting_query)))
-        {
+        if (!inspected.usable) continue;
+
+        if (resolved.bootstrap_capability_id == 0 and endpoint_candidate) {
+            resolved.bootstrap_capability_id = capability_id;
+            resolved.bootstrap_service_id = service_id;
+        }
+        if (query_fallback == 0 and query_candidate) {
             query_fallback = capability_id;
             query_service_id = service_id;
         }
+        if (resolved.input_capability_id == 0 and input_candidate) {
+            resolved.input_capability_id = capability_id;
+        }
+        if (resolved.surface_presentation_capability_id == 0 and surface_candidate) {
+            resolved.surface_presentation_capability_id = capability_id;
+        }
     }
-    return .{ .capability_id = query_fallback, .service_id = query_service_id };
-}
-
-fn selectInputCapability(
-    task: *const task_runtime.TaskRecord,
-    capability_table: *const capability.CapabilityTable,
-    now_ticks: u64,
-) u64 {
-    for (task.capabilityIds()) |capability_id| {
-        const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
-        if (granted.target.kind != .task or granted.target.id != task.id) continue;
-        if (granted.scope.task_id != task.id or !granted.rights.has(.input_recv)) continue;
-        return capability_id;
+    if (resolved.bootstrap_capability_id == 0) {
+        resolved.bootstrap_capability_id = query_fallback;
+        resolved.bootstrap_service_id = query_service_id;
     }
-    return 0;
-}
-
-fn selectSurfacePresentationCapability(
-    task: *const task_runtime.TaskRecord,
-    capability_table: *const capability.CapabilityTable,
-    now_ticks: u64,
-) u64 {
-    const surface_id = task.ui_surface_id orelse return 0;
-    if (surface_id == 0) return 0;
-    for (task.capabilityIds()) |capability_id| {
-        const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
-        if (granted.target.kind != .task or granted.target.id != task.id) continue;
-        if (granted.scope.task_id != task.id or !granted.rights.has(.surface_present)) continue;
-        return capability_id;
-    }
-    return 0;
+    return resolution;
 }
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
@@ -1058,6 +1232,99 @@ fn publishRootActiveTaskId(task_id: u64) void {
     }
 }
 
+test "mapping dispatch metadata is compact and bound to one address-space image" {
+    const metadata = try prepareMappingDispatchMetadata(
+        40,
+        41,
+        0x4000_1000,
+        0x7FFF_F000,
+        41,
+        0x4000_3000,
+        userspace_flags.FLAG_NX_PROOF_PROBE,
+    );
+    try std.testing.expectEqual(@as(u64, 40), metadata.owner_task_id);
+    try std.testing.expectEqual(@as(u64, 41), metadata.image_id);
+    try std.testing.expectEqual(@as(u32, 0x4000_1000), metadata.initial_instruction_pointer);
+    try std.testing.expectEqual(@as(u32, 0x7FFF_EFF0), metadata.initial_stack_pointer);
+    try std.testing.expectEqual(@as(u32, 0x4000_3000), metadata.bootstrap_mailbox_address);
+    try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contract_flags);
+    try std.testing.expectEqual(@as(u8, 0), STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS);
+
+    try std.testing.expectError(
+        error.AddressSpaceOwnerInvalid,
+        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0),
+    );
+    try std.testing.expectError(
+        error.AddressSpaceImageMismatch,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0),
+    );
+    try std.testing.expectError(
+        error.InitialContextInvalid,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0),
+    );
+    try std.testing.expectError(
+        error.InitialContextInvalid,
+        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0),
+    );
+    try std.testing.expectError(
+        error.InitialContextInvalid,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0),
+    );
+}
+
+test "mailbox publication preserves resume state and resets first launch" {
+    var mailbox = userspace_bootstrap_mailbox.Mailbox{
+        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady),
+        .fault_code = 0x72,
+        .resource_mask = 0x7,
+        .service_operation_count = 9,
+        .last_counter = 41,
+        .input_event_count = 12,
+        .ui_state_revision = 15,
+    };
+    const authorities = MailboxAuthorities{
+        .bootstrap_capability_id = 101,
+        .bootstrap_service_id = 102,
+        .input_capability_id = 103,
+        .surface_presentation_capability_id = 104,
+    };
+    const address: u64 = @intCast(@intFromPtr(&mailbox));
+
+    const resumed = prepareBootstrapMailboxUpdate(address, true, .app_component, 0, 105, 106, authorities).?;
+    writeBootstrapMailbox(resumed);
+    try std.testing.expect(resumed.preserve_runtime_state);
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.VERSION, mailbox.version);
+    try std.testing.expectEqual(@as(u64, 101), mailbox.authority_capability_id);
+    try std.testing.expectEqual(@as(u64, 102), mailbox.service_id);
+    try std.testing.expectEqual(@as(u64, 103), mailbox.input_capability_id);
+    try std.testing.expectEqual(@as(u64, 104), mailbox.surface_presentation_capability_id);
+    try std.testing.expectEqual(@as(u64, 105), mailbox.task_id);
+    try std.testing.expectEqual(@as(u64, 106), mailbox.ui_surface_id);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.steady)), mailbox.stage);
+    try std.testing.expectEqual(@as(u8, 0x72), mailbox.fault_code);
+    try std.testing.expectEqual(@as(u32, 0x7), mailbox.resource_mask);
+    try std.testing.expectEqual(@as(u16, 9), mailbox.service_operation_count);
+    try std.testing.expectEqual(@as(u32, 41), mailbox.last_counter);
+    try std.testing.expectEqual(@as(u64, 12), mailbox.input_event_count);
+    try std.testing.expectEqual(@as(u64, 15), mailbox.ui_state_revision);
+
+    const first_launch = prepareBootstrapMailboxUpdate(address, false, .app_component, 0, 107, 108, authorities).?;
+    writeBootstrapMailbox(first_launch);
+    try std.testing.expect(!first_launch.preserve_runtime_state);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.boot)), mailbox.stage);
+    try std.testing.expectEqual(@as(u8, 0), mailbox.fault_code);
+    try std.testing.expectEqual(@as(u32, 0), mailbox.resource_mask);
+    try std.testing.expectEqual(@as(u16, 0), mailbox.service_operation_count);
+    try std.testing.expectEqual(@as(u32, 0), mailbox.last_counter);
+    try std.testing.expectEqual(@as(u64, 0), mailbox.input_event_count);
+    try std.testing.expectEqual(@as(u64, 0), mailbox.ui_state_revision);
+    try std.testing.expectEqual(@as(u64, 107), mailbox.task_id);
+    try std.testing.expectEqual(@as(u64, 108), mailbox.ui_surface_id);
+
+    try std.testing.expect(prepareBootstrapMailboxUpdate(0, false, .app_component, 0, 1, 0, .{}) == null);
+    try std.testing.expectEqual(@as(u8, 1), USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH);
+}
+
 test "executor separates service, input, and surface presentation authority" {
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
@@ -1110,11 +1377,54 @@ test "executor separates service, input, and surface presentation authority" {
     try runtime.grantCapability(task.id, input_authority.id);
     try runtime.grantCapability(task.id, presentation_authority.id);
 
-    const bootstrap = selectBootstrapCapability(task, &capabilities, 10);
-    try std.testing.expectEqual(service_authority.id, bootstrap.capability_id);
-    try std.testing.expectEqual(@as(u64, 9), bootstrap.service_id);
-    try std.testing.expectEqual(input_authority.id, selectInputCapability(task, &capabilities, 10));
-    try std.testing.expectEqual(presentation_authority.id, selectSurfacePresentationCapability(task, &capabilities, 10));
+    var cache = MailboxAuthorityCache{};
+    var authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 10, &cache);
+    try std.testing.expectEqual(service_authority.id, authorities.bootstrap_capability_id);
+    try std.testing.expectEqual(@as(u64, 9), authorities.bootstrap_service_id);
+    try std.testing.expectEqual(input_authority.id, authorities.input_capability_id);
+    try std.testing.expectEqual(presentation_authority.id, authorities.surface_presentation_capability_id);
+    try std.testing.expectEqual(@as(u64, 1), cache.refresh_count);
+
+    _ = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
+    try std.testing.expectEqual(@as(u64, 1), cache.refresh_count);
+
+    try capabilities.revokeGrant(service_authority.id);
+    authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 11, &cache);
+    try std.testing.expectEqual(query_authority.id, authorities.bootstrap_capability_id);
+    try std.testing.expectEqual(@as(u64, 8), authorities.bootstrap_service_id);
+    try std.testing.expectEqual(input_authority.id, authorities.input_capability_id);
+    try std.testing.expectEqual(presentation_authority.id, authorities.surface_presentation_capability_id);
+    try std.testing.expectEqual(@as(u64, 2), cache.refresh_count);
+
+    authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 101, &cache);
+    try std.testing.expectEqual(MailboxAuthorities{}, authorities);
+    try std.testing.expectEqual(@as(u64, 3), cache.refresh_count);
+
+    const future_authority = try capabilities.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 10 },
+        .rights = .{ .service = .{ .endpoint_create = true } },
+        .scope = .{ .task_id = task.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 120, .expires_at_ticks = 200 },
+    });
+    try runtime.grantCapability(task.id, future_authority.id);
+    authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 110, &cache);
+    try std.testing.expectEqual(MailboxAuthorities{}, authorities);
+    try std.testing.expectEqual(@as(u64, 119), cache.valid_until_ticks);
+    try std.testing.expectEqual(@as(u64, 4), cache.refresh_count);
+    _ = resolveMailboxAuthoritiesCached(task, &capabilities, 119, &cache);
+    try std.testing.expectEqual(@as(u64, 4), cache.refresh_count);
+
+    authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 120, &cache);
+    try std.testing.expectEqual(future_authority.id, authorities.bootstrap_capability_id);
+    try std.testing.expectEqual(@as(u64, 10), authorities.bootstrap_service_id);
+    try std.testing.expectEqual(@as(u64, 5), cache.refresh_count);
+
+    try std.testing.expect(try runtime.revokeCapability(task.id, future_authority.id));
+    authorities = resolveMailboxAuthoritiesCached(task, &capabilities, 120, &cache);
+    try std.testing.expectEqual(MailboxAuthorities{}, authorities);
+    try std.testing.expectEqual(@as(u64, 6), cache.refresh_count);
 }
 
 test "executor matches userspace counters by stage and pulse" {
@@ -1149,18 +1459,32 @@ test "executor runtime binding has one owner and compare-release semantics" {
     try std.testing.expect(executor.releaseRuntimeBinding(&second_owner, &second_runtime));
 }
 
-test "executor retires inactive address spaces idempotently and reuses slots" {
+test "executor retires inactive address spaces with mailbox caches and reuses slots" {
     var executor = Executor{};
-    executor.mappings[0] = .{ .state = .live, .address_space_id = 42 };
+    executor.mappings[0] = .{
+        .state = .live,
+        .address_space_id = 42,
+        .dispatch_metadata = .{
+            .owner_task_id = 8,
+            .image_id = 9,
+            .initial_instruction_pointer = 0x4000_1000,
+            .initial_stack_pointer = 0x7FFF_EFF0,
+            .bootstrap_mailbox_address = 0x4000_3000,
+            .contract_flags = userspace_flags.FLAG_NX_PROOF_PROBE,
+        },
+        .mailbox_authority_cache = .{ .initialized = true, .refresh_count = 7 },
+    };
     executor.rebuildMappingIndex();
 
     const event = task_runtime.AddressSpaceRetirementEvent{
         .address_space_id = 42,
-        .reason = .rehost,
+        .reason = .snapshot_restore,
     };
     executor.retireAddressSpace(event);
     try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
     try std.testing.expect(executor.findMapping(42) == null);
+    try std.testing.expectEqual(MappingDispatchMetadata{}, executor.mappings[0].dispatch_metadata);
+    try std.testing.expectEqual(@as(u64, 0), executor.mappings[0].mailbox_authority_cache.refresh_count);
 
     executor.retireAddressSpace(event);
     executor.mappings[0] = .{ .state = .live, .address_space_id = 43 };

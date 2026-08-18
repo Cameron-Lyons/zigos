@@ -3,6 +3,7 @@ const principal = @import("core/principal.zig");
 const service_registry = @import("services/service_registry.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
 const userspace_scheduler = @import("task/userspace_scheduler.zig");
+const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
@@ -45,6 +46,7 @@ const network_policy = @import("sync/network_policy.zig");
 const supervisor = @import("session/supervisor.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
+const session_manager_boot_flow = @import("session/session_manager_boot_flow.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
 const session_service_bootstrap = @import("session/session_service_bootstrap.zig");
 
@@ -96,6 +98,7 @@ pub const indexed_hot_path_tables = .{
         .supports_direct_capability_slot_insertion = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "insertIndexAt"),
         .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
+        .tracks_mutation_generation = @hasField(capability.CapabilityTable, "mutation_generation"),
     },
     .shared_memory = .{
         .uses_compact_mmu_object_mapping_head = @hasField(shared_memory.Object, "mmu_mapping_head"),
@@ -115,6 +118,15 @@ pub const indexed_hot_path_tables = .{
         .uses_accelerator_deadline_heads = @hasField(userspace_scheduler.Scheduler, "accelerator_deadline_heads"),
         .uses_accelerator_claim_task_index = @hasField(userspace_scheduler.Scheduler, "accelerator_claim_task_index"),
         .grants_next_accelerator_claim = @hasDecl(userspace_scheduler.Scheduler, "grantNextAcceleratorClaim"),
+        .caches_ui_presentation_eligibility = userspace_scheduler.STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS == 0,
+    },
+    .userspace_executor = .{
+        .resolves_mailbox_authorities_together = @hasDecl(userspace_executor, "resolveMailboxAuthorities"),
+        .caches_mailbox_authorities = @hasDecl(userspace_executor, "resolveMailboxAuthoritiesCached"),
+        .activates_one_user_address_space_per_dispatch = userspace_executor.USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH == 1,
+        .accepts_prevalidated_task_records = @typeInfo(@TypeOf(userspace_executor.Executor.executeTask)).@"fn".params[4].type.? == *const task_runtime.TaskRecord,
+        .installs_static_handoff_stack_once_per_bind = userspace_executor.STATIC_HANDOFF_STACK_INSTALLS_PER_BIND == 1,
+        .avoids_steady_address_space_image_indexes = userspace_executor.STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS == 0,
     },
     .userspace_loader = .{
         .uses_image_arena = @hasDecl(@FieldType(userspace_loader.Catalog, "images"), "reserveIndex"),
@@ -125,6 +137,8 @@ pub const indexed_hot_path_tables = .{
         .uses_address_space_arena = @hasDecl(@FieldType(task_runtime.Runtime, "address_spaces"), "reserveIndex"),
         .uses_initial_component_label_index = @hasField(task_runtime.Runtime, "task_initial_component_label_index"),
         .tracks_task_state_counts = @hasField(task_runtime.Runtime, "task_state_counts"),
+        .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
+        .tracks_task_capability_generation = @hasDecl(task_runtime.TaskRecord, "capabilityGeneration"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
     },
     .accelerator_scheduler = .{
@@ -241,6 +255,9 @@ pub const indexed_hot_path_tables = .{
         .tracks_visible_window_count = @hasField(compositor_session.Session, "visible_window_count"),
         .supports_indexed_task_window_ownership = @hasDecl(compositor_session.Session, "taskOwnsVisibleWindow"),
         .supports_indexed_active_window_order = @hasDecl(compositor_session.Session, "activeWindowOrderIndex"),
+        .uses_surface_task_index = @hasField(compositor_session.Session, "surface_task_index"),
+        .tracks_active_surface_chain = @hasField(compositor_session.Session, "active_surface_head"),
+        .caches_surface_prune_generation = @hasField(compositor_session.Session, "last_surface_prune_generation"),
     },
     .input_router = .{
         .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
@@ -378,5 +395,6 @@ pub const indexed_hot_path_tables = .{
     },
     .session_manager_boot_flow = .{
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
+        .caches_surface_authority_lifecycle_generation = @hasField(session_manager_boot_flow.SessionManager, "surface_authority_scanned_lifecycle_generation"),
     },
 };
