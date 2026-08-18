@@ -90,7 +90,8 @@ pub const indexed_hot_path_tables = .{
     },
     .service_registry = .{
         .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),
-        .uses_typed_interface_ids = @hasField(service_registry.Binding, "interface_id"),
+        .uses_typed_interface_ids = @hasDecl(service_registry.Binding, "interfaceId"),
+        .derives_static_contract_metadata = service_registry.DERIVES_STATIC_CONTRACT_METADATA,
     },
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
