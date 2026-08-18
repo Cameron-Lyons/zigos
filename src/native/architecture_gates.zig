@@ -209,9 +209,11 @@ pub const indexed_hot_path_tables = .{
 
     .secret_vault_service = .{
         .uses_handle_arena = @hasDecl(@FieldType(secret_vault_service.Service, "handles"), "reserve"),
-        .uses_secret_handle_index = @hasField(secret_vault_service.Service, "secret_handle_index"),
-        .uses_active_handle_index = @hasField(secret_vault_service.Service, "active_handle_index"),
+        .uses_bounded_handle_scan = secret_vault_service.BOUNDED_HANDLE_SCAN,
+        .drops_secondary_handle_indexes = !@hasField(secret_vault_service.Service, "secret_handle_index") and
+            !@hasField(secret_vault_service.Service, "active_handle_index"),
         .tracks_active_handles = @hasField(secret_vault_service.Service, "active_handle_count"),
+        .keeps_fixed_state_within_ceiling = @sizeOf(secret_vault_service.Service) <= secret_vault_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .media_print_service = .{
         .uses_bounded_job_scan = media_print_service.BOUNDED_JOB_SCAN,
