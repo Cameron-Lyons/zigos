@@ -1,4 +1,6 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
+const abi = @import("../core/abi.zig");
+const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const debug_contract = @import("../security/debug_contract.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
@@ -241,6 +243,133 @@ pub const AuditEvent = struct {
 
 pub const ProvenanceRecord = debug_contract.ProvenanceRecord;
 
+comptime {
+    if (debug_contract.MAX_LABEL_BYTES > std.math.maxInt(u8) or
+        debug_contract.MAX_DETAIL_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("compact task provenance text lengths require wider counters");
+    }
+}
+
+pub const TaskProvenanceRecord = struct {
+    trace_id: u64 = 0,
+    parent_trace_id: u64 = 0,
+    task_id: u64 = 0,
+    artifact_id: u64 = 0,
+    service_id: u64 = 0,
+    capability_id: u64 = 0,
+    target_id: u64 = 0,
+    tick: u64 = 0,
+    source_identity_fingerprint: u64 = 0,
+    release_transparency_sequence: u64 = 0,
+    release_transparency_root_fingerprint: u64 = 0,
+    release_transparency_log_head_fingerprint: u64 = 0,
+    denial_fingerprint: u64 = 0,
+    operation: [debug_contract.MAX_LABEL_BYTES]u8 = [_]u8{0} ** debug_contract.MAX_LABEL_BYTES,
+    detail: [debug_contract.MAX_DETAIL_BYTES]u8 = [_]u8{0} ** debug_contract.MAX_DETAIL_BYTES,
+    kind: debug_contract.ProvenanceKind = .none,
+    decision: debug_contract.Decision = .allowed,
+    target_kind: ?capability.CapabilityTargetKind = null,
+    denial_reason: abi.DenialReason = .none,
+    operation_len: u8 = 0,
+    detail_len: u8 = 0,
+
+    pub fn from(record: ProvenanceRecord) TaskProvenanceRecord {
+        const operation_len = @min(record.operation_len, record.operation.len);
+        const detail_len = @min(record.detail_len, record.detail.len);
+        var compact = TaskProvenanceRecord{
+            .trace_id = record.trace_id,
+            .parent_trace_id = record.parent_trace_id,
+            .task_id = record.task_id,
+            .artifact_id = record.artifact_id,
+            .service_id = record.service_id,
+            .capability_id = record.capability_id,
+            .target_id = record.target_id,
+            .tick = record.tick,
+            .source_identity_fingerprint = record.source_identity_fingerprint,
+            .release_transparency_sequence = record.release_transparency_sequence,
+            .release_transparency_root_fingerprint = record.release_transparency_root_fingerprint,
+            .release_transparency_log_head_fingerprint = record.release_transparency_log_head_fingerprint,
+            .denial_fingerprint = record.denial.fingerprint,
+            .kind = record.kind,
+            .decision = record.decision,
+            .target_kind = record.target_kind,
+            .denial_reason = record.denial.reason,
+            .operation_len = @intCast(operation_len),
+            .detail_len = @intCast(detail_len),
+        };
+        @memcpy(compact.operation[0..operation_len], record.operation[0..operation_len]);
+        @memcpy(compact.detail[0..detail_len], record.detail[0..detail_len]);
+        return compact;
+    }
+
+    pub fn operationSlice(self: *const TaskProvenanceRecord) []const u8 {
+        return self.operation[0..self.operation_len];
+    }
+
+    pub fn detailSlice(self: *const TaskProvenanceRecord) []const u8 {
+        return self.detail[0..self.detail_len];
+    }
+
+    pub fn hasReleaseTransparency(self: *const TaskProvenanceRecord) bool {
+        return self.release_transparency_sequence != 0 and
+            self.release_transparency_root_fingerprint != 0 and
+            self.release_transparency_log_head_fingerprint != 0;
+    }
+};
+
+test "task provenance compacts recovery traces without losing diagnostic identity" {
+    const denial = debug_contract.explainDenied(
+        .policy_denied,
+        "open-camera",
+        "camera",
+        9,
+        17,
+        .device,
+        3,
+    );
+    const source = debug_contract.provenance(
+        .syscall,
+        .denied,
+        44,
+        9,
+        22,
+        17,
+        .device,
+        3,
+        "open-camera",
+        "redacted=yes",
+        denial,
+        0xA11CE,
+    );
+    const compact = TaskProvenanceRecord.from(source);
+
+    try std.testing.expect(@sizeOf(TaskProvenanceRecord) < @sizeOf(ProvenanceRecord));
+    try std.testing.expectEqual(source.trace_id, compact.trace_id);
+    try std.testing.expectEqual(source.parent_trace_id, compact.parent_trace_id);
+    try std.testing.expectEqual(source.kind, compact.kind);
+    try std.testing.expectEqual(source.decision, compact.decision);
+    try std.testing.expectEqual(source.target_kind, compact.target_kind);
+    try std.testing.expectEqual(source.denial.reason, compact.denial_reason);
+    try std.testing.expectEqual(source.denial.fingerprint, compact.denial_fingerprint);
+    try std.testing.expectEqualStrings(source.operationSlice(), compact.operationSlice());
+    try std.testing.expectEqualStrings(source.detailSlice(), compact.detailSlice());
+}
+
+test "task provenance clamps untrusted text lengths to compact storage" {
+    var source = ProvenanceRecord{};
+    @memset(&source.operation, 'o');
+    @memset(&source.detail, 'd');
+    source.operation_len = std.math.maxInt(usize);
+    source.detail_len = std.math.maxInt(usize);
+
+    const compact = TaskProvenanceRecord.from(source);
+    try std.testing.expectEqual(@as(usize, debug_contract.MAX_LABEL_BYTES), compact.operationSlice().len);
+    try std.testing.expectEqual(@as(usize, debug_contract.MAX_DETAIL_BYTES), compact.detailSlice().len);
+    try std.testing.expect(std.mem.allEqual(u8, compact.operationSlice(), 'o'));
+    try std.testing.expect(std.mem.allEqual(u8, compact.detailSlice(), 'd'));
+}
+
 pub const LaunchProvenanceSpec = struct {
     boundary: LaunchBoundary = .direct_request,
     image_id: u64 = 0,
@@ -297,7 +426,7 @@ pub const TaskColdRecord = struct {
     capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
     capability_generation: u64 = 1,
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
-    provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]ProvenanceRecord = [_]ProvenanceRecord{ProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
+    provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord = [_]TaskProvenanceRecord{TaskProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
     userspace_image: ExecutableImageSpec = .{},
 };
 
@@ -402,12 +531,12 @@ pub const TaskRecord = struct {
         self.audit_start = (self.audit_start + 1) % MAX_AUDIT_EVENTS;
     }
 
-    pub fn provenanceEventAt(self: *const TaskRecord, index: usize) ?ProvenanceRecord {
+    pub fn provenanceEventAt(self: *const TaskRecord, index: usize) ?TaskProvenanceRecord {
         if (index >= self.provenance_count) return null;
         return taskColdConst(self).provenance_trail[(self.provenance_start + index) % MAX_TASK_PROVENANCE_EVENTS];
     }
 
-    pub fn latestProvenanceEvent(self: *const TaskRecord) ?ProvenanceRecord {
+    pub fn latestProvenanceEvent(self: *const TaskRecord) ?TaskProvenanceRecord {
         if (self.provenance_count == 0) return null;
         return self.provenanceEventAt(self.provenance_count - 1);
     }
