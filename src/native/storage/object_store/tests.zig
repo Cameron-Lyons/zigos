@@ -4,6 +4,7 @@ const signing = @import("../../core/signing.zig");
 const object_store = @import("store.zig");
 
 const BlobSlot = object_store.BlobSlot;
+const BlobRecord = object_store.BlobRecord;
 const BlobChunkSlotIndex = object_store.BlobChunkSlotIndex;
 const VersionBlobSlotIndex = object_store.VersionBlobSlotIndex;
 const ChunkRef = object_store.ChunkRef;
@@ -29,6 +30,12 @@ test "blob manifests store compact chunk slot edges" {
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(BlobChunkSlotIndex));
     try std.testing.expect(@hasField(object_store.BlobRecord, "chunk_slot_indexes"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "chunks"));
+}
+
+test "resident object metadata uses capacity-sized length fields" {
+    try std.testing.expectEqual(@as(usize, 248), @sizeOf(SignedMetadata));
+    try std.testing.expectEqual(@as(usize, 132), @sizeOf(BlobRecord));
+    try std.testing.expectEqual(@as(usize, 136), @sizeOf(BlobSlot));
 }
 
 test "versions retain only compact canonical blob references" {
@@ -204,7 +211,7 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
 
     const version_record = store.version(result.version_id).?;
     const blob = store.versionBlob(version_record).?;
-    try std.testing.expectEqual(payload.len, blob.payload_len);
+    try std.testing.expectEqual(payload.len, blob.payloadLen());
     try std.testing.expectEqual(@as(u16, 4), blob.chunk_count);
     try std.testing.expectEqual(@as(u16, PAGE_SIZE_BYTES), store.blobChunk(blob, 0).?.payload_len);
     try std.testing.expectEqual(@as(u16, 17), store.blobChunk(blob, 3).?.payload_len);
@@ -212,7 +219,7 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
     const live_chunk_refs = try store.copyBlobChunkRefs(blob, &chunk_refs);
     const chunk_count = live_chunk_refs.len;
     try std.testing.expect(std.mem.eql(u8, &blob.merkle_root, &computeBlobMerkleRoot(live_chunk_refs)));
-    try std.testing.expect(std.mem.eql(u8, &blob.address, &computeBlobManifestAddress(blob.payload_len, live_chunk_refs)));
+    try std.testing.expect(std.mem.eql(u8, &blob.address, &computeBlobManifestAddress(blob.payloadLen(), live_chunk_refs)));
     try std.testing.expectEqual(@as(usize, 0), store.verifiedBlobManifestCount());
 
     var cursor = try store.versionChunkCursor(version_record);
@@ -257,7 +264,7 @@ test "object store accepts payloads beyond the old sixteen-page ceiling" {
     const version_record = store.version(result.version_id).?;
     const blob = store.versionBlob(version_record).?;
     try std.testing.expectEqual(@as(u16, 17), blob.chunk_count);
-    try std.testing.expectEqual(payload.len, blob.payload_len);
+    try std.testing.expectEqual(payload.len, blob.payloadLen());
 
     var out: [payload.len]u8 = undefined;
     const loaded = try store.versionPayloadInto(version_record, &out);
