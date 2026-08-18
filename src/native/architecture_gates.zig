@@ -453,6 +453,12 @@ pub const indexed_hot_path_tables = .{
         .keeps_overlay_session_state_within_ceilings = @sizeOf(sync_service.OverlaySession) <= sync_service.OVERLAY_SESSION_SIZE_CEILING_BYTES and
             @sizeOf(sync_service.OverlayRelayFrameResult) <= sync_service.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES and
             @sizeOf(sync_service.Service) <= sync_service.SERVICE_SIZE_CEILING_BYTES,
+        .stores_compact_service_queue_metadata = sync_service.COMPACT_SERVICE_QUEUE_METADATA and
+            @FieldType(sync_service.Service, "outbound_transport_frame_count") == u8 and
+            @FieldType(sync_service.Service, "inbound_transport_frame_count") == u8 and
+            @FieldType(sync_service.Service, "next_outbound_transport_frame_slot_index") == u8 and
+            @FieldType(sync_service.Service, "next_inbound_transport_frame_slot_index") == u8 and
+            @FieldType(sync_service.Service, "active_overlay_session_count") == u8,
         .stores_compact_sync_record_metadata = sync_state_support.COMPACT_RECORD_METADATA and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_count") == u8 and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_lens") == [sync_state_support.MAX_SELECTIVE_PREFIXES]u8 and

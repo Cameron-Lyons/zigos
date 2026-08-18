@@ -23,6 +23,7 @@ pub const ServiceConfig = struct {
 
     pub fn validate(comptime config: ServiceConfig) void {
         if (config.max_overlay_sessions == 0) @compileError("sync service requires at least one overlay session slot");
+        if (config.max_overlay_sessions > std.math.maxInt(u8)) @compileError("sync service overlay session count no longer fits compact metadata");
     }
 };
 
