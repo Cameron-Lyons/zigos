@@ -1,3 +1,5 @@
+const builtin = @import("builtin");
+const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
@@ -13,14 +15,29 @@ const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
+const root = @import("root");
+
+pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = true;
+const heap_backed_capability_table = builtin.target.os.tag == .freestanding and HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
+const CapabilityTableBacking = if (heap_backed_capability_table) ?*capability.CapabilityTable else capability.CapabilityTable;
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 pub const KernelContext = struct {
-    capability_table: capability.CapabilityTable = capability.CapabilityTable.init(),
+    capability_table: CapabilityTableBacking = if (heap_backed_capability_table) null else capability.CapabilityTable.init(),
     endpoint_table: endpoint_mod.Table = endpoint_mod.Table.init(),
     shared_memory_table: shared_memory_mod.Table = shared_memory_mod.Table.init(),
     kernel_instance: native_kernel.Kernel = undefined,
     kernel_port_instance: component_port.KernelPort = undefined,
     kernel_port_ready: bool = false,
+
+    comptime {
+        if (heap_backed_capability_table and @sizeOf(@This()) > 12 * 1024) {
+            @compileError("heap-backed kernel contexts exceed their compact resident layout");
+        }
+    }
 
     pub fn init() KernelContext {
         return .{};
@@ -28,6 +45,35 @@ pub const KernelContext = struct {
 
     pub fn resetPort(self: *KernelContext) void {
         self.kernel_port_ready = false;
+    }
+
+    pub fn capabilityTable(self: *KernelContext) ?*capability.CapabilityTable {
+        if (comptime heap_backed_capability_table) return self.capability_table;
+        return &self.capability_table;
+    }
+
+    pub fn ensureCapabilityTable(self: *KernelContext) error{NoSpaceLeft}!*capability.CapabilityTable {
+        if (self.capabilityTable()) |table| return table;
+        if (comptime heap_backed_capability_table) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(capability.CapabilityTable)) orelse return error.NoSpaceLeft;
+            const table: *capability.CapabilityTable = @ptrCast(@alignCast(allocation));
+            table.initializeAllocated();
+            self.capability_table = table;
+            return table;
+        }
+        return &self.capability_table;
+    }
+
+    pub fn releaseCapabilityTable(self: *KernelContext) void {
+        if (comptime heap_backed_capability_table) {
+            if (self.capability_table) |table| {
+                @memset(std.mem.asBytes(table), 0);
+                kernel_memory.kfree(@ptrCast(table));
+                self.capability_table = null;
+            }
+        } else {
+            self.capability_table = capability.CapabilityTable.init();
+        }
     }
 
     pub fn port(self: *KernelContext) ?*component_port.KernelPort {
@@ -41,10 +87,11 @@ pub const KernelContext = struct {
         runtime_service: *task_runtime_service_mod.Service,
         driver_runtime: *driver_runtime_mod.Runtime,
     ) *component_port.KernelPort {
+        const capability_table = self.capabilityTable() orelse unreachable;
         self.kernel_instance = native_kernel.Kernel.init(
             policy_authority,
             runtime_service.runtimePtr(),
-            &self.capability_table,
+            capability_table,
             &self.endpoint_table,
             &self.shared_memory_table,
         );
