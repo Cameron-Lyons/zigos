@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -14,6 +15,11 @@ const model = @import("package_service_model.zig");
 const service_authority = @import("service_authority.zig");
 const signing = @import("../core/signing.zig");
 const units = @import("../core/units.zig");
+const root = @import("root");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 pub const MAX_INSTALLED_BUNDLES = model.MAX_INSTALLED_BUNDLES;
 pub const MAX_LABEL_BYTES = model.MAX_LABEL_BYTES;
@@ -62,6 +68,7 @@ pub const Digest = bundle_digest.Digest;
 pub const Error = bundle_ops.Error || error{
     BundleNotFound,
     BundleTableFull,
+    NoSpaceLeft,
     InstallSourceMissing,
     InstallSourceInvalid,
     InvalidDataSchemaVersion,
@@ -110,17 +117,62 @@ pub const RemoveRequest = struct {
 
 const BundleSlot = model.BundleSlot;
 const BUNDLE_INDEX_CAPACITY: usize = MAX_INSTALLED_BUNDLES * 2;
-const BundleArena = indexed_arena.IndexedArenaWithKey(u64, BundleSlot, MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY, bundleSlotKey);
+pub const BundleArena = indexed_arena.IndexedArenaWithKey(u64, BundleSlot, MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY, bundleSlotKey);
+const heap_backed_bundle_arena = builtin.target.os.tag == .freestanding;
+const BundleArenaBacking = if (heap_backed_bundle_arena) ?*BundleArena else BundleArena;
 const zeroBundle = model.zeroBundle;
 
 pub const Service = struct {
     service_id: u64 = 0,
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
-    slots: BundleArena = BundleArena.init(),
+    slots: BundleArenaBacking = if (heap_backed_bundle_arena) null else BundleArena.init(),
     trust_store: principal.Keyring = principal.Keyring.init(),
+
+    comptime {
+        if (heap_backed_bundle_arena and @sizeOf(@This()) > units.kibibytes(16)) {
+            @compileError("heap-backed package services exceed their compact resident layout");
+        }
+    }
 
     pub fn init() Service {
         return .{};
+    }
+
+    pub fn reset(self: *Service) void {
+        self.deinit();
+        self.* = Service.init();
+    }
+
+    pub fn deinit(self: *Service) void {
+        if (comptime heap_backed_bundle_arena) {
+            if (self.slots) |slots| {
+                @memset(std.mem.asBytes(slots), 0);
+                kernel_memory.kfree(@ptrCast(slots));
+                self.slots = null;
+            }
+        }
+    }
+
+    fn bundleArena(self: *Service) ?*BundleArena {
+        if (comptime heap_backed_bundle_arena) return self.slots;
+        return &self.slots;
+    }
+
+    fn bundleArenaConst(self: *const Service) ?*const BundleArena {
+        if (comptime heap_backed_bundle_arena) return self.slots;
+        return &self.slots;
+    }
+
+    fn ensureBundleArena(self: *Service) error{NoSpaceLeft}!*BundleArena {
+        if (self.bundleArena()) |slots| return slots;
+        if (comptime heap_backed_bundle_arena) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(BundleArena)) orelse return error.NoSpaceLeft;
+            const slots: *BundleArena = @ptrCast(@alignCast(allocation));
+            initializeBundleArena(slots);
+            self.slots = slots;
+            return slots;
+        }
+        return &self.slots;
     }
 
     pub fn bind(self: *Service, service_id: u64, owner: principal.PrincipalId) void {
@@ -219,9 +271,10 @@ pub const Service = struct {
             };
         }
 
-        const slot_index = self.slots.reserveIndex(bundleKey(request.bundle.bundle_id)) orelse return error.BundleTableFull;
-        errdefer _ = self.slots.removeIndex(slot_index);
-        const slot = &self.slots.slots[slot_index];
+        const slots = try self.ensureBundleArena();
+        const slot_index = slots.reserveIndex(bundleKey(request.bundle.bundle_id)) orelse return error.BundleTableFull;
+        errdefer _ = slots.removeIndex(slot_index);
+        const slot = &slots.slots[slot_index];
         slot.bundle = zeroBundle();
         try bundle_ops.installNewValidated(
             &slot.bundle,
@@ -277,7 +330,7 @@ pub const Service = struct {
         const bundle = self.find(request.bundle_id) orelse return error.BundleNotFound;
         try requireActiveRevisionDigest(bundle, request.expected_active_digest);
         const removed_revision_count = bundle.revision_count;
-        _ = self.slots.remove(bundleKey(request.bundle_id));
+        _ = self.bundleArena().?.remove(bundleKey(request.bundle_id));
         return .{
             .removed_existing = true,
             .removed_revision_count = removed_revision_count,
@@ -319,13 +372,15 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, bundle_id: []const u8) ?*InstalledBundle {
-        const slot = self.slots.get(bundleKey(bundle_id)) orelse return null;
+        const slots = self.bundleArena() orelse return null;
+        const slot = slots.get(bundleKey(bundle_id)) orelse return null;
         if (!std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return null;
         return &slot.bundle;
     }
 
     pub fn rebuildIndexes(self: *Service) void {
-        self.slots.rebuildPrimaryIndex();
+        const slots = self.bundleArena() orelse return;
+        slots.rebuildPrimaryIndex();
     }
 
     pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
@@ -350,11 +405,19 @@ pub const Service = struct {
     }
 
     fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
-        const slot = self.slots.getConst(bundleKey(bundle_id)) orelse return null;
+        const slots = self.bundleArenaConst() orelse return null;
+        const slot = slots.getConst(bundleKey(bundle_id)) orelse return null;
         if (!std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return null;
         return &slot.bundle;
     }
 };
+
+fn initializeBundleArena(slots: *BundleArena) void {
+    @memset(std.mem.asBytes(slots), 0);
+    const free_no_index = indexed_arena.reusableNoIndex(MAX_INSTALLED_BUNDLES);
+    @memset(slots.free_next[0..], free_no_index);
+    slots.free_head = free_no_index;
+}
 
 fn recordOffboard(
     ledger: ?*event_ledger.Ledger,
