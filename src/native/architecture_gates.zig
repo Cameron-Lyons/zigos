@@ -192,6 +192,13 @@ pub const indexed_hot_path_tables = .{
     },
     .background_dispatch = .{
         .uses_bounded_record_scan = background_dispatch.BOUNDED_RECORD_SCAN,
+        .stores_compact_dispatch_metadata = background_dispatch.COMPACT_DISPATCH_METADATA and
+            @FieldType(background_dispatch.DispatchRecord, "background_task_id_len") == u8 and
+            @FieldType(background_dispatch.Controller, "active_count") == u8 and
+            @FieldType(background_dispatch.Controller, "record_count") == u8 and
+            @FieldType(background_dispatch.Controller, "next_reusable_slot") == u8,
+        .keeps_dispatch_state_within_ceilings = @sizeOf(background_dispatch.DispatchRecord) <= background_dispatch.DISPATCH_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(background_dispatch.Controller) <= background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
         .tracks_active_count = @hasField(background_dispatch.Controller, "active_count"),
         .uses_fair_reuse_cursor = @hasField(background_dispatch.Controller, "next_reusable_slot"),
         .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
