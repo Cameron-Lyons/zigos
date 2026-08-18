@@ -72,7 +72,7 @@ fn printSignedManifest(writer: anytype, bundle: manifest.BundleManifest, signer:
         .{
             bundle.bundle_id,
             try hex.encodeLower(&digest, &digest_hex),
-            signature.format,
+            signature.formatSlice(),
             signature.signer,
             try hex.encodeLower(signature.publicKeySlice(), &public_key_hex),
             try hex.encodeLower(signature.valueSlice(), &signature_hex),
@@ -112,7 +112,7 @@ fn printSignature(
             if (provider.descriptor.fips_140_validated_module) "yes" else "no",
             provider.descriptor.validation_certificate,
             if (provider.releaseEligible()) "yes" else "no",
-            signature.format,
+            signature.formatSlice(),
             signature.signer,
             try hex.encodeLower(signature.publicKeySlice(), &public_key_hex),
             try hex.encodeLower(signature.valueSlice(), &signature_hex),

@@ -1185,16 +1185,16 @@ fn verifyExportPackage(package: *const ExportPackage) bool {
 }
 
 fn persistExportPackageSignature(package: *ExportPackage) Error!void {
-    package.signature_format_len = native_util.copyTextExact(&package.signature_format_storage, package.signature.format) catch return error.SignatureFormatTooLong;
+    package.signature_format_len = native_util.copyTextExact(&package.signature_format_storage, package.signature.formatSlice()) catch return error.SignatureFormatTooLong;
     package.signature_signer_len = native_util.copyTextExact(&package.signature_signer_storage, package.signature.signer) catch return error.SignatureSignerTooLong;
-    package.signature.format = package.signature_format_storage[0..package.signature_format_len];
+    package.signature.format = manifest.parseSignatureFormat(package.signature_format_storage[0..package.signature_format_len]);
     package.signature.signer = package.signature_signer_storage[0..package.signature_signer_len];
 }
 
 fn exportPackageSignature(package: *const ExportPackage) manifest.Signature {
     var signature = package.signature;
     if (package.signature_format_len != 0) {
-        signature.format = package.signature_format_storage[0..package.signature_format_len];
+        signature.format = manifest.parseSignatureFormat(package.signature_format_storage[0..package.signature_format_len]);
     }
     if (package.signature_signer_len != 0) {
         signature.signer = package.signature_signer_storage[0..package.signature_signer_len];

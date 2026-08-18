@@ -1374,12 +1374,7 @@ fn indexOfFold(haystack: []const u8, needle: []const u8) ?usize {
 }
 
 fn writeMetadata(dest: *SignedMetadata, src: *const SignedMetadata) void {
-    dest.signature.format = src.signature.format;
-    dest.signature.signer = src.signature.signer;
-    dest.signature.public_key_len = src.signature.public_key_len;
-    dest.signature.value_len = src.signature.value_len;
-    dest.signature.public_key = src.signature.public_key;
-    dest.signature.value = src.signature.value;
+    dest.signature = src.signature;
     dest.label_len = src.label_len;
     dest.label = src.label;
     dest.content_type_len = src.content_type_len;

@@ -620,7 +620,7 @@ fn signBuildArtifactManifest(manifest: *BuildArtifactManifest) !void {
     );
     const signature = try signing.signWithDefaultRegistry(.ed25519, build_manifest_signer, payload);
     manifest.signature = .{
-        .format = signature.format,
+        .format = signature.formatSlice(),
         .signer = signature.signer,
         .public_key = signature.ed25519PublicKeySlice()[0..signing.ED25519_PUBLIC_KEY_BYTES].*,
         .value = signature.ed25519SignatureSlice()[0..signing.ED25519_SIGNATURE_BYTES].*,

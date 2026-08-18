@@ -101,7 +101,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .display_name = "Published Driver Runtime",
         .publisher = "zigos.spec",
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-spec-driver",
         },
     };

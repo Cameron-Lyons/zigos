@@ -1060,7 +1060,7 @@ test "review service retries invalid commands clamps leases and records audits" 
     };
     var bundle = manifest_fixtures.basicNotesBundle(&permissions);
     bundle.signature = .{
-        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .format = .ed25519,
         .signer = "zigos-dev-key",
     };
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
@@ -1245,7 +1245,7 @@ test "review service renders commands from a typed decision profile" {
     };
     var bundle = manifest_fixtures.basicNotesBundle(&permissions);
     bundle.signature = .{
-        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .format = .ed25519,
         .signer = "zigos-dev-key",
     };
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
@@ -1288,7 +1288,7 @@ test "review service consumes xHCI keyboard reports for physical permission comm
     };
     var bundle = manifest_fixtures.basicNotesBundle(&permissions);
     bundle.signature = .{
-        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .format = .ed25519,
         .signer = "zigos-dev-key",
     };
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
@@ -1384,7 +1384,7 @@ test "hosted modeled xHCI reports still count when a focused router is bound" {
     };
     var bundle = manifest_fixtures.basicNotesBundle(&permissions);
     bundle.signature = .{
-        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .format = .ed25519,
         .signer = "zigos-dev-key",
     };
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
@@ -1454,7 +1454,7 @@ test "rendered permission review surface drives allow deny controls through comp
         .publisher = "zigos.dev",
         .requested_permissions = &permissions,
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-dev-key",
         },
     };
@@ -1561,7 +1561,7 @@ test "rendered permission review surface requires every visible decision before 
         .publisher = "zigos.dev",
         .requested_permissions = &permissions,
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-dev-key",
         },
     };

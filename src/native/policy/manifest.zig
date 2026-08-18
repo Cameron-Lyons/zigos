@@ -255,20 +255,52 @@ pub const ML_DSA65_SIGNATURE_BYTES: usize = 3309;
 pub const MAX_SIGNATURE_PUBLIC_KEY_BYTES: usize = ED25519_PUBLIC_KEY_BYTES;
 pub const MAX_SIGNATURE_VALUE_BYTES: usize = ED25519_SIGNATURE_BYTES;
 
+comptime {
+    if (MAX_SIGNATURE_PUBLIC_KEY_BYTES > std.math.maxInt(u8) or
+        MAX_SIGNATURE_VALUE_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("native signature lengths must fit their compact fields");
+    }
+}
+
+pub const SignatureFormat = enum(u8) {
+    ed25519,
+    ml_dsa65,
+    unknown,
+
+    pub fn name(self: SignatureFormat) []const u8 {
+        return switch (self) {
+            .ed25519 => SIGNATURE_FORMAT_ED25519,
+            .ml_dsa65 => SIGNATURE_FORMAT_ML_DSA65,
+            .unknown => "unknown",
+        };
+    }
+};
+
+pub fn parseSignatureFormat(name: []const u8) SignatureFormat {
+    if (std.mem.eql(u8, name, SIGNATURE_FORMAT_ED25519)) return .ed25519;
+    if (std.mem.eql(u8, name, SIGNATURE_FORMAT_ML_DSA65)) return .ml_dsa65;
+    return .unknown;
+}
+
 pub const Signature = struct {
-    format: []const u8 = SIGNATURE_FORMAT_ED25519,
     signer: []const u8 = "",
-    public_key_len: usize = 0,
     public_key: [MAX_SIGNATURE_PUBLIC_KEY_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_PUBLIC_KEY_BYTES,
-    value_len: usize = 0,
     value: [MAX_SIGNATURE_VALUE_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_VALUE_BYTES,
+    public_key_len: u8 = 0,
+    value_len: u8 = 0,
+    format: SignatureFormat = .ed25519,
+
+    pub fn formatSlice(self: *const Signature) []const u8 {
+        return self.format.name();
+    }
 
     pub fn publicKeySlice(self: *const Signature) []const u8 {
-        return self.public_key[0..@min(self.public_key_len, self.public_key.len)];
+        return self.public_key[0..@min(@as(usize, self.public_key_len), self.public_key.len)];
     }
 
     pub fn valueSlice(self: *const Signature) []const u8 {
-        return self.value[0..@min(self.value_len, self.value.len)];
+        return self.value[0..@min(@as(usize, self.value_len), self.value.len)];
     }
 
     pub fn isPresent(self: *const Signature) bool {
@@ -279,10 +311,8 @@ pub const Signature = struct {
     pub fn isComplete(self: *const Signature) bool {
         const layout = layoutForFormat(self.format) orelse return false;
         return self.isPresent() and
-            self.public_key_len == layout.public_key_bytes and
-            self.value_len == layout.value_bytes and
-            self.public_key_len <= self.public_key.len and
-            self.value_len <= self.value.len;
+            @as(usize, self.public_key_len) == layout.public_key_bytes and
+            @as(usize, self.value_len) == layout.value_bytes;
     }
 
     pub fn ed25519PublicKeySlice(self: *const Signature) []const u8 {
@@ -301,14 +331,22 @@ pub const SignatureLayout = struct {
     value_bytes: usize,
 };
 
-pub fn layoutForFormat(format: []const u8) ?SignatureLayout {
-    if (std.mem.eql(u8, format, SIGNATURE_FORMAT_ED25519)) {
-        return .{
+pub fn layoutForFormat(format: SignatureFormat) ?SignatureLayout {
+    return switch (format) {
+        .ed25519 => .{
             .public_key_bytes = ED25519_PUBLIC_KEY_BYTES,
             .value_bytes = ED25519_SIGNATURE_BYTES,
-        };
-    }
-    return null;
+        },
+        .ml_dsa65, .unknown => null,
+    };
+}
+
+test "signature metadata uses compact bounded fields" {
+    try std.testing.expectEqual(@as(usize, 120), @sizeOf(Signature));
+    try std.testing.expectEqual(SignatureFormat.ed25519, parseSignatureFormat(SIGNATURE_FORMAT_ED25519));
+    try std.testing.expectEqual(SignatureFormat.ml_dsa65, parseSignatureFormat(SIGNATURE_FORMAT_ML_DSA65));
+    try std.testing.expectEqual(SignatureFormat.unknown, parseSignatureFormat("unsupported"));
+    try std.testing.expectEqualStrings(SIGNATURE_FORMAT_ED25519, (Signature{}).formatSlice());
 }
 
 pub const BundleManifest = struct {
@@ -1414,7 +1452,7 @@ test "validate accepts a signed local-first bundle manifest" {
         },
         .update_channel = .beta,
         .signature = .{
-            .format = SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-dev-key",
         },
     };

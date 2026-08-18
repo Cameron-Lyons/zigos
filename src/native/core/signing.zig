@@ -390,7 +390,7 @@ pub const ExternalReleaseProvider = struct {
         if (!std.mem.eql(u8, identity.label, self.key.label)) return error.ReleaseKeyIdentityMismatch;
         const signature_bytes = try self.sign_fn(self.context, self.key, message);
         var result = manifest.Signature{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = self.key.label,
             .public_key_len = PUBLIC_KEY_BYTES,
             .value_len = SIGNATURE_BYTES,
@@ -401,7 +401,7 @@ pub const ExternalReleaseProvider = struct {
     }
 
     pub fn verify(self: *ExternalReleaseProvider, signature: manifest.Signature, message: []const u8) bool {
-        if (!std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ED25519)) return false;
+        if (signature.format != .ed25519) return false;
         if (!std.mem.eql(u8, signature.signer, self.key.label)) return false;
         if (!std.mem.eql(u8, signature.ed25519PublicKeySlice(), &self.key.public_key)) return false;
         return verifySignature(signature, message);
@@ -522,13 +522,13 @@ pub const SignatureProvider = struct {
 
     pub fn sign(self: SignatureProvider, identity: SignerIdentity, message: []const u8) !manifest.Signature {
         const signature = try self.sign_fn(self.context, identity, message);
-        if (!std.mem.eql(u8, signature.format, self.descriptor.format())) return error.SignatureProviderProfileMismatch;
+        if (!std.mem.eql(u8, signature.formatSlice(), self.descriptor.format())) return error.SignatureProviderProfileMismatch;
         if (!signature.isComplete()) return error.SignatureProviderIncompleteSignature;
         return signature;
     }
 
     pub fn verify(self: SignatureProvider, signature: manifest.Signature, message: []const u8) bool {
-        if (!std.mem.eql(u8, signature.format, self.descriptor.format())) return false;
+        if (!std.mem.eql(u8, signature.formatSlice(), self.descriptor.format())) return false;
         return self.verify_fn(self.context, signature, message);
     }
 
@@ -580,7 +580,7 @@ pub const SignatureProviderRegistry = struct {
     }
 
     pub fn verify(self: *const SignatureProviderRegistry, signature: manifest.Signature, message: []const u8) bool {
-        const profile = profileForFormat(signature.format) orelse return false;
+        const profile = profileForFormat(signature.formatSlice()) orelse return false;
         const provider = self.find(profile) orelse return false;
         return provider.verify(signature, message);
     }
@@ -644,7 +644,7 @@ pub fn signWithProfile(identity: SignerIdentity, message: []const u8, profile: S
     const signature_bytes = signature.toBytes();
 
     var result = manifest.Signature{
-        .format = formatForProfile(profile),
+        .format = signatureFormatForProfile(profile),
         .signer = identity.label,
         .public_key_len = Ed25519.PublicKey.encoded_length,
         .value_len = Ed25519.Signature.encoded_length,
@@ -668,7 +668,7 @@ fn verifySignature(signature: manifest.Signature, message: []const u8) bool {
     if (!signature.isComplete()) return false;
 
     if (!verifyEd25519(signature.ed25519PublicKeySlice(), signature.ed25519SignatureSlice(), message)) return false;
-    return std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ED25519);
+    return signature.format == .ed25519;
 }
 
 fn verifyEd25519(public_key_bytes: []const u8, signature_bytes: []const u8, message: []const u8) bool {
@@ -711,6 +711,13 @@ fn formatForProfile(profile: SignatureProfile) []const u8 {
     };
 }
 
+fn signatureFormatForProfile(profile: SignatureProfile) manifest.SignatureFormat {
+    return switch (profile) {
+        .ed25519 => .ed25519,
+        .ml_dsa65_fips204 => .ml_dsa65,
+    };
+}
+
 pub fn profileForFormat(format: []const u8) ?SignatureProfile {
     if (std.mem.eql(u8, format, manifest.SIGNATURE_FORMAT_ED25519)) return .ed25519;
     if (std.mem.eql(u8, format, manifest.SIGNATURE_FORMAT_ML_DSA65)) return .ml_dsa65_fips204;
@@ -726,7 +733,7 @@ pub fn defaultSoftwareRegistry(
 }
 
 fn signingProfileMatches(signature: manifest.Signature, profile: SignatureProfile) bool {
-    return std.mem.eql(u8, signature.format, formatForProfile(profile));
+    return signature.format == signatureFormatForProfile(profile);
 }
 
 test "ed25519 signing produces verifiable native signatures" {
@@ -768,7 +775,7 @@ test "signature providers expose release eligibility and reject mismatched profi
     try std.testing.expect(ed25519_provider.verify(ed25519_signature, "provider-message"));
 
     var wrong_format = ed25519_signature;
-    wrong_format.format = manifest.SIGNATURE_FORMAT_ML_DSA65;
+    wrong_format.format = .ml_dsa65;
     try std.testing.expect(!ed25519_provider.verify(wrong_format, "provider-message"));
 }
 
@@ -1067,6 +1074,6 @@ test "signature provider registry selects providers by profile and release eligi
     try std.testing.expect(registry.verify(ed25519_signature, "registry-message"));
 
     var unsupported = ed25519_signature;
-    unsupported.format = "unknown";
+    unsupported.format = .unknown;
     try std.testing.expect(!registry.verify(unsupported, "registry-message"));
 }
