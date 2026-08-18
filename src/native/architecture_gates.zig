@@ -1,4 +1,5 @@
 const indexed_arena = @import("core/indexed_arena.zig");
+const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
 const service_registry = @import("services/service_registry.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
@@ -79,6 +80,9 @@ pub const indexed_hot_path_tables = .{
     .indexed_arena = .{
         .tracks_used_count = @hasField(ProbeArena, "used_count"),
         .inserts_complete_values_at_exact_indexes = @hasDecl(ProbeArena, "insertIndexAt"),
+        .uses_capacity_sized_primary_index_slots = id_index.SlotIndex(256) == u8 and
+            id_index.SlotIndex(257) == u16 and
+            @sizeOf(id_index.Slot(1_536)) == 16,
     },
     .service_registry = .{
         .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),
