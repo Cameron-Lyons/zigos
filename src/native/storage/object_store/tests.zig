@@ -38,6 +38,12 @@ test "resident object metadata uses capacity-sized length fields" {
     try std.testing.expectEqual(@as(usize, 136), @sizeOf(BlobSlot));
 }
 
+test "object type index uses capacity-sized resident links" {
+    const ObjectTypeIndex = @FieldType(Store, "object_type_index");
+
+    try std.testing.expectEqual(@as(usize, 213), @sizeOf(ObjectTypeIndex));
+}
+
 test "versions retain only compact canonical blob references" {
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(VersionBlobSlotIndex));
     try std.testing.expect(!@hasField(object_store.VersionRecord, "blob_address"));
