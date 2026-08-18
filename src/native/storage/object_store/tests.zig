@@ -11,6 +11,7 @@ const ChunkSlot = object_store.ChunkSlot;
 const Error = object_store.Error;
 const MAX_BLOB_CHUNKS = object_store.MAX_BLOB_CHUNKS;
 const MAX_CHUNK_BYTES = object_store.MAX_CHUNK_BYTES;
+const MAX_INLINE_PAYLOAD_BYTES = object_store.MAX_INLINE_PAYLOAD_BYTES;
 const MAX_OBJECT_QUERY_RESULTS = object_store.MAX_OBJECT_QUERY_RESULTS;
 const MAX_PAYLOAD_BYTES = object_store.MAX_PAYLOAD_BYTES;
 const PAGE_SIZE_BYTES = object_store.PAGE_SIZE_BYTES;
@@ -261,6 +262,44 @@ test "object store accepts payloads beyond the old sixteen-page ceiling" {
     var out: [payload.len]u8 = undefined;
     const loaded = try store.versionPayloadInto(version_record, &out);
     try std.testing.expectEqualSlices(u8, &payload, loaded);
+}
+
+test "inline payload reads are bounded independently from object capacity" {
+    try std.testing.expect(MAX_INLINE_PAYLOAD_BYTES < MAX_PAYLOAD_BYTES);
+    var store = Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-inline-read-key",
+        .seed = signing.seedFromByte(0x48),
+    };
+
+    const inline_payload = [_]u8{0x31} ** MAX_INLINE_PAYLOAD_BYTES;
+    const inline_result = try store.putVersion(.{
+        .preferred_object_id = ids.object(915),
+        .object_type = .document,
+        .payload = &inline_payload,
+        .metadata = try signMetadata(signer, "inline", "application/octet-stream", .document, &inline_payload, 15),
+    });
+    try std.testing.expectEqualSlices(
+        u8,
+        &inline_payload,
+        try store.versionPayload(store.version(inline_result.version_id).?),
+    );
+
+    const streamed_payload = [_]u8{0x32} ** (MAX_INLINE_PAYLOAD_BYTES + 1);
+    const streamed_result = try store.putVersion(.{
+        .preferred_object_id = ids.object(916),
+        .object_type = .model_artifact,
+        .payload = &streamed_payload,
+        .metadata = try signMetadata(signer, "streamed", "application/octet-stream", .model_artifact, &streamed_payload, 16),
+    });
+    const streamed_version = store.version(streamed_result.version_id).?;
+    try std.testing.expectError(error.PayloadRequiresStreaming, store.versionPayload(streamed_version));
+    var out: [streamed_payload.len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        &streamed_payload,
+        try store.versionPayloadInto(streamed_version, &out),
+    );
 }
 
 test "object store verifies blob backend corruption before serving payloads" {
