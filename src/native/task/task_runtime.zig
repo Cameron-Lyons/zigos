@@ -190,6 +190,15 @@ const defaultInitialComponent = model.defaultInitialComponent;
 const makeLaunchProvenance = model.makeLaunchProvenance;
 const zeroExecutionComponent = model.zeroExecutionComponent;
 
+fn initializeTaskMultimapIndex(index: anytype) void {
+    const Index = @TypeOf(index.*);
+    const CompactIndex = @FieldType(Index, "free_bucket_head");
+    const compact_no_index: CompactIndex = @intCast(@max(index.links.len, index.buckets.len));
+    @memset(std.mem.asBytes(index), 0);
+    for (&index.links) |*link| link.bucket = compact_no_index;
+    index.free_bucket_head = compact_no_index;
+}
+
 pub const Runtime = struct {
     pub const AddressSpaceArenaType = model.AddressSpaceArena;
     pub const AddressSpaceSlotType = AddressSpaceSlot;
@@ -218,6 +227,25 @@ pub const Runtime = struct {
 
     pub fn init() Runtime {
         return Runtime{};
+    }
+
+    pub fn initializeAllocated(self: *Runtime) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.next_task_id = 1;
+        self.next_process_id = 1;
+        self.next_address_space_id = 1;
+        self.next_namespace_id = 1;
+        self.next_component_id = 1;
+        self.tasks.free_head = indexed_arena.reusableNoIndex(MAX_TASKS);
+        initializeTaskMultimapIndex(&self.task_owner_index);
+        initializeTaskMultimapIndex(&self.task_initial_component_label_index);
+        self.task_lifecycle_generation = 1;
+        if (comptime !heap_backed_task_cold) {
+            self.task_cold = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS;
+        }
+        if (comptime !heap_backed_address_spaces) {
+            self.address_spaces = model.AddressSpaceArena.init();
+        }
     }
 
     pub fn initSnapshot() Snapshot {
@@ -1172,6 +1200,25 @@ fn createTaskIdTestTask(runtime: *Runtime, owner_serial: u64) Error!*TaskRecord 
         },
         .local_only = true,
     });
+}
+
+test "allocated runtime initialization preserves empty indexes and id sequences" {
+    var runtime: Runtime = undefined;
+    runtime.initializeAllocated();
+
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+    try std.testing.expectEqual(@as(u64, 1), runtime.taskLifecycleGeneration());
+
+    const task = try createTaskIdTestTask(&runtime, 42);
+    try std.testing.expectEqual(@as(u64, 1), task.id);
+    try std.testing.expectEqual(task.id, runtime.findByOwner(task.owner).?.id);
+    const initial_label = task.executionComponents()[0].labelSlice();
+    try std.testing.expectEqual(task.id, runtime.findByInitialComponentLabel(initial_label).?.id);
+
+    const lifecycle_generation_before_reset = runtime.taskLifecycleGeneration();
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+    try std.testing.expectEqual(lifecycle_generation_before_reset + 1, runtime.taskLifecycleGeneration());
 }
 
 const RetirementRecorder = struct {

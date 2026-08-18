@@ -75,7 +75,8 @@ pub const TrustBoot = struct {
         const userspace_catalog = runtime_context.userspaceCatalog() orelse
             native_util.impossibleByInvariant("trust boot construction follows userspace-catalog allocation");
         return .{
-            .runtime = &runtime_context.runtime,
+            .runtime = runtime_context.taskRuntime() orelse
+                native_util.impossibleByInvariant("trust boot follows task-runtime allocation"),
             .userspace_catalog = userspace_catalog,
             .capability_table = capability_table,
             .compositor = compositor,

@@ -461,5 +461,6 @@ pub const indexed_hot_path_tables = .{
         .heap_backs_capability_table_on_freestanding = session_manager_boot_flow.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING,
         .heap_backs_userspace_catalog_on_freestanding = session_manager_boot_flow.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING,
         .heap_backs_userspace_scheduler_on_freestanding = session_manager_boot_flow.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING,
+        .heap_backs_task_runtime_on_freestanding = session_manager_boot_flow.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING,
     },
 };
