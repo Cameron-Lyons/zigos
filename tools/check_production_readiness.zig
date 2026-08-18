@@ -828,6 +828,7 @@ fn validateNuc11tnki5KernelProofSources(
     const qemu_harness_path = "scripts/qemu-harness.sh";
     const kernel_build_path = "build_support/kernel.zig";
     const bootloader_path = "src/boot/boot_x86_64.S";
+    const kernel_linker_path = "src/arch/x86_64/linker.ld";
     const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
     const production_grub_path = "src/boot/grub-x86_64-kernel.cfg";
     const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
@@ -946,6 +947,10 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (!common.pathExists(io, bootloader_path)) {
         try common.addError(errors, allocator, "x86-64 bootloader source is missing: {s}", .{bootloader_path});
+        return;
+    }
+    if (!common.pathExists(io, kernel_linker_path)) {
+        try common.addError(errors, allocator, "x86-64 kernel linker source is missing: {s}", .{kernel_linker_path});
         return;
     }
     if (!common.pathExists(io, qemu_grub_path)) {
@@ -1067,6 +1072,7 @@ fn validateNuc11tnki5KernelProofSources(
     const qemu_harness_source = try common.readFileAlloc(allocator, io, qemu_harness_path, common.source_file_max_bytes);
     const kernel_build_source = try common.readFileAlloc(allocator, io, kernel_build_path, common.source_file_max_bytes);
     const bootloader_source = try common.readFileAlloc(allocator, io, bootloader_path, common.source_file_max_bytes);
+    const kernel_linker_source = try common.readFileAlloc(allocator, io, kernel_linker_path, common.source_file_max_bytes);
     const qemu_grub_source = try common.readFileAlloc(allocator, io, qemu_grub_path, common.source_file_max_bytes);
     const production_grub_source = try common.readFileAlloc(allocator, io, production_grub_path, common.source_file_max_bytes);
     const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
@@ -1799,17 +1805,37 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_bootloader_load_contract_snippets = [_][]const u8{
-        "MULTIBOOT2_HEADER_TAG_ADDRESS",
-        ".long multiboot2_header_start",
-        ".long __kernel_start",
-        ".long __kernel_data_end",
-        ".long __kernel_end",
         "MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS",
         ".long _start",
     };
     for (required_bootloader_load_contract_snippets) |snippet| {
         if (std.mem.indexOf(u8, bootloader_source, snippet) == null) {
-            try common.addError(errors, allocator, "x86-64 bootloader must retain its contiguous Multiboot2 load contract: {s}", .{snippet});
+            try common.addError(errors, allocator, "x86-64 bootloader must retain its explicit Multiboot2 entry contract: {s}", .{snippet});
+        }
+    }
+    const required_kernel_load_contract_snippets = [_][]const u8{
+        "PHDRS",
+        "kernel PT_LOAD FLAGS(6);",
+        "__kernel_start = .;",
+        "__kernel_data_end = .;",
+        "__kernel_end = .;",
+    };
+    for (required_kernel_load_contract_snippets) |snippet| {
+        if (std.mem.indexOf(u8, kernel_linker_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86-64 linker must retain its single contiguous boot payload: {s}", .{snippet});
+        }
+    }
+    if (std.mem.count(u8, kernel_linker_source, ":kernel") != 6) {
+        try common.addError(errors, allocator, "x86-64 linker must bind all six runtime regions to one boot payload", .{});
+    }
+    const retired_bootloader_address_tag_snippets = [_][]const u8{
+        "MULTIBOOT2_HEADER_TAG_ADDRESS",
+        ".long multiboot2_header_start",
+        ".long __kernel_data_end",
+    };
+    for (retired_bootloader_address_tag_snippets) |snippet| {
+        if (std.mem.indexOf(u8, bootloader_source, snippet) != null) {
+            try common.addError(errors, allocator, "x86-64 bootloader must not restore the size-sensitive address-tag relocator path: {s}", .{snippet});
         }
     }
     const required_multiboot2_acpi_snippets = [_][]const u8{

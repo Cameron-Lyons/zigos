@@ -109,18 +109,18 @@ pub fn UniqueIndex(comptime capacity: usize) type {
     return struct {
         const Self = @This();
 
-        slots: [capacity]id_index.Slot(capacity) = id_index.emptyTable(capacity),
+        table: id_index.Table(capacity) = id_index.emptyTable(capacity),
 
         pub fn init() Self {
             return .{};
         }
 
         pub fn reset(self: *Self) void {
-            self.slots = id_index.emptyTable(capacity);
+            self.table = id_index.emptyTable(capacity);
         }
 
         pub fn lookup(self: *const Self, key: u64) ?usize {
-            return id_index.lookup(capacity, &self.slots, key);
+            return id_index.lookup(capacity, &self.table, key);
         }
 
         pub fn contains(self: *const Self, key: u64) bool {
@@ -128,15 +128,15 @@ pub fn UniqueIndex(comptime capacity: usize) type {
         }
 
         pub fn insert(self: *Self, key: u64, slot_index: usize) void {
-            id_index.insert(capacity, &self.slots, key, slot_index, "indexed arena unique indexes never store zero keys");
+            id_index.insert(capacity, &self.table, key, slot_index, "indexed arena unique indexes never store zero keys");
         }
 
         pub fn insertAbsent(self: *Self, key: u64, slot_index: usize) void {
-            id_index.insertAbsent(capacity, &self.slots, key, slot_index, "indexed arena unique indexes never store zero keys");
+            id_index.insertAbsent(capacity, &self.table, key, slot_index, "indexed arena unique indexes never store zero keys");
         }
 
         pub fn remove(self: *Self, key: u64) void {
-            id_index.remove(capacity, &self.slots, key);
+            id_index.remove(capacity, &self.table, key);
         }
     };
 }
@@ -1390,7 +1390,7 @@ test "indexed arena claims the first tombstone for proven absent keys" {
     _ = arena.insertIndex(9, .{ .record = .{ .id = 9, .label = "replacement" } }).?;
 
     const shared_bucket = id_index.hash(1, 4);
-    try std.testing.expectEqual(@as(u64, 9), arena.primary_index.slots[shared_bucket].id);
+    try std.testing.expectEqual(@as(u64, 9), arena.primary_index.table.ids[shared_bucket]);
     try std.testing.expectEqualStrings("replacement", arena.get(9).?.record.label);
     try std.testing.expectEqualStrings("second", arena.get(5).?.record.label);
 }

@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     const kernel_role_options = b.addOptions();
     kernel_role_options.addOption(
         u64,
-        "maximum_production_writable_load_size",
+        "maximum_production_boot_payload_size",
         if (optimize == .Debug) 24 * 1024 * 1024 else 16 * 1024 * 1024,
     );
     const kernel_role_check_module = b.createModule(.{
