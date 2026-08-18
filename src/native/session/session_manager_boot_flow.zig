@@ -105,6 +105,7 @@ pub const SessionManager = struct {
             self.runtime_context.userspace_scheduler.deinit();
         }
         self.runtime_context.runtime_checkpoint_store.reset();
+        self.runtime_context.runtime.reset();
         self.native_store.resetPersistent();
         self.* = SessionManager.init();
         bootstrap_driver_port.reset();

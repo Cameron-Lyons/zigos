@@ -123,7 +123,7 @@ pub const Service = struct {
         const checkpoint_state = checkpoint_store.snapshotConst() orelse
             native_util.impossibleByInvariant("checkpointed task runtime retains snapshot backing");
 
-        self.runtime.restoreFromSnapshot(checkpoint_state);
+        self.runtime.restoreFromSnapshot(checkpoint_state) catch return false;
         self.has_checkpoint = true;
         self.last_checkpoint_tick = checkpoint_store.last_checkpoint_tick;
         self.restart_generation += 1;

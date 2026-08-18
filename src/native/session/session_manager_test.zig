@@ -177,7 +177,7 @@ test "surface authority provisioning follows lifecycle generations at stable tas
     var snapshot = task_runtime.Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     const scanned_generation = manager.surface_authority_scanned_lifecycle_generation;
-    runtime.restoreFromSnapshot(&snapshot);
+    try runtime.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(initial_task_count, runtime.taskCount());
     try std.testing.expect(runtime.taskLifecycleGeneration() != scanned_generation);
     _ = manager.runUserspaceScheduler(102);
