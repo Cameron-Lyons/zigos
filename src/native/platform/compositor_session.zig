@@ -1925,7 +1925,7 @@ test "task-first compositor flow persists app-linked task views and audit state"
     try std.testing.expectEqual(ServiceStatus.ok, switch_response.status);
     try std.testing.expectEqual(task_response.window_id, switch_response.active_window_id);
     try std.testing.expect(compositor_checkpoint_store.valid);
-    runtime_service.checkpoint(14);
+    try runtime_service.checkpoint(14);
 
     const ephemeral_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 71 },

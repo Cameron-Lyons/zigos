@@ -208,7 +208,10 @@ pub const ProductionJourneyService = struct {
             response.failure = err;
         };
         if (response.status == .ok and request.control != .recover_system) {
-            self.runtime_service.checkpoint(request.tick);
+            self.runtime_service.checkpoint(request.tick) catch |err| {
+                response.status = statusForProductionJourneyError(err);
+                response.failure = err;
+            };
         }
         self.refreshResponse(&response);
         return response;

@@ -520,7 +520,7 @@ pub fn run(
         support.common.printBootMarker(boot_markers.platform_ux_recover_system);
     }
 
-    context.runtime_service.checkpoint(ux_flow_ledger_start_tick);
+    context.runtime_service.checkpoint(ux_flow_ledger_start_tick) catch |err| native_util.bootProofFailure("platform scenarios", err);
     context.storage_service_instance.checkpoint_enabled = true;
     context.storage_service_instance.checkpoint();
 }
