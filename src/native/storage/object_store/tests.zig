@@ -5,6 +5,7 @@ const object_store = @import("store.zig");
 
 const BlobSlot = object_store.BlobSlot;
 const BlobChunkSlotIndex = object_store.BlobChunkSlotIndex;
+const VersionBlobSlotIndex = object_store.VersionBlobSlotIndex;
 const ChunkRef = object_store.ChunkRef;
 const ChunkSlot = object_store.ChunkSlot;
 const Error = object_store.Error;
@@ -27,6 +28,13 @@ test "blob manifests store compact chunk slot edges" {
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(BlobChunkSlotIndex));
     try std.testing.expect(@hasField(object_store.BlobRecord, "chunk_slot_indexes"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "chunks"));
+}
+
+test "versions retain only compact canonical blob references" {
+    try std.testing.expectEqual(@as(usize, 2), @sizeOf(VersionBlobSlotIndex));
+    try std.testing.expect(!@hasField(object_store.VersionRecord, "blob_address"));
+    try std.testing.expect(!@hasField(object_store.VersionRecord, "payload_len"));
+    try std.testing.expect(!@hasField(object_store.VersionRecord, "chunk_count"));
 }
 
 test "object store keeps immutable signed versions with stable version addresses" {
@@ -141,7 +149,7 @@ test "object store splits blob and version addresses" {
 
     try std.testing.expect(std.mem.eql(u8, &first.blob_address, &second.blob_address));
     try std.testing.expect(!std.mem.eql(u8, &first.version_address, &second.version_address));
-    try std.testing.expect(std.mem.eql(u8, &store.version(first.version_id).?.blob_address, &first.blob_address));
+    try std.testing.expect(std.mem.eql(u8, &store.versionBlob(store.version(first.version_id).?).?.address, &first.blob_address));
     try std.testing.expect(std.mem.eql(u8, &store.version(second.version_id).?.version_address, &second.version_address));
     try std.testing.expectEqual(@as(usize, 1), store.blobCount());
 }
@@ -194,7 +202,7 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
     });
 
     const version_record = store.version(result.version_id).?;
-    const blob = store.blob(version_record.blob_address).?;
+    const blob = store.versionBlob(version_record).?;
     try std.testing.expectEqual(payload.len, blob.payload_len);
     try std.testing.expectEqual(@as(u16, 4), blob.chunk_count);
     try std.testing.expectEqual(@as(u16, PAGE_SIZE_BYTES), store.blobChunk(blob, 0).?.payload_len);
@@ -246,7 +254,7 @@ test "object store accepts payloads beyond the old sixteen-page ceiling" {
     });
 
     const version_record = store.version(result.version_id).?;
-    const blob = store.blob(version_record.blob_address).?;
+    const blob = store.versionBlob(version_record).?;
     try std.testing.expectEqual(@as(u16, 17), blob.chunk_count);
     try std.testing.expectEqual(payload.len, blob.payload_len);
 
@@ -270,6 +278,11 @@ test "object store verifies blob backend corruption before serving payloads" {
     });
 
     const version_record = store.version(result.version_id).?;
+    const version_blob_slot_index = version_record.blob_slot_index;
+    version_record.blob_slot_index = std.math.maxInt(VersionBlobSlotIndex);
+    try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
+    version_record.blob_slot_index = version_blob_slot_index;
+
     const blob = &store.blobSlotAtConst(version_record.blob_slot_index).blob;
     const chunk_slot_index = store.blobChunkSlotIndex(blob, 0).?;
     store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;

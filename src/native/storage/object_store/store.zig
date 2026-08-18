@@ -15,6 +15,7 @@ pub const MAX_CHUNK_BYTES: usize = PAGE_SIZE_BYTES;
 pub const MAX_BLOB_CHUNKS: usize = 28;
 pub const MAX_CHUNKS: usize = 224;
 pub const BlobChunkSlotIndex = u16;
+pub const VersionBlobSlotIndex = u16;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
 pub const MAX_VERSION_PARENTS: usize = 2;
@@ -46,6 +47,7 @@ pub const StoreConfig = struct {
         if (config.max_blobs == 0) @compileError("object store requires at least one blob slot");
         if (config.max_chunks == 0) @compileError("object store requires at least one chunk slot");
         if (config.max_chunks > @as(usize, std.math.maxInt(BlobChunkSlotIndex)) + 1) @compileError("object store chunk slots must fit compact blob edges");
+        if (config.max_blobs > @as(usize, std.math.maxInt(VersionBlobSlotIndex)) + 1) @compileError("object store blob slots must fit compact version references");
         if (config.object_index_capacity < config.max_objects) @compileError("object index capacity must cover object slots");
         if (config.version_index_capacity < config.max_versions) @compileError("version index capacity must cover version slots");
         if (config.blob_index_capacity < config.max_blobs) @compileError("blob index capacity must cover blob slabs");
@@ -315,12 +317,9 @@ pub const VersionRecord = struct {
     parent_count: u8,
     parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
     object_type: ObjectType,
-    blob_address: BlobAddress,
     version_address: VersionAddress,
     metadata: SignedMetadata,
-    payload_len: usize,
-    blob_slot_index: usize,
-    chunk_count: u16,
+    blob_slot_index: VersionBlobSlotIndex,
 };
 
 pub const ChunkRef = struct {
@@ -403,12 +402,9 @@ const VersionSlot = struct {
         .parent_count = 0,
         .parent_version_ids = [_]ids.VersionId{ids.VersionId.zero} ** MAX_VERSION_PARENTS,
         .object_type = .blob,
-        .blob_address = crypto_hash.zero_digest,
         .version_address = crypto_hash.zero_digest,
         .metadata = .{},
-        .payload_len = 0,
         .blob_slot_index = 0,
-        .chunk_count = 0,
     },
 };
 
@@ -710,10 +706,8 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 .parent_count = parent_count,
                 .parent_version_ids = parents,
                 .object_type = request.object_type,
-                .blob_address = blob_address,
                 .version_address = version_address,
                 .metadata = &request.metadata,
-                .payload_len = request.payload.len,
                 .blob_slot_index = blob_slot_index,
             });
 
@@ -836,7 +830,8 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             var current_version_id = object_record.latest_version_id;
             while (!current_version_id.isZero() and count < output.len) {
                 const version_record = self.versionConst(current_version_id) orelse return error.VersionNotFound;
-                output[count] = historyEntryFor(version_record);
+                const blob_record = self.versionBlob(version_record) orelse return error.BlobNotFound;
+                output[count] = historyEntryFor(version_record, blob_record.payload_len);
                 count += 1;
                 current_version_id = version_record.previous_version_id;
             }
@@ -852,8 +847,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn versionPayload(self: *Self, version_record: *const VersionRecord) Error![]const u8 {
-            if (version_record.payload_len > self.payload_read_buffer.len) return error.PayloadTooLarge;
-            return self.versionPayloadInto(version_record, self.payload_read_buffer[0..version_record.payload_len]);
+            const blob_record = try self.checkedVersionBlob(version_record);
+            if (blob_record.payload_len > self.payload_read_buffer.len) return error.PayloadTooLarge;
+            return self.versionPayloadInto(version_record, self.payload_read_buffer[0..blob_record.payload_len]);
         }
 
         pub fn versionChunkCursor(self: *Self, version_record: *const VersionRecord) Error!VersionChunkCursor {
@@ -870,17 +866,23 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             version_record: *const VersionRecord,
             out: []u8,
         ) Error!PayloadTransferSummary {
-            if (out.len < version_record.payload_len) return error.PayloadTooLarge;
-            var cursor = try self.versionChunkCursor(version_record);
+            const blob_record = try self.verifiedBlobManifest(version_record);
+            const payload_len = blob_record.payload_len;
+            if (out.len < payload_len) return error.PayloadTooLarge;
+            var cursor = VersionChunkCursor{
+                .store = self,
+                .blob = blob_record,
+                .chunk_count = @intCast(blob_record.chunk_count),
+            };
             var summary = PayloadTransferSummary{};
             while (try cursor.next()) |payload_chunk| {
                 const next_offset = payload_chunk.offset + payload_chunk.bytes.len;
-                if (next_offset > version_record.payload_len or next_offset > out.len) return error.CorruptBlob;
+                if (next_offset > payload_len or next_offset > out.len) return error.CorruptBlob;
                 @memcpy(out[payload_chunk.offset..next_offset], payload_chunk.bytes);
                 summary.bytes_transferred = next_offset;
                 summary.chunks_transferred += 1;
             }
-            if (summary.bytes_transferred != version_record.payload_len) return error.CorruptBlob;
+            if (summary.bytes_transferred != payload_len) return error.CorruptBlob;
             return summary;
         }
 
@@ -896,6 +898,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         pub fn blob(self: *const Self, address: BlobAddress) ?*const BlobRecord {
             const slot_index = self.blobSlotIndex(address) orelse return null;
             const slot = self.blobSlotAtConst(slot_index);
+            return &slot.blob;
+        }
+
+        pub fn versionBlob(self: *const Self, version_record: *const VersionRecord) ?*const BlobRecord {
+            const slot_index: usize = version_record.blob_slot_index;
+            if (slot_index >= self.blobSlotCapacity()) return null;
+            const slot = self.blobSlotAtConst(slot_index);
+            if (!slot.in_use) return null;
             return &slot.blob;
         }
 
@@ -1072,10 +1082,8 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             parent_count: u8,
             parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
             object_type: ObjectType,
-            blob_address: BlobAddress,
             version_address: VersionAddress,
             metadata: *const SignedMetadata,
-            payload_len: usize,
             blob_slot_index: usize,
         }) Error!void {
             const slot = self.versions.reserve(request.id) orelse return error.VersionTableFull;
@@ -1085,12 +1093,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.version.parent_count = request.parent_count;
             slot.version.parent_version_ids = request.parent_version_ids;
             slot.version.object_type = request.object_type;
-            slot.version.blob_address = request.blob_address;
             slot.version.version_address = request.version_address;
             writeMetadata(&slot.version.metadata, request.metadata);
-            slot.version.payload_len = request.payload_len;
-            slot.version.blob_slot_index = request.blob_slot_index;
-            slot.version.chunk_count = @intCast(chunkCountForLen(request.payload_len));
+            slot.version.blob_slot_index = @intCast(request.blob_slot_index);
             if (request.id.raw() >= self.next_version_id) {
                 self.next_version_id = request.id.raw() +% 1;
             }
@@ -1204,12 +1209,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         fn verifiedBlobManifest(self: *Self, version_record: *const VersionRecord) Error!*const BlobRecord {
-            if (version_record.blob_slot_index >= self.blobSlotCapacity()) return error.CorruptBlob;
-            const slot = self.blobSlotAt(version_record.blob_slot_index);
+            const slot_index: usize = version_record.blob_slot_index;
+            if (slot_index >= self.blobSlotCapacity()) return error.CorruptBlob;
+            const slot = self.blobSlotAt(slot_index);
             if (!slot.in_use) return error.BlobNotFound;
-            if (!std.mem.eql(u8, &slot.blob.address, &version_record.blob_address)) return error.CorruptBlob;
-            if (slot.blob.payload_len != version_record.payload_len) return error.CorruptBlob;
-            if (slot.blob.chunk_count != version_record.chunk_count) return error.CorruptBlob;
 
             if (slot.blob.manifest_verified) return &slot.blob;
 
@@ -1218,7 +1221,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             if (!std.mem.eql(u8, &computeBlobMerkleRoot(live_chunk_refs), &slot.blob.merkle_root)) {
                 return error.CorruptBlob;
             }
-            if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payload_len, live_chunk_refs), &version_record.blob_address)) {
+            if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payload_len, live_chunk_refs), &slot.blob.address)) {
                 return error.CorruptBlob;
             }
 
@@ -1228,6 +1231,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             }
 
             slot.blob.manifest_verified = true;
+            return &slot.blob;
+        }
+
+        fn checkedVersionBlob(self: *const Self, version_record: *const VersionRecord) Error!*const BlobRecord {
+            const slot_index: usize = version_record.blob_slot_index;
+            if (slot_index >= self.blobSlotCapacity()) return error.CorruptBlob;
+            const slot = self.blobSlotAtConst(slot_index);
+            if (!slot.in_use) return error.BlobNotFound;
             return &slot.blob;
         }
 
@@ -1272,14 +1283,14 @@ fn queryResultFor(object_record: *const ObjectRecord, latest: *const VersionReco
     return result;
 }
 
-fn historyEntryFor(version_record: *const VersionRecord) ObjectHistoryEntry {
+fn historyEntryFor(version_record: *const VersionRecord, payload_len: usize) ObjectHistoryEntry {
     var entry = ObjectHistoryEntry{
         .object_id = version_record.object_id,
         .version_id = version_record.id,
         .previous_version_id = version_record.previous_version_id,
         .parent_count = version_record.parent_count,
         .object_type = version_record.object_type,
-        .payload_len = version_record.payload_len,
+        .payload_len = payload_len,
         .created_at_ticks = version_record.metadata.created_at_ticks,
     };
     entry.label_len = version_record.metadata.label_len;
