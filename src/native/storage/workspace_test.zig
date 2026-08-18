@@ -11,6 +11,7 @@ const Directory = workspace_model.Directory;
 const Entry = workspace_model.Entry;
 const ExportPackage = workspace_model.ExportPackage;
 const MAX_WORKSPACE_ENTRIES = workspace_model.MAX_WORKSPACE_ENTRIES;
+const MAX_WORKSPACE_ENTRY_MUTATIONS = workspace_model.MAX_WORKSPACE_ENTRY_MUTATIONS;
 const ResharePolicy = workspace_model.ResharePolicy;
 const ShareNetworkScope = workspace_model.ShareNetworkScope;
 const workspaceRootAddress = workspace_model.workspaceRootAddress;
@@ -66,6 +67,12 @@ test "workspace transactions, snapshot restore, delete recovery, and signed expo
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "documents/notes.md", second.object_id, second.version_id, .document);
     try std.testing.expectEqual(@as(u32, 2), try directory.commit(workspace.id, 21));
+    try std.testing.expectEqual(second.version_id, (try directory.resolve(workspace.id, "documents/notes.md")).version_id);
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "documents/notes.md");
+    try std.testing.expectError(error.TransactionAlreadyOpen, directory.restore(workspace.id, baseline.id, 22));
+    try directory.abortTransaction(workspace.id);
     try std.testing.expectEqual(second.version_id, (try directory.resolve(workspace.id, "documents/notes.md")).version_id);
 
     try std.testing.expectEqual(@as(u32, 3), try directory.restore(workspace.id, baseline.id, 22));
@@ -602,16 +609,44 @@ test "aborting a transaction discards staged entries and reopens the workspace" 
     try directory.abortTransaction(notes.id);
     try std.testing.expect(!notes.staging.transaction_open);
     try std.testing.expectEqual(@as(usize, 0), notes.staging.staged_entry_count);
-    try std.testing.expectEqual(@as(usize, 0), notes.staging.staged_entries[0].path_len);
-    try std.testing.expect(notes.staging.staged_entries[0].object_id.isZero());
+    try std.testing.expectEqualDeep(workspace_model.EntryMutation{}, notes.mutation_log.entry_mutations[0]);
 
     try std.testing.expectError(error.EntryNotFound, directory.resolve(notes.id, "documents/notes.md"));
     try directory.beginTransaction(notes.id);
     try directory.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try directory.commit(notes.id, 11);
-    try std.testing.expectEqual(@as(usize, 0), notes.staging.staged_entries[0].path_len);
-    try std.testing.expect(notes.staging.staged_entries[0].object_id.isZero());
+    try std.testing.expectEqual(@as(usize, 1), notes.mutation_log.entry_mutation_count);
+    try std.testing.expectEqualStrings("documents/notes.md", notes.mutation_log.entry_mutations[0].entry.pathSlice());
+    try std.testing.expectEqualDeep(workspace_model.EntryMutation{}, notes.mutation_log.entry_mutations[1]);
     _ = try directory.resolve(notes.id, "documents/notes.md");
+
+    try directory.beginTransaction(notes.id);
+    try std.testing.expectError(error.TransactionAlreadyOpen, directory.recoverDeleted(notes.id, "documents/missing.md", 12));
+    try directory.abortTransaction(notes.id);
+}
+
+test "workspace staging is bounded by the unused mutation-log tail" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 2 },
+        .label = "bounded-staging",
+    });
+    workspace.mutation_log.entry_mutation_count = MAX_WORKSPACE_ENTRY_MUTATIONS - 1;
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "documents/last.md", ids.object(1), ids.version(1), .document);
+    try std.testing.expectError(
+        error.EntryTableFull,
+        directory.stagePut(workspace.id, "documents/overflow.md", ids.object(2), ids.version(2), .document),
+    );
+    try std.testing.expectEqual(@as(usize, 1), workspace.staging.staged_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), workspace.staging.staged_effective_entry_count);
+
+    try directory.abortTransaction(workspace.id);
+    try std.testing.expectEqualDeep(
+        workspace_model.EntryMutation{},
+        workspace.mutation_log.entry_mutations[MAX_WORKSPACE_ENTRY_MUTATIONS - 1],
+    );
 }
 
 test "workspace and snapshot identifiers stop at exhaustion" {

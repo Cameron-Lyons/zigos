@@ -377,6 +377,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_share_table = @hasField(workspace.WorkspaceRecord, "share_table"),
         .uses_share_grant_principal_index = @hasField(workspace.WorkspaceShareTable, "share_grant_principal_index"),
         .tracks_staging_state = @hasField(workspace.WorkspaceRecord, "staging"),
+        .reuses_mutation_log_tail_for_staging = !@hasField(workspace.WorkspaceStagingState, "staged_entries"),
         .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),
         .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
         .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),
