@@ -1317,6 +1317,7 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
     });
 
     var shared = shared_memory.Table.init();
+    defer shared.deinit();
     const task_id = ids.task(800 + iteration);
     const object = shared.createWithAccess(task_id, kibibytes(64), .{
         .cpu = true,
