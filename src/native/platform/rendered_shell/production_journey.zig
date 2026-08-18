@@ -440,7 +440,10 @@ pub const ProductionJourneyService = struct {
         const entry = try task_launch.openConfiguredDocument(self.ux, self.storage, self.config, task.id);
         self.document_object_id = entry.object_id.raw();
         self.document_version_id = entry.version_id.raw();
-        self.document_payload_bytes = if (self.storage.latestVersion(entry.object_id)) |version| version.payload_len else 0;
+        self.document_payload_bytes = if (self.storage.latestVersion(entry.object_id)) |version|
+            if (self.storage.versionBlob(version)) |blob| blob.payload_len else 0
+        else
+            0;
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,
             .view_type = .document_view,

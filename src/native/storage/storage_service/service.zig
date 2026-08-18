@@ -363,6 +363,10 @@ pub const StorageCore = struct {
         return self.store.versionChunkCursor(version_record);
     }
 
+    pub fn versionBlob(self: *const Service, version_record: *const object_store.VersionRecord) ?*const object_store.BlobRecord {
+        return self.store.versionBlob(version_record);
+    }
+
     pub fn transferVersionPayload(
         self: *const Service,
         version_record: *const object_store.VersionRecord,
@@ -377,7 +381,8 @@ pub const StorageCore = struct {
         transfer: SharedPayloadReadTransfer,
     ) SharedPayloadError!object_store.PayloadTransferSummary {
         const descriptor = try transfer.table.descriptor(transfer.object_id);
-        if (descriptor.size_bytes != transfer.bytes.len or transfer.bytes.len < version_record.payload_len) {
+        const blob_record = self.versionBlob(version_record) orelse return error.BlobNotFound;
+        if (descriptor.size_bytes != transfer.bytes.len or transfer.bytes.len < blob_record.payload_len) {
             return error.SharedMemorySizeMismatch;
         }
         if (descriptor.owner_task_id != transfer.consumer_task_id.raw()) return error.PermissionDenied;

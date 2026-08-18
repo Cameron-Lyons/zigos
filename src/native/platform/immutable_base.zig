@@ -268,7 +268,8 @@ pub const Manager = struct {
         const payload = self.storage.versionPayload(version) catch return false;
         if (!version.metadata.verifyFor(.model_artifact, payload)) return false;
         if (!std.mem.eql(u8, version.metadata.signature.signer, image.signerSlice())) return false;
-        return std.mem.eql(u8, &version.blob_address, &image.measurement);
+        const blob = self.storage.versionBlob(version) orelse return false;
+        return std.mem.eql(u8, &blob.address, &image.measurement);
     }
 
     pub fn selectVerifiedBootImage(self: *const Manager) Error!BootSelection {
@@ -377,8 +378,9 @@ pub const Manager = struct {
     fn hydrateSlot(self: *Manager, slot_index: usize) Error!void {
         const slot = &self.slots[slot_index];
         const version = self.storage.version(slot.version_id) orelse return error.CorruptState;
+        const blob = self.storage.versionBlob(version) orelse return error.CorruptState;
         slot.signer_len = try native_util.copyTextExact(&slot.signer, version.metadata.signature.signer);
-        slot.measurement = version.blob_address;
+        slot.measurement = blob.address;
     }
 };
 
