@@ -153,17 +153,51 @@ pub const Store = struct {
     ) Error!SecretHandle {
         const secret = self.findSecret(secret_id) orelse return error.SecretNotFound;
         if (self.handles.countInUse() >= MAX_HANDLES) return error.HandleTableFull;
+        return self.installHandle(null, secret, holder, task_id, allow_raw_export);
+    }
+
+    pub fn replaceHandle(
+        self: *Store,
+        retired_handle_id: u64,
+        secret_id: u64,
+        holder: principal.PrincipalId,
+        task_id: u64,
+        allow_raw_export: bool,
+    ) Error!SecretHandle {
+        const secret = self.findSecret(secret_id) orelse return error.SecretNotFound;
+        const retired_slot_index = self.handles.slotIndexOf(retired_handle_id) orelse return error.HandleNotFound;
+        return self.installHandle(retired_slot_index, secret, holder, task_id, allow_raw_export);
+    }
+
+    fn installHandle(
+        self: *Store,
+        retired_slot_index: ?usize,
+        secret: *const SecretRecord,
+        holder: principal.PrincipalId,
+        task_id: u64,
+        allow_raw_export: bool,
+    ) Error!SecretHandle {
         const handle_id = self.next_handle_id;
         if (handle_id == 0) return error.HandleIdExhausted;
+        if (self.handles.getConst(handle_id) != null) return error.HandleIdExhausted;
         const handle = SecretHandle{
             .id = handle_id,
-            .secret_id = secret_id,
+            .secret_id = secret.id,
             .holder = holder,
             .task_id = task_id,
             .hardware_backed = secret.hardware_backed,
             .export_allowed = allow_raw_export and secret.exportable,
         };
-        _ = self.handles.insertIndex(handle_id, .{ .handle = handle }) orelse return error.HandleIdExhausted;
+        if (retired_slot_index) |slot_index| {
+            if (!self.handles.removeIndex(slot_index)) {
+                native_util.impossibleByInvariant("secure store replacement handle has a live slot");
+            }
+            if (self.handles.insertIndexAt(handle_id, slot_index, .{ .handle = handle }) == null) {
+                native_util.impossibleByInvariant("secure store replacement reuses its retired handle slot");
+            }
+        } else {
+            _ = self.handles.insertIndex(handle_id, .{ .handle = handle }) orelse return error.HandleIdExhausted;
+        }
         self.next_handle_id +%= 1;
         return handle;
     }
@@ -377,6 +411,30 @@ test "secure secret store direct insertion rejects staged id collisions" {
     try std.testing.expectError(error.HandleIdExhausted, store.lendHandle(original_secret.id, holder, 94, true));
     try std.testing.expectEqual(@as(usize, 1), store.handles.countInUse());
     try std.testing.expectEqual(@as(u64, 93), store.describeHandle(original_handle.id).?.task_id);
+}
+
+test "secure secret store replaces one handle transactionally" {
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 6 };
+    const holder = principal.PrincipalId{ .kind = .app, .serial = 48 };
+    const secret = try store.importSecret(owner, "replaceable", "replaceable material", false, true);
+    const retired = try store.lendHandle(secret.id, holder, 95, true);
+
+    const next_before_missing = store.next_handle_id;
+    try std.testing.expectError(error.HandleNotFound, store.replaceHandle(999, secret.id, holder, 96, true));
+    try std.testing.expectEqual(next_before_missing, store.next_handle_id);
+    try std.testing.expect(store.describeHandle(retired.id) != null);
+
+    store.next_handle_id = retired.id;
+    try std.testing.expectError(error.HandleIdExhausted, store.replaceHandle(retired.id, secret.id, holder, 96, true));
+    try std.testing.expect(store.describeHandle(retired.id) != null);
+    store.next_handle_id = next_before_missing;
+
+    const replacement = try store.replaceHandle(retired.id, secret.id, holder, 96, true);
+    try std.testing.expect(replacement.id != retired.id);
+    try std.testing.expect(store.describeHandle(retired.id) == null);
+    try std.testing.expectEqual(@as(u64, 96), store.describeHandle(replacement.id).?.task_id);
+    try std.testing.expectEqual(@as(usize, 1), store.handles.countInUse());
 }
 
 test "secure secret store indexes secrets and handles through full tables" {
