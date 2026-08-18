@@ -935,7 +935,7 @@ fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, re
     try writer.writeBytes(&blob.address);
     try writer.writeBytes(&record.version_address);
     try writeMetadata(writer, record.metadata);
-    try writer.writeU32(@intCast(blob.payload_len));
+    try writer.writeU32(blob.payload_len);
     try writer.writeU16(blob.chunk_count);
 }
 
@@ -956,7 +956,7 @@ fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadCh
 fn encodeBlobBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
     try writer.writeBytes(&record.address);
     try writer.writeBytes(&record.merkle_root);
-    try writer.writeU32(@intCast(record.payload_len));
+    try writer.writeU32(record.payload_len);
     try writer.writeU16(record.ref_count);
     try writer.writeU16(record.chunk_count);
     const chunk_count: usize = @intCast(record.chunk_count);
@@ -1048,7 +1048,7 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     if (chunk_count_value > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
     const blob_slot_index = findBlobSlotIndex(store, blob_address) orelse return error.CorruptImage;
     const blob = &store.blobSlotAtConst(blob_slot_index).blob;
-    if (blob.payload_len != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
+    if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
     store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
 }
 
@@ -1082,7 +1082,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     const slot = store.blobSlotAt(slot_index);
     slot.blob.address = address;
     slot.blob.merkle_root = merkle_root;
-    slot.blob.payload_len = payload_len;
+    slot.blob.payload_len = @intCast(payload_len);
     slot.blob.ref_count = ref_count;
     slot.blob.chunk_count = @intCast(chunk_count);
     slot.blob.chunk_slot_indexes = chunk_slot_indexes;
@@ -1336,7 +1336,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         if (chunk_count_value > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
         const blob_slot_index = findBlobSlotIndex(store, blob_address) orelse return error.CorruptImage;
         const blob = &store.blobSlotAtConst(blob_slot_index).blob;
-        if (blob.payload_len != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
+        if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
         store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
     }
 
