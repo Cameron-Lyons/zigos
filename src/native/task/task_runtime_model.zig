@@ -61,6 +61,9 @@ comptime {
     if (MAX_TASKS > std.math.maxInt(u16)) {
         @compileError("task capacity exceeds its compact snapshot count");
     }
+    if (USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE - USER_STACK_ADDRESS_MIN > std.math.maxInt(u32)) {
+        @compileError("userspace stack aperture exceeds its compact byte extent");
+    }
 }
 
 fn includesVerificationEvidence() bool {
@@ -171,7 +174,7 @@ pub const AddressSpaceRegionKind = enum(u8) {
 pub const AddressSpaceRegionRecord = struct {
     kind: AddressSpaceRegionKind,
     virtual_address: u64,
-    size_bytes: usize,
+    size_bytes: u32,
     file_offset: u32,
     file_size: u32,
     access: SegmentAccess,
@@ -187,7 +190,7 @@ pub const AddressSpaceRecord = struct {
     instruction_pointer: u64,
     stack_pointer: u64,
     stack_top: u64,
-    stack_size_bytes: usize,
+    stack_size_bytes: u32,
     load_segment_count: u8,
     region_count: u8,
     image_sha256: [MAX_IMAGE_HASH_BYTES]u8,
@@ -617,8 +620,8 @@ test "task runtime uses capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 248), @sizeOf(LaunchProvenanceRecord));
     try std.testing.expectEqual(@as(usize, 424), @sizeOf(TaskRecord));
     try std.testing.expectEqual(@as(usize, 432), @sizeOf(TaskSlot));
-    try std.testing.expectEqual(@as(usize, 400), @sizeOf(AddressSpaceRecord));
-    try std.testing.expectEqual(@as(usize, 408), @sizeOf(AddressSpaceSlot));
+    try std.testing.expectEqual(@as(usize, 320), @sizeOf(AddressSpaceRecord));
+    try std.testing.expectEqual(@as(usize, 328), @sizeOf(AddressSpaceSlot));
 
     const expected_cold_bytes = 1_608 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(TaskProvenanceRecord);
     try std.testing.expectEqual(expected_cold_bytes, @sizeOf(TaskColdRecord));
