@@ -4,6 +4,7 @@ const signing = @import("../../core/signing.zig");
 const object_store = @import("store.zig");
 
 const BlobSlot = object_store.BlobSlot;
+const BlobChunkSlotIndex = object_store.BlobChunkSlotIndex;
 const ChunkRef = object_store.ChunkRef;
 const ChunkSlot = object_store.ChunkSlot;
 const Error = object_store.Error;
@@ -21,6 +22,12 @@ const computeBlobManifestAddress = object_store.computeBlobManifestAddress;
 const computeBlobMerkleRoot = object_store.computeBlobMerkleRoot;
 const ids = object_store.ids;
 const signMetadata = object_store.signMetadata;
+
+test "blob manifests store compact chunk slot edges" {
+    try std.testing.expectEqual(@as(usize, 2), @sizeOf(BlobChunkSlotIndex));
+    try std.testing.expect(@hasField(object_store.BlobRecord, "chunk_slot_indexes"));
+    try std.testing.expect(!@hasField(object_store.BlobRecord, "chunks"));
+}
 
 test "object store keeps immutable signed versions with stable version addresses" {
     var store = Store.init();
@@ -163,8 +170,8 @@ test "object store indexes full blob addresses authoritatively" {
     const first_blob = store.blob(first_address).?;
     const second_blob = store.blob(second_address).?;
     try std.testing.expectEqual(@as(u16, 1), first_blob.chunk_count);
-    try std.testing.expectEqualStrings("first", store.chunk(first_blob.chunks[0].address).?.chunkSlice());
-    try std.testing.expectEqualStrings("second", store.chunk(second_blob.chunks[0].address).?.chunkSlice());
+    try std.testing.expectEqualStrings("first", store.blobChunk(first_blob, 0).?.chunkSlice());
+    try std.testing.expectEqualStrings("second", store.blobChunk(second_blob, 0).?.chunkSlice());
     try std.testing.expectError(error.CorruptBlob, store.putBlob(first_address, "changed"));
 }
 
@@ -190,11 +197,13 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
     const blob = store.blob(version_record.blob_address).?;
     try std.testing.expectEqual(payload.len, blob.payload_len);
     try std.testing.expectEqual(@as(u16, 4), blob.chunk_count);
-    try std.testing.expectEqual(@as(u16, PAGE_SIZE_BYTES), blob.chunks[0].payload_len);
-    try std.testing.expectEqual(@as(u16, 17), blob.chunks[3].payload_len);
-    const chunk_count: usize = @intCast(blob.chunk_count);
-    try std.testing.expect(std.mem.eql(u8, &blob.merkle_root, &computeBlobMerkleRoot(blob.chunks[0..chunk_count])));
-    try std.testing.expect(std.mem.eql(u8, &blob.address, &computeBlobManifestAddress(blob.payload_len, blob.chunks[0..chunk_count])));
+    try std.testing.expectEqual(@as(u16, PAGE_SIZE_BYTES), store.blobChunk(blob, 0).?.payload_len);
+    try std.testing.expectEqual(@as(u16, 17), store.blobChunk(blob, 3).?.payload_len);
+    var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
+    const live_chunk_refs = try store.copyBlobChunkRefs(blob, &chunk_refs);
+    const chunk_count = live_chunk_refs.len;
+    try std.testing.expect(std.mem.eql(u8, &blob.merkle_root, &computeBlobMerkleRoot(live_chunk_refs)));
+    try std.testing.expect(std.mem.eql(u8, &blob.address, &computeBlobManifestAddress(blob.payload_len, live_chunk_refs)));
     try std.testing.expectEqual(@as(usize, 0), store.verifiedBlobManifestCount());
 
     var cursor = try store.versionChunkCursor(version_record);
@@ -261,8 +270,13 @@ test "object store verifies blob backend corruption before serving payloads" {
     });
 
     const version_record = store.version(result.version_id).?;
-    const chunk_slot_index = store.blobSlotAtConst(version_record.blob_slot_index).blob.chunks[0].slot_index;
+    const blob = &store.blobSlotAtConst(version_record.blob_slot_index).blob;
+    const chunk_slot_index = store.blobChunkSlotIndex(blob, 0).?;
     store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
+    try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
+
+    store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
+    store.blobSlotAt(version_record.blob_slot_index).blob.chunk_slot_indexes[0] = std.math.maxInt(BlobChunkSlotIndex);
     try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
 }
 
