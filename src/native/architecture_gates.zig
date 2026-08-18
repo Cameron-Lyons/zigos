@@ -103,6 +103,7 @@ pub const indexed_hot_path_tables = .{
         .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
         .tracks_mutation_generation = @hasField(capability.CapabilityTable, "mutation_generation"),
+        .retires_task_bound_and_targeting_authority = @hasDecl(capability.CapabilityTable, "retireTaskAuthority"),
     },
     .endpoint_table = .{
         .uses_generational_endpoint_ids = @hasDecl(@FieldType(endpoint.Table, "arena"), "getByHandle"),

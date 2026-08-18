@@ -312,6 +312,36 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             target_generation.generation += 1;
         }
 
+        pub fn retireTaskAuthority(self: *Self, task_id: u64, held_capability_ids: []const u64) usize {
+            if (task_id == 0) return 0;
+            var retired_count: usize = 0;
+
+            for (held_capability_ids) |capability_id| {
+                const slot_index = self.findSlotIndex(capability_id) orelse continue;
+                const scoped_task_id = self.slots.slots[slot_index].capability.scope.task_id orelse continue;
+                if (scoped_task_id != task_id) continue;
+                self.removeSlot(slot_index);
+                retired_count += 1;
+            }
+
+            const task_target = CapabilityTarget{ .kind = .task, .id = task_id };
+            const task_target_key = targetKey(task_target);
+            while (true) {
+                const slot_index = self.target_index.head(task_target_key);
+                if (slot_index == indexed_arena.no_index) break;
+                if (slot_index >= self.slots.slots.len) {
+                    native_util.impossibleByInvariant("capability target index points outside capability slots");
+                }
+                const slot = &self.slots.slots[slot_index];
+                if (!slot.in_use or !slot.capability.target.eql(task_target)) {
+                    native_util.impossibleByInvariant("capability target index points at the wrong task authority");
+                }
+                self.removeSlot(slot_index);
+                retired_count += 1;
+            }
+            return retired_count;
+        }
+
         pub fn query(self: *const Self, capability_id: u64) ?Capability {
             const slot = self.findConstSlot(capability_id) orelse return null;
             return slot.capability;
@@ -762,6 +792,81 @@ test "capabilities derive narrower rights and grant revocation leaves sibling au
     try std.testing.expect(table.query(parent.id) == null);
     try std.testing.expectError(error.CapabilityNotFound, table.requireUsable(parent.id, 10));
     _ = try table.requireUsable(derived.id, 10);
+}
+
+test "task authority retirement removes bound and targeting grants but preserves transfers" {
+    var table = CapabilityTable.init();
+    const policy = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
+    const source_holder = principal.PrincipalId{ .kind = .app, .serial = 100 };
+    const receiver_holder = principal.PrincipalId{ .kind = .app, .serial = 200 };
+
+    const parent = try table.mintBootRoot(.{
+        .holder = source_holder,
+        .issuer = policy,
+        .target = .{ .kind = .service, .id = 50 },
+        .rights = .{ .service = .{
+            .capability_derive = true,
+            .capability_pass = true,
+            .capability_query = true,
+        } },
+        .scope = .{ .task_id = 100, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    const derived = try table.derive(.{
+        .parent_capability_id = parent.id,
+        .holder = source_holder,
+        .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{ .task_id = 100, .local_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 90 },
+    });
+    const transferred = try table.pass(.{
+        .capability_id = parent.id,
+        .new_holder = receiver_holder,
+        .now_ticks = 2,
+        .allow_task_retarget = true,
+        .scope = .{ .task_id = 200, .local_only = true },
+    });
+    const unscoped = try table.mintBootRoot(.{
+        .holder = source_holder,
+        .issuer = policy,
+        .target = .{ .kind = .object, .id = 60 },
+        .rights = .{ .object = .{ .object_read = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    const targeting_task = try table.mintBootRoot(.{
+        .holder = receiver_holder,
+        .issuer = policy,
+        .target = .{ .kind = .task, .id = 100 },
+        .rights = .{ .task = .{ .task_terminate = true } },
+        .scope = .{ .task_id = 200, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    const unrelated = try table.mintBootRoot(.{
+        .holder = receiver_holder,
+        .issuer = policy,
+        .target = .{ .kind = .task, .id = 101 },
+        .rights = .{ .task = .{ .task_terminate = true } },
+        .scope = .{ .task_id = 200, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+
+    const mutation_generation = table.mutationGeneration();
+    try std.testing.expectEqual(@as(usize, 0), table.retireTaskAuthority(0, &.{parent.id}));
+    try std.testing.expectEqual(mutation_generation, table.mutationGeneration());
+    try std.testing.expectEqual(@as(usize, 3), table.retireTaskAuthority(100, &.{ 0, parent.id, derived.id, unscoped.id, std.math.maxInt(u64) }));
+    try std.testing.expect(table.query(parent.id) == null);
+    try std.testing.expect(table.query(derived.id) == null);
+    try std.testing.expect(table.query(targeting_task.id) == null);
+    try std.testing.expect(table.query(transferred.id) != null);
+    _ = try table.requireUsable(transferred.id, 10);
+    try std.testing.expect(table.query(unscoped.id) != null);
+    try std.testing.expect(table.query(unrelated.id) != null);
+    try std.testing.expectEqual(@as(usize, 3), table.activeCount());
+
+    var target_buffer: [2]Capability = undefined;
+    try std.testing.expectEqual(@as(usize, 0), table.queryByTarget(.{ .kind = .task, .id = 100 }, &target_buffer).len);
+    try std.testing.expectEqual(@as(usize, 1), table.queryByTarget(.{ .kind = .task, .id = 101 }, &target_buffer).len);
 }
 
 test "capability delegation depth budget stops transitive derive and pass chains" {
