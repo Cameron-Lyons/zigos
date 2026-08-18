@@ -205,6 +205,21 @@ pub const Scheduler = struct {
         return .{ .executor = executor };
     }
 
+    pub fn initializeAllocated(self: *Scheduler, executor: *userspace_executor.Executor) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.executor = executor;
+        self.slots.free_head = indexed_arena.reusableNoIndex(task_runtime.MAX_TASKS);
+        for (&self.ready_heads) |*head| head.* = no_index;
+        for (&self.ready_tails) |*tail| tail.* = no_index;
+        for (&self.accelerator_claim_heads) |*head| head.* = no_index;
+        for (&self.accelerator_claim_tails) |*tail| tail.* = no_index;
+        for (&self.accelerator_deadline_heads) |*head| head.* = no_index;
+        for (&self.accelerator_deadline_tails) |*tail| tail.* = no_index;
+        self.next_accelerator_claim_id = 1;
+        self.resource_state = .{};
+        self.resource_telemetry_source = .synthetic;
+    }
+
     fn acceleratorClaimBacking(self: *Scheduler) ?*AcceleratorClaimBacking {
         if (comptime heap_backed_accelerator_claims) return self.accelerator_claim_backing;
         return &self.accelerator_claim_backing;
@@ -265,7 +280,11 @@ pub const Scheduler = struct {
     pub fn reset(self: *Scheduler) void {
         const executor = self.executor;
         self.deinit();
-        self.* = Scheduler.init(executor);
+        if (comptime builtin.target.os.tag == .freestanding) {
+            self.initializeAllocated(executor);
+        } else {
+            self.* = Scheduler.init(executor);
+        }
     }
 
     pub fn bind(
@@ -1490,6 +1509,22 @@ fn createRunnableSchedulerTaskWithBudget(
         },
         .userspace_image = &image,
     });
+}
+
+test "allocated scheduler initialization preserves empty queue invariants" {
+    var executor = userspace_executor.Executor{};
+    var scheduler: Scheduler = undefined;
+    scheduler.initializeAllocated(&executor);
+
+    try std.testing.expectEqual(@as(usize, 0), scheduler.slots.countInUse());
+    try std.testing.expect(!scheduler.hasReadyTasks());
+    try std.testing.expectEqual(@as(u64, 1), scheduler.next_accelerator_claim_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), scheduler.resource_state.cpu_budget_ticks);
+    try std.testing.expectEqual(std.math.maxInt(usize), scheduler.resource_state.memory_bandwidth_units);
+    try std.testing.expect(scheduler.resource_state.gpu_available);
+    const slot_index = scheduler.slots.reserveIndex(7).?;
+    try std.testing.expectEqual(@as(usize, 0), slot_index);
+    try std.testing.expect(scheduler.slots.removeIndex(slot_index));
 }
 
 test "post-dispatch requeue validates retained task identity and state" {

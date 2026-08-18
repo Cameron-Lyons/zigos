@@ -44,12 +44,14 @@ pub const Builder = struct {
             native_util.impossibleByInvariant("service graph construction follows capability-table allocation");
         const userspace_catalog = runtime_context.userspaceCatalog() orelse
             native_util.impossibleByInvariant("service graph construction follows userspace-catalog allocation");
+        const userspace_scheduler = runtime_context.userspaceScheduler() orelse
+            native_util.impossibleByInvariant("service graph construction follows userspace-scheduler allocation");
         return .{
             .capability_table = capability_table,
             .runtime = &runtime_context.runtime,
             .service_directory = &self.service_directory,
             .userspace_catalog = userspace_catalog,
-            .userspace_scheduler = &runtime_context.userspace_scheduler,
+            .userspace_scheduler = userspace_scheduler,
             .package_service = &self.package_service_instance,
             .supervisor = &self.supervisor,
             .driver_directory = &self.driver_directory,
