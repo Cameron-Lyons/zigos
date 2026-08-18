@@ -209,7 +209,15 @@ pub const indexed_hot_path_tables = .{
         .supports_handle_replacement = @hasDecl(secure_secret_store.Store, "replaceHandle"),
     },
     .os_identity = .{
-        .uses_credential_arena = @hasDecl(@FieldType(os_identity.Store, "credentials"), "reserveIndex"),
+        .uses_bounded_credential_lookup = os_identity.BOUNDED_CREDENTIAL_LOOKUP,
+        .uses_dense_credential_table = os_identity.DENSE_CREDENTIAL_TABLE and
+            @FieldType(os_identity.Store, "credentials") == [os_identity.MAX_CREDENTIALS]os_identity.CredentialRecord,
+        .stores_compact_credential_metadata = os_identity.COMPACT_CREDENTIAL_METADATA and
+            @FieldType(os_identity.CredentialRecord, "relying_party_id_len") == u8 and
+            @FieldType(os_identity.CredentialRecord, "label_len") == u8,
+        .bounds_credential_lookup_comparisons = os_identity.CREDENTIAL_LOOKUP_COMPARISON_BOUND == 5,
+        .drops_credential_arena = @FieldType(os_identity.Store, "credentials") == [os_identity.MAX_CREDENTIALS]os_identity.CredentialRecord,
+        .keeps_fixed_state_within_ceiling = @sizeOf(os_identity.Store) <= os_identity.STORE_SIZE_CEILING_BYTES,
     },
 
     .secret_vault_service = .{
