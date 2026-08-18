@@ -32,6 +32,7 @@ const ENTRY_INDEX_CAPACITY: usize = MAX_WORKSPACE_ENTRIES * 2;
 const ENTRY_OBJECT_INDEX_CAPACITY: usize = MAX_WORKSPACE_ENTRIES;
 pub const SnapshotRootAddress = workspace_merkle.RootAddress;
 const snapshot_message_buffer_bytes: usize = 4096;
+pub const WorkspaceEntrySlotIndex = workspace_index.EntrySlotIndex;
 const EntryIndexSlot = workspace_index.EntryIndexSlot;
 const EntryObjectIndexSlot = workspace_index.EntryObjectIndexSlot;
 
