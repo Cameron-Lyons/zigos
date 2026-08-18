@@ -24,7 +24,14 @@ pub const MAX_WORKSPACE_LABEL_BYTES: usize = 48;
 pub const MAX_SHARE_GRANTS: usize = 8;
 pub const MAX_EXPORT_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_EXPORT_SIGNATURE_SIGNER_BYTES: usize = MAX_WORKSPACE_LABEL_BYTES;
+pub const WorkspacePathLength = u8;
 pub const NO_SNAPSHOT_GENERATION: u32 = std.math.maxInt(u32);
+
+comptime {
+    if (MAX_ENTRY_PATH_BYTES > std.math.maxInt(WorkspacePathLength)) {
+        @compileError("workspace path capacity exceeds its compact length field");
+    }
+}
 const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
 const SNAPSHOT_INDEX_CAPACITY: usize = MAX_SNAPSHOTS * 2;
 const SHARE_GRANT_INDEX_CAPACITY: usize = MAX_SHARE_GRANTS * 2;
@@ -98,10 +105,10 @@ pub const ShareGrantPrincipalIndex = struct {
 };
 
 pub const Entry = struct {
-    path_len: usize = 0,
     path: [MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** MAX_ENTRY_PATH_BYTES,
     object_id: ids.ObjectId = ids.ObjectId.zero,
     version_id: ids.VersionId = ids.VersionId.zero,
+    path_len: WorkspacePathLength = 0,
     object_type: object_store.ObjectType = .blob,
 
     pub fn init(path: []const u8, object_id: ids.ObjectId, version_id: ids.VersionId, object_type: object_store.ObjectType) Error!Entry {
@@ -110,12 +117,12 @@ pub const Entry = struct {
             .version_id = version_id,
             .object_type = object_type,
         };
-        entry.path_len = native_util.copyTextExact(&entry.path, path) catch return error.PathTooLong;
+        entry.path_len = @intCast(native_util.copyTextExact(&entry.path, path) catch return error.PathTooLong);
         return entry;
     }
 
     pub fn pathSlice(self: *const Entry) []const u8 {
-        return self.path[0..@min(self.path_len, self.path.len)];
+        return self.path[0..@min(@as(usize, self.path_len), self.path.len)];
     }
 
     pub fn pathHash(self: *const Entry) u64 {
@@ -154,14 +161,14 @@ pub const AuditVisibility = enum(u8) {
 
 pub const ShareGrant = struct {
     principal_id: principal.PrincipalId,
+    scope_object_id: ids.ObjectId = ids.ObjectId.zero,
+    expires_at_ticks: u64 = 0,
+    scope_path: [MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** MAX_ENTRY_PATH_BYTES,
     can_read: bool = true,
     can_write: bool = false,
     can_admin: bool = false,
     can_export: bool = false,
-    scope_object_id: ids.ObjectId = ids.ObjectId.zero,
-    scope_path_len: usize = 0,
-    scope_path: [MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** MAX_ENTRY_PATH_BYTES,
-    expires_at_ticks: u64 = 0,
+    scope_path_len: WorkspacePathLength = 0,
     network_scope: ShareNetworkScope = .local_only,
     reshare_policy: ResharePolicy = .owner_only,
     audit_visibility: AuditVisibility = .owner_only,
@@ -170,7 +177,7 @@ pub const ShareGrant = struct {
         var grant = self;
         grant.scope_object_id = object_id;
         @memset(grant.scope_path[0..], 0);
-        grant.scope_path_len = native_util.copyTextExact(&grant.scope_path, path) catch return error.PathTooLong;
+        grant.scope_path_len = @intCast(native_util.copyTextExact(&grant.scope_path, path) catch return error.PathTooLong);
         return grant;
     }
 
@@ -187,7 +194,7 @@ pub const ShareGrant = struct {
     }
 
     pub fn scopePathSlice(self: *const ShareGrant) []const u8 {
-        return self.scope_path[0..@min(self.scope_path_len, self.scope_path.len)];
+        return self.scope_path[0..@min(@as(usize, self.scope_path_len), self.scope_path.len)];
     }
 
     pub fn allowsObject(self: ShareGrant, object_id: ids.ObjectId, path: []const u8) bool {
