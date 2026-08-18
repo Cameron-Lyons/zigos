@@ -149,14 +149,13 @@ pub fn MultimapIndex(
     if (link_capacity == 0) @compileError("multimap index requires at least one linked slot");
     if (bucket_capacity == 0) @compileError("multimap index requires at least one bucket");
     if (index_capacity < bucket_capacity) @compileError("multimap bucket index capacity must cover buckets");
-    if (link_capacity > std.math.maxInt(u16)) @compileError("multimap link capacity must fit 16-bit indexes");
-    if (bucket_capacity > std.math.maxInt(u16)) @compileError("multimap bucket capacity must fit 16-bit indexes");
 
     return struct {
         const Self = @This();
         const BucketIndex = UniqueIndex(index_capacity);
-        const CompactIndex = u16;
-        const compact_no_index = std.math.maxInt(CompactIndex);
+        const compact_capacity = @max(link_capacity, bucket_capacity);
+        const CompactIndex = ReusableIndex(compact_capacity);
+        const compact_no_index = reusableNoIndex(compact_capacity);
 
         const Bucket = struct {
             key: u64 = 0,
@@ -1480,6 +1479,16 @@ test "indexed arena supports secondary indexes" {
         arena.findByUniqueIndex(&owner_index, 92, @as(u64, 92), testSlotMatchesOwner).?.record.label,
     );
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.findByUniqueIndex(&owner_index, 93, @as(u64, 93), testSlotMatchesOwner));
+}
+
+test "multimap indexes size links to their fixed capacities" {
+    const ByteIndex = MultimapIndex(128, 128, 256);
+    const WordIndex = MultimapIndex(256, 256, 512);
+
+    try std.testing.expectEqual(@as(usize, 384), @sizeOf(@FieldType(ByteIndex, "links")));
+    try std.testing.expectEqual(@as(usize, 5_000), @sizeOf(ByteIndex));
+    try std.testing.expectEqual(@as(usize, 1_536), @sizeOf(@FieldType(WordIndex, "links")));
+    try std.testing.expectEqual(@as(usize, 11_272), @sizeOf(WordIndex));
 }
 
 test "indexed arena supports constant-time arbitrary multimap removal" {

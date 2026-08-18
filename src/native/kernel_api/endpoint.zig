@@ -318,7 +318,7 @@ test "endpoint queues use capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(Endpoint, "queue_len")));
     try std.testing.expectEqual(@as(usize, 1_104), @sizeOf(Endpoint));
     try std.testing.expectEqual(@as(usize, 1_112), @sizeOf(EndpointSlot));
-    try std.testing.expectEqual(@as(usize, 74_208), @sizeOf(Table));
+    try std.testing.expectEqual(@as(usize, 74_016), @sizeOf(Table));
 }
 
 test "endpoints connect and exchange queued messages" {
