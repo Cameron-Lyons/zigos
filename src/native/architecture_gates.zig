@@ -104,6 +104,7 @@ pub const indexed_hot_path_tables = .{
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
         .tracks_mutation_generation = @hasField(capability.CapabilityTable, "mutation_generation"),
         .retires_task_bound_and_targeting_authority = @hasDecl(capability.CapabilityTable, "retireTaskAuthority"),
+        .retires_dead_target_authority = @hasDecl(capability.CapabilityTable, "retireTargetAuthority"),
     },
     .endpoint_table = .{
         .uses_generational_endpoint_ids = @hasDecl(@FieldType(endpoint.Table, "arena"), "getByHandle"),
@@ -163,6 +164,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_task_state_counts = @hasField(task_runtime.Runtime, "task_state_counts"),
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
         .tracks_task_capability_generation = @hasDecl(task_runtime.TaskRecord, "capabilityGeneration"),
+        .removes_retired_capability_attachments = @hasDecl(task_runtime.Runtime, "revokeCapabilityEverywhere"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
     },
     .accelerator_scheduler = .{

@@ -162,9 +162,16 @@ pub const Kernel = struct {
         @memcpy(held_capability_ids[0..held_capability_count], task.capabilityIds());
         const terminated = try self.runtime.terminateTask(task_id, now_ticks);
         if (!terminated) return false;
-        _ = self.capability_table.retireTaskAuthority(task_id, held_capability_ids[0..held_capability_count]);
-        _ = self.endpoint_table.retireTask(ids.task(task_id));
-        _ = self.shared_memory_table.retireTask(ids.task(task_id));
+        _ = self.capability_table.retireHeldTaskAuthority(task_id, held_capability_ids[0..held_capability_count]);
+        self.retireCapabilityTarget(.{ .kind = .task, .id = task_id });
+        const retired_endpoints = self.endpoint_table.retireTask(ids.task(task_id));
+        for (retired_endpoints.retiredEndpointIds()) |endpoint_id| {
+            self.retireCapabilityTarget(.{ .kind = .endpoint, .id = endpoint_id.raw() });
+        }
+        const retired_shared_memory = self.shared_memory_table.retireTask(ids.task(task_id));
+        for (retired_shared_memory.revokedObjectIds()) |object_id| {
+            self.retireCapabilityTarget(.{ .kind = .shared_memory, .id = object_id.raw() });
+        }
         return true;
     }
 
@@ -552,7 +559,10 @@ pub const Kernel = struct {
         now_ticks: u64,
     ) Error!abi.SharedMemoryDescriptor {
         const object_capability = try self.authorizeOperation(.shared_memory_revoke, context, now_ticks, .{});
-        return self.shared_memory_table.revoke(ids.sharedMemory(object_capability.target.id));
+        const target = object_capability.target;
+        const descriptor = try self.shared_memory_table.revoke(ids.sharedMemory(target.id));
+        self.retireCapabilityTarget(target);
+        return descriptor;
     }
 
     pub fn timeQuery(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!u64 {
@@ -789,6 +799,24 @@ pub const Kernel = struct {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
         if (task.capability_count + additional_count > task_runtime.MAX_TASK_CAPABILITIES) {
             return error.CapabilityTableFull;
+        }
+    }
+
+    fn retireCapabilityTarget(self: *Kernel, target: capability.CapabilityTarget) void {
+        var retired_buffer: [capability.MAX_CAPABILITIES]capability.RetiredAuthority = undefined;
+        const retired_count = self.capability_table.retireTargetAuthorityInto(target, &retired_buffer);
+        if (retired_count > retired_buffer.len) {
+            native_util.impossibleByInvariant("capability retirement output covers the capability table");
+        }
+        for (retired_buffer[0..retired_count]) |retired| {
+            if (retired.scoped_task_id) |task_id| {
+                if (self.runtime.find(task_id) != null) {
+                    _ = self.runtime.revokeCapability(task_id, retired.capability_id) catch |err|
+                        native_util.impossibleByInvariantError("scoped capability retirement resolves its runtime task", err);
+                }
+            } else {
+                _ = self.runtime.revokeCapabilityEverywhere(retired.capability_id);
+            }
         }
     }
 
@@ -1251,6 +1279,30 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try shared.map(peer_shared.id, ids.task(target_task.id));
     try shared.map(peer_shared.id, ids.task(999));
     try std.testing.expectEqual(@as(u16, 2), shared.mappingsForTask(ids.task(target_task.id)));
+    const external_endpoint_authority = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .policy_authority, .serial = 1 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .endpoint, .id = task_endpoint.id.raw() },
+        .rights = .{ .endpoint = .{ .endpoint_connect = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
+    });
+    const external_owned_shared_authority = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .policy_authority, .serial = 1 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .shared_memory, .id = owned_shared.id.raw() },
+        .rights = .{ .shared_memory = .{ .shared_memory_map = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
+    });
+    const external_peer_shared_authority = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .policy_authority, .serial = 1 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .shared_memory, .id = peer_shared.id.raw() },
+        .rights = .{ .shared_memory = .{ .shared_memory_map = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
+    });
 
     const minted = try kernel.capabilityMint(testContext(.capability_mint, admin_capability.id, .{ .policy = 1 }), .{
         .holder = target_task.owner,
@@ -1293,6 +1345,9 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
     try std.testing.expect(capabilities.query(task_capability.id) == null);
     try std.testing.expect(capabilities.query(external_task_authority.id) == null);
+    try std.testing.expect(capabilities.query(external_endpoint_authority.id) == null);
+    try std.testing.expect(capabilities.query(external_owned_shared_authority.id) == null);
+    try std.testing.expect(capabilities.query(external_peer_shared_authority.id) != null);
     try std.testing.expect(capabilities.query(admin_capability.id) != null);
     try std.testing.expectEqual(@as(u16, 0), endpoints.activeForTask(ids.task(target_task.id)));
     try std.testing.expectError(error.EndpointNotFound, endpoints.descriptor(task_endpoint.id));
