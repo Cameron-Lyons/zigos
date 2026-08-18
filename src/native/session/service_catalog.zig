@@ -912,9 +912,9 @@ const PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY: usize = ordered_published_native_se
 const published_native_class_index = buildPublishedNativeClassIndex();
 
 pub const service_catalog_indexing = .{
-    .uses_catalog_class_index = @TypeOf(catalog_class_index) == [CATALOG_CLASS_INDEX_CAPACITY]id_index.Slot,
-    .uses_service_contract_class_index = @TypeOf(service_contract_class_index) == [SERVICE_CONTRACT_CLASS_INDEX_CAPACITY]id_index.Slot,
-    .uses_published_contract_class_index = @TypeOf(published_native_class_index) == [PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY]id_index.Slot,
+    .uses_catalog_class_index = @TypeOf(catalog_class_index) == [CATALOG_CLASS_INDEX_CAPACITY]id_index.Slot(CATALOG_CLASS_INDEX_CAPACITY),
+    .uses_service_contract_class_index = @TypeOf(service_contract_class_index) == [SERVICE_CONTRACT_CLASS_INDEX_CAPACITY]id_index.Slot(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY),
+    .uses_published_contract_class_index = @TypeOf(published_native_class_index) == [PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY]id_index.Slot(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY),
 };
 
 pub fn entryForClass(class: ServiceClass) ?ServiceCatalogEntry {
@@ -1053,7 +1053,7 @@ fn catalogClassIndex(class: ServiceClass) ?usize {
     return entry_index;
 }
 
-fn buildCatalogClassIndex() [CATALOG_CLASS_INDEX_CAPACITY]id_index.Slot {
+fn buildCatalogClassIndex() [CATALOG_CLASS_INDEX_CAPACITY]id_index.Slot(CATALOG_CLASS_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(CATALOG_CLASS_INDEX_CAPACITY);
     for (catalog, 0..) |entry, entry_index| {
@@ -1062,7 +1062,7 @@ fn buildCatalogClassIndex() [CATALOG_CLASS_INDEX_CAPACITY]id_index.Slot {
     return index;
 }
 
-fn buildServiceContractClassIndex() [SERVICE_CONTRACT_CLASS_INDEX_CAPACITY]id_index.Slot {
+fn buildServiceContractClassIndex() [SERVICE_CONTRACT_CLASS_INDEX_CAPACITY]id_index.Slot(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY);
     for (ordered_service_contracts, 0..) |entry, entry_index| {
@@ -1071,7 +1071,7 @@ fn buildServiceContractClassIndex() [SERVICE_CONTRACT_CLASS_INDEX_CAPACITY]id_in
     return index;
 }
 
-fn buildPublishedNativeClassIndex() [PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY]id_index.Slot {
+fn buildPublishedNativeClassIndex() [PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY]id_index.Slot(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY);
     for (ordered_published_native_service_contracts, 0..) |entry, entry_index| {
