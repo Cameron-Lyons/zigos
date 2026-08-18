@@ -164,12 +164,16 @@ pub fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expectEqual(@as(u16, 0), revoked.mapped_task_count);
     try std.testing.expectEqual(@as(u32, owner_map.revocation_generation + 1), revoked.revocation_generation);
     try std.testing.expectEqual(@as(u16, 1), revoked.flags);
+    try std.testing.expect(kernel_port.kernel.capability_table.query(created.capability_id) == null);
+    try std.testing.expect(kernel_port.kernel.capability_table.query(peer_capability.id) == null);
+    try std.testing.expect(!runtime.hasCapability(owner.task_id, created.capability_id));
+    try std.testing.expect(!runtime.hasCapability(peer.task_id, peer_capability.id));
     try std.testing.expectEqual(@as(u16, 0), (try accountingQuery(kernel_port, session_task_id, session_authority_id, owner.task_id, 136)).shared_memory_mappings);
     try std.testing.expectEqual(@as(u16, 0), (try accountingQuery(kernel_port, session_task_id, session_authority_id, peer.task_id, 137)).shared_memory_mappings);
 
     const post_revoke_map = sharedMemoryMapResult(kernel_port, peer.task_id, peer_capability.id, peer.task_id, 138);
     try std.testing.expectEqual(abi.SyscallStatus.not_found, post_revoke_map.status);
-    try std.testing.expectEqual(abi.DenialReason.invalid_target, post_revoke_map.denial_reason);
+    try std.testing.expectEqual(abi.DenialReason.capability_missing, post_revoke_map.denial_reason);
     try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.taskMappingDescriptor(object_id, ids.task(owner.task_id)));
     try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(object_id, ids.task(owner.task_id)));
     try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(owner_mapping));

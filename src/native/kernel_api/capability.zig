@@ -114,6 +114,11 @@ pub const Inspection = struct {
     usable: bool,
 };
 
+pub const RetiredAuthority = struct {
+    capability_id: u64,
+    scoped_task_id: ?u64,
+};
+
 const CapabilitySlot = struct {
     in_use: bool = false,
     capability: Capability = zeroCapability(),
@@ -314,6 +319,12 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         pub fn retireTaskAuthority(self: *Self, task_id: u64, held_capability_ids: []const u64) usize {
             if (task_id == 0) return 0;
+            return self.retireHeldTaskAuthority(task_id, held_capability_ids) +
+                self.retireTargetAuthority(.{ .kind = .task, .id = task_id });
+        }
+
+        pub fn retireHeldTaskAuthority(self: *Self, task_id: u64, held_capability_ids: []const u64) usize {
+            if (task_id == 0) return 0;
             var retired_count: usize = 0;
 
             for (held_capability_ids) |capability_id| {
@@ -323,18 +334,35 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 self.removeSlot(slot_index);
                 retired_count += 1;
             }
+            return retired_count;
+        }
 
-            const task_target = CapabilityTarget{ .kind = .task, .id = task_id };
-            const task_target_key = targetKey(task_target);
+        pub fn retireTargetAuthority(self: *Self, target: CapabilityTarget) usize {
+            return self.retireTargetAuthorityInto(target, &[_]RetiredAuthority{});
+        }
+
+        pub fn retireTargetAuthorityInto(
+            self: *Self,
+            target: CapabilityTarget,
+            retired_output: []RetiredAuthority,
+        ) usize {
+            var retired_count: usize = 0;
+            const target_key = targetKey(target);
             while (true) {
-                const slot_index = self.target_index.head(task_target_key);
+                const slot_index = self.target_index.head(target_key);
                 if (slot_index == indexed_arena.no_index) break;
                 if (slot_index >= self.slots.slots.len) {
                     native_util.impossibleByInvariant("capability target index points outside capability slots");
                 }
                 const slot = &self.slots.slots[slot_index];
-                if (!slot.in_use or !slot.capability.target.eql(task_target)) {
-                    native_util.impossibleByInvariant("capability target index points at the wrong task authority");
+                if (!slot.in_use or !slot.capability.target.eql(target)) {
+                    native_util.impossibleByInvariant("capability target index points at the wrong authority");
+                }
+                if (retired_count < retired_output.len) {
+                    retired_output[retired_count] = .{
+                        .capability_id = slot.capability.id,
+                        .scoped_task_id = slot.capability.scope.task_id,
+                    };
                 }
                 self.removeSlot(slot_index);
                 retired_count += 1;
@@ -867,6 +895,63 @@ test "task authority retirement removes bound and targeting grants but preserves
     var target_buffer: [2]Capability = undefined;
     try std.testing.expectEqual(@as(usize, 0), table.queryByTarget(.{ .kind = .task, .id = 100 }, &target_buffer).len);
     try std.testing.expectEqual(@as(usize, 1), table.queryByTarget(.{ .kind = .task, .id = 101 }, &target_buffer).len);
+}
+
+test "dead target retirement removes every matching grant without scanning unrelated authority" {
+    var table = CapabilityTable.init();
+    const policy = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
+    const endpoint_target = CapabilityTarget{ .kind = .endpoint, .id = 123 };
+    const shared_target = CapabilityTarget{ .kind = .shared_memory, .id = 456 };
+
+    const endpoint_owner = try table.mintBootRoot(.{
+        .holder = .{ .kind = .app, .serial = 10 },
+        .issuer = policy,
+        .target = endpoint_target,
+        .rights = .{ .endpoint = .{ .endpoint_connect = true, .endpoint_send = true } },
+        .scope = .{ .task_id = 10 },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    const endpoint_peer = try table.mintBootRoot(.{
+        .holder = .{ .kind = .app, .serial = 11 },
+        .issuer = policy,
+        .target = endpoint_target,
+        .rights = .{ .endpoint = .{ .ipc_peer = true } },
+        .scope = .{ .task_id = 11 },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    const shared_owner = try table.mintBootRoot(.{
+        .holder = .{ .kind = .app, .serial = 12 },
+        .issuer = policy,
+        .target = shared_target,
+        .rights = .{ .shared_memory = .{ .shared_memory_map = true, .shared_memory_revoke = true } },
+        .scope = .{ .task_id = 12 },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    const unrelated = try table.mintBootRoot(.{
+        .holder = .{ .kind = .app, .serial = 13 },
+        .issuer = policy,
+        .target = .{ .kind = .endpoint, .id = 124 },
+        .rights = .{ .endpoint = .{ .endpoint_recv = true } },
+        .scope = .{ .task_id = 13 },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+
+    var retired_endpoint_authority: [2]RetiredAuthority = undefined;
+    try std.testing.expectEqual(@as(usize, 2), table.retireTargetAuthorityInto(endpoint_target, &retired_endpoint_authority));
+    try std.testing.expect(retired_endpoint_authority[0].capability_id == endpoint_owner.id or retired_endpoint_authority[1].capability_id == endpoint_owner.id);
+    try std.testing.expect(retired_endpoint_authority[0].capability_id == endpoint_peer.id or retired_endpoint_authority[1].capability_id == endpoint_peer.id);
+    try std.testing.expect(retired_endpoint_authority[0].scoped_task_id != null);
+    try std.testing.expect(retired_endpoint_authority[1].scoped_task_id != null);
+    try std.testing.expect(table.query(endpoint_owner.id) == null);
+    try std.testing.expect(table.query(endpoint_peer.id) == null);
+    try std.testing.expect(table.query(shared_owner.id) != null);
+    try std.testing.expect(table.query(unrelated.id) != null);
+    try std.testing.expectEqual(@as(usize, 0), table.retireTargetAuthority(endpoint_target));
+
+    try std.testing.expectEqual(@as(usize, 1), table.retireTargetAuthority(shared_target));
+    try std.testing.expect(table.query(shared_owner.id) == null);
+    try std.testing.expect(table.query(unrelated.id) != null);
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
 }
 
 test "capability delegation depth budget stops transitive derive and pass chains" {
