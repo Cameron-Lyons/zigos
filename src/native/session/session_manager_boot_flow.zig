@@ -46,6 +46,7 @@ pub const ServiceBindings = session_support.ServiceBindings;
 pub const Environment = session_support.Environment;
 pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = session_contexts.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
+pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
 const NETWORK_RECEIVE_SERVICE_BUDGET: usize = 8;
 
@@ -97,15 +98,14 @@ pub const SessionManager = struct {
         return .{};
     }
 
-    fn ensureConstructed(self: *SessionManager) void {
-        self.runtime_context.ensureConstructed();
+    fn ensureConstructed(self: *SessionManager) bool {
+        self.runtime_context.ensureConstructed() catch return false;
+        return true;
     }
 
     pub fn reset(self: *SessionManager) void {
         permission_review_service.clearSystemInputRouter();
-        if (self.runtime_context.constructed) {
-            self.runtime_context.userspace_scheduler.deinit();
-        }
+        self.runtime_context.releaseUserspaceScheduler();
         self.runtime_context.runtime_checkpoint_store.reset();
         self.runtime_context.runtime.reset();
         self.runtime_context.releaseUserspaceCatalog();
@@ -119,8 +119,7 @@ pub const SessionManager = struct {
         self.* = SessionManager.init();
         bootstrap_driver_port.reset();
         session_service_bootstrap.resetBootedDataPlanes();
-        self.ensureConstructed();
-        self.runtime_context.resetScheduler();
+        if (self.ensureConstructed()) self.runtime_context.resetScheduler();
     }
 
     pub fn isInitialized(self: *const SessionManager) bool {
@@ -148,7 +147,9 @@ pub const SessionManager = struct {
     }
 
     pub fn runtimeServicePtr(self: *SessionManager) *task_runtime_service_mod.Service {
-        self.ensureConstructed();
+        if (!self.ensureConstructed()) {
+            native_util.impossibleByInvariant("runtime service access requires constructed session state");
+        }
         return &self.runtime_context.runtime_service;
     }
 
@@ -163,8 +164,11 @@ pub const SessionManager = struct {
     }
 
     pub fn userspaceSchedulerPtr(self: *SessionManager) *userspace_scheduler.Scheduler {
-        self.ensureConstructed();
-        return &self.runtime_context.userspace_scheduler;
+        if (!self.ensureConstructed()) {
+            native_util.impossibleByInvariant("userspace scheduler access requires constructed session state");
+        }
+        return self.runtime_context.userspaceScheduler() orelse
+            native_util.impossibleByInvariant("constructed session state retains its userspace scheduler");
     }
 
     pub fn serviceDirectoryPtr(self: *SessionManager) *native_service_registry.Service {
@@ -249,7 +253,7 @@ pub const SessionManager = struct {
         if (service.frames_queued != 0) {
             const task_id = bootstrap_driver_port.activeNetworkTaskId();
             if (task_id != 0) {
-                _ = self.runtime_context.userspace_scheduler.wakeTask(
+                _ = self.userspaceSchedulerPtr().wakeTask(
                     task_id,
                     .external_event,
                     now_ticks,
@@ -272,7 +276,7 @@ pub const SessionManager = struct {
                 _ = self.input_router.dropForTask(task_id);
                 continue;
             }
-            _ = self.runtime_context.userspace_scheduler.wakeTask(
+            _ = self.userspaceSchedulerPtr().wakeTask(
                 task_id,
                 .external_event,
                 now_ticks,
@@ -421,7 +425,7 @@ pub const SessionManager = struct {
             if (!runtime_negative_proofs.runFreestandingAndPrint(
                 self.userspaceCatalogPtr(),
                 &self.runtime_context.runtime,
-                &self.runtime_context.userspace_scheduler,
+                self.userspaceSchedulerPtr(),
             )) {
                 self.failBoot();
                 return;
@@ -491,7 +495,7 @@ pub const SessionManager = struct {
     }
 
     pub fn beginServiceGraph(self: *SessionManager) ?ServiceGraph {
-        self.ensureConstructed();
+        if (!self.ensureConstructed()) return null;
         if (self.initialized) return null;
         self.initialized = true;
         self.kernel_context.resetPort();
@@ -592,13 +596,13 @@ pub const SessionManager = struct {
         const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
         const compositor_task = self.runtime_context.runtime.find(compositor_task_id) orelse return false;
         if (builtin.target.os.tag == .freestanding) {
-            _ = self.runtime_context.userspace_scheduler.wakeTask(compositor_task_id, .external_event, 0, 1);
+            _ = self.userspaceSchedulerPtr().wakeTask(compositor_task_id, .external_event, 0, 1);
             var attempts: usize = 0;
             const dispatch_budget = self.runtime_context.runtime.taskSlotCapacity() * 8;
             while (attempts < dispatch_budget and
                 self.recovery_context.review_compositor_session.surfacePresentation(compositor_task.ui_surface_id.?) == null) : (attempts += 1)
             {
-                if (!self.runtime_context.userspace_scheduler.hasReadyTasks()) break;
+                if (!self.userspaceSchedulerPtr().hasReadyTasks()) break;
                 _ = self.runUserspaceScheduler(@intCast(attempts + 1));
             }
             if (!self.proveUserspaceSurfacePresentation(compositor_task)) {
@@ -616,7 +620,7 @@ pub const SessionManager = struct {
         if (surface.task_id != compositor_task.id or surface.presentation.revision == 0) return false;
         const model = abi.surfaceModelKind(surface.presentation.model_kind) orelse return false;
         if (model != .compositor) return false;
-        const dispatch = self.runtime_context.userspace_scheduler.taskDispatchStats(compositor_task.id) orelse return false;
+        const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(compositor_task.id) orelse return false;
         if (dispatch.last_ui_state_revision != surface.presentation.revision) return false;
         const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
             self.userspaceCatalogPtr(),
@@ -652,7 +656,7 @@ pub const SessionManager = struct {
             console.print("ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing\n");
             return;
         };
-        const dispatch = self.runtime_context.userspace_scheduler.taskDispatchStats(task_id);
+        const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(task_id);
         const task = self.runtime_context.runtime.find(task_id);
         const authority = self.capabilityTablePtr().query(mailbox.authority_capability_id);
         var line_buffer: [512]u8 = undefined;
@@ -752,7 +756,7 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
         self.userspaceCatalogPtr(),
         &self.runtime_context.runtime,
         self.capabilityTablePtr(),
-        &self.runtime_context.userspace_scheduler,
+        self.userspaceSchedulerPtr(),
     );
     const services = try session_bootstrap.registerCoreServices(&self.service_graph_builder.supervisor, &self.runtime_context.runtime_service, ids);
 
@@ -822,7 +826,7 @@ fn launchNativeBootstrapService(
             .ui_surface_id = launch.ui_surface_id,
             .local_only = true,
         },
-        &self.runtime_context.userspace_scheduler,
+        self.userspaceSchedulerPtr(),
     ) catch |err| {
         const record = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapLaunch;
         self.recordBootFailure(record.id, launch.tick, err);
