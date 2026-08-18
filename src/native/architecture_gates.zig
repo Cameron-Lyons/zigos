@@ -400,6 +400,10 @@ pub const indexed_hot_path_tables = .{
         .tracks_latest_inserted_version = @hasField(object_store.Store, "latest_inserted_version_id"),
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
+        .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and
+            !@hasField(object_store.VersionRecord, "blob_address") and
+            !@hasField(object_store.VersionRecord, "payload_len") and
+            !@hasField(object_store.VersionRecord, "chunk_count"),
         .uses_object_type_index = @hasField(object_store.Store, "object_type_index"),
         .tracks_max_blob_payload_bytes = @hasField(object_store.Store, "max_blob_payload_bytes"),
         .exposes_max_blob_payload_bytes = @hasDecl(object_store.Store, "maxBlobPayloadBytes"),
