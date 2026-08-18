@@ -189,10 +189,9 @@ pub const indexed_hot_path_tables = .{
         .uses_claim_task_index = @hasField(accelerator_scheduler.Controller, "claim_task_index"),
     },
     .background_dispatch = .{
-        .uses_record_arena = @hasDecl(@FieldType(background_dispatch.Controller, "records"), "reserveIndex"),
+        .uses_bounded_record_scan = background_dispatch.BOUNDED_RECORD_SCAN,
         .tracks_active_count = @hasField(background_dispatch.Controller, "active_count"),
-        .uses_active_record_index = @hasField(background_dispatch.Controller, "active_record_index"),
-        .uses_reusable_record_index = @hasField(background_dispatch.Controller, "reusable_record_index"),
+        .uses_fair_reuse_cursor = @hasField(background_dispatch.Controller, "next_reusable_slot"),
         .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
     },
     .indexing_service = .{
