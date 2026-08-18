@@ -170,7 +170,8 @@ pub const indexed_hot_path_tables = .{
     },
     .task_runtime = .{
         .uses_task_arena = @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "reserveIndex"),
-        .uses_address_space_arena = @hasDecl(@FieldType(task_runtime.Runtime, "address_spaces"), "reserveIndex"),
+        .uses_address_space_arena = @hasDecl(task_runtime.Runtime.AddressSpaceArenaType, "reserveIndex"),
+        .heap_backs_address_space_arena_on_freestanding = task_runtime.HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING,
         .stores_compact_task_provenance = @sizeOf(task_runtime.TaskProvenanceRecord) < @sizeOf(task_runtime.ProvenanceRecord),
         .keeps_executable_mapping_only_in_address_space = !@hasField(task_runtime.TaskColdRecord, "userspace_image"),
         .uses_initial_component_label_index = @hasField(task_runtime.Runtime, "task_initial_component_label_index"),
