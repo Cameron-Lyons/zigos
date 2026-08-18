@@ -168,12 +168,12 @@ pub fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expectEqual(@as(u16, 0), (try accountingQuery(kernel_port, session_task_id, session_authority_id, peer.task_id, 137)).shared_memory_mappings);
 
     const post_revoke_map = sharedMemoryMapResult(kernel_port, peer.task_id, peer_capability.id, peer.task_id, 138);
-    try std.testing.expectEqual(abi.SyscallStatus.denied, post_revoke_map.status);
-    try std.testing.expectEqual(abi.DenialReason.capability_revoked, post_revoke_map.denial_reason);
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.taskMappingDescriptor(object_id, ids.task(owner.task_id)));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(object_id, ids.task(owner.task_id)));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(owner_mapping));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(owner_mmu_mapping));
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, post_revoke_map.status);
+    try std.testing.expectEqual(abi.DenialReason.invalid_target, post_revoke_map.denial_reason);
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.taskMappingDescriptor(object_id, ids.task(owner.task_id)));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(object_id, ids.task(owner.task_id)));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(owner_mapping));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(owner_mmu_mapping));
     try std.testing.expectEqual(@as(usize, 0), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(object_id));
 
     const accelerated = try kernel_port.kernel.shared_memory_table.createLabeledWithAccess(ids.task(owner.task_id), shared_memory_mod.PAGE_SIZE * 2, "booted-accelerator", .{
@@ -199,16 +199,16 @@ pub fn proveBootedSharedMemoryMappingRevocation(
     try kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(task_mmu_mapping);
     try kernel_port.kernel.shared_memory_table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_mapping, .gpu);
     try std.testing.expectEqual(@as(usize, 2), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(accelerated.id));
-    try kernel_port.kernel.shared_memory_table.revoke(accelerated.id);
+    _ = try kernel_port.kernel.shared_memory_table.revoke(accelerated.id);
     try std.testing.expectEqual(@as(usize, 0), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(accelerated.id));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.taskMappingDescriptor(accelerated.id, ids.task(owner.task_id)));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.acceleratorMappingDescriptor(accelerated.id, .gpu));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(accelerated.id, ids.task(owner.task_id)));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingAcceleratorMappingDescriptor(accelerated.id, .gpu));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(task_mapping));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateAcceleratorMappingDescriptor(gpu_mapping, .gpu));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(task_mmu_mapping));
-    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_mapping, .gpu));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.taskMappingDescriptor(accelerated.id, ids.task(owner.task_id)));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.acceleratorMappingDescriptor(accelerated.id, .gpu));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(accelerated.id, ids.task(owner.task_id)));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.freestandingAcceleratorMappingDescriptor(accelerated.id, .gpu));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(task_mapping));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateAcceleratorMappingDescriptor(gpu_mapping, .gpu));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(task_mmu_mapping));
+    try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_mapping, .gpu));
 }
 
 pub fn proveBootedDriverPermissions(
