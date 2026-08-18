@@ -112,6 +112,9 @@ pub const indexed_hot_path_tables = .{
         .retires_task_owned_endpoints = @hasDecl(endpoint.Table, "retireTask"),
     },
     .shared_memory = .{
+        .uses_generational_object_ids = @hasDecl(@FieldType(shared_memory.Table, "arena"), "getByHandle"),
+        .avoids_object_primary_index_lookups = shared_memory.SHARED_MEMORY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
+        .avoids_object_id_collision_probes = shared_memory.SHARED_MEMORY_ID_COLLISION_PROBES_PER_INSERT == 0,
         .uses_compact_mmu_object_mapping_head = @hasField(shared_memory.Object, "mmu_mapping_head"),
         .tracks_mmu_object_mapping_count = @hasField(shared_memory.Object, "mmu_mapping_count"),
         .uses_object_owner_index = @hasField(shared_memory.Table, "object_owner_index"),

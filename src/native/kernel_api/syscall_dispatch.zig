@@ -307,7 +307,7 @@ pub fn mapError(err: anyerror) DispatchResult {
         .status = .not_found,
         .denial_reason = .interface_not_found,
     };
-    if (err == error.TaskNotFound or err == error.EndpointNotFound) return .{
+    if (err == error.TaskNotFound or err == error.EndpointNotFound or err == error.SharedMemoryNotFound) return .{
         .status = .not_found,
         .denial_reason = .invalid_target,
     };

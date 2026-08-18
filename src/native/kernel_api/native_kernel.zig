@@ -552,8 +552,7 @@ pub const Kernel = struct {
         now_ticks: u64,
     ) Error!abi.SharedMemoryDescriptor {
         const object_capability = try self.authorizeOperation(.shared_memory_revoke, context, now_ticks, .{});
-        try self.shared_memory_table.revoke(ids.sharedMemory(object_capability.target.id));
-        return self.shared_memory_table.descriptor(ids.sharedMemory(object_capability.target.id));
+        return self.shared_memory_table.revoke(ids.sharedMemory(object_capability.target.id));
     }
 
     pub fn timeQuery(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!u64 {
@@ -1298,7 +1297,7 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try std.testing.expectEqual(@as(u16, 0), endpoints.activeForTask(ids.task(target_task.id)));
     try std.testing.expectError(error.EndpointNotFound, endpoints.descriptor(task_endpoint.id));
     try std.testing.expectEqual(@as(u16, 0), shared.mappingsForTask(ids.task(target_task.id)));
-    try std.testing.expectEqual(@as(u16, 1), (try shared.descriptor(owned_shared.id)).flags);
+    try std.testing.expectError(error.SharedMemoryNotFound, shared.descriptor(owned_shared.id));
     try std.testing.expectEqual(@as(u16, 0), (try shared.descriptor(peer_shared.id)).flags);
     try std.testing.expect(!shared.hasMapping(peer_shared.id, ids.task(target_task.id)));
     try std.testing.expect(shared.hasMapping(peer_shared.id, ids.task(999)));
