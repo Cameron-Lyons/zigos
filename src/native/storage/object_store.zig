@@ -42,6 +42,7 @@ pub const ObjectSyncState = store.ObjectSyncState;
 pub const ObjectSharingPolicy = store.ObjectSharingPolicy;
 pub const ObjectRecoveryHistory = store.ObjectRecoveryHistory;
 pub const VersionRecord = store.VersionRecord;
+pub const BlobChunkSlotIndex = store.BlobChunkSlotIndex;
 pub const ChunkRef = store.ChunkRef;
 pub const BlobRecord = store.BlobRecord;
 pub const ChunkRecord = store.ChunkRecord;
