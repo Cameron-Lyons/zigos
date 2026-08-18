@@ -373,6 +373,7 @@ pub fn proveBootedCompositorServicePath(
         240,
     );
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     try ledger.recordTaskFlow(ux_controller.flowAtOrder(0).?.*, 160);
     try ledger.recordTaskFlow(ux_controller.flowAtOrder(1).?.*, 161);
     try ledger.recordTaskFlow(ux_controller.flowAtOrder(2).?.*, 162);
@@ -467,6 +468,7 @@ fn proveBootedRenderedTaskShell(
 ) !void {
     var ux_controller = native_ux.Controller.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
 
     const shell_service_endpoint = try expectEndpointCreateWithFlags(
         kernel_port,
@@ -620,6 +622,7 @@ fn proveBootedRenderedPermissionReviewSurface(
         compositor_display.DEFAULT_HEIGHT,
     );
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .object_access,

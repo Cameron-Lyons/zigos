@@ -164,7 +164,8 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         .notes_object_capability = notes_review.object_capability,
     };
     const storage_state = storage_scenarios.run(&lifecycle_context);
-    const early_boot_ledger = lifecycle_context.update_ledger.*;
+    var early_boot_ledger = lifecycle_context.update_ledger.*;
+    defer early_boot_ledger.deinit();
     lifecycle_context.update_ledger.* = event_ledger.Ledger.initPersistent(
         lifecycle_context.storage_service_instance,
         lifecycle_context.package_service_principal,

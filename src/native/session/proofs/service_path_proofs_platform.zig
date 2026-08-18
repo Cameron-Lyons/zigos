@@ -171,6 +171,7 @@ pub fn proveBootedPostActivationHealthChecks(
 
     var manager = try immutable_base.Manager.init(storage, owner, state_signer);
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     _ = try manager.stageImage(0, "booted-stable-a", "kernel=booted-v1", image_signer, 610);
     try manager.beginActivation(0, 611);
     try update_health.recordBootSuccess(&manager, 612);

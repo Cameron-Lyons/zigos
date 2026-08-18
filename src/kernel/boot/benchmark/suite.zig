@@ -1491,7 +1491,7 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
 }
 
 fn benchmarkEventLedgerExport(iteration: u32) u64 {
-    event_ledger_context.ledger = event_ledger.Ledger.init();
+    event_ledger_context.ledger.reset();
     const user_subject = user(7 + iteration);
     const service_subject = service(9 + iteration);
     const device_subject = device(42 + iteration);
@@ -1739,6 +1739,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
     var runtime = DriverRecoveryRuntime{};
     var notifications = notification_center.Center.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const recovery = supervisor.recoverDriverCrash(
         compositor.id,
         &directory,
@@ -2500,7 +2501,7 @@ fn prepareUpdateHealthFixture(iteration: u32) void {
     update_health_context.sync_capabilities = capability.CapabilityTable.init();
     update_health_context.compositor = compositor_session.Session.init();
     update_health_context.supervisor = supervisor_mod.Supervisor.init();
-    update_health_context.ledger = event_ledger.Ledger.init();
+    update_health_context.ledger.reset();
 
     const network_probe = seedUpdateHealthNetworkProbe(
         &update_health_context.sync,
