@@ -213,8 +213,9 @@ pub const indexed_hot_path_tables = .{
         .tracks_active_handles = @hasField(secret_vault_service.Service, "active_handle_count"),
     },
     .media_print_service = .{
-        .uses_job_arena = @hasDecl(@FieldType(media_print_service.Service, "jobs"), "reserveIndex"),
-        .uses_completed_job_index = @hasField(media_print_service.Service, "completed_job_index"),
+        .uses_bounded_job_scan = media_print_service.BOUNDED_JOB_SCAN,
+        .uses_compact_completion_queue = media_print_service.COMPACT_COMPLETION_QUEUE,
+        .keeps_fixed_state_within_ceiling = @sizeOf(media_print_service.Service) <= media_print_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .notification_center = .{
         .uses_notification_arena = @hasDecl(@FieldType(notification_center.Center, "notifications"), "reserveIndex"),
