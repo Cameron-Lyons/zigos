@@ -472,9 +472,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             policy.device_to_device_policy_id = request.device_to_device_policy_id;
             policy.relay_policy_id = request.relay_policy_id;
             policy.overlay_policy_id = request.overlay_policy_id;
-            policy.relay_domain_len = native_util.copyTextExact(&policy.relay_domain, request.relay_domain) catch return error.NetworkTargetTooLong;
+            policy.relay_domain_len = @intCast(native_util.copyTextExact(&policy.relay_domain, request.relay_domain) catch return error.NetworkTargetTooLong);
             for (request.selective_prefixes, 0..) |prefix, index| {
-                policy.selective_prefix_lens[index] = native_util.copyTextExact(&policy.selective_prefixes[index], prefix) catch return error.PathTooLong;
+                policy.selective_prefix_lens[index] = @intCast(native_util.copyTextExact(&policy.selective_prefixes[index], prefix) catch return error.PathTooLong);
                 policy.selective_prefix_count += 1;
             }
 
@@ -508,7 +508,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             else
                 zeroOverlay();
             overlay.home_device = home_device;
-            overlay.service_identity_len = native_util.copyTextExact(&overlay.service_identity, service_identity) catch return error.ServiceIdentityTooLong;
+            overlay.service_identity_len = @intCast(native_util.copyTextExact(&overlay.service_identity, service_identity) catch return error.ServiceIdentityTooLong);
             overlay.remote_access_enabled = remote_access_enabled;
 
             const slot_index = existing_slot_index orelse
@@ -532,8 +532,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) Error!*OverlayRecord {
             const overlay = self.findOverlay(workspace_id) orelse return error.OverlayNotFound;
             var index: usize = 0;
-            while (index < overlay.private_service_count) : (index += 1) {
-                if (std.mem.eql(u8, overlay.private_services[index][0..overlay.private_service_lens[index]], label)) {
+            while (index < @as(usize, overlay.private_service_count)) : (index += 1) {
+                if (std.mem.eql(u8, overlay.private_services[index][0..@as(usize, overlay.private_service_lens[index])], label)) {
                     return overlay;
                 }
             }
@@ -542,7 +542,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const service_label_len = native_util.copyTextExact(&service_label, label) catch return error.ServiceIdentityTooLong;
             const slot_index = overlay.private_service_count;
             overlay.private_services[slot_index] = service_label;
-            overlay.private_service_lens[slot_index] = service_label_len;
+            overlay.private_service_lens[slot_index] = @intCast(service_label_len);
             overlay.private_service_count += 1;
             try self.checkpoint();
             return overlay;
@@ -707,8 +707,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             var contract = zeroDatabaseContract();
             contract.id = self.stateConst().next_contract_id;
             contract.workspace_id = workspace_id;
-            contract.bundle_id_len = native_util.copyTextExact(&contract.bundle_id, bundle_id) catch return error.BundleIdTooLong;
-            contract.label_len = native_util.copyTextExact(&contract.label, label) catch return error.LabelTooLong;
+            contract.bundle_id_len = @intCast(native_util.copyTextExact(&contract.bundle_id, bundle_id) catch return error.BundleIdTooLong);
+            contract.label_len = @intCast(native_util.copyTextExact(&contract.label, label) catch return error.LabelTooLong);
             contract.signature = signature;
 
             const slot_index = self.allocateDatabaseContractIndex(contract.id) orelse return error.DatabaseContractTableFull;
@@ -1222,7 +1222,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             conflict.workspace_id = workspace_id;
             conflict.device_id = device_id;
             conflict.object_id = object_id;
-            conflict.path_len = native_util.copyTextExact(&conflict.path, path) catch return error.PathTooLong;
+            conflict.path_len = @intCast(native_util.copyTextExact(&conflict.path, path) catch return error.PathTooLong);
             conflict.local_version_id = local_version_id;
             conflict.remote_version_id = remote_version_id;
             conflict.semantic = semantic;
@@ -1507,7 +1507,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.in_use = true;
             slot.entry.workspace_id = workspace_id;
             slot.entry.device_id = device_id;
-            slot.entry.path_len = native_util.copyTextExact(&slot.entry.path, path) catch return error.PathTooLong;
+            slot.entry.path_len = @intCast(native_util.copyTextExact(&slot.entry.path, path) catch return error.PathTooLong);
             slot.entry.object_id = object_store.ids.raw(object_id);
             slot.entry.version_id = object_store.ids.raw(version_id);
             slot.entry.workspace_generation = workspace_generation;
