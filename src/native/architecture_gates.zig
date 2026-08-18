@@ -226,7 +226,10 @@ pub const indexed_hot_path_tables = .{
         .tracks_visible_notification_count = @hasField(notification_center.Center, "visible_notification_count"),
     },
     .secure_pasteboard = .{
-        .uses_grant_arena = @hasDecl(@FieldType(secure_pasteboard.Service, "slots"), "reserve"),
+        .uses_bounded_grant_scan = secure_pasteboard.BOUNDED_GRANT_SCAN,
+        .reclaims_terminal_grants = secure_pasteboard.RECLAIMS_TERMINAL_GRANTS,
+        .stores_compact_grant_lengths = secure_pasteboard.COMPACT_GRANT_LENGTHS,
+        .keeps_fixed_state_within_ceiling = @sizeOf(secure_pasteboard.Service) <= secure_pasteboard.SERVICE_SIZE_CEILING_BYTES,
     },
     .sensitive_capture_service = .{
         .uses_bounded_session_scan = sensitive_capture_service.BOUNDED_SESSION_SCAN,
