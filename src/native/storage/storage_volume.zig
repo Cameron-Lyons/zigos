@@ -1427,12 +1427,14 @@ fn writeText(writer: *CursorWriter, text: []const u8) Error!void {
     try writer.writeBytes(text);
 }
 
-fn readTextInto(reader: *CursorReader, buffer: []u8, out_len: *usize) Error!void {
-    const len = try reader.readU16();
+fn readTextInto(reader: *CursorReader, buffer: []u8, out_len: anytype) Error!void {
+    const len: usize = try reader.readU16();
     if (len > buffer.len) return error.CorruptImage;
+    const Length = @TypeOf(out_len.*);
+    if (len > std.math.maxInt(Length)) return error.CorruptImage;
     @memset(buffer[0..], 0);
     try reader.readBytes(buffer[0..len]);
-    out_len.* = len;
+    out_len.* = @intCast(len);
 }
 
 fn writePrincipal(writer: *CursorWriter, principal_id: principal.PrincipalId) Error!void {
