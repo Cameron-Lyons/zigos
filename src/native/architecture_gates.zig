@@ -302,9 +302,17 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(package_service.StoredPermission) < package_service.MAX_PERMISSION_RESOURCE_BYTES,
     },
     .public_store = .{
-        .uses_release_arena = @hasDecl(@FieldType(public_store.Channel, "releases"), "reserveIndexAt"),
-        .uses_bundle_release_index = @hasField(public_store.Channel, "bundle_release_index"),
-        .uses_trusted_publisher_arena = @hasDecl(@FieldType(public_store.Channel, "trusted_publishers"), "reserve"),
+        .uses_bounded_release_scan = public_store.BOUNDED_RELEASE_SCAN and
+            public_store.RELEASE_SCAN_BOUND == public_store.MAX_RELEASES_PER_CHANNEL,
+        .uses_bounded_trusted_publisher_scan = public_store.BOUNDED_TRUSTED_PUBLISHER_SCAN and
+            public_store.TRUSTED_PUBLISHER_SCAN_BOUND == public_store.MAX_TRUSTED_PUBLISHERS_PER_CHANNEL,
+        .uses_dense_release_table = public_store.DENSE_RELEASE_TABLE and
+            @FieldType(public_store.Channel, "releases") == [public_store.MAX_RELEASES_PER_CHANNEL]public_store.Release,
+        .uses_dense_trusted_publisher_table = public_store.DENSE_TRUSTED_PUBLISHER_TABLE and
+            @FieldType(public_store.Channel, "trusted_publishers") == [public_store.MAX_TRUSTED_PUBLISHERS_PER_CHANNEL]public_store.TrustedPublisherRecord,
+        .uses_direct_release_identity_comparison = public_store.DIRECT_RELEASE_IDENTITY_COMPARISON,
+        .drops_public_store_indexes = !@hasField(public_store.Channel, "bundle_release_index"),
+        .keeps_fixed_state_within_ceiling = @sizeOf(public_store.Channel) <= public_store.CHANNEL_SIZE_CEILING_BYTES,
     },
     .driver_service = .{
         .uses_driver_arena = @hasDecl(@FieldType(driver_service.Directory, "slots"), "reserve"),
