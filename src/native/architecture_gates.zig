@@ -230,12 +230,19 @@ pub const indexed_hot_path_tables = .{
         .keeps_fixed_state_within_ceiling = @sizeOf(network_session_service.Service) <= network_session_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .notification_center = .{
-        .uses_notification_arena = @hasDecl(@FieldType(notification_center.Center, "notifications"), "reserveIndex"),
-        .uses_source_reason_index = @hasField(notification_center.Center, "source_reason_index"),
+        .uses_bounded_notification_scan = notification_center.BOUNDED_NOTIFICATION_SCAN,
+        .reclaims_suppressed_notifications = notification_center.RECLAIMS_SUPPRESSED_NOTIFICATIONS,
+        .stores_compact_notification_metadata = notification_center.COMPACT_NOTIFICATION_METADATA,
+        .uses_fixed_notification_table = @FieldType(notification_center.Center, "notifications") == [notification_center.MAX_NOTIFICATIONS]notification_center.Notification,
+        .drops_secondary_notification_indexes = !@hasField(notification_center.Center, "source_reason_index") and
+            !@hasField(notification_center.Center, "expiring_attention_index") and
+            !@hasField(notification_center.Center, "suppressed_notification_index"),
         .tracks_permanent_attention_counts = @hasField(notification_center.Center, "permanent_attention_counts"),
-        .uses_expiring_attention_index = @hasField(notification_center.Center, "expiring_attention_index"),
-        .tracks_visible_notification_chain = @hasField(notification_center.Center, "visible_tail_slot"),
+        .drops_visible_notification_chain = !@hasField(notification_center.Center, "visible_tail_slot") and
+            !@hasField(notification_center.Center, "visible_prev_by_slot") and
+            !@hasField(notification_center.Center, "visible_next_by_slot"),
         .tracks_visible_notification_count = @hasField(notification_center.Center, "visible_notification_count"),
+        .keeps_fixed_state_within_ceiling = @sizeOf(notification_center.Center) <= notification_center.CENTER_SIZE_CEILING_BYTES,
     },
     .secure_pasteboard = .{
         .uses_bounded_grant_scan = secure_pasteboard.BOUNDED_GRANT_SCAN,
