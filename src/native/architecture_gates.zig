@@ -310,7 +310,9 @@ pub const indexed_hot_path_tables = .{
         .tracks_active_inbox_chain = @hasField(input_router.Router, "active_inbox_head"),
     },
     .native_ux = .{
-        .uses_flow_arena = @hasField(native_ux.Controller, "flows"),
+        .uses_append_only_flow_log = native_ux.APPEND_ONLY_FLOW_LOG,
+        .uses_compact_flow_lengths = @FieldType(native_ux.FlowRecord, "detail_len") == u8 and
+            @FieldType(native_ux.FlowRecord, "bundle_id_len") == u8,
         .supports_ordered_flow_lookup = @hasDecl(native_ux.Controller, "flowAtOrder"),
     },
     .sync_transport_harness = .{
