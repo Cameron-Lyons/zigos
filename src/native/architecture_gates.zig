@@ -440,7 +440,7 @@ pub const indexed_hot_path_tables = .{
         .uses_service_arena = supervisor.supervisor_indexing.uses_service_arena,
         .uses_service_class_index = supervisor.supervisor_indexing.uses_service_class_index,
         .uses_diagnostic_service_index = supervisor.supervisor_indexing.uses_diagnostic_service_index,
-        .uses_diagnostic_service_kind_index = supervisor.supervisor_indexing.uses_diagnostic_service_kind_index,
+        .filters_diagnostic_kind_on_service_index = supervisor.supervisor_indexing.filters_diagnostic_kind_on_service_index,
         .uses_diagnostic_ring_cursor = @hasField(supervisor.Supervisor, "next_diagnostic_slot"),
     },
     .session_bootstrap = .{

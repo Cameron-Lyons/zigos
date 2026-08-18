@@ -99,13 +99,12 @@ const ServiceSlot = struct {
 const ServiceArena = indexed_arena.IndexedArena(ServiceSlot, MAX_SERVICES, SERVICE_INDEX_CAPACITY, serviceSlotId);
 const ServiceClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
 const DiagnosticServiceIndex = indexed_arena.MultimapIndex(MAX_DIAGNOSTICS, MAX_DIAGNOSTICS, MAX_DIAGNOSTICS * 2);
-const DiagnosticServiceKindIndex = indexed_arena.MultimapIndex(MAX_DIAGNOSTICS, MAX_DIAGNOSTICS, MAX_DIAGNOSTICS * 2);
 
 pub const supervisor_indexing = .{
     .uses_service_arena = @hasDecl(ServiceArena, "reserveIndex"),
     .uses_service_class_index = @hasDecl(ServiceClassIndex, "lookup"),
     .uses_diagnostic_service_index = @hasDecl(DiagnosticServiceIndex, "append"),
-    .uses_diagnostic_service_kind_index = @hasDecl(DiagnosticServiceKindIndex, "append"),
+    .filters_diagnostic_kind_on_service_index = @hasDecl(DiagnosticServiceIndex, "next"),
 };
 
 pub const Supervisor = struct {
@@ -118,7 +117,6 @@ pub const Supervisor = struct {
     diagnostic_count: usize = 0,
     next_diagnostic_slot: usize = 0,
     diagnostic_service_index: DiagnosticServiceIndex = DiagnosticServiceIndex.init(),
-    diagnostic_service_kind_index: DiagnosticServiceKindIndex = DiagnosticServiceKindIndex.init(),
 
     pub fn init() Supervisor {
         return Supervisor{};
@@ -366,8 +364,8 @@ pub const Supervisor = struct {
     }
 
     pub fn hasDiagnostic(self: *const Supervisor, service_id: u64, kind: DiagnosticKind) bool {
-        var slot_index = self.diagnostic_service_kind_index.head(diagnosticServiceKindKey(service_id, kind));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.diagnostic_service_kind_index.next(slot_index)) {
+        var slot_index = self.diagnostic_service_index.head(diagnosticServiceKey(service_id));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.diagnostic_service_index.next(slot_index)) {
             const event = self.diagnosticAt(slot_index) orelse continue;
             if (event.service_id == service_id and event.kind == kind) return true;
         }
@@ -468,10 +466,7 @@ pub const Supervisor = struct {
 
     fn indexDiagnostic(self: *Supervisor, slot_index: usize, event: DiagnosticEvent) void {
         if (!self.diagnostic_service_index.append(diagnosticServiceKey(event.service_id), slot_index)) {
-            native_util.impossibleByInvariant("supervisor diagnostic service index capacity covers diagnostic slots");
-        }
-        if (!self.diagnostic_service_kind_index.append(diagnosticServiceKindKey(event.service_id, event.kind), slot_index)) {
-            native_util.impossibleByInvariant("supervisor diagnostic service-kind index capacity covers diagnostic slots");
+            native_util.impossibleByInvariant("supervisor diagnostic index capacity covers diagnostic slots");
         }
     }
 
@@ -479,8 +474,9 @@ pub const Supervisor = struct {
         if (slot_index >= self.diagnostic_count) return;
         const old = self.diagnostics[slot_index];
         if (old.sequence == 0) return;
-        _ = self.diagnostic_service_index.remove(diagnosticServiceKey(old.service_id), slot_index);
-        _ = self.diagnostic_service_kind_index.remove(diagnosticServiceKindKey(old.service_id, old.kind), slot_index);
+        if (!self.diagnostic_service_index.remove(diagnosticServiceKey(old.service_id), slot_index)) {
+            native_util.impossibleByInvariant("retained supervisor diagnostics remain linked before replacement");
+        }
     }
 
     fn diagnosticAt(self: *const Supervisor, slot_index: usize) ?DiagnosticEvent {
@@ -523,11 +519,6 @@ fn serviceClassKey(class: contract.ServiceClass) u64 {
 
 fn diagnosticServiceKey(service_id: u64) u64 {
     return indexed_arena.nonZeroKey(service_id);
-}
-
-fn diagnosticServiceKindKey(service_id: u64, kind: DiagnosticKind) u64 {
-    const kind_value = @as(u64, @intFromEnum(kind)) + 1;
-    return indexed_arena.nonZeroKey((service_id *% 16) ^ kind_value);
 }
 
 fn zeroService() ServiceRecord {
@@ -718,8 +709,6 @@ test "supervisor keeps diagnostics indexed while recycling the bounded ring" {
     try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_count);
     try std.testing.expectEqual(@as(usize, 1), supervisor.next_diagnostic_slot);
     try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_service_index.count(diagnosticServiceKey(network.id)));
-    try std.testing.expectEqual(@as(usize, 0), supervisor.diagnostic_service_kind_index.count(diagnosticServiceKindKey(network.id, .registered)));
-    try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_service_kind_index.count(diagnosticServiceKindKey(network.id, .healthy)));
     try std.testing.expect(!supervisor.hasDiagnostic(network.id, .registered));
     try std.testing.expect(supervisor.hasDiagnostic(network.id, .healthy));
     try std.testing.expectEqual(@as(u64, 100 + MAX_DIAGNOSTICS - 1), supervisor.latestDiagnostic(network.id).?.tick);
