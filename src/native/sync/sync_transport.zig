@@ -266,6 +266,10 @@ pub const NativeTransportService = struct {
         return .{};
     }
 
+    pub fn deinit(self: *NativeTransportService) void {
+        self.endpoints.deinit();
+    }
+
     pub fn bindTrustedDeviceGraph(self: *NativeTransportService, graph: *const device_graph.Graph) void {
         self.trust_graph = graph;
     }

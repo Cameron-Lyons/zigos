@@ -21,6 +21,7 @@ pub fn sendOverlayRelayFrameViaService(
 
     var broker = service.egressBroker(network_capabilities);
     var transport = sync_transport.NativeTransportService.init();
+    defer transport.deinit();
     var connection = try transport.openRelay(&broker, .{
         .task_id = service.task_id,
         .principal_id = service.owner,
