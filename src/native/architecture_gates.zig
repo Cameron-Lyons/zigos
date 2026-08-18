@@ -443,6 +443,16 @@ pub const indexed_hot_path_tables = .{
         .rebuilds_loaded_indexes = @hasDecl(device_graph.Graph, "rebuildIndexes"),
     },
     .sync_service = .{
+        .stores_compact_overlay_session_metadata = sync_service.COMPACT_OVERLAY_SESSION_METADATA and
+            @FieldType(sync_service.OverlaySession, "service_identity_len") == u8 and
+            @FieldType(sync_service.OverlaySession, "relay_domain_len") == u8 and
+            @FieldType(sync_service.OverlaySession, "private_service_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "service_identity_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "relay_domain_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "private_service_len") == u8,
+        .keeps_overlay_session_state_within_ceilings = @sizeOf(sync_service.OverlaySession) <= sync_service.OVERLAY_SESSION_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.OverlayRelayFrameResult) <= sync_service.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.Service) <= sync_service.SERVICE_SIZE_CEILING_BYTES,
         .stores_compact_sync_record_metadata = sync_state_support.COMPACT_RECORD_METADATA and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_count") == u8 and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_lens") == [sync_state_support.MAX_SELECTIVE_PREFIXES]u8 and

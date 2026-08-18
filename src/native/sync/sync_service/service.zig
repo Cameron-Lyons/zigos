@@ -35,6 +35,11 @@ pub const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_OVERLAY_SESSIONS = overlay_model.MAX_OVERLAY_SESSIONS;
+pub const COMPACT_OVERLAY_SESSION_METADATA = overlay_model.COMPACT_OVERLAY_SESSION_METADATA;
+pub const OVERLAY_SESSION_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SIZE_CEILING_BYTES;
+pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES;
+pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 89_800;
 pub const ServiceConfig = overlay_model.ServiceConfig;
 pub const TransportMode = state_support.TransportMode;
 pub const SyncSemantic = state_support.SyncSemantic;
@@ -601,7 +606,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .open_tick = tick,
                 .last_activity_tick = tick,
             };
-            session.service_identity_len = native_util.copyTextExact(&session.service_identity, overlay.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong;
+            session.service_identity_len = @intCast(native_util.copyTextExact(&session.service_identity, overlay.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong);
 
             switch (usage) {
                 .sync_replication => {},
@@ -612,13 +617,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .private_service => {
                     const label = private_service_label orelse return error.PrivateServiceNotPublished;
                     if (!overlay.hasPrivateService(label)) return error.PrivateServiceNotPublished;
-                    session.private_service_len = native_util.copyTextExact(&session.private_service, label) catch return error.ServiceIdentityTooLong;
+                    session.private_service_len = @intCast(native_util.copyTextExact(&session.private_service, label) catch return error.ServiceIdentityTooLong);
                     session.remote_access = overlay.remote_access_enabled and transport == .relay_assisted;
                 },
             }
 
             if (transport == .relay_assisted) {
-                session.relay_domain_len = native_util.copyTextExact(&session.relay_domain, policy.relayDomainSlice()) catch return error.NetworkTargetTooLong;
+                session.relay_domain_len = @intCast(native_util.copyTextExact(&session.relay_domain, policy.relayDomainSlice()) catch return error.NetworkTargetTooLong);
                 session.remote_access = true;
             }
 
