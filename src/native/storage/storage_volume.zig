@@ -983,7 +983,7 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.Workspace
         try writeEntry(writer, entry);
     }
     try writer.writeU16(@intCast(record.mutation_log.entry_mutation_count));
-    for (record.mutation_log.entry_mutations[0..record.mutation_log.entry_mutation_count]) |mutation| {
+    for (record.mutation_log.entriesConst()[0..record.mutation_log.entry_mutation_count]) |mutation| {
         try writer.writeU32(mutation.generation);
         try writeEntry(writer, mutation.entry);
     }
@@ -1103,8 +1103,13 @@ fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void 
 fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
     const workspace_id = ids.workspace(try reader.readU64());
-    const slot = workspaces.workspaces.get(workspace_id) orelse
+    const existing_slot = workspaces.workspaces.get(workspace_id);
+    const slot = existing_slot orelse
         workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
+    slot.workspace.mutation_log.ensureBacking() catch {
+        if (existing_slot == null) std.debug.assert(workspaces.workspaces.remove(workspace_id));
+        return error.NoSpaceLeft;
+    };
 
     const previous_entry_count = slot.workspace.path_index.entry_count;
     const previous_mutation_count = slot.workspace.mutation_log.entry_mutation_count;
@@ -1131,14 +1136,15 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     }
     slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
     if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+    const mutations = slot.workspace.mutation_log.entries();
     for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
-        slot.workspace.mutation_log.entry_mutations[mutation_index] = .{
+        mutations[mutation_index] = .{
             .generation = try reader.readU32(),
             .entry = try readEntry(&reader),
         };
     }
     if (slot.workspace.mutation_log.entry_mutation_count < previous_mutation_tail) {
-        for (slot.workspace.mutation_log.entry_mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_tail]) |*mutation| {
+        for (mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_tail]) |*mutation| {
             mutation.* = .{};
         }
     }
@@ -1343,6 +1349,10 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
     for (0..@as(usize, workspace_count_value)) |_| {
         const workspace_id = ids.workspace(try reader.readU64());
         const slot = workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
+        slot.workspace.mutation_log.ensureBacking() catch {
+            std.debug.assert(workspaces.workspaces.remove(workspace_id));
+            return error.NoSpaceLeft;
+        };
         slot.workspace.id = workspace_id;
         slot.workspace.owner = try readPrincipal(&reader);
         readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
@@ -1354,8 +1364,9 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         }
         slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
         if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+        const mutations = slot.workspace.mutation_log.entries();
         for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
-            slot.workspace.mutation_log.entry_mutations[mutation_index] = .{
+            mutations[mutation_index] = .{
                 .generation = try reader.readU32(),
                 .entry = try readEntry(&reader),
             };
@@ -1733,8 +1744,8 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     live.path_index.entries[0] = try workspace.Entry.init("documents/keep.md", ids.object(1), ids.version(1), .document);
     live.path_index.entries[1] = try workspace.Entry.init("documents/retired.md", ids.object(2), ids.version(2), .document);
     live.mutation_log.entry_mutation_count = 2;
-    live.mutation_log.entry_mutations[0] = .{ .generation = 1, .entry = live.path_index.entries[0] };
-    live.mutation_log.entry_mutations[1] = .{ .generation = 2, .entry = live.path_index.entries[1] };
+    live.mutation_log.entries()[0] = .{ .generation = 1, .entry = live.path_index.entries[0] };
+    live.mutation_log.entries()[1] = .{ .generation = 2, .entry = live.path_index.entries[1] };
     live.share_table.share_grant_count = 2;
     live.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 42 } };
     live.share_table.share_grants[1] = .{ .principal_id = .{ .kind = .user, .serial = 43 } };
@@ -1744,7 +1755,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     live.staging.transaction_open = true;
     live.staging.staged_entry_count = 1;
     live.staging.staged_effective_entry_count = 2;
-    live.mutation_log.entry_mutations[live.mutation_log.entry_mutation_count] = .{
+    live.mutation_log.entries()[live.mutation_log.entry_mutation_count] = .{
         .entry = try workspace.Entry.init("documents/staged-secret.md", ids.object(3), ids.version(3), .document),
     };
 
@@ -1759,7 +1770,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     replacement.path_index.entry_count = 1;
     replacement.path_index.entries[0] = try workspace.Entry.init("documents/current.md", ids.object(4), ids.version(4), .document);
     replacement.mutation_log.entry_mutation_count = 1;
-    replacement.mutation_log.entry_mutations[0] = .{ .generation = 7, .entry = replacement.path_index.entries[0] };
+    replacement.mutation_log.entries()[0] = .{ .generation = 7, .entry = replacement.path_index.entries[0] };
     replacement.share_table.share_grant_count = 1;
     replacement.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 44 } };
     replacement.recoverable_deletes.deleted_count = 1;
@@ -1776,13 +1787,13 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     try std.testing.expectEqual(@as(usize, 1), live.path_index.entry_count);
     try std.testing.expectEqualStrings("documents/current.md", live.path_index.entries[0].pathSlice());
     try std.testing.expectEqualDeep(workspace.Entry{}, live.path_index.entries[1]);
-    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entry_mutations[1]);
+    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[1]);
     try std.testing.expectEqual(principal.PrincipalKind.service, live.share_table.share_grants[1].principal_id.kind);
     try std.testing.expectEqual(@as(u64, 0), live.share_table.share_grants[1].principal_id.serial);
     try std.testing.expectEqualDeep(workspace.Entry{}, live.recoverable_deletes.deleted_entries[1]);
     try std.testing.expect(!live.staging.transaction_open);
     try std.testing.expectEqual(@as(usize, 0), live.staging.staged_entry_count);
-    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entry_mutations[2]);
+    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[2]);
 }
 
 test "storage append rejects issuance watermark rewind" {
