@@ -15,6 +15,7 @@ pub const MAX_INTERFACE_NAME_BYTES: usize = 64;
 pub const MAX_PERMISSIONS_PER_BUNDLE: usize = 16;
 pub const MAX_PERMISSION_RESOURCE_BYTES: usize = 96;
 pub const MAX_PERMISSION_REASON_BYTES: usize = 128;
+pub const MAX_PERMISSION_TEXT_BYTES_PER_REVISION: usize = 4096;
 pub const MAX_BACKGROUND_TASKS_PER_BUNDLE: usize = 8;
 pub const MAX_BACKGROUND_TASK_ID_BYTES: usize = 48;
 pub const MAX_MODEL_FAMILY_BYTES: usize = 48;
@@ -136,10 +137,25 @@ pub const StoredInterface = struct {
     }
 };
 
+pub const PermissionTextRef = struct {
+    offset: u16 = 0,
+    len: u8 = 0,
+    reserved: u8 = 0,
+
+    pub fn slice(self: PermissionTextRef, text: []const u8) []const u8 {
+        const start: usize = self.offset;
+        const end = start + self.len;
+        std.debug.assert(end <= text.len);
+        return text[start..end];
+    }
+};
+
 pub const StoredPermission = struct {
+    pub const max_resource_bytes = MAX_PERMISSION_RESOURCE_BYTES;
+    pub const max_reason_bytes = MAX_PERMISSION_REASON_BYTES;
+
     kind: manifest.PermissionKind = .object_access,
-    resource_len: usize = 0,
-    resource: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
+    resource: PermissionTextRef = .{},
     rights: @FieldType(manifest.PermissionRequest, "rights") = .{ .policy = .{} },
     required: bool = true,
     local_only: bool = false,
@@ -149,39 +165,34 @@ pub const StoredPermission = struct {
     sensitivity: manifest.DataSensitivity = .internal_data,
     purpose: manifest.PermissionPurpose = .unspecified,
     retention_days: u16 = 0,
-    user_visible_reason_len: usize = 0,
-    user_visible_reason: [MAX_PERMISSION_REASON_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_REASON_BYTES,
-    egress_object_len: usize = 0,
-    egress_object: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
-    egress_principal_len: usize = 0,
-    egress_principal: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
-    egress_service_len: usize = 0,
-    egress_service: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
-    egress_event_type_len: usize = 0,
-    egress_event_type: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
+    user_visible_reason: PermissionTextRef = .{},
+    egress_object: PermissionTextRef = .{},
+    egress_principal: PermissionTextRef = .{},
+    egress_service: PermissionTextRef = .{},
+    egress_event_type: PermissionTextRef = .{},
 
-    pub fn resourceSlice(self: *const StoredPermission) []const u8 {
-        return self.resource[0..self.resource_len];
+    pub fn resourceSlice(self: *const StoredPermission, text: []const u8) []const u8 {
+        return self.resource.slice(text);
     }
 
-    pub fn userVisibleReasonSlice(self: *const StoredPermission) []const u8 {
-        return self.user_visible_reason[0..self.user_visible_reason_len];
+    pub fn userVisibleReasonSlice(self: *const StoredPermission, text: []const u8) []const u8 {
+        return self.user_visible_reason.slice(text);
     }
 
-    pub fn egressObjectSlice(self: *const StoredPermission) []const u8 {
-        return self.egress_object[0..self.egress_object_len];
+    pub fn egressObjectSlice(self: *const StoredPermission, text: []const u8) []const u8 {
+        return self.egress_object.slice(text);
     }
 
-    pub fn egressPrincipalSlice(self: *const StoredPermission) []const u8 {
-        return self.egress_principal[0..self.egress_principal_len];
+    pub fn egressPrincipalSlice(self: *const StoredPermission, text: []const u8) []const u8 {
+        return self.egress_principal.slice(text);
     }
 
-    pub fn egressServiceSlice(self: *const StoredPermission) []const u8 {
-        return self.egress_service[0..self.egress_service_len];
+    pub fn egressServiceSlice(self: *const StoredPermission, text: []const u8) []const u8 {
+        return self.egress_service.slice(text);
     }
 
-    pub fn egressEventTypeSlice(self: *const StoredPermission) []const u8 {
-        return self.egress_event_type[0..self.egress_event_type_len];
+    pub fn egressEventTypeSlice(self: *const StoredPermission, text: []const u8) []const u8 {
+        return self.egress_event_type.slice(text);
     }
 };
 
@@ -405,6 +416,8 @@ pub const BundleRevision = struct {
     consumed_interface_count: usize = 0,
     consumed_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
     requested_permission_count: usize = 0,
+    permission_text_len: u16 = 0,
+    permission_text: [MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8 = [_]u8{0} ** MAX_PERMISSION_TEXT_BYTES_PER_REVISION,
     requested_permissions: [MAX_PERMISSIONS_PER_BUNDLE]StoredPermission = [_]StoredPermission{zeroStoredPermission()} ** MAX_PERMISSIONS_PER_BUNDLE,
     background_task_count: usize = 0,
     background_tasks: [MAX_BACKGROUND_TASKS_PER_BUNDLE]StoredBackgroundTask = [_]StoredBackgroundTask{zeroStoredBackgroundTask()} ** MAX_BACKGROUND_TASKS_PER_BUNDLE,
@@ -427,6 +440,10 @@ pub const BundleRevision = struct {
 
     pub fn sourceIdentitySlice(self: *const BundleRevision) []const u8 {
         return self.source_identity[0..self.source_identity_len];
+    }
+
+    pub fn permissionTextSlice(self: *const BundleRevision) []const u8 {
+        return self.permission_text[0..self.permission_text_len];
     }
 };
 

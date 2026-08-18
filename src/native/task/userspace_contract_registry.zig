@@ -41,7 +41,7 @@ pub fn find(bundle_id: []const u8) ?*const ContractSpec {
     return &contracts[contract_index];
 }
 
-fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot {
+fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot(BUNDLE_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
     for (contracts, 0..) |contract, contract_index| {

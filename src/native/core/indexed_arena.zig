@@ -6,6 +6,22 @@ const native_util = @import("util.zig");
 
 pub const no_index = std.math.maxInt(usize);
 
+pub fn ReusableIndex(comptime capacity: usize) type {
+    if (capacity == 0) @compileError("reusable indexes require at least one slot");
+    if (capacity <= std.math.maxInt(u8)) return u8;
+    if (capacity <= std.math.maxInt(u16)) return u16;
+    if (@bitSizeOf(usize) > 32 and capacity <= 4_294_967_295) return u32;
+    return usize;
+}
+
+pub fn reusableNoIndex(comptime capacity: usize) ReusableIndex(capacity) {
+    return @intCast(capacity);
+}
+
+inline fn publicReusableIndex(comptime capacity: usize, index: ReusableIndex(capacity)) ?usize {
+    return if (index == reusableNoIndex(capacity)) null else @intCast(index);
+}
+
 pub fn nonZeroKey(key: u64) u64 {
     return if (key == 0) 1 else key;
 }
@@ -13,14 +29,14 @@ pub fn nonZeroKey(key: u64) u64 {
 inline fn popReusableIndex(
     comptime capacity: usize,
     claimed_count: usize,
-    free_head: *?usize,
-    free_next: *[capacity]?usize,
+    free_head: *ReusableIndex(capacity),
+    free_next: *[capacity]ReusableIndex(capacity),
     next_unclaimed_index: *usize,
 ) ?usize {
-    if (free_head.*) |slot_index| {
+    if (publicReusableIndex(capacity, free_head.*)) |slot_index| {
         if (slot_index >= claimed_count) return null;
         free_head.* = free_next.*[slot_index];
-        free_next.*[slot_index] = null;
+        free_next.*[slot_index] = reusableNoIndex(capacity);
         return slot_index;
     }
 
@@ -31,24 +47,25 @@ inline fn popReusableIndex(
 
 inline fn pushReusableIndex(
     comptime capacity: usize,
-    free_head: *?usize,
-    free_next: *[capacity]?usize,
+    free_head: *ReusableIndex(capacity),
+    free_next: *[capacity]ReusableIndex(capacity),
     slot_index: usize,
 ) void {
+    if (slot_index >= capacity) native_util.impossibleByInvariant("reusable index fits its arena capacity");
     free_next.*[slot_index] = free_head.*;
-    free_head.* = slot_index;
+    free_head.* = @intCast(slot_index);
 }
 
 inline fn unlinkReusableIndex(
     comptime capacity: usize,
     claimed_count: usize,
-    free_head: *?usize,
-    free_next: *[capacity]?usize,
+    free_head: *ReusableIndex(capacity),
+    free_next: *[capacity]ReusableIndex(capacity),
     slot_index: usize,
 ) bool {
     if (slot_index >= claimed_count) return false;
     var previous: ?usize = null;
-    var current = free_head.*;
+    var current = publicReusableIndex(capacity, free_head.*);
     while (current) |current_index| {
         if (current_index >= claimed_count) return false;
         const next = free_next.*[current_index];
@@ -58,11 +75,11 @@ inline fn unlinkReusableIndex(
             } else {
                 free_head.* = next;
             }
-            free_next.*[current_index] = null;
+            free_next.*[current_index] = reusableNoIndex(capacity);
             return true;
         }
         previous = current_index;
-        current = next;
+        current = publicReusableIndex(capacity, next);
     }
     return false;
 }
@@ -70,8 +87,8 @@ inline fn unlinkReusableIndex(
 inline fn claimReusableIndex(
     comptime capacity: usize,
     claimed_count: usize,
-    free_head: *?usize,
-    free_next: *[capacity]?usize,
+    free_head: *ReusableIndex(capacity),
+    free_next: *[capacity]ReusableIndex(capacity),
     next_unclaimed_index: *usize,
     slot_index: usize,
 ) bool {
@@ -92,7 +109,7 @@ pub fn UniqueIndex(comptime capacity: usize) type {
     return struct {
         const Self = @This();
 
-        slots: [capacity]id_index.Slot = id_index.emptyTable(capacity),
+        slots: [capacity]id_index.Slot(capacity) = id_index.emptyTable(capacity),
 
         pub fn init() Self {
             return .{};
@@ -383,12 +400,14 @@ pub fn IndexedArenaWithKeyOptions(
 
     return struct {
         const Self = @This();
+        const FreeIndex = ReusableIndex(capacity);
+        const free_no_index = reusableNoIndex(capacity);
 
         slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
         slot_keys: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
-        free_next: [capacity]?usize = [_]?usize{null} ** capacity,
-        free_head: ?usize = null,
+        free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
+        free_head: FreeIndex = free_no_index,
         next_unclaimed_index: usize = 0,
         used_count: usize = 0,
         dirty_count: usize = 0,
@@ -414,8 +433,8 @@ pub fn IndexedArenaWithKeyOptions(
             }
             self.primary_index.reset();
             @memset(self.slot_keys[0..claimed_count], ids.zero(Key));
-            @memset(self.free_next[0..claimed_count], null);
-            self.free_head = null;
+            @memset(self.free_next[0..claimed_count], free_no_index);
+            self.free_head = free_no_index;
             self.next_unclaimed_index = 0;
             self.used_count = 0;
             self.dirty_count = 0;
@@ -510,11 +529,11 @@ pub fn IndexedArenaWithKeyOptions(
             comptime excludes: anytype,
         ) ?usize {
             const claimed_count = self.claimedCount();
-            var next_index = self.free_head;
+            var next_index = publicReusableIndex(capacity, self.free_head);
             var attempts: usize = 0;
             while (next_index) |slot_index| : (attempts += 1) {
                 if (slot_index >= claimed_count or attempts >= claimed_count) return null;
-                next_index = self.free_next[slot_index];
+                next_index = publicReusableIndex(capacity, self.free_next[slot_index]);
                 if (excludes(context, slot_index)) continue;
                 return slot_index;
             }
@@ -567,8 +586,8 @@ pub fn IndexedArenaWithKeyOptions(
         pub fn rebuildPrimaryIndex(self: *Self) void {
             self.primary_index.reset();
             self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
-            self.free_next = [_]?usize{null} ** capacity;
-            self.free_head = null;
+            self.free_next = [_]FreeIndex{free_no_index} ** capacity;
+            self.free_head = free_no_index;
             self.next_unclaimed_index = capacity;
             self.used_count = 0;
 
@@ -787,13 +806,15 @@ pub fn GenerationalArena(
 
     return struct {
         const Self = @This();
+        const FreeIndex = ReusableIndex(capacity);
+        const free_no_index = reusableNoIndex(capacity);
         pub const Handle = GenerationalHandle(display_name);
         pub const slot_capacity = capacity;
 
         slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
         slot_generations: [capacity]u32 = [_]u32{0} ** capacity,
-        free_next: [capacity]?usize = [_]?usize{null} ** capacity,
-        free_head: ?usize = null,
+        free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
+        free_head: FreeIndex = free_no_index,
         next_unclaimed_index: usize = 0,
         used_count: usize = 0,
 
@@ -807,9 +828,9 @@ pub fn GenerationalArena(
             while (slot_index < claimed_count) : (slot_index += 1) {
                 self.slots[slot_index] = Slot{};
                 self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
-                self.free_next[slot_index] = null;
+                self.free_next[slot_index] = free_no_index;
             }
-            self.free_head = null;
+            self.free_head = free_no_index;
             self.next_unclaimed_index = 0;
             self.used_count = 0;
         }
@@ -848,11 +869,11 @@ pub fn GenerationalArena(
             comptime excludes: anytype,
         ) ?usize {
             const claimed_count = self.claimedCount();
-            var next_index = self.free_head;
+            var next_index = publicReusableIndex(capacity, self.free_head);
             var attempts: usize = 0;
             while (next_index) |slot_index| : (attempts += 1) {
                 if (slot_index >= claimed_count or attempts >= claimed_count) return null;
-                next_index = self.free_next[slot_index];
+                next_index = publicReusableIndex(capacity, self.free_next[slot_index]);
                 if (excludes(context, slot_index)) continue;
                 return slot_index;
             }
@@ -965,6 +986,8 @@ pub fn PagedIndexedArenaWithKey(
 
     return struct {
         const Self = @This();
+        const FreeIndex = ReusableIndex(capacity);
+        const free_no_index = reusableNoIndex(capacity);
         pub const Handle = GenerationalHandle("PagedArenaHandle");
         pub const slot_capacity = capacity;
         pub const slots_per_page = page_size;
@@ -978,8 +1001,8 @@ pub fn PagedIndexedArenaWithKey(
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
         slot_keys: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
         slot_generations: [capacity]u32 = [_]u32{0} ** capacity,
-        free_next: [capacity]?usize = [_]?usize{null} ** capacity,
-        free_head: ?usize = null,
+        free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
+        free_head: FreeIndex = free_no_index,
         next_unclaimed_index: usize = 0,
         used_count: usize = 0,
 
@@ -996,10 +1019,10 @@ pub fn PagedIndexedArenaWithKey(
                 if (slot_index < claimed_count) {
                     self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
                 }
-                self.free_next[slot_index] = null;
+                self.free_next[slot_index] = free_no_index;
             }
             self.primary_index.reset();
-            self.free_head = null;
+            self.free_head = free_no_index;
             self.next_unclaimed_index = 0;
             self.used_count = 0;
         }
@@ -1011,10 +1034,10 @@ pub fn PagedIndexedArenaWithKey(
                 self.slotAt(slot_index).in_use = false;
                 self.slot_keys[slot_index] = ids.zero(Key);
                 self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
-                self.free_next[slot_index] = null;
+                self.free_next[slot_index] = free_no_index;
             }
             self.primary_index.reset();
-            self.free_head = null;
+            self.free_head = free_no_index;
             self.next_unclaimed_index = 0;
             self.used_count = 0;
         }
@@ -1117,8 +1140,8 @@ pub fn PagedIndexedArenaWithKey(
         pub fn rebuildPrimaryIndex(self: *Self) void {
             self.primary_index.reset();
             self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
-            self.free_next = [_]?usize{null} ** capacity;
-            self.free_head = null;
+            self.free_next = [_]FreeIndex{free_no_index} ** capacity;
+            self.free_head = free_no_index;
             self.next_unclaimed_index = capacity;
             self.used_count = 0;
 
@@ -1241,6 +1264,39 @@ const TestSlot = struct {
     in_use: bool = false,
     record: TestRecord = .{},
 };
+
+test "arena free lists select the narrowest lossless reusable index" {
+    try std.testing.expect(ReusableIndex(255) == u8);
+    try std.testing.expect(ReusableIndex(256) == u16);
+    try std.testing.expect(ReusableIndex(65_535) == u16);
+    try std.testing.expect(ReusableIndex(65_536) == u32);
+    try std.testing.expectEqual(@as(u8, 255), reusableNoIndex(255));
+    try std.testing.expectEqual(@as(u16, 256), reusableNoIndex(256));
+
+    const ByteArena = IndexedArena(TestSlot, 4, 8, testSlotId);
+    const WordArena = IndexedArena(TestSlot, 256, 512, testSlotId);
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(@FieldType(ByteArena, "free_next")));
+    try std.testing.expectEqual(@as(usize, 512), @sizeOf(@FieldType(WordArena, "free_next")));
+}
+
+test "arena free lists retain the highest reusable index at width boundaries" {
+    {
+        const Arena = IndexedArena(TestSlot, 255, 510, testSlotId);
+        var arena = Arena.init();
+        const highest_index: usize = 254;
+        _ = arena.reserveIndexAt(1, highest_index).?;
+        try std.testing.expect(arena.removeIndex(highest_index));
+        try std.testing.expectEqual(highest_index, arena.reserveIndex(2).?);
+    }
+    {
+        const Arena = IndexedArena(TestSlot, 256, 512, testSlotId);
+        var arena = Arena.init();
+        const highest_index: usize = 255;
+        _ = arena.reserveIndexAt(1, highest_index).?;
+        try std.testing.expect(arena.removeIndex(highest_index));
+        try std.testing.expectEqual(highest_index, arena.reserveIndex(2).?);
+    }
+}
 
 fn testSlotId(slot: *const TestSlot) u64 {
     return slot.record.id;
@@ -1388,7 +1444,7 @@ test "indexed arena can reset membership while retaining unreachable payloads" {
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
     try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
-    try std.testing.expectEqual(@as(?usize, null), arena.free_head);
+    try std.testing.expectEqual(reusableNoIndex(4), arena.free_head);
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
     try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[0]);
     try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[1]);
@@ -1676,7 +1732,7 @@ test "paged indexed arena can reset membership while retaining unreachable paylo
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
     try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
-    try std.testing.expectEqual(@as(?usize, null), arena.free_head);
+    try std.testing.expectEqual(reusableNoIndex(8), arena.free_head);
     try std.testing.expect(arena.get(51) == null);
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.getByHandle(stale_high_handle));
     try std.testing.expect(!arena.slotAt(high_slot_index).in_use);
@@ -1688,7 +1744,7 @@ test "paged indexed arena can reset membership while retaining unreachable paylo
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(parked_high_generation, arena.slot_generations[high_slot_index]);
     try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
-    try std.testing.expectEqual(@as(?usize, null), arena.free_head);
+    try std.testing.expectEqual(reusableNoIndex(8), arena.free_head);
     try std.testing.expectEqual(@as(usize, 0), arena.reserveIndex(53).?);
 
     const replacement = arena.reserveAtIndex(54, high_slot_index).?;

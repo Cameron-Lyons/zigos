@@ -1,4 +1,5 @@
 const indexed_arena = @import("core/indexed_arena.zig");
+const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
 const service_registry = @import("services/service_registry.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
@@ -79,6 +80,13 @@ pub const indexed_hot_path_tables = .{
     .indexed_arena = .{
         .tracks_used_count = @hasField(ProbeArena, "used_count"),
         .inserts_complete_values_at_exact_indexes = @hasDecl(ProbeArena, "insertIndexAt"),
+        .uses_capacity_sized_primary_index_slots = id_index.SlotIndex(256) == u8 and
+            id_index.SlotIndex(257) == u16 and
+            @sizeOf(id_index.Slot(1_536)) == 16,
+        .uses_capacity_sized_arena_free_lists = indexed_arena.ReusableIndex(255) == u8 and
+            indexed_arena.ReusableIndex(256) == u16 and
+            @sizeOf(@FieldType(ProbeArena, "free_next")) == 1 and
+            @sizeOf(@FieldType(ProbeArena, "free_head")) == 1,
     },
     .service_registry = .{
         .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),
@@ -163,6 +171,8 @@ pub const indexed_hot_path_tables = .{
     .task_runtime = .{
         .uses_task_arena = @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "reserveIndex"),
         .uses_address_space_arena = @hasDecl(@FieldType(task_runtime.Runtime, "address_spaces"), "reserveIndex"),
+        .stores_compact_task_provenance = @sizeOf(task_runtime.TaskProvenanceRecord) < @sizeOf(task_runtime.ProvenanceRecord),
+        .keeps_executable_mapping_only_in_address_space = !@hasField(task_runtime.TaskColdRecord, "userspace_image"),
         .uses_initial_component_label_index = @hasField(task_runtime.Runtime, "task_initial_component_label_index"),
         .tracks_task_state_counts = @hasField(task_runtime.Runtime, "task_state_counts"),
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
@@ -239,6 +249,9 @@ pub const indexed_hot_path_tables = .{
     },
     .package_service = .{
         .uses_bundle_arena = @hasDecl(@FieldType(package_service.Service, "slots"), "reserve"),
+        .uses_revision_permission_text_pool = @hasField(package_service.BundleRevision, "permission_text"),
+        .uses_compact_permission_text_refs = @sizeOf(@FieldType(package_service.StoredPermission, "resource")) == 4 and
+            @sizeOf(package_service.StoredPermission) < package_service.MAX_PERMISSION_RESOURCE_BYTES,
     },
     .public_store = .{
         .uses_release_arena = @hasDecl(@FieldType(public_store.Channel, "releases"), "reserveIndexAt"),
@@ -379,6 +392,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_staging_state = @hasField(workspace.WorkspaceRecord, "staging"),
         .reuses_mutation_log_tail_for_staging = !@hasField(workspace.WorkspaceStagingState, "staged_entries"),
         .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),
+        .uses_compact_path_lengths = @sizeOf(workspace.WorkspacePathLength) == 1,
         .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
         .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),
         .supports_indexed_path_lookup = @hasField(workspace.WorkspacePathIndex, "path_slots"),
@@ -399,6 +413,10 @@ pub const indexed_hot_path_tables = .{
         .tracks_latest_inserted_version = @hasField(object_store.Store, "latest_inserted_version_id"),
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
+        .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and
+            !@hasField(object_store.VersionRecord, "blob_address") and
+            !@hasField(object_store.VersionRecord, "payload_len") and
+            !@hasField(object_store.VersionRecord, "chunk_count"),
         .uses_object_type_index = @hasField(object_store.Store, "object_type_index"),
         .tracks_max_blob_payload_bytes = @hasField(object_store.Store, "max_blob_payload_bytes"),
         .exposes_max_blob_payload_bytes = @hasDecl(object_store.Store, "maxBlobPayloadBytes"),

@@ -40,19 +40,20 @@ pub fn reassignHost(
     runtime: anytype,
     component_class: anytype,
     owner_task_id: u64,
-    image_id: u64,
-    userspace_image: anytype,
+    source_address_space: anytype,
     replace_address_space_id: u64,
 ) ErrorSet!HostAssignment(ProcessClassType, NamespaceClassType) {
-    return assignHost(
+    var address_space = source_address_space;
+    address_space.instruction_pointer = address_space.entry_point;
+    address_space.stack_pointer = address_space.stack_top;
+    return assignAddressSpaceHost(
         ErrorSet,
         ProcessClassType,
         NamespaceClassType,
         runtime,
         component_class,
         owner_task_id,
-        image_id,
-        userspace_image,
+        address_space,
         replace_address_space_id,
     );
 }
@@ -117,6 +118,39 @@ fn assignHost(
     userspace_image: anytype,
     replace_address_space_id: ?u64,
 ) ErrorSet!HostAssignment(ProcessClassType, NamespaceClassType) {
+    const AddressSpaceType = AddressSpaceRecordType(@TypeOf(runtime));
+    const RegionType = AddressSpaceRegionType(@TypeOf(runtime));
+    return assignAddressSpaceHost(
+        ErrorSet,
+        ProcessClassType,
+        NamespaceClassType,
+        runtime,
+        component_class,
+        owner_task_id,
+        makeAddressSpace(
+            AddressSpaceType,
+            RegionType,
+            addressSpaceRegionCapacity(@TypeOf(runtime)),
+            0,
+            owner_task_id,
+            0,
+            image_id,
+            userspace_image,
+        ),
+        replace_address_space_id,
+    );
+}
+
+fn assignAddressSpaceHost(
+    ErrorSet: type,
+    ProcessClassType: type,
+    NamespaceClassType: type,
+    runtime: anytype,
+    component_class: anytype,
+    owner_task_id: u64,
+    address_space_template: anytype,
+    replace_address_space_id: ?u64,
+) ErrorSet!HostAssignment(ProcessClassType, NamespaceClassType) {
     const process_id = runtime.next_process_id;
     const address_space_id = runtime.next_address_space_id;
     const namespace_id = runtime.next_namespace_id;
@@ -124,23 +158,11 @@ fn assignHost(
         return error.AddressSpaceTableFull;
     }
 
-    const AddressSpaceType = AddressSpaceRecordType(@TypeOf(runtime));
-    const RegionType = AddressSpaceRegionType(@TypeOf(runtime));
-    try installAddressSpace(
-        ErrorSet,
-        runtime,
-        replace_address_space_id,
-        makeAddressSpace(
-            AddressSpaceType,
-            RegionType,
-            addressSpaceRegionCapacity(@TypeOf(runtime)),
-            address_space_id,
-            owner_task_id,
-            process_id,
-            image_id,
-            userspace_image,
-        ),
-    );
+    var address_space = address_space_template;
+    address_space.id = address_space_id;
+    address_space.owner_task_id = owner_task_id;
+    address_space.process_id = process_id;
+    try installAddressSpace(ErrorSet, runtime, replace_address_space_id, address_space);
     runtime.next_process_id = nextHostIdAfter(process_id);
     runtime.next_address_space_id = nextHostIdAfter(address_space_id);
     runtime.next_namespace_id = nextHostIdAfter(namespace_id);
