@@ -638,9 +638,9 @@ fn buildDeltaLog(
         const version_record = store.version(version_id) orelse continue;
         if (version_record.id.raw() <= root.last_version_id) continue;
         try appendVersionPayloadChunks(&writer, store, version_record);
-        const blob = store.blob(version_record.blob_address) orelse return error.CorruptImage;
+        const blob = store.versionBlob(version_record) orelse return error.CorruptImage;
         try appendBlobRecord(&writer, store, blob);
-        try appendVersionRecord(&writer, version_record);
+        try appendVersionRecord(&writer, store, version_record);
     }
 
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
@@ -833,9 +833,9 @@ fn appendObjectRecord(writer: *CursorWriter, record: *const object_store.ObjectR
     try volume_log.finishRecord(writer, header_offset);
 }
 
-fn appendVersionRecord(writer: *CursorWriter, record: *const object_store.VersionRecord) Error!void {
+fn appendVersionRecord(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.VersionRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .version_state);
-    try encodeVersionBody(writer, record);
+    try encodeVersionBody(writer, store, record);
     try volume_log.finishRecord(writer, header_offset);
 }
 
@@ -884,7 +884,8 @@ fn encodeObjectBody(writer: *CursorWriter, record: *const object_store.ObjectRec
     try writer.writeU64(record.recovery_history.latest_recoverable_version_id.raw());
 }
 
-fn encodeVersionBody(writer: *CursorWriter, record: *const object_store.VersionRecord) Error!void {
+fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.VersionRecord) Error!void {
+    const blob = store.versionBlob(record) orelse return error.CorruptImage;
     try writer.writeU64(record.id.raw());
     try writer.writeU64(record.object_id.raw());
     try writer.writeU64(record.previous_version_id.raw());
@@ -894,11 +895,11 @@ fn encodeVersionBody(writer: *CursorWriter, record: *const object_store.VersionR
         try writer.writeU64(record.parent_version_ids[parent_index].raw());
     }
     try writer.writeByte(@intFromEnum(record.object_type));
-    try writer.writeBytes(&record.blob_address);
+    try writer.writeBytes(&blob.address);
     try writer.writeBytes(&record.version_address);
     try writeMetadata(writer, record.metadata);
-    try writer.writeU32(@intCast(record.payload_len));
-    try writer.writeU16(record.chunk_count);
+    try writer.writeU32(@intCast(blob.payload_len));
+    try writer.writeU16(blob.chunk_count);
 }
 
 fn appendBlobRecord(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
@@ -1000,15 +1001,18 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
         store.versions.slots[slot_index].version.parent_version_ids[parent_index] = ids.version(try reader.readU64());
     }
     store.versions.slots[slot_index].version.object_type = try parseObjectType(try reader.readByte());
-    try reader.readBytes(&store.versions.slots[slot_index].version.blob_address);
+    var blob_address: object_store.BlobAddress = undefined;
+    try reader.readBytes(&blob_address);
     try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
     store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
-    store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU32());
-    if (store.versions.slots[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
+    const payload_len: usize = @intCast(try reader.readU32());
+    if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
     const chunk_count_value = try reader.readU16();
     if (chunk_count_value > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
-    store.versions.slots[slot_index].version.chunk_count = chunk_count_value;
-    store.versions.slots[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions.slots[slot_index].version.blob_address) orelse return error.CorruptImage;
+    const blob_slot_index = findBlobSlotIndex(store, blob_address) orelse return error.CorruptImage;
+    const blob = &store.blobSlotAtConst(blob_slot_index).blob;
+    if (blob.payload_len != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
+    store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
 }
 
 fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
@@ -1190,7 +1194,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
 
     for (&store.versions.slots) |*slot| {
         if (!slot.in_use) continue;
-        try encodeVersionBody(&writer, &slot.version);
+        try encodeVersionBody(&writer, store, &slot.version);
     }
 
     for (&workspaces.workspaces.slots) |*slot| {
@@ -1285,15 +1289,18 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
             store.versions.slots[slot_index].version.parent_version_ids[parent_index] = ids.version(try reader.readU64());
         }
         store.versions.slots[slot_index].version.object_type = try parseObjectType(try reader.readByte());
-        try reader.readBytes(&store.versions.slots[slot_index].version.blob_address);
+        var blob_address: object_store.BlobAddress = undefined;
+        try reader.readBytes(&blob_address);
         try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
         store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
-        store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU32());
-        if (store.versions.slots[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
+        const payload_len: usize = @intCast(try reader.readU32());
+        if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
         const chunk_count_value = try reader.readU16();
         if (chunk_count_value > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
-        store.versions.slots[slot_index].version.chunk_count = chunk_count_value;
-        store.versions.slots[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions.slots[slot_index].version.blob_address) orelse return error.CorruptImage;
+        const blob_slot_index = findBlobSlotIndex(store, blob_address) orelse return error.CorruptImage;
+        const blob = &store.blobSlotAtConst(blob_slot_index).blob;
+        if (blob.payload_len != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
+        store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
     }
 
     for (0..@as(usize, workspace_count_value)) |_| {
