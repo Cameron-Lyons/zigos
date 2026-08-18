@@ -393,6 +393,7 @@ pub const indexed_hot_path_tables = .{
         .persists_workspace_state = @hasDecl(storage_volume, "saveToImage"),
         .replays_state_by_primary_index = @hasDecl(storage_volume, "loadFromImage"),
         .requires_target_nvme_attachment = @hasDecl(storage_volume.Volume, "hasProductionStorageBackend"),
+        .bounds_log_io_workspace_to_one_data_region = storage_volume.IO_LOG_WORKSPACE_BYTES == storage_volume.DATA_REGION_BYTES,
         .tracks_latest_inserted_version = @hasField(object_store.Store, "latest_inserted_version_id"),
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_object_type_index = @hasField(object_store.Store, "object_type_index"),
