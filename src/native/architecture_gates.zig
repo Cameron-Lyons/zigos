@@ -228,11 +228,11 @@ pub const indexed_hot_path_tables = .{
         .uses_grant_arena = @hasDecl(@FieldType(secure_pasteboard.Service, "slots"), "reserve"),
     },
     .sensitive_capture_service = .{
-        .uses_session_arena = @hasDecl(@FieldType(sensitive_capture_service.Service, "slots"), "reserve"),
+        .uses_bounded_session_scan = sensitive_capture_service.BOUNDED_SESSION_SCAN,
+        .reclaims_inactive_session_slots = sensitive_capture_service.RECLAIMS_INACTIVE_SESSION_SLOTS,
+        .keeps_fixed_state_within_ceiling = @sizeOf(sensitive_capture_service.Service) <= sensitive_capture_service.SERVICE_SIZE_CEILING_BYTES,
         .tracks_active_sessions = @hasField(sensitive_capture_service.Service, "active_session_count"),
         .tracks_privacy_indicators = @hasField(sensitive_capture_service.Service, "privacy_indicator_counts"),
-        .uses_active_session_index = @hasField(sensitive_capture_service.Service, "active_session_index"),
-        .uses_active_kind_index = @hasField(sensitive_capture_service.Service, "active_kind_index"),
     },
     .agent_delegation_service = .{
         .uses_delegation_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "slots"), "reserve"),
