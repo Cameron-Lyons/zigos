@@ -14,6 +14,19 @@ const sync_state = @import("sync_state_support.zig");
 
 pub const MAX_PACKET_BYTES: usize = 256;
 pub const MAX_RELAY_PACKETS: usize = 16;
+pub const COMPACT_RELAY_METADATA = true;
+pub const ENCRYPTED_PACKET_SIZE_CEILING_BYTES: usize = 352;
+pub const SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES: usize = 504;
+pub const RELAY_PACKET_SLOT_SIZE_CEILING_BYTES: usize = 368;
+pub const RELAY_SIZE_CEILING_BYTES: usize = 7_040;
+pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 7_152;
+pub const TRANSPORT_SESSION_SIZE_CEILING_BYTES: usize = 288;
+
+comptime {
+    if (MAX_PACKET_BYTES > std.math.maxInt(u16) or network_policy.MAX_TARGET_BYTES > std.math.maxInt(u8)) {
+        @compileError("relay transport metadata no longer fits compact lengths");
+    }
+}
 
 pub const Error = error{
     EgressDenied,
@@ -36,14 +49,20 @@ pub const EncryptedPacket = struct {
     capability_id: u64,
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
-    ciphertext_len: usize,
+    ciphertext_len: u16,
     ciphertext: [MAX_PACKET_BYTES]u8,
     payload_digest: crypto_hash.Digest,
     encrypted: bool,
     egress_allowed: bool,
 
     pub fn ciphertextSlice(self: *const EncryptedPacket) []const u8 {
-        return self.ciphertext[0..self.ciphertext_len];
+        return self.ciphertext[0..@as(usize, self.ciphertext_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > ENCRYPTED_PACKET_SIZE_CEILING_BYTES) {
+            @compileError("encrypted relay packet exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -51,6 +70,12 @@ pub const SignedEncryptedFrame = struct {
     packet: EncryptedPacket,
     packet_digest: crypto_hash.Digest,
     signature: manifest.Signature,
+
+    comptime {
+        if (@sizeOf(@This()) > SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES) {
+            @compileError("signed encrypted relay frame exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const SessionTrustPosture = enum(u8) {
@@ -75,6 +100,12 @@ const RelayPacketSlot = struct {
     in_use: bool = false,
     packet_id: u64 = 0,
     packet: EncryptedPacket = undefined,
+
+    comptime {
+        if (@sizeOf(@This()) > RELAY_PACKET_SLOT_SIZE_CEILING_BYTES) {
+            @compileError("relay packet slot exceeds its compact size ceiling");
+        }
+    }
 };
 
 const RelayPacketArena = indexed_arena.IndexedArenaWithKey(u64, RelayPacketSlot, MAX_RELAY_PACKETS, MAX_RELAY_PACKETS * 2, relayPacketSlotId);
@@ -136,12 +167,18 @@ pub const Relay = struct {
         if (self.next_packet_id == 0) return error.RelayPacketIdExhausted;
         return self.next_packet_id;
     }
+
+    comptime {
+        if (@sizeOf(@This()) > RELAY_SIZE_CEILING_BYTES) {
+            @compileError("relay queue exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const BootedOverlayRelayService = struct {
     service_id: u64,
     task_id: u64,
-    relay_domain_len: usize = 0,
+    relay_domain_len: u8 = 0,
     relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     relay: Relay = Relay.init(),
     accepted_packets: usize = 0,
@@ -156,13 +193,13 @@ pub const BootedOverlayRelayService = struct {
             .service_id = service_id,
             .task_id = task_id,
         };
-        service.relay_domain_len = relay_domain.len;
+        service.relay_domain_len = @intCast(relay_domain.len);
         @memcpy(service.relay_domain[0..relay_domain.len], relay_domain);
         return service;
     }
 
     pub fn relayDomainSlice(self: *const BootedOverlayRelayService) []const u8 {
-        return self.relay_domain[0..self.relay_domain_len];
+        return self.relay_domain[0..@as(usize, self.relay_domain_len)];
     }
 
     pub fn submitSignedFrame(
@@ -216,6 +253,12 @@ pub const BootedOverlayRelayService = struct {
         self.rejected_packets += 1;
         return err;
     }
+
+    comptime {
+        if (@sizeOf(@This()) > BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES) {
+            @compileError("booted relay service exceeds its compact size ceiling");
+        }
+    }
 };
 
 fn relayPacketSlotId(slot: *const RelayPacketSlot) u64 {
@@ -249,7 +292,7 @@ pub const TransportSession = struct {
     capability_id: u64,
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
-    relay_domain_len: usize = 0,
+    relay_domain_len: u8 = 0,
     relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     key: crypto_hash.Digest,
     egress_decision: network_policy.EgressDecision,
@@ -264,7 +307,7 @@ pub const TransportSession = struct {
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
 
     pub fn relayDomainSlice(self: *const TransportSession) []const u8 {
-        return self.relay_domain[0..self.relay_domain_len];
+        return self.relay_domain[0..@as(usize, self.relay_domain_len)];
     }
 
     pub fn productionAttested(self: *const TransportSession) bool {
@@ -283,6 +326,12 @@ pub const TransportSession = struct {
 
     pub fn requireProductionAttestation(self: *const TransportSession) Error!void {
         if (!self.productionAttested()) return error.ProductionAttestationRequired;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > TRANSPORT_SESSION_SIZE_CEILING_BYTES) {
+            @compileError("transport session exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -403,7 +452,7 @@ pub const Harness = struct {
             .capability_id = session.capability_id,
             .source_device = session.source_device,
             .target_device = session.target_device,
-            .ciphertext_len = plaintext.len,
+            .ciphertext_len = @intCast(plaintext.len),
             .ciphertext = [_]u8{0} ** MAX_PACKET_BYTES,
             .payload_digest = digestPayload(session, plaintext),
             .encrypted = true,
@@ -482,8 +531,9 @@ pub const Harness = struct {
             .attestation_verifier_metadata_digest_bound = request.evidence.attestation_verifier_metadata_digest_bound,
             .attestation_verifier_metadata_digest = request.evidence.attestation_verifier_metadata_digest,
         };
-        session.relay_domain_len = @min(relay_domain.len, session.relay_domain.len);
-        @memcpy(session.relay_domain[0..session.relay_domain_len], relay_domain[0..session.relay_domain_len]);
+        const relay_domain_len = @min(relay_domain.len, session.relay_domain.len);
+        session.relay_domain_len = @intCast(relay_domain_len);
+        @memcpy(session.relay_domain[0..relay_domain_len], relay_domain[0..relay_domain_len]);
         self.next_session_id = nextMonotonicId(session_id);
         self.created_sessions += 1;
         return session;
@@ -669,7 +719,7 @@ fn validateSessionForCrypto(session: *const TransportSession) Error!void {
         return error.EgressDenied;
     }
     if (!session.egress_decision.allowed) return error.EgressDenied;
-    if (session.relay_domain_len > network_policy.MAX_TARGET_BYTES) return error.RelayDomainTooLong;
+    if (@as(usize, session.relay_domain_len) > network_policy.MAX_TARGET_BYTES) return error.RelayDomainTooLong;
     try validateDevicePair(session.source_device, session.target_device);
 }
 
@@ -695,13 +745,14 @@ fn decryptPacket(
     {
         return error.PacketTargetMismatch;
     }
-    if (packet.ciphertext_len > packet.ciphertext.len) return error.PacketTooLarge;
-    if (packet.ciphertext_len > plaintext_out.len) return error.PacketTooLarge;
+    const ciphertext_len: usize = @intCast(packet.ciphertext_len);
+    if (ciphertext_len > packet.ciphertext.len) return error.PacketTooLarge;
+    if (ciphertext_len > plaintext_out.len) return error.PacketTooLarge;
     var index: usize = 0;
-    while (index < packet.ciphertext_len) : (index += 1) {
+    while (index < ciphertext_len) : (index += 1) {
         plaintext_out[index] = packet.ciphertext[index] ^ session.key[index % session.key.len];
     }
-    const plaintext = plaintext_out[0..packet.ciphertext_len];
+    const plaintext = plaintext_out[0..ciphertext_len];
     const expected_digest = digestPayload(session, plaintext);
     if (!std.mem.eql(u8, &expected_digest, &packet.payload_digest)) {
         return error.PacketAuthenticationFailed;
@@ -1254,4 +1305,22 @@ test "emulated native transport denies service identity before packet transmissi
     try std.testing.expectEqual(@as(usize, 2), transport.denied_before_transmit);
     try std.testing.expectEqual(@as(usize, 1), transport.transmitted_packets);
     try std.testing.expectEqual(@as(usize, 1), transport.harness.created_sessions);
+}
+
+test "compact relay metadata preserves exact packet and domain capacities" {
+    const packet_bytes = [_]u8{0xA5} ** MAX_PACKET_BYTES;
+    var packet = std.mem.zeroes(EncryptedPacket);
+    packet.ciphertext_len = @intCast(packet_bytes.len);
+    @memcpy(&packet.ciphertext, &packet_bytes);
+    try std.testing.expectEqualSlices(u8, &packet_bytes, packet.ciphertextSlice());
+
+    const relay_domain = [_]u8{'r'} ** network_policy.MAX_TARGET_BYTES;
+    const service = try BootedOverlayRelayService.init(1, 2, &relay_domain);
+    try std.testing.expectEqual(@as(u8, network_policy.MAX_TARGET_BYTES), service.relay_domain_len);
+    try std.testing.expectEqualSlices(u8, &relay_domain, service.relayDomainSlice());
+
+    var session = std.mem.zeroes(TransportSession);
+    session.relay_domain_len = @intCast(relay_domain.len);
+    @memcpy(&session.relay_domain, &relay_domain);
+    try std.testing.expectEqualSlices(u8, &relay_domain, session.relayDomainSlice());
 }
