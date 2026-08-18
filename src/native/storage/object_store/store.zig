@@ -18,6 +18,8 @@ pub const BlobChunkSlotIndex = u16;
 pub const VersionBlobSlotIndex = u16;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
+pub const MAX_INLINE_PAYLOAD_CHUNKS: usize = 2;
+pub const MAX_INLINE_PAYLOAD_BYTES: usize = MAX_CHUNK_BYTES * MAX_INLINE_PAYLOAD_CHUNKS;
 pub const MAX_VERSION_PARENTS: usize = 2;
 pub const MAX_OBJECT_QUERY_RESULTS: usize = 16;
 pub const MAX_OBJECT_HISTORY_RESULTS: usize = 16;
@@ -357,6 +359,7 @@ pub const Error = error{
     ObjectTableFull,
     ParentMismatch,
     PayloadTooLarge,
+    PayloadRequiresStreaming,
     SigningFailed,
     TypeMismatch,
     UnsignedMetadata,
@@ -562,7 +565,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         versions: VersionArena = VersionArena.init(),
         blobs: BlobArena = BlobArena.init(),
         chunks: ChunkArena = ChunkArena.init(),
-        payload_read_buffer: [MAX_PAYLOAD_BYTES]u8 = undefined,
+        inline_payload_read_buffer: [MAX_INLINE_PAYLOAD_BYTES]u8 = undefined,
 
         pub fn init() Self {
             return .{};
@@ -856,10 +859,12 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return model;
         }
 
+        /// Materializes small objects into store-owned scratch memory. Larger objects remain
+        /// available through versionChunkCursor, versionPayloadInto, or shared-memory transfer.
         pub fn versionPayload(self: *Self, version_record: *const VersionRecord) Error![]const u8 {
             const blob_record = try self.checkedVersionBlob(version_record);
-            if (blob_record.payload_len > self.payload_read_buffer.len) return error.PayloadTooLarge;
-            return self.versionPayloadInto(version_record, self.payload_read_buffer[0..blob_record.payload_len]);
+            if (blob_record.payload_len > self.inline_payload_read_buffer.len) return error.PayloadRequiresStreaming;
+            return self.versionPayloadInto(version_record, self.inline_payload_read_buffer[0..blob_record.payload_len]);
         }
 
         pub fn versionChunkCursor(self: *Self, version_record: *const VersionRecord) Error!VersionChunkCursor {

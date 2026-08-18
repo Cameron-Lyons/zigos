@@ -696,15 +696,15 @@ test "storage service accepts large object payloads through mapped shared memory
         .bytes = &payload,
     });
 
-    const loaded = try service.versionPayload(service.version(result.version_id).?);
-    try std.testing.expectEqualSlices(u8, &payload, loaded);
+    const version = service.version(result.version_id).?;
+    try std.testing.expectError(error.PayloadRequiresStreaming, service.versionPayload(version));
 
     const consumer_task_id = ids.task(202);
     var read_buffer: [payload.len]u8 = undefined;
     const read_object = try shared.create(consumer_task_id, payload.len);
     try shared.map(read_object.id, consumer_task_id);
     try shared.map(read_object.id, storage_task_id);
-    const read_summary = try service.versionPayloadIntoSharedMemory(service.version(result.version_id).?, .{
+    const read_summary = try service.versionPayloadIntoSharedMemory(version, .{
         .table = &shared,
         .object_id = read_object.id,
         .consumer_task_id = consumer_task_id,
