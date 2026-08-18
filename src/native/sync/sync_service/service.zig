@@ -41,6 +41,10 @@ pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
 pub const COMPACT_SERVICE_QUEUE_METADATA = true;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 89_760;
+pub const COMPACT_REPLICATION_SUMMARY_METADATA = state_support.COMPACT_REPLICATION_SUMMARY_METADATA;
+pub const REPLICATION_SUMMARY_SIZE_CEILING_BYTES = state_support.REPLICATION_SUMMARY_SIZE_CEILING_BYTES;
+pub const COMPACT_PEER_REPLICATION_RESULT_METADATA = replication_model.COMPACT_PEER_REPLICATION_RESULT_METADATA;
+pub const PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES = replication_model.PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES;
 pub const ServiceConfig = overlay_model.ServiceConfig;
 pub const TransportMode = state_support.TransportMode;
 pub const SyncSemantic = state_support.SyncSemantic;
@@ -830,7 +834,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 if (frame.encrypted) summary.encrypted_transport_count += 1;
                 try self.setReplicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash, entry.object_id, entry.version_id, mutation.generation);
             }
-            summary.conflict_count = self.countConflictsFor(workspace_id, to_device);
+            summary.conflict_count = @intCast(self.countConflictsFor(workspace_id, to_device));
             if (summary.selected_entry_count != 0 or summary.conflict_count != 0) {
                 try self.checkpoint();
             }

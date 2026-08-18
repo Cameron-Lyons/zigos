@@ -18,6 +18,9 @@ pub const MAX_DOCUMENT_VECTOR_CLOCKS: usize = 8;
 pub const COMPACT_DOCUMENT_LOG_METADATA = true;
 pub const DOCUMENT_OPERATION_SIZE_CEILING_BYTES: usize = 112;
 pub const DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES: usize = 2_472;
+pub const MEDIA_REPLICATION_CHUNK_BYTES: usize = 128;
+pub const MAX_MEDIA_REPLICATION_CHUNKS: usize =
+    (object_store.MAX_PAYLOAD_BYTES + MEDIA_REPLICATION_CHUNK_BYTES - 1) / MEDIA_REPLICATION_CHUNK_BYTES;
 const DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES: usize = 160;
 const DOCUMENT_MERGE_TEST_BUFFER_BYTES: usize = 96;
 const DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES: usize = 128;
@@ -601,13 +604,12 @@ pub const default_chunk_media_adapter = DefaultChunkMediaAdapter.adapter();
 pub const default_secret_transfer_adapter = DefaultSecretTransferAdapter.adapter();
 pub const default_database_sync_adapter = DefaultDatabaseSyncAdapter.adapter();
 
-const PAYLOAD_CHUNK_BYTES: usize = 128;
 const VERSION_PREFIX_BUFFER_BYTES: usize = 16;
 const SMALL_DOCUMENT_MERGE_BUFFER_BYTES: usize = 8;
 
 fn chunkCountForPayload(payload_len: usize) usize {
     if (payload_len == 0) return 0;
-    return (payload_len + PAYLOAD_CHUNK_BYTES - 1) / PAYLOAD_CHUNK_BYTES;
+    return (payload_len + MEDIA_REPLICATION_CHUNK_BYTES - 1) / MEDIA_REPLICATION_CHUNK_BYTES;
 }
 
 fn versionStartsWith(

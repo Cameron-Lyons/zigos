@@ -473,6 +473,19 @@ pub const indexed_hot_path_tables = .{
             @FieldType(sync_service.Service, "next_outbound_transport_frame_slot_index") == u8 and
             @FieldType(sync_service.Service, "next_inbound_transport_frame_slot_index") == u8 and
             @FieldType(sync_service.Service, "active_overlay_session_count") == u8,
+        .stores_compact_replication_result_metadata = sync_service.COMPACT_REPLICATION_SUMMARY_METADATA and
+            sync_service.COMPACT_PEER_REPLICATION_RESULT_METADATA and
+            @FieldType(sync_service.ReplicationSummary, "selected_entry_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "skipped_entry_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "snapshot_count") == u16 and
+            @FieldType(sync_service.ReplicationSummary, "conflict_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "transport_frame_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "accepted_frame_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "persisted_object_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "relay_delivery_count") == u32 and
+            @FieldType(sync_service.PeerReplicationResult, "payload_bytes") == u32,
+        .keeps_replication_results_within_ceilings = @sizeOf(sync_service.ReplicationSummary) <= sync_service.REPLICATION_SUMMARY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.PeerReplicationResult) <= sync_service.PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES,
         .stores_compact_sync_record_metadata = sync_state_support.COMPACT_RECORD_METADATA and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_count") == u8 and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_lens") == [sync_state_support.MAX_SELECTIVE_PREFIXES]u8 and

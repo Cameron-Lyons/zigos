@@ -344,10 +344,10 @@ test "sync service requires database contract before transactional workspace rep
         tablet,
         .device_to_device,
     );
-    try std.testing.expectEqual(@as(usize, 2), summary.selected_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.merged_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.transactional_count);
-    try std.testing.expectEqual(@as(usize, 2), summary.transport_frame_count);
+    try std.testing.expectEqual(@as(u8, 2), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.merged_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.transactional_count);
+    try std.testing.expectEqual(@as(u8, 2), summary.transport_frame_count);
     try std.testing.expectEqual(summary.transport_frame_count, summary.encrypted_transport_count);
     try std.testing.expectEqual(document.version_id.raw(), service.replicaVersion(workspace_record.id.raw(), tablet, "documents/notes.md").?);
     try std.testing.expectEqual(db_events.version_id.raw(), service.replicaVersion(workspace_record.id.raw(), tablet, "databases/app.notes.db/events").?);
@@ -461,8 +461,8 @@ test "sync service persists durable transport queues and enforces replay and wor
         tablet,
         .device_to_device,
     );
-    try std.testing.expectEqual(@as(usize, 1), summary.selected_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.transport_frame_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.transport_frame_count);
     try std.testing.expectEqual(@as(usize, 1), resident.outboundTransportFrameCount());
     const frame_path_key = sync_indexes.transportFramePathLookupKey(workspace_record.id.raw(), tablet, path);
     try std.testing.expectEqual(@as(usize, 1), service.outbound_transport_path_index.count(frame_path_key));
@@ -744,11 +744,11 @@ test "sync service treats per-object shares and conflict review as local-first p
         tablet,
         .device_to_device,
     );
-    try std.testing.expectEqual(@as(usize, 1), summary.selected_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.skipped_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.share_denied_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.transport_frame_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.skipped_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.share_denied_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.conflict_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.transport_frame_count);
     try std.testing.expect(service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, private_path) == null);
 
     try std.testing.expectError(error.TransportDenied, port.acceptTransportFrame(authority, &storage, .{
@@ -1018,11 +1018,11 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     try std.testing.expect(summary.overlay_ready);
     try std.testing.expect(summary.remote_access_ready);
     try std.testing.expect(summary.private_service_published);
-    try std.testing.expectEqual(@as(usize, 1), summary.selected_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.merged_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.transport_frame_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.encrypted_transport_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.merged_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.conflict_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.transport_frame_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.encrypted_transport_count);
     try std.testing.expect(source_sync.findConflict(workspace_id, tablet, path) != null);
 
     const frame = source_sync.latestTransportFrameForPath(workspace_id, tablet, path) orelse return error.MissingTransportFrame;
@@ -1107,8 +1107,8 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     var restarted_source_port = sync_service.SyncPort.init(&restarted_source_sync, &restarted_source_capabilities);
     const restarted_source_authority = syncAuthority(&restarted_source_sync, sync_owner, restarted_source_authority_capability, 60);
     const restarted_clean = try restarted_source_port.replicateWorkspace(restarted_source_authority, &restarted_source_storage, workspace_id, laptop, tablet, .relay_assisted);
-    try std.testing.expectEqual(@as(usize, 0), restarted_clean.selected_entry_count);
-    try std.testing.expectEqual(@as(usize, 0), restarted_clean.transport_frame_count);
+    try std.testing.expectEqual(@as(u8, 0), restarted_clean.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 0), restarted_clean.transport_frame_count);
 
     source_checkpoint_store.resetPersistent();
     target_checkpoint_store.resetPersistent();
@@ -1434,19 +1434,19 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expect(result.summary.personal_e2ee);
     try std.testing.expect(result.summary.used_relay);
     try std.testing.expect(result.summary.overlay_ready);
-    try std.testing.expectEqual(@as(usize, 4), result.summary.selected_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), result.summary.merged_count);
+    try std.testing.expectEqual(@as(u8, 4), result.summary.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), result.summary.merged_count);
     try std.testing.expect(result.summary.snapshot_count > 1);
-    try std.testing.expectEqual(@as(usize, 1), result.summary.secret_transfer_count);
-    try std.testing.expectEqual(@as(usize, 1), result.summary.transactional_count);
-    try std.testing.expectEqual(@as(usize, 1), result.summary.conflict_count);
-    try std.testing.expectEqual(@as(usize, 4), result.accepted_frame_count);
-    try std.testing.expectEqual(@as(usize, 4), result.persisted_object_count);
+    try std.testing.expectEqual(@as(u8, 1), result.summary.secret_transfer_count);
+    try std.testing.expectEqual(@as(u8, 1), result.summary.transactional_count);
+    try std.testing.expectEqual(@as(u8, 1), result.summary.conflict_count);
+    try std.testing.expectEqual(@as(u8, 4), result.accepted_frame_count);
+    try std.testing.expectEqual(@as(u8, 4), result.persisted_object_count);
     const expected_relay_deliveries = 3 + (media_payload.len + sync_transport.MAX_NATIVE_PAYLOAD_BYTES - 1) / sync_transport.MAX_NATIVE_PAYLOAD_BYTES;
-    try std.testing.expectEqual(@as(usize, expected_relay_deliveries), result.relay_delivery_count);
+    try std.testing.expectEqual(@as(u32, expected_relay_deliveries), result.relay_delivery_count);
     try std.testing.expect(result.used_booted_relay_service);
     const expected_payload_bytes = "source edit".len + media_payload.len + secret_payload.len + database_payload.len;
-    try std.testing.expectEqual(@as(usize, expected_payload_bytes), result.payload_bytes);
+    try std.testing.expectEqual(@as(u32, expected_payload_bytes), result.payload_bytes);
     try std.testing.expectEqual(@as(usize, expected_relay_deliveries), relay_service.accepted_packets);
     try std.testing.expectEqual(@as(usize, expected_relay_deliveries), relay_service.delivered_packets);
     try std.testing.expectEqual(@as(usize, 1), target_resident.databaseContractCount());
@@ -1682,12 +1682,12 @@ test "sync service covers device graph policy replication semantics and restart 
     try std.testing.expect(summary.overlay_ready);
     try std.testing.expect(summary.remote_access_ready);
     try std.testing.expect(summary.private_service_published);
-    try std.testing.expectEqual(@as(usize, 2), summary.selected_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.skipped_entry_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.merged_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.snapshot_count);
-    try std.testing.expectEqual(@as(usize, 2), summary.transport_frame_count);
-    try std.testing.expectEqual(@as(usize, 2), summary.encrypted_transport_count);
+    try std.testing.expectEqual(@as(u8, 2), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.skipped_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.merged_count);
+    try std.testing.expectEqual(@as(u16, 1), summary.snapshot_count);
+    try std.testing.expectEqual(@as(u8, 2), summary.transport_frame_count);
+    try std.testing.expectEqual(@as(u8, 2), summary.encrypted_transport_count);
     try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(notes_id, tablet));
     const notes_frame = service.latestTransportFrameForPath(notes_id, tablet, "documents/notes.md").?;
     try std.testing.expect(notes_frame.encrypted);
@@ -1739,11 +1739,11 @@ test "sync service covers device graph policy replication semantics and restart 
         .encrypted = true,
         .path = "documents/notes.md",
     }));
-    try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.conflict_count);
     try std.testing.expect(service.findConflict(notes_id, tablet, "documents/notes.md") != null);
     const clean_summary = try service_port.replicateWorkspace(service_authority, &storage, notes_id, laptop, tablet, .device_to_device);
-    try std.testing.expectEqual(@as(usize, 0), clean_summary.selected_entry_count);
-    try std.testing.expectEqual(@as(usize, 0), clean_summary.transport_frame_count);
+    try std.testing.expectEqual(@as(u8, 0), clean_summary.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 0), clean_summary.transport_frame_count);
 
     try std.testing.expect(try service_port.transferSecretObject(service_authority, &storage, notes_id, secret.object_id, laptop, tablet, .device_to_device));
     const contract = try service_port.registerDatabaseContract(service_authority, notes_id, "app.db.notes", "notes-db", contract_signer);
