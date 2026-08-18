@@ -25,10 +25,11 @@ pub const required_device_sectors = volume_layout.required_device_sectors;
 pub const max_signer_bytes = volume_layout.max_signer_bytes;
 pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
+pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
+pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
 
 const data_start_byte = volume_layout.data_start_byte;
-const data_capacity_bytes = volume_layout.data_capacity_bytes;
-const data_region_bytes = volume_layout.data_region_bytes;
+const data_region_bytes = DATA_REGION_BYTES;
 const alternate_data_region_offset = volume_layout.alternate_data_region_offset;
 const max_replay_log_records = volume_layout.max_replay_log_records;
 const max_log_segments = volume_layout.max_log_segments;
@@ -83,7 +84,7 @@ pub const Backend = volume_backend.Backend;
 pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 
 pub const Volume = struct {
-    io_log_buffer: [data_capacity_bytes]u8 = undefined,
+    io_log_buffer: [IO_LOG_WORKSPACE_BYTES]u8 = undefined,
     sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size,
     attached_backend_present: bool = false,
     attached_backend_sector_count: u64 = 0,
@@ -311,33 +312,33 @@ fn saveIncremental(
     }
     const delta = if (current) |loaded|
         if (can_append)
-            try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
+            try tryBuildAppendDelta(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
         else
-            BuiltLog{}
+            null
     else
-        BuiltLog{};
+        null;
 
     if (current != null and !can_append) try flushWrites(writer);
 
-    if (can_append and delta.bytes_len == 0) {
+    if (can_append and delta != null and delta.?.bytes_len == 0) {
         if (started_dirty) try flushWrites(writer);
         store.clearDirty();
         workspaces.clearDirty();
         return .{ .generation = current_generation };
     }
 
-    if (can_append and appendLogFits(current.?.root, delta)) {
+    if (can_append and delta != null and appendLogFits(current.?.root, delta.?)) {
         const next_generation = current_generation + 1;
         const data_offset = current.?.root.data_offset;
-        const next_log_bytes = current.?.root.log_bytes + @as(u32, @intCast(delta.bytes_len));
+        const next_log_bytes = current.?.root.log_bytes + @as(u32, @intCast(delta.?.bytes_len));
         var next_root = try buildRootState(next_generation, next_log_bytes, store, workspaces, state_hashes);
         next_root.data_offset = data_offset;
-        next_root.log_record_count = current.?.root.log_record_count + delta.record_count;
-        next_root.log_segment_count = current.?.root.log_segment_count + delta.segment_count;
+        next_root.log_record_count = current.?.root.log_record_count + delta.?.record_count;
+        next_root.log_segment_count = current.?.root.log_segment_count + delta.?.segment_count;
         next_root.compacted_generation = current.?.root.compacted_generation;
         const next_root_sector = volume_root_slot.nextRootSector(current);
 
-        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, self.io_log_buffer[0..delta.bytes_len]);
+        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, self.io_log_buffer[0..delta.?.bytes_len]);
         try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
         try flushWrites(writer);
@@ -663,6 +664,19 @@ fn buildDeltaLog(
         .bytes_len = writer.offset,
         .record_count = countLogRecords(buffer[0..writer.offset]) catch return error.CorruptImage,
         .segment_count = 1,
+    };
+}
+
+fn tryBuildAppendDelta(
+    buffer: []u8,
+    root: RootState,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+    state_hashes: *WorkspaceStateHashCache,
+) Error!?BuiltLog {
+    return buildDeltaLog(buffer, root, store, workspaces, state_hashes) catch |err| switch (err) {
+        error.NoSpaceLeft => null,
+        else => return err,
     };
 }
 
@@ -1535,9 +1549,28 @@ fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.Blo
     return store.blobSlotIndex(address);
 }
 
-test "storage volume keeps only the final log io workspace" {
+test "storage volume bounds its log io workspace to one durable data region" {
     try std.testing.expect(@hasField(Volume, "io_log_buffer"));
     try std.testing.expect(!@hasField(Volume, "io_payload_buffer"));
+    try std.testing.expectEqual(DATA_REGION_BYTES, IO_LOG_WORKSPACE_BYTES);
+    try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
+}
+
+test "append workspace exhaustion falls back to checkpoint compaction" {
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    store.* = object_store.Store.init();
+    const workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(workspaces);
+    workspaces.* = workspace.Directory.init();
+    var state_hashes = WorkspaceStateHashCache{};
+    var exhausted_workspace: [0]u8 = .{};
+
+    try std.testing.expectEqual(
+        @as(?BuiltLog, null),
+        try tryBuildAppendDelta(&exhausted_workspace, .{}, store, workspaces, &state_hashes),
+    );
 }
 
 test "checkpoint records accept exact capacity and reject one byte less" {
