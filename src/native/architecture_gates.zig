@@ -172,6 +172,7 @@ pub const indexed_hot_path_tables = .{
         .uses_task_arena = @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "reserveIndex"),
         .uses_address_space_arena = @hasDecl(@FieldType(task_runtime.Runtime, "address_spaces"), "reserveIndex"),
         .stores_compact_task_provenance = @sizeOf(task_runtime.TaskProvenanceRecord) < @sizeOf(task_runtime.ProvenanceRecord),
+        .keeps_executable_mapping_only_in_address_space = !@hasField(task_runtime.TaskColdRecord, "userspace_image"),
         .uses_initial_component_label_index = @hasField(task_runtime.Runtime, "task_initial_component_label_index"),
         .tracks_task_state_counts = @hasField(task_runtime.Runtime, "task_state_counts"),
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),

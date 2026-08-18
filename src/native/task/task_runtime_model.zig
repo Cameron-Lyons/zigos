@@ -427,7 +427,6 @@ pub const TaskColdRecord = struct {
     capability_generation: u64 = 1,
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
     provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord = [_]TaskProvenanceRecord{TaskProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
-    userspace_image: ExecutableImageSpec = .{},
 };
 
 pub const TaskRecord = struct {
@@ -462,6 +461,7 @@ pub const TaskRecord = struct {
     last_background_tick: u64 = 0,
     zero_ambient_authority: bool,
     local_only: bool,
+    executable_loaded: bool,
     launch: LaunchProvenanceRecord,
     cold_state: ?*TaskColdRecord,
 
@@ -500,12 +500,8 @@ pub const TaskRecord = struct {
         return taskColdConst(self).capability_generation;
     }
 
-    pub fn userspaceImage(self: *const TaskRecord) *const ExecutableImageSpec {
-        return &taskColdConst(self).userspace_image;
-    }
-
     pub fn hasLoadedExecutable(self: *const TaskRecord) bool {
-        return self.userspaceImage().isPresent();
+        return self.executable_loaded;
     }
 
     pub fn auditEventAt(self: *const TaskRecord, index: usize) ?AuditEvent {
@@ -634,6 +630,7 @@ pub fn zeroTask() TaskRecord {
         .last_background_tick = 0,
         .zero_ambient_authority = true,
         .local_only = false,
+        .executable_loaded = false,
         .launch = zeroLaunchProvenance(),
         .cold_state = null,
     };
@@ -662,8 +659,7 @@ pub fn reassignHost(
     self: anytype,
     component_class: ComponentClass,
     owner_task_id: u64,
-    image_id: u64,
-    userspace_image: ExecutableImageSpec,
+    address_space: AddressSpaceRecord,
     replace_address_space_id: u64,
 ) Error!runtime_host.HostAssignment(ProcessClass, NamespaceClass) {
     return runtime_host.reassignHost(
@@ -673,8 +669,7 @@ pub fn reassignHost(
         self,
         component_class,
         owner_task_id,
-        image_id,
-        userspace_image,
+        address_space,
         replace_address_space_id,
     );
 }
@@ -698,7 +693,6 @@ pub fn copyTaskColdForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, ta
     dest.capability_generation = src.capability_generation;
     copyAuditTrailForTask(dest, src, task);
     copyProvenanceTrailForTask(dest, src, task);
-    dest.userspace_image = src.userspace_image;
 }
 
 fn copyAuditTrailForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
