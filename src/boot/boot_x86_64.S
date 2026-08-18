@@ -2,11 +2,33 @@
 .align 8
 .equ MULTIBOOT2_HEADER_MAGIC, 0xe85250d6
 .equ MULTIBOOT2_ARCH_I386, 0
+.equ MULTIBOOT2_HEADER_TAG_ADDRESS, 2
+.equ MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS, 3
+.extern __kernel_start
+.extern __kernel_data_end
+.extern __kernel_end
 multiboot2_header_start:
     .long MULTIBOOT2_HEADER_MAGIC
     .long MULTIBOOT2_ARCH_I386
     .long multiboot2_header_end - multiboot2_header_start
     .long -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT2_ARCH_I386 + (multiboot2_header_end - multiboot2_header_start))
+
+    # Load the contiguous kernel image directly instead of asking the
+    # bootloader to relocate each ELF program and metadata section.
+    .short MULTIBOOT2_HEADER_TAG_ADDRESS
+    .short 0
+    .long 24
+    .long multiboot2_header_start
+    .long __kernel_start
+    .long __kernel_data_end
+    .long __kernel_end
+
+    .short MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS
+    .short 0
+    .long 12
+    .long _start
+    .align 8
+
     .short 0
     .short 0
     .long 8
