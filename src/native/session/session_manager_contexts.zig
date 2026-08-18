@@ -18,8 +18,11 @@ const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const root = @import("root");
 
 pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = true;
+pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = true;
 const heap_backed_capability_table = builtin.target.os.tag == .freestanding and HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
+const heap_backed_userspace_catalog = builtin.target.os.tag == .freestanding and HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 const CapabilityTableBacking = if (heap_backed_capability_table) ?*capability.CapabilityTable else capability.CapabilityTable;
+const UserspaceCatalogBacking = if (heap_backed_userspace_catalog) ?*userspace_loader.Catalog else userspace_loader.Catalog;
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
 else
@@ -108,8 +111,14 @@ pub const RuntimeContext = struct {
     runtime_service: task_runtime_service_mod.Service = undefined,
     userspace_executor: userspace_executor.Executor = .{},
     userspace_scheduler: userspace_scheduler.Scheduler = undefined,
-    userspace_catalog: userspace_loader.Catalog = userspace_loader.Catalog.init(),
+    userspace_catalog: UserspaceCatalogBacking = if (heap_backed_userspace_catalog) null else userspace_loader.Catalog.init(),
     constructed: bool = false,
+
+    comptime {
+        if (heap_backed_userspace_catalog and @sizeOf(@This()) > 104 * 1024) {
+            @compileError("heap-backed runtime contexts exceed their compact resident layout");
+        }
+    }
 
     pub fn init() RuntimeContext {
         return .{};
@@ -123,6 +132,35 @@ pub const RuntimeContext = struct {
         );
         self.userspace_scheduler = userspace_scheduler.Scheduler.init(&self.userspace_executor);
         self.constructed = true;
+    }
+
+    pub fn userspaceCatalog(self: *RuntimeContext) ?*userspace_loader.Catalog {
+        if (comptime heap_backed_userspace_catalog) return self.userspace_catalog;
+        return &self.userspace_catalog;
+    }
+
+    pub fn ensureUserspaceCatalog(self: *RuntimeContext) error{NoSpaceLeft}!*userspace_loader.Catalog {
+        if (self.userspaceCatalog()) |catalog| return catalog;
+        if (comptime heap_backed_userspace_catalog) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(userspace_loader.Catalog)) orelse return error.NoSpaceLeft;
+            const catalog: *userspace_loader.Catalog = @ptrCast(@alignCast(allocation));
+            catalog.initializeAllocated();
+            self.userspace_catalog = catalog;
+            return catalog;
+        }
+        return &self.userspace_catalog;
+    }
+
+    pub fn releaseUserspaceCatalog(self: *RuntimeContext) void {
+        if (comptime heap_backed_userspace_catalog) {
+            if (self.userspace_catalog) |catalog| {
+                @memset(std.mem.asBytes(catalog), 0);
+                kernel_memory.kfree(@ptrCast(catalog));
+                self.userspace_catalog = null;
+            }
+        } else {
+            self.userspace_catalog = userspace_loader.Catalog.init();
+        }
     }
 
     pub fn resetScheduler(self: *RuntimeContext) void {

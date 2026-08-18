@@ -45,6 +45,7 @@ pub const BootstrapState = session_support.BootstrapState;
 pub const ServiceBindings = session_support.ServiceBindings;
 pub const Environment = session_support.Environment;
 pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = session_contexts.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
+pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
 const NETWORK_RECEIVE_SERVICE_BUDGET: usize = 8;
 
@@ -107,6 +108,7 @@ pub const SessionManager = struct {
         }
         self.runtime_context.runtime_checkpoint_store.reset();
         self.runtime_context.runtime.reset();
+        self.runtime_context.releaseUserspaceCatalog();
         self.kernel_context.endpoint_table.deinit();
         self.kernel_context.shared_memory_table.deinit();
         self.kernel_context.releaseCapabilityTable();
@@ -156,7 +158,8 @@ pub const SessionManager = struct {
     }
 
     pub fn userspaceCatalogPtr(self: *SessionManager) *userspace_loader.Catalog {
-        return &self.runtime_context.userspace_catalog;
+        return self.runtime_context.userspaceCatalog() orelse
+            native_util.impossibleByInvariant("session userspace catalog access follows allocation");
     }
 
     pub fn userspaceSchedulerPtr(self: *SessionManager) *userspace_scheduler.Scheduler {
@@ -383,7 +386,7 @@ pub const SessionManager = struct {
 
     fn taskOwnsUiSurface(self: *SessionManager, task: *const task_runtime.TaskRecord) bool {
         if (task.state != .active or task.ui_surface_id == null or task.ui_surface_id.? == 0) return false;
-        const image = self.runtime_context.userspace_catalog.findById(task.launch.image_id) orelse return false;
+        const image = self.userspaceCatalogPtr().findById(task.launch.image_id) orelse return false;
         return (image.contract_flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
     }
 
@@ -416,7 +419,7 @@ pub const SessionManager = struct {
                 return;
             }
             if (!runtime_negative_proofs.runFreestandingAndPrint(
-                &self.runtime_context.userspace_catalog,
+                self.userspaceCatalogPtr(),
                 &self.runtime_context.runtime,
                 &self.runtime_context.userspace_scheduler,
             )) {
@@ -493,6 +496,10 @@ pub const SessionManager = struct {
         self.initialized = true;
         self.kernel_context.resetPort();
         _ = self.kernel_context.ensureCapabilityTable() catch {
+            self.failBoot();
+            return null;
+        };
+        _ = self.runtime_context.ensureUserspaceCatalog() catch {
             self.failBoot();
             return null;
         };
@@ -612,7 +619,7 @@ pub const SessionManager = struct {
         const dispatch = self.runtime_context.userspace_scheduler.taskDispatchStats(compositor_task.id) orelse return false;
         if (dispatch.last_ui_state_revision != surface.presentation.revision) return false;
         const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
-            &self.runtime_context.userspace_catalog,
+            self.userspaceCatalogPtr(),
             &self.runtime_context.runtime,
             compositor_task.id,
         ) orelse return false;
@@ -638,7 +645,7 @@ pub const SessionManager = struct {
 
     fn printSurfacePresentationTelemetry(self: *SessionManager, task_id: u64) void {
         const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
-            &self.runtime_context.userspace_catalog,
+            self.userspaceCatalogPtr(),
             &self.runtime_context.runtime,
             task_id,
         ) orelse {
@@ -742,7 +749,7 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
 
     const ids = session_bootstrap.principals();
     try session_bootstrap.initializeUserspace(
-        &self.runtime_context.userspace_catalog,
+        self.userspaceCatalogPtr(),
         &self.runtime_context.runtime,
         self.capabilityTablePtr(),
         &self.runtime_context.userspace_scheduler,
@@ -806,7 +813,7 @@ fn launchNativeBootstrapService(
     if (launch.mode != .native_direct) return error.MissingBootstrapLaunch;
     const bundle_id = service_catalog.bundleIdForServiceClass(class) orelse return error.MissingUserspaceImage;
     return userspace_launch.launchRegisteredDirect(
-        &self.runtime_context.userspace_catalog,
+        self.userspaceCatalogPtr(),
         &self.runtime_context.runtime,
         bundle_id,
         .{
