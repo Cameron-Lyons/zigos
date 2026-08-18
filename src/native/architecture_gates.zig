@@ -93,9 +93,12 @@ pub const indexed_hot_path_tables = .{
         .uses_publisher_index = @hasField(principal.Keyring, "publisher_index"),
     },
     .capability_table = .{
-        .uses_capability_arena = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveIndex"),
+        .uses_capability_arena = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandle"),
+        .uses_generational_capability_ids = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "getByHandle"),
+        .avoids_capability_primary_index_lookups = capability.CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY == 0,
+        .avoids_capability_id_collision_probes = capability.CAPABILITY_ID_COLLISION_PROBES_PER_INSERT == 0,
         .uses_target_generation_arena = @hasDecl(@FieldType(capability.CapabilityTable, "target_generations"), "reserveIndex"),
-        .supports_direct_capability_slot_insertion = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "insertIndexAt"),
+        .supports_direct_capability_slot_insertion = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandleAt"),
         .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
         .tracks_mutation_generation = @hasField(capability.CapabilityTable, "mutation_generation"),
@@ -119,6 +122,8 @@ pub const indexed_hot_path_tables = .{
         .uses_accelerator_claim_task_index = @hasField(userspace_scheduler.Scheduler, "accelerator_claim_task_index"),
         .grants_next_accelerator_claim = @hasDecl(userspace_scheduler.Scheduler, "grantNextAcceleratorClaim"),
         .caches_ui_presentation_eligibility = userspace_scheduler.STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS == 0,
+        .uses_generational_task_handles_for_dispatch = @hasDecl(task_runtime.Runtime, "findByHandle") and
+            userspace_scheduler.SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH == 0,
     },
     .userspace_executor = .{
         .resolves_mailbox_authorities_together = @hasDecl(userspace_executor, "resolveMailboxAuthorities"),
@@ -127,6 +132,13 @@ pub const indexed_hot_path_tables = .{
         .accepts_prevalidated_task_records = @typeInfo(@TypeOf(userspace_executor.Executor.executeTask)).@"fn".params[4].type.? == *const task_runtime.TaskRecord,
         .installs_static_handoff_stack_once_per_bind = userspace_executor.STATIC_HANDOFF_STACK_INSTALLS_PER_BIND == 1,
         .avoids_steady_address_space_image_indexes = userspace_executor.STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS == 0,
+        .avoids_steady_mapping_index_lookups = @hasDecl(userspace_executor.Executor, "mappingHandle") and
+            userspace_executor.STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH == 0,
+        .uses_mapping_arena = @hasDecl(@FieldType(userspace_executor.Executor, "mappings"), "reserveHandle"),
+        .avoids_cold_mapping_slot_scans = userspace_executor.COLD_MAPPING_LINEAR_SLOT_SCANS == 0,
+        .avoids_steady_retirement_slot_scans = userspace_executor.STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH == 0,
+        .avoids_unrelated_capability_mutation_authority_scans = userspace_executor.UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS == 0,
+        .avoids_unchanged_resume_mailbox_writes = userspace_executor.UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH == 0,
     },
     .userspace_loader = .{
         .uses_image_arena = @hasDecl(@FieldType(userspace_loader.Catalog, "images"), "reserveIndex"),
