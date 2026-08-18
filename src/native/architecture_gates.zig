@@ -441,8 +441,8 @@ pub const indexed_hot_path_tables = .{
     .supervisor = .{
         .uses_service_arena = supervisor.supervisor_indexing.uses_service_arena,
         .uses_service_class_index = supervisor.supervisor_indexing.uses_service_class_index,
-        .uses_diagnostic_service_index = supervisor.supervisor_indexing.uses_diagnostic_service_index,
-        .filters_diagnostic_kind_on_service_index = supervisor.supervisor_indexing.filters_diagnostic_kind_on_service_index,
+        .scans_bounded_diagnostic_ring = supervisor.supervisor_indexing.scans_bounded_diagnostic_ring,
+        .scans_diagnostics_newest_first = supervisor.supervisor_indexing.scans_diagnostics_newest_first,
         .uses_diagnostic_ring_cursor = @hasField(supervisor.Supervisor, "next_diagnostic_slot"),
     },
     .session_bootstrap = .{
