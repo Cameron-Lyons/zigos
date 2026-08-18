@@ -17,8 +17,8 @@ const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 const record_magic = "ZGSYNCR";
-const record_version: u16 = 7;
-const record_prefix = "state/v7/";
+const record_version: u16 = 8;
+const record_prefix = "state/v8/";
 const transport_cursor_path = record_prefix ++ "qc";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
@@ -792,9 +792,9 @@ fn writeSignature(writer: *CursorWriter, signature: manifest.Signature) Error!vo
     if (signature.signer.len > state_support.MAX_LABEL_BYTES) return error.StateTooLarge;
     try writer.writeByte(1);
     try writeText(writer, signature.signer);
-    try writer.writeU16(@intCast(signature.public_key_len));
+    try writer.writeByte(signature.public_key_len);
     try writer.writeBytes(signature.public_key[0..signature.public_key_len]);
-    try writer.writeU16(@intCast(signature.value_len));
+    try writer.writeByte(signature.value_len);
     try writer.writeBytes(signature.value[0..signature.value_len]);
 }
 
@@ -802,18 +802,20 @@ fn readSignature(reader: *CursorReader, signer_storage: *[state_support.MAX_LABE
     if ((try reader.readByte()) == 0) return .{};
 
     var signature = manifest.Signature{
-        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .format = .ed25519,
         .signer = signer_storage[0..0],
     };
     var signer_len: usize = 0;
     try readTextInto(reader, signer_storage, &signer_len);
     signature.signer = signer_storage[0..signer_len];
-    signature.public_key_len = try reader.readU16();
-    if (signature.public_key_len > signature.public_key.len) return error.InvalidStateSignatureEncoding;
-    try reader.readBytes(signature.public_key[0..signature.public_key_len]);
-    signature.value_len = try reader.readU16();
-    if (signature.value_len > signature.value.len) return error.InvalidStateSignatureEncoding;
-    try reader.readBytes(signature.value[0..signature.value_len]);
+    const public_key_len = try reader.readByte();
+    if (public_key_len > signature.public_key.len) return error.InvalidStateSignatureEncoding;
+    signature.public_key_len = @intCast(public_key_len);
+    try reader.readBytes(signature.public_key[0..public_key_len]);
+    const value_len = try reader.readByte();
+    if (value_len > signature.value.len) return error.InvalidStateSignatureEncoding;
+    signature.value_len = @intCast(value_len);
+    try reader.readBytes(signature.value[0..value_len]);
     return signature;
 }
 

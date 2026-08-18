@@ -60,7 +60,7 @@ pub fn validateInstallStorageShape(
     try validateTextLen(bundle.accessibility.profile_notes, arrayFieldLen(StoredAccessibilityType, "profile_notes"), error.AccessibilityProfileTooLong);
     try validateTextLen(bundle.object_resilience.backup_format, arrayFieldLen(StoredObjectResilienceType, "backup_format"), error.ObjectBackupFormatTooLong);
     try validateTextLen(bundle.semantic_index.model_digest, arrayFieldLen(StoredSemanticIndexType, "model_digest"), error.SemanticIndexModelDigestTooLong);
-    try validateTextLen(bundle.signature.format, arrayFieldLen(StoredSignatureType, "format"), error.SignatureFormatTooLong);
+    try validateTextLen(bundle.signature.formatSlice(), arrayFieldLen(StoredSignatureType, "format"), error.SignatureFormatTooLong);
     try validateTextLen(bundle.signature.signer, arrayFieldLen(StoredSignatureType, "signer"), error.SignatureSignerTooLong);
 
     for (bundle.provided_interfaces) |interface| {
@@ -313,11 +313,11 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .model_digest = revision.semantic_index.modelDigestSlice(),
     };
     resolved.signature = .{
-        .format = revision.signature.formatSlice(),
+        .format = manifest.parseSignatureFormat(revision.signature.formatSlice()),
         .signer = revision.signature.signerSlice(),
-        .public_key_len = revision.signature.public_key_len,
+        .public_key_len = @intCast(revision.signature.public_key_len),
         .public_key = revision.signature.public_key,
-        .value_len = revision.signature.value_len,
+        .value_len = @intCast(revision.signature.value_len),
         .value = revision.signature.value,
     };
 
@@ -505,7 +505,7 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.semantic_index.model_digest_len = copyValidatedText(&revision.semantic_index.model_digest, source.semantic_index.model_digest);
 
     revision.signature = .{};
-    revision.signature.format_len = copyValidatedText(&revision.signature.format, source.signature.format);
+    revision.signature.format_len = copyValidatedText(&revision.signature.format, source.signature.formatSlice());
     revision.signature.signer_len = copyValidatedText(&revision.signature.signer, source.signature.signer);
     revision.signature.public_key_len = source.signature.public_key_len;
     revision.signature.public_key = source.signature.public_key;

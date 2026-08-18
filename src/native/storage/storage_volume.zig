@@ -1430,13 +1430,13 @@ fn writeSignature(writer: *CursorWriter, signature: anytype) Error!void {
             signature.signer
         else
             "invalid-signer";
-        const public_key_len = @min(signature.public_key_len, signature.public_key.len);
-        const value_len = @min(signature.value_len, signature.value.len);
+        const public_key_len = @min(@as(usize, signature.public_key_len), signature.public_key.len);
+        const value_len = @min(@as(usize, signature.value_len), signature.value.len);
         try writer.writeByte(1);
         try writeText(writer, signer);
-        try writer.writeU16(@intCast(public_key_len));
+        try writer.writeByte(@intCast(public_key_len));
         try writer.writeBytes(signature.public_key[0..public_key_len]);
-        try writer.writeU16(@intCast(value_len));
+        try writer.writeByte(@intCast(value_len));
         try writer.writeBytes(signature.value[0..value_len]);
         return;
     }
@@ -1455,15 +1455,17 @@ fn readSignature(self: *Volume, reader: *CursorReader) Error!@import("../policy/
     const signer = try self.internSigner(signer_storage[0..signer_len]);
 
     var signature = manifest.Signature{
-        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .format = .ed25519,
         .signer = signer,
     };
-    signature.public_key_len = try reader.readU16();
-    if (signature.public_key_len > signature.public_key.len) return error.InvalidSignatureEncoding;
-    try reader.readBytes(signature.public_key[0..signature.public_key_len]);
-    signature.value_len = try reader.readU16();
-    if (signature.value_len > signature.value.len) return error.InvalidSignatureEncoding;
-    try reader.readBytes(signature.value[0..signature.value_len]);
+    const public_key_len = try reader.readByte();
+    if (public_key_len > signature.public_key.len) return error.InvalidSignatureEncoding;
+    signature.public_key_len = @intCast(public_key_len);
+    try reader.readBytes(signature.public_key[0..public_key_len]);
+    const value_len = try reader.readByte();
+    if (value_len > signature.value.len) return error.InvalidSignatureEncoding;
+    signature.value_len = @intCast(value_len);
+    try reader.readBytes(signature.value[0..value_len]);
     return signature;
 }
 
