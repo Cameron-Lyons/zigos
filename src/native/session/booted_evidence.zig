@@ -143,7 +143,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         .driver_directory = manager.driverDirectoryPtr(),
         .storage_service_instance = manager.storageServicePtr(),
         .storage_checkpoint_store = manager.storageCheckpointStorePtr(),
-        .export_package = manager.exportPackagePtr(),
+        .export_package = manager.exportPackagePtr() catch |err| native_util.bootProofFailure("booted export package", err),
         .policy_authority = graph.state.ids.policy_authority,
         .session_service = graph.state.ids.session_service,
         .session_user = graph.state.ids.session_user,

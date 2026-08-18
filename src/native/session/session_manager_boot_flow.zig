@@ -184,8 +184,8 @@ pub const SessionManager = struct {
             native_util.impossibleByInvariant("booted storage service retains checkpoint state");
     }
 
-    pub fn exportPackagePtr(self: *SessionManager) *workspace_mod.ExportPackage {
-        return &self.native_store.export_package_buffer;
+    pub fn exportPackagePtr(self: *SessionManager) error{NoSpaceLeft}!*workspace_mod.ExportPackage {
+        return self.native_store.exportPackagePtr();
     }
 
     pub fn syncResidentStatePtr(self: *SessionManager) *sync_service_mod.ResidentState {
