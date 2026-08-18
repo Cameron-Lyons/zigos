@@ -539,7 +539,7 @@ fn launchProvenance(
         .update_channel = revision.channel,
         .data_schema_version = revision.schema_version,
         .permission_digest = revision.permission_digest,
-        .signature_format = signature.format,
+        .signature_format = signature.formatSlice(),
         .signature_signer = signature.signer,
         .signature_public_key_len = signature.public_key_len,
         .signed = signature.isComplete(),
@@ -587,7 +587,7 @@ fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const
     crypto_hash.updateInt(&hasher, "release-transparency-sequence", revision.release_transparency.sequence);
     crypto_hash.updateBytes(&hasher, "release-transparency-root", &revision.release_transparency.root);
     crypto_hash.updateBytes(&hasher, "release-transparency-log-head", &revision.release_transparency.log_head);
-    crypto_hash.updateBytes(&hasher, "signature-format", signature.format);
+    crypto_hash.updateBytes(&hasher, "signature-format", signature.formatSlice());
     crypto_hash.updateBytes(&hasher, "signature-signer", signature.signer);
     crypto_hash.updateInt(&hasher, "signature-public-key-len", signature.public_key_len);
     crypto_hash.updateBytes(&hasher, "signature-public-key", signature.publicKeySlice());

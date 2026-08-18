@@ -910,7 +910,7 @@ pub fn driverBoundaryAuditGate() !void {
         .bundle_id = "svc.driver.backlog",
         .display_name = "Backlog Driver",
         .publisher = "zigos.spec",
-        .signature = .{ .format = manifest.SIGNATURE_FORMAT_ED25519, .signer = "zigos-spec-driver" },
+        .signature = .{ .format = .ed25519, .signer = "zigos-spec-driver" },
     };
     const driver = try directory.register(.{
         .service_id = 811,
@@ -1434,7 +1434,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .bundle_id = "svc.driver.storage-boundary",
         .display_name = "Storage Boundary Driver",
         .publisher = "zigos.spec",
-        .signature = .{ .format = manifest.SIGNATURE_FORMAT_ED25519, .signer = "zigos-spec-driver" },
+        .signature = .{ .format = .ed25519, .signer = "zigos-spec-driver" },
     };
     const registered_driver = try directory.register(.{
         .service_id = storage_service.id,
@@ -1683,7 +1683,7 @@ pub fn uxRenderingGate() !void {
         .bundle_id = "app.backlog",
         .display_name = "Backlog App",
         .publisher = "zigos.spec",
-        .signature = .{ .format = manifest.SIGNATURE_FORMAT_ED25519, .signer = "zigos-spec-app" },
+        .signature = .{ .format = .ed25519, .signer = "zigos-spec-app" },
     };
     const request = manifest.PermissionRequest{
         .kind = .clipboard,

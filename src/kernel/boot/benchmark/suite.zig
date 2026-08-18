@@ -1719,7 +1719,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         .display_name = "Driver Runtime",
         .publisher = "zigos.spec",
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-driver-key",
         },
     };

@@ -149,7 +149,7 @@ pub fn explicitGrantsRequireAuthority() !void {
         .publisher = "zigos.spec",
         .requested_permissions = &bundle_requests,
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-spec-bundle",
         },
     };
@@ -360,7 +360,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
         .components = &.{.{ .id = "accounting-ui", .entry = "app.accounting.ui" }},
         .assets = &.{.{ .path = "assets/accounting/icon.svg", .content_type = "image/svg+xml" }},
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-spec-app",
         },
     };

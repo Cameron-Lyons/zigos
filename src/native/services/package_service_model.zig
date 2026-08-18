@@ -366,11 +366,11 @@ pub const StoredSignature = struct {
 
     pub fn toManifest(self: *const StoredSignature) manifest.Signature {
         return .{
-            .format = self.formatSlice(),
+            .format = manifest.parseSignatureFormat(self.formatSlice()),
             .signer = self.signerSlice(),
-            .public_key_len = self.public_key_len,
+            .public_key_len = @intCast(self.public_key_len),
             .public_key = self.public_key,
-            .value_len = self.value_len,
+            .value_len = @intCast(self.value_len),
             .value = self.value,
         };
     }

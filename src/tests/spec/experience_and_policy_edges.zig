@@ -99,7 +99,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
         .publisher = "zigos.spec",
         .requested_permissions = &requests,
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-spec-trip",
         },
     };

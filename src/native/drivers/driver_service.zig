@@ -574,7 +574,7 @@ test "driver services require signed least-privilege device authority" {
         .display_name = "Network Driver",
         .publisher = "zigos.dev",
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-driver-key",
         },
     };
@@ -990,7 +990,7 @@ test "driver services reject unsigned bundles and escalated device rights" {
         .display_name = "Storage Driver",
         .publisher = "zigos.dev",
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-driver-key",
         },
     };
@@ -1036,7 +1036,7 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
         .display_name = "Graphics Driver Runtime",
         .publisher = "zigos.spec",
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-spec-driver",
         },
     };

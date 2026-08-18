@@ -6,7 +6,7 @@ const state_support = @import("../sync_state_support.zig");
 const DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES: usize = 160;
 
 pub fn signatureEql(a: manifest.Signature, b: manifest.Signature) bool {
-    return std.mem.eql(u8, a.format, b.format) and
+    return a.format == b.format and
         std.mem.eql(u8, a.signer, b.signer) and
         a.public_key_len == b.public_key_len and
         std.mem.eql(u8, a.publicKeySlice(), b.publicKeySlice()) and

@@ -209,7 +209,7 @@ pub fn inboundSourceFrameLookupKey(
 }
 
 fn appendSignature(hash: u64, signature: manifest.Signature) u64 {
-    var next = appendHashBytes(hash, signature.format);
+    var next = appendHashBytes(hash, signature.formatSlice());
     next = appendHashBytes(next, signature.signer);
     next = appendHashBytes(next, signature.publicKeySlice());
     next = appendHashBytes(next, signature.valueSlice());
