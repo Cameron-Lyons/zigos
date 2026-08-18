@@ -291,11 +291,11 @@ pub const indexed_hot_path_tables = .{
     },
     .compositor_session = .{
         .uses_window_arena = @hasField(compositor_session.Session, "windows"),
-        .uses_review_item_arena = @hasField(compositor_session.Session, "items"),
+        .uses_review_item_arena = @hasDecl(compositor_session.ReviewItemArena, "reserveIndex"),
         .uses_task_bundle_index = @hasField(compositor_session.Session, "task_bundle_index"),
         .uses_task_window_index = @hasField(compositor_session.Session, "task_window_index"),
         .uses_reviewer_window_index = @hasField(compositor_session.Session, "reviewer_window_index"),
-        .uses_window_review_item_index = @hasField(compositor_session.Session, "window_review_item_index"),
+        .uses_window_review_item_index = @hasDecl(compositor_session.WindowReviewItemIndex, "append"),
         .tracks_visible_window_count = @hasField(compositor_session.Session, "visible_window_count"),
         .supports_indexed_task_window_ownership = @hasDecl(compositor_session.Session, "taskOwnsVisibleWindow"),
         .supports_indexed_active_window_order = @hasDecl(compositor_session.Session, "activeWindowOrderIndex"),

@@ -108,6 +108,7 @@ pub const SessionManager = struct {
         self.runtime_context.runtime.reset();
         self.kernel_context.endpoint_table.deinit();
         self.kernel_context.shared_memory_table.deinit();
+        self.recovery_context.review_compositor_session.deinit();
         self.recovery_context.diagnostic_ledger.deinit();
         self.service_graph_builder.package_service_instance.deinit();
         self.native_store.resetPersistent();
