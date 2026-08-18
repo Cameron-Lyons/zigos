@@ -1,9 +1,7 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
-const builtin = @import("builtin");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const debug_contract = @import("../security/debug_contract.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
-const id_index = @import("../core/id_index.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
@@ -29,7 +27,8 @@ pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
 pub const MAX_IMAGE_HASH_BYTES: usize = crypto_hash.digest_bytes;
 pub const INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const TASK_OWNER_INDEX_CAPACITY: usize = MAX_TASKS * 2;
-pub const CAPABILITY_INDEX_CAPACITY: usize = MAX_TASK_CAPABILITIES * 2;
+pub const TASK_CAPABILITY_SCAN_BOUND: usize = MAX_TASK_CAPABILITIES;
+pub const TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
 pub const DEFAULT_USER_STACK_SIZE_BYTES: usize = units.kibibytes(64);
 pub const USER_PAGE_SIZE: u64 = launch_helpers.USER_PAGE_SIZE;
@@ -293,13 +292,9 @@ pub const TaskCreateRequest = struct {
     userspace_image: ?*const ExecutableImageSpec = null,
 };
 
-pub const IdIndexSlot = id_index.Slot;
-pub const CapabilityIndex = indexed_arena.UniqueIndex(CAPABILITY_INDEX_CAPACITY);
-
 pub const TaskColdRecord = struct {
     execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
     capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
-    capability_index: CapabilityIndex = CapabilityIndex.init(),
     capability_generation: u64 = 1,
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
     provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]ProvenanceRecord = [_]ProvenanceRecord{ProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
@@ -366,6 +361,9 @@ pub const TaskRecord = struct {
     }
 
     pub fn capabilityIds(self: *const TaskRecord) []const u64 {
+        if (self.capability_count > TASK_CAPABILITY_SCAN_BOUND) {
+            native_util.impossibleByInvariant("task capabilities stay within their fixed scan bound");
+        }
         return taskColdConst(self).capability_ids[0..self.capability_count];
     }
 
@@ -556,10 +554,6 @@ pub fn saturatingSub(current: usize, amount: usize) usize {
     return runtime_host.saturatingSub(current, amount);
 }
 
-pub fn emptyIndexTable(comptime capacity: usize) [capacity]IdIndexSlot {
-    return id_index.emptyTable(capacity);
-}
-
 pub fn zeroTaskCold() TaskColdRecord {
     return .{};
 }
@@ -572,7 +566,6 @@ pub fn resetTaskCold(dest: *TaskColdRecord) void {
 pub fn copyTaskColdForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
     copySlots(ExecutionComponentRecord, dest.execution_components[0..task.execution_component_count], src.execution_components[0..task.execution_component_count]);
     copySlots(u64, dest.capability_ids[0..task.capability_count], src.capability_ids[0..task.capability_count]);
-    dest.capability_index = src.capability_index;
     dest.capability_generation = src.capability_generation;
     copyAuditTrailForTask(dest, src, task);
     copyProvenanceTrailForTask(dest, src, task);
@@ -640,60 +633,16 @@ pub fn zeroBytes(dest: []u8) void {
     }
 }
 
-pub fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id: u64) ?usize {
-    return id_index.lookup(capacity, table, id);
-}
-
-pub fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
-    id_index.insert(capacity, table, id, slot_index, "id indexes never store the reserved zero id");
-}
-
-pub fn indexRemove(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64) void {
-    id_index.remove(capacity, table, id);
-}
-
-pub fn indexHash(id: u64, comptime capacity: usize) usize {
-    return id_index.hash(id, capacity);
-}
-
 pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {
-    const cold = taskColdConst(task);
-    const slot_index = cold.capability_index.lookup(capability_id) orelse {
-        if (debugIndexChecksEnabled() and taskCapabilityScanIndex(task, capability_id) != null) {
-            native_util.impossibleByInvariant("task capability index missed a live capability");
-        }
-        return null;
-    };
-    if (slot_index >= task.capability_count) native_util.impossibleByInvariant("task capability index points outside live capabilities");
-    if (cold.capability_ids[slot_index] != capability_id) native_util.impossibleByInvariant("task capability index points at the wrong capability");
-    return slot_index;
-}
-
-pub fn taskHasCapability(task: *const TaskRecord, capability_id: u64) bool {
-    return taskCapabilityIndex(task, capability_id) != null;
-}
-
-fn taskCapabilityScanIndex(task: *const TaskRecord, capability_id: u64) ?usize {
-    const cold = taskColdConst(task);
-    var index: usize = 0;
-    while (index < task.capability_count) : (index += 1) {
-        if (cold.capability_ids[index] == capability_id) return index;
+    if (capability_id == 0) return null;
+    for (task.capabilityIds(), 0..) |attached_capability_id, capability_index| {
+        if (attached_capability_id == capability_id) return capability_index;
     }
     return null;
 }
 
-fn debugIndexChecksEnabled() bool {
-    return builtin.mode == .Debug;
-}
-
-pub fn rebuildCapabilityIndex(task: *TaskRecord) void {
-    const cold = taskCold(task);
-    cold.capability_index.reset();
-    var index: usize = 0;
-    while (index < task.capability_count) : (index += 1) {
-        if (cold.capability_ids[index] == 0) continue;
-        cold.capability_index.insert(cold.capability_ids[index], index);
-    }
+pub fn taskHasCapability(task: *const TaskRecord, capability_id: u64) bool {
+    return taskCapabilityIndex(task, capability_id) != null;
 }
 
 pub fn zeroAddressSpace() AddressSpaceRecord {
