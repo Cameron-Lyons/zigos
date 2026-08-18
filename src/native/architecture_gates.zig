@@ -158,7 +158,7 @@ pub const indexed_hot_path_tables = .{
         .avoids_steady_address_space_image_indexes = userspace_executor.STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS == 0,
         .avoids_steady_mapping_index_lookups = @hasDecl(userspace_executor.Executor, "mappingHandle") and
             userspace_executor.STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH == 0,
-        .uses_mapping_arena = @hasDecl(@FieldType(userspace_executor.Executor, "mappings"), "reserveHandle"),
+        .uses_mapping_arena = @hasDecl(userspace_executor.MappingArena, "reserveHandle"),
         .avoids_cold_mapping_slot_scans = userspace_executor.COLD_MAPPING_LINEAR_SLOT_SCANS == 0,
         .avoids_steady_retirement_slot_scans = userspace_executor.STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH == 0,
         .avoids_unrelated_capability_mutation_authority_scans = userspace_executor.UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS == 0,
