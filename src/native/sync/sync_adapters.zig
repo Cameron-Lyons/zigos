@@ -522,7 +522,7 @@ pub const DefaultChunkMediaAdapter = struct {
         const blob = request.store.versionBlob(version) orelse return error.BlobNotFound;
         return .{
             .snapshot_replicated = true,
-            .replicated_chunks = @max(@max(@as(usize, blob.chunk_count), chunk_count), chunkCountForPayload(blob.payload_len)),
+            .replicated_chunks = @max(@max(@as(usize, blob.chunk_count), chunk_count), chunkCountForPayload(blob.payloadLen())),
         };
     }
 };
