@@ -7,7 +7,16 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 
 pub const MAX_DELEGATIONS: usize = 16;
+pub const COMPACT_ACTIVE_DELEGATION_METADATA = true;
+pub const ACTIVE_GENERATION_BUCKET_SIZE_CEILING_BYTES: usize = 8;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_056;
 const NO_ACTIVE_GENERATION: u32 = std.math.maxInt(u32);
+
+comptime {
+    if (MAX_DELEGATIONS > std.math.maxInt(u8)) {
+        @compileError("active delegation metadata no longer fits compact counters");
+    }
+}
 
 pub const Error = event_ledger.Error || error{
     ActionBudgetExceeded,
@@ -91,7 +100,13 @@ const DelegationGenerationIndex = indexed_arena.MultimapIndex(MAX_DELEGATIONS, M
 const ActiveGenerationBucket = struct {
     in_use: bool = false,
     generation: u32 = 0,
-    active_count: usize = 0,
+    active_count: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > ACTIVE_GENERATION_BUCKET_SIZE_CEILING_BYTES) {
+            @compileError("active delegation generation bucket exceeds its compact size ceiling");
+        }
+    }
 };
 
 fn activeGenerationBucketKey(bucket: *const ActiveGenerationBucket) u64 {
@@ -110,13 +125,19 @@ pub const Service = struct {
     next_delegation_id: u64 = 1,
     minimum_generation: u32 = 1,
     slots: DelegationArena = DelegationArena.init(),
-    active_delegation_count: usize = 0,
+    active_delegation_count: u8 = 0,
     lowest_active_generation: u32 = NO_ACTIVE_GENERATION,
     delegation_generation_index: DelegationGenerationIndex = DelegationGenerationIndex.init(),
     active_generation_buckets: ActiveGenerationBucketArena = ActiveGenerationBucketArena.init(),
 
     pub fn init() Service {
         return .{};
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) {
+            @compileError("agent delegation service exceeds its compact size ceiling");
+        }
     }
 
     pub fn authorize(
@@ -263,7 +284,7 @@ pub const Service = struct {
     }
 
     pub fn activeCount(self: *const Service) usize {
-        return self.active_delegation_count;
+        return @intCast(self.active_delegation_count);
     }
 
     fn accountActiveDelegation(self: *Service, slot_index: usize, delegation: *const Delegation) void {
@@ -727,7 +748,7 @@ test "agent delegation service kill switch walks active generation index" {
     try std.testing.expectEqual(@as(usize, 2), service.delegation_generation_index.count(generationKey(2)));
     try std.testing.expectEqual(@as(usize, 1), service.delegation_generation_index.count(generationKey(5)));
     try std.testing.expectEqual(@as(usize, 3), service.active_generation_buckets.countInUse());
-    try std.testing.expectEqual(@as(usize, 2), service.active_generation_buckets.get(generationKey(2)).?.active_count);
+    try std.testing.expectEqual(@as(u8, 2), service.active_generation_buckets.get(generationKey(2)).?.active_count);
     const generation_one_bucket_slot = service.active_generation_buckets.slotIndexOf(generationKey(1)).?;
     const generation_two_bucket_slot = service.active_generation_buckets.slotIndexOf(generationKey(2)).?;
 
@@ -744,7 +765,7 @@ test "agent delegation service kill switch walks active generation index" {
     try std.testing.expectEqual(@as(usize, 1), service.active_generation_buckets.countInUse());
     try std.testing.expect(service.active_generation_buckets.get(generationKey(1)) == null);
     try std.testing.expect(service.active_generation_buckets.get(generationKey(2)) == null);
-    try std.testing.expectEqual(@as(usize, 1), service.active_generation_buckets.get(generationKey(5)).?.active_count);
+    try std.testing.expectEqual(@as(u8, 1), service.active_generation_buckets.get(generationKey(5)).?.active_count);
 
     const reused_generation = try service.authorize(&policies, subjects, .{
         .subject = subject,
@@ -956,6 +977,11 @@ test "agent delegation service ids stop at exhaustion" {
             .detail = "private full table agent session",
         }, null);
     }
+    try std.testing.expectEqual(MAX_DELEGATIONS, full_service.activeCount());
+    try std.testing.expectEqual(
+        @as(u8, MAX_DELEGATIONS),
+        full_service.active_generation_buckets.get(generationKey(1)).?.active_count,
+    );
     const next_before_full = full_service.next_delegation_id;
     try std.testing.expectError(error.DelegationTableFull, full_service.authorize(&policies, subjects, .{
         .subject = subject,
