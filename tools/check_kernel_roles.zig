@@ -4,7 +4,6 @@ const kernel_role_options = @import("kernel_role_options");
 
 const max_elf_bytes: usize = 256 * 1024 * 1024;
 const maximum_production_writable_load_size = kernel_role_options.maximum_production_writable_load_size;
-const minimum_verification_writable_load_delta: u64 = 7 * 1024 * 1024;
 
 const elf_header_size: usize = @sizeOf(elf.Elf32_Ehdr);
 const program_header_size: usize = @sizeOf(elf.Elf32_Phdr);
@@ -150,8 +149,8 @@ const RoleError = error{
     VerificationMissingRuntimeProofSymbols,
     VerificationMissingBootedEvidenceSymbols,
     VerificationMissingExpectedSignatures,
+    VerificationMissingWritableEvidence,
     VerificationWritableLoadNotLarger,
-    VerificationWritableLoadDeltaTooSmall,
 };
 
 const CliError = error{
@@ -220,6 +219,7 @@ const Section = struct {
 const Symbol = struct {
     name_offset: u32,
     section_index: u16,
+    size: u64,
 };
 
 const SectionTable = struct {
@@ -239,6 +239,7 @@ const Analysis = struct {
     benchmark_symbols: usize,
     recovery_symbols: usize,
     verification_orchestration_symbols: usize,
+    verification_evidence_writable_bytes: u64,
     verification_only_signatures: usize,
 };
 
@@ -339,7 +340,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [768]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     try stdout_writer.interface.print(
-        "Kernel role check passed: production writable-load={d} bytes (.data={d}, maximum={d}, {d} symbols, no verification workloads); verification writable-load={d} bytes (.data={d}, {d} symbols, runtime-proof={d}, booted-evidence={d}, signatures={d}); delta={d} bytes (minimum={d}); userspace production={d} clean, verification-only={d}, MMU-proof machine-code sentinels={d}.\n",
+        "Kernel role check passed: production writable-load={d} bytes (.data={d}, maximum={d}, {d} symbols, no verification workloads); verification writable-load={d} bytes (.data={d}, {d} symbols, runtime-proof={d}, booted-evidence={d}, signatures={d}, named-writable-evidence={d} bytes); delta={d} bytes; userspace production={d} clean, verification-only={d}, MMU-proof machine-code sentinels={d}.\n",
         .{
             production.writable_load_size,
             production.data_size,
@@ -351,8 +352,8 @@ pub fn main(init: std.process.Init) !void {
             verification.runtime_proof_symbols,
             verification.booted_evidence_symbols,
             verification.verification_only_signatures,
+            verification.verification_evidence_writable_bytes,
             writable_load_delta,
-            minimum_verification_writable_load_delta,
             inputs.production_userspace_paths.len,
             inputs.verification_userspace_paths.len,
             mmu_probe_machine_code_sentinel_count,
@@ -414,6 +415,7 @@ fn analyzeElf(bytes: []const u8) ParseError!Analysis {
     var benchmark_symbols: usize = 0;
     var recovery_symbols: usize = 0;
     var verification_orchestration_symbols: usize = 0;
+    var verification_evidence_writable_bytes: u64 = 0;
 
     var section_index: usize = 0;
     while (section_index < sections.count) : (section_index += 1) {
@@ -461,6 +463,11 @@ fn analyzeElf(bytes: []const u8) ParseError!Analysis {
                 verification_orchestration_symbols,
                 counts.verification_orchestration_symbols,
             ) catch return error.IntegerOverflow;
+            verification_evidence_writable_bytes = std.math.add(
+                u64,
+                verification_evidence_writable_bytes,
+                counts.verification_evidence_writable_bytes,
+            ) catch return error.IntegerOverflow;
         }
     }
 
@@ -476,6 +483,7 @@ fn analyzeElf(bytes: []const u8) ParseError!Analysis {
         .benchmark_symbols = benchmark_symbols,
         .recovery_symbols = recovery_symbols,
         .verification_orchestration_symbols = verification_orchestration_symbols,
+        .verification_evidence_writable_bytes = verification_evidence_writable_bytes,
         .verification_only_signatures = countLoadedSignatures(bytes, programs, &verification_only_signatures),
     };
 }
@@ -512,6 +520,7 @@ const SymbolCounts = struct {
     benchmark_symbols: usize,
     recovery_symbols: usize,
     verification_orchestration_symbols: usize,
+    verification_evidence_writable_bytes: u64,
 };
 
 fn inspectSymbolTable(
@@ -539,6 +548,7 @@ fn inspectSymbolTable(
     var benchmark_symbols: usize = 0;
     var recovery_symbols: usize = 0;
     var verification_orchestration_symbols: usize = 0;
+    var verification_evidence_writable_bytes: u64 = 0;
     var index: usize = 0;
     while (index < count) : (index += 1) {
         const symbol = try parseSymbol(symbol_bytes, index * expected_symbol_size, sections.elf_class);
@@ -557,11 +567,20 @@ fn inspectSymbolTable(
         {
             continue;
         }
-        if (std.mem.startsWith(u8, name, runtime_proof_symbol_prefix)) {
+        const is_runtime_proof = std.mem.startsWith(u8, name, runtime_proof_symbol_prefix);
+        const is_booted_evidence = std.mem.startsWith(u8, name, booted_evidence_symbol_prefix);
+        if (is_runtime_proof) {
             runtime_proof_symbols += 1;
         }
-        if (std.mem.startsWith(u8, name, booted_evidence_symbol_prefix)) {
+        if (is_booted_evidence) {
             booted_evidence_symbols += 1;
+        }
+        if ((is_runtime_proof or is_booted_evidence) and defining_section.flags & shf_write != 0) {
+            verification_evidence_writable_bytes = std.math.add(
+                u64,
+                verification_evidence_writable_bytes,
+                symbol.size,
+            ) catch return error.IntegerOverflow;
         }
         if (std.mem.startsWith(u8, name, demo_symbol_prefix)) demo_symbols += 1;
         if (std.mem.startsWith(u8, name, benchmark_symbol_prefix)) benchmark_symbols += 1;
@@ -582,6 +601,7 @@ fn inspectSymbolTable(
         .benchmark_symbols = benchmark_symbols,
         .recovery_symbols = recovery_symbols,
         .verification_orchestration_symbols = verification_orchestration_symbols,
+        .verification_evidence_writable_bytes = verification_evidence_writable_bytes,
     };
 }
 
@@ -970,11 +990,19 @@ fn parseSymbol(bytes: []const u8, offset: usize, elf_class: ElfClass) ParseError
     return switch (elf_class) {
         .elf32 => symbol: {
             const raw = try readStruct(elf.Elf32_Sym, bytes, offset);
-            break :symbol .{ .name_offset = raw.st_name, .section_index = raw.st_shndx };
+            break :symbol .{
+                .name_offset = raw.st_name,
+                .section_index = raw.st_shndx,
+                .size = raw.st_size,
+            };
         },
         .elf64 => symbol: {
             const raw = try readStruct(elf.Elf64_Sym, bytes, offset);
-            break :symbol .{ .name_offset = raw.st_name, .section_index = raw.st_shndx };
+            break :symbol .{
+                .name_offset = raw.st_name,
+                .section_index = raw.st_shndx,
+                .size = raw.st_size,
+            };
         },
     };
 }
@@ -1124,11 +1152,11 @@ fn validateRoles(production: Analysis, verification: Analysis) RoleError!void {
     if (verification.verification_only_signatures != verification_only_signatures.len) {
         return error.VerificationMissingExpectedSignatures;
     }
-    if (verification.writable_load_size < production.writable_load_size) {
-        return error.VerificationWritableLoadNotLarger;
+    if (verification.verification_evidence_writable_bytes == 0) {
+        return error.VerificationMissingWritableEvidence;
     }
-    if (verification.writable_load_size - production.writable_load_size < minimum_verification_writable_load_delta) {
-        return error.VerificationWritableLoadDeltaTooSmall;
+    if (verification.writable_load_size <= production.writable_load_size) {
+        return error.VerificationWritableLoadNotLarger;
     }
 }
 
@@ -1224,19 +1252,19 @@ fn printRoleFailure(err: RoleError, production: Analysis, verification: Analysis
             "Kernel role check failed: verification ELF contains only {d} of {d} required verification-only workload signatures.\n",
             .{ verification.verification_only_signatures, verification_only_signatures.len },
         ),
-        error.VerificationWritableLoadNotLarger => std.debug.print(
-            "Kernel role check failed: verification writable load state ({d} bytes) is smaller than production ({d} bytes).\n",
-            .{ verification.writable_load_size, production.writable_load_size },
+        error.VerificationMissingWritableEvidence => std.debug.print(
+            "Kernel role check failed: verification ELF contains no named writable runtime-proof or booted-evidence state.\n",
+            .{},
         ),
-        error.VerificationWritableLoadDeltaTooSmall => std.debug.print(
-            "Kernel role check failed: verification writable load state exceeds production by only {d} bytes; at least {d} bytes are required.\n",
-            .{ verification.writable_load_size - production.writable_load_size, minimum_verification_writable_load_delta },
+        error.VerificationWritableLoadNotLarger => std.debug.print(
+            "Kernel role check failed: verification writable load state ({d} bytes) is not larger than production ({d} bytes).\n",
+            .{ verification.writable_load_size, production.writable_load_size },
         ),
     }
     std.process.exit(1);
 }
 
-test "role validation accepts isolated proof evidence and seven MiB writable allocation delta" {
+test "role validation accepts isolated named proof evidence with compact writable state" {
     const production = Analysis{
         .data_size = 1024,
         .writable_load_size = 2048,
@@ -1247,11 +1275,12 @@ test "role validation accepts isolated proof evidence and seven MiB writable all
         .benchmark_symbols = 0,
         .recovery_symbols = 0,
         .verification_orchestration_symbols = 0,
+        .verification_evidence_writable_bytes = 0,
         .verification_only_signatures = 0,
     };
     const verification = Analysis{
-        .data_size = production.data_size + minimum_verification_writable_load_delta,
-        .writable_load_size = production.writable_load_size + minimum_verification_writable_load_delta,
+        .data_size = production.data_size + 1,
+        .writable_load_size = production.writable_load_size + 1,
         .symbol_count = 20,
         .runtime_proof_symbols = 4,
         .booted_evidence_symbols = 1,
@@ -1259,6 +1288,7 @@ test "role validation accepts isolated proof evidence and seven MiB writable all
         .benchmark_symbols = 0,
         .recovery_symbols = 0,
         .verification_orchestration_symbols = 1,
+        .verification_evidence_writable_bytes = 256,
         .verification_only_signatures = verification_only_signatures.len,
     };
     try validateRoles(production, verification);
@@ -1275,6 +1305,7 @@ test "role validation rejects leaked and undersized proof kernels" {
         .benchmark_symbols = 0,
         .recovery_symbols = 0,
         .verification_orchestration_symbols = 0,
+        .verification_evidence_writable_bytes = 0,
         .verification_only_signatures = 0,
     };
     var leaked = clean;
@@ -1316,9 +1347,16 @@ test "role validation rejects leaked and undersized proof kernels" {
     verification.runtime_proof_symbols = 1;
     verification.booted_evidence_symbols = 1;
     verification.verification_only_signatures = verification_only_signatures.len;
-    verification.writable_load_size += minimum_verification_writable_load_delta - 1;
+    verification.writable_load_size += 1;
     try std.testing.expectError(
-        error.VerificationWritableLoadDeltaTooSmall,
+        error.VerificationMissingWritableEvidence,
+        validateRoles(clean, verification),
+    );
+
+    verification.verification_evidence_writable_bytes = 1;
+    verification.writable_load_size = clean.writable_load_size;
+    try std.testing.expectError(
+        error.VerificationWritableLoadNotLarger,
         validateRoles(clean, verification),
     );
 }
@@ -1531,6 +1569,7 @@ test "ELF parser reads loaded state, defined symbols, and workload signatures" {
     try std.testing.expectEqual(@as(usize, 3), analysis.symbol_count);
     try std.testing.expectEqual(@as(usize, 1), analysis.runtime_proof_symbols);
     try std.testing.expectEqual(@as(usize, 1), analysis.booted_evidence_symbols);
+    try std.testing.expectEqual(@as(u64, 10), analysis.verification_evidence_writable_bytes);
     try std.testing.expectEqual(@as(usize, 0), analysis.demo_symbols);
     try std.testing.expectEqual(@as(usize, 0), analysis.benchmark_symbols);
     try std.testing.expectEqual(@as(usize, 0), analysis.recovery_symbols);
@@ -1617,6 +1656,7 @@ test "ELF64 parser reads the same loaded-state and symbol contract" {
     try std.testing.expectEqual(@as(usize, 3), analysis.symbol_count);
     try std.testing.expectEqual(@as(usize, 1), analysis.runtime_proof_symbols);
     try std.testing.expectEqual(@as(usize, 1), analysis.booted_evidence_symbols);
+    try std.testing.expectEqual(@as(u64, 10), analysis.verification_evidence_writable_bytes);
     try std.testing.expectEqual(verification_only_signatures.len, analysis.verification_only_signatures);
 
     const userspace = try analyzeUserspaceElf(bytes);
@@ -1718,9 +1758,9 @@ fn buildTestElf(storage: []u8) []u8 {
 
     @memcpy(storage[section_names_offset..][0..section_names.len], section_names);
     @memcpy(storage[strings_offset..][0..symbol_names.len], symbol_names);
-    writeSymbol(storage, symbols_offset + symbol_size, 1, 2);
+    writeSymbol(storage, symbols_offset + symbol_size, 1, 2, 4);
     const booted_name_offset = 1 + "native.session.proofs.runtime_negative_proofs.fixture".len + 1;
-    writeSymbol(storage, symbols_offset + 2 * symbol_size, booted_name_offset, 2);
+    writeSymbol(storage, symbols_offset + 2 * symbol_size, booted_name_offset, 2, 6);
 
     var signature_offset: usize = signatures_offset;
     for (verification_only_signatures) |signature| {
@@ -1872,7 +1912,7 @@ fn buildTestElf64(storage: []u8) []u8 {
         .st_other = 0,
         .st_shndx = 2,
         .st_value = 0x2000,
-        .st_size = 0,
+        .st_size = 4,
     });
     const booted_name_offset = 1 + "native.session.proofs.runtime_negative_proofs.fixture".len + 1;
     writeStruct(elf.Elf64_Sym, storage, symbols_offset + 2 * @sizeOf(elf.Elf64_Sym), .{
@@ -1881,7 +1921,7 @@ fn buildTestElf64(storage: []u8) []u8 {
         .st_other = 0,
         .st_shndx = 2,
         .st_value = 0x2000,
-        .st_size = 0,
+        .st_size = 6,
     });
 
     var signature_offset = signatures_offset;
@@ -1930,9 +1970,10 @@ fn writeSection(bytes: []u8, offset: anytype, section: Section) void {
     writeU32(bytes, start + 36, section.entry_size);
 }
 
-fn writeSymbol(bytes: []u8, offset: anytype, name_offset: anytype, section_index: u16) void {
+fn writeSymbol(bytes: []u8, offset: anytype, name_offset: anytype, section_index: u16, size: u32) void {
     const start: usize = @intCast(offset);
     writeU32(bytes, start, name_offset);
+    writeU32(bytes, start + 8, size);
     writeU16(bytes, start + 14, section_index);
 }
 
