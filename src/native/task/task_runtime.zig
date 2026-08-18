@@ -50,6 +50,7 @@ pub const ResourceBudget = model.ResourceBudget;
 pub const AuditEventKind = model.AuditEventKind;
 pub const AuditEvent = model.AuditEvent;
 pub const ProvenanceRecord = model.ProvenanceRecord;
+pub const TaskProvenanceRecord = model.TaskProvenanceRecord;
 pub const LaunchProvenanceSpec = model.LaunchProvenanceSpec;
 pub const LaunchProvenanceRecord = model.LaunchProvenanceRecord;
 pub const TaskCreateRequest = model.TaskCreateRequest;
@@ -1020,12 +1021,12 @@ fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
     const cold = taskCold(task);
     if (task.provenance_count < MAX_TASK_PROVENANCE_EVENTS) {
         const slot_index = (task.provenance_start + task.provenance_count) % MAX_TASK_PROVENANCE_EVENTS;
-        cold.provenance_trail[slot_index] = event;
+        cold.provenance_trail[slot_index] = TaskProvenanceRecord.from(event);
         task.provenance_count += 1;
         return;
     }
 
-    cold.provenance_trail[task.provenance_start] = event;
+    cold.provenance_trail[task.provenance_start] = TaskProvenanceRecord.from(event);
     task.provenance_start = (task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS;
 }
 
@@ -1492,6 +1493,46 @@ test "restoring a snapshot rebuilds authoritative indexes" {
     const pre_rehost_address_space_id = restored.find(task_id).?.address_space_id;
     try std.testing.expect(try restored.rehostTask(task_id, 2));
     try std.testing.expect(restored.findAddressSpaceConst(pre_rehost_address_space_id) == null);
+}
+
+test "snapshot restore preserves compact task denial provenance" {
+    var runtime = Runtime.init();
+    const task = try createTaskIdTestTask(&runtime, 24);
+    const denial = debug_contract.explainDenied(
+        .scope_violation,
+        "endpoint-send",
+        "endpoint_send",
+        task.id,
+        77,
+        .endpoint,
+        91,
+    );
+    try runtime.recordProvenance(task.id, debug_contract.provenance(
+        .syscall,
+        .denied,
+        55,
+        task.id,
+        0,
+        77,
+        .endpoint,
+        91,
+        "endpoint-send",
+        "scope=isolated",
+        denial,
+        0xA11CE,
+    ));
+
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    var restored = Runtime.init();
+    restored.restoreFromSnapshot(&snapshot);
+
+    const latest = restored.find(task.id).?.latestProvenanceEvent().?;
+    try std.testing.expectEqual(debug_contract.Decision.denied, latest.decision);
+    try std.testing.expectEqual(denial.reason, latest.denial_reason);
+    try std.testing.expectEqual(denial.fingerprint, latest.denial_fingerprint);
+    try std.testing.expectEqualStrings("endpoint-send", latest.operationSlice());
+    try std.testing.expectEqualStrings("scope=isolated", latest.detailSlice());
 }
 
 test "explicit resource classes override the default task classification" {
