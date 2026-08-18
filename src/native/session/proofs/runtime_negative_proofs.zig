@@ -330,7 +330,7 @@ pub fn driverAuthorityEscapeIsRejected() bool {
             .bundle_id = "zigos.system.audio-driver",
             .display_name = "Audio Driver",
             .publisher = "zigos.spec",
-            .signature = .{ .format = manifest.SIGNATURE_FORMAT_ED25519, .signer = "zigos-spec-driver" },
+            .signature = .{ .format = .ed25519, .signer = "zigos-spec-driver" },
         },
     }) catch |err| return err == error.AuthorityRightsEscalation;
     return false;

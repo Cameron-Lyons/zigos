@@ -646,7 +646,7 @@ fn proveBootedRenderedPermissionReviewSurface(
         .publisher = "zigos.local",
         .requested_permissions = &permissions,
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "booted-trip-review",
         },
     };

@@ -334,7 +334,7 @@ test "kernel bootstrap cannot publish network data-plane transports" {
             .display_name = "Network Driver",
             .publisher = "zigos.spec",
             .signature = .{
-                .format = manifest.SIGNATURE_FORMAT_ED25519,
+                .format = .ed25519,
                 .signer = "zigos-spec-driver",
             },
         },
@@ -446,7 +446,7 @@ test "runtime uses the activation tick when claiming storage authority" {
             .display_name = "Storage Driver Runtime",
             .publisher = "zigos.spec",
             .signature = .{
-                .format = manifest.SIGNATURE_FORMAT_ED25519,
+                .format = .ed25519,
                 .signer = "zigos-spec-driver",
             },
         },

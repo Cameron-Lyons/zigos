@@ -518,7 +518,7 @@ pub fn buildArtifactManifestFromGenerated(comptime generated: anytype) Error!Bui
         try manifest.addDigest(kind, entry.label, entry.digest);
     }
     var signature = policy_manifest.Signature{
-        .format = generated.signature_format,
+        .format = policy_manifest.parseSignatureFormat(generated.signature_format),
         .signer = generated.signature_signer,
         .public_key_len = generated.signature_public_key.len,
         .value_len = generated.signature_value.len,
@@ -988,7 +988,7 @@ test "driver set measurements bind signed driver records and restart generation"
         .display_name = "Network Driver",
         .publisher = "zigos.dev",
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-driver-key",
         },
     };
