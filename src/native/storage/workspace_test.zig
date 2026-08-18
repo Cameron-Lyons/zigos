@@ -620,15 +620,15 @@ test "aborting a transaction discards staged entries and reopens the workspace" 
     try directory.abortTransaction(notes.id);
     try std.testing.expect(!notes.staging.transaction_open);
     try std.testing.expectEqual(@as(usize, 0), notes.staging.staged_entry_count);
-    try std.testing.expectEqualDeep(workspace_model.EntryMutation{}, notes.mutation_log.entry_mutations[0]);
+    try std.testing.expectEqualDeep(workspace_model.EntryMutation{}, notes.mutation_log.entriesConst()[0]);
 
     try std.testing.expectError(error.EntryNotFound, directory.resolve(notes.id, "documents/notes.md"));
     try directory.beginTransaction(notes.id);
     try directory.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try directory.commit(notes.id, 11);
     try std.testing.expectEqual(@as(usize, 1), notes.mutation_log.entry_mutation_count);
-    try std.testing.expectEqualStrings("documents/notes.md", notes.mutation_log.entry_mutations[0].entry.pathSlice());
-    try std.testing.expectEqualDeep(workspace_model.EntryMutation{}, notes.mutation_log.entry_mutations[1]);
+    try std.testing.expectEqualStrings("documents/notes.md", notes.mutation_log.entriesConst()[0].entry.pathSlice());
+    try std.testing.expectEqualDeep(workspace_model.EntryMutation{}, notes.mutation_log.entriesConst()[1]);
     _ = try directory.resolve(notes.id, "documents/notes.md");
 
     try directory.beginTransaction(notes.id);
@@ -656,7 +656,7 @@ test "workspace staging is bounded by the unused mutation-log tail" {
     try directory.abortTransaction(workspace.id);
     try std.testing.expectEqualDeep(
         workspace_model.EntryMutation{},
-        workspace.mutation_log.entry_mutations[MAX_WORKSPACE_ENTRY_MUTATIONS - 1],
+        workspace.mutation_log.entriesConst()[MAX_WORKSPACE_ENTRY_MUTATIONS - 1],
     );
 }
 
