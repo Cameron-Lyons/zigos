@@ -78,6 +78,15 @@ const EndpointArena = indexed_arena.GenerationalArena("EndpointId", EndpointSlot
 const EndpointHandle = EndpointArena.Handle;
 const EndpointOwnerIndex = indexed_arena.MultimapIndex(MAX_ENDPOINTS, MAX_ENDPOINTS, ENDPOINT_INDEX_CAPACITY);
 
+pub const TaskRetirement = struct {
+    endpoint_count: u16 = 0,
+    endpoint_ids: [MAX_ENDPOINTS]ids.EndpointId = [_]ids.EndpointId{ids.EndpointId.zero} ** MAX_ENDPOINTS,
+
+    pub fn retiredEndpointIds(self: *const TaskRetirement) []const ids.EndpointId {
+        return self.endpoint_ids[0..self.endpoint_count];
+    }
+};
+
 pub const Table = struct {
     arena: EndpointArena = EndpointArena.init(),
     owner_index: EndpointOwnerIndex = EndpointOwnerIndex.init(),
@@ -213,9 +222,8 @@ pub const Table = struct {
         return self.arena.countInUse();
     }
 
-    pub fn retireTask(self: *Table, task_id: ids.TaskId) u16 {
-        var retired_ids: [MAX_ENDPOINTS]ids.EndpointId = [_]ids.EndpointId{ids.EndpointId.zero} ** MAX_ENDPOINTS;
-        var retired_count: usize = 0;
+    pub fn retireTask(self: *Table, task_id: ids.TaskId) TaskRetirement {
+        var retired = TaskRetirement{};
         while (true) {
             const slot_index = self.owner_index.head(task_id.raw());
             if (slot_index == indexed_arena.no_index) break;
@@ -226,8 +234,8 @@ pub const Table = struct {
             if (!slot.in_use or !slot.endpoint.owner_task_id.eql(task_id)) {
                 native_util.impossibleByInvariant("endpoint owner index points at the wrong endpoint");
             }
-            retired_ids[retired_count] = slot.endpoint.id;
-            retired_count += 1;
+            retired.endpoint_ids[retired.endpoint_count] = slot.endpoint.id;
+            retired.endpoint_count += 1;
             if (!self.owner_index.remove(task_id.raw(), slot_index)) {
                 native_util.impossibleByInvariant("live endpoint is absent from its owner index");
             }
@@ -235,19 +243,19 @@ pub const Table = struct {
                 native_util.impossibleByInvariant("live endpoint disappeared during retirement");
             }
         }
-        if (retired_count == 0) return 0;
+        if (retired.endpoint_count == 0) return retired;
 
         for (&self.arena.slots) |*slot| {
             if (!slot.in_use) continue;
             const peer_endpoint_id = slot.endpoint.peer_endpoint_id orelse continue;
-            for (retired_ids[0..retired_count]) |retired_id| {
+            for (retired.retiredEndpointIds()) |retired_id| {
                 if (peer_endpoint_id.eql(retired_id)) {
                     slot.endpoint.peer_endpoint_id = null;
                     break;
                 }
             }
         }
-        return @intCast(retired_count);
+        return retired;
     }
 
     fn find(self: *Table, endpoint_id: ids.EndpointId) ?*Endpoint {
@@ -317,7 +325,9 @@ test "endpoint ids reject stale handles after slot reuse" {
     const endpoint = try table.create(ids.task(10), "first", .{});
     const original_handle = EndpointHandle{ .value = endpoint.id.raw() };
 
-    try std.testing.expectEqual(@as(u16, 1), table.retireTask(ids.task(10)));
+    const retired = table.retireTask(ids.task(10));
+    try std.testing.expectEqual(@as(u16, 1), retired.endpoint_count);
+    try std.testing.expect(retired.retiredEndpointIds()[0].eql(endpoint.id));
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(endpoint.id));
 
     const replacement = try table.create(ids.task(11), "replacement", .{});
@@ -352,7 +362,9 @@ test "retiring task endpoints clears queues and surviving peer links" {
     try table.send(client_b.id, ids.task(11), 2, "queued-b", null, false);
     try std.testing.expectEqual(@as(u16, 2), (try table.descriptor(service.id)).queued_messages);
 
-    try std.testing.expectEqual(@as(u16, 1), table.retireTask(ids.task(12)));
+    const retired = table.retireTask(ids.task(12));
+    try std.testing.expectEqual(@as(u16, 1), retired.endpoint_count);
+    try std.testing.expect(retired.retiredEndpointIds()[0].eql(service.id));
     try std.testing.expectEqual(@as(usize, 2), table.activeCount());
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(service.id));
     try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_a.id)).peer_endpoint_id);
