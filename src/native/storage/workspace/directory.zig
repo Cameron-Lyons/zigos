@@ -31,6 +31,9 @@ comptime {
     if (MAX_ENTRY_PATH_BYTES > std.math.maxInt(WorkspacePathLength)) {
         @compileError("workspace path capacity exceeds its compact length field");
     }
+    if (MAX_SHARE_GRANTS > std.math.maxInt(u8)) {
+        @compileError("workspace share capacity exceeds its compact index");
+    }
 }
 const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
 const SNAPSHOT_INDEX_CAPACITY: usize = MAX_SNAPSHOTS * 2;
@@ -46,7 +49,7 @@ const EntryObjectIndexSlot = workspace_index.EntryObjectIndexSlot;
 const ShareGrantPrincipalIndexSlot = struct {
     in_use: bool = false,
     principal_id: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
-    grant_index: usize = 0,
+    grant_index: u8 = 0,
 };
 
 pub const ShareGrantPrincipalIndex = struct {
@@ -77,7 +80,7 @@ pub const ShareGrantPrincipalIndex = struct {
         while (attempts < SHARE_GRANT_INDEX_CAPACITY) : (attempts += 1) {
             const slot = self.slots[slot_index];
             if (!slot.in_use) return null;
-            if (slot.principal_id.eql(principal_id)) return slot.grant_index;
+            if (slot.principal_id.eql(principal_id)) return @intCast(slot.grant_index);
             slot_index = (slot_index + 1) % SHARE_GRANT_INDEX_CAPACITY;
         }
         return null;
@@ -94,7 +97,7 @@ pub const ShareGrantPrincipalIndex = struct {
                 slot.* = .{
                     .in_use = true,
                     .principal_id = principal_id,
-                    .grant_index = grant_index,
+                    .grant_index = @intCast(grant_index),
                 };
                 return true;
             }
@@ -1690,6 +1693,15 @@ fn closeTransactionState(workspace: *WorkspaceRecord) void {
 
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
+}
+
+test "workspace sharing uses capacity-sized resident indexes" {
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ShareGrantPrincipalIndexSlot));
+    try std.testing.expectEqual(@as(usize, 384), @sizeOf(ShareGrantPrincipalIndex));
+    try std.testing.expectEqual(@as(usize, 1_480), @sizeOf(WorkspaceShareTable));
+    try std.testing.expectEqual(@as(usize, 43_984), @sizeOf(WorkspaceRecord));
+    try std.testing.expectEqual(@as(usize, 43_992), @sizeOf(WorkspaceSlot));
+    try std.testing.expectEqual(@as(usize, 358_152), @sizeOf(Directory));
 }
 
 test "workspace borrowed resolution returns the directory owned entry" {
