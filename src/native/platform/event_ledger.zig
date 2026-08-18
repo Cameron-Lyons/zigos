@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
@@ -15,8 +16,14 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
 const kinds = @import("event_kinds.zig");
+const root = @import("root");
 const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
+
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 512;
@@ -266,6 +273,46 @@ const SubjectEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MA
 const TaskEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
 const EventOrderIndex = indexed_arena.MultimapIndex(MAX_EVENTS, 1, 2);
 const EVENT_ORDER_KEY: u64 = 1;
+const heap_backed_event_ledger = builtin.target.os.tag == .freestanding;
+
+pub const EventBacking = struct {
+    events: EventArena = EventArena.init(),
+    kind_index: KindEventIndex = KindEventIndex.init(),
+    subject_index: SubjectEventIndex = SubjectEventIndex.init(),
+    task_index: TaskEventIndex = TaskEventIndex.init(),
+    event_order_index: EventOrderIndex = EventOrderIndex.init(),
+
+    fn init() EventBacking {
+        return .{};
+    }
+
+    fn initializeAllocated(self: *EventBacking) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.events.free_head = indexed_arena.reusableNoIndex(MAX_EVENTS);
+        initializeEventIndex(&self.kind_index);
+        initializeEventIndex(&self.subject_index);
+        initializeEventIndex(&self.task_index);
+        initializeEventIndex(&self.event_order_index);
+    }
+
+    fn resetIndexes(self: *EventBacking) void {
+        initializeEventIndex(&self.kind_index);
+        initializeEventIndex(&self.subject_index);
+        initializeEventIndex(&self.task_index);
+        initializeEventIndex(&self.event_order_index);
+    }
+};
+
+fn initializeEventIndex(index: anytype) void {
+    const Index = @TypeOf(index.*);
+    const CompactIndex = @FieldType(Index, "free_bucket_head");
+    const compact_no_index: CompactIndex = @intCast(@max(index.links.len, index.buckets.len));
+    @memset(std.mem.asBytes(index), 0);
+    for (&index.links) |*link| link.bucket = compact_no_index;
+    index.free_bucket_head = compact_no_index;
+}
+
+const EventBackingStorage = if (heap_backed_event_ledger) ?*EventBacking else EventBacking;
 
 const QueryIndex = enum {
     kind,
@@ -285,11 +332,7 @@ pub const Ledger = struct {
     header_version_id: u64 = 0,
     next_sequence: u64 = 1,
     oldest_retained_sequence: u64 = 0,
-    events: EventArena = EventArena.init(),
-    kind_index: KindEventIndex = KindEventIndex.init(),
-    subject_index: SubjectEventIndex = SubjectEventIndex.init(),
-    task_index: TaskEventIndex = TaskEventIndex.init(),
-    event_order_index: EventOrderIndex = EventOrderIndex.init(),
+    event_backing: EventBackingStorage = if (heap_backed_event_ledger) null else EventBacking.init(),
     persistence_batch_depth: usize = 0,
     pending_persist_first_sequence: u64 = 0,
     pending_persist_count: usize = 0,
@@ -297,6 +340,49 @@ pub const Ledger = struct {
 
     pub fn init() Ledger {
         return .{};
+    }
+
+    comptime {
+        if (heap_backed_event_ledger and @sizeOf(@This()) > 256) {
+            @compileError("heap-backed event ledgers exceed their compact resident layout");
+        }
+    }
+
+    pub fn deinit(self: *Ledger) void {
+        if (comptime heap_backed_event_ledger) {
+            if (self.event_backing) |backing| {
+                @memset(std.mem.asBytes(backing), 0);
+                kernel_memory.kfree(@ptrCast(backing));
+                self.event_backing = null;
+            }
+        }
+    }
+
+    pub fn reset(self: *Ledger) void {
+        self.deinit();
+        self.* = Ledger.init();
+    }
+
+    fn eventBacking(self: *Ledger) ?*EventBacking {
+        if (comptime heap_backed_event_ledger) return self.event_backing;
+        return &self.event_backing;
+    }
+
+    fn backingConst(self: *const Ledger) ?*const EventBacking {
+        if (comptime heap_backed_event_ledger) return self.event_backing;
+        return &self.event_backing;
+    }
+
+    fn ensureBacking(self: *Ledger) error{NoSpaceLeft}!*EventBacking {
+        if (self.eventBacking()) |backing| return backing;
+        if (comptime heap_backed_event_ledger) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(EventBacking)) orelse return error.NoSpaceLeft;
+            const backing: *EventBacking = @ptrCast(@alignCast(allocation));
+            backing.initializeAllocated();
+            self.event_backing = backing;
+            return backing;
+        }
+        return &self.event_backing;
     }
 
     pub fn initPersistent(
@@ -317,6 +403,7 @@ pub const Ledger = struct {
             .state_signer = state_signer,
             .workspace_id = workspace_record.id.raw(),
         };
+        errdefer ledger.deinit();
 
         if (storage.resolve(workspace_record.id, state_entry_path)) |_| {
             try ledger.loadPersistedEvents();
@@ -1291,9 +1378,10 @@ pub const Ledger = struct {
     }
 
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?*const Event {
-        const tail = self.kind_index.tail(kindKey(kind));
+        const backing = self.backingConst() orelse return null;
+        const tail = backing.kind_index.tail(kindKey(kind));
         if (tail == indexed_arena.no_index) return null;
-        return &self.events.slots[tail].event;
+        return &backing.events.slots[tail].event;
     }
 
     pub fn queryEvents(self: *const Ledger, query: Query, output: []Event) []Event {
@@ -1310,9 +1398,10 @@ pub const Ledger = struct {
 
     pub fn exportText(self: *const Ledger, buffer: []u8, options: ExportOptions) Error![]const u8 {
         var used: usize = 0;
+        const backing = self.backingConst() orelse return buffer[0..0];
         var index: usize = 0;
-        while (index < self.events.next_unclaimed_index) : (index += 1) {
-            const slot = &self.events.slots[index];
+        while (index < backing.events.next_unclaimed_index) : (index += 1) {
+            const slot = &backing.events.slots[index];
             if (!slot.in_use) continue;
             try renderTextEvent(&slot.event, buffer, &used, options.include_protected_content);
         }
@@ -1332,7 +1421,8 @@ pub const Ledger = struct {
 
     pub fn userVisibleDiagnosticSummary(self: *const Ledger) DiagnosticSummary {
         var summary = DiagnosticSummary{};
-        for (&self.events.slots) |*slot| {
+        const backing = self.backingConst() orelse return summary;
+        for (&backing.events.slots) |*slot| {
             if (!slot.in_use) continue;
             const event = &slot.event;
             summary.total_events += 1;
@@ -1625,42 +1715,44 @@ pub const Ledger = struct {
         var latest_object_capability: u64 = 0;
         var latest_egress_capability: u64 = 0;
 
-        var task_cursor = self.task_index.head(taskKey(task_id));
-        while (task_cursor != indexed_arena.no_index) : (task_cursor = self.task_index.next(task_cursor)) {
-            const event = self.taskIndexedEvent(task_cursor);
-            if (event.task_id != task_id) continue;
+        if (self.backingConst()) |backing| {
+            var task_cursor = backing.task_index.head(taskKey(task_id));
+            while (task_cursor != indexed_arena.no_index) : (task_cursor = backing.task_index.next(task_cursor)) {
+                const event = self.taskIndexedEvent(task_cursor);
+                if (event.task_id != task_id) continue;
 
-            switch (event.kind) {
-                .capability_revocation => {
-                    if (revocation_id_count < revocation_ids.len) {
-                        revocation_ids[revocation_id_count] = event.related_id;
-                        revocation_id_count += 1;
-                    }
-                },
-                .permission_review, .permission_decision => {
-                    if (eventMentionsDocument(event, document_resource)) prompt_count += 1;
-                },
-                .capability_grant => {
-                    if (!eventMentionsDocument(event, document_resource)) continue;
-                    if (event.permission_kind) |permission_kind| {
-                        switch (permission_kind) {
-                            .object_access, .contacts => {
-                                object_grant_count += 1;
-                                latest_object_capability = event.related_id;
-                                if (grant_id_count < grant_ids.len) {
-                                    grant_ids[grant_id_count] = event.related_id;
-                                    grant_id_count += 1;
-                                }
-                            },
-                            .network_egress => {
-                                egress_route_count += 1;
-                                latest_egress_capability = event.related_id;
-                            },
-                            else => {},
+                switch (event.kind) {
+                    .capability_revocation => {
+                        if (revocation_id_count < revocation_ids.len) {
+                            revocation_ids[revocation_id_count] = event.related_id;
+                            revocation_id_count += 1;
                         }
-                    }
-                },
-                else => {},
+                    },
+                    .permission_review, .permission_decision => {
+                        if (eventMentionsDocument(event, document_resource)) prompt_count += 1;
+                    },
+                    .capability_grant => {
+                        if (!eventMentionsDocument(event, document_resource)) continue;
+                        if (event.permission_kind) |permission_kind| {
+                            switch (permission_kind) {
+                                .object_access, .contacts => {
+                                    object_grant_count += 1;
+                                    latest_object_capability = event.related_id;
+                                    if (grant_id_count < grant_ids.len) {
+                                        grant_ids[grant_id_count] = event.related_id;
+                                        grant_id_count += 1;
+                                    }
+                                },
+                                .network_egress => {
+                                    egress_route_count += 1;
+                                    latest_egress_capability = event.related_id;
+                                },
+                                else => {},
+                            }
+                        }
+                    },
+                    else => {},
+                }
             }
         }
 
@@ -1695,7 +1787,8 @@ pub const Ledger = struct {
     }
 
     pub fn absorb(self: *Ledger, source: *const Ledger) Error!void {
-        for (&source.events.slots) |*slot| {
+        const source_backing = source.backingConst() orelse return;
+        for (&source_backing.events.slots) |*slot| {
             if (!slot.in_use) continue;
             var event = slot.event;
             event.sequence = 0;
@@ -1727,21 +1820,22 @@ pub const Ledger = struct {
     }
 
     fn appendEvent(self: *Ledger, event: *const Event) Error!void {
+        const backing = try self.ensureBacking();
         const sequence = self.next_sequence;
-        const event_index = self.events.insertIndex(sequence, .{ .event = event.* }) orelse reserve: {
+        const event_index = backing.events.insertIndex(sequence, .{ .event = event.* }) orelse reserve: {
             if (!self.evictOldestEvent()) return error.EventTableFull;
-            break :reserve self.events.insertIndex(sequence, .{ .event = event.* }) orelse return error.EventTableFull;
+            break :reserve backing.events.insertIndex(sequence, .{ .event = event.* }) orelse return error.EventTableFull;
         };
-        const slot = &self.events.slots[event_index];
+        const slot = &backing.events.slots[event_index];
         slot.event.sequence = sequence;
         self.next_sequence += 1;
         self.indexEvent(event_index) catch |err| {
-            _ = self.events.removeIndex(event_index);
+            _ = backing.events.removeIndex(event_index);
             try self.rebuildIndexes();
             return err;
         };
-        if (!self.event_order_index.append(EVENT_ORDER_KEY, event_index)) {
-            _ = self.events.removeIndex(event_index);
+        if (!backing.event_order_index.append(EVENT_ORDER_KEY, event_index)) {
+            _ = backing.events.removeIndex(event_index);
             try self.rebuildIndexes();
             return error.EventTableFull;
         }
@@ -1754,16 +1848,17 @@ pub const Ledger = struct {
     }
 
     fn evictOldestEvent(self: *Ledger) bool {
-        const index = self.event_order_index.head(EVENT_ORDER_KEY);
+        const backing = self.eventBacking() orelse return false;
+        const index = backing.event_order_index.head(EVENT_ORDER_KEY);
         if (index == indexed_arena.no_index) return false;
-        if (index >= self.events.slots.len) native_util.impossibleByInvariant("event order index points outside slots");
-        if (!self.events.slots[index].in_use) native_util.impossibleByInvariant("event order index points at a free slot");
-        if (!self.event_order_index.remove(EVENT_ORDER_KEY, index)) {
+        if (index >= backing.events.slots.len) native_util.impossibleByInvariant("event order index points outside slots");
+        if (!backing.events.slots[index].in_use) native_util.impossibleByInvariant("event order index points at a free slot");
+        if (!backing.event_order_index.remove(EVENT_ORDER_KEY, index)) {
             native_util.impossibleByInvariant("event order index is missing its oldest event");
         }
-        const removed_sequence = self.events.slots[index].event.sequence;
-        self.removeEventIndexes(index, &self.events.slots[index].event);
-        if (!self.events.removeIndex(index)) native_util.impossibleByInvariant("oldest event slot is live");
+        const removed_sequence = backing.events.slots[index].event.sequence;
+        self.removeEventIndexes(index, &backing.events.slots[index].event);
+        if (!backing.events.removeIndex(index)) native_util.impossibleByInvariant("oldest event slot is live");
         self.oldest_retained_sequence = self.nextOldestSequence(removed_sequence);
         return true;
     }
@@ -1775,14 +1870,15 @@ pub const Ledger = struct {
         count: *usize,
         output: ?[]Event,
     ) void {
+        const backing = self.backingConst() orelse return;
         var selected_index: ?QueryIndex = null;
         var selected_count: usize = std.math.maxInt(usize);
         if (query.kind) |kind| {
             selected_index = .kind;
-            selected_count = self.kind_index.count(kindKey(kind));
+            selected_count = backing.kind_index.count(kindKey(kind));
         }
         if (query.subject) |subject| {
-            const candidate_count = self.subject_index.count(subjectKey(subject));
+            const candidate_count = backing.subject_index.count(subjectKey(subject));
             if (candidate_count == 0) return;
             if (candidate_count < selected_count) {
                 selected_index = .subject;
@@ -1790,7 +1886,7 @@ pub const Ledger = struct {
             }
         }
         if (query.task_id) |task_id| {
-            const candidate_count = self.task_index.count(taskKey(task_id));
+            const candidate_count = backing.task_index.count(taskKey(task_id));
             if (candidate_count == 0) return;
             if (candidate_count < selected_count) {
                 selected_index = .task;
@@ -1799,14 +1895,14 @@ pub const Ledger = struct {
         }
         if (selected_index) |index_kind| {
             switch (index_kind) {
-                .kind => self.visitIndex(&self.kind_index, kindKey(query.kind.?), query, limit, count, output),
-                .subject => self.visitIndex(&self.subject_index, subjectKey(query.subject.?), query, limit, count, output),
-                .task => self.visitIndex(&self.task_index, taskKey(query.task_id.?), query, limit, count, output),
+                .kind => self.visitIndex(&backing.kind_index, kindKey(query.kind.?), query, limit, count, output),
+                .subject => self.visitIndex(&backing.subject_index, subjectKey(query.subject.?), query, limit, count, output),
+                .task => self.visitIndex(&backing.task_index, taskKey(query.task_id.?), query, limit, count, output),
             }
             return;
         }
 
-        for (&self.events.slots) |*slot| {
+        for (&backing.events.slots) |*slot| {
             if (!slot.in_use) continue;
             if (!matchesQuery(&slot.event, query)) continue;
             if (count.* >= limit) break;
@@ -1824,9 +1920,10 @@ pub const Ledger = struct {
         count: *usize,
         output: ?[]Event,
     ) void {
+        const backing = self.backingConst() orelse return;
         var cursor = index.head(key);
         while (cursor != indexed_arena.no_index and count.* < limit) : (cursor = index.next(cursor)) {
-            const slot = &self.events.slots[cursor];
+            const slot = &backing.events.slots[cursor];
             if (!slot.in_use or !matchesQuery(&slot.event, query)) continue;
             if (output) |records| records[count.*] = redactedForQuery(&slot.event, query);
             count.* += 1;
@@ -1834,66 +1931,72 @@ pub const Ledger = struct {
     }
 
     fn taskIndexedEvent(self: *const Ledger, cursor: usize) *const Event {
-        if (cursor >= self.events.slots.len) native_util.impossibleByInvariant("event task index points outside slots");
-        const slot = &self.events.slots[cursor];
+        const backing = self.backingConst() orelse
+            native_util.impossibleByInvariant("event task index requires allocated backing");
+        if (cursor >= backing.events.slots.len) native_util.impossibleByInvariant("event task index points outside slots");
+        const slot = &backing.events.slots[cursor];
         if (!slot.in_use) native_util.impossibleByInvariant("event task index points at a free slot");
         return &slot.event;
     }
 
     pub fn removeEventIndexes(self: *Ledger, event_index: usize, event: *const Event) void {
-        if (!self.kind_index.remove(kindKey(event.kind), event_index)) {
+        const backing = self.eventBacking() orelse
+            native_util.impossibleByInvariant("live event indexes require allocated backing");
+        if (!backing.kind_index.remove(kindKey(event.kind), event_index)) {
             native_util.impossibleByInvariant("event kind index missing live event");
         }
-        if (!self.subject_index.remove(subjectKey(event.subject), event_index)) {
+        if (!backing.subject_index.remove(subjectKey(event.subject), event_index)) {
             native_util.impossibleByInvariant("event subject index missing live event");
         }
-        if (event.task_id != 0 and !self.task_index.remove(taskKey(event.task_id), event_index)) {
+        if (event.task_id != 0 and !backing.task_index.remove(taskKey(event.task_id), event_index)) {
             native_util.impossibleByInvariant("event task index missing live event");
         }
     }
 
     fn indexEvent(self: *Ledger, event_index: usize) Error!void {
-        const event = &self.events.slots[event_index].event;
-        if (!self.kind_index.append(kindKey(event.kind), event_index)) return error.EventTableFull;
-        if (!self.subject_index.append(subjectKey(event.subject), event_index)) return error.EventTableFull;
-        if (event.task_id != 0 and !self.task_index.append(taskKey(event.task_id), event_index)) return error.EventTableFull;
+        const backing = self.eventBacking() orelse return error.NoSpaceLeft;
+        const event = &backing.events.slots[event_index].event;
+        if (!backing.kind_index.append(kindKey(event.kind), event_index)) return error.EventTableFull;
+        if (!backing.subject_index.append(subjectKey(event.subject), event_index)) return error.EventTableFull;
+        if (event.task_id != 0 and !backing.task_index.append(taskKey(event.task_id), event_index)) return error.EventTableFull;
     }
 
     fn rebuildIndexes(self: *Ledger) Error!void {
-        self.kind_index.reset();
-        self.subject_index.reset();
-        self.task_index.reset();
-        self.event_order_index.reset();
-        self.events.rebuildPrimaryIndex();
+        const backing = self.eventBacking() orelse return;
+        backing.resetIndexes();
+        backing.events.rebuildPrimaryIndex();
         self.oldest_retained_sequence = 0;
+
         var indexed_count: usize = 0;
         var last_sequence: u64 = 0;
-        while (indexed_count < self.events.countInUse()) : (indexed_count += 1) {
+        while (indexed_count < backing.events.countInUse()) : (indexed_count += 1) {
             var selected_index: usize = indexed_arena.no_index;
             var selected_sequence: u64 = std.math.maxInt(u64);
-            for (self.events.slots, 0..) |slot, slot_index| {
+            for (backing.events.slots, 0..) |slot, slot_index| {
                 if (!slot.in_use or slot.event.sequence <= last_sequence or slot.event.sequence >= selected_sequence) continue;
                 selected_index = slot_index;
                 selected_sequence = slot.event.sequence;
             }
             if (selected_index == indexed_arena.no_index) return error.CorruptState;
             try self.indexEvent(selected_index);
-            if (!self.event_order_index.append(EVENT_ORDER_KEY, selected_index)) return error.EventTableFull;
+            if (!backing.event_order_index.append(EVENT_ORDER_KEY, selected_index)) return error.EventTableFull;
             if (self.oldest_retained_sequence == 0) self.oldest_retained_sequence = selected_sequence;
             last_sequence = selected_sequence;
         }
     }
 
     fn nextOldestSequence(self: *const Ledger, removed_sequence: u64) u64 {
-        if (self.events.countInUse() == 0) return 0;
+        const backing = self.backingConst() orelse return 0;
+        if (backing.events.countInUse() == 0) return 0;
         const contiguous_sequence = std.math.add(u64, removed_sequence, 1) catch return self.scanOldestSequence();
-        if (self.events.getConst(contiguous_sequence) != null) return contiguous_sequence;
+        if (backing.events.getConst(contiguous_sequence) != null) return contiguous_sequence;
         return self.scanOldestSequence();
     }
 
     fn scanOldestSequence(self: *const Ledger) u64 {
+        const backing = self.backingConst() orelse return 0;
         var oldest_sequence: u64 = 0;
-        for (self.events.slots) |slot| {
+        for (backing.events.slots) |slot| {
             if (!slot.in_use) continue;
             if (oldest_sequence == 0 or slot.event.sequence < oldest_sequence) {
                 oldest_sequence = slot.event.sequence;
@@ -1918,7 +2021,8 @@ pub const Ledger = struct {
     }
 
     fn findEventBySequence(self: *const Ledger, sequence: u64) ?Event {
-        const slot = self.events.getConst(sequence) orelse return null;
+        const backing = self.backingConst() orelse return null;
+        const slot = backing.events.getConst(sequence) orelse return null;
         return slot.event;
     }
 
@@ -1991,7 +2095,7 @@ pub const Ledger = struct {
 
     fn loadPersistedEvents(self: *Ledger) Error!void {
         const storage = self.storage orelse return;
-        self.events.reset();
+        const backing = try self.ensureBacking();
         try self.rebuildIndexes();
         self.next_sequence = 1;
         self.oldest_retained_sequence = 0;
@@ -2013,23 +2117,23 @@ pub const Ledger = struct {
             if (loaded_count >= MAX_EVENTS) break;
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
             const event = (try parsePersistentEvent(try storage.versionPayload(version))).intoEvent();
-            const slot_index = self.events.reserveIndexAt(event.sequence, loaded_count) orelse return error.CorruptState;
-            self.events.slots[slot_index].event = event;
+            const slot_index = backing.events.reserveIndexAt(event.sequence, loaded_count) orelse return error.CorruptState;
+            backing.events.slots[slot_index].event = event;
             loaded_count += 1;
         }
 
         var index: usize = 1;
         while (index < loaded_count) : (index += 1) {
             var cursor = index;
-            while (cursor > 0 and self.events.slots[cursor - 1].event.sequence > self.events.slots[cursor].event.sequence) : (cursor -= 1) {
-                const tmp = self.events.slots[cursor - 1];
-                self.events.slots[cursor - 1] = self.events.slots[cursor];
-                self.events.slots[cursor] = tmp;
+            while (cursor > 0 and backing.events.slots[cursor - 1].event.sequence > backing.events.slots[cursor].event.sequence) : (cursor -= 1) {
+                const tmp = backing.events.slots[cursor - 1];
+                backing.events.slots[cursor - 1] = backing.events.slots[cursor];
+                backing.events.slots[cursor] = tmp;
             }
         }
 
-        if (loaded_count > 0 and self.next_sequence <= self.events.slots[loaded_count - 1].event.sequence) {
-            self.next_sequence = self.events.slots[loaded_count - 1].event.sequence + 1;
+        if (loaded_count > 0 and self.next_sequence <= backing.events.slots[loaded_count - 1].event.sequence) {
+            self.next_sequence = backing.events.slots[loaded_count - 1].event.sequence + 1;
         }
         try self.rebuildIndexes();
     }
