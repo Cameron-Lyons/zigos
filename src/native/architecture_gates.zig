@@ -410,6 +410,11 @@ pub const indexed_hot_path_tables = .{
         .replays_state_by_primary_index = @hasDecl(storage_volume, "loadFromImage"),
         .requires_target_nvme_attachment = @hasDecl(storage_volume.Volume, "hasProductionStorageBackend"),
         .bounds_log_io_workspace_to_one_data_region = storage_volume.IO_LOG_WORKSPACE_BYTES == storage_volume.DATA_REGION_BYTES,
+        .interns_replayed_signer_text = @hasField(storage_volume.Volume, "signer_text_pool") and
+            !@hasField(storage_volume.Volume, "version_signers") and
+            !@hasField(storage_volume.Volume, "object_signers") and
+            !@hasField(storage_volume.Volume, "snapshot_signers") and
+            @sizeOf(@FieldType(storage_volume.Volume, "signer_text_pool")) == storage_volume.SIGNER_TEXT_POOL_BYTES,
         .tracks_latest_inserted_version = @hasField(object_store.Store, "latest_inserted_version_id"),
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
