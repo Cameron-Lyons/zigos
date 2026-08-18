@@ -42,11 +42,13 @@ pub const Builder = struct {
     ) Environment {
         const capability_table = kernel_context.capabilityTable() orelse
             native_util.impossibleByInvariant("service graph construction follows capability-table allocation");
+        const userspace_catalog = runtime_context.userspaceCatalog() orelse
+            native_util.impossibleByInvariant("service graph construction follows userspace-catalog allocation");
         return .{
             .capability_table = capability_table,
             .runtime = &runtime_context.runtime,
             .service_directory = &self.service_directory,
-            .userspace_catalog = &runtime_context.userspace_catalog,
+            .userspace_catalog = userspace_catalog,
             .userspace_scheduler = &runtime_context.userspace_scheduler,
             .package_service = &self.package_service_instance,
             .supervisor = &self.supervisor,
