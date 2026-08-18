@@ -335,6 +335,16 @@ pub const indexed_hot_path_tables = .{
         .uses_policy_arena = @hasDecl(@FieldType(network_policy.Directory, "policies"), "reserve"),
     },
     .policy_object = .{
+        .stores_compact_policy_metadata = policy_object.COMPACT_POLICY_METADATA and
+            @FieldType(policy_object.PolicyObject, "label_len") == u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_install_source_count") == u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_install_source_lens") == [policy_object.MAX_ALLOW_LIST]u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_network_destination_count") == u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_network_destination_lens") == [policy_object.MAX_ALLOW_LIST]u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_sync_destination_count") == u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_sync_destination_lens") == [policy_object.MAX_ALLOW_LIST]u8,
+        .keeps_policy_state_within_ceilings = @sizeOf(policy_object.PolicyObject) <= policy_object.POLICY_OBJECT_SIZE_CEILING_BYTES and
+            @sizeOf(policy_object.Directory) <= policy_object.DIRECTORY_SIZE_CEILING_BYTES,
         .uses_policy_arena = @hasDecl(@FieldType(policy_object.Directory, "policies"), "reserve"),
         .uses_scope_index = @hasField(policy_object.Directory, "scope_index"),
     },
