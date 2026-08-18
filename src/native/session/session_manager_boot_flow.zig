@@ -106,6 +106,7 @@ pub const SessionManager = struct {
         }
         self.runtime_context.runtime_checkpoint_store.reset();
         self.runtime_context.runtime.reset();
+        self.kernel_context.endpoint_table.deinit();
         self.service_graph_builder.package_service_instance.deinit();
         self.native_store.resetPersistent();
         self.* = SessionManager.init();
