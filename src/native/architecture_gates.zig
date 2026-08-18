@@ -166,6 +166,8 @@ pub const indexed_hot_path_tables = .{
         .uses_initial_component_label_index = @hasField(task_runtime.Runtime, "task_initial_component_label_index"),
         .tracks_task_state_counts = @hasField(task_runtime.Runtime, "task_state_counts"),
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
+        .bounds_task_capability_scans = task_runtime.TASK_CAPABILITY_SCAN_BOUND == task_runtime.MAX_TASK_CAPABILITIES,
+        .avoids_task_capability_primary_index_lookups = task_runtime.TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
         .tracks_task_capability_generation = @hasDecl(task_runtime.TaskRecord, "capabilityGeneration"),
         .removes_retired_capability_attachments = @hasDecl(task_runtime.Runtime, "revokeCapabilityEverywhere"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
