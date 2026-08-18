@@ -419,6 +419,15 @@ pub const indexed_hot_path_tables = .{
         .supports_ordered_flow_lookup = @hasDecl(native_ux.Controller, "flowAtOrder"),
     },
     .sync_transport_harness = .{
+        .stores_compact_relay_metadata = sync_transport_harness.COMPACT_RELAY_METADATA and
+            @FieldType(sync_transport_harness.EncryptedPacket, "ciphertext_len") == u16 and
+            @FieldType(sync_transport_harness.BootedOverlayRelayService, "relay_domain_len") == u8 and
+            @FieldType(sync_transport_harness.TransportSession, "relay_domain_len") == u8,
+        .keeps_relay_state_within_ceilings = @sizeOf(sync_transport_harness.EncryptedPacket) <= sync_transport_harness.ENCRYPTED_PACKET_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.SignedEncryptedFrame) <= sync_transport_harness.SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.Relay) <= sync_transport_harness.RELAY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.BootedOverlayRelayService) <= sync_transport_harness.BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.TransportSession) <= sync_transport_harness.TRANSPORT_SESSION_SIZE_CEILING_BYTES,
         .uses_relay_packet_arena = @hasField(sync_transport_harness.Relay, "packets"),
         .uses_relay_session_index = @hasField(sync_transport_harness.Relay, "session_index"),
     },
