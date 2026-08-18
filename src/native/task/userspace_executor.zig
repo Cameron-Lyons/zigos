@@ -767,7 +767,7 @@ pub const Executor = struct {
         for (address_space.regions[0..address_space.region_count]) |region| {
             switch (region.kind) {
                 .load_segment => try mapLoadRegion(&entry.address_space.?, region, image.elf_file),
-                .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, region.size_bytes, region.access),
+                .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, @as(usize, region.size_bytes), region.access),
             }
         }
 
@@ -1292,7 +1292,7 @@ fn addressSpaceAllowsExecution(address_space: *const task_runtime.AddressSpaceRe
     const address64: u64 = address;
     for (address_space.regions[0..address_space.region_count]) |region| {
         if (region.kind != .load_segment or !region.access.execute) continue;
-        const region_end = std.math.add(u64, region.virtual_address, region.size_bytes) catch continue;
+        const region_end = std.math.add(u64, region.virtual_address, @as(u64, region.size_bytes)) catch continue;
         if (address64 >= region.virtual_address and address64 < region_end) return true;
     }
     return false;
