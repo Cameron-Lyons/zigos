@@ -249,6 +249,9 @@ pub const indexed_hot_path_tables = .{
     },
     .package_service = .{
         .uses_bundle_arena = @hasDecl(@FieldType(package_service.Service, "slots"), "reserve"),
+        .uses_revision_permission_text_pool = @hasField(package_service.BundleRevision, "permission_text"),
+        .uses_compact_permission_text_refs = @sizeOf(@FieldType(package_service.StoredPermission, "resource")) == 4 and
+            @sizeOf(package_service.StoredPermission) < package_service.MAX_PERMISSION_RESOURCE_BYTES,
     },
     .public_store = .{
         .uses_release_arena = @hasDecl(@FieldType(public_store.Channel, "releases"), "reserveIndexAt"),

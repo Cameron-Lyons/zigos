@@ -7,6 +7,7 @@ const copyTextExact = native_util.copyTextExact;
 
 pub const Error = manifest.ValidationError || error{
     InstallSourceTooLong,
+    PermissionTextBudgetExceeded,
     RevisionIdExhausted,
 };
 
@@ -76,14 +77,23 @@ pub fn validateInstallStorageShape(
         try validateTextLen(asset.path, arrayFieldLen(StoredAssetType, "path"), error.AssetPathTooLong);
         try validateTextLen(asset.content_type, arrayFieldLen(StoredAssetType, "content_type"), error.AssetContentTypeTooLong);
     }
+    var permission_text_len: usize = 0;
     for (bundle.requested_permissions) |permission| {
-        try validateTextLen(permission.resource, arrayFieldLen(StoredPermissionType, "resource"), error.PermissionResourceTooLong);
-        try validateTextLen(permission.user_visible_reason, arrayFieldLen(StoredPermissionType, "user_visible_reason"), error.PermissionReasonTooLong);
-        try validateTextLen(permission.egress_intent.object, arrayFieldLen(StoredPermissionType, "egress_object"), error.PermissionResourceTooLong);
-        try validateTextLen(permission.egress_intent.principal, arrayFieldLen(StoredPermissionType, "egress_principal"), error.PermissionResourceTooLong);
-        try validateTextLen(permission.egress_intent.service, arrayFieldLen(StoredPermissionType, "egress_service"), error.PermissionResourceTooLong);
-        try validateTextLen(permission.egress_intent.event_type, arrayFieldLen(StoredPermissionType, "egress_event_type"), error.PermissionResourceTooLong);
+        try validateTextLen(permission.resource, StoredPermissionType.max_resource_bytes, error.PermissionResourceTooLong);
+        try validateTextLen(permission.user_visible_reason, StoredPermissionType.max_reason_bytes, error.PermissionReasonTooLong);
+        try validateTextLen(permission.egress_intent.object, StoredPermissionType.max_resource_bytes, error.PermissionResourceTooLong);
+        try validateTextLen(permission.egress_intent.principal, StoredPermissionType.max_resource_bytes, error.PermissionResourceTooLong);
+        try validateTextLen(permission.egress_intent.service, StoredPermissionType.max_resource_bytes, error.PermissionResourceTooLong);
+        try validateTextLen(permission.egress_intent.event_type, StoredPermissionType.max_resource_bytes, error.PermissionResourceTooLong);
+
+        permission_text_len = std.math.add(usize, permission_text_len, permission.resource.len) catch return error.PermissionTextBudgetExceeded;
+        permission_text_len = std.math.add(usize, permission_text_len, permission.user_visible_reason.len) catch return error.PermissionTextBudgetExceeded;
+        permission_text_len = std.math.add(usize, permission_text_len, permission.egress_intent.object.len) catch return error.PermissionTextBudgetExceeded;
+        permission_text_len = std.math.add(usize, permission_text_len, permission.egress_intent.principal.len) catch return error.PermissionTextBudgetExceeded;
+        permission_text_len = std.math.add(usize, permission_text_len, permission.egress_intent.service.len) catch return error.PermissionTextBudgetExceeded;
+        permission_text_len = std.math.add(usize, permission_text_len, permission.egress_intent.event_type.len) catch return error.PermissionTextBudgetExceeded;
     }
+    if (permission_text_len > arrayFieldLen(RevisionType, "permission_text")) return error.PermissionTextBudgetExceeded;
     for (bundle.background_tasks) |task| {
         try validateTextLen(task.id, arrayFieldLen(StoredBackgroundTaskType, "id"), error.BackgroundTaskIdTooLong);
     }
@@ -159,6 +169,7 @@ pub fn rollback(bundle: anytype) void {
 
 pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.BundleManifest {
     const revision = bundle.activeRevision();
+    const permission_text = revision.permissionTextSlice();
 
     var index: usize = 0;
     while (index < revision.provided_interface_count) : (index += 1) {
@@ -204,7 +215,7 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         const stored = &revision.requested_permissions[index];
         resolved.requested_permissions[index] = .{
             .kind = stored.kind,
-            .resource = stored.resourceSlice(),
+            .resource = stored.resourceSlice(permission_text),
             .rights = stored.rights,
             .required = stored.required,
             .local_only = stored.local_only,
@@ -213,13 +224,13 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
             .sensitivity = stored.sensitivity,
             .purpose = stored.purpose,
             .retention_days = stored.retention_days,
-            .user_visible_reason = stored.userVisibleReasonSlice(),
+            .user_visible_reason = stored.userVisibleReasonSlice(permission_text),
             .egress_intent = .{
                 .kind = stored.egress_intent_kind,
-                .object = stored.egressObjectSlice(),
-                .principal = stored.egressPrincipalSlice(),
-                .service = stored.egressServiceSlice(),
-                .event_type = stored.egressEventTypeSlice(),
+                .object = stored.egressObjectSlice(permission_text),
+                .principal = stored.egressPrincipalSlice(permission_text),
+                .service = stored.egressServiceSlice(permission_text),
+                .event_type = stored.egressEventTypeSlice(permission_text),
             },
         };
     }
@@ -389,23 +400,34 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     }
 
     revision.requested_permission_count = source.requested_permissions.len;
+    const previous_permission_text_len = @min(
+        @as(usize, @intCast(revision.permission_text_len)),
+        revision.permission_text.len,
+    );
+    revision.permission_text_len = 0;
     for (source.requested_permissions, 0..) |permission, permission_index| {
-        revision.requested_permissions[permission_index].kind = permission.kind;
-        revision.requested_permissions[permission_index].resource_len = copyValidatedText(&revision.requested_permissions[permission_index].resource, permission.resource);
-        revision.requested_permissions[permission_index].rights = permission.rights;
-        revision.requested_permissions[permission_index].required = permission.required;
-        revision.requested_permissions[permission_index].local_only = permission.local_only;
-        revision.requested_permissions[permission_index].max_lease_ticks = permission.max_lease_ticks;
-        revision.requested_permissions[permission_index].target_id = permission.target_id;
-        revision.requested_permissions[permission_index].sensitivity = permission.sensitivity;
-        revision.requested_permissions[permission_index].purpose = permission.purpose;
-        revision.requested_permissions[permission_index].retention_days = permission.retention_days;
-        revision.requested_permissions[permission_index].user_visible_reason_len = copyValidatedText(&revision.requested_permissions[permission_index].user_visible_reason, permission.user_visible_reason);
-        revision.requested_permissions[permission_index].egress_intent_kind = permission.egress_intent.kind;
-        revision.requested_permissions[permission_index].egress_object_len = copyValidatedText(&revision.requested_permissions[permission_index].egress_object, permission.egress_intent.object);
-        revision.requested_permissions[permission_index].egress_principal_len = copyValidatedText(&revision.requested_permissions[permission_index].egress_principal, permission.egress_intent.principal);
-        revision.requested_permissions[permission_index].egress_service_len = copyValidatedText(&revision.requested_permissions[permission_index].egress_service, permission.egress_intent.service);
-        revision.requested_permissions[permission_index].egress_event_type_len = copyValidatedText(&revision.requested_permissions[permission_index].egress_event_type, permission.egress_intent.event_type);
+        revision.requested_permissions[permission_index] = .{};
+        const stored = &revision.requested_permissions[permission_index];
+        stored.kind = permission.kind;
+        try writePermissionText(revision, &stored.resource, permission.resource);
+        stored.rights = permission.rights;
+        stored.required = permission.required;
+        stored.local_only = permission.local_only;
+        stored.max_lease_ticks = permission.max_lease_ticks;
+        stored.target_id = permission.target_id;
+        stored.sensitivity = permission.sensitivity;
+        stored.purpose = permission.purpose;
+        stored.retention_days = permission.retention_days;
+        try writePermissionText(revision, &stored.user_visible_reason, permission.user_visible_reason);
+        stored.egress_intent_kind = permission.egress_intent.kind;
+        try writePermissionText(revision, &stored.egress_object, permission.egress_intent.object);
+        try writePermissionText(revision, &stored.egress_principal, permission.egress_intent.principal);
+        try writePermissionText(revision, &stored.egress_service, permission.egress_intent.service);
+        try writePermissionText(revision, &stored.egress_event_type, permission.egress_intent.event_type);
+    }
+    const permission_text_len: usize = @intCast(revision.permission_text_len);
+    if (permission_text_len < previous_permission_text_len) {
+        @memset(revision.permission_text[permission_text_len..previous_permission_text_len], 0);
     }
 
     revision.background_task_count = source.background_tasks.len;
@@ -494,6 +516,18 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
 fn copyValidatedText(dest: []u8, src: []const u8) usize {
     @memcpy(dest[0..src.len], src);
     return src.len;
+}
+
+fn writePermissionText(revision: anytype, destination: anytype, text: []const u8) Error!void {
+    const start: usize = revision.permission_text_len;
+    const end = std.math.add(usize, start, text.len) catch return error.PermissionTextBudgetExceeded;
+    if (end > revision.permission_text.len) return error.PermissionTextBudgetExceeded;
+    @memcpy(revision.permission_text[start..end], text);
+    destination.* = .{
+        .offset = @intCast(start),
+        .len = @intCast(text.len),
+    };
+    revision.permission_text_len = @intCast(end);
 }
 
 fn storageType(comptime PtrType: type) type {

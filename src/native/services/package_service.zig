@@ -27,6 +27,7 @@ pub const MAX_INTERFACES_PER_BUNDLE = model.MAX_INTERFACES_PER_BUNDLE;
 pub const MAX_INTERFACE_NAME_BYTES = model.MAX_INTERFACE_NAME_BYTES;
 pub const MAX_PERMISSIONS_PER_BUNDLE = model.MAX_PERMISSIONS_PER_BUNDLE;
 pub const MAX_PERMISSION_RESOURCE_BYTES = model.MAX_PERMISSION_RESOURCE_BYTES;
+pub const MAX_PERMISSION_TEXT_BYTES_PER_REVISION = model.MAX_PERMISSION_TEXT_BYTES_PER_REVISION;
 pub const MAX_BACKGROUND_TASKS_PER_BUNDLE = model.MAX_BACKGROUND_TASKS_PER_BUNDLE;
 pub const MAX_BACKGROUND_TASK_ID_BYTES = model.MAX_BACKGROUND_TASK_ID_BYTES;
 pub const MAX_MODEL_FAMILY_BYTES = model.MAX_MODEL_FAMILY_BYTES;
@@ -620,10 +621,11 @@ fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const
         crypto_hash.updateInt(&hasher, "consumed-interface-minor", interface.version_minor);
     }
     crypto_hash.updateInt(&hasher, "requested-permission-count", revision.requested_permission_count);
+    const permission_text = revision.permissionTextSlice();
     for (revision.requested_permissions[0..revision.requested_permission_count], 0..) |permission, index| {
         crypto_hash.updateInt(&hasher, "permission-index", index);
         crypto_hash.updateEnum(&hasher, "permission-kind", permission.kind);
-        crypto_hash.updateBytes(&hasher, "permission-resource", permission.resourceSlice());
+        crypto_hash.updateBytes(&hasher, "permission-resource", permission.resourceSlice(permission_text));
         crypto_hash.updateEnum(&hasher, "permission-rights-target", std.meta.activeTag(permission.rights));
         crypto_hash.updateInt(&hasher, "permission-rights-bits", permission.rights.toBits());
         crypto_hash.updateBool(&hasher, "permission-required", permission.required);
@@ -634,11 +636,11 @@ fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const
         crypto_hash.updateEnum(&hasher, "permission-sensitivity", permission.sensitivity);
         crypto_hash.updateEnum(&hasher, "permission-purpose", permission.purpose);
         crypto_hash.updateInt(&hasher, "permission-retention-days", permission.retention_days);
-        crypto_hash.updateBytes(&hasher, "permission-user-visible-reason", permission.userVisibleReasonSlice());
-        crypto_hash.updateBytes(&hasher, "permission-egress-object", permission.egressObjectSlice());
-        crypto_hash.updateBytes(&hasher, "permission-egress-principal", permission.egressPrincipalSlice());
-        crypto_hash.updateBytes(&hasher, "permission-egress-service", permission.egressServiceSlice());
-        crypto_hash.updateBytes(&hasher, "permission-egress-event-type", permission.egressEventTypeSlice());
+        crypto_hash.updateBytes(&hasher, "permission-user-visible-reason", permission.userVisibleReasonSlice(permission_text));
+        crypto_hash.updateBytes(&hasher, "permission-egress-object", permission.egressObjectSlice(permission_text));
+        crypto_hash.updateBytes(&hasher, "permission-egress-principal", permission.egressPrincipalSlice(permission_text));
+        crypto_hash.updateBytes(&hasher, "permission-egress-service", permission.egressServiceSlice(permission_text));
+        crypto_hash.updateBytes(&hasher, "permission-egress-event-type", permission.egressEventTypeSlice(permission_text));
     }
     crypto_hash.updateInt(&hasher, "background-task-count", revision.background_task_count);
     for (revision.background_tasks[0..revision.background_task_count], 0..) |task, index| {
@@ -799,6 +801,24 @@ fn publicStoreTransparency(sequence: u64, root_byte: u8, log_head_byte: u8) Rele
         .root = crypto_hash.digestFromByte(root_byte),
         .log_head = crypto_hash.digestFromByte(log_head_byte),
     };
+}
+
+fn permissionTextLen(permission: manifest.PermissionRequest) usize {
+    return permission.resource.len +
+        permission.user_visible_reason.len +
+        permission.egress_intent.object.len +
+        permission.egress_intent.principal.len +
+        permission.egress_intent.service.len +
+        permission.egress_intent.event_type.len;
+}
+
+fn expectPermissionTextEqual(expected: manifest.PermissionRequest, actual: manifest.PermissionRequest) !void {
+    try std.testing.expectEqualStrings(expected.resource, actual.resource);
+    try std.testing.expectEqualStrings(expected.user_visible_reason, actual.user_visible_reason);
+    try std.testing.expectEqualStrings(expected.egress_intent.object, actual.egress_intent.object);
+    try std.testing.expectEqualStrings(expected.egress_intent.principal, actual.egress_intent.principal);
+    try std.testing.expectEqualStrings(expected.egress_intent.service, actual.egress_intent.service);
+    try std.testing.expectEqualStrings(expected.egress_intent.event_type, actual.egress_intent.event_type);
 }
 
 test "package port requires service authority before install update rollback and remove" {
@@ -2151,6 +2171,160 @@ test "package bundle ops reject semantically invalid manifests before storage" {
         bundle_ops.installNew(&service.slots.slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
     );
     try std.testing.expectEqual(@as(u32, 0), service.slots.slots[0].bundle.revision_count);
+}
+
+test "package revisions pool permission text and preserve rollback values" {
+    const v1_permissions = [_]manifest.PermissionRequest{.{
+        .kind = .network_egress,
+        .resource = "relay.v1",
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .user_visible_reason = "Synchronize the first revision",
+        .egress_intent = .{
+            .kind = .sync_object,
+            .object = "document:quarterly-v1",
+            .principal = "user:owner-v1",
+            .service = "svc.sync.v1",
+            .event_type = "sync.completed.v1",
+        },
+    }};
+    var v1 = manifest.BundleManifest{
+        .bundle_id = "zigos.permission-pool",
+        .display_name = "Permission Pool",
+        .publisher = "zigos.dev",
+        .requested_permissions = &v1_permissions,
+    };
+
+    var bundle = zeroBundle();
+    try bundle_ops.installNew(
+        &bundle,
+        v1,
+        "store:zigos",
+        1,
+        bundle_digest.permissionDigest(v1.requested_permissions),
+    );
+
+    var resolved: ResolvedManifest = undefined;
+    const resolved_v1 = bundle_ops.resolveActiveManifest(&bundle, &resolved);
+    try expectPermissionTextEqual(v1_permissions[0], resolved_v1.requested_permissions[0]);
+    try std.testing.expectEqual(
+        permissionTextLen(v1_permissions[0]),
+        @as(usize, bundle.activeRevision().permission_text_len),
+    );
+
+    const v2_permissions = [_]manifest.PermissionRequest{.{
+        .kind = .network_egress,
+        .resource = "relay.v2",
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .user_visible_reason = "Synchronize the second revision",
+        .egress_intent = .{
+            .kind = .sync_object,
+            .object = "document:quarterly-v2",
+            .principal = "user:owner-v2",
+            .service = "svc.sync.v2",
+            .event_type = "sync.completed.v2",
+        },
+    }};
+    v1.version_minor = 1;
+    v1.requested_permissions = &v2_permissions;
+    try bundle_ops.installRevision(
+        &bundle,
+        v1,
+        "store:zigos",
+        1,
+        bundle_digest.permissionDigest(v1.requested_permissions),
+    );
+
+    const resolved_v2 = bundle_ops.resolveActiveManifest(&bundle, &resolved);
+    try expectPermissionTextEqual(v2_permissions[0], resolved_v2.requested_permissions[0]);
+    bundle_ops.rollback(&bundle);
+    const resolved_rollback = bundle_ops.resolveActiveManifest(&bundle, &resolved);
+    try expectPermissionTextEqual(v1_permissions[0], resolved_rollback.requested_permissions[0]);
+
+    const previous_permission_text_len: usize = bundle.revisions[1].permission_text_len;
+    const v3_permissions = [_]manifest.PermissionRequest{.{
+        .kind = .network_egress,
+        .resource = "r",
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .user_visible_reason = "Sync",
+        .egress_intent = .{
+            .kind = .sync_object,
+            .object = "d",
+            .principal = "u",
+            .service = "s",
+            .event_type = "e",
+        },
+    }};
+    v1.version_minor = 2;
+    v1.requested_permissions = &v3_permissions;
+    try bundle_ops.installRevision(
+        &bundle,
+        v1,
+        "store:zigos",
+        1,
+        bundle_digest.permissionDigest(v1.requested_permissions),
+    );
+
+    const recycled_revision = bundle.activeRevision();
+    const recycled_permission_text_len: usize = recycled_revision.permission_text_len;
+    const zero_permission_text = [_]u8{0} ** MAX_PERMISSION_TEXT_BYTES_PER_REVISION;
+    try std.testing.expect(recycled_permission_text_len < previous_permission_text_len);
+    try std.testing.expectEqualSlices(
+        u8,
+        zero_permission_text[0 .. previous_permission_text_len - recycled_permission_text_len],
+        recycled_revision.permission_text[recycled_permission_text_len..previous_permission_text_len],
+    );
+    const resolved_v3 = bundle_ops.resolveActiveManifest(&bundle, &resolved);
+    try expectPermissionTextEqual(v3_permissions[0], resolved_v3.requested_permissions[0]);
+}
+
+test "package permission text storage enforces individual and revision budgets" {
+    const full_resource = [_]u8{'r'} ** MAX_PERMISSION_RESOURCE_BYTES;
+    const full_reason = [_]u8{'q'} ** model.MAX_PERMISSION_REASON_BYTES;
+    var resources = [_][MAX_PERMISSION_RESOURCE_BYTES]u8{full_resource} ** 7;
+    var permissions: [resources.len]manifest.PermissionRequest = undefined;
+    for (&permissions, 0..) |*permission, index| {
+        resources[index][0] = @intCast(index + 1);
+        permission.* = .{
+            .kind = .network_egress,
+            .resource = resources[index][0..],
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .user_visible_reason = full_reason[0..],
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = full_resource[0..],
+                .principal = full_resource[0..],
+                .service = full_resource[0..],
+                .event_type = full_resource[0..],
+            },
+        };
+    }
+
+    var bundle = zeroBundle();
+    var source = manifest.BundleManifest{
+        .bundle_id = "zigos.permission-budget",
+        .display_name = "Permission Budget",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+    };
+    try std.testing.expectError(
+        error.PermissionTextBudgetExceeded,
+        bundle_ops.installNew(&bundle, source, "store:zigos", 1, crypto_hash.digestFromByte(0x41)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), bundle.revision_count);
+
+    const oversized_resource = [_]u8{'r'} ** (MAX_PERMISSION_RESOURCE_BYTES + 1);
+    const oversized_permission = [_]manifest.PermissionRequest{.{
+        .kind = .object_access,
+        .resource = oversized_resource[0..],
+        .rights = .{ .object = .{ .object_read = true } },
+        .local_only = true,
+    }};
+    source.requested_permissions = &oversized_permission;
+    try std.testing.expectError(
+        error.PermissionResourceTooLong,
+        bundle_ops.installNew(&bundle, source, "store:zigos", 1, crypto_hash.digestFromByte(0x42)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), bundle.revision_count);
 }
 
 test "package service rejects example writer manifest updates that widen permissions without declaration" {
