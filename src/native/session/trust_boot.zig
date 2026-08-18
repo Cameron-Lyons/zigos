@@ -70,10 +70,12 @@ pub const TrustBoot = struct {
         graph_builder: *service_graph_builder_mod.Builder,
         native_store: *native_store_mount.NativeStoreMount,
     ) TrustBoot {
+        const capability_table = kernel_context.capabilityTable() orelse
+            native_util.impossibleByInvariant("trust boot construction follows capability-table allocation");
         return .{
             .runtime = &runtime_context.runtime,
             .userspace_catalog = &runtime_context.userspace_catalog,
-            .capability_table = &kernel_context.capability_table,
+            .capability_table = capability_table,
             .compositor = compositor,
             .service_directory = &graph_builder.service_directory,
             .supervisor = &graph_builder.supervisor,

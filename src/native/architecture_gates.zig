@@ -458,5 +458,6 @@ pub const indexed_hot_path_tables = .{
     .session_manager_boot_flow = .{
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
         .caches_surface_authority_lifecycle_generation = @hasField(session_manager_boot_flow.SessionManager, "surface_authority_scanned_lifecycle_generation"),
+        .heap_backs_capability_table_on_freestanding = session_manager_boot_flow.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING,
     },
 };

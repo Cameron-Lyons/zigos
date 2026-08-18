@@ -44,6 +44,7 @@ const workspace_mod = @import("../storage/workspace.zig");
 pub const BootstrapState = session_support.BootstrapState;
 pub const ServiceBindings = session_support.ServiceBindings;
 pub const Environment = session_support.Environment;
+pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = session_contexts.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
 const NETWORK_RECEIVE_SERVICE_BUDGET: usize = 8;
 
@@ -108,6 +109,7 @@ pub const SessionManager = struct {
         self.runtime_context.runtime.reset();
         self.kernel_context.endpoint_table.deinit();
         self.kernel_context.shared_memory_table.deinit();
+        self.kernel_context.releaseCapabilityTable();
         self.recovery_context.review_compositor_session.deinit();
         self.recovery_context.diagnostic_ledger.deinit();
         self.service_graph_builder.package_service_instance.deinit();
@@ -149,7 +151,8 @@ pub const SessionManager = struct {
     }
 
     pub fn capabilityTablePtr(self: *SessionManager) *capability.CapabilityTable {
-        return &self.kernel_context.capability_table;
+        return self.kernel_context.capabilityTable() orelse
+            native_util.impossibleByInvariant("session capability access follows table allocation");
     }
 
     pub fn userspaceCatalogPtr(self: *SessionManager) *userspace_loader.Catalog {
@@ -279,7 +282,7 @@ pub const SessionManager = struct {
     pub fn focusedInputCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         const task = self.runtime_context.runtime.find(task_id) orelse return null;
         for (task.capabilityIds()) |capability_id| {
-            const granted = self.kernel_context.capability_table.requireUsable(capability_id, now_ticks) catch continue;
+            const granted = self.capabilityTablePtr().requireUsable(capability_id, now_ticks) catch continue;
             if (granted.target.kind != .task or granted.target.id != task_id) continue;
             if (granted.scope.task_id != task_id or !granted.rights.has(.input_recv)) continue;
             return capability_id;
@@ -291,7 +294,7 @@ pub const SessionManager = struct {
         if (self.focusedInputCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
         const task = self.runtime_context.runtime.find(task_id) orelse return null;
         if (self.compositor_broker_service_id == 0) return null;
-        const granted = self.kernel_context.capability_table.mintBootRoot(.{
+        const granted = self.capabilityTablePtr().mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
             .target = .{ .kind = .task, .id = task_id },
@@ -314,7 +317,7 @@ pub const SessionManager = struct {
             },
         }) catch return null;
         self.runtime_context.runtime.grantCapability(task_id, granted.id) catch {
-            self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+            self.capabilityTablePtr().revokeGrant(granted.id) catch {};
             return null;
         };
         return granted.id;
@@ -323,7 +326,7 @@ pub const SessionManager = struct {
     pub fn surfacePresentationCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         const task = self.runtime_context.runtime.find(task_id) orelse return null;
         for (task.capabilityIds()) |capability_id| {
-            const granted = self.kernel_context.capability_table.requireUsable(capability_id, now_ticks) catch continue;
+            const granted = self.capabilityTablePtr().requireUsable(capability_id, now_ticks) catch continue;
             if (granted.target.kind != .task or granted.target.id != task_id) continue;
             if (granted.scope.task_id != task_id or !granted.rights.has(.surface_present)) continue;
             return capability_id;
@@ -335,7 +338,7 @@ pub const SessionManager = struct {
         if (self.surfacePresentationCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
         const task = self.runtime_context.runtime.find(task_id) orelse return null;
         if (!self.taskOwnsUiSurface(task) or self.compositor_broker_service_id == 0) return null;
-        const granted = self.kernel_context.capability_table.mintBootRoot(.{
+        const granted = self.capabilityTablePtr().mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
             .target = .{ .kind = .task, .id = task_id },
@@ -358,7 +361,7 @@ pub const SessionManager = struct {
             },
         }) catch return null;
         self.runtime_context.runtime.grantCapability(task_id, granted.id) catch {
-            self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+            self.capabilityTablePtr().revokeGrant(granted.id) catch {};
             return null;
         };
         return granted.id;
@@ -489,6 +492,10 @@ pub const SessionManager = struct {
         if (self.initialized) return null;
         self.initialized = true;
         self.kernel_context.resetPort();
+        _ = self.kernel_context.ensureCapabilityTable() catch {
+            self.failBoot();
+            return null;
+        };
 
         const env = self.service_graph_builder.environment(
             &self.runtime_context,
@@ -640,7 +647,7 @@ pub const SessionManager = struct {
         };
         const dispatch = self.runtime_context.userspace_scheduler.taskDispatchStats(task_id);
         const task = self.runtime_context.runtime.find(task_id);
-        const authority = self.kernel_context.capability_table.query(mailbox.authority_capability_id);
+        const authority = self.capabilityTablePtr().query(mailbox.authority_capability_id);
         var line_buffer: [512]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buffer,
@@ -679,7 +686,7 @@ pub const SessionManager = struct {
             graph.state.services.storage_service.id,
             graph.service_bindings.bindingFor(.storage_object).task_id,
             graph.state.ids.storage_service,
-            &self.kernel_context.capability_table,
+            self.capabilityTablePtr(),
         ) catch return false;
         return true;
     }
@@ -737,7 +744,7 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
     try session_bootstrap.initializeUserspace(
         &self.runtime_context.userspace_catalog,
         &self.runtime_context.runtime,
-        &self.kernel_context.capability_table,
+        self.capabilityTablePtr(),
         &self.runtime_context.userspace_scheduler,
     );
     const services = try session_bootstrap.registerCoreServices(&self.service_graph_builder.supervisor, &self.runtime_context.runtime_service, ids);
@@ -835,7 +842,7 @@ fn mintNativeBootstrapGrant(
         .policy_mint_authority => services.policy_service.id,
         .service_task_authority => unreachable,
     };
-    return try self.kernel_context.capability_table.mintBootRoot(.{
+    return try self.capabilityTablePtr().mintBootRoot(.{
         .holder = ids.session_service,
         .issuer = ids.policy_authority,
         .target = target,
@@ -867,7 +874,7 @@ fn grantNativeServiceTaskAuthority(
 ) BootstrapError!void {
     if (!catalogDeclaresGrant(class, .service_task_authority)) return error.MissingBootstrapGrant;
     const service = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapGrant;
-    const granted = try self.kernel_context.capability_table.mintBootRoot(.{
+    const granted = try self.capabilityTablePtr().mintBootRoot(.{
         .holder = task.owner,
         .issuer = ids.policy_authority,
         .target = .{ .kind = .service, .id = service.id },
@@ -889,7 +896,7 @@ fn grantNativeServiceTaskAuthority(
         },
     });
     self.runtime_context.runtime.grantCapability(task.id, granted.id) catch |err| {
-        self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+        self.capabilityTablePtr().revokeGrant(granted.id) catch {};
         return err;
     };
 }

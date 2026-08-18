@@ -2,6 +2,7 @@ const component_port = @import("../kernel_api/component_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const native_service_registry = @import("../services/service_registry.zig");
+const native_util = @import("../core/util.zig");
 const package_service = @import("../services/package_service.zig");
 const session_contexts = @import("session_manager_contexts.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
@@ -39,8 +40,10 @@ pub const Builder = struct {
         kernel_context: *session_contexts.KernelContext,
         recovery_context: *session_contexts.RecoveryContext,
     ) Environment {
+        const capability_table = kernel_context.capabilityTable() orelse
+            native_util.impossibleByInvariant("service graph construction follows capability-table allocation");
         return .{
-            .capability_table = &kernel_context.capability_table,
+            .capability_table = capability_table,
             .runtime = &runtime_context.runtime,
             .service_directory = &self.service_directory,
             .userspace_catalog = &runtime_context.userspace_catalog,
