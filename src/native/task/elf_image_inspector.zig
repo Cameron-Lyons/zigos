@@ -156,7 +156,7 @@ fn inspectTyped(
         offset = program_end;
     }
     if (loadable_segment_count == 0) return error.MissingLoadableSegment;
-    executable_image.segment_count = loadable_segment_count;
+    executable_image.segment_count = @intCast(loadable_segment_count);
     if (!mailboxFitsWritableLoad(&executable_image, bootstrap_mailbox_address)) {
         return error.InvalidBootstrapMailboxSection;
     }
