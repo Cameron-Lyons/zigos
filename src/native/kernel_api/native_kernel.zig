@@ -156,8 +156,13 @@ pub const Kernel = struct {
     pub fn taskTerminate(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!bool {
         const task_capability = try self.authorizeOperation(.task_terminate, context, now_ticks, .{});
         const task_id = task_capability.target.id;
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        var held_capability_ids: [task_runtime.MAX_TASK_CAPABILITIES]u64 = undefined;
+        const held_capability_count = task.capability_count;
+        @memcpy(held_capability_ids[0..held_capability_count], task.capabilityIds());
         const terminated = try self.runtime.terminateTask(task_id, now_ticks);
         if (!terminated) return false;
+        _ = self.capability_table.retireTaskAuthority(task_id, held_capability_ids[0..held_capability_count]);
         _ = self.endpoint_table.retireTask(ids.task(task_id));
         return true;
     }
@@ -1229,6 +1234,14 @@ test "capability mint query revoke and task termination are exposed by the nativ
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
     });
     try runtime.grantCapability(target_task.id, task_capability.id);
+    const external_task_authority = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .policy_authority, .serial = 1 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = target_task.id },
+        .rights = .{ .task = .{ .task_terminate = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
+    });
     const task_endpoint = try endpoints.create(ids.task(target_task.id), "terminated-task", .{});
     try std.testing.expectEqual(@as(u16, 1), endpoints.activeForTask(ids.task(target_task.id)));
 
@@ -1271,6 +1284,9 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try kernel.capabilityRevoke(testContext(.capability_revoke, minted.capability_id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
     try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
+    try std.testing.expect(capabilities.query(task_capability.id) == null);
+    try std.testing.expect(capabilities.query(external_task_authority.id) == null);
+    try std.testing.expect(capabilities.query(admin_capability.id) != null);
     try std.testing.expectEqual(@as(u16, 0), endpoints.activeForTask(ids.task(target_task.id)));
     try std.testing.expectError(error.EndpointNotFound, endpoints.descriptor(task_endpoint.id));
 }
