@@ -303,6 +303,7 @@ pub const indexed_hot_path_tables = .{
         .uses_surface_task_index = @hasField(compositor_session.Session, "surface_task_index"),
         .tracks_active_surface_chain = @hasField(compositor_session.Session, "active_surface_head"),
         .caches_surface_prune_generation = @hasField(compositor_session.Session, "last_surface_prune_generation"),
+        .heap_backs_surface_arena_on_freestanding = compositor_session.HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING,
     },
     .input_router = .{
         .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
