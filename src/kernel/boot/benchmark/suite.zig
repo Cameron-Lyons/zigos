@@ -874,14 +874,14 @@ fn prepareTaskCheckpointFixture() void {
 }
 
 fn preparePackageFixture() void {
-    package_context.service = package_service.Service.init();
+    package_context.service.reset();
     package_context.signed_v1 = signedPackageBundle(package_bundle_v1);
     package_context.signed_v2 = signedPackageBundle(package_bundle_v2);
     trustBenchmarkPackagePublisher(&package_context.service);
-    const slot = &package_context.service.slots.slots[0];
-    slot.in_use = true;
-    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    package_context.service.rebuildIndexes();
+    _ = package_context.service.install(.{
+        .bundle = package_context.signed_v1,
+        .source_identity = "benchmark:zigos",
+    }, null) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn trustBenchmarkPackagePublisher(service_ref: *package_service.Service) void {
@@ -1421,23 +1421,23 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
 
 fn benchmarkPackageRevision(iteration: u32) u64 {
     _ = iteration;
-    const slot = &package_context.service.slots.slots[0];
-    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const bundle = package_context.service.find("app.notes") orelse benchmark_reporting.benchStepFailure("benchmark suite", error.BundleNotFound);
+    package_service_bundle_ops.installNew(bundle, package_context.signed_v1, "benchmark:zigos", 1, crypto_hash.digestFromByte(0x11)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     package_service_bundle_ops.installRevision(
-        &slot.bundle,
+        bundle,
         package_context.signed_v2,
-        "store:zigos",
+        "benchmark:zigos",
         2,
         crypto_hash.digestFromByte(0x22),
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    const active = package_service_bundle_ops.resolveActiveManifest(&slot.bundle, &package_context.resolved);
+    const active = package_service_bundle_ops.resolveActiveManifest(bundle, &package_context.resolved);
     const launch_plan = package_context.service.buildLaunchPlan("app.notes") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    package_service_bundle_ops.rollback(&slot.bundle);
+    package_service_bundle_ops.rollback(bundle);
     return active.version_minor +
         launch_plan.components.len +
         launch_plan.assets.len +
-        slot.bundle.activeRevision().version_minor +
-        @intFromBool(slot.bundle.rollbackAvailable());
+        bundle.activeRevision().version_minor +
+        @intFromBool(bundle.rollbackAvailable());
 }
 
 fn benchmarkIndexingQuery(iteration: u32) u64 {

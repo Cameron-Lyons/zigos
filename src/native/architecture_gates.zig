@@ -248,7 +248,7 @@ pub const indexed_hot_path_tables = .{
         .uses_lease_arena = @hasDecl(@FieldType(personal_context_service.Service, "slots"), "reserve"),
     },
     .package_service = .{
-        .uses_bundle_arena = @hasDecl(@FieldType(package_service.Service, "slots"), "reserve"),
+        .uses_bundle_arena = @hasDecl(package_service.BundleArena, "reserve"),
         .uses_revision_permission_text_pool = @hasField(package_service.BundleRevision, "permission_text"),
         .uses_compact_permission_text_refs = @sizeOf(@FieldType(package_service.StoredPermission, "resource")) == 4 and
             @sizeOf(package_service.StoredPermission) < package_service.MAX_PERMISSION_RESOURCE_BYTES,
