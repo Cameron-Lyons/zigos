@@ -639,7 +639,7 @@ fn buildDeltaLog(
         if (version_record.id.raw() <= root.last_version_id) continue;
         try appendVersionPayloadChunks(&writer, store, version_record);
         const blob = store.blob(version_record.blob_address) orelse return error.CorruptImage;
-        try appendBlobRecord(&writer, blob);
+        try appendBlobRecord(&writer, store, blob);
         try appendVersionRecord(&writer, version_record);
     }
 
@@ -901,9 +901,9 @@ fn encodeVersionBody(writer: *CursorWriter, record: *const object_store.VersionR
     try writer.writeU16(record.chunk_count);
 }
 
-fn appendBlobRecord(writer: *CursorWriter, record: *const object_store.BlobRecord) Error!void {
+fn appendBlobRecord(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .blob_state);
-    try encodeBlobBody(writer, record);
+    try encodeBlobBody(writer, store, record);
     try volume_log.finishRecord(writer, header_offset);
 }
 
@@ -915,14 +915,15 @@ fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadCh
     try volume_log.finishRecord(writer, header_offset);
 }
 
-fn encodeBlobBody(writer: *CursorWriter, record: *const object_store.BlobRecord) Error!void {
+fn encodeBlobBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
     try writer.writeBytes(&record.address);
     try writer.writeBytes(&record.merkle_root);
     try writer.writeU32(@intCast(record.payload_len));
     try writer.writeU16(record.ref_count);
     try writer.writeU16(record.chunk_count);
     const chunk_count: usize = @intCast(record.chunk_count);
-    for (record.chunks[0..chunk_count]) |chunk_ref| {
+    for (0..chunk_count) |chunk_index| {
+        const chunk_ref = store.blobChunkRef(record, chunk_index) catch return error.CorruptImage;
         try writer.writeBytes(&chunk_ref.address);
         try writer.writeU16(chunk_ref.payload_len);
     }
@@ -1021,11 +1022,15 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     const chunk_count: usize = @intCast(try reader.readU16());
     if (payload_len > object_store.MAX_PAYLOAD_BYTES or chunk_count > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
     var chunk_refs = [_]object_store.ChunkRef{object_store.ChunkRef{}} ** object_store.MAX_BLOB_CHUNKS;
+    var chunk_slot_indexes = [_]object_store.BlobChunkSlotIndex{0} ** object_store.MAX_BLOB_CHUNKS;
     var chunk_index: usize = 0;
     while (chunk_index < chunk_count) : (chunk_index += 1) {
         try reader.readBytes(&chunk_refs[chunk_index].address);
         chunk_refs[chunk_index].payload_len = try reader.readU16();
-        chunk_refs[chunk_index].slot_index = store.chunkSlotIndex(chunk_refs[chunk_index].address) orelse return error.CorruptImage;
+        const chunk_slot_index = store.chunkSlotIndex(chunk_refs[chunk_index].address) orelse return error.CorruptImage;
+        const chunk_slot = store.chunkSlotAtConst(chunk_slot_index);
+        if (!chunk_slot.in_use or chunk_slot.chunk.payload_len != chunk_refs[chunk_index].payload_len) return error.CorruptImage;
+        chunk_slot_indexes[chunk_index] = @intCast(chunk_slot_index);
     }
     if (!std.mem.eql(u8, &object_store.computeBlobMerkleRoot(chunk_refs[0..chunk_count]), &merkle_root)) return error.CorruptImage;
     if (!std.mem.eql(u8, &object_store.computeBlobManifestAddress(payload_len, chunk_refs[0..chunk_count]), &address)) return error.CorruptImage;
@@ -1039,7 +1044,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     slot.blob.payload_len = payload_len;
     slot.blob.ref_count = ref_count;
     slot.blob.chunk_count = @intCast(chunk_count);
-    slot.blob.chunks = chunk_refs;
+    slot.blob.chunk_slot_indexes = chunk_slot_indexes;
     slot.blob.manifest_verified = false;
 }
 
@@ -1179,7 +1184,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     while (blob_slot_index < store.blobSlotCapacity()) : (blob_slot_index += 1) {
         const slot = store.blobSlotAtConst(blob_slot_index);
         if (!slot.in_use) continue;
-        try encodeBlobBody(&writer, &slot.blob);
+        try encodeBlobBody(&writer, store, &slot.blob);
     }
 
     for (&store.versions.slots) |*slot| {

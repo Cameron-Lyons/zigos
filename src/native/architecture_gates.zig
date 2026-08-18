@@ -396,6 +396,7 @@ pub const indexed_hot_path_tables = .{
         .bounds_log_io_workspace_to_one_data_region = storage_volume.IO_LOG_WORKSPACE_BYTES == storage_volume.DATA_REGION_BYTES,
         .tracks_latest_inserted_version = @hasField(object_store.Store, "latest_inserted_version_id"),
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
+        .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
         .uses_object_type_index = @hasField(object_store.Store, "object_type_index"),
         .tracks_max_blob_payload_bytes = @hasField(object_store.Store, "max_blob_payload_bytes"),
         .exposes_max_blob_payload_bytes = @hasDecl(object_store.Store, "maxBlobPayloadBytes"),
