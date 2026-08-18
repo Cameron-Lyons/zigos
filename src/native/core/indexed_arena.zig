@@ -92,7 +92,7 @@ pub fn UniqueIndex(comptime capacity: usize) type {
     return struct {
         const Self = @This();
 
-        slots: [capacity]id_index.Slot = id_index.emptyTable(capacity),
+        slots: [capacity]id_index.Slot(capacity) = id_index.emptyTable(capacity),
 
         pub fn init() Self {
             return .{};
