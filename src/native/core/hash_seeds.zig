@@ -16,5 +16,3 @@ pub const document_index_key: u64 = 0x5A47_494E_4458;
 pub const sync_document_operation_key: u64 = 0x5A47_5344_4F50_4944;
 pub const sync_document_clock_key: u64 = 0x5A47_5344_434C_4F43;
 pub const shared_memory_label_key: u64 = 0x5A47_5348_4D45_4D00;
-pub const shared_memory_mapping_key: u64 = 0x5A47_5348_4D41_5000;
-pub const shared_memory_task_mapping_key: u64 = 0x5A47_5348_4D54_4153;
