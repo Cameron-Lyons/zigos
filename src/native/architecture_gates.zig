@@ -244,7 +244,9 @@ pub const indexed_hot_path_tables = .{
         .uses_active_generation_bucket_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "active_generation_buckets"), "reserve"),
     },
     .object_resilience_service = .{
-        .uses_snapshot_arena = @hasDecl(@FieldType(object_resilience_service.Service, "slots"), "reserve"),
+        .uses_bounded_snapshot_scan = object_resilience_service.BOUNDED_SNAPSHOT_SCAN,
+        .reclaims_revoked_snapshots = object_resilience_service.RECLAIMS_REVOKED_SNAPSHOTS,
+        .keeps_fixed_state_within_ceiling = @sizeOf(object_resilience_service.Service) <= object_resilience_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .personal_context_service = .{
         .uses_lease_arena = @hasDecl(@FieldType(personal_context_service.Service, "slots"), "reserve"),
