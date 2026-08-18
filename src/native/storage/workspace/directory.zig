@@ -280,7 +280,6 @@ pub const WorkspaceShareTable = struct {
 pub const WorkspaceStagingState = struct {
     transaction_open: bool = false,
     staged_entry_count: usize = 0,
-    staged_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
     staged_effective_entry_count: usize = 0,
 };
 
@@ -574,7 +573,7 @@ pub const Directory = struct {
     pub fn abortTransaction(self: *Directory, workspace_id: ids.WorkspaceId) Error!void {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (!workspace.staging.transaction_open) return error.NoActiveTransaction;
-        clearTransactionState(workspace);
+        discardTransactionState(workspace);
         workspace.staging.staged_effective_entry_count = workspace.path_index.entry_count;
     }
 
@@ -591,19 +590,19 @@ pub const Directory = struct {
         if (!workspace.staging.transaction_open) return error.NoActiveTransaction;
 
         if (findStagedEntryIndex(workspace, path)) |index| {
-            if (isDeleteTombstone(workspace.staging.staged_entries[index])) {
+            const staged_entry = stagedEntryAt(workspace, index);
+            if (isDeleteTombstone(staged_entry.*)) {
                 workspace.staging.staged_effective_entry_count += 1;
             }
-            workspace.staging.staged_entries[index] = try Entry.init(path, object_id, version_id, object_type);
+            staged_entry.* = try Entry.init(path, object_id, version_id, object_type);
             return;
         }
-        if (findWorkspaceEntryIndex(workspace, path) == null) {
+        const adds_entry = findWorkspaceEntryIndex(workspace, path) == null;
+        if (adds_entry) {
             if (workspace.staging.staged_effective_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
-            workspace.staging.staged_effective_entry_count += 1;
         }
-        if (workspace.staging.staged_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
-
-        try insertSortedEntry(&workspace.staging.staged_entries, &workspace.staging.staged_entry_count, try Entry.init(path, object_id, version_id, object_type));
+        try insertSortedStagedEntry(workspace, try Entry.init(path, object_id, version_id, object_type));
+        if (adds_entry) workspace.staging.staged_effective_entry_count += 1;
     }
 
     pub fn stageDelete(self: *Directory, workspace_id: ids.WorkspaceId, path: []const u8) Error!void {
@@ -613,21 +612,21 @@ pub const Directory = struct {
         const base_exists = findWorkspaceEntryIndex(workspace, path) != null;
 
         if (findStagedEntryIndex(workspace, path)) |index| {
-            if (isDeleteTombstone(workspace.staging.staged_entries[index])) return error.EntryNotFound;
+            const staged_entry = stagedEntryAt(workspace, index);
+            if (isDeleteTombstone(staged_entry.*)) return error.EntryNotFound;
 
             workspace.staging.staged_effective_entry_count -= 1;
             if (base_exists) {
-                workspace.staging.staged_entries[index] = try deleteTombstone(path);
+                staged_entry.* = try deleteTombstone(path);
             } else {
-                removeEntry(&workspace.staging.staged_entries, &workspace.staging.staged_entry_count, index);
+                removeStagedEntry(workspace, index);
             }
             return;
         }
 
         if (!base_exists) return error.EntryNotFound;
-        if (workspace.staging.staged_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
 
-        try insertSortedEntry(&workspace.staging.staged_entries, &workspace.staging.staged_entry_count, try deleteTombstone(path));
+        try insertSortedStagedEntry(workspace, try deleteTombstone(path));
         workspace.staging.staged_effective_entry_count -= 1;
     }
 
@@ -637,7 +636,7 @@ pub const Directory = struct {
         if (!workspace.staging.transaction_open) return error.NoActiveTransaction;
 
         try applyTransactionDelta(workspace);
-        clearTransactionState(workspace);
+        closeTransactionState(workspace);
         compactMutationLogIfSafe(workspace);
         self.markWorkspaceDirty(workspace_id);
         return workspace.generation;
@@ -781,6 +780,7 @@ pub const Directory = struct {
     pub fn restore(self: *Directory, workspace_id: ids.WorkspaceId, snapshot_id: ids.SnapshotId, tick: u64) Error!u32 {
         _ = tick;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
+        if (workspace.staging.transaction_open) return error.TransactionAlreadyOpen;
         const snapshot_record = self.findSnapshot(snapshot_id) orelse return error.SnapshotNotFound;
         if (!snapshot_record.workspace_id.eql(workspace_id)) return error.SnapshotNotFound;
         var materialized_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
@@ -794,7 +794,6 @@ pub const Directory = struct {
         if (!verifySnapshotRecord(snapshot_record, snapshot_entries)) return error.InvalidSignature;
 
         try replaceCurrentEntriesWith(workspace, snapshot_entries);
-        clearTransactionState(workspace);
         self.markWorkspaceDirty(workspace_id);
         return workspace.generation;
     }
@@ -802,6 +801,7 @@ pub const Directory = struct {
     pub fn recoverDeleted(self: *Directory, workspace_id: ids.WorkspaceId, path: []const u8, tick: u64) Error!bool {
         _ = tick;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
+        if (workspace.staging.transaction_open) return error.TransactionAlreadyOpen;
         if (findEntryIndex(workspace.path_index.entries[0..workspace.path_index.entry_count], path) != null) return false;
 
         var index = workspace.recoverable_deletes.deleted_count;
@@ -910,8 +910,8 @@ pub const Directory = struct {
         if (!package.workspace_id.eql(workspace_id)) return error.SnapshotNotFound;
 
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
+        if (workspace.staging.transaction_open) return error.TransactionAlreadyOpen;
         try replaceCurrentEntriesWith(workspace, package.entries[0..package.entry_count]);
-        clearTransactionState(workspace);
         self.markWorkspaceDirty(workspace_id);
         return workspace.generation;
     }
@@ -1304,7 +1304,70 @@ fn findWorkspaceEntryObjectIndex(workspace: *const WorkspaceRecord, object_id: i
 }
 
 fn findStagedEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
-    return findEntryIndex(workspace.staging.staged_entries[0..workspace.staging.staged_entry_count], path);
+    var left: usize = 0;
+    var right = workspace.staging.staged_entry_count;
+    while (left < right) {
+        const middle = left + (right - left) / 2;
+        switch (compareEntryPath(stagedEntryAtConst(workspace, middle).pathSlice(), path)) {
+            .lt => left = middle + 1,
+            .eq => return middle,
+            .gt => right = middle,
+        }
+    }
+    return null;
+}
+
+fn stagedEntryAt(workspace: *WorkspaceRecord, staged_index: usize) *Entry {
+    return &workspace.mutation_log.entry_mutations[stagedMutationIndex(workspace, staged_index)].entry;
+}
+
+fn stagedEntryAtConst(workspace: *const WorkspaceRecord, staged_index: usize) *const Entry {
+    return &workspace.mutation_log.entry_mutations[stagedMutationIndex(workspace, staged_index)].entry;
+}
+
+fn stagedMutationIndex(workspace: *const WorkspaceRecord, staged_index: usize) usize {
+    const mutation_index = workspace.mutation_log.entry_mutation_count + staged_index;
+    if (staged_index >= workspace.staging.staged_entry_count or mutation_index >= MAX_WORKSPACE_ENTRY_MUTATIONS) {
+        native_util.impossibleByInvariant("staged workspace entry occupies the unused mutation-log tail");
+    }
+    return mutation_index;
+}
+
+fn insertSortedStagedEntry(workspace: *WorkspaceRecord, entry: Entry) Error!void {
+    const staged_count = workspace.staging.staged_entry_count;
+    if (staged_count >= MAX_WORKSPACE_ENTRIES or
+        workspace.mutation_log.entry_mutation_count + staged_count >= MAX_WORKSPACE_ENTRY_MUTATIONS)
+    {
+        return error.EntryTableFull;
+    }
+
+    var insert_index: usize = 0;
+    while (insert_index < staged_count and compareEntryPath(stagedEntryAtConst(workspace, insert_index).pathSlice(), entry.pathSlice()) == .lt) : (insert_index += 1) {}
+    if (insert_index < staged_count and compareEntryPath(stagedEntryAtConst(workspace, insert_index).pathSlice(), entry.pathSlice()) == .eq) {
+        return error.DuplicatePath;
+    }
+
+    const base_index = workspace.mutation_log.entry_mutation_count;
+    var move_index = staged_count;
+    while (move_index > insert_index) : (move_index -= 1) {
+        workspace.mutation_log.entry_mutations[base_index + move_index] =
+            workspace.mutation_log.entry_mutations[base_index + move_index - 1];
+    }
+    workspace.mutation_log.entry_mutations[base_index + insert_index] = .{ .entry = entry };
+    workspace.staging.staged_entry_count += 1;
+}
+
+fn removeStagedEntry(workspace: *WorkspaceRecord, staged_index: usize) void {
+    const staged_count = workspace.staging.staged_entry_count;
+    if (staged_index >= staged_count) native_util.impossibleByInvariant("staged workspace entry removal stays within the transaction");
+    const base_index = workspace.mutation_log.entry_mutation_count;
+    var move_index = staged_index + 1;
+    while (move_index < staged_count) : (move_index += 1) {
+        workspace.mutation_log.entry_mutations[base_index + move_index - 1] =
+            workspace.mutation_log.entry_mutations[base_index + move_index];
+    }
+    workspace.mutation_log.entry_mutations[base_index + staged_count - 1] = .{};
+    workspace.staging.staged_entry_count -= 1;
 }
 
 fn deleteTombstone(path: []const u8) Error!Entry {
@@ -1554,9 +1617,12 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
     debugAssertEntriesSorted(workspace.path_index.entries[0..workspace.path_index.entry_count]);
     if (workspace.mutation_log.entry_mutation_count + workspace.staging.staged_entry_count > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
     const next_generation = workspace.generation + 1;
+    const staged_entry_start = workspace.mutation_log.entry_mutation_count;
+    const staged_entry_count = workspace.staging.staged_entry_count;
     var structural_change = false;
     var object_index_dirty = false;
-    for (workspace.staging.staged_entries[0..workspace.staging.staged_entry_count]) |staged_entry| {
+    for (0..staged_entry_count) |staged_index| {
+        const staged_entry = workspace.mutation_log.entry_mutations[staged_entry_start + staged_index].entry;
         if (isDeleteTombstone(staged_entry)) {
             const existing_index = findEntryIndex(workspace.path_index.entries[0..workspace.path_index.entry_count], staged_entry.pathSlice()) orelse return error.EntryNotFound;
             appendDeleted(workspace, workspace.path_index.entries[existing_index]);
@@ -1592,17 +1658,19 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
     }
 }
 
-fn clearTransactionState(workspace: *WorkspaceRecord) void {
-    clearEntryPrefix(&workspace.staging.staged_entries, workspace.staging.staged_entry_count);
+fn discardTransactionState(workspace: *WorkspaceRecord) void {
+    const staged_entry_start = workspace.mutation_log.entry_mutation_count;
+    const staged_entry_end = @min(staged_entry_start + workspace.staging.staged_entry_count, MAX_WORKSPACE_ENTRY_MUTATIONS);
+    for (workspace.mutation_log.entry_mutations[staged_entry_start..staged_entry_end]) |*mutation| {
+        mutation.* = .{};
+    }
+    closeTransactionState(workspace);
+}
+
+fn closeTransactionState(workspace: *WorkspaceRecord) void {
     workspace.staging.transaction_open = false;
     workspace.staging.staged_entry_count = 0;
     workspace.staging.staged_effective_entry_count = 0;
-}
-
-fn clearEntryPrefix(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: usize) void {
-    for (entries[0..count]) |*entry| {
-        entry.* = Entry{};
-    }
 }
 
 fn debugIndexChecksEnabled() bool {

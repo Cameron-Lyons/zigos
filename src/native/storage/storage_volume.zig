@@ -1069,6 +1069,10 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     const previous_mutation_count = slot.workspace.mutation_log.entry_mutation_count;
     const previous_share_grant_count = slot.workspace.share_table.share_grant_count;
     const previous_staged_entry_count = slot.workspace.staging.staged_entry_count;
+    const previous_mutation_tail = @min(
+        previous_mutation_count + previous_staged_entry_count,
+        workspace.MAX_WORKSPACE_ENTRY_MUTATIONS,
+    );
     const previous_deleted_count = slot.workspace.recoverable_deletes.deleted_count;
     slot.workspace.id = workspace_id;
     slot.workspace.owner = try readPrincipal(&reader);
@@ -1092,8 +1096,8 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
             .entry = try readEntry(&reader),
         };
     }
-    if (slot.workspace.mutation_log.entry_mutation_count < previous_mutation_count) {
-        for (slot.workspace.mutation_log.entry_mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_count]) |*mutation| {
+    if (slot.workspace.mutation_log.entry_mutation_count < previous_mutation_tail) {
+        for (slot.workspace.mutation_log.entry_mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_tail]) |*mutation| {
             mutation.* = .{};
         }
     }
@@ -1118,9 +1122,6 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
         }
     }
 
-    for (slot.workspace.staging.staged_entries[0..previous_staged_entry_count]) |*entry| {
-        entry.* = .{};
-    }
     slot.workspace.staging.transaction_open = false;
     slot.workspace.staging.staged_entry_count = 0;
     slot.workspace.staging.staged_effective_entry_count = 0;
@@ -1694,7 +1695,9 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     live.staging.transaction_open = true;
     live.staging.staged_entry_count = 1;
     live.staging.staged_effective_entry_count = 2;
-    live.staging.staged_entries[0] = try workspace.Entry.init("documents/staged-secret.md", ids.object(3), ids.version(3), .document);
+    live.mutation_log.entry_mutations[live.mutation_log.entry_mutation_count] = .{
+        .entry = try workspace.Entry.init("documents/staged-secret.md", ids.object(3), ids.version(3), .document),
+    };
 
     const replacement_workspaces = try allocator.create(workspace.Directory);
     defer allocator.destroy(replacement_workspaces);
@@ -1730,7 +1733,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     try std.testing.expectEqualDeep(workspace.Entry{}, live.recoverable_deletes.deleted_entries[1]);
     try std.testing.expect(!live.staging.transaction_open);
     try std.testing.expectEqual(@as(usize, 0), live.staging.staged_entry_count);
-    try std.testing.expectEqualDeep(workspace.Entry{}, live.staging.staged_entries[0]);
+    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entry_mutations[2]);
 }
 
 test "storage append rejects issuance watermark rewind" {
