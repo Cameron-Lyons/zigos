@@ -176,7 +176,8 @@ pub const SessionManager = struct {
     }
 
     pub fn storageCheckpointStorePtr(self: *SessionManager) *storage_service_mod.CheckpointStore {
-        return &self.native_store.storage_checkpoint_store;
+        return self.native_store.checkpointStorePtr() orelse
+            native_util.impossibleByInvariant("booted storage service retains checkpoint state");
     }
 
     pub fn exportPackagePtr(self: *SessionManager) *workspace_mod.ExportPackage {
@@ -467,7 +468,10 @@ pub const SessionManager = struct {
             self.failBoot();
             return;
         }
-        self.bindProductionStorageService(&graph);
+        if (!self.bindProductionStorageService(&graph)) {
+            self.failBoot();
+            return;
+        }
         if (!storage_durability_qemu.run(&self.native_store.storage_service_instance)) {
             self.failBoot();
             return;
@@ -512,7 +516,10 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         }
-        self.bindProductionStorageService(&graph);
+        if (!self.bindProductionStorageService(&graph)) {
+            self.failBoot();
+            return null;
+        }
         self.runtime_context.runtime_service.checkpoint(60) catch {
             self.failBoot();
             return null;
@@ -661,13 +668,14 @@ pub const SessionManager = struct {
         console.print(line);
     }
 
-    pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) void {
+    pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) bool {
         self.native_store.bindProduction(
             graph.state.services.storage_service.id,
             graph.service_bindings.bindingFor(.storage_object).task_id,
             graph.state.ids.storage_service,
             &self.kernel_context.capability_table,
-        );
+        ) catch return false;
+        return true;
     }
 
     pub fn failBoot(self: *SessionManager) void {
