@@ -209,12 +209,13 @@ pub const TrustBoot = struct {
         ) catch return false;
         const workspace_id = manager.workspace_id;
         const sync_record = self.supervisor.findByClass(.sync_replication) orelse return false;
+        const sync_resident_state = self.native_store.syncResidentStatePtr() catch return false;
         var sync_instance = sync_service.Service.initWithStorage(
             sync_record.id,
             graph.service_bindings.bindingFor(.sync_replication).task_id,
             sync_record.owner,
             &self.native_store.storage_service_instance,
-            &self.native_store.sync_resident_state,
+            sync_resident_state,
         ) catch return false;
         const network_probe = self.seedProductionHealthNetworkProbe(&sync_instance, workspace_id, 81) catch return false;
         const compositor_task = self.runtime.find(graph.service_bindings.bindingFor(.compositor_ui_session).task_id) orelse return false;

@@ -458,6 +458,11 @@ pub const ResidentState = struct {
         [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_DATABASE_CONTRACTS,
     next_state_tick: u64 = 1,
 
+    pub fn initializeAllocated(self: *ResidentState) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.resetPersistent();
+    }
+
     pub fn resetForServiceInit(self: *ResidentState) void {
         self.persisted_state.reset();
         self.transport_cursor_loaded = false;
@@ -615,6 +620,25 @@ pub fn zeroDeviceGraphRecord() device_graph.DeviceRecord {
         .platform_root_provenance = measured_boot.RootProvenance.synthetic_host,
         .platform_root_digest = crypto_hash.zero_digest,
     };
+}
+
+test "allocated sync resident state starts in canonical empty state" {
+    var resident_state: ResidentState = undefined;
+    resident_state.initializeAllocated();
+
+    try std.testing.expect(!resident_state.has_persisted_state);
+    try std.testing.expect(!resident_state.transport_cursor_loaded);
+    try std.testing.expectEqual(@as(u64, 1), resident_state.next_state_tick);
+    try std.testing.expectEqual(@as(usize, 0), resident_state.userRootCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.deviceCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.networkPolicyCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.workspacePolicyCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.replicaCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.conflictCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.databaseContractCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.overlayCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.outboundTransportFrameCount());
+    try std.testing.expectEqual(@as(usize, 0), resident_state.inboundTransportFrameCount());
 }
 
 pub fn zeroWorkspacePolicy() WorkspacePolicy {

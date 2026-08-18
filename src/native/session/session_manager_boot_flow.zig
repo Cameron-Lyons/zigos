@@ -188,8 +188,8 @@ pub const SessionManager = struct {
         return self.native_store.exportPackagePtr();
     }
 
-    pub fn syncResidentStatePtr(self: *SessionManager) *sync_service_mod.ResidentState {
-        return &self.native_store.sync_resident_state;
+    pub fn syncResidentStatePtr(self: *SessionManager) error{NoSpaceLeft}!*sync_service_mod.ResidentState {
+        return self.native_store.syncResidentStatePtr();
     }
 
     pub fn packageServicePtr(self: *SessionManager) *package_service.Service {
