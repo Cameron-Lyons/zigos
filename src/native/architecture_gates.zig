@@ -364,6 +364,21 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(measured_boot.Recorder) <= measured_boot.RECORDER_SIZE_CEILING_BYTES,
     },
     .compositor_session = .{
+        .stores_compact_window_metadata = compositor_session.COMPACT_RECORD_METADATA and
+            @FieldType(compositor_session.WindowRecord, "bundle_id_len") == u8 and
+            @FieldType(compositor_session.WindowRecord, "display_name_len") == u8 and
+            @FieldType(compositor_session.WindowRecord, "title_len") == u8 and
+            @FieldType(compositor_session.WindowRecord, "detail_len") == u8 and
+            @FieldType(compositor_session.WindowRecord, "item_count") == u8,
+        .stores_compact_review_item_metadata = @FieldType(compositor_session.ReviewItemRecord, "label_len") == u8 and
+            @FieldType(compositor_session.ReviewItemRecord, "resource_len") == u8 and
+            @FieldType(compositor_session.ReviewItemRecord, "reason_len") == u8 and
+            @FieldType(compositor_session.ReviewItemRecord, "object_scope_len") == u8 and
+            @FieldType(compositor_session.ReviewItemRecord, "network_path_len") == u8,
+        .keeps_records_within_ceilings = @sizeOf(compositor_session.WindowRecord) <= compositor_session.WINDOW_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(compositor_session.ReviewItemRecord) <= compositor_session.REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES,
+        .keeps_snapshot_state_within_ceilings = @sizeOf(compositor_session.SessionSnapshot) <= compositor_session.SESSION_SNAPSHOT_SIZE_CEILING_BYTES and
+            @sizeOf(compositor_session.CheckpointStore) <= compositor_session.CHECKPOINT_STORE_SIZE_CEILING_BYTES,
         .uses_window_arena = @hasField(compositor_session.Session, "windows"),
         .uses_review_item_arena = @hasDecl(compositor_session.ReviewItemArena, "reserveIndex"),
         .uses_task_bundle_index = @hasField(compositor_session.Session, "task_bundle_index"),
