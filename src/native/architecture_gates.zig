@@ -332,6 +332,11 @@ pub const indexed_hot_path_tables = .{
         .uses_dma_program_device_index = device_broker.dma_program_indexing.uses_device_index,
     },
     .network_policy = .{
+        .stores_compact_policy_metadata = network_policy.COMPACT_POLICY_METADATA and
+            @FieldType(network_policy.PolicyRecord, "label_len") == u8 and
+            @FieldType(network_policy.PolicyRecord, "target_len") == u8,
+        .keeps_policy_state_within_ceilings = @sizeOf(network_policy.PolicyRecord) <= network_policy.POLICY_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(network_policy.Directory) <= network_policy.DIRECTORY_SIZE_CEILING_BYTES,
         .uses_policy_arena = @hasDecl(@FieldType(network_policy.Directory, "policies"), "reserve"),
     },
     .policy_object = .{
@@ -422,6 +427,16 @@ pub const indexed_hot_path_tables = .{
         .tracks_last_packet_id = @hasField(sync_transport.PacketCapture, "last_packet_id"),
     },
     .device_graph = .{
+        .stores_compact_identity_metadata = device_graph.COMPACT_IDENTITY_METADATA and
+            @FieldType(device_graph.PlatformDeviceRoot, "label_len") == u8 and
+            @FieldType(device_graph.UserRootRecord, "label_len") == u8 and
+            @FieldType(device_graph.DeviceRecord, "label_len") == u8 and
+            @FieldType(device_graph.DeviceRecord, "platform_key_label_len") == u8 and
+            @FieldType(device_graph.Graph, "trusted_device_count") == u8,
+        .keeps_identity_state_within_ceilings = @sizeOf(device_graph.PlatformDeviceRoot) <= device_graph.PLATFORM_DEVICE_ROOT_SIZE_CEILING_BYTES and
+            @sizeOf(device_graph.UserRootRecord) <= device_graph.USER_ROOT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(device_graph.DeviceRecord) <= device_graph.DEVICE_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(device_graph.Graph) <= device_graph.GRAPH_SIZE_CEILING_BYTES,
         .uses_user_root_arena = @hasDecl(@FieldType(device_graph.Graph, "user_roots"), "reserveIndex"),
         .uses_device_arena = @hasDecl(@FieldType(device_graph.Graph, "devices"), "reserveIndex"),
         .tracks_trusted_device_count = @hasField(device_graph.Graph, "trusted_device_count"),
