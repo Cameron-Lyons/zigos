@@ -239,7 +239,7 @@ fn makeAddressSpace(
             .write = true,
         },
     };
-    record.region_count = userspace_image.segment_count + 1;
+    record.region_count = @intCast(userspace_image.segment_count + 1);
     return record;
 }
 
