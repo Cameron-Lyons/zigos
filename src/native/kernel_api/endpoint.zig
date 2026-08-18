@@ -13,6 +13,19 @@ const MAX_ENDPOINT_LABEL_PAYLOAD_BYTES: usize = MAX_ENDPOINT_LABEL_BYTES - 1;
 pub const ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const ENDPOINT_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 
+comptime {
+    const byte_capacities = [_]usize{
+        MAX_ENDPOINT_QUEUE,
+        MAX_MESSAGE_BYTES,
+        MAX_ENDPOINT_LABEL_BYTES,
+    };
+    for (byte_capacities) |capacity| {
+        if (capacity > std.math.maxInt(u8)) {
+            @compileError("endpoint capacity exceeds its compact field");
+        }
+    }
+}
+
 pub const EndpointFlags = packed struct(u16) {
     local_only: bool = false,
     service_port: bool = false,
@@ -23,14 +36,19 @@ pub const EndpointFlags = packed struct(u16) {
 pub const Message = struct {
     sender_task_id: ids.TaskId,
     correlation_id: u64,
-    attached_capability_id: ?ids.CapabilityId = null,
+    attached_capability_id: ids.CapabilityId = ids.CapabilityId.zero,
     move_attached_capability: bool = false,
     flags: EndpointFlags = .{},
-    len: usize,
+    len: u8,
     bytes: [MAX_MESSAGE_BYTES]u8,
 
     pub fn payload(self: *const Message) []const u8 {
         return self.bytes[0..self.len];
+    }
+
+    pub fn attachedCapabilityId(self: *const Message) ?ids.CapabilityId {
+        if (self.attached_capability_id.isZero()) return null;
+        return self.attached_capability_id;
     }
 };
 
@@ -47,11 +65,11 @@ pub const Endpoint = struct {
     id: ids.EndpointId,
     owner_task_id: ids.TaskId,
     flags: EndpointFlags,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_ENDPOINT_LABEL_BYTES]u8,
-    peer_endpoint_id: ?ids.EndpointId = null,
-    queue_head: usize = 0,
-    queue_len: usize = 0,
+    peer_endpoint_id: ids.EndpointId = ids.EndpointId.zero,
+    queue_head: u8 = 0,
+    queue_len: u8 = 0,
     queue: [MAX_ENDPOINT_QUEUE]Message = [_]Message{zeroMessage()} ** MAX_ENDPOINT_QUEUE,
 
     pub fn labelSlice(self: *const Endpoint) []const u8 {
@@ -106,7 +124,7 @@ pub const Table = struct {
                 .id = endpoint_id,
                 .owner_task_id = owner_task_id,
                 .flags = flags,
-                .label_len = @min(label.len, MAX_ENDPOINT_LABEL_PAYLOAD_BYTES),
+                .label_len = @intCast(@min(label.len, MAX_ENDPOINT_LABEL_PAYLOAD_BYTES)),
                 .label = [_]u8{0} ** MAX_ENDPOINT_LABEL_BYTES,
             },
         };
@@ -122,24 +140,24 @@ pub const Table = struct {
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
 
         if (peer.flags.service_port) {
-            if (endpoint.peer_endpoint_id != null) return error.EndpointBusy;
+            if (!endpoint.peer_endpoint_id.isZero()) return error.EndpointBusy;
             endpoint.peer_endpoint_id = peer_endpoint_id;
-            if (peer.peer_endpoint_id == null) {
+            if (peer.peer_endpoint_id.isZero()) {
                 peer.peer_endpoint_id = endpoint_id;
             }
             return;
         }
 
         if (endpoint.flags.service_port) {
-            if (peer.peer_endpoint_id != null) return error.EndpointBusy;
+            if (!peer.peer_endpoint_id.isZero()) return error.EndpointBusy;
             peer.peer_endpoint_id = endpoint_id;
-            if (endpoint.peer_endpoint_id == null) {
+            if (endpoint.peer_endpoint_id.isZero()) {
                 endpoint.peer_endpoint_id = peer_endpoint_id;
             }
             return;
         }
 
-        if (endpoint.peer_endpoint_id != null or peer.peer_endpoint_id != null) return error.EndpointBusy;
+        if (!endpoint.peer_endpoint_id.isZero() or !peer.peer_endpoint_id.isZero()) return error.EndpointBusy;
 
         endpoint.peer_endpoint_id = peer_endpoint_id;
         peer.peer_endpoint_id = endpoint_id;
@@ -157,21 +175,22 @@ pub const Table = struct {
         if (payload.len > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
 
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
-        const peer_endpoint_id = endpoint.peer_endpoint_id orelse return error.PeerNotConnected;
+        const peer_endpoint_id = endpoint.peer_endpoint_id;
+        if (peer_endpoint_id.isZero()) return error.PeerNotConnected;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
         if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.QueueFull;
 
         const insert_index = (peer.queue_head + peer.queue_len) % MAX_ENDPOINT_QUEUE;
         peer.queue[insert_index].sender_task_id = sender_task_id;
         peer.queue[insert_index].correlation_id = correlation_id;
-        peer.queue[insert_index].attached_capability_id = attached_capability_id;
+        peer.queue[insert_index].attached_capability_id = attached_capability_id orelse ids.CapabilityId.zero;
         peer.queue[insert_index].move_attached_capability = move_attached_capability;
         peer.queue[insert_index].flags = .{
             .local_only = endpoint.flags.local_only and peer.flags.local_only,
             .service_port = endpoint.flags.service_port or peer.flags.service_port,
             .carries_capability = attached_capability_id != null,
         };
-        peer.queue[insert_index].len = payload.len;
+        peer.queue[insert_index].len = @intCast(payload.len);
         @memcpy(peer.queue[insert_index].bytes[0..payload.len], payload);
         peer.queue_len += 1;
     }
@@ -191,13 +210,13 @@ pub const Table = struct {
         const received = ReceivedMessage{
             .sender_task_id = message.sender_task_id,
             .correlation_id = message.correlation_id,
-            .attached_capability_id = message.attached_capability_id,
+            .attached_capability_id = message.attachedCapabilityId(),
             .move_attached_capability = message.move_attached_capability,
             .flags = message.flags,
             .len = message.len,
         };
         message.len = 0;
-        endpoint.queue_head = (endpoint.queue_head + 1) % MAX_ENDPOINT_QUEUE;
+        endpoint.queue_head = @intCast((endpoint.queue_head + 1) % MAX_ENDPOINT_QUEUE);
         endpoint.queue_len -= 1;
         return received;
     }
@@ -207,7 +226,7 @@ pub const Table = struct {
         return .{
             .endpoint_id = endpoint.id.raw(),
             .owner_task_id = endpoint.owner_task_id.raw(),
-            .peer_endpoint_id = if (endpoint.peer_endpoint_id) |id| id.raw() else 0,
+            .peer_endpoint_id = endpoint.peer_endpoint_id.raw(),
             .queued_messages = @intCast(endpoint.queue_len),
             .flags = @bitCast(endpoint.flags),
             .label_hash = hashLabel(endpoint.labelSlice()),
@@ -247,10 +266,11 @@ pub const Table = struct {
 
         for (&self.arena.slots) |*slot| {
             if (!slot.in_use) continue;
-            const peer_endpoint_id = slot.endpoint.peer_endpoint_id orelse continue;
+            const peer_endpoint_id = slot.endpoint.peer_endpoint_id;
+            if (peer_endpoint_id.isZero()) continue;
             for (retired.retiredEndpointIds()) |retired_id| {
                 if (peer_endpoint_id.eql(retired_id)) {
-                    slot.endpoint.peer_endpoint_id = null;
+                    slot.endpoint.peer_endpoint_id = ids.EndpointId.zero;
                     break;
                 }
             }
@@ -292,6 +312,15 @@ fn hashLabel(label: []const u8) u64 {
     return native_util.fnv1a64(label);
 }
 
+test "endpoint queues use capacity-sized resident metadata" {
+    try std.testing.expectEqual(@as(usize, 128), @sizeOf(Message));
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(Message, "len")));
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(Endpoint, "queue_len")));
+    try std.testing.expectEqual(@as(usize, 1_104), @sizeOf(Endpoint));
+    try std.testing.expectEqual(@as(usize, 1_112), @sizeOf(EndpointSlot));
+    try std.testing.expectEqual(@as(usize, 74_208), @sizeOf(Table));
+}
+
 test "endpoints connect and exchange queued messages" {
     var table = Table.init();
     const left = try table.create(ids.task(10), "left", .{ .local_only = true });
@@ -304,6 +333,7 @@ test "endpoints connect and exchange queued messages" {
 
     try std.testing.expect(received.sender_task_id.eql(ids.task(10)));
     try std.testing.expectEqual(@as(u64, 77), received.correlation_id);
+    try std.testing.expectEqual(@as(?ids.CapabilityId, null), received.attached_capability_id);
     try std.testing.expectEqualStrings("hello", payload[0..received.len]);
 }
 
@@ -333,6 +363,10 @@ test "endpoint descriptors track peer links and queue depth" {
     try std.testing.expectEqual(left.id.raw(), descriptor.peer_endpoint_id);
     try std.testing.expectEqual(@as(u16, 1), descriptor.queued_messages);
     try std.testing.expect(descriptor.label_hash != 0);
+
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(right.id, &payload)).?;
+    try std.testing.expect(received.attached_capability_id.?.eql(ids.capability(99)));
 }
 
 test "endpoint ids reject stale handles after slot reuse" {
