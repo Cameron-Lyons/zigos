@@ -12,6 +12,7 @@ pub const MAX_EXPORT_SIGNATURE_FORMAT_BYTES = directory.MAX_EXPORT_SIGNATURE_FOR
 pub const MAX_EXPORT_SIGNATURE_SIGNER_BYTES = directory.MAX_EXPORT_SIGNATURE_SIGNER_BYTES;
 
 pub const SnapshotRootAddress = directory.SnapshotRootAddress;
+pub const WorkspaceEntrySlotIndex = directory.WorkspaceEntrySlotIndex;
 
 pub const Entry = directory.Entry;
 pub const EntryMutation = directory.EntryMutation;

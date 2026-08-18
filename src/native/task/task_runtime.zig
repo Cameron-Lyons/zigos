@@ -14,6 +14,8 @@ const units = @import("../core/units.zig");
 
 pub const MAX_TASKS = model.MAX_TASKS;
 pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
+pub const TASK_CAPABILITY_SCAN_BOUND = model.TASK_CAPABILITY_SCAN_BOUND;
+pub const TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION = model.TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION;
 pub const MAX_TASK_COMPONENTS = model.MAX_TASK_COMPONENTS;
 pub const MAX_AUDIT_EVENTS = model.MAX_AUDIT_EVENTS;
 pub const MAX_TASK_PROVENANCE_EVENTS = model.MAX_TASK_PROVENANCE_EVENTS;
@@ -164,7 +166,6 @@ const taskColdConst = model.taskColdConst;
 const taskCapabilityIndex = model.taskCapabilityIndex;
 const taskHasCapability = model.taskHasCapability;
 const taskOwnerIndexKey = model.taskOwnerIndexKey;
-const rebuildCapabilityIndex = model.rebuildCapabilityIndex;
 const validateUserspaceImage = model.validateUserspaceImage;
 const TEST_TASK_MEMORY_BYTES: usize = units.kibibytes(4);
 const TEST_MINIMAL_MEMORY_BYTES: usize = 256;
@@ -340,7 +341,6 @@ pub const Runtime = struct {
         if (!self.appendInitialComponentLabelIndex(slot_index, &slot.task)) {
             native_util.impossibleByInvariant("task label index capacity covers task slots");
         }
-        rebuildCapabilityIndex(&slot.task);
     }
 
     pub fn createTask(self: *Runtime, request: TaskCreateRequest) Error!*TaskRecord {
@@ -614,8 +614,8 @@ pub const Runtime = struct {
             var capability_index: usize = 0;
             while (capability_index < slot.task.capability_count) : (capability_index += 1) {
                 const capability_id = slot.task.capabilityIds()[capability_index];
-                if (capability_id != 0 and !taskHasCapability(&slot.task, capability_id)) {
-                    native_util.impossibleByInvariant("task capability index missing a live capability");
+                if (capability_id == 0 or taskCapabilityIndex(&slot.task, capability_id) != capability_index) {
+                    native_util.impossibleByInvariant("live task capabilities are nonzero and unique");
                 }
             }
         }
@@ -672,10 +672,12 @@ pub const Runtime = struct {
     pub fn grantCapability(self: *Runtime, task_id: u64, capability_id: u64) Error!void {
         const task = self.find(task_id) orelse return error.TaskNotFound;
         const cold = taskCold(task);
+        if (capability_id == 0) {
+            native_util.impossibleByInvariant("task capability attachments never use the reserved zero id");
+        }
         if (taskHasCapability(task, capability_id)) return;
         if (task.capability_count >= MAX_TASK_CAPABILITIES) return error.CapabilityTableFull;
         cold.capability_ids[task.capability_count] = capability_id;
-        cold.capability_index.insert(capability_id, task.capability_count);
         task.capability_count += 1;
         advanceTaskCapabilityGeneration(task);
         appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task_id, capability_id, 0));
@@ -715,10 +717,8 @@ pub const Runtime = struct {
             const last_index = task.capability_count - 1;
             const moved_capability_id = cold.capability_ids[last_index];
 
-            cold.capability_index.remove(capability_id);
             if (index != last_index) {
                 cold.capability_ids[index] = moved_capability_id;
-                cold.capability_index.insert(moved_capability_id, index);
             }
 
             task.capability_count -= 1;
@@ -729,6 +729,21 @@ pub const Runtime = struct {
         }
 
         return false;
+    }
+
+    pub fn revokeCapabilityEverywhere(self: *Runtime, capability_id: u64) u16 {
+        var revoked_count: u16 = 0;
+        for (0..self.taskSlotCapacity()) |slot_index| {
+            const slot = self.taskSlotAt(slot_index);
+            if (!slot.in_use or !taskHasCapability(&slot.task, capability_id)) continue;
+            const revoked = self.revokeCapability(slot.task.id, capability_id) catch |err|
+                native_util.impossibleByInvariantError("indexed live task accepts capability retirement", err);
+            if (!revoked) {
+                native_util.impossibleByInvariant("capability retirement removes every located task attachment");
+            }
+            revoked_count += 1;
+        }
+        return revoked_count;
     }
 
     pub fn processSeparated(self: *const Runtime, left_task_id: u64, right_task_id: u64) bool {
@@ -1339,6 +1354,45 @@ test "granting and revoking capabilities updates the task table" {
     var restored = Runtime.init();
     restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 1), restored.find(task.id).?.capabilityGeneration());
+}
+
+test "bounded task capability scans preserve full-table and compaction semantics" {
+    var runtime = Runtime.init();
+    const task = try createTaskIdTestTask(&runtime, 40);
+
+    for (0..MAX_TASK_CAPABILITIES) |capability_index| {
+        try runtime.grantCapability(task.id, 1_000 + capability_index);
+    }
+    try std.testing.expectEqual(MAX_TASK_CAPABILITIES, task.capability_count);
+    for (0..MAX_TASK_CAPABILITIES) |capability_index| {
+        try std.testing.expect(runtime.hasCapability(task.id, 1_000 + capability_index));
+    }
+
+    try runtime.grantCapability(task.id, 1_000 + MAX_TASK_CAPABILITIES - 1);
+    try std.testing.expectEqual(MAX_TASK_CAPABILITIES, task.capability_count);
+    try std.testing.expectError(error.CapabilityTableFull, runtime.grantCapability(task.id, 2_000));
+
+    try std.testing.expect(try runtime.revokeCapability(task.id, 1_000));
+    try std.testing.expect(!runtime.hasCapability(task.id, 1_000));
+    try std.testing.expect(runtime.hasCapability(task.id, 1_000 + MAX_TASK_CAPABILITIES - 1));
+    try runtime.grantCapability(task.id, 2_000);
+    try std.testing.expectEqual(MAX_TASK_CAPABILITIES, task.capability_count);
+    try std.testing.expect(runtime.hasCapability(task.id, 2_000));
+}
+
+test "capability retirement removes attachments from every task" {
+    var runtime = Runtime.init();
+    const first = try createTaskIdTestTask(&runtime, 41);
+    const second = try createTaskIdTestTask(&runtime, 42);
+
+    try runtime.grantCapability(first.id, 77);
+    try runtime.grantCapability(first.id, 88);
+    try runtime.grantCapability(second.id, 77);
+    try std.testing.expectEqual(@as(u16, 2), runtime.revokeCapabilityEverywhere(77));
+    try std.testing.expect(!runtime.hasCapability(first.id, 77));
+    try std.testing.expect(!runtime.hasCapability(second.id, 77));
+    try std.testing.expect(runtime.hasCapability(first.id, 88));
+    try std.testing.expectEqual(@as(u16, 0), runtime.revokeCapabilityEverywhere(77));
 }
 
 test "task runtime records redacted crash report provenance" {

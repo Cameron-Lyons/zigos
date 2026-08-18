@@ -12,10 +12,12 @@ pub const PAGE_SIZE: usize = 4096;
 const SHARED_MEMORY_INDEX_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * 2;
 pub const SHARED_MEMORY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const SHARED_MEMORY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
+pub const OBJECT_TASK_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT;
+pub const MMU_OBJECT_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT + 3;
+pub const MMU_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 const MAPPING_EDGE_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MAX_MAPPINGS_PER_OBJECT;
 const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
-const MMU_MAPPING_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * (MAX_MAPPINGS_PER_OBJECT + 3);
-const MMU_MAPPING_INDEX_CAPACITY: usize = MMU_MAPPING_CAPACITY * 2;
+const MMU_MAPPING_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MMU_OBJECT_MAPPING_SCAN_BOUND;
 const no_mmu_mapping: u16 = std.math.maxInt(u16);
 const FREESTANDING_PHYSICAL_BASE: u64 = 0x0010_0000;
 const TASK_SHARED_VIRTUAL_BASE: u64 = userspace_layout.shared_start;
@@ -112,6 +114,11 @@ pub const FreestandingMappingDescriptor = struct {
 pub const TaskRetirement = struct {
     revoked_owned_objects: u16 = 0,
     removed_peer_mappings: u16 = 0,
+    revoked_object_ids: [MAX_SHARED_MEMORY_OBJECTS]ids.SharedMemoryId = [_]ids.SharedMemoryId{ids.SharedMemoryId.zero} ** MAX_SHARED_MEMORY_OBJECTS,
+
+    pub fn revokedObjectIds(self: *const TaskRetirement) []const ids.SharedMemoryId {
+        return self.revoked_object_ids[0..self.revoked_owned_objects];
+    }
 };
 
 pub const Error = error{
@@ -142,11 +149,7 @@ const MmuMapping = struct {
     object_prev: u16 = no_mmu_mapping,
 };
 
-fn mmuMappingSlotKey(slot: *const MmuMapping) u64 {
-    return mmuMappingKey(slot.object_id, slot.kind, slot.domain_id);
-}
-
-const MmuMappingArena = indexed_arena.IndexedArenaWithKey(u64, MmuMapping, MMU_MAPPING_CAPACITY, MMU_MAPPING_INDEX_CAPACITY, mmuMappingSlotKey);
+const MmuMappingArena = indexed_arena.GenerationalArena("MmuMapping", MmuMapping, MMU_MAPPING_CAPACITY);
 
 pub const FreestandingMmu = struct {
     next_physical_frame: u64 = 1,
@@ -172,11 +175,9 @@ pub const FreestandingMmu = struct {
         object: *Object,
         task_id: ids.TaskId,
     ) Error!FreestandingMappingDescriptor {
-        const key = mmuMappingKey(object.id, .task, task_id.raw());
-        const slot_index = self.mappings.reserveIndex(key) orelse {
-            if (self.mappings.getConst(key) != null) return error.AlreadyMapped;
-            return error.TableFull;
-        };
+        if (self.findIndex(object, .task, task_id.raw()) != null) return error.AlreadyMapped;
+        if (object.mmu_mapping_count >= MMU_OBJECT_MAPPING_SCAN_BOUND) return error.TableFull;
+        const slot_index = self.mappings.reserveIndex() orelse return error.TableFull;
         const virtual_base = self.allocateTaskVirtual(object.page_count) catch |err| {
             _ = self.mappings.removeIndex(slot_index);
             return err;
@@ -188,7 +189,7 @@ pub const FreestandingMmu = struct {
     }
 
     fn unmapTask(self: *FreestandingMmu, object: *Object, task_id: ids.TaskId) Error!bool {
-        return self.removeMapping(object, mmuMappingKey(object.id, .task, task_id.raw()));
+        return self.removeMapping(object, .task, task_id.raw());
     }
 
     fn mapAccelerator(
@@ -196,12 +197,11 @@ pub const FreestandingMmu = struct {
         object: *Object,
         target: ComputeTarget,
     ) Error!FreestandingMappingDescriptor {
+        if (target == .cpu) return error.AcceleratorAccessDenied;
         const domain_id = acceleratorDomainId(target);
-        const key = mmuMappingKey(object.id, .accelerator, domain_id);
-        const slot_index = self.mappings.reserveIndex(key) orelse {
-            if (self.mappings.getConst(key) != null) return error.AcceleratorAlreadyAttached;
-            return error.TableFull;
-        };
+        if (self.findIndex(object, .accelerator, domain_id) != null) return error.AcceleratorAlreadyAttached;
+        if (object.mmu_mapping_count >= MMU_OBJECT_MAPPING_SCAN_BOUND) return error.TableFull;
+        const slot_index = self.mappings.reserveIndex() orelse return error.TableFull;
         const virtual_base = self.allocateAcceleratorVirtual(object.page_count) catch |err| {
             _ = self.mappings.removeIndex(slot_index);
             return err;
@@ -213,17 +213,32 @@ pub const FreestandingMmu = struct {
     }
 
     fn unmapAccelerator(self: *FreestandingMmu, object: *Object, target: ComputeTarget) Error!bool {
-        return self.removeMapping(object, mmuMappingKey(object.id, .accelerator, acceleratorDomainId(target)));
+        return self.removeMapping(object, .accelerator, acceleratorDomainId(target));
     }
 
     fn revokeObject(self: *FreestandingMmu, object: *Object) void {
-        var compact_index = object.mmu_mapping_head;
-        while (compact_index != no_mmu_mapping) {
-            const slot_index: usize = compact_index;
-            const next_compact_index = self.mappings.slots[slot_index].object_next;
+        if (object.mmu_mapping_count > MMU_OBJECT_MAPPING_SCAN_BOUND) {
+            native_util.impossibleByInvariant("shared-memory MMU object list stays within its fixed scan bound");
+        }
+        while (object.mmu_mapping_count != 0) {
+            if (object.mmu_mapping_head == no_mmu_mapping) {
+                native_util.impossibleByInvariant("non-empty shared-memory MMU object list has a head");
+            }
+            const slot_index: usize = object.mmu_mapping_head;
+            if (slot_index >= self.mappings.slots.len) {
+                native_util.impossibleByInvariant("shared-memory MMU object list points outside mapping slots");
+            }
+            const mapping = &self.mappings.slots[slot_index];
+            if (!mapping.in_use or !mapping.object_id.eql(object.id)) {
+                native_util.impossibleByInvariant("shared-memory MMU object list points at the wrong live mapping");
+            }
             self.unlinkObjectMapping(object, slot_index);
-            _ = self.mappings.removeIndex(slot_index);
-            compact_index = next_compact_index;
+            if (!self.mappings.removeIndex(slot_index)) {
+                native_util.impossibleByInvariant("shared-memory MMU revoke removes every linked mapping");
+            }
+        }
+        if (object.mmu_mapping_head != no_mmu_mapping) {
+            native_util.impossibleByInvariant("empty shared-memory MMU object list has no head");
         }
     }
 
@@ -232,7 +247,7 @@ pub const FreestandingMmu = struct {
         object: *const Object,
         task_id: ids.TaskId,
     ) Error!FreestandingMappingDescriptor {
-        const mapping = self.findAny(object.id, .task, task_id.raw()) orelse return error.MappingNotFound;
+        const mapping = self.findAny(object, .task, task_id.raw()) orelse return error.MappingNotFound;
         return descriptorFromMmuMapping(object, mapping);
     }
 
@@ -241,7 +256,7 @@ pub const FreestandingMmu = struct {
         object: *const Object,
         target: ComputeTarget,
     ) Error!FreestandingMappingDescriptor {
-        const mapping = self.findAny(object.id, .accelerator, acceleratorDomainId(target)) orelse return error.AcceleratorNotAttached;
+        const mapping = self.findAny(object, .accelerator, acceleratorDomainId(target)) orelse return error.AcceleratorNotAttached;
         return descriptorFromMmuMapping(object, mapping);
     }
 
@@ -275,25 +290,63 @@ pub const FreestandingMmu = struct {
 
     fn findAny(
         self: *const FreestandingMmu,
-        object_id: ids.SharedMemoryId,
+        object: *const Object,
         kind: MmuMappingKind,
         domain_id: u64,
     ) ?*const MmuMapping {
-        return self.mappings.getConst(mmuMappingKey(object_id, kind, domain_id));
+        const slot_index = self.findIndex(object, kind, domain_id) orelse return null;
+        return &self.mappings.slots[slot_index];
     }
 
-    fn removeMapping(self: *FreestandingMmu, object: *Object, key: u64) bool {
-        const slot_index = self.mappings.slotIndexOf(key) orelse return false;
-        const mapping = &self.mappings.slots[slot_index];
-        if (!mapping.in_use or !mapping.object_id.eql(object.id)) return false;
+    fn findIndex(
+        self: *const FreestandingMmu,
+        object: *const Object,
+        kind: MmuMappingKind,
+        domain_id: u64,
+    ) ?usize {
+        const expected_count: usize = object.mmu_mapping_count;
+        if (expected_count > MMU_OBJECT_MAPPING_SCAN_BOUND) {
+            native_util.impossibleByInvariant("shared-memory MMU object list stays within its fixed scan bound");
+        }
+        var compact_index = object.mmu_mapping_head;
+        var visited: usize = 0;
+        while (compact_index != no_mmu_mapping) : (visited += 1) {
+            if (visited >= expected_count) {
+                native_util.impossibleByInvariant("shared-memory MMU object list length matches its count");
+            }
+            const slot_index: usize = compact_index;
+            if (slot_index >= self.mappings.slots.len) {
+                native_util.impossibleByInvariant("shared-memory MMU object list points outside mapping slots");
+            }
+            const mapping = &self.mappings.slots[slot_index];
+            if (!mapping.in_use or !mapping.object_id.eql(object.id)) {
+                native_util.impossibleByInvariant("shared-memory MMU object list points at the wrong live mapping");
+            }
+            if (mapping.kind == kind and mapping.domain_id == domain_id) return slot_index;
+            compact_index = mapping.object_next;
+        }
+        if (visited != expected_count) {
+            native_util.impossibleByInvariant("shared-memory MMU object list length matches its count");
+        }
+        return null;
+    }
+
+    fn removeMapping(self: *FreestandingMmu, object: *Object, kind: MmuMappingKind, domain_id: u64) bool {
+        const slot_index = self.findIndex(object, kind, domain_id) orelse return false;
         self.unlinkObjectMapping(object, slot_index);
-        return self.mappings.removeIndex(slot_index);
+        if (!self.mappings.removeIndex(slot_index)) {
+            native_util.impossibleByInvariant("shared-memory MMU unmap removes a live linked mapping");
+        }
+        return true;
     }
 
     fn linkObjectMapping(self: *FreestandingMmu, object: *Object, slot_index: usize) void {
         const compact_index: u16 = @intCast(slot_index);
         const mapping = &self.mappings.slots[slot_index];
         std.debug.assert(mapping.in_use and mapping.object_id.eql(object.id));
+        if (object.mmu_mapping_count >= MMU_OBJECT_MAPPING_SCAN_BOUND) {
+            native_util.impossibleByInvariant("shared-memory MMU object list stays within its fixed scan bound");
+        }
         mapping.object_prev = no_mmu_mapping;
         mapping.object_next = object.mmu_mapping_head;
         if (object.mmu_mapping_head != no_mmu_mapping) {
@@ -331,14 +384,12 @@ const ObjectArena = indexed_arena.GenerationalArena("SharedMemoryId", ObjectSlot
 const ObjectHandle = ObjectArena.Handle;
 const ObjectOwnerIndex = indexed_arena.MultimapIndex(MAX_SHARED_MEMORY_OBJECTS, MAX_SHARED_MEMORY_OBJECTS, SHARED_MEMORY_INDEX_CAPACITY);
 const MappingIndex = indexed_arena.MultimapIndex(MAPPING_EDGE_CAPACITY, MAPPING_EDGE_CAPACITY, MAPPING_INDEX_CAPACITY);
-const ObjectTaskMappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
 
 pub const Table = struct {
     mmu: FreestandingMmu = FreestandingMmu.init(),
     arena: ObjectArena = ObjectArena.init(),
     object_owner_index: ObjectOwnerIndex = ObjectOwnerIndex.init(),
     mapping_index: MappingIndex = MappingIndex.init(),
-    object_task_mapping_index: ObjectTaskMappingIndex = ObjectTaskMappingIndex.init(),
 
     pub fn init() Table {
         return .{};
@@ -405,20 +456,17 @@ pub const Table = struct {
         const object_slot_index = object_handle.slotIndex();
         const object = &object_slot.object;
 
-        const task_mapping_key = objectTaskMappingKey(object_id, task_id);
-        if (self.object_task_mapping_index.contains(task_mapping_key)) return error.AlreadyMapped;
+        if (objectTaskMappingPosition(object, task_id) != null) return error.AlreadyMapped;
         if (object.mapping_count >= object.mapped_task_ids.len) return error.TableFull;
 
         const edge_index = mappingEdgeIndex(object_slot_index, object.mapping_count);
         if (!self.mapping_index.append(task_id.raw(), edge_index)) return error.TableFull;
-        self.object_task_mapping_index.insert(task_mapping_key, edge_index);
         object.mapped_task_ids[object.mapping_count] = task_id;
         object.mapping_count += 1;
         _ = self.mmu.mapTask(object, task_id) catch |err| {
             object.mapping_count -= 1;
             object.mapped_task_ids[object.mapping_count] = ids.TaskId.zero;
             _ = self.mapping_index.remove(task_id.raw(), mappingEdgeIndex(object_slot_index, object.mapping_count));
-            self.object_task_mapping_index.remove(task_mapping_key);
             return err;
         };
     }
@@ -428,13 +476,9 @@ pub const Table = struct {
         const object_slot = self.arena.getByHandle(object_handle) orelse return error.SharedMemoryNotFound;
         const object_slot_index = object_handle.slotIndex();
         const object = &object_slot.object;
-        const task_mapping_key = objectTaskMappingKey(object_id, task_id);
-        const edge_index = self.object_task_mapping_index.lookup(task_mapping_key) orelse return false;
-        if (mappingEdgeObjectSlotIndex(edge_index) != object_slot_index) return false;
-        const index = mappingEdgeMappingIndex(edge_index);
-        if (index >= object.mapping_count or !object.mapped_task_ids[index].eql(task_id)) return false;
+        const index = objectTaskMappingPosition(object, task_id) orelse return false;
+        const edge_index = mappingEdgeIndex(object_slot_index, index);
 
-        self.object_task_mapping_index.remove(task_mapping_key);
         _ = self.mapping_index.remove(task_id.raw(), edge_index);
         var tail = index;
         while (tail + 1 < object.mapping_count) : (tail += 1) {
@@ -443,7 +487,6 @@ pub const Table = struct {
             const new_edge_index = mappingEdgeIndex(object_slot_index, tail);
             _ = self.mapping_index.remove(moved_task_id.raw(), old_edge_index);
             if (!self.mapping_index.append(moved_task_id.raw(), new_edge_index)) return error.TableFull;
-            self.object_task_mapping_index.insert(objectTaskMappingKey(object_id, moved_task_id), new_edge_index);
             object.mapped_task_ids[tail] = moved_task_id;
         }
         object.mapping_count -= 1;
@@ -460,7 +503,6 @@ pub const Table = struct {
         _ = self.object_owner_index.remove(object.owner_task_id.raw(), object_slot_index);
         for (object.mapped_task_ids[0..object.mapping_count], 0..) |task_id, mapping_index| {
             _ = self.mapping_index.remove(task_id.raw(), mappingEdgeIndex(object_slot_index, mapping_index));
-            self.object_task_mapping_index.remove(objectTaskMappingKey(object_id, task_id));
         }
         self.mmu.revokeObject(object);
         object.revocation_generation += 1;
@@ -487,8 +529,10 @@ pub const Table = struct {
             if (!slot.in_use or !slot.object.owner_task_id.eql(task_id)) {
                 native_util.impossibleByInvariant("shared-memory owner index points at the wrong live object");
             }
-            _ = self.revoke(slot.object.id) catch |err|
+            const object_id = slot.object.id;
+            _ = self.revoke(object_id) catch |err|
                 native_util.impossibleByInvariantError("task retirement revokes an indexed shared-memory object", err);
+            retired.revoked_object_ids[retired.revoked_owned_objects] = object_id;
             retired.revoked_owned_objects += 1;
         }
 
@@ -519,6 +563,7 @@ pub const Table = struct {
 
     pub fn attachAccelerator(self: *Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!void {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
+        if (target == .cpu) return error.AcceleratorAccessDenied;
         if (!object.allowsCompute(target)) return error.AcceleratorAccessDenied;
         if (object.attachedTo(target)) return error.AcceleratorAlreadyAttached;
 
@@ -687,8 +732,8 @@ pub const Table = struct {
     }
 
     pub fn hasMapping(self: *const Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) bool {
-        if (self.findConst(object_id) == null) return false;
-        return self.object_task_mapping_index.contains(objectTaskMappingKey(object_id, task_id));
+        const object = self.findConst(object_id) orelse return false;
+        return objectTaskMappingPosition(object, task_id) != null;
     }
 
     pub fn activeCount(self: *const Table) usize {
@@ -706,21 +751,14 @@ pub const Table = struct {
     }
 };
 
-fn mmuMappingKey(object_id: ids.SharedMemoryId, kind: MmuMappingKind, domain_id: u64) u64 {
-    const kind_offset: usize = @sizeOf(u64);
-    const domain_offset: usize = kind_offset + @sizeOf(u8);
-    var bytes: [@sizeOf(u64) + @sizeOf(u8) + @sizeOf(u64)]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..@sizeOf(u64)], object_id.raw(), .little);
-    bytes[kind_offset] = @intFromEnum(kind);
-    std.mem.writeInt(u64, bytes[domain_offset..][0..@sizeOf(u64)], domain_id, .little);
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.shared_memory_mapping_key, &bytes));
-}
-
-fn objectTaskMappingKey(object_id: ids.SharedMemoryId, task_id: ids.TaskId) u64 {
-    var bytes: [@sizeOf(u64) * 2]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..@sizeOf(u64)], object_id.raw(), .little);
-    std.mem.writeInt(u64, bytes[@sizeOf(u64)..][0..@sizeOf(u64)], task_id.raw(), .little);
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.shared_memory_task_mapping_key, &bytes));
+fn objectTaskMappingPosition(object: *const Object, task_id: ids.TaskId) ?usize {
+    if (object.mapping_count > OBJECT_TASK_MAPPING_SCAN_BOUND) {
+        native_util.impossibleByInvariant("shared-memory object task mappings stay within their fixed scan bound");
+    }
+    for (object.mapped_task_ids[0..object.mapping_count], 0..) |mapped_task_id, mapping_index| {
+        if (mapped_task_id.eql(task_id)) return mapping_index;
+    }
+    return null;
 }
 
 fn mappingEdgeIndex(object_slot_index: usize, mapping_index: usize) usize {
@@ -948,6 +986,26 @@ test "shared memory objects map unmap and revoke across tasks" {
     try std.testing.expectError(error.SharedMemoryNotFound, table.map(object.id, ids.task(9)));
 }
 
+test "bounded object task scans preserve compacted mappings" {
+    var table = Table.init();
+    const object = try table.create(ids.task(1), PAGE_SIZE);
+
+    try table.map(object.id, ids.task(2));
+    try table.map(object.id, ids.task(3));
+    try table.map(object.id, ids.task(4));
+    try std.testing.expect(try table.unmap(object.id, ids.task(3)));
+    try std.testing.expect(table.hasMapping(object.id, ids.task(2)));
+    try std.testing.expect(!table.hasMapping(object.id, ids.task(3)));
+    try std.testing.expect(table.hasMapping(object.id, ids.task(4)));
+    try std.testing.expectEqual(@as(u16, 1), table.mappingsForTask(ids.task(4)));
+    _ = try table.taskMappingDescriptor(object.id, ids.task(4));
+
+    try std.testing.expect(try table.unmap(object.id, ids.task(2)));
+    try std.testing.expect(table.hasMapping(object.id, ids.task(4)));
+    try std.testing.expectError(error.AlreadyMapped, table.map(object.id, ids.task(4)));
+    try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(object.id)).mapped_task_count);
+}
+
 test "task retirement revokes owned objects and removes only its peer mappings" {
     var table = Table.init();
     const owned = try table.createLabeledWithAccess(ids.task(10), PAGE_SIZE, "owned", .{ .gpu = true });
@@ -965,6 +1023,9 @@ test "task retirement revokes owned objects and removes only its peer mappings" 
     const retired = table.retireTask(ids.task(10));
     try std.testing.expectEqual(@as(u16, 2), retired.revoked_owned_objects);
     try std.testing.expectEqual(@as(u16, 1), retired.removed_peer_mappings);
+    try std.testing.expectEqual(@as(usize, 2), retired.revokedObjectIds().len);
+    try std.testing.expect(retired.revokedObjectIds()[0].eql(owned.id) or retired.revokedObjectIds()[1].eql(owned.id));
+    try std.testing.expect(retired.revokedObjectIds()[0].eql(owned_idle.id) or retired.revokedObjectIds()[1].eql(owned_idle.id));
     try std.testing.expectEqual(@as(usize, 0), table.liveOwnedBytesForTask(ids.task(10)));
     try std.testing.expectEqual(@as(u16, 0), table.mappingsForTask(ids.task(10)));
     try std.testing.expectEqual(@as(u16, 1), table.mappingsForTask(ids.task(11)));
@@ -1114,6 +1175,7 @@ test "compact mmu object lists unlink head middle and tail independently" {
     try table.map(object.id, ids.task(41));
     try table.attachAccelerator(object.id, .gpu);
     try table.attachAccelerator(object.id, .media);
+    try std.testing.expectError(error.AcceleratorAccessDenied, table.attachAccelerator(object.id, .cpu));
     try table.map(peer_object.id, ids.task(50));
     try std.testing.expectEqual(@as(usize, 4), table.activeFreestandingMappings(object.id));
     try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(peer_object.id));
@@ -1139,15 +1201,11 @@ test "compact mmu revoke preserves a peer that reused a freed mapping slot" {
 
     try table.map(object.id, ids.task(61));
     try table.map(object.id, ids.task(62));
-    const released_slot = table.mmu.mappings.slotIndexOf(
-        mmuMappingKey(object.id, .task, ids.task(61).raw()),
-    ).?;
+    const released_slot = table.mmu.findIndex(table.find(object.id).?, .task, ids.task(61).raw()).?;
     try std.testing.expect(try table.unmap(object.id, ids.task(61)));
 
     try table.map(peer_object.id, ids.task(71));
-    const reused_slot = table.mmu.mappings.slotIndexOf(
-        mmuMappingKey(peer_object.id, .task, ids.task(71).raw()),
-    ).?;
+    const reused_slot = table.mmu.findIndex(table.find(peer_object.id).?, .task, ids.task(71).raw()).?;
     try std.testing.expectEqual(released_slot, reused_slot);
     try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(object.id));
     try std.testing.expectEqual(@as(usize, 1), table.activeFreestandingMappings(peer_object.id));
@@ -1162,32 +1220,31 @@ test "compact mmu revoke preserves a peer that reused a freed mapping slot" {
 
 test "freestanding mmu preserves duplicate mapping errors when full" {
     var table = Table.init();
-    const object = try table.create(ids.task(30), PAGE_SIZE);
-    const stored_object = table.find(object.id).?;
-
-    _ = try table.mmu.mapTask(stored_object, ids.task(31));
-    _ = try table.mmu.mapAccelerator(stored_object, .gpu);
-
-    for (0..MMU_MAPPING_CAPACITY * 2) |offset| {
-        if (table.mmu.mappings.countInUse() == MMU_MAPPING_CAPACITY) break;
-        const filler_domain_id = 10_000 + @as(u64, @intCast(offset));
-        const key = mmuMappingKey(object.id, .task, filler_domain_id);
-        const slot_index = table.mmu.mappings.reserveIndex(key) orelse continue;
-        table.mmu.mappings.slots[slot_index] = mappingFromObject(stored_object, .task, filler_domain_id, 0);
-        table.mmu.linkObjectMapping(stored_object, slot_index);
+    var object_ids = [_]ids.SharedMemoryId{ids.SharedMemoryId.zero} ** MAX_SHARED_MEMORY_OBJECTS;
+    for (&object_ids, 0..) |*object_id, object_index| {
+        const object = try table.create(ids.task(1_000 + object_index), PAGE_SIZE);
+        object_id.* = object.id;
+        const stored_object = table.find(object.id).?;
+        for (0..MAX_MAPPINGS_PER_OBJECT) |mapping_index| {
+            const task_id = ids.task(20_000 + object_index * MAX_MAPPINGS_PER_OBJECT + mapping_index);
+            _ = try table.mmu.mapTask(stored_object, task_id);
+        }
+        _ = try table.mmu.mapAccelerator(stored_object, .gpu);
+        _ = try table.mmu.mapAccelerator(stored_object, .npu);
+        _ = try table.mmu.mapAccelerator(stored_object, .media);
     }
 
+    const stored_object = table.find(object_ids[0]).?;
     try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.mappings.countInUse());
-    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.activeFreestandingMappings(object.id));
-    try std.testing.expectError(error.AlreadyMapped, table.mmu.mapTask(stored_object, ids.task(31)));
+    try std.testing.expectEqual(MMU_OBJECT_MAPPING_SCAN_BOUND, table.activeFreestandingMappings(object_ids[0]));
+    try std.testing.expectError(error.AlreadyMapped, table.mmu.mapTask(stored_object, ids.task(20_000)));
     try std.testing.expectError(error.AcceleratorAlreadyAttached, table.mmu.mapAccelerator(stored_object, .gpu));
-    try std.testing.expectError(error.TableFull, table.mmu.mapTask(stored_object, ids.task(32)));
+    try std.testing.expectError(error.TableFull, table.mmu.mapTask(stored_object, ids.task(30_000)));
     try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.mmu.mappings.countInUse());
-    try std.testing.expectEqual(MMU_MAPPING_CAPACITY, table.activeFreestandingMappings(object.id));
+    try std.testing.expectEqual(MMU_OBJECT_MAPPING_SCAN_BOUND, table.activeFreestandingMappings(object_ids[0]));
 
-    _ = try table.revoke(object.id);
+    for (object_ids) |object_id| _ = try table.revoke(object_id);
     try std.testing.expectEqual(@as(usize, 0), table.mmu.mappings.countInUse());
-    try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
     try std.testing.expectEqual(no_mmu_mapping, stored_object.mmu_mapping_head);
 }
 
