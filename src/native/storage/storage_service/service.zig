@@ -685,7 +685,7 @@ pub const StoragePort = struct {
         try self.core.shareWorkspace(key, effective_grant);
         return .{
             .grant = effective_grant,
-            .capability = derived.*,
+            .capability = derived,
         };
     }
 
