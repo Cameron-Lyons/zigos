@@ -428,6 +428,28 @@ pub const indexed_hot_path_tables = .{
         .rebuilds_loaded_indexes = @hasDecl(device_graph.Graph, "rebuildIndexes"),
     },
     .sync_service = .{
+        .stores_compact_sync_record_metadata = sync_state_support.COMPACT_RECORD_METADATA and
+            @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_count") == u8 and
+            @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_lens") == [sync_state_support.MAX_SELECTIVE_PREFIXES]u8 and
+            @FieldType(sync_state_support.WorkspacePolicy, "relay_domain_len") == u8 and
+            @FieldType(sync_state_support.OverlayRecord, "service_identity_len") == u8 and
+            @FieldType(sync_state_support.OverlayRecord, "private_service_count") == u8 and
+            @FieldType(sync_state_support.OverlayRecord, "private_service_lens") == [sync_state_support.MAX_PRIVATE_SERVICES]u8 and
+            @FieldType(sync_state_support.DatabaseContract, "bundle_id_len") == u8 and
+            @FieldType(sync_state_support.DatabaseContract, "label_len") == u8,
+        .stores_compact_sync_paths = @FieldType(sync_state_support.ReplicaEntry, "path_len") == sync_state_support.SyncPathLength and
+            @FieldType(sync_state_support.ConflictRecord, "path_len") == sync_state_support.SyncPathLength and
+            @FieldType(sync_state_support.ConflictReviewRecord, "path_len") == sync_state_support.SyncPathLength and
+            @FieldType(sync_state_support.TransportFrame, "path_len") == sync_state_support.SyncPathLength,
+        .keeps_sync_records_within_ceilings = @sizeOf(sync_state_support.WorkspacePolicy) <= sync_state_support.WORKSPACE_POLICY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.OverlayRecord) <= sync_state_support.OVERLAY_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.ReplicaEntry) <= sync_state_support.REPLICA_ENTRY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.ConflictRecord) <= sync_state_support.CONFLICT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.ConflictReviewRecord) <= sync_state_support.CONFLICT_REVIEW_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.DatabaseContract) <= sync_state_support.DATABASE_CONTRACT_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.TransportFrame) <= sync_state_support.TRANSPORT_FRAME_SIZE_CEILING_BYTES,
+        .keeps_sync_state_within_ceilings = @sizeOf(sync_state_support.PersistentState) <= sync_state_support.PERSISTENT_STATE_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.ResidentState) <= sync_state_support.RESIDENT_STATE_SIZE_CEILING_BYTES,
         .uses_overlay_session_arena = @hasField(sync_service.Service, "overlay_sessions"),
         .uses_workspace_policy_index = @hasField(sync_service.Service, "workspace_policy_index"),
         .uses_overlay_index = @hasField(sync_service.Service, "overlay_index"),

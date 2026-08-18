@@ -180,7 +180,7 @@ test "sync service configuration errors preserve live policy and overlay records
     _ = try service.publishPrivateService(workspace_id, "notes.remote");
     try std.testing.expectError(error.ServiceIdentityTooLong, service.publishPrivateService(workspace_id, too_long_label));
     const overlay_with_service = service.findOverlay(workspace_id).?;
-    try std.testing.expectEqual(@as(usize, 1), overlay_with_service.private_service_count);
+    try std.testing.expectEqual(@as(u8, 1), overlay_with_service.private_service_count);
     try std.testing.expect(overlay_with_service.hasPrivateService("notes.remote"));
 }
 
@@ -1780,7 +1780,7 @@ test "sync service covers device graph policy replication semantics and restart 
     });
     try std.testing.expectEqual(local_policy.id, restarted_local_policy.id);
     const restarted_overlay = try restarted_port.publishPrivateService(restarted_authority, notes_id, "notes.remote");
-    try std.testing.expectEqual(@as(usize, 1), restarted_overlay.private_service_count);
+    try std.testing.expectEqual(@as(u8, 1), restarted_overlay.private_service_count);
     const restarted_contract = try restarted_port.registerDatabaseContract(restarted_authority, notes_id, "app.db.notes", "notes-db", contract_signer);
     try std.testing.expectEqual(contract.id, restarted_contract.id);
 
