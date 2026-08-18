@@ -11,6 +11,11 @@ const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const std = @import("std");
 const units = @import("../core/units.zig");
+const root = @import("root");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 pub const MAX_TASKS = model.MAX_TASKS;
 pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
@@ -174,6 +179,9 @@ const TEST_MINIMAL_SHARED_MEMORY_BYTES: usize = 512;
 const TASK_STATE_COUNT: usize = @typeInfo(TaskState).@"enum".fields.len;
 const TASK_LABEL_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 const TaskInitialComponentLabelIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_LABEL_INDEX_CAPACITY);
+const heap_backed_task_cold = builtin.target.os.tag == .freestanding;
+const TaskColdRecords = [MAX_TASKS]TaskColdRecord;
+const TaskColdBacking = if (heap_backed_task_cold) ?*TaskColdRecords else TaskColdRecords;
 const findAddressSpaceSlot = model.findAddressSpaceSlot;
 const defaultInitialComponent = model.defaultInitialComponent;
 const makeLaunchProvenance = model.makeLaunchProvenance;
@@ -194,9 +202,15 @@ pub const Runtime = struct {
     task_initial_component_label_index: TaskInitialComponentLabelIndex = TaskInitialComponentLabelIndex.init(),
     task_state_counts: [TASK_STATE_COUNT]usize = [_]usize{0} ** TASK_STATE_COUNT,
     task_lifecycle_generation: u64 = 1,
-    task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
+    task_cold: TaskColdBacking = if (heap_backed_task_cold) null else [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
     address_spaces: model.AddressSpaceArena = model.AddressSpaceArena.init(),
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
+
+    comptime {
+        if (heap_backed_task_cold and @sizeOf(@This()) > 128 * 1024) {
+            @compileError("heap-backed task runtimes exceed their compact hot layout");
+        }
+    }
 
     pub fn init() Runtime {
         return Runtime{};
@@ -219,6 +233,45 @@ pub const Runtime = struct {
         return true;
     }
 
+    fn taskColdRecords(self: *Runtime) ?*TaskColdRecords {
+        if (comptime heap_backed_task_cold) return self.task_cold;
+        return &self.task_cold;
+    }
+
+    fn taskColdRecordsConst(self: *const Runtime) ?*const TaskColdRecords {
+        if (comptime heap_backed_task_cold) return self.task_cold;
+        return &self.task_cold;
+    }
+
+    fn ensureTaskColdRecords(self: *Runtime) error{NoSpaceLeft}!*TaskColdRecords {
+        if (self.taskColdRecords()) |records| return records;
+        if (comptime heap_backed_task_cold) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(TaskColdRecords)) orelse return error.NoSpaceLeft;
+            const records: *TaskColdRecords = @ptrCast(@alignCast(allocation));
+            @memset(std.mem.asBytes(records), 0);
+            self.task_cold = records;
+            return records;
+        }
+        return &self.task_cold;
+    }
+
+    fn clearTaskColdRecords(self: *Runtime) void {
+        const records = self.taskColdRecords() orelse return;
+        for (records) |*cold| resetTaskCold(cold);
+    }
+
+    fn releaseTaskColdRecords(self: *Runtime) void {
+        if (comptime heap_backed_task_cold) {
+            if (self.task_cold) |records| {
+                @memset(std.mem.asBytes(records), 0);
+                kernel_memory.kfree(@ptrCast(records));
+                self.task_cold = null;
+            }
+        } else {
+            self.clearTaskColdRecords();
+        }
+    }
+
     pub fn reset(self: *Runtime) void {
         const retirements = self.captureAddressSpaceRetirements(.runtime_reset);
         self.next_task_id = 1;
@@ -230,9 +283,7 @@ pub const Runtime = struct {
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
         self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
-        for (&self.task_cold) |*cold| {
-            cold.* = zeroTaskCold();
-        }
+        self.releaseTaskColdRecords();
         self.address_spaces.reset();
         self.advanceTaskLifecycleGeneration();
         self.notifyAddressSpaceRetirements(&retirements);
@@ -246,13 +297,16 @@ pub const Runtime = struct {
         out.next_component_id = self.next_component_id;
         out.task_count = 0;
         const task_claimed_count = self.tasks.claimedCount();
+        const task_cold = self.taskColdRecordsConst();
         var slot_index: usize = 0;
         while (slot_index < task_claimed_count) : (slot_index += 1) {
             const slot = self.tasks.slotAtConst(slot_index);
             if (!slot.in_use) continue;
             const dense_index = out.task_count;
             out.tasks[dense_index] = slot.*;
-            copyTaskColdForTask(&out.task_cold[dense_index], &self.task_cold[slot_index], &slot.task);
+            const cold_records = task_cold orelse
+                native_util.impossibleByInvariant("live tasks retain cold runtime state");
+            copyTaskColdForTask(&out.task_cold[dense_index], &cold_records[slot_index], &slot.task);
             out.task_count += 1;
         }
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
@@ -265,9 +319,15 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
+    pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) error{NoSpaceLeft}!void {
+        const task_cold = if (state.task_count == 0) null else try self.ensureTaskColdRecords();
         const retirements = self.captureAddressSpaceRetirements(.snapshot_restore);
         self.resetForSnapshotRestore();
+        if (state.task_count == 0 and heap_backed_task_cold) {
+            self.releaseTaskColdRecords();
+        } else {
+            self.clearTaskColdRecords();
+        }
         self.next_task_id = state.next_task_id;
         self.next_process_id = state.next_process_id;
         self.next_address_space_id = state.next_address_space_id;
@@ -284,7 +344,9 @@ pub const Runtime = struct {
                 native_util.impossibleByInvariant("task snapshot count is bounded by task arena capacity");
             };
             self.tasks.slotAt(slot_index).task = state.tasks[task_index].task;
-            copyTaskColdForTask(&self.task_cold[task_index], &state.task_cold[task_index], &state.tasks[task_index].task);
+            const cold_records = task_cold orelse
+                native_util.impossibleByInvariant("restored tasks retain cold runtime state");
+            copyTaskColdForTask(&cold_records[task_index], &state.task_cold[task_index], &state.tasks[task_index].task);
             self.rebuildTaskDerivedIndexesAt(slot_index);
         }
 
@@ -334,7 +396,9 @@ pub const Runtime = struct {
 
     fn rebuildTaskDerivedIndexesAt(self: *Runtime, slot_index: usize) void {
         const slot = self.tasks.slotAt(slot_index);
-        slot.task.cold_state = &self.task_cold[slot_index];
+        const task_cold = self.taskColdRecords() orelse
+            native_util.impossibleByInvariant("live tasks retain cold runtime state");
+        slot.task.cold_state = &task_cold[slot_index];
         if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
             native_util.impossibleByInvariant("task owner index capacity covers task slots");
         }
@@ -356,6 +420,7 @@ pub const Runtime = struct {
         const task_id = self.nextReservableTaskId() orelse return error.TaskTableFull;
         const slot_index = self.tasks.reserveIndex(task_id) orelse return error.TaskTableFull;
         errdefer _ = self.tasks.removeIndex(slot_index);
+        const task_cold = try self.ensureTaskColdRecords();
 
         const initial_component = try self.makeExecutionComponent(defaultInitialComponent(request));
         const host = try allocateHost(
@@ -367,7 +432,7 @@ pub const Runtime = struct {
         );
 
         const slot = self.tasks.slotAt(slot_index);
-        resetTaskCold(&self.task_cold[slot_index]);
+        resetTaskCold(&task_cold[slot_index]);
         slot.task = .{
             .id = task_id,
             .process_id = host.process_id,
@@ -393,9 +458,9 @@ pub const Runtime = struct {
             .local_only = request.local_only,
             .executable_loaded = userspace_image.isPresent(),
             .launch = makeLaunchProvenance(request.launch),
-            .cold_state = &self.task_cold[slot_index],
+            .cold_state = &task_cold[slot_index],
         };
-        self.task_cold[slot_index].execution_components[0] = initial_component;
+        task_cold[slot_index].execution_components[0] = initial_component;
         appendProvenanceToTask(&slot.task, debug_contract.launchProvenance(
             task_id,
             0,
@@ -1187,7 +1252,7 @@ test "task handles reject stale task records across restore and reuse" {
 
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
-    runtime.restoreFromSnapshot(&snapshot);
+    try runtime.restoreFromSnapshot(&snapshot);
 
     try std.testing.expect(runtime.findByHandle(first_handle, task_id) == null);
     const restored_handle = runtime.taskHandle(task_id).?;
@@ -1354,7 +1419,7 @@ test "granting and revoking capabilities updates the task table" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 1), restored.find(task.id).?.capabilityGeneration());
 }
 
@@ -1473,7 +1538,7 @@ test "restoring a snapshot rebuilds authoritative indexes" {
     try restored.grantCapability(stale_task_id, 92);
     try std.testing.expect(try restored.suspendTask(stale_task_id, 1));
 
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
 
     const restored_task = restored.find(task_id).?;
     try std.testing.expect(restored.find(stale_task_id) == null);
@@ -1527,7 +1592,7 @@ test "snapshot restore preserves compact task denial provenance" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
 
     const latest = restored.find(task.id).?.latestProvenanceEvent().?;
     try std.testing.expectEqual(debug_contract.Decision.denied, latest.decision);
@@ -1808,7 +1873,7 @@ test "rehosting a restored userspace task clones authoritative mapped state" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
 
     const restored_task = restored.find(task.id).?;
     try std.testing.expect(restored_task.hasLoadedExecutable());
@@ -2063,7 +2128,7 @@ test "address-space retirement on snapshot restore replaces only runtime state a
     const restored_sink = AddressSpaceRetirementSink.init(RetirementRecorder, &restored_recorder);
     try std.testing.expect(restored.bindAddressSpaceRetirementSink(restored_sink));
 
-    restored.restoreFromSnapshot(snapshot);
+    try restored.restoreFromSnapshot(snapshot);
     try std.testing.expectEqual(@as(usize, 2), restored_recorder.count);
     try std.testing.expectEqual(replaced_first_address_space_id, restored_recorder.eventAt(0).address_space_id);
     try std.testing.expectEqual(replaced_second_address_space_id, restored_recorder.eventAt(1).address_space_id);
@@ -2080,7 +2145,7 @@ test "address-space retirement on snapshot restore replaces only runtime state a
     try std.testing.expect(restored_recorder.commit_observed);
 
     try std.testing.expect(restored.unbindAddressSpaceRetirementSink(restored_sink));
-    restored.restoreFromSnapshot(snapshot);
+    try restored.restoreFromSnapshot(snapshot);
     restored.reset();
     try std.testing.expectEqual(@as(usize, 0), source_recorder.count);
 }
@@ -2140,7 +2205,7 @@ test "task state counts track lifecycle transitions and snapshot restore" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 2), restored.taskLifecycleGeneration());
 
     try std.testing.expectEqual(@as(usize, 1), restored.countTasksInState(.active));
@@ -2152,7 +2217,7 @@ test "task state counts track lifecycle transitions and snapshot restore" {
     try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.terminated));
 
     restored.task_lifecycle_generation = std.math.maxInt(u64);
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 1), restored.taskLifecycleGeneration());
     restored.task_lifecycle_generation = std.math.maxInt(u64);
     restored.reset();
@@ -2204,7 +2269,7 @@ test "initial component label lookup is indexed across lifecycle and restore" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(second_task_id, restored.findByInitialComponentLabel("indexed-service").?.id);
 
     try std.testing.expect(try restored.terminateTask(second_task_id, 23));

@@ -1216,7 +1216,8 @@ fn benchmarkSupervisorReadyLookup(iteration: u32) u64 {
 fn benchmarkTaskCheckpointWriteRestore(iteration: u32) u64 {
     _ = iteration;
     task_checkpoint_context.source_runtime.writeSnapshot(&task_checkpoint_context.snapshot);
-    task_checkpoint_context.restored_runtime.restoreFromSnapshot(&task_checkpoint_context.snapshot);
+    task_checkpoint_context.restored_runtime.restoreFromSnapshot(&task_checkpoint_context.snapshot) catch |err|
+        benchmark_reporting.benchStepFailure("benchmark task checkpoint restore", err);
 
     const restored_primary = task_checkpoint_context.restored_runtime.find(task_checkpoint_context.primary_task_id) orelse unreachable;
     const restored_helper = task_checkpoint_context.restored_runtime.find(task_checkpoint_context.secondary_task_id) orelse unreachable;

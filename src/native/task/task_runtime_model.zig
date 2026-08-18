@@ -568,6 +568,7 @@ pub const Error = error{
     ComponentTableFull,
     CapabilityTableFull,
     InvalidUserspaceImage,
+    NoSpaceLeft,
     TaskNotFound,
     TaskTableFull,
 };

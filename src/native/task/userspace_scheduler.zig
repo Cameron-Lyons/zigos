@@ -1517,7 +1517,7 @@ test "userspace scheduler refreshes task handles after runtime restore" {
 
     var snapshot = task_runtime.Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
-    runtime.restoreFromSnapshot(&snapshot);
+    try runtime.restoreFromSnapshot(&snapshot);
     const restored_handle = runtime.taskHandle(task_id).?;
     try std.testing.expect(!restored_handle.eql(original_handle));
 
