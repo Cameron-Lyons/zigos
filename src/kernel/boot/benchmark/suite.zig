@@ -1220,13 +1220,14 @@ fn benchmarkTaskCheckpointWriteRestore(iteration: u32) u64 {
 
     const restored_primary = task_checkpoint_context.restored_runtime.find(task_checkpoint_context.primary_task_id) orelse unreachable;
     const restored_helper = task_checkpoint_context.restored_runtime.find(task_checkpoint_context.secondary_task_id) orelse unreachable;
+    const restored_address_space = task_checkpoint_context.restored_runtime.findAddressSpaceConst(restored_primary.address_space_id) orelse unreachable;
     const latest_primary = restored_primary.latestAuditEvent() orelse unreachable;
     const latest_helper = restored_helper.latestAuditEvent() orelse unreachable;
 
     return restored_primary.id +
         restored_primary.execution_component_count +
         restored_primary.capability_count +
-        restored_primary.userspaceImage().segment_count +
+        restored_address_space.load_segment_count +
         restored_primary.background_cpu_consumed_ticks +
         latest_primary.tick +
         restored_helper.capability_count +
