@@ -155,7 +155,11 @@ pub const Kernel = struct {
 
     pub fn taskTerminate(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!bool {
         const task_capability = try self.authorizeOperation(.task_terminate, context, now_ticks, .{});
-        return self.runtime.terminateTask(task_capability.target.id, now_ticks);
+        const task_id = task_capability.target.id;
+        const terminated = try self.runtime.terminateTask(task_id, now_ticks);
+        if (!terminated) return false;
+        _ = self.endpoint_table.retireTask(ids.task(task_id));
+        return true;
     }
 
     pub fn endpointCreate(
@@ -1225,6 +1229,8 @@ test "capability mint query revoke and task termination are exposed by the nativ
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
     });
     try runtime.grantCapability(target_task.id, task_capability.id);
+    const task_endpoint = try endpoints.create(ids.task(target_task.id), "terminated-task", .{});
+    try std.testing.expectEqual(@as(u16, 1), endpoints.activeForTask(ids.task(target_task.id)));
 
     const minted = try kernel.capabilityMint(testContext(.capability_mint, admin_capability.id, .{ .policy = 1 }), .{
         .holder = target_task.owner,
@@ -1265,6 +1271,8 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try kernel.capabilityRevoke(testContext(.capability_revoke, minted.capability_id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
     try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
+    try std.testing.expectEqual(@as(u16, 0), endpoints.activeForTask(ids.task(target_task.id)));
+    try std.testing.expectError(error.EndpointNotFound, endpoints.descriptor(task_endpoint.id));
 }
 
 test "task authority graph marks target-revoked capabilities unusable" {

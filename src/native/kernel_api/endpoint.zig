@@ -10,6 +10,8 @@ pub const MAX_MESSAGE_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 pub const MAX_ENDPOINT_LABEL_BYTES: usize = 48;
 const ENDPOINT_INDEX_CAPACITY: usize = MAX_ENDPOINTS * 2;
 const MAX_ENDPOINT_LABEL_PAYLOAD_BYTES: usize = MAX_ENDPOINT_LABEL_BYTES - 1;
+pub const ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
+pub const ENDPOINT_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 
 pub const EndpointFlags = packed struct(u16) {
     local_only: bool = false,
@@ -59,7 +61,6 @@ pub const Endpoint = struct {
 
 pub const Error = error{
     EndpointBusy,
-    EndpointIdExhausted,
     EndpointNotFound,
     MessageTooLarge,
     ReceiveBufferTooSmall,
@@ -73,11 +74,11 @@ const EndpointSlot = struct {
     endpoint: Endpoint = zeroEndpoint(),
 };
 
-const EndpointArena = indexed_arena.IndexedArenaWithKey(ids.EndpointId, EndpointSlot, MAX_ENDPOINTS, ENDPOINT_INDEX_CAPACITY, endpointSlotId);
+const EndpointArena = indexed_arena.GenerationalArena("EndpointId", EndpointSlot, MAX_ENDPOINTS);
+const EndpointHandle = EndpointArena.Handle;
 const EndpointOwnerIndex = indexed_arena.MultimapIndex(MAX_ENDPOINTS, MAX_ENDPOINTS, ENDPOINT_INDEX_CAPACITY);
 
 pub const Table = struct {
-    next_endpoint_id: u64 = 1,
     arena: EndpointArena = EndpointArena.init(),
     owner_index: EndpointOwnerIndex = EndpointOwnerIndex.init(),
 
@@ -86,22 +87,24 @@ pub const Table = struct {
     }
 
     pub fn create(self: *Table, owner_task_id: ids.TaskId, label: []const u8, flags: EndpointFlags) Error!Endpoint {
-        if (self.arena.countInUse() >= MAX_ENDPOINTS) return error.TableFull;
-        const endpoint_id = self.nextEndpointId() orelse return error.EndpointIdExhausted;
-        const slot_index = self.arena.reserveIndex(endpoint_id) orelse return error.TableFull;
-        const slot = &self.arena.slots[slot_index];
-        slot.endpoint = .{
-            .id = endpoint_id,
-            .owner_task_id = owner_task_id,
-            .flags = flags,
-            .label_len = @min(label.len, MAX_ENDPOINT_LABEL_PAYLOAD_BYTES),
-            .label = [_]u8{0} ** MAX_ENDPOINT_LABEL_BYTES,
+        const handle = self.arena.reserveHandle() orelse return error.TableFull;
+        const slot = self.arena.getByHandle(handle) orelse
+            native_util.impossibleByInvariant("reserved endpoint handle is not live");
+        const endpoint_id = ids.endpoint(handle.value);
+        slot.* = .{
+            .in_use = true,
+            .endpoint = .{
+                .id = endpoint_id,
+                .owner_task_id = owner_task_id,
+                .flags = flags,
+                .label_len = @min(label.len, MAX_ENDPOINT_LABEL_PAYLOAD_BYTES),
+                .label = [_]u8{0} ** MAX_ENDPOINT_LABEL_BYTES,
+            },
         };
         @memcpy(slot.endpoint.label[0..slot.endpoint.label_len], label[0..slot.endpoint.label_len]);
-        if (!self.owner_index.append(owner_task_id.raw(), slot_index)) {
+        if (!self.owner_index.append(owner_task_id.raw(), handle.slotIndex())) {
             native_util.impossibleByInvariant("endpoint owner index capacity covers endpoint slots");
         }
-        self.advanceNextEndpointIdFrom(endpoint_id);
         return slot.endpoint;
     }
 
@@ -206,28 +209,57 @@ pub const Table = struct {
         return @intCast(self.owner_index.count(task_id.raw()));
     }
 
-    fn nextEndpointId(self: *const Table) ?ids.EndpointId {
-        return if (self.next_endpoint_id == 0) null else ids.endpoint(self.next_endpoint_id);
+    pub fn activeCount(self: *const Table) usize {
+        return self.arena.countInUse();
     }
 
-    fn advanceNextEndpointIdFrom(self: *Table, endpoint_id: ids.EndpointId) void {
-        self.next_endpoint_id = endpoint_id.raw() +% 1;
+    pub fn retireTask(self: *Table, task_id: ids.TaskId) u16 {
+        var retired_ids: [MAX_ENDPOINTS]ids.EndpointId = [_]ids.EndpointId{ids.EndpointId.zero} ** MAX_ENDPOINTS;
+        var retired_count: usize = 0;
+        while (true) {
+            const slot_index = self.owner_index.head(task_id.raw());
+            if (slot_index == indexed_arena.no_index) break;
+            if (slot_index >= self.arena.slots.len) {
+                native_util.impossibleByInvariant("endpoint owner index points outside endpoint slots");
+            }
+            const slot = &self.arena.slots[slot_index];
+            if (!slot.in_use or !slot.endpoint.owner_task_id.eql(task_id)) {
+                native_util.impossibleByInvariant("endpoint owner index points at the wrong endpoint");
+            }
+            retired_ids[retired_count] = slot.endpoint.id;
+            retired_count += 1;
+            if (!self.owner_index.remove(task_id.raw(), slot_index)) {
+                native_util.impossibleByInvariant("live endpoint is absent from its owner index");
+            }
+            if (!self.arena.removeIndex(slot_index)) {
+                native_util.impossibleByInvariant("live endpoint disappeared during retirement");
+            }
+        }
+        if (retired_count == 0) return 0;
+
+        for (&self.arena.slots) |*slot| {
+            if (!slot.in_use) continue;
+            const peer_endpoint_id = slot.endpoint.peer_endpoint_id orelse continue;
+            for (retired_ids[0..retired_count]) |retired_id| {
+                if (peer_endpoint_id.eql(retired_id)) {
+                    slot.endpoint.peer_endpoint_id = null;
+                    break;
+                }
+            }
+        }
+        return @intCast(retired_count);
     }
 
     fn find(self: *Table, endpoint_id: ids.EndpointId) ?*Endpoint {
-        const slot = self.arena.get(endpoint_id) orelse return null;
+        const slot = self.arena.getByHandle(EndpointHandle{ .value = endpoint_id.raw() }) orelse return null;
         return &slot.endpoint;
     }
 
     fn findConst(self: *const Table, endpoint_id: ids.EndpointId) ?*const Endpoint {
-        const slot = self.arena.getConst(endpoint_id) orelse return null;
+        const slot = self.arena.getConstByHandle(EndpointHandle{ .value = endpoint_id.raw() }) orelse return null;
         return &slot.endpoint;
     }
 };
-
-fn endpointSlotId(slot: *const EndpointSlot) ids.EndpointId {
-    return slot.endpoint.id;
-}
 
 fn zeroMessage() Message {
     return .{
@@ -295,30 +327,57 @@ test "endpoint descriptors track peer links and queue depth" {
     try std.testing.expect(descriptor.label_hash != 0);
 }
 
-test "endpoint ids stop at exhaustion" {
+test "endpoint ids reject stale handles after slot reuse" {
     var table = Table.init();
+    const endpoint = try table.create(ids.task(10), "first", .{});
+    const original_handle = EndpointHandle{ .value = endpoint.id.raw() };
 
-    table.next_endpoint_id = std.math.maxInt(u64);
-    const max_endpoint = try table.create(ids.task(10), "max", .{});
-    try std.testing.expectEqual(std.math.maxInt(u64), max_endpoint.id.raw());
-    try std.testing.expectEqual(@as(u64, 0), table.next_endpoint_id);
-    try std.testing.expectError(error.EndpointNotFound, table.descriptor(ids.EndpointId.zero));
+    try std.testing.expectEqual(@as(u16, 1), table.retireTask(ids.task(10)));
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(endpoint.id));
 
-    try std.testing.expectError(error.EndpointIdExhausted, table.create(ids.task(11), "exhausted", .{}));
-    try std.testing.expectEqual(@as(u64, 0), table.next_endpoint_id);
-    try std.testing.expectError(error.EndpointNotFound, table.descriptor(ids.EndpointId.zero));
+    const replacement = try table.create(ids.task(11), "replacement", .{});
+    const replacement_handle = EndpointHandle{ .value = replacement.id.raw() };
+    try std.testing.expectEqual(original_handle.slotIndex(), replacement_handle.slotIndex());
+    try std.testing.expect(!endpoint.id.eql(replacement.id));
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(endpoint.id));
+    try std.testing.expectEqual(replacement.id.raw(), (try table.descriptor(replacement.id)).endpoint_id);
 }
 
-test "endpoint ids do not advance when the table is full" {
+test "endpoint table rejection preserves active endpoints" {
     var table = Table.init();
     for (0..MAX_ENDPOINTS) |index| {
         _ = try table.create(ids.task(@intCast(index + 100)), "endpoint", .{});
     }
 
-    const next_before_full = table.next_endpoint_id;
+    try std.testing.expectEqual(MAX_ENDPOINTS, table.activeCount());
     try std.testing.expectError(error.TableFull, table.create(ids.task(1_000), "rejected", .{}));
-    try std.testing.expectEqual(next_before_full, table.next_endpoint_id);
+    try std.testing.expectEqual(MAX_ENDPOINTS, table.activeCount());
     try std.testing.expectEqual(@as(u16, 1), table.activeForTask(ids.task(100)));
+}
+
+test "retiring task endpoints clears queues and surviving peer links" {
+    var table = Table.init();
+    const client_a = try table.create(ids.task(10), "client-a", .{});
+    const client_b = try table.create(ids.task(11), "client-b", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+
+    try table.connect(client_a.id, service.id);
+    try table.connect(client_b.id, service.id);
+    try table.send(client_a.id, ids.task(10), 1, "queued-a", null, false);
+    try table.send(client_b.id, ids.task(11), 2, "queued-b", null, false);
+    try std.testing.expectEqual(@as(u16, 2), (try table.descriptor(service.id)).queued_messages);
+
+    try std.testing.expectEqual(@as(u16, 1), table.retireTask(ids.task(12)));
+    try std.testing.expectEqual(@as(usize, 2), table.activeCount());
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(service.id));
+    try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_a.id)).peer_endpoint_id);
+    try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_b.id)).peer_endpoint_id);
+    try std.testing.expectError(error.PeerNotConnected, table.send(client_a.id, ids.task(10), 3, "stale", null, false));
+}
+
+test "endpoint identity paths avoid primary indexes and collision probes" {
+    try std.testing.expectEqual(@as(u8, 0), ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION);
+    try std.testing.expectEqual(@as(u8, 0), ENDPOINT_ID_COLLISION_PROBES_PER_INSERT);
 }
 
 test "service ports accept multiple client connections without blocking later binds" {
