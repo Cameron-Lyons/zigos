@@ -150,7 +150,7 @@ fn planBackgroundCapacity(task: *const TaskRecord, budget: manifest.BackgroundRe
 const TaskArena = model.TaskArena;
 pub const TaskHandle = model.TaskHandle;
 const TaskOwnerIndex = model.TaskOwnerIndex;
-const TaskColdRecord = model.TaskColdRecord;
+pub const TaskColdRecord = model.TaskColdRecord;
 const TaskSlot = model.TaskSlot;
 const AddressSpaceSlot = model.AddressSpaceSlot;
 const allocateHost = model.allocateHost;
@@ -390,10 +390,10 @@ pub const Runtime = struct {
             .background_allowed = request.budget.background_allowed,
             .zero_ambient_authority = true,
             .local_only = request.local_only,
+            .executable_loaded = userspace_image.isPresent(),
             .launch = makeLaunchProvenance(request.launch),
             .cold_state = &self.task_cold[slot_index],
         };
-        self.task_cold[slot_index].userspace_image = userspace_image;
         self.task_cold[slot_index].execution_components[0] = initial_component;
         appendProvenanceToTask(&slot.task, debug_contract.launchProvenance(
             task_id,
@@ -758,13 +758,14 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.TaskNotFound;
         if (task.state == .terminated) return false;
         const retired_address_space_id = task.address_space_id;
+        const retired_address_space = self.findAddressSpaceConst(retired_address_space_id) orelse
+            native_util.impossibleByInvariant("live task references an indexed address space");
 
         const host = try reassignHost(
             self,
             task.component_class,
             task.id,
-            task.launch.image_id,
-            task.userspaceImage().*,
+            retired_address_space.*,
             task.address_space_id,
         );
         task.process_id = host.process_id;
@@ -1643,9 +1644,9 @@ test "userspace tasks materialize executable mappings in their address spaces" {
     try std.testing.expect(task.hasLoadedExecutable());
     try std.testing.expect(address_space.hasMappedExecutable());
     try std.testing.expectEqual(@as(u64, 45), address_space.image_id);
-    try std.testing.expectEqual(task.userspaceImage().entry_point, address_space.instruction_pointer);
-    try std.testing.expectEqual(task.userspaceImage().segment_count, address_space.load_segment_count);
-    try std.testing.expectEqual(task.userspaceImage().segment_count + 1, address_space.region_count);
+    try std.testing.expectEqual(workspace_storage_image.entry_point, address_space.instruction_pointer);
+    try std.testing.expectEqual(workspace_storage_image.segment_count, address_space.load_segment_count);
+    try std.testing.expectEqual(workspace_storage_image.segment_count + 1, address_space.region_count);
     try std.testing.expectEqual(AddressSpaceRegionKind.stack, address_space.regions[address_space.region_count - 1].kind);
 }
 
@@ -1776,7 +1777,7 @@ test "tasks are isolated in separate process address space and namespace hosts a
     try std.testing.expectEqual(AuditEventKind.service_restarted, service_task.latestAuditEvent().?.kind);
 }
 
-test "rehosting a userspace task rebuilds the mapped executable state" {
+test "rehosting a restored userspace task clones authoritative mapped state" {
     var runtime = Runtime.init();
     const sync_service_image = try generated_image_fixtures.syncServiceImage();
     const task = try runtime.createTask(.{
@@ -1803,15 +1804,31 @@ test "rehosting a userspace task rebuilds the mapped executable state" {
         .userspace_image = &sync_service_image,
     });
 
-    const original_address_space_id = task.address_space_id;
-    try std.testing.expect(try runtime.rehostTask(task.id, 77));
-    try std.testing.expect(task.address_space_id != original_address_space_id);
-    try std.testing.expect(runtime.findAddressSpaceConst(original_address_space_id) == null);
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    var restored = Runtime.init();
+    restored.restoreFromSnapshot(&snapshot);
 
-    const address_space = runtime.findAddressSpaceConst(task.address_space_id).?;
+    const restored_task = restored.find(task.id).?;
+    try std.testing.expect(restored_task.hasLoadedExecutable());
+    const original_address_space_id = restored_task.address_space_id;
+    const original_address_space = restored.findAddressSpaceConst(original_address_space_id).?.*;
+    try std.testing.expect(try restored.rehostTask(restored_task.id, 77));
+    try std.testing.expect(restored_task.address_space_id != original_address_space_id);
+    try std.testing.expect(restored.findAddressSpaceConst(original_address_space_id) == null);
+
+    const address_space = restored.findAddressSpaceConst(restored_task.address_space_id).?;
     try std.testing.expect(address_space.hasMappedExecutable());
-    try std.testing.expectEqual(task.userspaceImage().entry_point, address_space.instruction_pointer);
-    try std.testing.expectEqual(task.userspaceImage().segment_count, address_space.load_segment_count);
+    try std.testing.expectEqual(original_address_space.entry_point, address_space.instruction_pointer);
+    try std.testing.expectEqual(original_address_space.stack_top, address_space.stack_pointer);
+    try std.testing.expectEqual(original_address_space.load_segment_count, address_space.load_segment_count);
+    try std.testing.expectEqual(original_address_space.region_count, address_space.region_count);
+    try std.testing.expectEqualSlices(
+        AddressSpaceRegionRecord,
+        original_address_space.regions[0..original_address_space.region_count],
+        address_space.regions[0..address_space.region_count],
+    );
+    try std.testing.expectEqualSlices(u8, &original_address_space.image_sha256, &address_space.image_sha256);
 }
 
 test "terminating a task clears its capabilities and marks the state" {
