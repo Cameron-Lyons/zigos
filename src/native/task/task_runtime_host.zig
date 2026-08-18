@@ -211,7 +211,7 @@ fn makeAddressSpace(
     record.instruction_pointer = userspace_image.entry_point;
     record.stack_pointer = userspace_image.stack_top;
     record.stack_top = userspace_image.stack_top;
-    record.stack_size_bytes = userspace_image.stack_size_bytes;
+    record.stack_size_bytes = @intCast(userspace_image.stack_size_bytes);
     record.load_segment_count = userspace_image.segment_count;
     record.image_sha256 = userspace_image.file_sha256;
 
@@ -230,8 +230,8 @@ fn makeAddressSpace(
 
     record.regions[index] = .{
         .kind = .stack,
-        .virtual_address = userspace_image.stack_top - userspace_image.stack_size_bytes,
-        .size_bytes = userspace_image.stack_size_bytes,
+        .virtual_address = userspace_image.stack_top - @as(u64, userspace_image.stack_size_bytes),
+        .size_bytes = @intCast(userspace_image.stack_size_bytes),
         .file_offset = 0,
         .file_size = 0,
         .access = .{
