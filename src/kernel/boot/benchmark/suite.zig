@@ -2500,6 +2500,7 @@ fn prepareUpdateHealthFixture(iteration: u32) void {
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     update_health_context.sync = sync_service.Service.init(1_500, 401, owner);
     update_health_context.sync_capabilities = capability.CapabilityTable.init();
+    update_health_context.compositor.deinit();
     update_health_context.compositor = compositor_session.Session.init();
     update_health_context.supervisor = supervisor_mod.Supervisor.init();
     update_health_context.ledger.reset();
