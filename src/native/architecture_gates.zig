@@ -423,6 +423,11 @@ pub const indexed_hot_path_tables = .{
         .uses_relay_session_index = @hasField(sync_transport_harness.Relay, "session_index"),
     },
     .sync_transport = .{
+        .stores_compact_capture_metadata = sync_transport.COMPACT_CAPTURE_METADATA and
+            @FieldType(sync_transport.CapturedPacket, "len") == u16,
+        .keeps_capture_state_within_ceilings = @sizeOf(sync_transport.CapturedPacket) <= sync_transport.CAPTURED_PACKET_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport.PacketCapture) <= sync_transport.PACKET_CAPTURE_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport.NativeTransportService) <= sync_transport.NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES,
         .uses_packet_capture_arena = @hasDecl(@FieldType(sync_transport.PacketCapture, "packets"), "reserveIndex"),
         .tracks_last_packet_id = @hasField(sync_transport.PacketCapture, "last_packet_id"),
     },
