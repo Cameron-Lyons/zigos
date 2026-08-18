@@ -538,6 +538,12 @@ pub const indexed_hot_path_tables = .{
             @hasField(@FieldType(sync_state_support.PersistentState, "database_contracts"), "next_unclaimed_index"),
     },
     .sync_adapters = .{
+        .stores_compact_document_log_metadata = sync_adapters.COMPACT_DOCUMENT_LOG_METADATA and
+            @FieldType(sync_adapters.DocumentOperation, "text_len") == u8 and
+            @FieldType(sync_adapters.DocumentOperationLog, "operation_count") == u8 and
+            @FieldType(sync_adapters.DocumentOperationLog, "clock_count") == u8,
+        .keeps_document_log_state_within_ceilings = @sizeOf(sync_adapters.DocumentOperation) <= sync_adapters.DOCUMENT_OPERATION_SIZE_CEILING_BYTES and
+            @sizeOf(sync_adapters.DocumentOperationLog) <= sync_adapters.DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES,
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),
         .uses_transport_frame_target_index = @hasField(sync_adapters.TransportQueue, "target_index"),
         .uses_transport_frame_path_index = @hasField(sync_adapters.TransportQueue, "path_index"),
