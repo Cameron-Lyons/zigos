@@ -562,8 +562,8 @@ pub const Runtime = struct {
         var record = zeroExecutionComponent();
         record.id = component_id;
         record.substrate = component.substrate;
-        record.label_len = native_util.copyTextWithReserve(record.label[0..], component.label, 1);
-        record.entry_len = native_util.copyTextWithReserve(record.entry[0..], component.entry, 1);
+        record.label_len = @intCast(native_util.copyTextWithReserve(record.label[0..], component.label, 1));
+        record.entry_len = @intCast(native_util.copyTextWithReserve(record.entry[0..], component.entry, 1));
         return record;
     }
 
@@ -1029,7 +1029,7 @@ fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
     }
 
     cold.provenance_trail[task.provenance_start] = TaskProvenanceRecord.from(event);
-    task.provenance_start = (task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS;
+    task.provenance_start = @intCast((task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS);
 }
 
 fn createTaskIdTestTask(runtime: *Runtime, owner_serial: u64) Error!*TaskRecord {
