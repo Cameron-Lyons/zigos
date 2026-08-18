@@ -138,7 +138,7 @@ fn runSessionLifecycle(
         .sync_service_id = state.services.sync_service.id,
         .sync_task_id = service_bindings.bindingFor(.sync_replication).task_id,
         .sync_service_principal = state.ids.sync_service,
-        .sync_resident_state = manager.syncResidentStatePtr(),
+        .sync_resident_state = manager.syncResidentStatePtr() catch |err| native_util.bootProofFailure("scenario sync state", err),
         .policy_service_id = state.services.policy_service.id,
         .network_service_id = state.services.network_service.id,
         .compositor_service_id = state.services.compositor_service.id,

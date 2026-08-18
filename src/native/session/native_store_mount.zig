@@ -15,14 +15,16 @@ else
 
 const heap_backed_checkpoint_store = builtin.target.os.tag == .freestanding;
 const heap_backed_export_package = builtin.target.os.tag == .freestanding;
+const heap_backed_sync_resident_state = builtin.target.os.tag == .freestanding;
 const CheckpointStoreBacking = if (heap_backed_checkpoint_store) ?*storage_service_mod.CheckpointStore else storage_service_mod.CheckpointStore;
 const ExportPackageBacking = if (heap_backed_export_package) ?*workspace_mod.ExportPackage else workspace_mod.ExportPackage;
+const SyncResidentStateBacking = if (heap_backed_sync_resident_state) ?*sync_service_mod.ResidentState else sync_service_mod.ResidentState;
 
 pub const NativeStoreMount = struct {
     storage_checkpoint_store: CheckpointStoreBacking = if (heap_backed_checkpoint_store) null else .{},
     storage_service_instance: storage_service_mod.Service = emptyStorageService(),
     export_package_backing: ExportPackageBacking = if (heap_backed_export_package) null else workspace_mod.emptyExportPackage(),
-    sync_resident_state: sync_service_mod.ResidentState = .{},
+    sync_resident_state_backing: SyncResidentStateBacking = if (heap_backed_sync_resident_state) null else .{},
 
     pub fn init() NativeStoreMount {
         return .{};
@@ -46,8 +48,17 @@ pub const NativeStoreMount = struct {
         } else {
             workspace_mod.resetExportPackage(&self.export_package_backing);
         }
+        if (comptime heap_backed_sync_resident_state) {
+            if (self.sync_resident_state_backing) |resident_state| {
+                resident_state.resetPersistent();
+                @memset(std.mem.asBytes(resident_state), 0);
+                kernel_memory.kfree(@ptrCast(resident_state));
+                self.sync_resident_state_backing = null;
+            }
+        } else {
+            self.sync_resident_state_backing.resetPersistent();
+        }
         self.storage_service_instance = emptyStorageService();
-        self.sync_resident_state.resetPersistent();
     }
 
     pub fn checkpointStorePtr(self: *NativeStoreMount) ?*storage_service_mod.CheckpointStore {
@@ -65,6 +76,18 @@ pub const NativeStoreMount = struct {
             return export_package;
         }
         return &self.export_package_backing;
+    }
+
+    pub fn syncResidentStatePtr(self: *NativeStoreMount) error{NoSpaceLeft}!*sync_service_mod.ResidentState {
+        if (comptime heap_backed_sync_resident_state) {
+            if (self.sync_resident_state_backing) |resident_state| return resident_state;
+            const allocation = kernel_memory.kmalloc(@sizeOf(sync_service_mod.ResidentState)) orelse return error.NoSpaceLeft;
+            const resident_state: *sync_service_mod.ResidentState = @ptrCast(@alignCast(allocation));
+            resident_state.initializeAllocated();
+            self.sync_resident_state_backing = resident_state;
+            return resident_state;
+        }
+        return &self.sync_resident_state_backing;
     }
 
     fn ensureCheckpointStore(self: *NativeStoreMount) error{NoSpaceLeft}!*storage_service_mod.CheckpointStore {
@@ -110,7 +133,7 @@ pub const NativeStoreMount = struct {
 };
 
 comptime {
-    if (heap_backed_checkpoint_store and @sizeOf(NativeStoreMount) > 64 * 1024) {
+    if (heap_backed_checkpoint_store and @sizeOf(NativeStoreMount) > 256) {
         @compileError("heap-backed native store mounts exceed their compact resident layout");
     }
 }
@@ -157,6 +180,24 @@ test "native store initializes reuses and resets its export package buffer" {
     const reset = try mount.exportPackagePtr();
     try std.testing.expect(first == reset);
     try std.testing.expectEqual(@as(usize, 0), reset.entry_count);
+}
+
+test "native store initializes reuses and resets its sync resident state" {
+    var mount = NativeStoreMount.init();
+    defer mount.resetPersistent();
+
+    const first = try mount.syncResidentStatePtr();
+    try std.testing.expect(!first.has_persisted_state);
+    try std.testing.expectEqual(@as(u64, 1), first.next_state_tick);
+    try std.testing.expect(first == try mount.syncResidentStatePtr());
+
+    first.has_persisted_state = true;
+    first.next_state_tick = 8;
+    mount.resetPersistent();
+    const reset = try mount.syncResidentStatePtr();
+    try std.testing.expect(first == reset);
+    try std.testing.expect(!reset.has_persisted_state);
+    try std.testing.expectEqual(@as(u64, 1), reset.next_state_tick);
 }
 
 test "native store root adoption only accepts production NVMe PCI volumes" {
