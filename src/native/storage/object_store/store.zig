@@ -477,11 +477,13 @@ pub const Store = StoreWith(.{});
 fn ObjectTypeIndexWith(comptime capacity: usize) type {
     return struct {
         const Self = @This();
+        const SlotIndex = indexed_arena.ReusableIndex(capacity);
+        const no_slot = indexed_arena.reusableNoIndex(capacity);
 
-        heads: [OBJECT_TYPE_COUNT]usize = [_]usize{indexed_arena.no_index} ** OBJECT_TYPE_COUNT,
-        tails: [OBJECT_TYPE_COUNT]usize = [_]usize{indexed_arena.no_index} ** OBJECT_TYPE_COUNT,
-        counts: [OBJECT_TYPE_COUNT]usize = [_]usize{0} ** OBJECT_TYPE_COUNT,
-        next_by_slot: [capacity]usize = [_]usize{indexed_arena.no_index} ** capacity,
+        heads: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{no_slot} ** OBJECT_TYPE_COUNT,
+        tails: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{no_slot} ** OBJECT_TYPE_COUNT,
+        counts: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{0} ** OBJECT_TYPE_COUNT,
+        next_by_slot: [capacity]SlotIndex = [_]SlotIndex{no_slot} ** capacity,
 
         pub fn init() Self {
             return .{};
@@ -492,30 +494,35 @@ fn ObjectTypeIndexWith(comptime capacity: usize) type {
         }
 
         pub fn count(self: *const Self, object_type: ObjectType) usize {
-            return self.counts[objectTypeBucket(object_type)];
+            return @intCast(self.counts[objectTypeBucket(object_type)]);
         }
 
         pub fn head(self: *const Self, object_type: ObjectType) usize {
-            return self.heads[objectTypeBucket(object_type)];
+            return publicIndex(self.heads[objectTypeBucket(object_type)]);
         }
 
         pub fn next(self: *const Self, slot_index: usize) usize {
             if (slot_index >= capacity) return indexed_arena.no_index;
-            return self.next_by_slot[slot_index];
+            return publicIndex(self.next_by_slot[slot_index]);
         }
 
         pub fn append(self: *Self, object_type: ObjectType, slot_index: usize) bool {
             if (slot_index >= capacity) return false;
             const bucket = objectTypeBucket(object_type);
-            self.next_by_slot[slot_index] = indexed_arena.no_index;
-            if (self.tails[bucket] == indexed_arena.no_index) {
-                self.heads[bucket] = slot_index;
+            const compact_slot_index: SlotIndex = @intCast(slot_index);
+            self.next_by_slot[slot_index] = no_slot;
+            if (self.tails[bucket] == no_slot) {
+                self.heads[bucket] = compact_slot_index;
             } else {
-                self.next_by_slot[self.tails[bucket]] = slot_index;
+                self.next_by_slot[self.tails[bucket]] = compact_slot_index;
             }
-            self.tails[bucket] = slot_index;
+            self.tails[bucket] = compact_slot_index;
             self.counts[bucket] += 1;
             return true;
+        }
+
+        fn publicIndex(index: SlotIndex) usize {
+            return if (index == no_slot) indexed_arena.no_index else @intCast(index);
         }
     };
 }
