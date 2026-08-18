@@ -409,11 +409,11 @@ pub const Kernel = struct {
             try self.validateRuntimeGrant(task_id, 1);
         }
         const derived = try self.capability_table.derive(request);
-        errdefer self.capability_table.rollbackGrant(&.{derived.*});
+        errdefer self.capability_table.rollbackGrant(&.{derived});
         if (request.scope.task_id) |task_id| {
             try self.runtime.grantCapability(task_id, derived.id);
         }
-        return capabilityDescriptor(derived);
+        return capabilityDescriptor(&derived);
     }
 
     pub fn capabilityPass(
@@ -1366,7 +1366,8 @@ test "capability grant plan does not mint when runtime attachment cannot fit" {
         try runtime.grantCapability(target_task.id, existing.id);
     }
 
-    const next_capability_id = capabilities.next_capability_id;
+    const capability_count = capabilities.activeCount();
+    const capability_mutation_generation = capabilities.mutationGeneration();
     try std.testing.expectError(error.CapabilityTableFull, kernel.capabilityMint(testContext(.capability_mint, admin_capability.id, .{ .policy = 1 }), .{
         .holder = target_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
@@ -1375,8 +1376,8 @@ test "capability grant plan does not mint when runtime attachment cannot fit" {
         .scope = .{ .task_id = target_task.id, .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
     }, 10));
-    try std.testing.expectEqual(next_capability_id, capabilities.next_capability_id);
-    try std.testing.expect(capabilities.query(next_capability_id) == null);
+    try std.testing.expectEqual(capability_count, capabilities.activeCount());
+    try std.testing.expectEqual(capability_mutation_generation, capabilities.mutationGeneration());
 }
 
 test "native kernel brokers device metadata and port io through device capabilities" {
