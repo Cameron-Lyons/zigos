@@ -143,7 +143,7 @@ pub const indexed_hot_path_tables = .{
         .configures_resource_state = @hasDecl(userspace_scheduler.Scheduler, "configureResourceState"),
         .uses_accelerator_claim_heads = @hasField(userspace_scheduler.Scheduler, "accelerator_claim_heads"),
         .uses_accelerator_deadline_heads = @hasField(userspace_scheduler.Scheduler, "accelerator_deadline_heads"),
-        .uses_accelerator_claim_task_index = @hasField(userspace_scheduler.Scheduler, "accelerator_claim_task_index"),
+        .uses_accelerator_claim_task_index = @hasField(userspace_scheduler.AcceleratorClaimBacking, "task_index"),
         .grants_next_accelerator_claim = @hasDecl(userspace_scheduler.Scheduler, "grantNextAcceleratorClaim"),
         .caches_ui_presentation_eligibility = userspace_scheduler.STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS == 0,
         .uses_generational_task_handles_for_dispatch = @hasDecl(task_runtime.Runtime, "findByHandle") and
