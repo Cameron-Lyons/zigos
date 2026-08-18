@@ -252,7 +252,9 @@ pub const indexed_hot_path_tables = .{
         .keeps_fixed_state_within_ceiling = @sizeOf(object_resilience_service.Service) <= object_resilience_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .personal_context_service = .{
-        .uses_lease_arena = @hasDecl(@FieldType(personal_context_service.Service, "slots"), "reserve"),
+        .uses_bounded_lease_scan = personal_context_service.BOUNDED_LEASE_SCAN,
+        .reclaims_terminal_leases = personal_context_service.RECLAIMS_TERMINAL_LEASES,
+        .keeps_fixed_state_within_ceiling = @sizeOf(personal_context_service.Service) <= personal_context_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .package_service = .{
         .uses_bundle_arena = @hasDecl(package_service.BundleArena, "reserve"),
