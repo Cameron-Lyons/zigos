@@ -30,6 +30,7 @@ const secure_secret_store = @import("platform/secure_secret_store.zig");
 const os_identity = @import("platform/os_identity.zig");
 const secret_vault_service = @import("services/secret_vault_service.zig");
 const media_print_service = @import("services/media_print_service.zig");
+const network_session_service = @import("services/network_session_service.zig");
 const notification_center = @import("services/notification_center.zig");
 const secure_pasteboard = @import("services/secure_pasteboard.zig");
 const capability = @import("kernel_api/capability.zig");
@@ -216,6 +217,12 @@ pub const indexed_hot_path_tables = .{
         .uses_bounded_job_scan = media_print_service.BOUNDED_JOB_SCAN,
         .uses_compact_completion_queue = media_print_service.COMPACT_COMPLETION_QUEUE,
         .keeps_fixed_state_within_ceiling = @sizeOf(media_print_service.Service) <= media_print_service.SERVICE_SIZE_CEILING_BYTES,
+    },
+    .network_session_service = .{
+        .uses_bounded_session_scan = network_session_service.BOUNDED_SESSION_SCAN,
+        .reclaims_terminal_sessions = network_session_service.RECLAIMS_TERMINAL_SESSIONS,
+        .stores_compact_destination_length = network_session_service.COMPACT_DESTINATION_LENGTH,
+        .keeps_fixed_state_within_ceiling = @sizeOf(network_session_service.Service) <= network_session_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .notification_center = .{
         .uses_notification_arena = @hasDecl(@FieldType(notification_center.Center, "notifications"), "reserveIndex"),
