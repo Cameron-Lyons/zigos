@@ -32,6 +32,7 @@ const media_print_service = @import("services/media_print_service.zig");
 const notification_center = @import("services/notification_center.zig");
 const secure_pasteboard = @import("services/secure_pasteboard.zig");
 const capability = @import("kernel_api/capability.zig");
+const endpoint = @import("kernel_api/endpoint.zig");
 const shared_memory = @import("kernel_api/shared_memory.zig");
 const sensitive_capture_service = @import("services/sensitive_capture_service.zig");
 const agent_delegation_service = @import("services/agent_delegation_service.zig");
@@ -102,12 +103,20 @@ pub const indexed_hot_path_tables = .{
         .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),
         .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
         .tracks_mutation_generation = @hasField(capability.CapabilityTable, "mutation_generation"),
+        .retires_task_bound_and_targeting_authority = @hasDecl(capability.CapabilityTable, "retireTaskAuthority"),
+    },
+    .endpoint_table = .{
+        .uses_generational_endpoint_ids = @hasDecl(@FieldType(endpoint.Table, "arena"), "getByHandle"),
+        .avoids_endpoint_primary_index_lookups = endpoint.ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
+        .avoids_endpoint_id_collision_probes = endpoint.ENDPOINT_ID_COLLISION_PROBES_PER_INSERT == 0,
+        .retires_task_owned_endpoints = @hasDecl(endpoint.Table, "retireTask"),
     },
     .shared_memory = .{
         .uses_compact_mmu_object_mapping_head = @hasField(shared_memory.Object, "mmu_mapping_head"),
         .tracks_mmu_object_mapping_count = @hasField(shared_memory.Object, "mmu_mapping_count"),
         .uses_object_owner_index = @hasField(shared_memory.Table, "object_owner_index"),
         .uses_object_task_mapping_index = @hasField(shared_memory.Table, "object_task_mapping_index"),
+        .retires_task_owned_objects_and_peer_mappings = @hasDecl(shared_memory.Table, "retireTask"),
     },
     .userspace_scheduler = .{
         .uses_scheduler_slot_arena = @hasField(userspace_scheduler.Scheduler, "slots"),
