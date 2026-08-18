@@ -109,6 +109,17 @@ test "workspace paths reject overlong values instead of truncating" {
             .document,
         ),
     );
+
+    const max_path = [_]u8{'p'} ** workspace_model.MAX_ENTRY_PATH_BYTES;
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, &max_path, ids.object(11), ids.version(21), .document);
+    _ = try directory.commit(workspace.id, 1);
+    try std.testing.expectEqualStrings(&max_path, (try directory.resolve(workspace.id, &max_path)).pathSlice());
+
+    const scoped_grant = try (workspace_model.ShareGrant{
+        .principal_id = .{ .kind = .user, .serial = 45 },
+    }).withObjectScope(ids.object(11), &max_path);
+    try std.testing.expectEqualStrings(&max_path, scoped_grant.scopePathSlice());
 }
 
 test "workspace can restore the original workspace from a signed export package" {

@@ -10,6 +10,7 @@ pub const MAX_WORKSPACE_LABEL_BYTES = directory.MAX_WORKSPACE_LABEL_BYTES;
 pub const MAX_SHARE_GRANTS = directory.MAX_SHARE_GRANTS;
 pub const MAX_EXPORT_SIGNATURE_FORMAT_BYTES = directory.MAX_EXPORT_SIGNATURE_FORMAT_BYTES;
 pub const MAX_EXPORT_SIGNATURE_SIGNER_BYTES = directory.MAX_EXPORT_SIGNATURE_SIGNER_BYTES;
+pub const WorkspacePathLength = directory.WorkspacePathLength;
 
 pub const SnapshotRootAddress = directory.SnapshotRootAddress;
 pub const WorkspaceEntrySlotIndex = directory.WorkspaceEntrySlotIndex;
