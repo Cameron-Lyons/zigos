@@ -253,6 +253,44 @@ test "workspace path index keeps cached root and lookups current across incremen
     try std.testing.expectEqualStrings("m.md", (try directory.resolveObject(workspace.id, ids.object(32))).pathSlice());
 }
 
+test "compact workspace indexes cover every entry slot at capacity" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 12 },
+        .label = "full-index",
+    });
+
+    try directory.beginTransaction(workspace.id);
+    for (0..MAX_WORKSPACE_ENTRIES) |entry_index| {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "documents/entry-{d}", .{entry_index});
+        try directory.stagePut(
+            workspace.id,
+            path,
+            ids.object(entry_index + 1),
+            ids.version(entry_index + 101),
+            .document,
+        );
+    }
+    _ = try directory.commit(workspace.id, 52);
+
+    try std.testing.expectEqual(MAX_WORKSPACE_ENTRIES, (try directory.entries(workspace.id)).len);
+    for (0..MAX_WORKSPACE_ENTRIES) |entry_index| {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "documents/entry-{d}", .{entry_index});
+        const expected_object_id = ids.object(entry_index + 1);
+        try std.testing.expectEqual(expected_object_id, (try directory.resolve(workspace.id, path)).object_id);
+        try std.testing.expectEqualStrings(path, (try directory.resolveObject(workspace.id, expected_object_id)).pathSlice());
+    }
+    try std.testing.expectError(error.EntryNotFound, directory.resolveObject(workspace.id, ids.object(MAX_WORKSPACE_ENTRIES + 1)));
+
+    directory.rebuildIndexes();
+    try std.testing.expectEqual(
+        ids.object(MAX_WORKSPACE_ENTRIES),
+        (try directory.resolve(workspace.id, "documents/entry-95")).object_id,
+    );
+}
+
 test "structural workspace commits scrub the full inactive Merkle tail" {
     var directory = Directory.init();
     const workspace = try directory.create(.{

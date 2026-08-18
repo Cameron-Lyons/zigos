@@ -4,23 +4,17 @@ const id_index = @import("../../core/id_index.zig");
 const indexed_arena = @import("../../core/indexed_arena.zig");
 const native_util = @import("../../core/util.zig");
 
-pub const EntryIndexSlot = struct {
-    state: id_index.State = .empty,
-    path_hash: u64 = 0,
-    slot_index: usize = 0,
-};
-
-pub const EntryObjectIndexSlot = struct {
-    object_id: u64 = 0,
-    slot_index: u8 = 0,
-};
+pub const EntrySlotIndex = u8;
+pub const EntryIndexSlot = EntrySlotIndex;
+pub const EntryObjectIndexSlot = EntrySlotIndex;
+pub const no_entry_slot: EntrySlotIndex = std.math.maxInt(EntrySlotIndex);
 
 pub fn emptyEntryIndexTable(comptime capacity: usize) [capacity]EntryIndexSlot {
-    return [_]EntryIndexSlot{EntryIndexSlot{}} ** capacity;
+    return [_]EntryIndexSlot{no_entry_slot} ** capacity;
 }
 
 pub fn emptyEntryObjectIndexTable(comptime capacity: usize) [capacity]EntryObjectIndexSlot {
-    return [_]EntryObjectIndexSlot{EntryObjectIndexSlot{}} ** capacity;
+    return [_]EntryObjectIndexSlot{no_entry_slot} ** capacity;
 }
 
 pub fn pathHash(path: []const u8) u64 {
@@ -51,21 +45,11 @@ pub fn findIndexedEntryPath(
     var index = id_index.hash(key, capacity);
     var attempts: usize = 0;
     while (attempts < capacity) : (attempts += 1) {
-        const slot = slots[index];
-        switch (slot.state) {
-            .empty => return null,
-            .filled => {
-                if (slot.path_hash == key) {
-                    if (slot.slot_index >= entries.len) {
-                        native_util.impossibleByInvariant("entry path index points outside workspace entries");
-                    }
-                    if (std.mem.eql(u8, entries[slot.slot_index].pathSlice(), path)) {
-                        return slot.slot_index;
-                    }
-                }
-            },
-            .tombstone => {},
-        }
+        const entry_slot = slots[index];
+        if (entry_slot == no_entry_slot) return null;
+        const entry_index: usize = entry_slot;
+        if (entry_index >= entries.len) native_util.impossibleByInvariant("entry path index points outside workspace entries");
+        if (std.mem.eql(u8, entries[entry_index].pathSlice(), path)) return entry_index;
         index = (index + 1) % capacity;
     }
     return null;
@@ -78,31 +62,20 @@ pub fn insertEntryPathSlot(
     path: []const u8,
     slot_index: usize,
 ) void {
+    if (slot_index >= no_entry_slot) native_util.impossibleByInvariant("workspace entry index fits compact slot references");
     const key = entryPathIndexKey(path);
     var index = id_index.hash(key, capacity);
     var attempts: usize = 0;
     while (attempts < capacity) : (attempts += 1) {
-        switch (slots[index].state) {
-            .empty, .tombstone => {
-                slots[index] = .{
-                    .state = .filled,
-                    .path_hash = key,
-                    .slot_index = slot_index,
-                };
-                return;
-            },
-            .filled => {
-                if (slots[index].path_hash == key) {
-                    const existing_index = slots[index].slot_index;
-                    if (existing_index >= entries.len) {
-                        native_util.impossibleByInvariant("entry path index points outside workspace entries");
-                    }
-                    if (std.mem.eql(u8, entries[existing_index].pathSlice(), path)) {
-                        slots[index].slot_index = slot_index;
-                        return;
-                    }
-                }
-            },
+        if (slots[index] == no_entry_slot) {
+            slots[index] = @intCast(slot_index);
+            return;
+        }
+        const existing_index: usize = slots[index];
+        if (existing_index >= entries.len) native_util.impossibleByInvariant("entry path index points outside workspace entries");
+        if (std.mem.eql(u8, entries[existing_index].pathSlice(), path)) {
+            slots[index] = @intCast(slot_index);
+            return;
         }
         index = (index + 1) % capacity;
     }
@@ -120,15 +93,11 @@ pub fn findIndexedEntryObject(
     var index = id_index.hash(key, capacity);
     var attempts: usize = 0;
     while (attempts < capacity) : (attempts += 1) {
-        const slot = slots[index];
-        if (slot.object_id == 0) return null;
-        if (slot.object_id == key) {
-            const entry_index: usize = slot.slot_index;
-            if (entry_index < entries.len and entries[entry_index].object_id.raw() == key) {
-                return entry_index;
-            }
-            return null;
-        }
+        const entry_slot = slots[index];
+        if (entry_slot == no_entry_slot) return null;
+        const entry_index: usize = entry_slot;
+        if (entry_index >= entries.len) native_util.impossibleByInvariant("entry object index points outside workspace entries");
+        if (entries[entry_index].object_id.raw() == key) return entry_index;
         index = (index + 1) % capacity;
     }
     return null;
@@ -137,17 +106,12 @@ pub fn findIndexedEntryObject(
 pub fn insertEntryObjectSlot(comptime capacity: usize, slots: *[capacity]EntryObjectIndexSlot, object_id: u64, slot_index: usize) void {
     const key = objectIdIndexKey(object_id);
     if (key == 0) return;
+    if (slot_index >= no_entry_slot) native_util.impossibleByInvariant("workspace object index fits compact slot references");
     var index = id_index.hash(key, capacity);
     var attempts: usize = 0;
     while (attempts < capacity) : (attempts += 1) {
-        if (slots[index].object_id == 0) {
-            slots[index] = .{
-                .object_id = key,
-                .slot_index = @intCast(slot_index),
-            };
-            return;
-        }
-        if (slots[index].object_id == key) {
+        if (slots[index] == no_entry_slot) {
+            slots[index] = @intCast(slot_index);
             return;
         }
         index = (index + 1) % capacity;
@@ -184,16 +148,12 @@ test "entry path index probes through matching hash collisions" {
     const key = entryPathIndexKey(entries[1].pathSlice());
     const first_index = id_index.hash(key, capacity);
     const second_index = (first_index + 1) % capacity;
-    slots[first_index] = .{
-        .state = .filled,
-        .path_hash = key,
-        .slot_index = 0,
-    };
+    slots[first_index] = 0;
 
     insertEntryPathSlot(capacity, &slots, &entries, entries[1].pathSlice(), 1);
 
-    try std.testing.expectEqual(@as(usize, 0), slots[first_index].slot_index);
-    try std.testing.expectEqual(@as(usize, 1), slots[second_index].slot_index);
+    try std.testing.expectEqual(@as(EntryIndexSlot, 0), slots[first_index]);
+    try std.testing.expectEqual(@as(EntryIndexSlot, 1), slots[second_index]);
     try std.testing.expectEqual(
         @as(?usize, 1),
         findIndexedEntryPath(capacity, &slots, &entries, entries[1].pathSlice()),
