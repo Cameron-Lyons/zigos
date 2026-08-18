@@ -731,6 +731,21 @@ pub const Runtime = struct {
         return false;
     }
 
+    pub fn revokeCapabilityEverywhere(self: *Runtime, capability_id: u64) u16 {
+        var revoked_count: u16 = 0;
+        for (0..self.taskSlotCapacity()) |slot_index| {
+            const slot = self.taskSlotAt(slot_index);
+            if (!slot.in_use or !taskHasCapability(&slot.task, capability_id)) continue;
+            const revoked = self.revokeCapability(slot.task.id, capability_id) catch |err|
+                native_util.impossibleByInvariantError("indexed live task accepts capability retirement", err);
+            if (!revoked) {
+                native_util.impossibleByInvariant("capability retirement removes every located task attachment");
+            }
+            revoked_count += 1;
+        }
+        return revoked_count;
+    }
+
     pub fn processSeparated(self: *const Runtime, left_task_id: u64, right_task_id: u64) bool {
         const left = self.findConst(left_task_id) orelse return false;
         const right = self.findConst(right_task_id) orelse return false;
@@ -1339,6 +1354,21 @@ test "granting and revoking capabilities updates the task table" {
     var restored = Runtime.init();
     restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 1), restored.find(task.id).?.capabilityGeneration());
+}
+
+test "capability retirement removes attachments from every task" {
+    var runtime = Runtime.init();
+    const first = try createTaskIdTestTask(&runtime, 41);
+    const second = try createTaskIdTestTask(&runtime, 42);
+
+    try runtime.grantCapability(first.id, 77);
+    try runtime.grantCapability(first.id, 88);
+    try runtime.grantCapability(second.id, 77);
+    try std.testing.expectEqual(@as(u16, 2), runtime.revokeCapabilityEverywhere(77));
+    try std.testing.expect(!runtime.hasCapability(first.id, 77));
+    try std.testing.expect(!runtime.hasCapability(second.id, 77));
+    try std.testing.expect(runtime.hasCapability(first.id, 88));
+    try std.testing.expectEqual(@as(u16, 0), runtime.revokeCapabilityEverywhere(77));
 }
 
 test "task runtime records redacted crash report provenance" {

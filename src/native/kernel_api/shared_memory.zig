@@ -112,6 +112,11 @@ pub const FreestandingMappingDescriptor = struct {
 pub const TaskRetirement = struct {
     revoked_owned_objects: u16 = 0,
     removed_peer_mappings: u16 = 0,
+    revoked_object_ids: [MAX_SHARED_MEMORY_OBJECTS]ids.SharedMemoryId = [_]ids.SharedMemoryId{ids.SharedMemoryId.zero} ** MAX_SHARED_MEMORY_OBJECTS,
+
+    pub fn revokedObjectIds(self: *const TaskRetirement) []const ids.SharedMemoryId {
+        return self.revoked_object_ids[0..self.revoked_owned_objects];
+    }
 };
 
 pub const Error = error{
@@ -487,8 +492,10 @@ pub const Table = struct {
             if (!slot.in_use or !slot.object.owner_task_id.eql(task_id)) {
                 native_util.impossibleByInvariant("shared-memory owner index points at the wrong live object");
             }
-            _ = self.revoke(slot.object.id) catch |err|
+            const object_id = slot.object.id;
+            _ = self.revoke(object_id) catch |err|
                 native_util.impossibleByInvariantError("task retirement revokes an indexed shared-memory object", err);
+            retired.revoked_object_ids[retired.revoked_owned_objects] = object_id;
             retired.revoked_owned_objects += 1;
         }
 
@@ -965,6 +972,9 @@ test "task retirement revokes owned objects and removes only its peer mappings" 
     const retired = table.retireTask(ids.task(10));
     try std.testing.expectEqual(@as(u16, 2), retired.revoked_owned_objects);
     try std.testing.expectEqual(@as(u16, 1), retired.removed_peer_mappings);
+    try std.testing.expectEqual(@as(usize, 2), retired.revokedObjectIds().len);
+    try std.testing.expect(retired.revokedObjectIds()[0].eql(owned.id) or retired.revokedObjectIds()[1].eql(owned.id));
+    try std.testing.expect(retired.revokedObjectIds()[0].eql(owned_idle.id) or retired.revokedObjectIds()[1].eql(owned_idle.id));
     try std.testing.expectEqual(@as(usize, 0), table.liveOwnedBytesForTask(ids.task(10)));
     try std.testing.expectEqual(@as(u16, 0), table.mappingsForTask(ids.task(10)));
     try std.testing.expectEqual(@as(u16, 1), table.mappingsForTask(ids.task(11)));
