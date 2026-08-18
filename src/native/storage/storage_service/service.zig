@@ -144,7 +144,6 @@ pub const StorageCore = struct {
         transfer: SharedPayloadTransfer,
     ) SharedPayloadError!object_store.PutResult {
         const descriptor = try transfer.table.descriptor(transfer.object_id);
-        if (descriptor.flags != 0) return error.Revoked;
         if (descriptor.size_bytes != transfer.bytes.len) return error.SharedMemorySizeMismatch;
         if (descriptor.owner_task_id != transfer.producer_task_id.raw()) return error.PermissionDenied;
         if (!transfer.table.hasMapping(transfer.object_id, transfer.producer_task_id)) return error.SharedMemoryNotMapped;
@@ -378,7 +377,6 @@ pub const StorageCore = struct {
         transfer: SharedPayloadReadTransfer,
     ) SharedPayloadError!object_store.PayloadTransferSummary {
         const descriptor = try transfer.table.descriptor(transfer.object_id);
-        if (descriptor.flags != 0) return error.Revoked;
         if (descriptor.size_bytes != transfer.bytes.len or transfer.bytes.len < version_record.payload_len) {
             return error.SharedMemorySizeMismatch;
         }
