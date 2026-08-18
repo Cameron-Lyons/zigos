@@ -551,10 +551,10 @@ pub const NativeTransportService = struct {
             return error.NativeTransportFrameMissing;
         message.sender_task_id = received.sender_task_id;
         message.correlation_id = received.correlation_id;
-        message.attached_capability_id = received.attached_capability_id;
+        message.attached_capability_id = received.attached_capability_id orelse ids.CapabilityId.zero;
         message.move_attached_capability = received.move_attached_capability;
         message.flags = received.flags;
-        message.len = received.len;
+        message.len = @intCast(received.len);
         return message;
     }
 
