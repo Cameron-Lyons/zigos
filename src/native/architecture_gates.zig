@@ -83,6 +83,10 @@ pub const indexed_hot_path_tables = .{
         .uses_capacity_sized_primary_index_slots = id_index.SlotIndex(256) == u8 and
             id_index.SlotIndex(257) == u16 and
             @sizeOf(id_index.Slot(1_536)) == 16,
+        .uses_capacity_sized_arena_free_lists = indexed_arena.ReusableIndex(255) == u8 and
+            indexed_arena.ReusableIndex(256) == u16 and
+            @sizeOf(@FieldType(ProbeArena, "free_next")) == 1 and
+            @sizeOf(@FieldType(ProbeArena, "free_head")) == 1,
     },
     .service_registry = .{
         .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),
