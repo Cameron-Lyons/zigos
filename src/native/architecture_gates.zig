@@ -11,6 +11,7 @@ const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
 const indexing_service = @import("services/indexing_service.zig");
 const event_ledger = @import("platform/event_ledger.zig");
+const measured_boot = @import("platform/measured_boot.zig");
 const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
 const native_ux = @import("platform/native_ux.zig");
@@ -344,6 +345,23 @@ pub const indexed_hot_path_tables = .{
         .indexes_task = @hasField(event_ledger.EventBacking, "task_index"),
         .visits_indexes = @hasDecl(event_ledger.Ledger, "queryEvents"),
         .removes_evicted_indexes = @hasDecl(event_ledger.Ledger, "removeEventIndexes"),
+    },
+    .measured_boot = .{
+        .stores_compact_measurement_metadata = measured_boot.COMPACT_MEASUREMENT_METADATA and
+            @FieldType(measured_boot.MeasurementRecord, "label_len") == u8 and
+            @FieldType(measured_boot.BuildArtifactEntry, "label_len") == u8,
+        .stores_compact_manifest_counts = @FieldType(measured_boot.ArtifactManifest, "entry_count") == u8 and
+            @FieldType(measured_boot.BuildArtifactManifest, "entry_count") == u8,
+        .stores_compact_boot_record_counts = @FieldType(measured_boot.BootRecord, "record_count") == u8 and
+            @FieldType(measured_boot.BootloaderMeasurementHandoff, "record_count") == u8 and
+            @FieldType(measured_boot.Recorder, "record_count") == u8,
+        .keeps_measurement_records_within_ceiling = @sizeOf(measured_boot.MeasurementRecord) <= measured_boot.MEASUREMENT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(measured_boot.BuildArtifactEntry) <= measured_boot.BUILD_ARTIFACT_ENTRY_SIZE_CEILING_BYTES,
+        .keeps_manifests_within_ceilings = @sizeOf(measured_boot.ArtifactManifest) <= measured_boot.ARTIFACT_MANIFEST_SIZE_CEILING_BYTES and
+            @sizeOf(measured_boot.BuildArtifactManifest) <= measured_boot.BUILD_ARTIFACT_MANIFEST_SIZE_CEILING_BYTES,
+        .keeps_boot_state_within_ceilings = @sizeOf(measured_boot.BootRecord) <= measured_boot.BOOT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(measured_boot.BootloaderMeasurementHandoff) <= measured_boot.BOOTLOADER_HANDOFF_SIZE_CEILING_BYTES and
+            @sizeOf(measured_boot.Recorder) <= measured_boot.RECORDER_SIZE_CEILING_BYTES,
     },
     .compositor_session = .{
         .uses_window_arena = @hasField(compositor_session.Session, "windows"),
