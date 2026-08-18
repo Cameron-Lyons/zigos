@@ -104,12 +104,12 @@ pub const SessionManager = struct {
         if (self.runtime_context.constructed) {
             self.runtime_context.userspace_scheduler.deinit();
         }
+        self.native_store.resetPersistent();
         self.* = SessionManager.init();
         bootstrap_driver_port.reset();
         session_service_bootstrap.resetBootedDataPlanes();
         self.ensureConstructed();
         self.runtime_context.resetScheduler();
-        self.native_store.resetPersistent();
     }
 
     pub fn isInitialized(self: *const SessionManager) bool {
