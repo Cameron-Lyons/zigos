@@ -119,7 +119,10 @@ pub const indexed_hot_path_tables = .{
         .uses_compact_mmu_object_mapping_head = @hasField(shared_memory.Object, "mmu_mapping_head"),
         .tracks_mmu_object_mapping_count = @hasField(shared_memory.Object, "mmu_mapping_count"),
         .uses_object_owner_index = @hasField(shared_memory.Table, "object_owner_index"),
-        .uses_object_task_mapping_index = @hasField(shared_memory.Table, "object_task_mapping_index"),
+        .bounds_object_task_mapping_scans = shared_memory.OBJECT_TASK_MAPPING_SCAN_BOUND == shared_memory.MAX_MAPPINGS_PER_OBJECT,
+        .bounds_mmu_object_mapping_scans = shared_memory.MMU_OBJECT_MAPPING_SCAN_BOUND == shared_memory.MAX_MAPPINGS_PER_OBJECT + 3,
+        .avoids_mmu_primary_index_lookups = shared_memory.MMU_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
+        .uses_reusable_mmu_mapping_slots = @hasDecl(@FieldType(shared_memory.FreestandingMmu, "mappings"), "reserveIndex"),
         .retires_task_owned_objects_and_peer_mappings = @hasDecl(shared_memory.Table, "retireTask"),
     },
     .userspace_scheduler = .{
