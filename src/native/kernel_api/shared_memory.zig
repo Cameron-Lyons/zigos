@@ -3,6 +3,7 @@ const abi = @import("../core/abi.zig");
 const hash_seeds = @import("../core/hash_seeds.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
+const native_util = @import("../core/util.zig");
 const userspace_layout = @import("../core/userspace_layout.zig");
 
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
@@ -105,6 +106,11 @@ pub const FreestandingMappingDescriptor = struct {
     revocation_generation: u32,
     attachment_generation: u32,
     zero_copy: bool,
+};
+
+pub const TaskRetirement = struct {
+    revoked_owned_objects: u16 = 0,
+    removed_peer_mappings: u16 = 0,
 };
 
 pub const Error = error{
@@ -463,6 +469,48 @@ pub const Table = struct {
         object.attached_compute = ComputeAccess.empty();
         object.mapping_count = 0;
         object.mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT;
+    }
+
+    pub fn retireTask(self: *Table, task_id: ids.TaskId) TaskRetirement {
+        var retired = TaskRetirement{};
+        while (true) {
+            const object_slot_index = self.object_owner_index.head(task_id.raw());
+            if (object_slot_index == indexed_arena.no_index) break;
+            if (object_slot_index >= self.arena.slots.len) {
+                native_util.impossibleByInvariant("shared-memory owner index points outside object slots");
+            }
+            const slot = &self.arena.slots[object_slot_index];
+            if (!slot.in_use or slot.object.revoked or !slot.object.owner_task_id.eql(task_id)) {
+                native_util.impossibleByInvariant("shared-memory owner index points at the wrong live object");
+            }
+            self.revoke(slot.object.id) catch |err|
+                native_util.impossibleByInvariantError("task retirement revokes an indexed shared-memory object", err);
+            retired.revoked_owned_objects += 1;
+        }
+
+        while (true) {
+            const edge_index = self.mapping_index.head(task_id.raw());
+            if (edge_index == indexed_arena.no_index) break;
+            const object_slot_index = mappingEdgeObjectSlotIndex(edge_index);
+            const object_mapping_index = mappingEdgeMappingIndex(edge_index);
+            if (object_slot_index >= self.arena.slots.len) {
+                native_util.impossibleByInvariant("shared-memory task mapping points outside object slots");
+            }
+            const slot = &self.arena.slots[object_slot_index];
+            if (!slot.in_use or slot.object.revoked or
+                object_mapping_index >= slot.object.mapping_count or
+                !slot.object.mapped_task_ids[object_mapping_index].eql(task_id))
+            {
+                native_util.impossibleByInvariant("shared-memory task mapping index points at the wrong live mapping");
+            }
+            const removed = self.unmap(slot.object.id, task_id) catch |err|
+                native_util.impossibleByInvariantError("task retirement unmaps an indexed shared-memory mapping", err);
+            if (!removed) {
+                native_util.impossibleByInvariant("task retirement removes every indexed shared-memory mapping");
+            }
+            retired.removed_peer_mappings += 1;
+        }
+        return retired;
     }
 
     pub fn attachAccelerator(self: *Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!void {
@@ -909,6 +957,41 @@ test "shared memory objects map unmap and revoke across tasks" {
     try std.testing.expectEqual(@as(u16, 1), descriptor.flags);
     try std.testing.expectError(error.Revoked, table.taskMappingDescriptor(object.id, ids.task(7)));
     try std.testing.expectError(error.Revoked, table.map(object.id, ids.task(9)));
+}
+
+test "task retirement revokes owned objects and removes only its peer mappings" {
+    var table = Table.init();
+    const owned = try table.createLabeledWithAccess(ids.task(10), PAGE_SIZE, "owned", .{ .gpu = true });
+    const owned_idle = try table.create(ids.task(10), PAGE_SIZE * 2);
+    const peer = try table.create(ids.task(11), PAGE_SIZE * 3);
+
+    try table.map(owned.id, ids.task(10));
+    try table.map(owned.id, ids.task(11));
+    try table.attachAccelerator(owned.id, .gpu);
+    try table.map(peer.id, ids.task(10));
+    try table.map(peer.id, ids.task(11));
+    try table.map(peer.id, ids.task(12));
+    try std.testing.expectEqual(@as(usize, 6), table.mmu.mappings.countInUse());
+
+    const retired = table.retireTask(ids.task(10));
+    try std.testing.expectEqual(@as(u16, 2), retired.revoked_owned_objects);
+    try std.testing.expectEqual(@as(u16, 1), retired.removed_peer_mappings);
+    try std.testing.expectEqual(@as(usize, 0), table.liveOwnedBytesForTask(ids.task(10)));
+    try std.testing.expectEqual(@as(u16, 0), table.mappingsForTask(ids.task(10)));
+    try std.testing.expectEqual(@as(u16, 1), table.mappingsForTask(ids.task(11)));
+    try std.testing.expectEqual(@as(usize, 2), table.mmu.mappings.countInUse());
+    try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(owned.id)).flags);
+    try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(owned_idle.id)).flags);
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(peer.id)).flags);
+    try std.testing.expectEqual(@as(u16, 2), (try table.descriptor(peer.id)).mapped_task_count);
+    try std.testing.expectError(error.MappingNotFound, table.taskMappingDescriptor(peer.id, ids.task(10)));
+    _ = try table.taskMappingDescriptor(peer.id, ids.task(11));
+    _ = try table.taskMappingDescriptor(peer.id, ids.task(12));
+    try std.testing.expectError(error.Revoked, table.acceleratorMappingDescriptor(owned.id, .gpu));
+
+    const repeated = table.retireTask(ids.task(10));
+    try std.testing.expectEqual(@as(u16, 0), repeated.revoked_owned_objects);
+    try std.testing.expectEqual(@as(u16, 0), repeated.removed_peer_mappings);
 }
 
 test "shared memory object ids stop at exhaustion" {
