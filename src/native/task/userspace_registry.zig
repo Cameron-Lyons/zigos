@@ -254,7 +254,7 @@ pub fn findForRole(bundle_id: []const u8) ?*const ImageSpec {
 fn findInCatalog(
     comptime capacity: usize,
     specs: []const ImageSpec,
-    index: *const [capacity]id_index.Slot(capacity),
+    index: *const id_index.Table(capacity),
     bundle_id: []const u8,
 ) ?*const ImageSpec {
     const key = bundleIndexKey(bundle_id);
@@ -317,7 +317,7 @@ pub fn serviceClassIndexKey(class: contract.ServiceClass) u64 {
 fn buildBundleIndex(
     comptime capacity: usize,
     comptime specs: []const ImageSpec,
-) [capacity]id_index.Slot(capacity) {
+) id_index.Table(capacity) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(capacity);
     for (specs, 0..) |spec, spec_index| {
@@ -335,7 +335,7 @@ fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const
     }
 }
 
-fn buildServiceClassIndex() [SERVICE_CLASS_INDEX_CAPACITY]id_index.Slot(SERVICE_CLASS_INDEX_CAPACITY) {
+fn buildServiceClassIndex() id_index.Table(SERVICE_CLASS_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(SERVICE_CLASS_INDEX_CAPACITY);
     for (production_boot_image_specs, 0..) |spec, spec_index| {

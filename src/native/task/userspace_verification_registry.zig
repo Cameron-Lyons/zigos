@@ -98,7 +98,7 @@ pub fn findForRole(bundle_id: []const u8) ?*const ImageSpec {
     return findVerification(bundle_id);
 }
 
-fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot(BUNDLE_INDEX_CAPACITY) {
+fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
     for (verification_boot_image_specs, 0..) |spec, spec_index| {

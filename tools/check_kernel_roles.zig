@@ -3,7 +3,7 @@ const elf = std.elf;
 const kernel_role_options = @import("kernel_role_options");
 
 const max_elf_bytes: usize = 256 * 1024 * 1024;
-const maximum_production_writable_load_size = kernel_role_options.maximum_production_writable_load_size;
+const maximum_production_boot_payload_size = kernel_role_options.maximum_production_boot_payload_size;
 
 const elf_header_size: usize = @sizeOf(elf.Elf32_Ehdr);
 const program_header_size: usize = @sizeOf(elf.Elf32_Phdr);
@@ -138,7 +138,8 @@ const ParseError = error{
 };
 
 const RoleError = error{
-    ProductionWritableLoadTooLarge,
+    ProductionBootPayloadTooLarge,
+    ProductionLoadSegmentCountInvalid,
     ProductionContainsRuntimeProofSymbols,
     ProductionContainsBootedEvidenceSymbols,
     ProductionContainsDemoSymbols,
@@ -150,7 +151,8 @@ const RoleError = error{
     VerificationMissingBootedEvidenceSymbols,
     VerificationMissingExpectedSignatures,
     VerificationMissingWritableEvidence,
-    VerificationWritableLoadNotLarger,
+    VerificationBootPayloadNotLarger,
+    VerificationLoadSegmentCountInvalid,
 };
 
 const CliError = error{
@@ -231,7 +233,8 @@ const SectionTable = struct {
 
 const Analysis = struct {
     data_size: u64,
-    writable_load_size: u64,
+    boot_payload_size: u64,
+    load_segment_count: usize,
     symbol_count: usize,
     runtime_proof_symbols: usize,
     booted_evidence_symbols: usize,
@@ -336,24 +339,24 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    const writable_load_delta = verification.writable_load_size - production.writable_load_size;
+    const boot_payload_delta = verification.boot_payload_size - production.boot_payload_size;
     var stdout_buffer: [768]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     try stdout_writer.interface.print(
-        "Kernel role check passed: production writable-load={d} bytes (.data={d}, maximum={d}, {d} symbols, no verification workloads); verification writable-load={d} bytes (.data={d}, {d} symbols, runtime-proof={d}, booted-evidence={d}, signatures={d}, named-writable-evidence={d} bytes); delta={d} bytes; userspace production={d} clean, verification-only={d}, MMU-proof machine-code sentinels={d}.\n",
+        "Kernel role check passed: production boot-payload={d} bytes in one load segment (.data={d}, maximum={d}, {d} symbols, no verification workloads); verification boot-payload={d} bytes in one load segment (.data={d}, {d} symbols, runtime-proof={d}, booted-evidence={d}, signatures={d}, named-writable-evidence={d} bytes); delta={d} bytes; userspace production={d} clean, verification-only={d}, MMU-proof machine-code sentinels={d}.\n",
         .{
-            production.writable_load_size,
+            production.boot_payload_size,
             production.data_size,
-            maximum_production_writable_load_size,
+            maximum_production_boot_payload_size,
             production.symbol_count,
-            verification.writable_load_size,
+            verification.boot_payload_size,
             verification.data_size,
             verification.symbol_count,
             verification.runtime_proof_symbols,
             verification.booted_evidence_symbols,
             verification.verification_only_signatures,
             verification.verification_evidence_writable_bytes,
-            writable_load_delta,
+            boot_payload_delta,
             inputs.production_userspace_paths.len,
             inputs.verification_userspace_paths.len,
             mmu_probe_machine_code_sentinel_count,
@@ -475,7 +478,8 @@ fn analyzeElf(bytes: []const u8) ParseError!Analysis {
     if (symbol_table_count == 0) return error.MissingSymbolTable;
     return .{
         .data_size = data_size.?,
-        .writable_load_size = program_analysis.writable_load_size,
+        .boot_payload_size = program_analysis.boot_payload_size,
+        .load_segment_count = program_analysis.load_segment_count,
         .symbol_count = symbol_count,
         .runtime_proof_symbols = runtime_proof_symbols,
         .booted_evidence_symbols = booted_evidence_symbols,
@@ -829,7 +833,8 @@ fn symbolSize(elf_class: ElfClass) usize {
 }
 
 const ProgramAnalysis = struct {
-    writable_load_size: u64,
+    boot_payload_size: u64,
+    load_segment_count: usize,
 };
 
 fn validateKernelSectionPolicy(name: []const u8, section: Section) ParseError!void {
@@ -855,7 +860,7 @@ fn validateKernelSectionPolicy(name: []const u8, section: Section) ParseError!vo
 fn analyzeProgramHeaders(bytes: []const u8, table: ProgramTable) ParseError!ProgramAnalysis {
     var load_count: usize = 0;
     var writable_load_count: usize = 0;
-    var writable_load_size: u64 = 0;
+    var boot_payload_size: u64 = 0;
     var index: usize = 0;
     while (index < table.count) : (index += 1) {
         const program = try parseProgramHeader(bytes, table, index);
@@ -865,6 +870,8 @@ fn analyzeProgramHeaders(bytes: []const u8, table: ProgramTable) ParseError!Prog
         }
         if (program.segment_type != pt_load) continue;
         load_count += 1;
+        boot_payload_size = std.math.add(u64, boot_payload_size, program.memory_size) catch
+            return error.IntegerOverflow;
         if (program.flags & (pf_write | pf_execute) == (pf_write | pf_execute)) {
             return error.WritableExecutableLoadSegment;
         }
@@ -878,13 +885,14 @@ fn analyzeProgramHeaders(bytes: []const u8, table: ProgramTable) ParseError!Prog
         }
         if (program.flags & pf_write != 0) {
             writable_load_count += 1;
-            writable_load_size = std.math.add(u64, writable_load_size, program.memory_size) catch
-                return error.IntegerOverflow;
         }
     }
     if (load_count == 0) return error.InvalidProgramHeaderTable;
     if (writable_load_count == 0) return error.MissingWritableLoadSegment;
-    return .{ .writable_load_size = writable_load_size };
+    return .{
+        .boot_payload_size = boot_payload_size,
+        .load_segment_count = load_count,
+    };
 }
 
 fn sectionCoveredByLoad(bytes: []const u8, table: ProgramTable, section: Section) bool {
@@ -1135,8 +1143,10 @@ fn printUserspaceRoleFailure(
 }
 
 fn validateRoles(production: Analysis, verification: Analysis) RoleError!void {
-    if (production.writable_load_size > maximum_production_writable_load_size) {
-        return error.ProductionWritableLoadTooLarge;
+    if (production.load_segment_count != 1) return error.ProductionLoadSegmentCountInvalid;
+    if (verification.load_segment_count != 1) return error.VerificationLoadSegmentCountInvalid;
+    if (production.boot_payload_size > maximum_production_boot_payload_size) {
+        return error.ProductionBootPayloadTooLarge;
     }
     if (production.runtime_proof_symbols != 0) return error.ProductionContainsRuntimeProofSymbols;
     if (production.booted_evidence_symbols != 0) return error.ProductionContainsBootedEvidenceSymbols;
@@ -1155,8 +1165,8 @@ fn validateRoles(production: Analysis, verification: Analysis) RoleError!void {
     if (verification.verification_evidence_writable_bytes == 0) {
         return error.VerificationMissingWritableEvidence;
     }
-    if (verification.writable_load_size <= production.writable_load_size) {
-        return error.VerificationWritableLoadNotLarger;
+    if (verification.boot_payload_size <= production.boot_payload_size) {
+        return error.VerificationBootPayloadNotLarger;
     }
 }
 
@@ -1208,9 +1218,13 @@ fn parseErrorDescription(err: ParseError) []const u8 {
 
 fn printRoleFailure(err: RoleError, production: Analysis, verification: Analysis) noreturn {
     switch (err) {
-        error.ProductionWritableLoadTooLarge => std.debug.print(
-            "Kernel role check failed: production writable load state is {d} bytes; at most {d} bytes are allowed.\n",
-            .{ production.writable_load_size, maximum_production_writable_load_size },
+        error.ProductionBootPayloadTooLarge => std.debug.print(
+            "Kernel role check failed: production boot payload is {d} bytes; at most {d} bytes are allowed.\n",
+            .{ production.boot_payload_size, maximum_production_boot_payload_size },
+        ),
+        error.ProductionLoadSegmentCountInvalid => std.debug.print(
+            "Kernel role check failed: production ELF has {d} load segments; exactly one contiguous boot payload is required.\n",
+            .{production.load_segment_count},
         ),
         error.ProductionContainsRuntimeProofSymbols => std.debug.print(
             "Kernel role check failed: production ELF contains {d} runtime-negative-proof symbol(s) with prefix '{s}'.\n",
@@ -1256,9 +1270,13 @@ fn printRoleFailure(err: RoleError, production: Analysis, verification: Analysis
             "Kernel role check failed: verification ELF contains no named writable runtime-proof or booted-evidence state.\n",
             .{},
         ),
-        error.VerificationWritableLoadNotLarger => std.debug.print(
-            "Kernel role check failed: verification writable load state ({d} bytes) is not larger than production ({d} bytes).\n",
-            .{ verification.writable_load_size, production.writable_load_size },
+        error.VerificationBootPayloadNotLarger => std.debug.print(
+            "Kernel role check failed: verification boot payload ({d} bytes) is not larger than production ({d} bytes).\n",
+            .{ verification.boot_payload_size, production.boot_payload_size },
+        ),
+        error.VerificationLoadSegmentCountInvalid => std.debug.print(
+            "Kernel role check failed: verification ELF has {d} load segments; exactly one contiguous boot payload is required.\n",
+            .{verification.load_segment_count},
         ),
     }
     std.process.exit(1);
@@ -1267,7 +1285,8 @@ fn printRoleFailure(err: RoleError, production: Analysis, verification: Analysis
 test "role validation accepts isolated named proof evidence with compact writable state" {
     const production = Analysis{
         .data_size = 1024,
-        .writable_load_size = 2048,
+        .boot_payload_size = 2048,
+        .load_segment_count = 1,
         .symbol_count = 10,
         .runtime_proof_symbols = 0,
         .booted_evidence_symbols = 0,
@@ -1280,7 +1299,8 @@ test "role validation accepts isolated named proof evidence with compact writabl
     };
     const verification = Analysis{
         .data_size = production.data_size + 1,
-        .writable_load_size = production.writable_load_size + 1,
+        .boot_payload_size = production.boot_payload_size + 1,
+        .load_segment_count = 1,
         .symbol_count = 20,
         .runtime_proof_symbols = 4,
         .booted_evidence_symbols = 1,
@@ -1297,7 +1317,8 @@ test "role validation accepts isolated named proof evidence with compact writabl
 test "role validation rejects leaked and undersized proof kernels" {
     const clean = Analysis{
         .data_size = 4096,
-        .writable_load_size = 8192,
+        .boot_payload_size = 8192,
+        .load_segment_count = 1,
         .symbol_count = 1,
         .runtime_proof_symbols = 0,
         .booted_evidence_symbols = 0,
@@ -1323,10 +1344,17 @@ test "role validation rejects leaked and undersized proof kernels" {
     );
 
     var oversized = clean;
-    oversized.writable_load_size = maximum_production_writable_load_size + 1;
+    oversized.boot_payload_size = maximum_production_boot_payload_size + 1;
     try std.testing.expectError(
-        error.ProductionWritableLoadTooLarge,
+        error.ProductionBootPayloadTooLarge,
         validateRoles(oversized, clean),
+    );
+
+    var split_payload = clean;
+    split_payload.load_segment_count = 2;
+    try std.testing.expectError(
+        error.ProductionLoadSegmentCountInvalid,
+        validateRoles(split_payload, clean),
     );
 
     var leaked_signature = clean;
@@ -1347,16 +1375,23 @@ test "role validation rejects leaked and undersized proof kernels" {
     verification.runtime_proof_symbols = 1;
     verification.booted_evidence_symbols = 1;
     verification.verification_only_signatures = verification_only_signatures.len;
-    verification.writable_load_size += 1;
+    verification.boot_payload_size += 1;
     try std.testing.expectError(
         error.VerificationMissingWritableEvidence,
         validateRoles(clean, verification),
     );
 
     verification.verification_evidence_writable_bytes = 1;
-    verification.writable_load_size = clean.writable_load_size;
+    verification.boot_payload_size = clean.boot_payload_size;
     try std.testing.expectError(
-        error.VerificationWritableLoadNotLarger,
+        error.VerificationBootPayloadNotLarger,
+        validateRoles(clean, verification),
+    );
+
+    verification.boot_payload_size += 1;
+    verification.load_segment_count = 2;
+    try std.testing.expectError(
+        error.VerificationLoadSegmentCountInvalid,
         validateRoles(clean, verification),
     );
 }
@@ -1565,7 +1600,8 @@ test "ELF parser reads loaded state, defined symbols, and workload signatures" {
     const bytes = buildTestElf(&storage);
     const analysis = try analyzeElf(bytes);
     try std.testing.expectEqual(@as(u64, 16), analysis.data_size);
-    try std.testing.expectEqual(@as(u64, 48), analysis.writable_load_size);
+    try std.testing.expectEqual(@as(u64, bytes.len + 48), analysis.boot_payload_size);
+    try std.testing.expectEqual(@as(usize, 2), analysis.load_segment_count);
     try std.testing.expectEqual(@as(usize, 3), analysis.symbol_count);
     try std.testing.expectEqual(@as(usize, 1), analysis.runtime_proof_symbols);
     try std.testing.expectEqual(@as(usize, 1), analysis.booted_evidence_symbols);
@@ -1652,7 +1688,8 @@ test "ELF64 parser reads the same loaded-state and symbol contract" {
     const bytes = buildTestElf64(&storage);
     const analysis = try analyzeElf(bytes);
     try std.testing.expectEqual(@as(u64, 16), analysis.data_size);
-    try std.testing.expectEqual(@as(u64, 48), analysis.writable_load_size);
+    try std.testing.expectEqual(@as(u64, bytes.len + 48), analysis.boot_payload_size);
+    try std.testing.expectEqual(@as(usize, 2), analysis.load_segment_count);
     try std.testing.expectEqual(@as(usize, 3), analysis.symbol_count);
     try std.testing.expectEqual(@as(usize, 1), analysis.runtime_proof_symbols);
     try std.testing.expectEqual(@as(usize, 1), analysis.booted_evidence_symbols);

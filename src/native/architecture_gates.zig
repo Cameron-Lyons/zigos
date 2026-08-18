@@ -80,9 +80,9 @@ pub const indexed_hot_path_tables = .{
     .indexed_arena = .{
         .tracks_used_count = @hasField(ProbeArena, "used_count"),
         .inserts_complete_values_at_exact_indexes = @hasDecl(ProbeArena, "insertIndexAt"),
-        .uses_capacity_sized_primary_index_slots = id_index.SlotIndex(256) == u8 and
+        .uses_split_primary_index_storage = id_index.SlotIndex(256) == u8 and
             id_index.SlotIndex(257) == u16 and
-            @sizeOf(id_index.Slot(1_536)) == 16,
+            @sizeOf(id_index.Table(1_536)) == 16_896,
         .uses_capacity_sized_arena_free_lists = indexed_arena.ReusableIndex(255) == u8 and
             indexed_arena.ReusableIndex(256) == u16 and
             @sizeOf(@FieldType(ProbeArena, "free_next")) == 1 and
