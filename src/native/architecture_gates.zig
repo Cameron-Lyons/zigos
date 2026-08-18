@@ -196,8 +196,12 @@ pub const indexed_hot_path_tables = .{
         .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
     },
     .indexing_service = .{
-        .uses_document_arena = @hasField(indexing_service.Service, "documents"),
-        .uses_workspace_index = @hasField(indexing_service.Service, "workspace_index"),
+        .uses_bounded_document_scan = indexing_service.BOUNDED_DOCUMENT_SCAN,
+        .uses_dense_document_table = indexing_service.DENSE_DOCUMENT_TABLE,
+        .stores_compact_document_metadata = indexing_service.COMPACT_DOCUMENT_METADATA,
+        .drops_document_indexes = !@hasField(indexing_service.Service, "workspace_index") and
+            @FieldType(indexing_service.Service, "documents") == [indexing_service.MAX_DOCUMENTS]indexing_service.DocumentRecord,
+        .keeps_fixed_state_within_ceiling = @sizeOf(indexing_service.Service) <= indexing_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .secure_secret_store = .{
         .uses_secret_arena = @hasDecl(@FieldType(secure_secret_store.Store, "secrets"), "reserve"),
