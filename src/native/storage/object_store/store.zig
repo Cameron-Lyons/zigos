@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../../core/crypto_hash.zig");
@@ -6,6 +7,10 @@ const indexed_arena = @import("../../core/indexed_arena.zig");
 const manifest = @import("../../policy/manifest.zig");
 const native_util = @import("../../core/util.zig");
 const signing = @import("../../core/signing.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../../kernel/memory/memory.zig")
+else
+    struct {};
 
 pub const MAX_OBJECTS: usize = 192;
 pub const MAX_VERSIONS: usize = 768;
@@ -32,6 +37,8 @@ const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
 const CHUNK_INDEX_CAPACITY: usize = MAX_CHUNKS * 2;
 const BLOB_PAGE_SIZE: usize = 64;
 const CHUNK_PAGE_SIZE: usize = 32;
+const heap_backed_chunk_payloads = builtin.target.os.tag == .freestanding;
+const ChunkPayload = if (heap_backed_chunk_payloads) ?[*]u8 else [MAX_CHUNK_BYTES]u8;
 
 comptime {
     if (MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
@@ -357,10 +364,52 @@ pub const BlobRecord = struct {
 pub const ChunkRecord = struct {
     address: ChunkAddress,
     payload_len: u16,
-    payload: [MAX_CHUNK_BYTES]u8,
+    payload: ChunkPayload,
 
     pub fn chunkSlice(self: *const ChunkRecord) []const u8 {
-        return self.payload[0..@as(usize, @intCast(self.payload_len))];
+        const payload_len: usize = @intCast(self.payload_len);
+        if (payload_len > MAX_CHUNK_BYTES) {
+            native_util.impossibleByInvariant("object store chunk payload length fits its backing");
+        }
+        if (comptime heap_backed_chunk_payloads) {
+            if (payload_len == 0) return "";
+            const payload = self.payload orelse
+                native_util.impossibleByInvariant("live object store chunks retain payload backing");
+            return payload[0..payload_len];
+        }
+        return self.payload[0..payload_len];
+    }
+
+    fn writePayload(self: *ChunkRecord, bytes: []const u8) Error!void {
+        if (bytes.len > MAX_CHUNK_BYTES) return error.PayloadTooLarge;
+        if (comptime heap_backed_chunk_payloads) {
+            if (self.payload != null) {
+                native_util.impossibleByInvariant("object store chunk payload backing is assigned once");
+            }
+            if (bytes.len != 0) {
+                const allocation = kernel_memory.kmalloc(bytes.len) orelse return error.NoSpaceLeft;
+                const payload: [*]u8 = @ptrCast(allocation);
+                @memcpy(payload[0..bytes.len], bytes);
+                self.payload = payload;
+            }
+        } else {
+            @memcpy(self.payload[0..bytes.len], bytes);
+            @memset(self.payload[bytes.len..], 0);
+        }
+        self.payload_len = @intCast(bytes.len);
+    }
+
+    fn releasePayload(self: *ChunkRecord) void {
+        if (comptime heap_backed_chunk_payloads) {
+            if (self.payload) |payload| {
+                @memset(payload[0..@as(usize, @intCast(self.payload_len))], 0);
+                kernel_memory.kfree(@ptrCast(payload));
+                self.payload = null;
+            }
+        } else {
+            @memset(&self.payload, 0);
+        }
+        self.payload_len = 0;
     }
 };
 
@@ -444,9 +493,18 @@ pub const ChunkSlot = struct {
     chunk: ChunkRecord = .{
         .address = crypto_hash.zero_digest,
         .payload_len = 0,
-        .payload = [_]u8{0} ** MAX_CHUNK_BYTES,
+        .payload = if (heap_backed_chunk_payloads) null else [_]u8{0} ** MAX_CHUNK_BYTES,
     },
 };
+
+comptime {
+    if (heap_backed_chunk_payloads and @sizeOf(ChunkRecord) > 48) {
+        @compileError("heap-backed object store chunk records exceed their compact layout");
+    }
+    if (heap_backed_chunk_payloads and @sizeOf(ChunkSlot) > 56) {
+        @compileError("heap-backed object store chunk slots exceed their compact layout");
+    }
+}
 
 fn objectSlotId(slot: *const ObjectSlot) ids.ObjectId {
     return slot.object.id;
@@ -618,7 +676,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot_index = 0;
             while (slot_index < self.chunks.next_unclaimed_index) : (slot_index += 1) {
                 const slot = self.chunks.slotAt(slot_index);
-                if (slot.in_use) slot.* = ChunkSlot{};
+                if (slot.in_use) {
+                    slot.chunk.releasePayload();
+                    slot.* = ChunkSlot{};
+                }
             }
             self.chunks.resetRetainingPayloads();
         }
@@ -1230,9 +1291,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot_index = self.chunks.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
             const slot = self.chunkSlotAt(slot_index);
             slot.chunk.address = address;
-            slot.chunk.payload_len = @intCast(payload.len);
-            @memcpy(slot.chunk.payload[0..payload.len], payload);
-            @memset(slot.chunk.payload[payload.len..], 0);
+            slot.chunk.writePayload(payload) catch |err| {
+                std.debug.assert(self.chunks.removeIndex(slot_index));
+                return err;
+            };
             return slot_index;
         }
 
