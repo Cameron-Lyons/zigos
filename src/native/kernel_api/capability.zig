@@ -10,6 +10,8 @@ pub const MAX_CAPABILITIES: usize = 128;
 pub const CAPABILITY_INDEX_CAPACITY: usize = MAX_CAPABILITIES * 2;
 pub const MAX_TARGET_GENERATIONS: usize = 128;
 pub const MAX_GRANT_PLAN_ENTRIES: usize = 16;
+pub const CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY: u8 = 0;
+pub const CAPABILITY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 
 pub const TableConfig = struct {
     max_capabilities: usize = MAX_CAPABILITIES,
@@ -118,10 +120,6 @@ const CapabilitySlot = struct {
     target_generation_index: u8 = 0,
 };
 
-fn capabilitySlotId(slot: *const CapabilitySlot) u64 {
-    return slot.capability.id;
-}
-
 const TargetGeneration = struct {
     in_use: bool = false,
     target: CapabilityTarget = .{ .kind = .task, .id = 0 },
@@ -150,21 +148,19 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         const MAX_TABLE_CAPABILITIES = config.max_capabilities;
         const TABLE_INDEX_CAPACITY = config.capability_index_capacity;
         const MAX_TABLE_TARGET_GENERATIONS = config.max_target_generations;
-        const CapabilityArena = indexed_arena.IndexedArenaWithKey(u64, CapabilitySlot, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY, capabilitySlotId);
+        const CapabilityArena = indexed_arena.GenerationalArena("CapabilityId", CapabilitySlot, MAX_TABLE_CAPABILITIES);
+        const CapabilityHandle = CapabilityArena.Handle;
         const TargetGenerationArena = indexed_arena.IndexedArenaWithKey(u64, TargetGeneration, MAX_TABLE_TARGET_GENERATIONS, TABLE_INDEX_CAPACITY, targetGenerationKey);
         const HolderIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
         const TargetIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
         const InsertedCapabilitySlot = struct {
-            capability_id: u64,
             slot_index: usize,
         };
 
-        next_capability_id: u64 = 1,
         slots: CapabilityArena = CapabilityArena.init(),
         holder_index: HolderIndex = HolderIndex.init(),
         target_index: TargetIndex = TargetIndex.init(),
         target_generations: TargetGenerationArena = TargetGenerationArena.init(),
-        active_capability_count: usize = 0,
         mutation_generation: u64 = 1,
 
         pub fn init() Self {
@@ -173,6 +169,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         pub fn mutationGeneration(self: *const Self) u64 {
             return self.mutation_generation;
+        }
+
+        pub fn activeCount(self: *const Self) usize {
+            return self.slots.countInUse();
         }
 
         pub fn mintBootRoot(self: *Self, request: MintRequest) Error!Capability {
@@ -239,11 +239,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = self.targetGenerationAt(target_generation_index).generation,
                 .audit = request.audit,
             };
-            const inserted = try self.insertWithNextCapabilityId(record, target_generation_index);
+            const inserted = try self.insertWithNewCapabilityId(record, target_generation_index);
             return inserted.*;
         }
 
-        pub fn derive(self: *Self, request: DeriveRequest) Error!*const Capability {
+        pub fn derive(self: *Self, request: DeriveRequest) Error!Capability {
             const parent_slot = self.findConstSlot(request.parent_capability_id) orelse return error.CapabilityNotFound;
             const parent = &parent_slot.capability;
             if (!self.isUsableSlot(parent_slot, request.lease.issued_at_ticks)) return error.CapabilityRevoked;
@@ -265,7 +265,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = parent.revocation_generation,
                 .audit = audit,
             };
-            return self.insertWithNextCapabilityId(record, parent_slot.target_generation_index);
+            const inserted = try self.insertWithNewCapabilityId(record, parent_slot.target_generation_index);
+            return inserted.*;
         }
 
         pub fn pass(self: *Self, request: PassRequest) Error!Capability {
@@ -288,7 +289,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = original.revocation_generation,
                 .audit = audit,
             };
-            const passed = try self.insertWithNextCapabilityId(record, original_slot.target_generation_index);
+            const passed = try self.insertWithNewCapabilityId(record, original_slot.target_generation_index);
 
             if (request.revoke_source) {
                 const source_slot_index = self.findSlotIndex(request.capability_id) orelse return error.CapabilityNotFound;
@@ -330,56 +331,38 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return inspected.capability;
         }
 
-        fn insertNextCapabilitySlot(
+        fn insertCapabilitySlot(
             self: *Self,
             capability_template: Capability,
             target_generation_index: u8,
             requested_slot_index: ?usize,
         ) ?InsertedCapabilitySlot {
-            if (self.activeCapabilityCount() >= self.slots.slots.len) return null;
-
-            var capability_id = normalizeCapabilityId(self.next_capability_id);
-            var attempts: usize = 0;
-            while (attempts <= self.slots.slots.len) : (attempts += 1) {
-                var capability = capability_template;
-                capability.id = capability_id;
-                const slot = CapabilitySlot{
-                    .capability = capability,
-                    .target_generation_index = target_generation_index,
-                };
-                const slot_index = if (requested_slot_index) |explicit_index|
-                    self.slots.insertIndexAt(capability_id, explicit_index, slot)
-                else
-                    self.slots.insertIndex(capability_id, slot);
-                if (slot_index) |inserted_slot_index| {
-                    return .{
-                        .capability_id = capability_id,
-                        .slot_index = inserted_slot_index,
-                    };
-                }
-                capability_id = nextCapabilityIdAfter(capability_id);
-            }
-            return null;
+            if (self.activeCount() >= self.slots.slots.len) return null;
+            const reserved_handle = if (requested_slot_index) |explicit_index|
+                self.slots.reserveHandleAt(explicit_index) orelse return null
+            else
+                self.slots.reserveHandle() orelse return null;
+            const slot = self.slots.getByHandle(reserved_handle) orelse
+                native_util.impossibleByInvariant("reserved capability handle is not live");
+            var capability = capability_template;
+            capability.id = reserved_handle.value;
+            slot.* = .{
+                .in_use = true,
+                .capability = capability,
+                .target_generation_index = target_generation_index,
+            };
+            return .{
+                .slot_index = reserved_handle.slotIndex(),
+            };
         }
 
-        fn advanceNextCapabilityIdFrom(self: *Self, capability_id: u64) void {
-            self.next_capability_id = nextCapabilityIdAfter(capability_id);
-        }
-
-        fn activeCapabilityCount(self: *const Self) usize {
-            return self.active_capability_count;
-        }
-
-        fn insertWithNextCapabilityId(self: *Self, capability_template: Capability, target_generation_index: u8) Error!*const Capability {
-            const inserted_slot = self.insertNextCapabilitySlot(capability_template, target_generation_index, null) orelse return error.TableFull;
-            const inserted = self.commitInsertedSlot(inserted_slot.slot_index);
-            self.advanceNextCapabilityIdFrom(inserted_slot.capability_id);
-            return inserted;
+        fn insertWithNewCapabilityId(self: *Self, capability_template: Capability, target_generation_index: u8) Error!*const Capability {
+            const inserted_slot = self.insertCapabilitySlot(capability_template, target_generation_index, null) orelse return error.TableFull;
+            return self.commitInsertedSlot(inserted_slot.slot_index);
         }
 
         fn commitInsertedSlot(self: *Self, slot_index: usize) *const Capability {
             self.indexSlot(slot_index);
-            self.active_capability_count += 1;
             self.advanceMutationGeneration();
             return &self.slots.slots[slot_index].capability;
         }
@@ -390,7 +373,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn findConstSlot(self: *const Self, capability_id: u64) ?*const CapabilitySlot {
-            return self.slots.getConst(capability_id);
+            return self.slots.getConstByHandle(.{ .value = capability_id });
         }
 
         fn isUsableSlot(self: *const Self, slot: *const CapabilitySlot, now_ticks: u64) bool {
@@ -456,16 +439,15 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                     .revocation_generation = self.targetGenerationAt(reservation.target_generation_indexes[index]).generation,
                     .audit = entry.request.audit,
                 };
-                const inserted_slot = self.insertNextCapabilitySlot(
+                const inserted_slot = self.insertCapabilitySlot(
                     granted_capability,
                     reservation.target_generation_indexes[index],
                     reservation.slot_indexes[index],
                 ) orelse {
                     native_util.impossibleByInvariant("grant plan slot reservations cover capability id allocation");
                 };
-                if (inserted_slot.capability_id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
                 const granted = self.commitInsertedSlot(inserted_slot.slot_index);
-                self.advanceNextCapabilityIdFrom(inserted_slot.capability_id);
+                if (granted.id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
                 output[index] = granted.*;
             }
         }
@@ -544,24 +526,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn findSlotIndex(self: *const Self, capability_id: u64) ?usize {
-            const slot_index = self.slots.slotIndexOf(capability_id) orelse {
-                self.debugAssertCapabilityIndexMissAbsent(capability_id);
-                return null;
-            };
-            if (slot_index >= self.slots.slots.len) native_util.impossibleByInvariant("capability index points outside slots");
-            const slot = &self.slots.slots[slot_index];
-            if (!slot.in_use) native_util.impossibleByInvariant("capability index points at a free slot");
-            if (slot.capability.id != capability_id) native_util.impossibleByInvariant("capability index points at the wrong slot");
+            const handle = CapabilityHandle{ .value = capability_id };
+            const slot = self.slots.getConstByHandle(handle) orelse return null;
+            const slot_index = handle.slotIndex();
+            if (slot.capability.id != capability_id) native_util.impossibleByInvariant("capability handle points at the wrong slot");
             return slot_index;
-        }
-
-        fn debugAssertCapabilityIndexMissAbsent(self: *const Self, capability_id: u64) void {
-            if (!debugIndexChecksEnabledForTable()) return;
-            for (self.slots.slots) |slot| {
-                if (slot.in_use and slot.capability.id == capability_id) {
-                    native_util.impossibleByInvariant("capability index missed a live capability");
-                }
-            }
         }
 
         fn removeSlot(self: *Self, slot_index: usize) void {
@@ -570,7 +539,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             self.unlinkHolder(slot_index, holderKey(removed.holder));
             self.unlinkTarget(slot_index, targetKey(removed.target));
             if (self.slots.removeIndex(slot_index)) {
-                self.active_capability_count -= 1;
                 self.advanceMutationGeneration();
             }
         }
@@ -649,15 +617,6 @@ fn targetKey(target: CapabilityTarget) u64 {
 
 fn nonZeroKey(key: u64) u64 {
     return if (key == 0) 0xD1B5_4A32_D192_ED03 else key;
-}
-
-fn normalizeCapabilityId(capability_id: u64) u64 {
-    return if (capability_id == 0) 1 else capability_id;
-}
-
-fn nextCapabilityIdAfter(capability_id: u64) u64 {
-    const next = capability_id +% 1;
-    return normalizeCapabilityId(next);
 }
 
 fn debugIndexChecksEnabled() bool {
@@ -797,7 +756,7 @@ test "capabilities derive narrower rights and grant revocation leaves sibling au
 
     _ = try table.requireUsable(parent.id, 10);
     const stored_derived = try table.requireUsable(derived.id, 10);
-    try std.testing.expect(derived == stored_derived);
+    try std.testing.expect(std.meta.eql(derived, stored_derived.*));
 
     try table.revokeGrant(parent.id);
     try std.testing.expect(table.query(parent.id) == null);
@@ -1066,17 +1025,16 @@ test "capability table capacity is configurable" {
     }));
 }
 
-test "capability ids wrap without zero and skip active capabilities" {
+test "capability ids encode slot generations and reject stale reuse" {
     const SmallTable = CapabilityTableWith(.{
-        .max_capabilities = 5,
-        .capability_index_capacity = 16,
+        .max_capabilities = 1,
+        .capability_index_capacity = 2,
         .max_target_generations = 1,
     });
     var table = SmallTable.init();
     const holder = principal.PrincipalId{ .kind = .service, .serial = 1 };
 
-    table.next_capability_id = std.math.maxInt(u64);
-    const max_capability = try table.mintBootRoot(.{
+    const first = try table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
         .target = .{ .kind = .service, .id = 1 },
@@ -1084,11 +1042,12 @@ test "capability ids wrap without zero and skip active capabilities" {
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
-    try std.testing.expectEqual(std.math.maxInt(u64), max_capability.id);
-    try std.testing.expectEqual(@as(u64, 1), table.next_capability_id);
+    const slot_index = table.findSlotIndex(first.id).?;
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(first.id >> 32)));
     try std.testing.expect(table.query(0) == null);
 
-    const wrapped_capability = try table.mintBootRoot(.{
+    try table.revokeGrant(first.id);
+    const replacement = try table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
         .target = .{ .kind = .service, .id = 1 },
@@ -1096,12 +1055,14 @@ test "capability ids wrap without zero and skip active capabilities" {
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
-    try std.testing.expectEqual(@as(u64, 1), wrapped_capability.id);
-    try std.testing.expectEqual(@as(u64, 2), table.next_capability_id);
-    try std.testing.expect(table.query(0) == null);
+    try std.testing.expectEqual(slot_index, table.findSlotIndex(replacement.id).?);
+    try std.testing.expect(first.id != replacement.id);
+    try std.testing.expect(table.query(first.id) == null);
+    try std.testing.expect(table.query(replacement.id) != null);
 
-    table.next_capability_id = 1;
-    const skipped_capability = try table.mintBootRoot(.{
+    try table.revokeGrant(replacement.id);
+    table.slots.slot_generations[slot_index] = std.math.maxInt(u32);
+    const last_generation = try table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
         .target = .{ .kind = .service, .id = 1 },
@@ -1109,12 +1070,9 @@ test "capability ids wrap without zero and skip active capabilities" {
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
-    try std.testing.expectEqual(@as(u64, 2), skipped_capability.id);
-    try std.testing.expectEqual(@as(u64, 3), table.next_capability_id);
-    try std.testing.expect(table.query(0) == null);
-
-    var plan = GrantPlan{};
-    try plan.addMint(1, .{
+    try std.testing.expectEqual(std.math.maxInt(u32), @as(u32, @intCast(last_generation.id >> 32)));
+    try table.revokeGrant(last_generation.id);
+    const wrapped = try table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
         .target = .{ .kind = .service, .id = 1 },
@@ -1122,15 +1080,11 @@ test "capability ids wrap without zero and skip active capabilities" {
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
-    var output: [1]Capability = undefined;
-    table.next_capability_id = 1;
-    _ = try table.applyGrantPlan(&plan, &output);
-    try std.testing.expectEqual(@as(u64, 3), output[0].id);
-    try std.testing.expectEqual(@as(u64, 4), table.next_capability_id);
-    try std.testing.expect(table.query(0) == null);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(wrapped.id >> 32)));
+    try std.testing.expect(table.query(last_generation.id) == null);
 }
 
-test "capability ids do not advance when the table is full" {
+test "capability allocation leaves a full table unchanged" {
     const SmallTable = CapabilityTableWith(.{
         .max_capabilities = 1,
         .capability_index_capacity = 2,
@@ -1148,7 +1102,8 @@ test "capability ids do not advance when the table is full" {
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
 
-    const next_before_full = table.next_capability_id;
+    const count_before_full = table.activeCount();
+    const mutation_generation_before_full = table.mutationGeneration();
     try std.testing.expectError(error.TableFull, table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
@@ -1157,8 +1112,8 @@ test "capability ids do not advance when the table is full" {
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     }));
-    try std.testing.expectEqual(next_before_full, table.next_capability_id);
-    try std.testing.expect(table.query(next_before_full) == null);
+    try std.testing.expectEqual(count_before_full, table.activeCount());
+    try std.testing.expectEqual(mutation_generation_before_full, table.mutationGeneration());
 }
 
 test "derived capability views are copied before revoked slots are reused" {
@@ -1182,15 +1137,14 @@ test "derived capability views are copied before revoked slots are reused" {
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
-    const derived_view = try table.derive(.{
+    const derived = try table.derive(.{
         .parent_capability_id = first.id,
         .holder = derived_holder,
         .rights = .{ .service = .{ .capability_query = true } },
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
-    const derived: Capability = derived_view.*;
-    const derived_slot_index = table.slots.slotIndexOf(derived.id).?;
+    const derived_slot_index = table.findSlotIndex(derived.id).?;
 
     try table.revokeGrant(derived.id);
     const reused = try table.mintBootRoot(.{
@@ -1205,8 +1159,8 @@ test "derived capability views are copied before revoked slots are reused" {
     try std.testing.expect(table.query(first.id) != null);
     try std.testing.expect(table.query(derived.id) == null);
     try std.testing.expect(table.query(reused.id) != null);
-    try std.testing.expect(table.slots.slotIndexOf(derived.id) == null);
-    try std.testing.expectEqual(derived_slot_index, table.slots.slotIndexOf(reused.id).?);
+    try std.testing.expect(table.findSlotIndex(derived.id) == null);
+    try std.testing.expectEqual(derived_slot_index, table.findSlotIndex(reused.id).?);
     try std.testing.expect(derived.holder.eql(derived_holder));
     try std.testing.expect(derived.rights.has(.capability_query));
     try std.testing.expectEqual(@as(usize, 2), table.slots.countInUse());
@@ -1265,4 +1219,18 @@ test "grant plan reserves target generation slots in the arena" {
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     }));
+
+    const retired_ids = [_]u64{ output[0].id, output[1].id };
+    table.rollbackGrant(&output);
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
+    try std.testing.expect(table.query(retired_ids[0]) == null);
+    try std.testing.expect(table.query(retired_ids[1]) == null);
+
+    var replacements: [2]Capability = undefined;
+    _ = try table.applyGrantPlan(&plan, &replacements);
+    try std.testing.expectEqual(@as(usize, 2), table.activeCount());
+    try std.testing.expect(retired_ids[0] != replacements[0].id);
+    try std.testing.expect(retired_ids[1] != replacements[1].id);
+    try std.testing.expect(table.query(replacements[0].id) != null);
+    try std.testing.expect(table.query(replacements[1].id) != null);
 }

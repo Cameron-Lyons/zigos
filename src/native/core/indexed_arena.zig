@@ -772,6 +772,166 @@ pub fn GenerationalHandle(comptime display_name: []const u8) type {
     };
 }
 
+pub fn GenerationalArena(
+    comptime display_name: []const u8,
+    comptime Slot: type,
+    comptime capacity: usize,
+) type {
+    if (capacity == 0) @compileError("generational arena requires at least one slot");
+    if (capacity > @as(usize, std.math.maxInt(u32)) + 1) {
+        @compileError("generational arena slot indexes must fit in a handle");
+    }
+
+    return struct {
+        const Self = @This();
+        pub const Handle = GenerationalHandle(display_name);
+        pub const slot_capacity = capacity;
+
+        slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
+        slot_generations: [capacity]u32 = [_]u32{0} ** capacity,
+        free_next: [capacity]?usize = [_]?usize{null} ** capacity,
+        free_head: ?usize = null,
+        next_unclaimed_index: usize = 0,
+        used_count: usize = 0,
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn reset(self: *Self) void {
+            const claimed_count = self.claimedCount();
+            var slot_index: usize = 0;
+            while (slot_index < claimed_count) : (slot_index += 1) {
+                self.slots[slot_index] = Slot{};
+                self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+                self.free_next[slot_index] = null;
+            }
+            self.free_head = null;
+            self.next_unclaimed_index = 0;
+            self.used_count = 0;
+        }
+
+        pub fn reserve(self: *Self) ?*Slot {
+            const slot_index = self.reserveIndex() orelse return null;
+            return &self.slots[slot_index];
+        }
+
+        pub fn reserveHandle(self: *Self) ?Handle {
+            const slot_index = self.reserveIndex() orelse return null;
+            return self.handleForIndex(slot_index);
+        }
+
+        pub fn reserveIndex(self: *Self) ?usize {
+            const slot_index = self.popFreeIndex() orelse return null;
+            self.claimSlot(slot_index);
+            return slot_index;
+        }
+
+        pub fn reserveHandleAt(self: *Self, slot_index: usize) ?Handle {
+            const reserved_index = self.reserveIndexAt(slot_index) orelse return null;
+            return self.handleForIndex(reserved_index);
+        }
+
+        pub fn reserveIndexAt(self: *Self, slot_index: usize) ?usize {
+            if (slot_index >= capacity or self.slots[slot_index].in_use) return null;
+            if (!self.claimFreeIndex(slot_index)) return null;
+            self.claimSlot(slot_index);
+            return slot_index;
+        }
+
+        pub fn availableIndexExcluding(
+            self: *const Self,
+            context: anytype,
+            comptime excludes: anytype,
+        ) ?usize {
+            const claimed_count = self.claimedCount();
+            var next_index = self.free_head;
+            var attempts: usize = 0;
+            while (next_index) |slot_index| : (attempts += 1) {
+                if (slot_index >= claimed_count or attempts >= claimed_count) return null;
+                next_index = self.free_next[slot_index];
+                if (excludes(context, slot_index)) continue;
+                return slot_index;
+            }
+
+            var slot_index = claimed_count;
+            while (slot_index < capacity) : (slot_index += 1) {
+                if (excludes(context, slot_index)) continue;
+                return slot_index;
+            }
+            return null;
+        }
+
+        pub fn getByHandle(self: *Self, handle: Handle) ?*Slot {
+            const slot_index = handle.slotIndex();
+            if (!self.handleMatches(slot_index, handle)) return null;
+            return &self.slots[slot_index];
+        }
+
+        pub fn getConstByHandle(self: *const Self, handle: Handle) ?*const Slot {
+            const slot_index = handle.slotIndex();
+            if (!self.handleMatches(slot_index, handle)) return null;
+            return &self.slots[slot_index];
+        }
+
+        pub fn handleForIndex(self: *const Self, slot_index: usize) ?Handle {
+            if (slot_index >= capacity or !self.slots[slot_index].in_use) return null;
+            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
+        }
+
+        pub fn removeHandle(self: *Self, handle: Handle) bool {
+            const slot_index = handle.slotIndex();
+            if (!self.handleMatches(slot_index, handle)) return false;
+            return self.removeIndex(slot_index);
+        }
+
+        pub fn removeIndex(self: *Self, slot_index: usize) bool {
+            if (slot_index >= capacity or !self.slots[slot_index].in_use) return false;
+            self.slots[slot_index] = Slot{};
+            self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+            self.used_count -= 1;
+            self.pushFreeIndex(slot_index);
+            return true;
+        }
+
+        pub fn countInUse(self: *const Self) usize {
+            return self.used_count;
+        }
+
+        pub inline fn claimedCount(self: *const Self) usize {
+            if (self.next_unclaimed_index > capacity) {
+                native_util.impossibleByInvariant("generational arena claimed prefix fits its slots");
+            }
+            return self.next_unclaimed_index;
+        }
+
+        fn claimSlot(self: *Self, slot_index: usize) void {
+            self.slots[slot_index] = Slot{};
+            self.slots[slot_index].in_use = true;
+            if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
+            self.used_count += 1;
+        }
+
+        fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
+            if (handle.isZero() or slot_index >= capacity) return false;
+            return self.slots[slot_index].in_use and self.slot_generations[slot_index] == handle.generation();
+        }
+
+        inline fn popFreeIndex(self: *Self) ?usize {
+            return popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index);
+        }
+
+        inline fn pushFreeIndex(self: *Self, slot_index: usize) void {
+            pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
+        }
+
+        inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
+            if (slot_index >= capacity or self.slots[slot_index].in_use) return false;
+            return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
+        }
+    };
+}
+
 inline fn nextSlotGeneration(current: u32) u32 {
     const next = current +% 1;
     return if (next == 0) 1 else next;
@@ -1402,6 +1562,45 @@ test "multimap index matches an insertion-order model under churn" {
             }
         }
     }
+}
+
+test "generational arena reuses slots and rejects stale handles" {
+    const Arena = GenerationalArena("TestGenerationalHandle", TestSlot, 3);
+    var arena = Arena.init();
+
+    const first_handle = arena.reserveHandle().?;
+    arena.getByHandle(first_handle).?.record = .{ .id = 11, .owner = 1, .label = "first" };
+    const second_handle = arena.reserveHandleAt(2).?;
+    arena.getByHandle(second_handle).?.record = .{ .id = 12, .owner = 2, .label = "second" };
+    const third_handle = arena.reserveHandle().?;
+    try std.testing.expectEqual(@as(usize, 1), third_handle.slotIndex());
+    try std.testing.expect(arena.reserveHandle() == null);
+    try std.testing.expectEqual(@as(usize, 3), arena.countInUse());
+
+    try std.testing.expect(arena.removeHandle(first_handle));
+    try std.testing.expect(arena.getByHandle(first_handle) == null);
+    const replacement_handle = arena.reserveHandle().?;
+    try std.testing.expectEqual(first_handle.slotIndex(), replacement_handle.slotIndex());
+    try std.testing.expect(!first_handle.eql(replacement_handle));
+    try std.testing.expectEqualStrings("", arena.getByHandle(replacement_handle).?.record.label);
+
+    arena.reset();
+    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+    try std.testing.expect(arena.getByHandle(second_handle) == null);
+    try std.testing.expect(arena.getByHandle(replacement_handle) == null);
+}
+
+test "generational arena generations wrap without zero" {
+    const Arena = GenerationalArena("TestGenerationalHandle", TestSlot, 1);
+    var arena = Arena.init();
+    arena.slot_generations[0] = std.math.maxInt(u32);
+
+    const last_generation_handle = arena.reserveHandle().?;
+    try std.testing.expectEqual(std.math.maxInt(u32), last_generation_handle.generation());
+    try std.testing.expect(arena.removeHandle(last_generation_handle));
+    const wrapped_handle = arena.reserveHandle().?;
+    try std.testing.expectEqual(@as(u32, 1), wrapped_handle.generation());
+    try std.testing.expect(arena.getByHandle(last_generation_handle) == null);
 }
 
 test "paged indexed arena uses slab pages and invalidates stale handles" {
