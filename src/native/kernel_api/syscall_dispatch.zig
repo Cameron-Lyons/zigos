@@ -97,7 +97,7 @@ pub fn validateAddressSpaceRange(
         var advanced = false;
         for (address_space.regions[0..address_space.region_count]) |region| {
             const region_start = std.math.cast(usize, region.virtual_address) orelse continue;
-            const region_end = std.math.add(usize, region_start, region.size_bytes) catch continue;
+            const region_end = std.math.add(usize, region_start, @as(usize, region.size_bytes)) catch continue;
             if (covered_until < region_start or covered_until >= region_end) continue;
             if (!regionAllows(region.access, access)) return false;
             covered_until = @min(end_exclusive, region_end);
