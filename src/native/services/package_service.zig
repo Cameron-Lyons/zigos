@@ -138,9 +138,22 @@ pub const Service = struct {
         return .{};
     }
 
+    pub fn initializeAllocated(self: *Service) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.owner = .{ .kind = .service, .serial = 0 };
+        if (comptime !heap_backed_bundle_arena) {
+            self.slots = BundleArena.init();
+        }
+        self.trust_store.initializeAllocated();
+    }
+
     pub fn reset(self: *Service) void {
         self.deinit();
-        self.* = Service.init();
+        if (comptime builtin.target.os.tag == .freestanding) {
+            self.initializeAllocated();
+        } else {
+            self.* = Service.init();
+        }
     }
 
     pub fn deinit(self: *Service) void {
@@ -885,7 +898,8 @@ fn expectPermissionTextEqual(expected: manifest.PermissionRequest, actual: manif
 }
 
 test "package port requires service authority before install update rollback and remove" {
-    var service = Service.init();
+    var service: Service = undefined;
+    service.initializeAllocated();
     service.bind(740, .{ .kind = .service, .serial = 740 });
     var capabilities = capability.CapabilityTable.init();
     var port = PackagePort.init(&service, &capabilities);

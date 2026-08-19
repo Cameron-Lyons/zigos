@@ -69,10 +69,10 @@ fn overlayRelayFrameResult(
         .delivered_len = delivered_len,
         .packet_digest = signed_frame.packet_digest,
     };
-    result.service_identity_len = native_util.copyTextExact(&result.service_identity, overlay_session.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong;
-    result.relay_domain_len = native_util.copyTextExact(&result.relay_domain, overlay_session.relayDomainSlice()) catch return error.NetworkTargetTooLong;
+    result.service_identity_len = @intCast(native_util.copyTextExact(&result.service_identity, overlay_session.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong);
+    result.relay_domain_len = @intCast(native_util.copyTextExact(&result.relay_domain, overlay_session.relayDomainSlice()) catch return error.NetworkTargetTooLong);
     if (overlay_session.private_service_len != 0) {
-        result.private_service_len = native_util.copyTextExact(&result.private_service, overlay_session.privateServiceSlice()) catch return error.ServiceIdentityTooLong;
+        result.private_service_len = @intCast(native_util.copyTextExact(&result.private_service, overlay_session.privateServiceSlice()) catch return error.ServiceIdentityTooLong);
     }
     return result;
 }

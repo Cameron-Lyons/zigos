@@ -202,6 +202,16 @@ pub const Catalog = struct {
         return Catalog{};
     }
 
+    pub fn initializeAllocated(self: *Catalog) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.next_image_id = 1;
+        self.images.free_head = indexed_arena.reusableNoIndex(MAX_IMAGES);
+    }
+
+    pub fn reset(self: *Catalog) void {
+        self.initializeAllocated();
+    }
+
     pub fn register(self: *Catalog, request: ImageRegisterRequest) Error!*const ImageRecord {
         return self.registerWithEmbeddedElf(request, null, .{});
     }
@@ -674,6 +684,28 @@ fn signedTestBundle(bundle_id: []const u8, display_name: []const u8) !manifest.B
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
     return bundle;
+}
+
+test "allocated userspace catalog initialization preserves empty catalog invariants" {
+    var catalog: Catalog = undefined;
+    catalog.initializeAllocated();
+
+    try std.testing.expectEqual(@as(usize, 0), catalog.imageCount());
+    const bundle = try signedTestBundle("app.allocated-catalog", "Allocated Catalog");
+    const image_bytes = makeSyntheticElf32ForTest(0x4000_5000, 2, 2);
+    const image = try catalog.registerEmbeddedArtifact(.{
+        .bundle = bundle,
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "main",
+            .entry = "app.main",
+        },
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
+    });
+
+    try std.testing.expectEqual(@as(u64, 1), image.id);
+    try std.testing.expectEqual(image.id, catalog.findById(image.id).?.id);
+    try std.testing.expectEqualStrings(bundle.bundle_id, catalog.findByBundleId(bundle.bundle_id).?.bundleIdSlice());
 }
 
 test "userspace image launch records bundle provenance and isolated process state" {
