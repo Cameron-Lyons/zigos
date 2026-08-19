@@ -604,6 +604,11 @@ pub const Table = struct {
         if (!backing.arena.removeHandle(object_handle)) {
             native_util.impossibleByInvariant("revoked shared-memory handle remains live through teardown");
         }
+        if (backing.arena.countInUse() == 0 and backing.mmu.mappings.countInUse() == 0) {
+            backing.mmu.next_physical_frame = 1;
+            backing.mmu.next_task_virtual_page = 1;
+            backing.mmu.next_accelerator_virtual_page = 1;
+        }
         return revoked_descriptor;
     }
 
@@ -1105,6 +1110,23 @@ test "shared memory objects map unmap and revoke across tasks" {
     try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(object.id));
     try std.testing.expectError(error.SharedMemoryNotFound, table.taskMappingDescriptor(object.id, ids.task(7)));
     try std.testing.expectError(error.SharedMemoryNotFound, table.map(object.id, ids.task(9)));
+}
+
+test "revoking the final shared memory object reclaims descriptor cursors" {
+    var table = Table.init();
+    const object = try table.createWithAccess(ids.task(7), PAGE_SIZE, .{
+        .cpu = true,
+        .gpu = true,
+    });
+    try table.map(object.id, ids.task(7));
+    try table.attachAccelerator(object.id, .gpu);
+
+    _ = try table.revoke(object.id);
+
+    const mmu = table.mmuForTests();
+    try std.testing.expectEqual(@as(u64, 1), mmu.next_physical_frame);
+    try std.testing.expectEqual(@as(u64, 1), mmu.next_task_virtual_page);
+    try std.testing.expectEqual(@as(u64, 1), mmu.next_accelerator_virtual_page);
 }
 
 test "bounded object task scans preserve compacted mappings" {

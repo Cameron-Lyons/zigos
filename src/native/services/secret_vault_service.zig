@@ -8,6 +8,9 @@ const principal = @import("../core/principal.zig");
 const secure_secret_store = @import("../platform/secure_secret_store.zig");
 
 pub const MAX_HANDLES: usize = secure_secret_store.MAX_HANDLES;
+pub const BOUNDED_HANDLE_SCAN = true;
+pub const RECLAIMS_TERMINAL_HANDLES = true;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 10_280;
 
 pub const Error = secure_secret_store.Error || event_ledger.Error || error{
     HandleExpired,
@@ -98,18 +101,20 @@ const HandleSlot = struct {
 };
 
 const HandleArena = indexed_arena.IndexedArenaWithKey(u64, HandleSlot, MAX_HANDLES, MAX_HANDLES * 2, handleSlotId);
-const SecretHandleIndex = indexed_arena.MultimapIndex(MAX_HANDLES, MAX_HANDLES, MAX_HANDLES * 2);
-const ActiveHandleIndex = indexed_arena.MultimapIndex(MAX_HANDLES, 1, 2);
-const ACTIVE_HANDLE_KEY: u64 = 1;
 
 pub const Service = struct {
     store: secure_secret_store.Store = secure_secret_store.Store.init(),
     next_handle_id: u64 = 1,
     generation: u32 = 1,
     handles: HandleArena = HandleArena.init(),
-    secret_handle_index: SecretHandleIndex = SecretHandleIndex.init(),
-    active_handle_index: ActiveHandleIndex = ActiveHandleIndex.init(),
     active_handle_count: usize = 0,
+    next_reusable_handle: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) {
+            @compileError("secret vault service exceeds its fixed-state size ceiling");
+        }
+    }
 
     pub fn init() Service {
         return .{};
@@ -178,26 +183,37 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        if (self.handles.countInUse() >= MAX_HANDLES) {
-            try recordLend(ledger, request, 0, false);
-            return error.HandleTableFull;
-        }
+        const retired_slot_index = if (self.handles.countInUse() >= MAX_HANDLES)
+            self.terminalHandleSlot(request.now_ticks) orelse {
+                try recordLend(ledger, request, 0, false);
+                return error.HandleTableFull;
+            }
+        else
+            null;
         const handle_id = self.next_handle_id;
         if (handle_id == 0) {
             try recordLend(ledger, request, 0, false);
             return error.VaultHandleIdExhausted;
         }
-        const store_handle = try self.store.lendHandle(
-            request.secret_id,
-            request.holder,
-            request.task_id,
-            request.allow_raw_export,
-        );
-        const slot_index = self.handles.reserveIndex(handle_id) orelse return error.HandleTableFull;
-        if (!self.secret_handle_index.append(request.secret_id, slot_index)) {
-            _ = self.handles.removeIndex(slot_index);
-            return error.HandleTableFull;
-        }
+        const store_handle = if (retired_slot_index) |slot_index|
+            try self.store.replaceHandle(
+                self.handles.slots[slot_index].handle.store_handle_id,
+                request.secret_id,
+                request.holder,
+                request.task_id,
+                request.allow_raw_export,
+            )
+        else
+            try self.store.lendHandle(
+                request.secret_id,
+                request.holder,
+                request.task_id,
+                request.allow_raw_export,
+            );
+        const slot_index = if (retired_slot_index) |retired|
+            self.reuseHandleSlot(retired, handle_id)
+        else
+            self.handles.reserveIndex(handle_id) orelse return error.HandleTableFull;
         const slot = &self.handles.slots[slot_index];
         slot.handle = .{
             .id = handle_id,
@@ -210,9 +226,6 @@ pub const Service = struct {
             .raw_export_allowed = store_handle.export_allowed,
             .generation = self.generation,
         };
-        if (!self.active_handle_index.append(ACTIVE_HANDLE_KEY, slot_index)) {
-            native_util.impossibleByInvariant("secret vault active-handle index covers handle slots");
-        }
         self.next_handle_id +%= 1;
         self.active_handle_count += 1;
         try recordLend(ledger, request, slot.handle.id, true);
@@ -359,9 +372,8 @@ pub const Service = struct {
     pub fn activeHandleCountAt(self: *const Service, now_ticks: u64) usize {
         if (self.active_handle_count == 0) return 0;
         var count: usize = 0;
-        var slot_index = self.active_handle_index.head(ACTIVE_HANDLE_KEY);
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.active_handle_index.next(slot_index)) {
-            const slot = self.activeHandleSlotAt(slot_index);
+        for (&self.handles.slots) |*slot| {
+            if (!slot.in_use or slot.handle.revoked) continue;
             if (!slot.handle.expired(now_ticks)) count += 1;
         }
         return count;
@@ -369,10 +381,7 @@ pub const Service = struct {
 
     fn revokeSecretHandles(self: *Service, secret_id: u64) usize {
         var revoked_count: usize = 0;
-        var slot_index = self.secret_handle_index.head(secret_id);
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.secret_handle_index.next(slot_index)) {
-            if (slot_index >= self.handles.slots.len) continue;
-            const slot = &self.handles.slots[slot_index];
+        for (&self.handles.slots) |*slot| {
             if (!slot.in_use or slot.handle.secret_id != secret_id) continue;
             if (self.markRevoked(&slot.handle)) revoked_count += 1;
         }
@@ -381,24 +390,37 @@ pub const Service = struct {
 
     fn markRevoked(self: *Service, handle: *VaultHandle) bool {
         if (handle.revoked) return false;
-        const slot_index = self.handles.slotIndexOf(handle.id) orelse {
-            native_util.impossibleByInvariant("secret vault active handle has an arena slot");
-        };
-        if (!self.active_handle_index.remove(ACTIVE_HANDLE_KEY, slot_index)) {
-            native_util.impossibleByInvariant("secret vault active-handle index missing live handle");
-        }
         handle.revoked = true;
         if (self.active_handle_count == 0) native_util.impossibleByInvariant("secret vault active handle count underflow");
         self.active_handle_count -= 1;
         return true;
     }
 
-    fn activeHandleSlotAt(self: *const Service, slot_index: usize) *const HandleSlot {
-        if (slot_index >= MAX_HANDLES) native_util.impossibleByInvariant("secret vault active-handle index points outside slots");
-        const slot = &self.handles.slots[slot_index];
-        if (!slot.in_use) native_util.impossibleByInvariant("secret vault active-handle index points at free slot");
-        if (slot.handle.revoked) native_util.impossibleByInvariant("secret vault active-handle index points at revoked handle");
-        return slot;
+    fn terminalHandleSlot(self: *const Service, now_ticks: u64) ?usize {
+        const start: usize = @intCast(self.next_reusable_handle);
+        for (0..MAX_HANDLES) |offset| {
+            const slot_index = (start + offset) % MAX_HANDLES;
+            const slot = &self.handles.slots[slot_index];
+            if (!slot.in_use) continue;
+            if (slot.handle.revoked or slot.handle.expired(now_ticks)) return slot_index;
+        }
+        return null;
+    }
+
+    fn reuseHandleSlot(self: *Service, retired_slot_index: usize, handle_id: u64) usize {
+        const retired = &self.handles.slots[retired_slot_index].handle;
+        if (!retired.revoked) {
+            if (self.active_handle_count == 0) native_util.impossibleByInvariant("secret vault active handle count covers expired replacement");
+            self.active_handle_count -= 1;
+        }
+        if (!self.handles.removeIndex(retired_slot_index)) {
+            native_util.impossibleByInvariant("secret vault replacement handle has a live slot");
+        }
+        const slot_index = self.handles.reserveIndexAt(handle_id, retired_slot_index) orelse {
+            native_util.impossibleByInvariant("secret vault replacement reuses its retired handle slot");
+        };
+        self.next_reusable_handle = @intCast((slot_index + 1) % MAX_HANDLES);
+        return slot_index;
     }
 };
 
@@ -637,7 +659,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
     try std.testing.expect(handle.hardware_backed);
     try std.testing.expect(!handle.raw_export_allowed);
     try std.testing.expectEqual(@as(usize, 1), service.activeHandleCount());
-    try std.testing.expectEqual(@as(usize, 1), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
+    try std.testing.expectEqual(@as(usize, 1), service.activeHandleCountAt(19));
 
     try std.testing.expectError(error.PolicyDenied, service.exportRaw(&policies, subjects, .{
         .holder = app,
@@ -659,7 +681,6 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
     }, &ledger);
     try std.testing.expect(rotated.id != secret.id);
     try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
-    try std.testing.expectEqual(@as(usize, 0), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
     try std.testing.expectError(error.HandleRevoked, service.exportRaw(&policies, subjects, .{
         .holder = app,
         .task_id = 72,
@@ -708,7 +729,6 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .detail = "private api token wrong holder task revoke",
     }, &ledger));
     try std.testing.expectEqual(@as(usize, 1), service.activeHandleCount());
-    try std.testing.expectEqual(@as(usize, 1), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
     try service.revoke(.{
         .subject = user,
         .task_id = 71,
@@ -727,7 +747,6 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .detail = "private api token v2 raw export denied",
     }, &ledger));
     try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
-    try std.testing.expectEqual(@as(usize, 0), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
 
     const first_secret_revoke_handle = try service.lendHandle(&policies, subjects, .{
         .owner = user,
@@ -748,8 +767,8 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .detail = "private api token v2 relend second",
     }, &ledger);
     try std.testing.expectEqual(@as(usize, 2), service.activeHandleCount());
-    try std.testing.expectEqual(@as(usize, 2), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
-    try std.testing.expectEqual(@as(usize, 3), service.secret_handle_index.count(rotated.id));
+    try std.testing.expect(service.findHandle(first_secret_revoke_handle.id) != null);
+    try std.testing.expect(service.findHandle(second_secret_revoke_handle.id) != null);
     try service.revoke(.{
         .subject = user,
         .task_id = 71,
@@ -758,7 +777,6 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .detail = "private api token v2 secret revoked",
     }, &ledger);
     try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
-    try std.testing.expectEqual(@as(usize, 0), service.active_handle_index.count(ACTIVE_HANDLE_KEY));
     try std.testing.expectError(error.HandleRevoked, service.exportRaw(&policies, subjects, .{
         .holder = app,
         .task_id = 72,
@@ -796,7 +814,6 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .now_ticks = 12,
         .detail = "private expiring token lent",
     }, &expiry_ledger);
-    try std.testing.expectEqual(@as(usize, 1), expiry_service.active_handle_index.count(ACTIVE_HANDLE_KEY));
     try std.testing.expectEqual(@as(usize, 1), expiry_service.activeHandleCountAt(19));
     try std.testing.expectEqual(@as(usize, 0), expiry_service.activeHandleCountAt(20));
     try std.testing.expectError(error.HandleExpired, expiry_service.exportRaw(&policies, subjects, .{
@@ -907,7 +924,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=secret_vault") != null);
 }
 
-test "secret vault lending stages id and capacity before lower store handles" {
+test "secret vault stages lending and reclaims terminal handles under pressure" {
     const signing = @import("../core/signing.zig");
 
     var policies = policy_object.Directory.init();
@@ -963,8 +980,10 @@ test "secret vault lending stages id and capacity before lower store handles" {
 
     var full_service = Service.init();
     const full_secret = try full_service.store.importSecret(user, "full-token", "private full token", false, true);
+    var first_full_handle_id: u64 = 0;
+    var first_full_store_handle_id: u64 = 0;
     for (0..MAX_HANDLES) |index| {
-        _ = try full_service.lendHandle(&policies, subjects, .{
+        const filled = try full_service.lendHandle(&policies, subjects, .{
             .owner = user,
             .holder = app,
             .task_id = 90 + @as(u64, @intCast(index)),
@@ -975,7 +994,14 @@ test "secret vault lending stages id and capacity before lower store handles" {
             .hardware_backed = false,
             .detail = "private full token capacity filler",
         }, null);
+        if (index == 0) {
+            first_full_handle_id = filled.id;
+            first_full_store_handle_id = filled.store_handle_id;
+        }
     }
+    try std.testing.expectEqual(MAX_HANDLES, full_service.activeHandleCount());
+    try std.testing.expectEqual(MAX_HANDLES, full_service.activeHandleCountAt(99));
+    try std.testing.expectEqual(@as(usize, 0), full_service.activeHandleCountAt(100));
 
     const store_next_before = full_service.store.next_handle_id;
     try std.testing.expectError(error.HandleTableFull, full_service.lendHandle(&policies, subjects, .{
@@ -991,4 +1017,83 @@ test "secret vault lending stages id and capacity before lower store handles" {
     }, null));
     try std.testing.expectEqual(store_next_before, full_service.store.next_handle_id);
     try std.testing.expect(full_service.store.describeHandle(store_next_before) == null);
+    try full_service.revoke(.{
+        .subject = user,
+        .task_id = 90,
+        .secret_id = full_secret.id,
+        .now_ticks = 21,
+        .detail = "private full token revoked through bounded scan",
+    }, null);
+    try std.testing.expectEqual(@as(usize, 0), full_service.activeHandleCount());
+    try std.testing.expect(full_service.findHandle(first_full_handle_id).?.revoked);
+
+    const replacement = try full_service.lendHandle(&policies, subjects, .{
+        .owner = user,
+        .holder = app,
+        .task_id = 123,
+        .secret_id = full_secret.id,
+        .expires_at_ticks = 40,
+        .now_ticks = 22,
+        .allow_raw_export = true,
+        .hardware_backed = false,
+        .detail = "private full token replacement after revocation",
+    }, null);
+    try std.testing.expect(full_service.findHandle(first_full_handle_id) == null);
+    try std.testing.expect(full_service.store.describeHandle(first_full_store_handle_id) == null);
+    try std.testing.expectEqual(@as(usize, 1), full_service.activeHandleCount());
+    try std.testing.expectEqual(MAX_HANDLES, full_service.handles.countInUse());
+    try std.testing.expectEqual(MAX_HANDLES, full_service.store.handles.countInUse());
+    try std.testing.expectEqualStrings("private full token", try full_service.exportRaw(&policies, subjects, .{
+        .holder = app,
+        .task_id = 123,
+        .handle_id = replacement.id,
+        .now_ticks = 23,
+        .detail = "private full token replacement export",
+    }, null));
+
+    var expiry_reuse_service = Service.init();
+    const expiry_reuse_secret = try expiry_reuse_service.store.importSecret(user, "expiry-reuse", "private expiry reuse token", false, true);
+    var first_expired_handle_id: u64 = 0;
+    var first_expired_store_handle_id: u64 = 0;
+    for (0..MAX_HANDLES) |index| {
+        const filled = try expiry_reuse_service.lendHandle(&policies, subjects, .{
+            .owner = user,
+            .holder = app,
+            .task_id = 200 + @as(u64, @intCast(index)),
+            .secret_id = expiry_reuse_secret.id,
+            .expires_at_ticks = 30,
+            .now_ticks = 20,
+            .allow_raw_export = true,
+            .hardware_backed = false,
+            .detail = "private expiry reuse capacity filler",
+        }, null);
+        if (index == 0) {
+            first_expired_handle_id = filled.id;
+            first_expired_store_handle_id = filled.store_handle_id;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), expiry_reuse_service.activeHandleCountAt(30));
+
+    const expiry_replacement = try expiry_reuse_service.lendHandle(&policies, subjects, .{
+        .owner = user,
+        .holder = app,
+        .task_id = 300,
+        .secret_id = expiry_reuse_secret.id,
+        .expires_at_ticks = 40,
+        .now_ticks = 30,
+        .allow_raw_export = true,
+        .hardware_backed = false,
+        .detail = "private expiry reuse replacement",
+    }, null);
+    try std.testing.expect(expiry_reuse_service.findHandle(first_expired_handle_id) == null);
+    try std.testing.expect(expiry_reuse_service.store.describeHandle(first_expired_store_handle_id) == null);
+    try std.testing.expectEqual(MAX_HANDLES, expiry_reuse_service.activeHandleCount());
+    try std.testing.expectEqual(@as(usize, 1), expiry_reuse_service.activeHandleCountAt(30));
+    try std.testing.expectEqualStrings("private expiry reuse token", try expiry_reuse_service.exportRaw(&policies, subjects, .{
+        .holder = app,
+        .task_id = 300,
+        .handle_id = expiry_replacement.id,
+        .now_ticks = 31,
+        .detail = "private expiry reuse replacement export",
+    }, null));
 }
