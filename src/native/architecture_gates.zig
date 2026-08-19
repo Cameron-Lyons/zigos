@@ -192,6 +192,13 @@ pub const indexed_hot_path_tables = .{
     },
     .background_dispatch = .{
         .uses_bounded_record_scan = background_dispatch.BOUNDED_RECORD_SCAN,
+        .stores_compact_dispatch_metadata = background_dispatch.COMPACT_DISPATCH_METADATA and
+            @FieldType(background_dispatch.DispatchRecord, "background_task_id_len") == u8 and
+            @FieldType(background_dispatch.Controller, "active_count") == u8 and
+            @FieldType(background_dispatch.Controller, "record_count") == u8 and
+            @FieldType(background_dispatch.Controller, "next_reusable_slot") == u8,
+        .keeps_dispatch_state_within_ceilings = @sizeOf(background_dispatch.DispatchRecord) <= background_dispatch.DISPATCH_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(background_dispatch.Controller) <= background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
         .tracks_active_count = @hasField(background_dispatch.Controller, "active_count"),
         .uses_fair_reuse_cursor = @hasField(background_dispatch.Controller, "next_reusable_slot"),
         .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
@@ -473,6 +480,19 @@ pub const indexed_hot_path_tables = .{
             @FieldType(sync_service.Service, "next_outbound_transport_frame_slot_index") == u8 and
             @FieldType(sync_service.Service, "next_inbound_transport_frame_slot_index") == u8 and
             @FieldType(sync_service.Service, "active_overlay_session_count") == u8,
+        .stores_compact_replication_result_metadata = sync_service.COMPACT_REPLICATION_SUMMARY_METADATA and
+            sync_service.COMPACT_PEER_REPLICATION_RESULT_METADATA and
+            @FieldType(sync_service.ReplicationSummary, "selected_entry_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "skipped_entry_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "snapshot_count") == u16 and
+            @FieldType(sync_service.ReplicationSummary, "conflict_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "transport_frame_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "accepted_frame_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "persisted_object_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "relay_delivery_count") == u32 and
+            @FieldType(sync_service.PeerReplicationResult, "payload_bytes") == u32,
+        .keeps_replication_results_within_ceilings = @sizeOf(sync_service.ReplicationSummary) <= sync_service.REPLICATION_SUMMARY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.PeerReplicationResult) <= sync_service.PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES,
         .stores_compact_sync_record_metadata = sync_state_support.COMPACT_RECORD_METADATA and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_count") == u8 and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_lens") == [sync_state_support.MAX_SELECTIVE_PREFIXES]u8 and
