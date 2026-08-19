@@ -4,6 +4,14 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_ALLOW_LIST: usize = 8;
 pub const MAX_LABEL_BYTES: usize = 64;
+pub const COMPACT_POLICY_METADATA = true;
+pub const POLICY_OBJECT_SIZE_CEILING_BYTES: usize = 2_000;
+
+comptime {
+    if (MAX_ALLOW_LIST > std.math.maxInt(u8) or MAX_LABEL_BYTES > std.math.maxInt(u8)) {
+        @compileError("policy object metadata no longer fits compact counters");
+    }
+}
 
 pub const Scope = enum(u8) {
     user,
@@ -398,19 +406,19 @@ pub const PolicyObject = struct {
     scope: Scope,
     subject_id: u64,
     issuer: principal.PrincipalId,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     install_source_mode: InstallSourceMode,
-    allowed_install_source_count: usize,
+    allowed_install_source_count: u8,
     allowed_install_sources: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
-    allowed_install_source_lens: [MAX_ALLOW_LIST]usize,
+    allowed_install_source_lens: [MAX_ALLOW_LIST]u8,
     network_egress_mode: NetworkEgressMode,
-    allowed_network_destination_count: usize,
+    allowed_network_destination_count: u8,
     allowed_network_destinations: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
-    allowed_network_destination_lens: [MAX_ALLOW_LIST]usize,
-    allowed_sync_destination_count: usize,
+    allowed_network_destination_lens: [MAX_ALLOW_LIST]u8,
+    allowed_sync_destination_count: u8,
     allowed_sync_destinations: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
-    allowed_sync_destination_lens: [MAX_ALLOW_LIST]usize,
+    allowed_sync_destination_lens: [MAX_ALLOW_LIST]u8,
     removable_storage_allowed: bool,
     screen_capture_allowed: bool,
     clipboard_allowed: bool,
@@ -501,20 +509,20 @@ pub const PolicyObject = struct {
     signature: manifest.Signature,
 
     pub fn labelSlice(self: *const PolicyObject) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn allowsInstallSource(self: *const PolicyObject, source_identity: []const u8) bool {
         return switch (self.install_source_mode) {
             .any_signed => true,
             .trusted_sources => listContains(
-                self.allowed_install_sources[0..self.allowed_install_source_count],
-                self.allowed_install_source_lens[0..self.allowed_install_source_count],
+                self.allowed_install_sources[0..@as(usize, self.allowed_install_source_count)],
+                self.allowed_install_source_lens[0..@as(usize, self.allowed_install_source_count)],
                 source_identity,
             ),
             .platform_store_only => std.mem.startsWith(u8, source_identity, "store:") or listContains(
-                self.allowed_install_sources[0..self.allowed_install_source_count],
-                self.allowed_install_source_lens[0..self.allowed_install_source_count],
+                self.allowed_install_sources[0..@as(usize, self.allowed_install_source_count)],
+                self.allowed_install_source_lens[0..@as(usize, self.allowed_install_source_count)],
                 source_identity,
             ),
         };
@@ -542,8 +550,8 @@ pub const PolicyObject = struct {
             .none => false,
             .local_only => isLocalDestination(destination),
             .allow_list => listContains(
-                self.allowed_network_destinations[0..self.allowed_network_destination_count],
-                self.allowed_network_destination_lens[0..self.allowed_network_destination_count],
+                self.allowed_network_destinations[0..@as(usize, self.allowed_network_destination_count)],
+                self.allowed_network_destination_lens[0..@as(usize, self.allowed_network_destination_count)],
                 destination,
             ),
         };
@@ -558,10 +566,16 @@ pub const PolicyObject = struct {
             };
         }
         return listContains(
-            self.allowed_sync_destinations[0..self.allowed_sync_destination_count],
-            self.allowed_sync_destination_lens[0..self.allowed_sync_destination_count],
+            self.allowed_sync_destinations[0..@as(usize, self.allowed_sync_destination_count)],
+            self.allowed_sync_destination_lens[0..@as(usize, self.allowed_sync_destination_count)],
             destination,
         );
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > POLICY_OBJECT_SIZE_CEILING_BYTES) {
+            @compileError("policy object exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -578,9 +592,9 @@ pub const Error = error{
     TooManySyncDestinations,
 };
 
-fn listContains(items: []const [MAX_LABEL_BYTES]u8, lens: []const usize, needle: []const u8) bool {
+fn listContains(items: []const [MAX_LABEL_BYTES]u8, lens: []const u8, needle: []const u8) bool {
     for (items, 0..) |item, index| {
-        if (std.mem.eql(u8, item[0..lens[index]], needle)) return true;
+        if (std.mem.eql(u8, item[0..@as(usize, lens[index])], needle)) return true;
     }
     return false;
 }

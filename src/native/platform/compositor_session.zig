@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const binary_cursor = @import("binary_cursor");
@@ -9,6 +10,11 @@ const native_util = @import("../core/util.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
 const units = @import("../core/units.zig");
+const root = @import("root");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
@@ -22,7 +28,27 @@ pub const MAX_RESOURCE_BYTES: usize = 96;
 pub const MAX_WINDOW_DETAIL_BYTES: usize = 96;
 pub const MAX_PRESENTED_SURFACES: usize = MAX_WINDOWS;
 pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
+pub const COMPACT_RECORD_METADATA = true;
+pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
+pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 520;
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_712;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_720;
 const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
+const heap_backed_review_items = builtin.target.os.tag == .freestanding;
+pub const HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING = true;
+const heap_backed_surface_arena = builtin.target.os.tag == .freestanding and HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING;
+
+comptime {
+    if (MAX_REVIEW_ITEMS > std.math.maxInt(u8) or
+        MAX_TITLE_BYTES > std.math.maxInt(u8) or
+        MAX_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_REASON_BYTES > std.math.maxInt(u8) or
+        MAX_RESOURCE_BYTES > std.math.maxInt(u8) or
+        MAX_WINDOW_DETAIL_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("compositor record metadata no longer fits compact counters");
+    }
+}
 
 pub const ViewType = enum(u8) {
     document_view,
@@ -62,45 +88,51 @@ pub const WindowRecord = struct {
     visible: bool = true,
     modal: bool = true,
     workspace_id: u64 = 0,
-    bundle_id_len: usize = 0,
+    bundle_id_len: u8 = 0,
     bundle_id: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    display_name_len: usize = 0,
+    display_name_len: u8 = 0,
     display_name: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    title_len: usize = 0,
+    title_len: u8 = 0,
     title: [MAX_TITLE_BYTES]u8 = [_]u8{0} ** MAX_TITLE_BYTES,
-    detail_len: usize = 0,
+    detail_len: u8 = 0,
     detail: [MAX_WINDOW_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_WINDOW_DETAIL_BYTES,
-    item_count: usize = 0,
+    item_count: u8 = 0,
 
     pub fn bundleIdSlice(self: *const WindowRecord) []const u8 {
-        return self.bundle_id[0..self.bundle_id_len];
+        return self.bundle_id[0..@as(usize, self.bundle_id_len)];
     }
 
     pub fn displayNameSlice(self: *const WindowRecord) []const u8 {
-        return self.display_name[0..self.display_name_len];
+        return self.display_name[0..@as(usize, self.display_name_len)];
     }
 
     pub fn titleSlice(self: *const WindowRecord) []const u8 {
-        return self.title[0..self.title_len];
+        return self.title[0..@as(usize, self.title_len)];
     }
 
     pub fn detailSlice(self: *const WindowRecord) []const u8 {
-        return self.detail[0..self.detail_len];
+        return self.detail[0..@as(usize, self.detail_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > WINDOW_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("compositor window record exceeds its compact size ceiling");
+        }
     }
 };
 
 pub const ReviewItemRecord = struct {
     window_id: u64 = 0,
     kind: manifest.PermissionKind = .object_access,
-    label_len: usize = 0,
+    label_len: u8 = 0,
     label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    resource_len: usize = 0,
+    resource_len: u8 = 0,
     resource: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
-    reason_len: usize = 0,
+    reason_len: u8 = 0,
     reason: [MAX_REASON_BYTES]u8 = [_]u8{0} ** MAX_REASON_BYTES,
-    object_scope_len: usize = 0,
+    object_scope_len: u8 = 0,
     object_scope: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
-    network_path_len: usize = 0,
+    network_path_len: u8 = 0,
     network_path: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
     requested_local_only: bool = false,
     requested_lease_ticks: u64 = 0,
@@ -110,23 +142,29 @@ pub const ReviewItemRecord = struct {
     decision_lease_ticks: u64 = 0,
 
     pub fn labelSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn resourceSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.resource[0..self.resource_len];
+        return self.resource[0..@as(usize, self.resource_len)];
     }
 
     pub fn reasonSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.reason[0..self.reason_len];
+        return self.reason[0..@as(usize, self.reason_len)];
     }
 
     pub fn objectScopeSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.object_scope[0..self.object_scope_len];
+        return self.object_scope[0..@as(usize, self.object_scope_len)];
     }
 
     pub fn networkPathSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.network_path[0..self.network_path_len];
+        return self.network_path[0..@as(usize, self.network_path_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("compositor review item record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -157,6 +195,7 @@ pub const Error = error{
     MalformedPresentation,
     StalePresentation,
     PresentationConflict,
+    OutOfMemory,
 };
 
 const WINDOW_INDEX_CAPACITY: usize = MAX_WINDOWS * 2;
@@ -190,13 +229,39 @@ const SurfaceSlot = struct {
 };
 
 const WindowArena = indexed_arena.IndexedArenaWithKey(u64, WindowSlot, MAX_WINDOWS, WINDOW_INDEX_CAPACITY, windowSlotId);
-const ReviewItemArena = indexed_arena.IndexedArenaWithKey(u64, ReviewItemSlot, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY, reviewItemSlotKey);
+pub const ReviewItemArena = indexed_arena.IndexedArenaWithKey(u64, ReviewItemSlot, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY, reviewItemSlotKey);
 const SurfaceArena = indexed_arena.IndexedArenaWithKey(u64, SurfaceSlot, MAX_PRESENTED_SURFACES, SURFACE_INDEX_CAPACITY, surfaceSlotId);
+const SurfaceArenaBacking = if (heap_backed_surface_arena) ?*SurfaceArena else SurfaceArena;
 const SurfaceTaskIndex = indexed_arena.UniqueIndex(SURFACE_INDEX_CAPACITY);
 const TaskBundleIndex = indexed_arena.UniqueIndex(WINDOW_INDEX_CAPACITY);
 const TaskWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
 const ReviewerWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
-const WindowReviewItemIndex = indexed_arena.MultimapIndex(MAX_REVIEW_ITEMS, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY);
+pub const WindowReviewItemIndex = indexed_arena.MultimapIndex(MAX_REVIEW_ITEMS, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY);
+
+fn initializeSurfaceArena(surfaces: *SurfaceArena) void {
+    @memset(std.mem.asBytes(surfaces), 0);
+    surfaces.free_head = indexed_arena.reusableNoIndex(MAX_PRESENTED_SURFACES);
+}
+
+const ReviewItemBacking = struct {
+    items: ReviewItemArena = ReviewItemArena.init(),
+    item_order: [MAX_REVIEW_ITEMS]u64 = [_]u64{0} ** MAX_REVIEW_ITEMS,
+    window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
+
+    fn init() ReviewItemBacking {
+        return .{};
+    }
+
+    fn initializeAllocated(self: *ReviewItemBacking) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.items.free_head = indexed_arena.reusableNoIndex(MAX_REVIEW_ITEMS);
+        for (&self.window_review_item_index.buckets) |*bucket| bucket.* = .{};
+        for (&self.window_review_item_index.links) |*link| link.* = .{};
+        self.window_review_item_index.free_bucket_head = indexed_arena.reusableNoIndex(MAX_REVIEW_ITEMS);
+    }
+};
+
+const ReviewItemBackingStorage = if (heap_backed_review_items) ?*ReviewItemBacking else ReviewItemBacking;
 
 pub const Operation = enum(u8) {
     open_view = 1,
@@ -214,6 +279,7 @@ pub const ServiceStatus = enum(u8) {
     invalid_request = 3,
     recovery_missing = 4,
     id_exhausted = 5,
+    resource_exhausted = 6,
 };
 
 pub const ServiceRequest = struct {
@@ -266,6 +332,12 @@ pub const SessionSnapshot = struct {
     surface_task_index: SurfaceTaskIndex = SurfaceTaskIndex.init(),
     active_surface_head: u16 = NO_SURFACE_SLOT_INDEX,
     active_surface_tail: u16 = NO_SURFACE_SLOT_INDEX,
+
+    comptime {
+        if (@sizeOf(@This()) > SESSION_SNAPSHOT_SIZE_CEILING_BYTES) {
+            @compileError("compositor snapshot exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const CheckpointStore = struct {
@@ -274,6 +346,12 @@ pub const CheckpointStore = struct {
 
     pub fn reset(self: *CheckpointStore) void {
         self.* = .{};
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > CHECKPOINT_STORE_SIZE_CEILING_BYTES) {
+            @compileError("compositor checkpoint store exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -284,14 +362,12 @@ pub const Session = struct {
     window_order: [MAX_WINDOWS]u64 = [_]u64{0} ** MAX_WINDOWS,
     window_count: usize = 0,
     visible_window_count: usize = 0,
-    items: ReviewItemArena = ReviewItemArena.init(),
-    item_order: [MAX_REVIEW_ITEMS]u64 = [_]u64{0} ** MAX_REVIEW_ITEMS,
+    review_items: ReviewItemBackingStorage = if (heap_backed_review_items) null else ReviewItemBacking.init(),
     item_count: usize = 0,
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
     reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
-    window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
-    surfaces: SurfaceArena = SurfaceArena.init(),
+    surfaces: SurfaceArenaBacking = if (heap_backed_surface_arena) null else SurfaceArena.init(),
     surface_task_index: SurfaceTaskIndex = SurfaceTaskIndex.init(),
     active_surface_head: u16 = NO_SURFACE_SLOT_INDEX,
     active_surface_tail: u16 = NO_SURFACE_SLOT_INDEX,
@@ -301,8 +377,89 @@ pub const Session = struct {
         return .{};
     }
 
+    comptime {
+        if ((heap_backed_review_items or heap_backed_surface_arena) and @sizeOf(@This()) > 5 * 1024) {
+            @compileError("heap-backed compositor sessions exceed their compact resident layout");
+        }
+    }
+
+    pub fn deinit(self: *Session) void {
+        self.releaseReviewItems();
+        self.releaseSurfaceArena();
+        self.item_count = 0;
+    }
+
     pub fn reset(self: *Session) void {
+        self.deinit();
         self.* = init();
+    }
+
+    fn reviewItemsPtr(self: *Session) ?*ReviewItemBacking {
+        if (comptime heap_backed_review_items) return self.review_items;
+        return &self.review_items;
+    }
+
+    fn reviewItemsConst(self: *const Session) ?*const ReviewItemBacking {
+        if (comptime heap_backed_review_items) return self.review_items;
+        return &self.review_items;
+    }
+
+    fn ensureReviewItems(self: *Session) error{OutOfMemory}!*ReviewItemBacking {
+        if (self.reviewItemsPtr()) |review_items| return review_items;
+        if (comptime heap_backed_review_items) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(ReviewItemBacking)) orelse return error.OutOfMemory;
+            const review_items: *ReviewItemBacking = @ptrCast(@alignCast(allocation));
+            review_items.initializeAllocated();
+            self.review_items = review_items;
+            return review_items;
+        }
+        return &self.review_items;
+    }
+
+    fn releaseReviewItems(self: *Session) void {
+        if (comptime heap_backed_review_items) {
+            if (self.review_items) |review_items| {
+                @memset(std.mem.asBytes(review_items), 0);
+                kernel_memory.kfree(@ptrCast(review_items));
+                self.review_items = null;
+            }
+        } else {
+            self.review_items = ReviewItemBacking.init();
+        }
+    }
+
+    fn surfaceArena(self: *Session) ?*SurfaceArena {
+        if (comptime heap_backed_surface_arena) return self.surfaces;
+        return &self.surfaces;
+    }
+
+    fn surfaceArenaConst(self: *const Session) ?*const SurfaceArena {
+        if (comptime heap_backed_surface_arena) return self.surfaces;
+        return &self.surfaces;
+    }
+
+    fn ensureSurfaceArena(self: *Session) error{OutOfMemory}!*SurfaceArena {
+        if (self.surfaceArena()) |surfaces| return surfaces;
+        if (comptime heap_backed_surface_arena) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(SurfaceArena)) orelse return error.OutOfMemory;
+            const surfaces: *SurfaceArena = @ptrCast(@alignCast(allocation));
+            initializeSurfaceArena(surfaces);
+            self.surfaces = surfaces;
+            return surfaces;
+        }
+        return &self.surfaces;
+    }
+
+    fn releaseSurfaceArena(self: *Session) void {
+        if (comptime heap_backed_surface_arena) {
+            if (self.surfaces) |surfaces| {
+                @memset(std.mem.asBytes(surfaces), 0);
+                kernel_memory.kfree(@ptrCast(surfaces));
+                self.surfaces = null;
+            }
+        } else {
+            self.surfaces = SurfaceArena.init();
+        }
     }
 
     pub fn beginPermissionReview(
@@ -323,11 +480,11 @@ pub const Session = struct {
         window.view_type = .app_panel;
         window.visible = true;
         window.modal = true;
-        window.bundle_id_len = copyText(&window.bundle_id, bundle.bundle_id);
-        window.display_name_len = copyText(&window.display_name, bundle.display_name);
+        window.bundle_id_len = @intCast(copyText(&window.bundle_id, bundle.bundle_id));
+        window.display_name_len = @intCast(copyText(&window.display_name, bundle.display_name));
         const title = std.fmt.bufPrint(&window.title, "{s} permission review", .{bundle.display_name}) catch
             window.title[0..copyText(&window.title, bundle.display_name)];
-        window.title_len = title.len;
+        window.title_len = @intCast(title.len);
         self.indexWindowForTaskBundle(window);
         self.indexWindowForTask(window);
         self.indexWindowForReviewer(window);
@@ -380,24 +537,25 @@ pub const Session = struct {
             return item;
         }
         const window = self.findWindow(window_id) orelse return error.WindowNotFound;
+        const review_items = try self.ensureReviewItems();
 
         const key = reviewItemKey(window_id, request.kind, request.resource);
-        const slot_index = self.items.reserveIndex(key) orelse return error.ReviewItemTableFull;
-        const slot = &self.items.slots[slot_index];
+        const slot_index = review_items.items.reserveIndex(key) orelse return error.ReviewItemTableFull;
+        const slot = &review_items.items.slots[slot_index];
         slot.key = key;
         const item = &slot.item;
         item.* = zeroItem();
         item.window_id = window_id;
         item.kind = request.kind;
-        item.label_len = copyText(&item.label, manifest.permissionDisplayLabel(request.kind));
-        item.resource_len = copyText(&item.resource, request.resource);
-        item.reason_len = deriveReason(&item.reason, bundle, request);
-        item.object_scope_len = deriveObjectScope(&item.object_scope, request);
-        item.network_path_len = deriveNetworkPath(&item.network_path, request);
+        item.label_len = @intCast(copyText(&item.label, manifest.permissionDisplayLabel(request.kind)));
+        item.resource_len = @intCast(copyText(&item.resource, request.resource));
+        item.reason_len = @intCast(deriveReason(&item.reason, bundle, request));
+        item.object_scope_len = @intCast(deriveObjectScope(&item.object_scope, request));
+        item.network_path_len = @intCast(deriveNetworkPath(&item.network_path, request));
         item.requested_local_only = request.local_only;
         item.requested_lease_ticks = request.max_lease_ticks;
         self.indexReviewItemForWindow(slot_index, item);
-        self.item_order[self.item_count] = key;
+        review_items.item_order[self.item_count] = key;
         self.item_count += 1;
         window.item_count += 1;
         return item;
@@ -427,29 +585,32 @@ pub const Session = struct {
         if (task.id == 0 or task.state != .active or !abi.isCanonicalSurfacePresentation(presentation)) return error.MalformedPresentation;
         if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.InvalidSurface;
 
-        if (self.surfaces.get(presentation.surface_id)) |slot| {
-            if (slot.surface.task_id != task.id) return error.InvalidSurface;
-            const slot_index = self.surfaces.slotIndexOf(presentation.surface_id) orelse
-                native_util.impossibleByInvariant("presented surface remains indexed by surface id");
-            if (self.surface_task_index.lookup(surfaceTaskKey(task.id)) != slot_index) {
-                native_util.impossibleByInvariant("presented surface task index points at the matching slot");
+        if (self.surfaceArena()) |surfaces| {
+            if (surfaces.get(presentation.surface_id)) |slot| {
+                if (slot.surface.task_id != task.id) return error.InvalidSurface;
+                const slot_index = surfaces.slotIndexOf(presentation.surface_id) orelse
+                    native_util.impossibleByInvariant("presented surface remains indexed by surface id");
+                if (self.surface_task_index.lookup(surfaceTaskKey(task.id)) != slot_index) {
+                    native_util.impossibleByInvariant("presented surface task index points at the matching slot");
+                }
+                const previous_revision = slot.surface.presentation.revision;
+                if (presentation.revision < previous_revision) return error.StalePresentation;
+                if (presentation.revision == previous_revision) {
+                    if (std.meta.eql(slot.surface.presentation, presentation.*)) return .duplicate;
+                    return error.PresentationConflict;
+                }
+                slot.surface.presentation = presentation.*;
+                slot.surface.presentation_count +|= 1;
+                return .accepted;
             }
-            const previous_revision = slot.surface.presentation.revision;
-            if (presentation.revision < previous_revision) return error.StalePresentation;
-            if (presentation.revision == previous_revision) {
-                if (std.meta.eql(slot.surface.presentation, presentation.*)) return .duplicate;
-                return error.PresentationConflict;
-            }
-            slot.surface.presentation = presentation.*;
-            slot.surface.presentation_count +|= 1;
-            return .accepted;
         }
 
         if (self.surface_task_index.lookup(surfaceTaskKey(task.id)) != null) {
             native_util.impossibleByInvariant("active task owns at most one presented surface");
         }
-        const slot_index = self.surfaces.reserveIndex(presentation.surface_id) orelse return error.SurfaceTableFull;
-        self.surfaces.slots[slot_index].surface = .{
+        const surfaces = try self.ensureSurfaceArena();
+        const slot_index = surfaces.reserveIndex(presentation.surface_id) orelse return error.SurfaceTableFull;
+        surfaces.slots[slot_index].surface = .{
             .task_id = task.id,
             .presentation_count = 1,
             .presentation = presentation.*,
@@ -460,23 +621,29 @@ pub const Session = struct {
     }
 
     pub fn surfacePresentation(self: *const Session, surface_id: u64) ?*const SurfaceRecord {
-        const slot = self.surfaces.getConst(surface_id) orelse return null;
+        const surfaces = self.surfaceArenaConst() orelse return null;
+        const slot = surfaces.getConst(surface_id) orelse return null;
         return &slot.surface;
     }
 
     pub fn presentedSurfaceCount(self: *const Session) usize {
-        return self.surfaces.countInUse();
+        const surfaces = self.surfaceArenaConst() orelse return 0;
+        return surfaces.countInUse();
     }
 
     pub fn pruneSurfacePresentations(self: *Session, runtime: *const task_runtime.Runtime) usize {
         const lifecycle_generation = runtime.taskLifecycleGeneration();
         if (self.last_surface_prune_generation == lifecycle_generation) return 0;
+        const surfaces = self.surfaceArena() orelse {
+            self.last_surface_prune_generation = lifecycle_generation;
+            return 0;
+        };
 
         var removed: usize = 0;
         var index: usize = self.active_surface_head;
         while (index != NO_SURFACE_SLOT_INDEX) {
             if (index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface chain points outside slots");
-            const slot = &self.surfaces.slots[index];
+            const slot = &surfaces.slots[index];
             if (!slot.in_use) native_util.impossibleByInvariant("active surface chain points at a free slot");
             const next_index = slot.next_active_index;
             const task = runtime.findConst(slot.surface.task_id) orelse {
@@ -549,8 +716,9 @@ pub const Session = struct {
         kind: manifest.PermissionKind,
         resource: []const u8,
     ) ?*ReviewItemRecord {
+        const review_items = self.reviewItemsPtr() orelse return null;
         const key = reviewItemKey(window_id, kind, resource);
-        const slot = self.items.get(key) orelse return null;
+        const slot = review_items.items.get(key) orelse return null;
         if (!reviewItemMatches(.{ .window_id = window_id, .kind = kind, .resource = resource }, slot)) return null;
         return &slot.item;
     }
@@ -561,8 +729,9 @@ pub const Session = struct {
         kind: manifest.PermissionKind,
         resource: []const u8,
     ) ?*const ReviewItemRecord {
+        const review_items = self.reviewItemsConst() orelse return null;
         const key = reviewItemKey(window_id, kind, resource);
-        const slot = self.items.getConst(key) orelse return null;
+        const slot = review_items.items.getConst(key) orelse return null;
         if (!reviewItemMatches(.{ .window_id = window_id, .kind = kind, .resource = resource }, slot)) return null;
         return &slot.item;
     }
@@ -578,7 +747,9 @@ pub const Session = struct {
 
     pub fn itemAtOrder(self: *const Session, index: usize) ?*const ReviewItemRecord {
         if (index >= self.item_count) return null;
-        const slot = self.items.getConst(self.item_order[index]) orelse return null;
+        const review_items = self.reviewItemsConst() orelse
+            native_util.impossibleByInvariant("non-empty compositor review order retains backing");
+        const slot = review_items.items.getConst(review_items.item_order[index]) orelse return null;
         return &slot.item;
     }
 
@@ -662,46 +833,72 @@ pub const Session = struct {
     }
 
     pub fn snapshot(self: *const Session) SessionSnapshot {
-        return .{
+        var stored: SessionSnapshot = undefined;
+        stored = .{
             .next_window_id = self.next_window_id,
             .active_window_id = self.active_window_id,
             .windows = self.windows,
             .window_order = self.window_order,
             .window_count = self.window_count,
             .visible_window_count = self.visible_window_count,
-            .items = self.items,
-            .item_order = self.item_order,
+            .items = undefined,
+            .item_order = undefined,
             .item_count = self.item_count,
             .task_bundle_index = self.task_bundle_index,
             .task_window_index = self.task_window_index,
             .reviewer_window_index = self.reviewer_window_index,
-            .window_review_item_index = self.window_review_item_index,
-            .surfaces = self.surfaces,
+            .window_review_item_index = undefined,
+            .surfaces = if (self.surfaceArenaConst()) |surfaces| surfaces.* else SurfaceArena.init(),
             .surface_task_index = self.surface_task_index,
             .active_surface_head = self.active_surface_head,
             .active_surface_tail = self.active_surface_tail,
         };
+        @memset(std.mem.asBytes(&stored.items), 0);
+        @memset(&stored.item_order, 0);
+        @memset(std.mem.asBytes(&stored.window_review_item_index), 0);
+        if (self.reviewItemsConst()) |review_items| {
+            stored.items = review_items.items;
+            stored.item_order = review_items.item_order;
+            stored.window_review_item_index = review_items.window_review_item_index;
+        } else if (self.item_count != 0) {
+            native_util.impossibleByInvariant("non-empty compositor review state retains backing");
+        }
+        return stored;
     }
 
-    pub fn restore(self: *Session, stored: SessionSnapshot) void {
+    pub fn restore(self: *Session, stored: SessionSnapshot) Error!void {
+        const retained_review_items = self.reviewItemsPtr() != null;
+        const review_items = if (stored.item_count == 0) null else try self.ensureReviewItems();
+        errdefer if (!retained_review_items and review_items != null) self.releaseReviewItems();
+        const retained_surfaces = self.surfaceArena() != null;
+        const surfaces = if (stored.surfaces.claimedCount() == 0) null else try self.ensureSurfaceArena();
+        errdefer if (!retained_surfaces and surfaces != null) self.releaseSurfaceArena();
         self.next_window_id = stored.next_window_id;
         self.active_window_id = stored.active_window_id;
         self.windows = stored.windows;
         self.window_order = stored.window_order;
         self.window_count = stored.window_count;
         self.visible_window_count = stored.visible_window_count;
-        self.items = stored.items;
-        self.item_order = stored.item_order;
         self.item_count = stored.item_count;
         self.task_bundle_index = stored.task_bundle_index;
         self.task_window_index = stored.task_window_index;
         self.reviewer_window_index = stored.reviewer_window_index;
-        self.window_review_item_index = stored.window_review_item_index;
-        self.surfaces = stored.surfaces;
         self.surface_task_index = stored.surface_task_index;
         self.active_surface_head = stored.active_surface_head;
         self.active_surface_tail = stored.active_surface_tail;
         self.last_surface_prune_generation = 0;
+        if (review_items) |items| {
+            items.items = stored.items;
+            items.item_order = stored.item_order;
+            items.window_review_item_index = stored.window_review_item_index;
+        } else {
+            self.releaseReviewItems();
+        }
+        if (surfaces) |surface_arena| {
+            surface_arena.* = stored.surfaces;
+        } else {
+            self.releaseSurfaceArena();
+        }
     }
 
     fn createWindow(
@@ -723,10 +920,10 @@ pub const Session = struct {
         window.visible = true;
         window.modal = modal;
         window.workspace_id = workspace_id;
-        window.bundle_id_len = copyText(&window.bundle_id, bundle_id);
-        window.display_name_len = copyText(&window.display_name, display_name);
-        window.title_len = deriveWindowTitle(&window.title, title_prefix, detail);
-        window.detail_len = copyText(&window.detail, detail);
+        window.bundle_id_len = @intCast(copyText(&window.bundle_id, bundle_id));
+        window.display_name_len = @intCast(copyText(&window.display_name, display_name));
+        window.title_len = @intCast(deriveWindowTitle(&window.title, title_prefix, detail));
+        window.detail_len = @intCast(copyText(&window.detail, detail));
         self.indexWindowForTask(window);
         self.active_window_id = window.id;
         return window;
@@ -805,15 +1002,19 @@ pub const Session = struct {
     fn removeSurfacesForTask(self: *Session, task_id: u64) void {
         if (task_id == 0) return;
         const slot_index = self.surface_task_index.lookup(surfaceTaskKey(task_id)) orelse return;
+        const surfaces = self.surfaceArena() orelse
+            native_util.impossibleByInvariant("indexed compositor surfaces retain arena backing");
         if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("surface task index points outside slots");
-        const slot = &self.surfaces.slots[slot_index];
+        const slot = &surfaces.slots[slot_index];
         if (!slot.in_use or slot.surface.task_id != task_id) native_util.impossibleByInvariant("surface task index points at the wrong task");
         if (!self.removeSurfaceSlot(slot_index)) native_util.impossibleByInvariant("task-owned surface remains live until task teardown");
     }
 
     fn linkActiveSurface(self: *Session, slot_index: usize) void {
+        const surfaces = self.surfaceArena() orelse
+            native_util.impossibleByInvariant("active compositor surfaces retain arena backing");
         if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface append points outside slots");
-        const slot = &self.surfaces.slots[slot_index];
+        const slot = &surfaces.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("active surface append requires a live slot");
         const encoded_index: u16 = @intCast(slot_index);
         slot.previous_active_index = self.active_surface_tail;
@@ -822,14 +1023,16 @@ pub const Session = struct {
             self.active_surface_head = encoded_index;
         } else {
             if (self.active_surface_tail >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface tail points outside slots");
-            self.surfaces.slots[self.active_surface_tail].next_active_index = encoded_index;
+            surfaces.slots[self.active_surface_tail].next_active_index = encoded_index;
         }
         self.active_surface_tail = encoded_index;
     }
 
     fn unlinkActiveSurface(self: *Session, slot_index: usize) void {
+        const surfaces = self.surfaceArena() orelse
+            native_util.impossibleByInvariant("active compositor surfaces retain arena backing");
         if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface unlink points outside slots");
-        const slot = &self.surfaces.slots[slot_index];
+        const slot = &surfaces.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("active surface unlink requires a live slot");
         const previous = slot.previous_active_index;
         const next = slot.next_active_index;
@@ -838,22 +1041,23 @@ pub const Session = struct {
             self.active_surface_head = next;
         } else {
             if (previous >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface previous link points outside slots");
-            self.surfaces.slots[previous].next_active_index = next;
+            surfaces.slots[previous].next_active_index = next;
         }
         if (next == NO_SURFACE_SLOT_INDEX) {
             if (self.active_surface_tail != slot_index) native_util.impossibleByInvariant("active surface tail matches its final link");
             self.active_surface_tail = previous;
         } else {
             if (next >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface next link points outside slots");
-            self.surfaces.slots[next].previous_active_index = previous;
+            surfaces.slots[next].previous_active_index = previous;
         }
         slot.previous_active_index = NO_SURFACE_SLOT_INDEX;
         slot.next_active_index = NO_SURFACE_SLOT_INDEX;
     }
 
     fn removeSurfaceSlot(self: *Session, slot_index: usize) bool {
+        const surfaces = self.surfaceArena() orelse return false;
         if (slot_index >= MAX_PRESENTED_SURFACES) return false;
-        const slot = &self.surfaces.slots[slot_index];
+        const slot = &surfaces.slots[slot_index];
         if (!slot.in_use) return false;
         const task_key = surfaceTaskKey(slot.surface.task_id);
         if (self.surface_task_index.lookup(task_key) != slot_index) {
@@ -861,7 +1065,7 @@ pub const Session = struct {
         }
         self.surface_task_index.remove(task_key);
         self.unlinkActiveSurface(slot_index);
-        return self.surfaces.removeIndex(slot_index);
+        return surfaces.removeIndex(slot_index);
     }
 
     fn closeWindowSlot(self: *Session, slot_index: usize) bool {
@@ -884,11 +1088,14 @@ pub const Session = struct {
     }
 
     fn removeReviewItemsForWindow(self: *Session, window_id: u64) void {
-        var slot_index = self.window_review_item_index.head(windowReviewItemKey(window_id));
+        if (self.item_count == 0) return;
+        const review_items = self.reviewItemsPtr() orelse
+            native_util.impossibleByInvariant("non-empty compositor review state retains backing");
+        var slot_index = review_items.window_review_item_index.head(windowReviewItemKey(window_id));
         while (slot_index != indexed_arena.no_index) {
-            const next_slot_index = self.window_review_item_index.next(slot_index);
+            const next_slot_index = review_items.window_review_item_index.next(slot_index);
             if (slot_index >= MAX_REVIEW_ITEMS) native_util.impossibleByInvariant("window review-item index points outside review item slots");
-            const slot = &self.items.slots[slot_index];
+            const slot = &review_items.items.slots[slot_index];
             if (!slot.in_use) native_util.impossibleByInvariant("window review-item index points at a free review item slot");
             if (slot.item.window_id != window_id) native_util.impossibleByInvariant("window review-item index points at the wrong window");
             self.removeReviewItemSlot(slot_index);
@@ -897,21 +1104,24 @@ pub const Session = struct {
     }
 
     fn indexReviewItemForWindow(self: *Session, slot_index: usize, item: *const ReviewItemRecord) void {
-        if (!self.window_review_item_index.append(windowReviewItemKey(item.window_id), slot_index)) {
+        const review_items = self.reviewItemsPtr() orelse
+            native_util.impossibleByInvariant("indexed compositor review items retain backing");
+        if (!review_items.window_review_item_index.append(windowReviewItemKey(item.window_id), slot_index)) {
             native_util.impossibleByInvariant("window review-item index capacity covers review item slots");
         }
     }
 
     fn removeReviewItemSlot(self: *Session, slot_index: usize) void {
         if (slot_index >= MAX_REVIEW_ITEMS) return;
-        const slot = &self.items.slots[slot_index];
+        const review_items = self.reviewItemsPtr() orelse return;
+        const slot = &review_items.items.slots[slot_index];
         if (!slot.in_use) return;
         const key = slot.key;
         const window_id = slot.item.window_id;
-        if (!self.window_review_item_index.remove(windowReviewItemKey(window_id), slot_index)) {
+        if (!review_items.window_review_item_index.remove(windowReviewItemKey(window_id), slot_index)) {
             native_util.impossibleByInvariant("window review-item index missing live item");
         }
-        _ = self.items.removeIndex(slot_index);
+        _ = review_items.items.removeIndex(slot_index);
         self.removeItemOrderByKey(key);
     }
 
@@ -936,18 +1146,22 @@ pub const Session = struct {
 
     fn removeItemOrderAt(self: *Session, order_index: usize) void {
         if (order_index >= self.item_count) return;
+        const review_items = self.reviewItemsPtr() orelse
+            native_util.impossibleByInvariant("non-empty compositor review order retains backing");
         var index = order_index;
         while (index + 1 < self.item_count) : (index += 1) {
-            self.item_order[index] = self.item_order[index + 1];
+            review_items.item_order[index] = review_items.item_order[index + 1];
         }
         self.item_count -= 1;
-        self.item_order[self.item_count] = 0;
+        review_items.item_order[self.item_count] = 0;
+        if (self.item_count == 0) self.releaseReviewItems();
     }
 
     fn removeItemOrderByKey(self: *Session, key: u64) void {
+        const review_items = self.reviewItemsPtr() orelse return;
         var order_index: usize = 0;
         while (order_index < self.item_count) : (order_index += 1) {
-            if (self.item_order[order_index] == key) {
+            if (review_items.item_order[order_index] == key) {
                 self.removeItemOrderAt(order_index);
                 return;
             }
@@ -1079,7 +1293,7 @@ pub const Service = struct {
             .recover_state => {
                 const store = self.checkpoint_store orelse return error.RecoveryStateMissing;
                 if (!store.valid) return error.RecoveryStateMissing;
-                self.session.restore(store.snapshot);
+                try self.session.restore(store.snapshot);
                 response.recovered = true;
             },
             .close_task_windows => {
@@ -1376,6 +1590,7 @@ fn statusForError(err: Error) ServiceStatus {
         error.WindowNotFound, error.ReviewItemNotFound, error.TaskNotFound => .not_found,
         error.WindowTableFull, error.ReviewItemTableFull, error.SurfaceTableFull => .table_full,
         error.RecoveryStateMissing => .recovery_missing,
+        error.OutOfMemory => .resource_exhausted,
         error.InvalidSurface, error.MalformedRequest, error.MalformedPresentation, error.StalePresentation, error.PresentationConflict, error.RequestTooLarge, error.ResponseTooLarge, error.NoVisibleWindows => .invalid_request,
     };
 }
@@ -1518,6 +1733,62 @@ const TEST_REVIEW_HEADER_BUFFER_BYTES: usize = 256;
 const TEST_REVIEW_ITEM_BUFFER_BYTES: usize = 512;
 const TEST_REVIEW_DECISION_BUFFER_BYTES: usize = 256;
 const TEST_COMPACT_RENDER_BUFFER_BYTES: usize = 320;
+
+test "compositor compact record metadata preserves exact text capacities" {
+    const long_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
+    const long_resource = [_]u8{'r'} ** (MAX_RESOURCE_BYTES + 1);
+    const long_reason = [_]u8{'d'} ** (MAX_REASON_BYTES + 1);
+
+    var window = zeroWindow();
+    window.bundle_id_len = @intCast(copyText(&window.bundle_id, &long_label));
+    window.display_name_len = @intCast(copyText(&window.display_name, &long_label));
+    window.title_len = @intCast(copyText(&window.title, &long_label));
+    window.detail_len = @intCast(copyText(&window.detail, &long_resource));
+    window.item_count = @intCast(MAX_REVIEW_ITEMS);
+    try std.testing.expectEqual(@as(usize, MAX_LABEL_BYTES), window.bundleIdSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_LABEL_BYTES), window.displayNameSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_TITLE_BYTES), window.titleSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_WINDOW_DETAIL_BYTES), window.detailSlice().len);
+    try std.testing.expectEqual(@as(u8, MAX_REVIEW_ITEMS), window.item_count);
+
+    var item = zeroItem();
+    item.label_len = @intCast(copyText(&item.label, &long_label));
+    item.resource_len = @intCast(copyText(&item.resource, &long_resource));
+    item.reason_len = @intCast(copyText(&item.reason, &long_reason));
+    item.object_scope_len = @intCast(copyText(&item.object_scope, &long_resource));
+    item.network_path_len = @intCast(copyText(&item.network_path, &long_resource));
+    try std.testing.expectEqual(@as(usize, MAX_LABEL_BYTES), item.labelSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.resourceSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_REASON_BYTES), item.reasonSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.objectScopeSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.networkPathSlice().len);
+}
+
+test "allocated compositor review backing initializes its arena order and index" {
+    var review_items: ReviewItemBacking = undefined;
+    review_items.initializeAllocated();
+
+    try std.testing.expectEqual(@as(usize, 0), review_items.items.countInUse());
+    try std.testing.expectEqual(@as(u64, 0), review_items.item_order[0]);
+
+    const slot_index = review_items.items.reserveIndex(7).?;
+    try std.testing.expectEqual(@as(usize, 0), slot_index);
+    try std.testing.expect(review_items.window_review_item_index.append(11, slot_index));
+    try std.testing.expectEqual(@as(usize, 1), review_items.window_review_item_index.count(11));
+    try std.testing.expect(review_items.window_review_item_index.remove(11, slot_index));
+    try std.testing.expect(review_items.items.removeIndex(slot_index));
+}
+
+test "allocated compositor surface arena preserves empty and reusable slot invariants" {
+    var surfaces: SurfaceArena = undefined;
+    initializeSurfaceArena(&surfaces);
+
+    try std.testing.expectEqual(@as(usize, 0), surfaces.countInUse());
+    const slot_index = surfaces.reserveIndex(7).?;
+    try std.testing.expectEqual(@as(usize, 0), slot_index);
+    try std.testing.expect(surfaces.removeIndex(slot_index));
+    try std.testing.expectEqual(slot_index, surfaces.reserveIndex(8).?);
+}
 
 test "compositor service wire protocol opens switches reviews decides and recovers" {
     var runtime = task_runtime.Runtime.init();
@@ -1704,7 +1975,7 @@ test "compositor task window index survives restore and closes only matching tas
 
     const snapshot = session.snapshot();
     var restored = Session.init();
-    restored.restore(snapshot);
+    try restored.restore(snapshot);
     try std.testing.expect(restored.taskOwnsVisibleWindow(first_task.id));
     try std.testing.expect(restored.taskOwnsVisibleWindow(77));
 
@@ -1768,7 +2039,7 @@ test "compositor window order indexes saturated switching removal and restore" {
 
     const snapshot = session.snapshot();
     var restored = Session.init();
-    restored.restore(snapshot);
+    try restored.restore(snapshot);
     try std.testing.expectEqual(@as(?usize, MAX_WINDOWS - 1), restored.activeWindowOrderIndex());
     for (window_ids, 0..) |window_id, order_index| {
         try std.testing.expectEqual(window_id, restored.windowAtOrder(order_index).?.id);
@@ -2075,7 +2346,7 @@ test "compositor session opens document workspace and full-screen task views" {
 
     const snapshot = session.snapshot();
     var restored = Session.init();
-    restored.restore(snapshot);
+    try restored.restore(snapshot);
     try std.testing.expectEqual(@as(usize, 3), restored.window_count);
     try std.testing.expectEqual(@as(usize, 3), restored.visibleWindowCount());
 
@@ -2119,10 +2390,11 @@ test "compositor window ids stop at exhaustion" {
     try std.testing.expectEqual(@as(usize, 1), session.window_count);
     try std.testing.expect(session.findWindowConst(0) == null);
     try std.testing.expectEqual(ServiceStatus.id_exhausted, statusForError(error.WindowIdExhausted));
+    try std.testing.expectEqual(ServiceStatus.resource_exhausted, statusForError(error.OutOfMemory));
 
     const snapshot = session.snapshot();
     var restored = Session.init();
-    restored.restore(snapshot);
+    try restored.restore(snapshot);
     try std.testing.expectEqual(@as(u64, 0), restored.next_window_id);
     try std.testing.expectError(error.WindowIdExhausted, restored.openTaskView(app_task, "Final Task"));
 }
@@ -2168,7 +2440,7 @@ test "compositor session owns bounded monotonic surface presentations" {
 
     const snapshot = session.snapshot();
     var restored = Session.init();
-    restored.restore(snapshot);
+    try restored.restore(snapshot);
     try std.testing.expectEqualStrings("draft!", restored.surfacePresentation(71).?.textSlice());
     try std.testing.expectEqual(@as(?usize, surface_slot_index), restored.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), restored.active_surface_head);
@@ -2224,7 +2496,7 @@ test "compositor surface pruning caches unchanged task lifecycle generations" {
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(runtime.find(app_task_id).?, &presentation));
     try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
     const snapshot = session.snapshot();
-    session.restore(snapshot);
+    try session.restore(snapshot);
     try std.testing.expectEqual(@as(u64, 0), session.last_surface_prune_generation);
     try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
 
@@ -2284,7 +2556,7 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
 
     const snapshot = session.snapshot();
     var restored = Session.init();
-    restored.restore(snapshot);
+    try restored.restore(snapshot);
     try std.testing.expect(try runtime.terminateTask(task_ids[1], 101));
     try std.testing.expect(try runtime.terminateTask(task_ids[MAX_PRESENTED_SURFACES - 2], 102));
     try std.testing.expectEqual(@as(usize, 2), restored.pruneSurfacePresentations(&runtime));
