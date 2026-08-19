@@ -84,15 +84,28 @@ install_macos() {
 }
 
 install_apt() {
-  local s
+  local s source
+  local -a apt_options=(
+    -o Acquire::Retries=4
+    -o Acquire::http::Timeout=30
+    -o Acquire::https::Timeout=30
+    -o Acquire::ForceIPv4=true
+  )
   s="$(sudo_cmd)"
 
   log "Installing dependencies with apt..."
-  ${s} apt-get update
-  ${s} apt-get install -y nasm qemu-system-x86 ovmf grub-common grub-efi-amd64-bin dosfstools xorriso mtools
+  if [ -f /etc/apt/apt-mirrors.txt ]; then
+    ${s} sed -i '\|azure.archive.ubuntu.com|d' /etc/apt/apt-mirrors.txt
+  fi
+  for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+    [ -f "${source}" ] || continue
+    ${s} sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "${source}"
+  done
+  ${s} apt-get "${apt_options[@]}" update
+  ${s} apt-get "${apt_options[@]}" install -y nasm qemu-system-x86 ovmf grub-common grub-efi-amd64-bin dosfstools xorriso mtools
 
   if ! have_cmd zig; then
-    if ! ${s} apt-get install -y zig; then
+    if ! ${s} apt-get "${apt_options[@]}" install -y zig; then
       log "Could not install Zig from apt on this distro. Install Zig 0.16.0 exactly from https://ziglang.org/download/ or use mise."
     fi
   fi
