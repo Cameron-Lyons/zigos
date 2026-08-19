@@ -48,6 +48,7 @@ pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = session_contexts.HEAP_B
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
+pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
 const NETWORK_RECEIVE_SERVICE_BUDGET: usize = 8;
 
@@ -115,7 +116,7 @@ pub const SessionManager = struct {
         self.kernel_context.releaseCapabilityTable();
         self.recovery_context.review_compositor_session.deinit();
         self.recovery_context.diagnostic_ledger.deinit();
-        self.service_graph_builder.package_service_instance.deinit();
+        self.service_graph_builder.releasePackageService();
         self.native_store.resetPersistent();
         self.* = SessionManager.init();
         bootstrap_driver_port.reset();
@@ -210,7 +211,8 @@ pub const SessionManager = struct {
     }
 
     pub fn packageServicePtr(self: *SessionManager) *package_service.Service {
-        return &self.service_graph_builder.package_service_instance;
+        return self.service_graph_builder.ensurePackageService() catch
+            native_util.impossibleByInvariant("package service access requires allocated service-graph state");
     }
 
     pub fn reviewUxControllerPtr(self: *SessionManager) *native_ux.Controller {
@@ -516,6 +518,10 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         };
+        _ = self.service_graph_builder.ensurePackageService() catch {
+            self.failBoot();
+            return null;
+        };
 
         const env = self.service_graph_builder.environment(
             &self.runtime_context,
@@ -526,7 +532,7 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         };
-        self.service_graph_builder.package_service_instance.bind(
+        self.packageServicePtr().bind(
             state.services.package_service.id,
             state.ids.package_service,
         );
@@ -998,7 +1004,7 @@ fn presentSurfaceForKernel(
     const session: *compositor_session.Session = @ptrCast(@alignCast(context));
     return switch (session.presentSurface(task, presentation) catch |err| switch (err) {
         error.StalePresentation, error.PresentationConflict => return .stale,
-        error.SurfaceTableFull => return .full,
+        error.SurfaceTableFull, error.OutOfMemory => return .full,
         else => return .invalid_surface,
     }) {
         .accepted => .accepted,
