@@ -588,16 +588,17 @@ pub const TrustBoot = struct {
         for (&self.service_directory.registry.bindings.slots) |*slot| {
             if (!slot.in_use) continue;
             const binding = &slot.binding;
+            const contract = binding.typedContract();
             crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);
             crypto_hash.updateInt(&hasher, "registry-owner-task-id", binding.owner_task_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-id", binding.endpoint_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-capability-id", binding.endpoint_capability_id);
-            crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(binding.interface_id));
-            crypto_hash.updateBytes(&hasher, "registry-interface-name", binding.interface.name);
-            crypto_hash.updateInt(&hasher, "registry-version-major", binding.interface.version_major);
-            crypto_hash.updateInt(&hasher, "registry-version-minor", binding.interface.version_minor);
+            crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(binding.interfaceId()));
+            crypto_hash.updateBytes(&hasher, "registry-interface-name", contract.interface.name);
+            crypto_hash.updateInt(&hasher, "registry-version-major", binding.version_major);
+            crypto_hash.updateInt(&hasher, "registry-version-minor", binding.version_minor);
             crypto_hash.updateInt(&hasher, "registry-flags", binding.flags);
-            crypto_hash.updateInt(&hasher, "registry-contract-hash", binding.typed_contract_hash);
+            crypto_hash.updateInt(&hasher, "registry-contract-hash", contract.contract_hash);
         }
         return crypto_hash.finalize(&hasher);
     }
