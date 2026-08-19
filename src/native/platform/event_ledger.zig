@@ -363,6 +363,17 @@ pub const Ledger = struct {
         self.* = Ledger.init();
     }
 
+    pub fn resetRetainingBacking(self: *Ledger) void {
+        if (comptime heap_backed_event_ledger) {
+            while (self.evictOldestEvent()) {}
+            const retained_backing = self.event_backing;
+            self.* = Ledger.init();
+            self.event_backing = retained_backing;
+            return;
+        }
+        self.* = Ledger.init();
+    }
+
     fn eventBacking(self: *Ledger) ?*EventBacking {
         if (comptime heap_backed_event_ledger) return self.event_backing;
         return &self.event_backing;
