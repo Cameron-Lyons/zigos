@@ -7,6 +7,7 @@ const permission_review_service = @import("../policy/permission_review_service.z
 const policy_component_port = @import("../policy/policy_component_port.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
 const scenario_world = @import("scenario_world.zig");
@@ -127,7 +128,7 @@ fn runSessionLifecycle(
         .driver_directory = manager.driverDirectoryPtr(),
         .storage_service_instance = manager.storageServicePtr(),
         .storage_checkpoint_store = manager.storageCheckpointStorePtr(),
-        .export_package = manager.exportPackagePtr(),
+        .export_package = manager.exportPackagePtr() catch |err| native_util.bootProofFailure("scenario export package", err),
         .policy_authority = state.ids.policy_authority,
         .session_service = state.ids.session_service,
         .session_user = state.ids.session_user,
@@ -137,7 +138,7 @@ fn runSessionLifecycle(
         .sync_service_id = state.services.sync_service.id,
         .sync_task_id = service_bindings.bindingFor(.sync_replication).task_id,
         .sync_service_principal = state.ids.sync_service,
-        .sync_resident_state = manager.syncResidentStatePtr(),
+        .sync_resident_state = manager.syncResidentStatePtr() catch |err| native_util.bootProofFailure("scenario sync state", err),
         .policy_service_id = state.services.policy_service.id,
         .network_service_id = state.services.network_service.id,
         .compositor_service_id = state.services.compositor_service.id,

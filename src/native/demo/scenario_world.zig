@@ -10,7 +10,8 @@ pub const Context = support.Context;
 
 pub fn run(context: *Context) void {
     const storage_state = storage_scenarios.run(context);
-    const early_boot_ledger = context.update_ledger.*;
+    var early_boot_ledger = context.update_ledger.*;
+    defer early_boot_ledger.deinit();
     context.update_ledger.* = event_ledger.Ledger.initPersistent(
         context.storage_service_instance,
         context.package_service_principal,

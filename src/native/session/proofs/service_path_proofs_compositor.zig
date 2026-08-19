@@ -6,6 +6,7 @@ const event_ledger = @import("../../platform/event_ledger.zig");
 const generated_image_fixtures = if (@import("builtin").is_test) @import("../../task/generated_image_fixtures.zig") else struct {};
 const ids = @import("../../core/ids.zig");
 const manifest = @import("../../policy/manifest.zig");
+const native_util = @import("../../core/util.zig");
 const native_ux = @import("../../platform/native_ux.zig");
 const object_store = @import("../../storage/object_store.zig");
 const permission_review_service = @import("../../policy/permission_review_service.zig");
@@ -141,7 +142,8 @@ pub fn proveBootedCompositorServicePath(
     var tick: u64 = 124;
     {
         const shell_snapshot = session.snapshot();
-        defer session.restore(shell_snapshot);
+        defer session.restore(shell_snapshot) catch |err|
+            native_util.impossibleByInvariantError("compositor proof restores its retained shell snapshot", err);
         try proveBootedRenderedTaskShell(
             kernel_port,
             runtime_service,
@@ -158,7 +160,8 @@ pub fn proveBootedCompositorServicePath(
 
     {
         const permission_snapshot = session.snapshot();
-        defer session.restore(permission_snapshot);
+        defer session.restore(permission_snapshot) catch |err|
+            native_util.impossibleByInvariantError("compositor proof restores its retained permission snapshot", err);
         try proveBootedRenderedPermissionReviewSurface(runtime, &service, session, app_task.id, capability_table);
     }
 
@@ -373,6 +376,7 @@ pub fn proveBootedCompositorServicePath(
         240,
     );
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     try ledger.recordTaskFlow(ux_controller.flowAtOrder(0).?.*, 160);
     try ledger.recordTaskFlow(ux_controller.flowAtOrder(1).?.*, 161);
     try ledger.recordTaskFlow(ux_controller.flowAtOrder(2).?.*, 162);
@@ -467,6 +471,7 @@ fn proveBootedRenderedTaskShell(
 ) !void {
     var ux_controller = native_ux.Controller.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
 
     const shell_service_endpoint = try expectEndpointCreateWithFlags(
         kernel_port,
@@ -620,6 +625,7 @@ fn proveBootedRenderedPermissionReviewSurface(
         compositor_display.DEFAULT_HEIGHT,
     );
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .object_access,
