@@ -11,6 +11,9 @@ const model = @import("policy_object_model.zig");
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_ALLOW_LIST = model.MAX_ALLOW_LIST;
 pub const MAX_LABEL_BYTES = model.MAX_LABEL_BYTES;
+pub const COMPACT_POLICY_METADATA = model.COMPACT_POLICY_METADATA;
+pub const POLICY_OBJECT_SIZE_CEILING_BYTES = model.POLICY_OBJECT_SIZE_CEILING_BYTES;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 33_264;
 const POLICY_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
 
 pub const Scope = model.Scope;
@@ -83,7 +86,7 @@ pub const Directory = struct {
         policy.scope = request.scope;
         policy.subject_id = request.subject_id;
         policy.issuer = request.issuer;
-        policy.label_len = native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong;
+        policy.label_len = @intCast(native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong);
         policy.install_source_mode = request.install_source_mode;
         policy.network_egress_mode = request.network_egress_mode;
         policy.removable_storage_allowed = request.removable_storage_allowed;
@@ -175,15 +178,15 @@ pub const Directory = struct {
         policy.audit_export_required = request.audit_export_required;
 
         for (request.allowed_install_sources, 0..) |source_identity, index| {
-            policy.allowed_install_source_lens[index] = native_util.copyTextExact(&policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong;
+            policy.allowed_install_source_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong);
             policy.allowed_install_source_count += 1;
         }
         for (request.allowed_network_destinations, 0..) |destination, index| {
-            policy.allowed_network_destination_lens[index] = native_util.copyTextExact(&policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong;
+            policy.allowed_network_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong);
             policy.allowed_network_destination_count += 1;
         }
         for (request.allowed_sync_destinations, 0..) |destination, index| {
-            policy.allowed_sync_destination_lens[index] = native_util.copyTextExact(&policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong;
+            policy.allowed_sync_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong);
             policy.allowed_sync_destination_count += 1;
         }
 
@@ -849,6 +852,12 @@ pub const Directory = struct {
             native_util.impossibleByInvariant("policy scope index capacity covers policy slots");
         }
     }
+
+    comptime {
+        if (@sizeOf(@This()) > DIRECTORY_SIZE_CEILING_BYTES) {
+            @compileError("policy directory exceeds its compact size ceiling");
+        }
+    }
 };
 
 const ActivePolicyIterator = struct {
@@ -935,14 +944,14 @@ fn zeroPolicy() PolicyObject {
         .install_source_mode = .any_signed,
         .allowed_install_source_count = 0,
         .allowed_install_sources = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
-        .allowed_install_source_lens = [_]usize{0} ** MAX_ALLOW_LIST,
+        .allowed_install_source_lens = [_]u8{0} ** MAX_ALLOW_LIST,
         .network_egress_mode = .inherit,
         .allowed_network_destination_count = 0,
         .allowed_network_destinations = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
-        .allowed_network_destination_lens = [_]usize{0} ** MAX_ALLOW_LIST,
+        .allowed_network_destination_lens = [_]u8{0} ** MAX_ALLOW_LIST,
         .allowed_sync_destination_count = 0,
         .allowed_sync_destinations = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
-        .allowed_sync_destination_lens = [_]usize{0} ** MAX_ALLOW_LIST,
+        .allowed_sync_destination_lens = [_]u8{0} ** MAX_ALLOW_LIST,
         .removable_storage_allowed = false,
         .screen_capture_allowed = false,
         .clipboard_allowed = false,
@@ -1158,19 +1167,19 @@ fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     crypto_hash.updateBool(&hasher, "audit-export-required", policy.audit_export_required);
 
     var allow_index: usize = 0;
-    while (allow_index < policy.allowed_install_source_count) : (allow_index += 1) {
+    while (allow_index < @as(usize, policy.allowed_install_source_count)) : (allow_index += 1) {
         crypto_hash.updateInt(&hasher, "install-source-index", allow_index);
-        crypto_hash.updateBytes(&hasher, "install-source", policy.allowed_install_sources[allow_index][0..policy.allowed_install_source_lens[allow_index]]);
+        crypto_hash.updateBytes(&hasher, "install-source", policy.allowed_install_sources[allow_index][0..@as(usize, policy.allowed_install_source_lens[allow_index])]);
     }
     var network_index: usize = 0;
-    while (network_index < policy.allowed_network_destination_count) : (network_index += 1) {
+    while (network_index < @as(usize, policy.allowed_network_destination_count)) : (network_index += 1) {
         crypto_hash.updateInt(&hasher, "network-destination-index", network_index);
-        crypto_hash.updateBytes(&hasher, "network-destination", policy.allowed_network_destinations[network_index][0..policy.allowed_network_destination_lens[network_index]]);
+        crypto_hash.updateBytes(&hasher, "network-destination", policy.allowed_network_destinations[network_index][0..@as(usize, policy.allowed_network_destination_lens[network_index])]);
     }
     var sync_index: usize = 0;
-    while (sync_index < policy.allowed_sync_destination_count) : (sync_index += 1) {
+    while (sync_index < @as(usize, policy.allowed_sync_destination_count)) : (sync_index += 1) {
         crypto_hash.updateInt(&hasher, "sync-destination-index", sync_index);
-        crypto_hash.updateBytes(&hasher, "sync-destination", policy.allowed_sync_destinations[sync_index][0..policy.allowed_sync_destination_lens[sync_index]]);
+        crypto_hash.updateBytes(&hasher, "sync-destination", policy.allowed_sync_destinations[sync_index][0..@as(usize, policy.allowed_sync_destination_lens[sync_index])]);
     }
     return crypto_hash.finalize(&hasher);
 }
@@ -2170,6 +2179,39 @@ test "policy objects reject oversized lists and refuse authorization after tampe
         0x5A;
     try std.testing.expect(!directory.verify(policy.id));
     try std.testing.expect(!directory.installSourceAllowed(.device, 8, "store:zigos"));
+}
+
+test "compact policy metadata preserves exact label and allow-list capacities" {
+    const full_label = [_]u8{'p'} ** MAX_LABEL_BYTES;
+    const full_allow_list = [_][]const u8{&full_label} ** MAX_ALLOW_LIST;
+    var directory = Directory.init();
+    const policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 77,
+        .issuer = .{ .kind = .policy_authority, .serial = 88 },
+        .label = &full_label,
+        .install_source_mode = .trusted_sources,
+        .allowed_install_sources = &full_allow_list,
+        .network_egress_mode = .allow_list,
+        .allowed_network_destinations = &full_allow_list,
+        .allowed_sync_destinations = &full_allow_list,
+    }, .{
+        .label = "compact-policy-key",
+        .seed = signing.seedFromByte(0x68),
+    });
+
+    try std.testing.expectEqual(@as(u8, MAX_LABEL_BYTES), policy.label_len);
+    try std.testing.expectEqual(@as(u8, MAX_ALLOW_LIST), policy.allowed_install_source_count);
+    try std.testing.expectEqual(@as(u8, MAX_ALLOW_LIST), policy.allowed_network_destination_count);
+    try std.testing.expectEqual(@as(u8, MAX_ALLOW_LIST), policy.allowed_sync_destination_count);
+    try std.testing.expectEqual(@as(u8, MAX_LABEL_BYTES), policy.allowed_install_source_lens[MAX_ALLOW_LIST - 1]);
+    try std.testing.expectEqual(@as(u8, MAX_LABEL_BYTES), policy.allowed_network_destination_lens[MAX_ALLOW_LIST - 1]);
+    try std.testing.expectEqual(@as(u8, MAX_LABEL_BYTES), policy.allowed_sync_destination_lens[MAX_ALLOW_LIST - 1]);
+    try std.testing.expectEqualSlices(u8, &full_label, policy.labelSlice());
+    try std.testing.expect(policy.allowsInstallSource(&full_label));
+    try std.testing.expect(policy.allowsNetworkDestination(&full_label));
+    try std.testing.expect(policy.allowsSyncDestination(&full_label));
+    try std.testing.expect(directory.verify(policy.id));
 }
 
 test "policy directory indexes policy slots by id and scope through a full table" {
