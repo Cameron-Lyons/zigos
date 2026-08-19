@@ -19,6 +19,23 @@ const DOCUMENT_KNOWLEDGE_BUFFER_BYTES: usize = 512;
 const DETAIL_PAYLOAD_BUFFER_BYTES: usize = 96;
 const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
 
+test "event ledger reset clears events indexes and sequence state" {
+    var ledger = Ledger.init();
+    try ledger.recordProcessCrash(
+        .network_stack,
+        .{ .kind = .service, .serial = 9 },
+        21,
+        5001,
+        "segfault",
+    );
+    try std.testing.expectEqual(@as(u64, 2), ledger.next_sequence);
+
+    ledger.reset();
+    try std.testing.expectEqual(@as(u64, 1), ledger.next_sequence);
+    try std.testing.expectEqual(@as(usize, 0), ledger.countMatching(.{}));
+    try std.testing.expect(ledger.latestKind(.process_crash) == null);
+}
+
 test "event ledger text export preserves the stable diagnostic wire format" {
     var ledger = Ledger.init();
     try ledger.recordProcessCrash(

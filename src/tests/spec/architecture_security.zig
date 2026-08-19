@@ -337,7 +337,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
             .entry = "app.typed.launcher",
         },
     });
-    runtime_service_instance.checkpoint(12);
+    try runtime_service_instance.checkpoint(12);
     _ = try runtime.createTask(.{
         .owner = spec_support.app(31),
         .component_class = .app_component,

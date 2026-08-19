@@ -11,6 +11,11 @@ const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const std = @import("std");
 const units = @import("../core/units.zig");
+const root = @import("root");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 pub const MAX_TASKS = model.MAX_TASKS;
 pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
@@ -174,12 +179,28 @@ const TEST_MINIMAL_SHARED_MEMORY_BYTES: usize = 512;
 const TASK_STATE_COUNT: usize = @typeInfo(TaskState).@"enum".fields.len;
 const TASK_LABEL_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 const TaskInitialComponentLabelIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_LABEL_INDEX_CAPACITY);
+const heap_backed_task_cold = builtin.target.os.tag == .freestanding;
+pub const HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING = true;
+const heap_backed_address_spaces = builtin.target.os.tag == .freestanding and HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING;
+const TaskColdRecords = [MAX_TASKS]TaskColdRecord;
+const TaskColdBacking = if (heap_backed_task_cold) ?*TaskColdRecords else TaskColdRecords;
+const AddressSpaceBacking = if (heap_backed_address_spaces) ?*model.AddressSpaceArena else model.AddressSpaceArena;
 const findAddressSpaceSlot = model.findAddressSpaceSlot;
 const defaultInitialComponent = model.defaultInitialComponent;
 const makeLaunchProvenance = model.makeLaunchProvenance;
 const zeroExecutionComponent = model.zeroExecutionComponent;
 
+fn initializeTaskMultimapIndex(index: anytype) void {
+    const Index = @TypeOf(index.*);
+    const CompactIndex = @FieldType(Index, "free_bucket_head");
+    const compact_no_index: CompactIndex = @intCast(@max(index.links.len, index.buckets.len));
+    @memset(std.mem.asBytes(index), 0);
+    for (&index.links) |*link| link.bucket = compact_no_index;
+    index.free_bucket_head = compact_no_index;
+}
+
 pub const Runtime = struct {
+    pub const AddressSpaceArenaType = model.AddressSpaceArena;
     pub const AddressSpaceSlotType = AddressSpaceSlot;
     pub const AddressSpaceRecordType = AddressSpaceRecord;
     pub const AddressSpaceRegionType = AddressSpaceRegionRecord;
@@ -194,12 +215,37 @@ pub const Runtime = struct {
     task_initial_component_label_index: TaskInitialComponentLabelIndex = TaskInitialComponentLabelIndex.init(),
     task_state_counts: [TASK_STATE_COUNT]usize = [_]usize{0} ** TASK_STATE_COUNT,
     task_lifecycle_generation: u64 = 1,
-    task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
-    address_spaces: model.AddressSpaceArena = model.AddressSpaceArena.init(),
+    task_cold: TaskColdBacking = if (heap_backed_task_cold) null else [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
+    address_spaces: AddressSpaceBacking = if (heap_backed_address_spaces) null else model.AddressSpaceArena.init(),
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
+
+    comptime {
+        if (heap_backed_address_spaces and @sizeOf(@This()) > 72 * 1024) {
+            @compileError("heap-backed task runtimes exceed their compact hot layout");
+        }
+    }
 
     pub fn init() Runtime {
         return Runtime{};
+    }
+
+    pub fn initializeAllocated(self: *Runtime) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.next_task_id = 1;
+        self.next_process_id = 1;
+        self.next_address_space_id = 1;
+        self.next_namespace_id = 1;
+        self.next_component_id = 1;
+        self.tasks.free_head = indexed_arena.reusableNoIndex(MAX_TASKS);
+        initializeTaskMultimapIndex(&self.task_owner_index);
+        initializeTaskMultimapIndex(&self.task_initial_component_label_index);
+        self.task_lifecycle_generation = 1;
+        if (comptime !heap_backed_task_cold) {
+            self.task_cold = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS;
+        }
+        if (comptime !heap_backed_address_spaces) {
+            self.address_spaces = model.AddressSpaceArena.init();
+        }
     }
 
     pub fn initSnapshot() Snapshot {
@@ -219,6 +265,80 @@ pub const Runtime = struct {
         return true;
     }
 
+    fn taskColdRecords(self: *Runtime) ?*TaskColdRecords {
+        if (comptime heap_backed_task_cold) return self.task_cold;
+        return &self.task_cold;
+    }
+
+    fn taskColdRecordsConst(self: *const Runtime) ?*const TaskColdRecords {
+        if (comptime heap_backed_task_cold) return self.task_cold;
+        return &self.task_cold;
+    }
+
+    fn ensureTaskColdRecords(self: *Runtime) error{NoSpaceLeft}!*TaskColdRecords {
+        if (self.taskColdRecords()) |records| return records;
+        if (comptime heap_backed_task_cold) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(TaskColdRecords)) orelse return error.NoSpaceLeft;
+            const records: *TaskColdRecords = @ptrCast(@alignCast(allocation));
+            @memset(std.mem.asBytes(records), 0);
+            self.task_cold = records;
+            return records;
+        }
+        return &self.task_cold;
+    }
+
+    fn clearTaskColdRecords(self: *Runtime, count: usize) void {
+        const records = self.taskColdRecords() orelse return;
+        for (records[0..@min(count, records.len)]) |*cold| resetTaskCold(cold);
+    }
+
+    fn releaseTaskColdRecords(self: *Runtime) void {
+        if (comptime heap_backed_task_cold) {
+            if (self.task_cold) |records| {
+                @memset(std.mem.asBytes(records), 0);
+                kernel_memory.kfree(@ptrCast(records));
+                self.task_cold = null;
+            }
+        } else {
+            self.clearTaskColdRecords(MAX_TASKS);
+        }
+    }
+
+    fn addressSpaceArena(self: *Runtime) ?*model.AddressSpaceArena {
+        if (comptime heap_backed_address_spaces) return self.address_spaces;
+        return &self.address_spaces;
+    }
+
+    fn addressSpaceArenaConst(self: *const Runtime) ?*const model.AddressSpaceArena {
+        if (comptime heap_backed_address_spaces) return self.address_spaces;
+        return &self.address_spaces;
+    }
+
+    fn ensureAddressSpaceArena(self: *Runtime) error{NoSpaceLeft}!*model.AddressSpaceArena {
+        if (self.addressSpaceArena()) |arena| return arena;
+        if (comptime heap_backed_address_spaces) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(model.AddressSpaceArena)) orelse return error.NoSpaceLeft;
+            const arena: *model.AddressSpaceArena = @ptrCast(@alignCast(allocation));
+            @memset(std.mem.asBytes(arena), 0);
+            arena.free_head = indexed_arena.reusableNoIndex(MAX_TASKS);
+            self.address_spaces = arena;
+            return arena;
+        }
+        return &self.address_spaces;
+    }
+
+    fn releaseAddressSpaceArena(self: *Runtime) void {
+        if (comptime heap_backed_address_spaces) {
+            if (self.address_spaces) |arena| {
+                @memset(std.mem.asBytes(arena), 0);
+                kernel_memory.kfree(@ptrCast(arena));
+                self.address_spaces = null;
+            }
+        } else {
+            self.address_spaces.reset();
+        }
+    }
+
     pub fn reset(self: *Runtime) void {
         const retirements = self.captureAddressSpaceRetirements(.runtime_reset);
         self.next_task_id = 1;
@@ -230,10 +350,8 @@ pub const Runtime = struct {
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
         self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
-        for (&self.task_cold) |*cold| {
-            cold.* = zeroTaskCold();
-        }
-        self.address_spaces.reset();
+        self.releaseTaskColdRecords();
+        self.releaseAddressSpaceArena();
         self.advanceTaskLifecycleGeneration();
         self.notifyAddressSpaceRetirements(&retirements);
     }
@@ -246,28 +364,44 @@ pub const Runtime = struct {
         out.next_component_id = self.next_component_id;
         out.task_count = 0;
         const task_claimed_count = self.tasks.claimedCount();
+        const task_cold = self.taskColdRecordsConst();
         var slot_index: usize = 0;
         while (slot_index < task_claimed_count) : (slot_index += 1) {
             const slot = self.tasks.slotAtConst(slot_index);
             if (!slot.in_use) continue;
             const dense_index = out.task_count;
             out.tasks[dense_index] = slot.*;
-            copyTaskColdForTask(&out.task_cold[dense_index], &self.task_cold[slot_index], &slot.task);
+            const cold_records = task_cold orelse
+                native_util.impossibleByInvariant("live tasks retain cold runtime state");
+            copyTaskColdForTask(&out.task_cold[dense_index], &cold_records[slot_index], &slot.task);
             out.task_count += 1;
         }
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
 
         out.address_space_count = 0;
-        for (self.address_spaces.slots[0..self.address_spaces.claimedCount()]) |*slot| {
-            if (!slot.in_use) continue;
-            out.address_spaces[out.address_space_count] = slot.*;
-            out.address_space_count += 1;
+        if (self.addressSpaceArenaConst()) |address_spaces| {
+            for (address_spaces.slots[0..address_spaces.claimedCount()]) |*slot| {
+                if (!slot.in_use) continue;
+                out.address_spaces[out.address_space_count] = slot.*;
+                out.address_space_count += 1;
+            }
         }
     }
 
-    pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
+    pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) error{NoSpaceLeft}!void {
+        const task_cold = if (state.task_count == 0) null else try self.ensureTaskColdRecords();
+        const cold_records_to_clear = @max(self.tasks.claimedCount(), state.task_count);
+        const restored_address_spaces = if (state.address_space_count == 0) null else try self.ensureAddressSpaceArena();
         const retirements = self.captureAddressSpaceRetirements(.snapshot_restore);
         self.resetForSnapshotRestore();
+        if (state.task_count == 0 and heap_backed_task_cold) {
+            self.releaseTaskColdRecords();
+        } else {
+            self.clearTaskColdRecords(cold_records_to_clear);
+        }
+        if (state.address_space_count == 0 and heap_backed_address_spaces) {
+            self.releaseAddressSpaceArena();
+        }
         self.next_task_id = state.next_task_id;
         self.next_process_id = state.next_process_id;
         self.next_address_space_id = state.next_address_space_id;
@@ -284,7 +418,9 @@ pub const Runtime = struct {
                 native_util.impossibleByInvariant("task snapshot count is bounded by task arena capacity");
             };
             self.tasks.slotAt(slot_index).task = state.tasks[task_index].task;
-            copyTaskColdForTask(&self.task_cold[task_index], &state.task_cold[task_index], &state.tasks[task_index].task);
+            const cold_records = task_cold orelse
+                native_util.impossibleByInvariant("restored tasks retain cold runtime state");
+            copyTaskColdForTask(&cold_records[task_index], &state.task_cold[task_index], &state.tasks[task_index].task);
             self.rebuildTaskDerivedIndexesAt(slot_index);
         }
 
@@ -294,10 +430,12 @@ pub const Runtime = struct {
                 native_util.impossibleByInvariant("counted address-space snapshot records are live");
             }
             const address_space_id = state.address_spaces[address_space_index].address_space.id;
-            const slot_index = self.address_spaces.reserveIndexAt(address_space_id, address_space_index) orelse {
+            const address_spaces = restored_address_spaces orelse
+                native_util.impossibleByInvariant("restored address spaces retain arena backing");
+            const slot_index = address_spaces.reserveIndexAt(address_space_id, address_space_index) orelse {
                 native_util.impossibleByInvariant("address-space snapshot count is bounded by address-space arena capacity");
             };
-            self.address_spaces.slots[slot_index].address_space = state.address_spaces[address_space_index].address_space;
+            address_spaces.slots[slot_index].address_space = state.address_spaces[address_space_index].address_space;
         }
         self.debugAssertIndexIntegrity();
         self.advanceTaskLifecycleGeneration();
@@ -314,7 +452,7 @@ pub const Runtime = struct {
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
         self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
-        self.address_spaces.resetRetainingPayloads();
+        if (self.addressSpaceArena()) |address_spaces| address_spaces.resetRetainingPayloads();
     }
 
     pub fn rebuildIndexes(self: *Runtime) void {
@@ -322,7 +460,7 @@ pub const Runtime = struct {
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
         self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
-        self.address_spaces.rebuildPrimaryIndex();
+        if (self.addressSpaceArena()) |address_spaces| address_spaces.rebuildPrimaryIndex();
 
         var slot_index: usize = 0;
         while (slot_index < MAX_TASKS) : (slot_index += 1) {
@@ -334,7 +472,9 @@ pub const Runtime = struct {
 
     fn rebuildTaskDerivedIndexesAt(self: *Runtime, slot_index: usize) void {
         const slot = self.tasks.slotAt(slot_index);
-        slot.task.cold_state = &self.task_cold[slot_index];
+        const task_cold = self.taskColdRecords() orelse
+            native_util.impossibleByInvariant("live tasks retain cold runtime state");
+        slot.task.cold_state = &task_cold[slot_index];
         if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
             native_util.impossibleByInvariant("task owner index capacity covers task slots");
         }
@@ -356,8 +496,10 @@ pub const Runtime = struct {
         const task_id = self.nextReservableTaskId() orelse return error.TaskTableFull;
         const slot_index = self.tasks.reserveIndex(task_id) orelse return error.TaskTableFull;
         errdefer _ = self.tasks.removeIndex(slot_index);
+        const task_cold = try self.ensureTaskColdRecords();
 
         const initial_component = try self.makeExecutionComponent(defaultInitialComponent(request));
+        _ = try self.ensureAddressSpaceArena();
         const host = try allocateHost(
             self,
             request.component_class,
@@ -367,7 +509,7 @@ pub const Runtime = struct {
         );
 
         const slot = self.tasks.slotAt(slot_index);
-        resetTaskCold(&self.task_cold[slot_index]);
+        resetTaskCold(&task_cold[slot_index]);
         slot.task = .{
             .id = task_id,
             .process_id = host.process_id,
@@ -393,9 +535,9 @@ pub const Runtime = struct {
             .local_only = request.local_only,
             .executable_loaded = userspace_image.isPresent(),
             .launch = makeLaunchProvenance(request.launch),
-            .cold_state = &self.task_cold[slot_index],
+            .cold_state = &task_cold[slot_index],
         };
-        self.task_cold[slot_index].execution_components[0] = initial_component;
+        task_cold[slot_index].execution_components[0] = initial_component;
         appendProvenanceToTask(&slot.task, debug_contract.launchProvenance(
             task_id,
             0,
@@ -524,14 +666,22 @@ pub const Runtime = struct {
     }
 
     pub fn indexedAddressSpaceSlot(self: *Runtime, address_space_id: u64) ?*AddressSpaceSlot {
-        return self.address_spaces.get(address_space_id) orelse {
+        const address_spaces = self.addressSpaceArena() orelse {
+            self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
+            return null;
+        };
+        return address_spaces.get(address_space_id) orelse {
             self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
             return null;
         };
     }
 
     fn indexedAddressSpaceSlotConst(self: *const Runtime, address_space_id: u64) ?*const AddressSpaceSlot {
-        return self.address_spaces.getConst(address_space_id) orelse {
+        const address_spaces = self.addressSpaceArenaConst() orelse {
+            self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
+            return null;
+        };
+        return address_spaces.getConst(address_space_id) orelse {
             self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
             return null;
         };
@@ -576,18 +726,20 @@ pub const Runtime = struct {
     }
 
     pub fn installAddressSpaceRecord(self: *Runtime, replace_address_space_id: ?u64, address_space: AddressSpaceRecord) bool {
+        const address_spaces = self.addressSpaceArena() orelse
+            native_util.impossibleByInvariant("address-space installation follows arena allocation");
         if (replace_address_space_id) |old_id| {
-            if (self.address_spaces.slotIndexOf(old_id)) |old_slot_index| {
-                _ = self.address_spaces.removeIndex(old_slot_index);
-                const new_slot_index = self.address_spaces.reserveIndexAt(address_space.id, old_slot_index) orelse {
+            if (address_spaces.slotIndexOf(old_id)) |old_slot_index| {
+                _ = address_spaces.removeIndex(old_slot_index);
+                const new_slot_index = address_spaces.reserveIndexAt(address_space.id, old_slot_index) orelse {
                     native_util.impossibleByInvariant("removed address-space slot is immediately reusable");
                 };
-                self.address_spaces.slots[new_slot_index].address_space = address_space;
+                address_spaces.slots[new_slot_index].address_space = address_space;
                 return true;
             }
         }
 
-        const slot = self.address_spaces.reserve(address_space.id) orelse return false;
+        const slot = address_spaces.reserve(address_space.id) orelse return false;
         slot.address_space = address_space;
         return true;
     }
@@ -620,10 +772,12 @@ pub const Runtime = struct {
                 }
             }
         }
-        for (&self.address_spaces.slots) |*slot| {
-            if (!slot.in_use) continue;
-            _ = self.indexedAddressSpaceSlotConst(slot.address_space.id) orelse
-                native_util.impossibleByInvariant("address space index missing a live address space");
+        if (self.addressSpaceArenaConst()) |address_spaces| {
+            for (&address_spaces.slots) |*slot| {
+                if (!slot.in_use) continue;
+                _ = self.indexedAddressSpaceSlotConst(slot.address_space.id) orelse
+                    native_util.impossibleByInvariant("address space index missing a live address space");
+            }
         }
     }
 
@@ -663,7 +817,8 @@ pub const Runtime = struct {
 
     fn debugAssertAddressSpaceIndexMissAbsent(self: *const Runtime, address_space_id: u64) void {
         if (!debugIndexChecksEnabled()) return;
-        for (&self.address_spaces.slots) |*slot| {
+        const address_spaces = self.addressSpaceArenaConst() orelse return;
+        for (&address_spaces.slots) |*slot| {
             if (slot.in_use and slot.address_space.id == address_space_id) {
                 native_util.impossibleByInvariant("address space index missed a live address space");
             }
@@ -807,7 +962,8 @@ pub const Runtime = struct {
     fn captureAddressSpaceRetirements(self: *const Runtime, reason: AddressSpaceRetirementReason) AddressSpaceRetirementBatch {
         var batch = AddressSpaceRetirementBatch{};
         if (self.address_space_retirement_sink == null) return batch;
-        for (self.address_spaces.slots[0..self.address_spaces.claimedCount()]) |*slot| {
+        const address_spaces = self.addressSpaceArenaConst() orelse return batch;
+        for (address_spaces.slots[0..address_spaces.claimedCount()]) |*slot| {
             if (!slot.in_use) continue;
             batch.events[batch.count] = .{
                 .address_space_id = slot.address_space.id,
@@ -830,8 +986,9 @@ pub const Runtime = struct {
     }
 
     fn removeAddressSpaceRecord(self: *Runtime, address_space_id: u64) void {
-        const slot_index = self.address_spaces.slotIndexOf(address_space_id) orelse return;
-        _ = self.address_spaces.removeIndex(slot_index);
+        const address_spaces = self.addressSpaceArena() orelse return;
+        const slot_index = address_spaces.slotIndexOf(address_space_id) orelse return;
+        _ = address_spaces.removeIndex(slot_index);
     }
 
     pub fn recordProvenance(self: *Runtime, task_id: u64, event: ProvenanceRecord) Error!void {
@@ -1046,6 +1203,25 @@ fn createTaskIdTestTask(runtime: *Runtime, owner_serial: u64) Error!*TaskRecord 
     });
 }
 
+test "allocated runtime initialization preserves empty indexes and id sequences" {
+    var runtime: Runtime = undefined;
+    runtime.initializeAllocated();
+
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+    try std.testing.expectEqual(@as(u64, 1), runtime.taskLifecycleGeneration());
+
+    const task = try createTaskIdTestTask(&runtime, 42);
+    try std.testing.expectEqual(@as(u64, 1), task.id);
+    try std.testing.expectEqual(task.id, runtime.findByOwner(task.owner).?.id);
+    const initial_label = task.executionComponents()[0].labelSlice();
+    try std.testing.expectEqual(task.id, runtime.findByInitialComponentLabel(initial_label).?.id);
+
+    const lifecycle_generation_before_reset = runtime.taskLifecycleGeneration();
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+    try std.testing.expectEqual(lifecycle_generation_before_reset + 1, runtime.taskLifecycleGeneration());
+}
+
 const RetirementRecorder = struct {
     events: [MAX_TASKS * 2]AddressSpaceRetirementEvent = undefined,
     count: usize = 0,
@@ -1187,7 +1363,7 @@ test "task handles reject stale task records across restore and reuse" {
 
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
-    runtime.restoreFromSnapshot(&snapshot);
+    try runtime.restoreFromSnapshot(&snapshot);
 
     try std.testing.expect(runtime.findByHandle(first_handle, task_id) == null);
     const restored_handle = runtime.taskHandle(task_id).?;
@@ -1354,7 +1530,7 @@ test "granting and revoking capabilities updates the task table" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 1), restored.find(task.id).?.capabilityGeneration());
 }
 
@@ -1473,7 +1649,7 @@ test "restoring a snapshot rebuilds authoritative indexes" {
     try restored.grantCapability(stale_task_id, 92);
     try std.testing.expect(try restored.suspendTask(stale_task_id, 1));
 
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
 
     const restored_task = restored.find(task_id).?;
     try std.testing.expect(restored.find(stale_task_id) == null);
@@ -1527,7 +1703,7 @@ test "snapshot restore preserves compact task denial provenance" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
 
     const latest = restored.find(task.id).?.latestProvenanceEvent().?;
     try std.testing.expectEqual(debug_contract.Decision.denied, latest.decision);
@@ -1808,7 +1984,7 @@ test "rehosting a restored userspace task clones authoritative mapped state" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
 
     const restored_task = restored.find(task.id).?;
     try std.testing.expect(restored_task.hasLoadedExecutable());
@@ -2063,7 +2239,7 @@ test "address-space retirement on snapshot restore replaces only runtime state a
     const restored_sink = AddressSpaceRetirementSink.init(RetirementRecorder, &restored_recorder);
     try std.testing.expect(restored.bindAddressSpaceRetirementSink(restored_sink));
 
-    restored.restoreFromSnapshot(snapshot);
+    try restored.restoreFromSnapshot(snapshot);
     try std.testing.expectEqual(@as(usize, 2), restored_recorder.count);
     try std.testing.expectEqual(replaced_first_address_space_id, restored_recorder.eventAt(0).address_space_id);
     try std.testing.expectEqual(replaced_second_address_space_id, restored_recorder.eventAt(1).address_space_id);
@@ -2080,7 +2256,7 @@ test "address-space retirement on snapshot restore replaces only runtime state a
     try std.testing.expect(restored_recorder.commit_observed);
 
     try std.testing.expect(restored.unbindAddressSpaceRetirementSink(restored_sink));
-    restored.restoreFromSnapshot(snapshot);
+    try restored.restoreFromSnapshot(snapshot);
     restored.reset();
     try std.testing.expectEqual(@as(usize, 0), source_recorder.count);
 }
@@ -2140,7 +2316,7 @@ test "task state counts track lifecycle transitions and snapshot restore" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 2), restored.taskLifecycleGeneration());
 
     try std.testing.expectEqual(@as(usize, 1), restored.countTasksInState(.active));
@@ -2152,7 +2328,7 @@ test "task state counts track lifecycle transitions and snapshot restore" {
     try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.terminated));
 
     restored.task_lifecycle_generation = std.math.maxInt(u64);
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 1), restored.taskLifecycleGeneration());
     restored.task_lifecycle_generation = std.math.maxInt(u64);
     restored.reset();
@@ -2204,7 +2380,7 @@ test "initial component label lookup is indexed across lifecycle and restore" {
     var snapshot = Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     var restored = Runtime.init();
-    restored.restoreFromSnapshot(&snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(second_task_id, restored.findByInitialComponentLabel("indexed-service").?.id);
 
     try std.testing.expect(try restored.terminateTask(second_task_id, 23));

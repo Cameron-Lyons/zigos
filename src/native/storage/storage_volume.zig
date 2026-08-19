@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const ids = @import("../core/ids.zig");
@@ -12,6 +13,10 @@ const volume_log = @import("volume/log.zig");
 const volume_quota = @import("volume/quota.zig");
 const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/memory/memory.zig")
+else
+    struct {};
 
 pub const sector_size = volume_layout.sector_size;
 pub const slot_sectors = volume_layout.slot_sectors;
@@ -28,6 +33,8 @@ pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
+const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
+const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 
 comptime {
     if (SIGNER_TEXT_POOL_BYTES > std.math.maxInt(u16)) {
@@ -91,7 +98,7 @@ pub const Backend = volume_backend.Backend;
 pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 
 pub const Volume = struct {
-    io_log_buffer: [IO_LOG_WORKSPACE_BYTES]u8 = undefined,
+    io_log_buffer: IoLogWorkspace = if (heap_backed_io_workspace) null else undefined,
     sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size,
     attached_backend_present: bool = false,
     attached_backend_sector_count: u64 = 0,
@@ -104,12 +111,11 @@ pub const Volume = struct {
     workspace_state_hashes: WorkspaceStateHashCache = .{},
 
     pub fn init() Volume {
-        var volume: Volume = undefined;
-        volume.reset();
-        return volume;
+        return .{};
     }
 
     pub fn reset(self: *Volume) void {
+        self.releaseIoLogWorkspace();
         @memset(self.sector_buffer[0..], 0);
         self.attached_backend_present = false;
         self.attached_backend_sector_count = 0;
@@ -119,6 +125,27 @@ pub const Volume = struct {
         self.attached_backend_kind = .none;
         self.resetSignerText();
         self.workspace_state_hashes = .{};
+    }
+
+    fn ioLogWorkspace(self: *Volume) Error![]u8 {
+        if (comptime heap_backed_io_workspace) {
+            if (self.io_log_buffer) |buffer| return buffer[0..IO_LOG_WORKSPACE_BYTES];
+            const allocation = kernel_memory.kmalloc(IO_LOG_WORKSPACE_BYTES) orelse return error.NoSpaceLeft;
+            const buffer: [*]u8 = @ptrCast(allocation);
+            self.io_log_buffer = buffer;
+            return buffer[0..IO_LOG_WORKSPACE_BYTES];
+        }
+        return self.io_log_buffer[0..];
+    }
+
+    fn releaseIoLogWorkspace(self: *Volume) void {
+        if (comptime heap_backed_io_workspace) {
+            if (self.io_log_buffer) |buffer| {
+                @memset(buffer[0..IO_LOG_WORKSPACE_BYTES], 0);
+                kernel_memory.kfree(@ptrCast(buffer));
+                self.io_log_buffer = null;
+            }
+        }
     }
 
     fn resetSignerText(self: *Volume) void {
@@ -247,6 +274,12 @@ pub const Volume = struct {
     }
 };
 
+comptime {
+    if (heap_backed_io_workspace and @sizeOf(Volume) > 16 * 1024) {
+        @compileError("heap-backed storage volumes exceed their compact resident layout");
+    }
+}
+
 var default_volume = Volume.init();
 
 pub fn defaultVolume() *Volume {
@@ -331,6 +364,7 @@ fn saveIncremental(
     writer: anytype,
 ) Error!PersistResult {
     try ensureWithinProductCapacityEnvelope(store, workspaces);
+    const io_log_buffer = try self.ioLogWorkspace();
     const started_dirty = store.dirtyObjectIds().len != 0 or
         store.dirtyVersionIds().len != 0 or
         workspaces.dirtyWorkspaceIds().len != 0 or
@@ -346,7 +380,7 @@ fn saveIncremental(
     }
     const delta = if (current) |loaded|
         if (can_append)
-            try tryBuildAppendDelta(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
+            try tryBuildAppendDelta(io_log_buffer, loaded.root, store, workspaces, state_hashes)
         else
             null
     else
@@ -372,7 +406,7 @@ fn saveIncremental(
         next_root.compacted_generation = current.?.root.compacted_generation;
         const next_root_sector = volume_root_slot.nextRootSector(current);
 
-        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, self.io_log_buffer[0..delta.?.bytes_len]);
+        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, io_log_buffer[0..delta.?.bytes_len]);
         try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
         try flushWrites(writer);
@@ -384,7 +418,7 @@ fn saveIncremental(
     const checkpoint_log_len = try serializeCheckpointRecord(
         store,
         workspaces,
-        self.io_log_buffer[0..data_region_bytes],
+        io_log_buffer[0..data_region_bytes],
     );
 
     const next_generation = current_generation + 1;
@@ -399,7 +433,7 @@ fn saveIncremental(
     next_root.log_segment_count = 0;
     next_root.compacted_generation = next_generation;
     const next_root_sector = volume_root_slot.nextRootSector(current);
-    try writeBytes(writer, data_start_byte + next_data_offset, self.io_log_buffer[0..checkpoint_log_len]);
+    try writeBytes(writer, data_start_byte + next_data_offset, io_log_buffer[0..checkpoint_log_len]);
     try flushWrites(writer);
     try writeRoot(writer, next_root_sector, next_root);
     try flushWrites(writer);
@@ -546,8 +580,9 @@ fn loadBackendRootCandidate(
     loaded: LoadedRoot,
 ) Error!void {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
-    if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, self.io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
-    try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+    const io_log_buffer = try self.ioLogWorkspace();
+    if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
+    try replayLog(self, store, workspaces, io_log_buffer[0..loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
@@ -983,7 +1018,7 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.Workspace
         try writeEntry(writer, entry);
     }
     try writer.writeU16(@intCast(record.mutation_log.entry_mutation_count));
-    for (record.mutation_log.entry_mutations[0..record.mutation_log.entry_mutation_count]) |mutation| {
+    for (record.mutation_log.entriesConst()[0..record.mutation_log.entry_mutation_count]) |mutation| {
         try writer.writeU32(mutation.generation);
         try writeEntry(writer, mutation.entry);
     }
@@ -1103,8 +1138,13 @@ fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void 
 fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
     const workspace_id = ids.workspace(try reader.readU64());
-    const slot = workspaces.workspaces.get(workspace_id) orelse
+    const existing_slot = workspaces.workspaces.get(workspace_id);
+    const slot = existing_slot orelse
         workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
+    slot.workspace.mutation_log.ensureBacking() catch {
+        if (existing_slot == null) std.debug.assert(workspaces.workspaces.remove(workspace_id));
+        return error.NoSpaceLeft;
+    };
 
     const previous_entry_count = slot.workspace.path_index.entry_count;
     const previous_mutation_count = slot.workspace.mutation_log.entry_mutation_count;
@@ -1131,14 +1171,15 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     }
     slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
     if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+    const mutations = slot.workspace.mutation_log.entries();
     for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
-        slot.workspace.mutation_log.entry_mutations[mutation_index] = .{
+        mutations[mutation_index] = .{
             .generation = try reader.readU32(),
             .entry = try readEntry(&reader),
         };
     }
     if (slot.workspace.mutation_log.entry_mutation_count < previous_mutation_tail) {
-        for (slot.workspace.mutation_log.entry_mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_tail]) |*mutation| {
+        for (mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_tail]) |*mutation| {
             mutation.* = .{};
         }
     }
@@ -1343,6 +1384,10 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
     for (0..@as(usize, workspace_count_value)) |_| {
         const workspace_id = ids.workspace(try reader.readU64());
         const slot = workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
+        slot.workspace.mutation_log.ensureBacking() catch {
+            std.debug.assert(workspaces.workspaces.remove(workspace_id));
+            return error.NoSpaceLeft;
+        };
         slot.workspace.id = workspace_id;
         slot.workspace.owner = try readPrincipal(&reader);
         readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
@@ -1354,8 +1399,9 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         }
         slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
         if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+        const mutations = slot.workspace.mutation_log.entries();
         for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
-            slot.workspace.mutation_log.entry_mutations[mutation_index] = .{
+            mutations[mutation_index] = .{
                 .generation = try reader.readU32(),
                 .entry = try readEntry(&reader),
             };
@@ -1608,7 +1654,11 @@ test "storage volume bounds its log io workspace to one durable data region" {
     try std.testing.expect(@hasField(Volume, "io_log_buffer"));
     try std.testing.expect(!@hasField(Volume, "io_payload_buffer"));
     try std.testing.expectEqual(DATA_REGION_BYTES, IO_LOG_WORKSPACE_BYTES);
-    try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
+    if (heap_backed_io_workspace) {
+        try std.testing.expect(@sizeOf(@FieldType(Volume, "io_log_buffer")) <= @sizeOf(usize));
+    } else {
+        try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
+    }
 }
 
 test "append workspace exhaustion falls back to checkpoint compaction" {
@@ -1733,8 +1783,8 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     live.path_index.entries[0] = try workspace.Entry.init("documents/keep.md", ids.object(1), ids.version(1), .document);
     live.path_index.entries[1] = try workspace.Entry.init("documents/retired.md", ids.object(2), ids.version(2), .document);
     live.mutation_log.entry_mutation_count = 2;
-    live.mutation_log.entry_mutations[0] = .{ .generation = 1, .entry = live.path_index.entries[0] };
-    live.mutation_log.entry_mutations[1] = .{ .generation = 2, .entry = live.path_index.entries[1] };
+    live.mutation_log.entries()[0] = .{ .generation = 1, .entry = live.path_index.entries[0] };
+    live.mutation_log.entries()[1] = .{ .generation = 2, .entry = live.path_index.entries[1] };
     live.share_table.share_grant_count = 2;
     live.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 42 } };
     live.share_table.share_grants[1] = .{ .principal_id = .{ .kind = .user, .serial = 43 } };
@@ -1744,7 +1794,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     live.staging.transaction_open = true;
     live.staging.staged_entry_count = 1;
     live.staging.staged_effective_entry_count = 2;
-    live.mutation_log.entry_mutations[live.mutation_log.entry_mutation_count] = .{
+    live.mutation_log.entries()[live.mutation_log.entry_mutation_count] = .{
         .entry = try workspace.Entry.init("documents/staged-secret.md", ids.object(3), ids.version(3), .document),
     };
 
@@ -1759,7 +1809,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     replacement.path_index.entry_count = 1;
     replacement.path_index.entries[0] = try workspace.Entry.init("documents/current.md", ids.object(4), ids.version(4), .document);
     replacement.mutation_log.entry_mutation_count = 1;
-    replacement.mutation_log.entry_mutations[0] = .{ .generation = 7, .entry = replacement.path_index.entries[0] };
+    replacement.mutation_log.entries()[0] = .{ .generation = 7, .entry = replacement.path_index.entries[0] };
     replacement.share_table.share_grant_count = 1;
     replacement.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 44 } };
     replacement.recoverable_deletes.deleted_count = 1;
@@ -1776,13 +1826,13 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     try std.testing.expectEqual(@as(usize, 1), live.path_index.entry_count);
     try std.testing.expectEqualStrings("documents/current.md", live.path_index.entries[0].pathSlice());
     try std.testing.expectEqualDeep(workspace.Entry{}, live.path_index.entries[1]);
-    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entry_mutations[1]);
+    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[1]);
     try std.testing.expectEqual(principal.PrincipalKind.service, live.share_table.share_grants[1].principal_id.kind);
     try std.testing.expectEqual(@as(u64, 0), live.share_table.share_grants[1].principal_id.serial);
     try std.testing.expectEqualDeep(workspace.Entry{}, live.recoverable_deletes.deleted_entries[1]);
     try std.testing.expect(!live.staging.transaction_open);
     try std.testing.expectEqual(@as(usize, 0), live.staging.staged_entry_count);
-    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entry_mutations[2]);
+    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[2]);
 }
 
 test "storage append rejects issuance watermark rewind" {

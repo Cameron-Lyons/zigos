@@ -51,12 +51,13 @@ pub fn proveBootedSyncServicePath(
     const tablet_signer = signer("service-path-tablet", 0x64);
     const contract_signer = signer("service-path-contract", 0x65);
 
+    const sync_resident_state = try session_manager.system().syncResidentStatePtr();
     var sync_instance = try sync_service.Service.initWithStorage(
         sync_record.id,
         sync_task.id,
         sync_owner,
         storage,
-        session_manager.system().syncResidentStatePtr(),
+        sync_resident_state,
     );
     const authority = try capability_table.mintBootRoot(.{
         .holder = sync_owner,
