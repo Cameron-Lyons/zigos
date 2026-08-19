@@ -1,12 +1,14 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 
 pub const MAX_SNAPSHOTS: usize = 16;
+pub const BOUNDED_SNAPSHOT_SCAN = true;
+pub const RECLAIMS_REVOKED_SNAPSHOTS = true;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 1_184;
 
 pub const Error = event_ledger.Error || error{
     DeviceTrustMismatch,
@@ -68,20 +70,17 @@ pub const Snapshot = struct {
     restore_count: u16 = 0,
 };
 
-const Slot = struct {
-    in_use: bool = false,
-    snapshot: Snapshot = .{},
-};
-
-fn slotSnapshotKey(slot: *const Slot) u64 {
-    return slot.snapshot.id;
-}
-
-const SnapshotArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_SNAPSHOTS, MAX_SNAPSHOTS * 2, slotSnapshotKey);
-
 pub const Service = struct {
     next_snapshot_id: u64 = 1,
-    slots: SnapshotArena = SnapshotArena.init(),
+    snapshots: [MAX_SNAPSHOTS]Snapshot = [_]Snapshot{.{}} ** MAX_SNAPSHOTS,
+    snapshot_count: u8 = 0,
+    next_reusable_snapshot: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) {
+            @compileError("object resilience service exceeds its fixed-state size ceiling");
+        }
+    }
 
     pub fn init() Service {
         return .{};
@@ -106,15 +105,15 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        if (self.slots.countInUse() >= MAX_SNAPSHOTS) {
-            try recordBackup(ledger, request, 0, false);
-            return error.SnapshotTableFull;
-        }
         const snapshot_id = self.next_snapshot_id;
         if (snapshot_id == 0) {
             try recordBackup(ledger, request, 0, false);
             return error.SnapshotIdExhausted;
         }
+        const snapshot_index = self.availableSnapshotIndex() orelse {
+            try recordBackup(ledger, request, 0, false);
+            return error.SnapshotTableFull;
+        };
         const snapshot = Snapshot{
             .id = snapshot_id,
             .subject = request.subject,
@@ -128,15 +127,12 @@ pub const Service = struct {
             .recovery_key_present = request.recovery_key_present,
         };
 
-        const slot = self.slots.reserve(snapshot_id) orelse {
-            try recordBackup(ledger, request, 0, false);
-            return error.SnapshotTableFull;
-        };
-        errdefer _ = self.slots.remove(snapshot_id);
         try recordBackup(ledger, request, snapshot_id, true);
-        slot.snapshot = snapshot;
+        if (self.snapshots[snapshot_index].id == 0) self.snapshot_count += 1;
+        self.snapshots[snapshot_index] = snapshot;
+        self.next_reusable_snapshot = @intCast((snapshot_index + 1) % MAX_SNAPSHOTS);
         self.next_snapshot_id +%= 1;
-        return &slot.snapshot;
+        return &self.snapshots[snapshot_index];
     }
 
     pub fn restore(
@@ -200,8 +196,27 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, snapshot_id: u64) ?*Snapshot {
-        const slot = self.slots.get(snapshot_id) orelse return null;
-        return &slot.snapshot;
+        if (snapshot_id == 0) return null;
+        for (&self.snapshots) |*snapshot| {
+            if (snapshot.id == snapshot_id) return snapshot;
+        }
+        return null;
+    }
+
+    pub fn snapshotCount(self: *const Service) usize {
+        return @as(usize, self.snapshot_count);
+    }
+
+    fn availableSnapshotIndex(self: *const Service) ?usize {
+        for (0..MAX_SNAPSHOTS) |offset| {
+            const snapshot_index = (@as(usize, self.next_reusable_snapshot) + offset) % MAX_SNAPSHOTS;
+            if (self.snapshots[snapshot_index].id == 0) return snapshot_index;
+        }
+        for (0..MAX_SNAPSHOTS) |offset| {
+            const snapshot_index = (@as(usize, self.next_reusable_snapshot) + offset) % MAX_SNAPSHOTS;
+            if (self.snapshots[snapshot_index].revoked) return snapshot_index;
+        }
+        return null;
     }
 };
 
@@ -375,6 +390,63 @@ test "object resilience binds restore and revoke to snapshot subject and source 
         .detail = "private revoked object backup restore",
     }, &ledger));
 
+    const retained_snapshot_id = snapshot.id;
+    const revoked_snapshot_id = revocable.id;
+    for (0..MAX_SNAPSHOTS + 1) |index| {
+        const rolling = try service.prepareBackup(&directory, subjects, .{
+            .subject = owner,
+            .task_id = 1_000 + index,
+            .workspace_id = 11,
+            .object_id = 2_000 + index,
+            .restore_device_id = 333,
+            .bytes = 4096,
+            .sensitivity = .private_user_data,
+            .encrypted = true,
+            .recovery_key_present = true,
+            .now_ticks = 100 + index,
+        }, null);
+        try service.revoke(.{
+            .subject = owner,
+            .task_id = 1_000 + index,
+            .snapshot_id = rolling.id,
+            .now_ticks = 101 + index,
+        }, null);
+    }
+    try std.testing.expectEqual(MAX_SNAPSHOTS, service.snapshotCount());
+    try std.testing.expect(service.find(retained_snapshot_id) != null);
+    try std.testing.expect(service.find(revoked_snapshot_id) == null);
+
+    var full_service = Service.init();
+    for (0..MAX_SNAPSHOTS) |index| {
+        _ = try full_service.prepareBackup(&directory, subjects, .{
+            .subject = owner,
+            .task_id = 3_000 + index,
+            .workspace_id = 11,
+            .object_id = 4_000 + index,
+            .restore_device_id = 333,
+            .bytes = 4096,
+            .sensitivity = .private_user_data,
+            .encrypted = true,
+            .recovery_key_present = true,
+            .now_ticks = 200 + index,
+        }, null);
+    }
+    const next_snapshot_id_before_full = full_service.next_snapshot_id;
+    try std.testing.expectError(error.SnapshotTableFull, full_service.prepareBackup(&directory, subjects, .{
+        .subject = owner,
+        .task_id = 5_000,
+        .workspace_id = 11,
+        .object_id = 6_000,
+        .restore_device_id = 333,
+        .bytes = 4096,
+        .sensitivity = .private_user_data,
+        .encrypted = true,
+        .recovery_key_present = true,
+        .now_ticks = 300,
+    }, null));
+    try std.testing.expectEqual(next_snapshot_id_before_full, full_service.next_snapshot_id);
+    try std.testing.expectEqual(MAX_SNAPSHOTS, full_service.snapshotCount());
+
     const summary = ledger.userVisibleDiagnosticSummary();
     try std.testing.expectEqual(@as(usize, 8), summary.object_resilience_events);
     try std.testing.expectEqual(@as(usize, 4), summary.object_resilience_denials);
@@ -441,6 +513,6 @@ test "object resilience snapshot ids stop at exhaustion" {
         .detail = "private object backup contents",
     }, null));
     try std.testing.expectEqual(@as(u64, 0), service.next_snapshot_id);
-    try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.snapshotCount());
     try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }

@@ -1,8 +1,15 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
+const root = @import("root");
+
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 pub const MAX_ENDPOINTS: usize = 64;
 pub const MAX_ENDPOINT_QUEUE: usize = 8;
@@ -70,7 +77,13 @@ pub const Endpoint = struct {
     peer_endpoint_id: ids.EndpointId = ids.EndpointId.zero,
     queue_head: u8 = 0,
     queue_len: u8 = 0,
-    queue: [MAX_ENDPOINT_QUEUE]Message = [_]Message{zeroMessage()} ** MAX_ENDPOINT_QUEUE,
+    queue: EndpointQueueBacking = if (heap_backed_endpoint_queues) null else [_]Message{zeroMessage()} ** MAX_ENDPOINT_QUEUE,
+
+    comptime {
+        if (heap_backed_endpoint_queues and @sizeOf(@This()) > 128) {
+            @compileError("heap-backed endpoints exceed their compact resident layout");
+        }
+    }
 
     pub fn labelSlice(self: *const Endpoint) []const u8 {
         return self.label[0..self.label_len];
@@ -85,7 +98,12 @@ pub const Error = error{
     PeerNotConnected,
     QueueFull,
     TableFull,
+    NoSpaceLeft,
 };
+
+const EndpointQueue = [MAX_ENDPOINT_QUEUE]Message;
+const heap_backed_endpoint_queues = builtin.target.os.tag == .freestanding;
+const EndpointQueueBacking = if (heap_backed_endpoint_queues) ?*EndpointQueue else EndpointQueue;
 
 const EndpointSlot = struct {
     in_use: bool = false,
@@ -111,6 +129,19 @@ pub const Table = struct {
 
     pub fn init() Table {
         return .{};
+    }
+
+    pub fn reset(self: *Table) void {
+        self.deinit();
+        self.* = Table.init();
+    }
+
+    pub fn deinit(self: *Table) void {
+        if (comptime heap_backed_endpoint_queues) {
+            for (&self.arena.slots) |*slot| {
+                if (slot.in_use) releaseEndpointQueue(&slot.endpoint);
+            }
+        }
     }
 
     pub fn create(self: *Table, owner_task_id: ids.TaskId, label: []const u8, flags: EndpointFlags) Error!Endpoint {
@@ -180,18 +211,19 @@ pub const Table = struct {
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
         if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.QueueFull;
 
+        const queue = try ensureEndpointQueue(peer);
         const insert_index = (peer.queue_head + peer.queue_len) % MAX_ENDPOINT_QUEUE;
-        peer.queue[insert_index].sender_task_id = sender_task_id;
-        peer.queue[insert_index].correlation_id = correlation_id;
-        peer.queue[insert_index].attached_capability_id = attached_capability_id orelse ids.CapabilityId.zero;
-        peer.queue[insert_index].move_attached_capability = move_attached_capability;
-        peer.queue[insert_index].flags = .{
+        queue[insert_index].sender_task_id = sender_task_id;
+        queue[insert_index].correlation_id = correlation_id;
+        queue[insert_index].attached_capability_id = attached_capability_id orelse ids.CapabilityId.zero;
+        queue[insert_index].move_attached_capability = move_attached_capability;
+        queue[insert_index].flags = .{
             .local_only = endpoint.flags.local_only and peer.flags.local_only,
             .service_port = endpoint.flags.service_port or peer.flags.service_port,
             .carries_capability = attached_capability_id != null,
         };
-        peer.queue[insert_index].len = @intCast(payload.len);
-        @memcpy(peer.queue[insert_index].bytes[0..payload.len], payload);
+        queue[insert_index].len = @intCast(payload.len);
+        @memcpy(queue[insert_index].bytes[0..payload.len], payload);
         peer.queue_len += 1;
     }
 
@@ -203,8 +235,10 @@ pub const Table = struct {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         if (endpoint.queue_len == 0) return null;
 
+        const queue = endpointQueue(endpoint) orelse
+            native_util.impossibleByInvariant("non-empty endpoint queue retains its backing");
         const index = endpoint.queue_head;
-        const message = &endpoint.queue[index];
+        const message = &queue[index];
         if (message.len > payload_out.len) return error.ReceiveBufferTooSmall;
         @memcpy(payload_out[0..message.len], message.payload());
         const received = ReceivedMessage{
@@ -258,6 +292,7 @@ pub const Table = struct {
             if (!self.owner_index.remove(task_id.raw(), slot_index)) {
                 native_util.impossibleByInvariant("live endpoint is absent from its owner index");
             }
+            releaseEndpointQueue(&slot.endpoint);
             if (!self.arena.removeIndex(slot_index)) {
                 native_util.impossibleByInvariant("live endpoint disappeared during retirement");
             }
@@ -288,6 +323,39 @@ pub const Table = struct {
         return &slot.endpoint;
     }
 };
+
+fn endpointQueue(endpoint: *Endpoint) ?*EndpointQueue {
+    if (comptime heap_backed_endpoint_queues) return endpoint.queue;
+    return &endpoint.queue;
+}
+
+fn ensureEndpointQueue(endpoint: *Endpoint) error{NoSpaceLeft}!*EndpointQueue {
+    if (endpointQueue(endpoint)) |queue| return queue;
+    if (comptime heap_backed_endpoint_queues) {
+        const allocation = kernel_memory.kmalloc(@sizeOf(EndpointQueue)) orelse return error.NoSpaceLeft;
+        const queue: *EndpointQueue = @ptrCast(@alignCast(allocation));
+        initializeEndpointQueue(queue);
+        endpoint.queue = queue;
+        return queue;
+    }
+    return &endpoint.queue;
+}
+
+fn releaseEndpointQueue(endpoint: *Endpoint) void {
+    if (comptime heap_backed_endpoint_queues) {
+        if (endpoint.queue) |queue| {
+            @memset(std.mem.asBytes(queue), 0);
+            kernel_memory.kfree(@ptrCast(queue));
+            endpoint.queue = null;
+        }
+    }
+    endpoint.queue_head = 0;
+    endpoint.queue_len = 0;
+}
+
+fn initializeEndpointQueue(queue: *EndpointQueue) void {
+    @memset(std.mem.asBytes(queue), 0);
+}
 
 fn zeroMessage() Message {
     return .{
@@ -350,6 +418,20 @@ test "queued endpoint messages own their payload" {
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try table.recvInto(right.id, &payload)).?;
     try std.testing.expectEqualStrings("original", payload[0..received.len]);
+}
+
+test "endpoint table reset clears live queues and reuses capacity" {
+    var table = Table.init();
+    const left = try table.create(ids.task(20), "left", .{});
+    const right = try table.create(ids.task(21), "right", .{});
+    try table.connect(left.id, right.id);
+    try table.send(left.id, ids.task(20), 88, "queued", null, false);
+    try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(right.id)).queued_messages);
+
+    table.reset();
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
+    const replacement = try table.create(ids.task(22), "replacement", .{});
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(replacement.id)).queued_messages);
 }
 
 test "endpoint descriptors track peer links and queue depth" {
