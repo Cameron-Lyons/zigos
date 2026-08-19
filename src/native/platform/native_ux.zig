@@ -1,7 +1,6 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const humane_permissions = @import("../policy/humane_permissions.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
@@ -18,7 +17,7 @@ const yesNo = native_util.yesNo;
 pub const MAX_FLOWS: usize = 16;
 pub const MAX_DETAIL_BYTES: usize = 128;
 pub const MAX_BUNDLE_ID_BYTES: usize = 64;
-pub const MAX_PERMISSION_RESOURCE_BYTES: usize = 96;
+pub const APPEND_ONLY_FLOW_LOG = true;
 const REVIEW_FLOW_TEST_BUFFER_BYTES: usize = 384;
 
 pub const FlowKind = enum(u8) {
@@ -54,11 +53,9 @@ pub const FlowRecord = struct {
     decision_local_only: bool = false,
     decision_has_lease: bool = false,
     decision_lease_ticks: u64 = 0,
-    bundle_id_len: usize = 0,
+    bundle_id_len: u8 = 0,
     bundle_id: [MAX_BUNDLE_ID_BYTES]u8 = [_]u8{0} ** MAX_BUNDLE_ID_BYTES,
-    permission_resource_len: usize = 0,
-    permission_resource: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
-    detail_len: usize = 0,
+    detail_len: u8 = 0,
     detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
 
     pub fn detailSlice(self: *const FlowRecord) []const u8 {
@@ -70,32 +67,32 @@ pub const FlowRecord = struct {
     }
 
     pub fn permissionResourceSlice(self: *const FlowRecord) []const u8 {
-        return self.permission_resource[0..self.permission_resource_len];
+        return self.detailSlice();
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > 256) {
+            @compileError("native UX flow records exceed their compact text-sharing layout");
+        }
     }
 };
 
 pub const Error = error{
-    FlowIdExhausted,
     FlowTableFull,
 } || task_runtime.Error || workspace.Error || sync_service.Error || sync_service.AuthorityError;
 
-const FLOW_INDEX_CAPACITY: usize = MAX_FLOWS * 2;
-
-const FlowSlot = struct {
-    in_use: bool = false,
-    flow: FlowRecord = zeroFlow(),
-};
-
-const FlowArena = indexed_arena.IndexedArenaWithKey(u64, FlowSlot, MAX_FLOWS, FLOW_INDEX_CAPACITY, flowSlotId);
-
 pub const Controller = struct {
-    next_flow_id: u64 = 1,
-    flows: FlowArena = FlowArena.init(),
-    flow_order: [MAX_FLOWS]u64 = [_]u64{0} ** MAX_FLOWS,
+    flows: [MAX_FLOWS]FlowRecord = [_]FlowRecord{zeroFlow()} ** MAX_FLOWS,
     flow_count: usize = 0,
 
     pub fn init() Controller {
         return .{};
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > 5 * 1024) {
+            @compileError("native UX controller exceeds its compact append-only layout");
+        }
     }
 
     pub fn startTask(
@@ -151,7 +148,7 @@ pub const Controller = struct {
         bundle_id: []const u8,
     ) Error!*FlowRecord {
         const flow = try self.record(.open_app_panel, task_id, workspace_id, subject, bundle_id, true);
-        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        flow.bundle_id_len = @intCast(copyText(&flow.bundle_id, bundle_id));
         return flow;
     }
 
@@ -170,7 +167,7 @@ pub const Controller = struct {
         bundle_id: []const u8,
     ) Error!*FlowRecord {
         const flow = try self.record(.install_app, 0, 0, subject, bundle_id, true);
-        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        flow.bundle_id_len = @intCast(copyText(&flow.bundle_id, bundle_id));
         return flow;
     }
 
@@ -181,7 +178,7 @@ pub const Controller = struct {
         bundle_id: []const u8,
     ) Error!*FlowRecord {
         const flow = try self.record(.update_app, task_id, 0, subject, bundle_id, true);
-        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        flow.bundle_id_len = @intCast(copyText(&flow.bundle_id, bundle_id));
         return flow;
     }
 
@@ -192,7 +189,7 @@ pub const Controller = struct {
         bundle_id: []const u8,
     ) Error!*FlowRecord {
         const flow = try self.record(.rollback_app_update, task_id, 0, subject, bundle_id, true);
-        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        flow.bundle_id_len = @intCast(copyText(&flow.bundle_id, bundle_id));
         return flow;
     }
 
@@ -202,7 +199,7 @@ pub const Controller = struct {
         bundle_id: []const u8,
     ) Error!*FlowRecord {
         const flow = try self.record(.remove_app, 0, 0, subject, bundle_id, true);
-        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        flow.bundle_id_len = @intCast(copyText(&flow.bundle_id, bundle_id));
         return flow;
     }
 
@@ -291,8 +288,7 @@ pub const Controller = struct {
         flow.decision_local_only = decision_local_only;
         flow.decision_has_lease = decision_lease_ticks != null;
         flow.decision_lease_ticks = decision_lease_ticks orelse 0;
-        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
-        flow.permission_resource_len = copyText(&flow.permission_resource, request.resource);
+        flow.bundle_id_len = @intCast(copyText(&flow.bundle_id, bundle_id));
         return flow;
     }
 
@@ -307,14 +303,12 @@ pub const Controller = struct {
 
     pub fn flowAtOrder(self: *const Controller, order_index: usize) ?*const FlowRecord {
         if (order_index >= self.flow_count) return null;
-        const flow_id = self.flow_order[order_index];
-        const slot = self.flows.getConst(flow_id) orelse return null;
-        return &slot.flow;
+        return &self.flows[order_index];
     }
 
     pub fn flowById(self: *const Controller, flow_id: u64) ?*const FlowRecord {
-        const slot = self.flows.getConst(flow_id) orelse return null;
-        return &slot.flow;
+        if (flow_id == 0 or flow_id > self.flow_count) return null;
+        return &self.flows[@intCast(flow_id - 1)];
     }
 
     fn record(
@@ -327,20 +321,15 @@ pub const Controller = struct {
         approved: bool,
     ) Error!*FlowRecord {
         if (self.flow_count >= MAX_FLOWS) return error.FlowTableFull;
-        const flow_id = self.next_flow_id;
-        if (flow_id == 0) return error.FlowIdExhausted;
-        const slot = self.flows.reserve(flow_id) orelse return error.FlowTableFull;
-        const flow = &slot.flow;
+        const flow = &self.flows[self.flow_count];
         flow.* = zeroFlow();
-        flow.id = flow_id;
-        self.next_flow_id +%= 1;
+        flow.id = @intCast(self.flow_count + 1);
         flow.kind = kind;
         flow.task_id = task_id;
         flow.workspace_id = workspace_id;
         flow.subject = subject;
         flow.approved = approved;
-        flow.detail_len = copyText(&flow.detail, detail);
-        self.flow_order[self.flow_count] = flow.id;
+        flow.detail_len = @intCast(copyText(&flow.detail, detail));
         self.flow_count += 1;
         return flow;
     }
@@ -380,10 +369,6 @@ fn zeroFlow() FlowRecord {
         .id = 0,
         .kind = .start_task,
     };
-}
-
-fn flowSlotId(slot: *const FlowSlot) u64 {
-    return slot.flow.id;
 }
 
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) !void {
@@ -510,6 +495,7 @@ test "native ux renders structured permission review decisions" {
     var buffer: [REVIEW_FLOW_TEST_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderReviewFlowToBuffer(&buffer, flow);
 
+    try std.testing.expect(flow.permissionResourceSlice().ptr == flow.detailSlice().ptr);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "bundle=app.notes") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "kind=object_access") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "resource=workspace:notes") != null);
@@ -545,15 +531,18 @@ test "native ux records app lifecycle sync containment and removal flows" {
     try std.testing.expectEqualStrings("app.trip", controller.flowAtOrder(6).?.bundleIdSlice());
 }
 
-test "native ux flow ids stop at exhaustion" {
+test "native ux flow ids follow append order and stop at capacity" {
     var controller = Controller.init();
     const subject = principal.PrincipalId{ .kind = .user, .serial = 12 };
-    controller.next_flow_id = std.math.maxInt(u64);
 
-    const final_flow = try controller.installApp(subject, "app.final");
-    try std.testing.expectEqual(std.math.maxInt(u64), final_flow.id);
-    try std.testing.expectEqual(@as(u64, 0), controller.next_flow_id);
-    try std.testing.expectError(error.FlowIdExhausted, controller.removeApp(subject, "app.final"));
-    try std.testing.expectEqual(@as(usize, 1), controller.flow_count);
+    for (0..MAX_FLOWS) |index| {
+        const flow = try controller.installApp(subject, "app.full");
+        try std.testing.expectEqual(@as(u64, @intCast(index + 1)), flow.id);
+        try std.testing.expectEqual(flow, controller.flowAtOrder(index).?);
+        try std.testing.expectEqual(flow, controller.flowById(flow.id).?);
+    }
+    try std.testing.expectError(error.FlowTableFull, controller.removeApp(subject, "app.full"));
+    try std.testing.expectEqual(MAX_FLOWS, controller.flow_count);
     try std.testing.expect(controller.flowById(0) == null);
+    try std.testing.expect(controller.flowById(MAX_FLOWS + 1) == null);
 }

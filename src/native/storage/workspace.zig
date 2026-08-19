@@ -42,3 +42,4 @@ pub const shareGrantSlotIndex = directory.shareGrantSlotIndex;
 pub const workspaceRootAddress = directory.workspaceRootAddress;
 pub const emptySnapshotRecord = directory.emptySnapshotRecord;
 pub const emptyExportPackage = directory.emptyExportPackage;
+pub const resetExportPackage = directory.resetExportPackage;
