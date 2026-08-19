@@ -1,8 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
-const native_util = @import("../core/util.zig");
 const package_service = @import("package_service.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -10,9 +8,14 @@ const signing = @import("../core/signing.zig");
 pub const MAX_RELEASES_PER_CHANNEL: usize = 8;
 pub const MAX_ASSET_DIGEST_BYTES: usize = 96;
 pub const MAX_TRUSTED_PUBLISHERS_PER_CHANNEL: usize = 8;
-const RELEASE_INDEX_CAPACITY: usize = MAX_RELEASES_PER_CHANNEL * 2;
-const BUNDLE_RELEASE_INDEX_CAPACITY: usize = MAX_RELEASES_PER_CHANNEL * 2;
-const TRUSTED_PUBLISHER_INDEX_CAPACITY: usize = MAX_TRUSTED_PUBLISHERS_PER_CHANNEL * 2;
+pub const BOUNDED_RELEASE_SCAN = true;
+pub const BOUNDED_TRUSTED_PUBLISHER_SCAN = true;
+pub const DENSE_RELEASE_TABLE = true;
+pub const DENSE_TRUSTED_PUBLISHER_TABLE = true;
+pub const DIRECT_RELEASE_IDENTITY_COMPARISON = true;
+pub const RELEASE_SCAN_BOUND: usize = MAX_RELEASES_PER_CHANNEL;
+pub const TRUSTED_PUBLISHER_SCAN_BOUND: usize = MAX_TRUSTED_PUBLISHERS_PER_CHANNEL;
+pub const CHANNEL_SIZE_CEILING_BYTES: usize = 5_816;
 const SHA256_PREFIX = "sha256:";
 const SHA256_HEX_BYTES: usize = 64;
 
@@ -29,6 +32,17 @@ pub const Release = struct {
     data_schema_version: u32 = 1,
     transparency: ReleaseTransparency = .{},
 };
+
+fn emptyRelease() Release {
+    return .{
+        .bundle = .{
+            .bundle_id = "",
+            .display_name = "",
+            .publisher = "",
+        },
+        .assets = &.{},
+    };
+}
 
 pub const ReleaseTransparency = struct {
     sequence: u64 = 0,
@@ -89,46 +103,29 @@ pub const Error = error{
     StoreReleaseVersionRegressionRejected,
 };
 
-const ReleaseRecord = struct {
-    in_use: bool = false,
-    release: Release = .{
-        .bundle = .{
-            .bundle_id = "",
-            .display_name = "",
-            .publisher = "",
-        },
-        .assets = &.{},
-    },
-};
-
-const TrustedPublisherRecord = struct {
-    in_use: bool = false,
+pub const TrustedPublisherRecord = struct {
     revoked: bool = false,
     publisher: []const u8 = "",
     public_key: signing.PublicKey = [_]u8{0} ** signing.PUBLIC_KEY_BYTES,
 };
 
-fn releaseSlotKey(slot: *const ReleaseRecord) u64 {
-    const bundle = slot.release.bundle;
-    return releaseKey(bundle.bundle_id, bundle.version_major, bundle.version_minor);
-}
-
-fn trustedPublisherSlotKey(slot: *const TrustedPublisherRecord) u64 {
-    return trustedPublisherKey(slot.publisher, slot.public_key[0..]);
-}
-
-const ReleaseArena = indexed_arena.IndexedArenaWithKey(u64, ReleaseRecord, MAX_RELEASES_PER_CHANNEL, RELEASE_INDEX_CAPACITY, releaseSlotKey);
-const BundleReleaseIndex = indexed_arena.MultimapIndex(MAX_RELEASES_PER_CHANNEL, MAX_RELEASES_PER_CHANNEL, BUNDLE_RELEASE_INDEX_CAPACITY);
-const TrustedPublisherArena = indexed_arena.IndexedArenaWithKey(u64, TrustedPublisherRecord, MAX_TRUSTED_PUBLISHERS_PER_CHANNEL, TRUSTED_PUBLISHER_INDEX_CAPACITY, trustedPublisherSlotKey);
-
 pub const Channel = struct {
     source_identity: []const u8,
     update_channel: manifest.UpdateChannel,
-    releases: ReleaseArena = ReleaseArena.init(),
-    release_count: usize = 0,
-    bundle_release_index: BundleReleaseIndex = BundleReleaseIndex.init(),
+    releases: [MAX_RELEASES_PER_CHANNEL]Release = [_]Release{emptyRelease()} ** MAX_RELEASES_PER_CHANNEL,
+    release_count: u8 = 0,
     transparency_root: crypto_hash.Digest = crypto_hash.zero_digest,
-    trusted_publishers: TrustedPublisherArena = TrustedPublisherArena.init(),
+    trusted_publishers: [MAX_TRUSTED_PUBLISHERS_PER_CHANNEL]TrustedPublisherRecord = [_]TrustedPublisherRecord{.{}} ** MAX_TRUSTED_PUBLISHERS_PER_CHANNEL,
+    trusted_publisher_count: u8 = 0,
+
+    comptime {
+        if (MAX_RELEASES_PER_CHANNEL > std.math.maxInt(u8) or MAX_TRUSTED_PUBLISHERS_PER_CHANNEL > std.math.maxInt(u8)) {
+            @compileError("public store channel counts no longer fit compact storage");
+        }
+        if (@sizeOf(@This()) > CHANNEL_SIZE_CEILING_BYTES) {
+            @compileError("public store channel exceeds its fixed-state size ceiling");
+        }
+    }
 
     pub fn init(source_identity: []const u8, update_channel: manifest.UpdateChannel) Channel {
         return .{
@@ -157,7 +154,7 @@ pub const Channel = struct {
         assets: []const ReleaseAsset,
         data_schema_version: u32,
     ) ReleaseTransparency {
-        const sequence: u64 = @intCast(self.release_count + 1);
+        const sequence: u64 = @intCast(self.releaseCount() + 1);
         return .{
             .sequence = sequence,
             .previous_root = self.transparency_root,
@@ -175,41 +172,39 @@ pub const Channel = struct {
 
     pub fn trustPublisher(self: *Channel, publisher: []const u8, public_key: signing.PublicKey) Error!void {
         try validatePublisherIdentity(publisher);
-        const key = trustedPublisherKey(publisher, public_key[0..]);
-        if (self.trusted_publishers.get(key)) |record| {
+        if (self.findTrustedPublisher(publisher, public_key)) |record| {
             record.revoked = false;
             return;
         }
-        const record = self.trusted_publishers.reserve(key) orelse return error.StoreTrustedPublisherTableFull;
+        const slot_index = self.trustedPublisherCount();
+        if (slot_index >= MAX_TRUSTED_PUBLISHERS_PER_CHANNEL) return error.StoreTrustedPublisherTableFull;
+        const record = &self.trusted_publishers[slot_index];
         record.* = .{
-            .in_use = true,
             .revoked = false,
             .publisher = publisher,
             .public_key = public_key,
         };
+        self.trusted_publisher_count += 1;
     }
 
     pub fn revokePublisher(self: *Channel, publisher: []const u8, public_key: signing.PublicKey) Error!void {
         try validatePublisherIdentity(publisher);
-        const record = self.trusted_publishers.get(trustedPublisherKey(publisher, public_key[0..])) orelse return error.StoreTrustedPublisherMissing;
+        const record = self.findTrustedPublisher(publisher, public_key) orelse return error.StoreTrustedPublisherMissing;
         record.revoked = true;
     }
 
     pub fn publish(self: *Channel, release: Release) Error!void {
         try validateSourceIdentity(self.source_identity);
         try self.validateRelease(release);
-        const key = releaseKey(release.bundle.bundle_id, release.bundle.version_major, release.bundle.version_minor);
-        if (self.releases.getConst(key) != null) return error.StoreReleaseAlreadyPublished;
+        if (self.findExactIndex(release.bundle.bundle_id, release.bundle.version_major, release.bundle.version_minor) != null) {
+            return error.StoreReleaseAlreadyPublished;
+        }
         try self.validateVersionAdvances(release);
         try self.validateTransparency(release);
-        if (self.release_count >= MAX_RELEASES_PER_CHANNEL) return error.StoreChannelFull;
+        const slot_index = self.releaseCount();
+        if (slot_index >= MAX_RELEASES_PER_CHANNEL) return error.StoreChannelFull;
 
-        const slot_index = self.releases.reserveIndexAt(key, self.release_count) orelse return error.StoreChannelFull;
-        if (!self.bundle_release_index.append(bundleKey(release.bundle.bundle_id), slot_index)) {
-            _ = self.releases.removeIndex(slot_index);
-            return error.StoreChannelFull;
-        }
-        self.releases.slots[slot_index].release = release;
+        self.releases[slot_index] = release;
         self.release_count += 1;
         self.transparency_root = release.transparency.root;
     }
@@ -226,12 +221,13 @@ pub const Channel = struct {
 
     pub fn resolveLatest(self: *const Channel, bundle_id: []const u8) Error!ResolvedRelease {
         var matching_bundle_seen = false;
-        var slot_index = self.bundle_release_index.tail(bundleKey(bundle_id));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.bundle_release_index.previous(slot_index)) {
-            const record = self.bundleReleaseSlotAt(slot_index);
-            if (!std.mem.eql(u8, record.release.bundle.bundle_id, bundle_id)) continue;
+        var slot_index = self.releaseCount();
+        while (slot_index > 0) {
+            slot_index -= 1;
+            const release = self.releases[slot_index];
+            if (!std.mem.eql(u8, release.bundle.bundle_id, bundle_id)) continue;
             matching_bundle_seen = true;
-            if (!self.releaseSignedByTrustedPublisher(record.release.bundle)) continue;
+            if (!self.releaseSignedByTrustedPublisher(release.bundle)) continue;
             return self.resolveChecked(slot_index);
         }
         if (matching_bundle_seen) return error.StoreReleasePublisherUntrusted;
@@ -245,13 +241,14 @@ pub const Channel = struct {
         current_minor: u16,
     ) Error!ResolvedRelease {
         var matching_update_seen = false;
-        var slot_index = self.bundle_release_index.tail(bundleKey(bundle_id));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.bundle_release_index.previous(slot_index)) {
-            const record = self.bundleReleaseSlotAt(slot_index);
-            if (!std.mem.eql(u8, record.release.bundle.bundle_id, bundle_id)) continue;
-            if (!versionNewerThan(record.release, current_major, current_minor)) continue;
+        var slot_index = self.releaseCount();
+        while (slot_index > 0) {
+            slot_index -= 1;
+            const release = self.releases[slot_index];
+            if (!std.mem.eql(u8, release.bundle.bundle_id, bundle_id)) continue;
+            if (!versionNewerThan(release, current_major, current_minor)) continue;
             matching_update_seen = true;
-            if (!self.releaseSignedByTrustedPublisher(record.release.bundle)) continue;
+            if (!self.releaseSignedByTrustedPublisher(release.bundle)) continue;
             return self.resolveChecked(slot_index);
         }
         if (matching_update_seen) return error.StoreReleasePublisherUntrusted;
@@ -264,7 +261,15 @@ pub const Channel = struct {
         version_major: u16,
         version_minor: u16,
     ) ?usize {
-        return self.releases.slotIndexOf(releaseKey(bundle_id, version_major, version_minor));
+        for (self.releases[0..self.releaseCount()], 0..) |release, index| {
+            if (std.mem.eql(u8, release.bundle.bundle_id, bundle_id) and
+                release.bundle.version_major == version_major and
+                release.bundle.version_minor == version_minor)
+            {
+                return index;
+            }
+        }
+        return null;
     }
 
     fn validateRelease(self: *const Channel, release: Release) Error!void {
@@ -295,14 +300,12 @@ pub const Channel = struct {
     }
 
     fn validateVersionAdvances(self: *const Channel, release: Release) Error!void {
-        var slot_index = self.bundle_release_index.head(bundleKey(release.bundle.bundle_id));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.bundle_release_index.next(slot_index)) {
-            const record = self.bundleReleaseSlotAt(slot_index);
-            if (!std.mem.eql(u8, record.release.bundle.bundle_id, release.bundle.bundle_id)) continue;
+        for (self.releases[0..self.releaseCount()]) |published| {
+            if (!std.mem.eql(u8, published.bundle.bundle_id, release.bundle.bundle_id)) continue;
             if (!versionNewerThan(
                 release,
-                record.release.bundle.version_major,
-                record.release.bundle.version_minor,
+                published.bundle.version_major,
+                published.bundle.version_minor,
             )) return error.StoreReleaseVersionRegressionRejected;
         }
     }
@@ -311,7 +314,7 @@ pub const Channel = struct {
         if (release.transparency.sequence == 0 or std.mem.eql(u8, &release.transparency.root, &crypto_hash.zero_digest)) {
             return error.StoreTransparencyMissing;
         }
-        const expected_sequence: u64 = @intCast(self.release_count + 1);
+        const expected_sequence: u64 = @intCast(self.releaseCount() + 1);
         if (release.transparency.sequence != expected_sequence) return error.StoreTransparencySequenceInvalid;
         if (!std.mem.eql(u8, &release.transparency.previous_root, &self.transparency_root)) {
             return error.StoreTransparencyPreviousRootMismatch;
@@ -331,22 +334,14 @@ pub const Channel = struct {
     fn releaseSignedByTrustedPublisher(self: *const Channel, bundle: manifest.BundleManifest) bool {
         const key = bundle.signature.publicKeySlice();
         if (key.len != signing.PUBLIC_KEY_BYTES) return false;
-        const record = self.trusted_publishers.getConst(trustedPublisherKey(bundle.publisher, key)) orelse return false;
+        const public_key: signing.PublicKey = key[0..signing.PUBLIC_KEY_BYTES].*;
+        const record = self.findTrustedPublisherConst(bundle.publisher, public_key) orelse return false;
         return !record.revoked;
     }
 
-    fn bundleReleaseSlotAt(self: *const Channel, slot_index: usize) *const ReleaseRecord {
-        if (slot_index >= self.release_count) native_util.impossibleByInvariant("public store bundle-release index points outside published release range");
-        const record = &self.releases.slots[slot_index];
-        if (!record.in_use) native_util.impossibleByInvariant("public store bundle-release index points at free release slot");
-        return record;
-    }
-
     fn resolveChecked(self: *const Channel, index: usize) Error!ResolvedRelease {
-        if (index >= self.release_count) return error.StoreReleaseMissing;
-        const slot = self.releases.slots[index];
-        if (!slot.in_use) return error.StoreReleaseMissing;
-        const release = slot.release;
+        if (index >= self.releaseCount()) return error.StoreReleaseMissing;
+        const release = self.releases[index];
         if (!self.releaseSignedByTrustedPublisher(release.bundle)) return error.StoreReleasePublisherUntrusted;
         try self.validatePublishedTransparency(index);
         return self.resolvedRelease(release);
@@ -365,9 +360,9 @@ pub const Channel = struct {
     }
 
     fn validatePublishedTransparency(self: *const Channel, index: usize) Error!void {
-        const release = self.releases.slots[index].release;
+        const release = self.releases[index];
         if (release.transparency.sequence != index + 1) return error.StoreTransparencySequenceInvalid;
-        const expected_previous = if (index == 0) crypto_hash.zero_digest else self.releases.slots[index - 1].release.transparency.root;
+        const expected_previous = if (index == 0) crypto_hash.zero_digest else self.releases[index - 1].transparency.root;
         if (!std.mem.eql(u8, &release.transparency.previous_root, &expected_previous)) {
             return error.StoreTransparencyPreviousRootMismatch;
         }
@@ -381,6 +376,41 @@ pub const Channel = struct {
             release.data_schema_version,
         );
         if (!std.mem.eql(u8, &release.transparency.root, &expected_root)) return error.StoreTransparencyRootMismatch;
+    }
+
+    fn releaseCount(self: *const Channel) usize {
+        return @intCast(self.release_count);
+    }
+
+    fn trustedPublisherCount(self: *const Channel) usize {
+        return @intCast(self.trusted_publisher_count);
+    }
+
+    fn countReleasesForBundle(self: *const Channel, bundle_id: []const u8) usize {
+        var count: usize = 0;
+        for (self.releases[0..self.releaseCount()]) |release| {
+            if (std.mem.eql(u8, release.bundle.bundle_id, bundle_id)) count += 1;
+        }
+        return count;
+    }
+
+    fn findTrustedPublisher(self: *Channel, publisher: []const u8, public_key: signing.PublicKey) ?*TrustedPublisherRecord {
+        const slot_index = self.trustedPublisherSlotIndex(publisher, public_key) orelse return null;
+        return &self.trusted_publishers[slot_index];
+    }
+
+    fn findTrustedPublisherConst(self: *const Channel, publisher: []const u8, public_key: signing.PublicKey) ?*const TrustedPublisherRecord {
+        const slot_index = self.trustedPublisherSlotIndex(publisher, public_key) orelse return null;
+        return &self.trusted_publishers[slot_index];
+    }
+
+    fn trustedPublisherSlotIndex(self: *const Channel, publisher: []const u8, public_key: signing.PublicKey) ?usize {
+        for (self.trusted_publishers[0..self.trustedPublisherCount()], 0..) |record, index| {
+            if (std.mem.eql(u8, record.publisher, publisher) and std.mem.eql(u8, &record.public_key, &public_key)) {
+                return index;
+            }
+        }
+        return null;
     }
 };
 
@@ -400,31 +430,6 @@ fn validateSourceIdentity(source_identity: []const u8) Error!void {
 fn validatePublisherIdentity(publisher: []const u8) Error!void {
     if (publisher.len == 0) return error.StorePublisherMissing;
     if (publisher.len > principal.MAX_PUBLISHER_BYTES) return error.StorePublisherTooLong;
-}
-
-fn bundleKey(bundle_id: []const u8) u64 {
-    var hash = native_util.fnv1a64WithSeed(0x5055_4253_4255_4E44, "public-store:bundle:v1");
-    hash = appendKeyBytes(hash, bundle_id);
-    return indexed_arena.nonZeroKey(hash);
-}
-
-fn releaseKey(bundle_id: []const u8, version_major: u16, version_minor: u16) u64 {
-    var hash = native_util.fnv1a64WithSeed(0x5055_4253_544F_5231, "public-store:release:v1");
-    hash = appendKeyBytes(hash, bundle_id);
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, version_major);
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, version_minor);
-    return indexed_arena.nonZeroKey(hash);
-}
-
-fn trustedPublisherKey(publisher: []const u8, public_key: []const u8) u64 {
-    var hash = native_util.fnv1a64WithSeed(0x5055_4253_5452_5354, "public-store:trusted-publisher:v1");
-    hash = appendKeyBytes(hash, publisher);
-    hash = appendKeyBytes(hash, public_key);
-    return indexed_arena.nonZeroKey(hash);
-}
-
-fn appendKeyBytes(hash: u64, bytes: []const u8) u64 {
-    return native_util.fnv1a64WithSeed(native_util.fnv1a64AppendU64LittleEndian(hash, bytes.len), bytes);
 }
 
 fn supplyChainComplete(supply_chain: manifest.SupplyChainDecl) bool {
@@ -552,7 +557,7 @@ test "public store publishes signed asset releases and resolves package install 
     try channel.trustPublisher("zigos.dev", try signing.publicKey(signer));
     try channel.publish(channel.prepareRelease(v1, &v1_release_assets, 1));
     try channel.publish(channel.prepareRelease(v2, &v2_release_assets, 2));
-    try std.testing.expectEqual(@as(usize, 2), channel.bundle_release_index.count(bundleKey("app.notes")));
+    try std.testing.expectEqual(@as(usize, 2), channel.countReleasesForBundle("app.notes"));
 
     const resolved = try channel.resolveVersion("app.notes", 1, 0);
     const request = resolved.installRequest();
@@ -637,7 +642,7 @@ test "public store refuses unsigned tampered digestless or catalog-mismatched re
     try std.testing.expectError(error.StoreReleaseAlreadyPublished, channel.publish(channel.prepareRelease(bundle, &release_assets, 1)));
 }
 
-test "public store resolves exact versions through indexed full channel" {
+test "public store resolves exact versions through dense full channel" {
     const signer = signing.SignerIdentity{
         .label = "public-store-index-test",
         .seed = signing.seedFromByte(0x68),
@@ -688,8 +693,9 @@ test "public store resolves exact versions through indexed full channel" {
         try std.testing.expectEqual(@as(u64, version_minor) + 1, resolved.transparency_sequence);
     }
 
-    try std.testing.expectEqual(@as(usize, MAX_RELEASES_PER_CHANNEL), channel.releases.countInUse());
-    try std.testing.expectEqual(@as(usize, MAX_RELEASES_PER_CHANNEL), channel.bundle_release_index.count(bundleKey("app.indexed")));
+    try std.testing.expectEqual(@as(usize, MAX_RELEASES_PER_CHANNEL), channel.releaseCount());
+    try std.testing.expectEqual(@as(usize, MAX_RELEASES_PER_CHANNEL), channel.countReleasesForBundle("app.indexed"));
+    try std.testing.expect(@sizeOf(Channel) <= CHANNEL_SIZE_CEILING_BYTES);
     const latest = try channel.resolveLatest("app.indexed");
     try std.testing.expectEqual(@as(u16, MAX_RELEASES_PER_CHANNEL - 1), latest.bundle.version_minor);
 
@@ -785,4 +791,32 @@ test "public store enforces append-only transparency sequencing" {
     const latest = try channel.resolveLatest("app.notes");
     try std.testing.expectEqual(@as(u64, 2), latest.transparency_sequence);
     try std.testing.expect(std.mem.eql(u8, &latest.transparency_root, &latest.transparency_log_head));
+}
+
+test "public store fills dense publisher trust without duplicating reactivated entries" {
+    const publishers = [_][]const u8{
+        "publisher-0",
+        "publisher-1",
+        "publisher-2",
+        "publisher-3",
+        "publisher-4",
+        "publisher-5",
+        "publisher-6",
+        "publisher-7",
+    };
+    var channel = Channel.init("store:zigos/public", .stable);
+    for (publishers, 0..) |publisher, index| {
+        const public_key = [_]u8{@intCast(index + 1)} ** signing.PUBLIC_KEY_BYTES;
+        try channel.trustPublisher(publisher, public_key);
+    }
+    try std.testing.expectEqual(@as(usize, MAX_TRUSTED_PUBLISHERS_PER_CHANNEL), channel.trustedPublisherCount());
+
+    const first_key = [_]u8{1} ** signing.PUBLIC_KEY_BYTES;
+    try channel.revokePublisher(publishers[0], first_key);
+    try channel.trustPublisher(publishers[0], first_key);
+    try std.testing.expectEqual(@as(usize, MAX_TRUSTED_PUBLISHERS_PER_CHANNEL), channel.trustedPublisherCount());
+    try std.testing.expect(!channel.findTrustedPublisherConst(publishers[0], first_key).?.revoked);
+
+    const overflow_key = [_]u8{0xff} ** signing.PUBLIC_KEY_BYTES;
+    try std.testing.expectError(error.StoreTrustedPublisherTableFull, channel.trustPublisher("publisher-overflow", overflow_key));
 }

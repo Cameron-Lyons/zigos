@@ -468,7 +468,7 @@ test "compositor display framebuffer renders windows switching recovery and perm
     try expectDisplayContains(&display, "active_window=2");
 
     session.reset();
-    session.restore(snapshot);
+    try session.restore(snapshot);
     try display.renderSession(&session);
     try expectDisplayContains(&display, "type=document_view");
     try expectDisplayContains(&display, "type=workspace_view");

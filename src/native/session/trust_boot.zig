@@ -70,10 +70,15 @@ pub const TrustBoot = struct {
         graph_builder: *service_graph_builder_mod.Builder,
         native_store: *native_store_mount.NativeStoreMount,
     ) TrustBoot {
+        const capability_table = kernel_context.capabilityTable() orelse
+            native_util.impossibleByInvariant("trust boot construction follows capability-table allocation");
+        const userspace_catalog = runtime_context.userspaceCatalog() orelse
+            native_util.impossibleByInvariant("trust boot construction follows userspace-catalog allocation");
         return .{
-            .runtime = &runtime_context.runtime,
-            .userspace_catalog = &runtime_context.userspace_catalog,
-            .capability_table = &kernel_context.capability_table,
+            .runtime = runtime_context.taskRuntime() orelse
+                native_util.impossibleByInvariant("trust boot follows task-runtime allocation"),
+            .userspace_catalog = userspace_catalog,
+            .capability_table = capability_table,
             .compositor = compositor,
             .service_directory = &graph_builder.service_directory,
             .supervisor = &graph_builder.supervisor,
@@ -220,7 +225,8 @@ pub const TrustBoot = struct {
         const network_probe = self.seedProductionHealthNetworkProbe(&sync_instance, workspace_id, 81) catch return false;
         const compositor_task = self.runtime.find(graph.service_bindings.bindingFor(.compositor_ui_session).task_id) orelse return false;
         const compositor_snapshot = self.compositor.snapshot();
-        defer self.compositor.restore(compositor_snapshot);
+        defer self.compositor.restore(compositor_snapshot) catch |err|
+            native_util.impossibleByInvariantError("activation health restores its retained compositor snapshot", err);
         _ = self.compositor.openTaskView(compositor_task, "Post-Activation Health") catch return false;
 
         const policy_service_id = (self.supervisor.findByClass(.policy_mediation) orelse return false).id;
@@ -582,16 +588,17 @@ pub const TrustBoot = struct {
         for (&self.service_directory.registry.bindings.slots) |*slot| {
             if (!slot.in_use) continue;
             const binding = &slot.binding;
+            const contract = binding.typedContract();
             crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);
             crypto_hash.updateInt(&hasher, "registry-owner-task-id", binding.owner_task_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-id", binding.endpoint_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-capability-id", binding.endpoint_capability_id);
-            crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(binding.interface_id));
-            crypto_hash.updateBytes(&hasher, "registry-interface-name", binding.interface.name);
-            crypto_hash.updateInt(&hasher, "registry-version-major", binding.interface.version_major);
-            crypto_hash.updateInt(&hasher, "registry-version-minor", binding.interface.version_minor);
+            crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(binding.interfaceId()));
+            crypto_hash.updateBytes(&hasher, "registry-interface-name", contract.interface.name);
+            crypto_hash.updateInt(&hasher, "registry-version-major", binding.version_major);
+            crypto_hash.updateInt(&hasher, "registry-version-minor", binding.version_minor);
             crypto_hash.updateInt(&hasher, "registry-flags", binding.flags);
-            crypto_hash.updateInt(&hasher, "registry-contract-hash", binding.typed_contract_hash);
+            crypto_hash.updateInt(&hasher, "registry-contract-hash", contract.contract_hash);
         }
         return crypto_hash.finalize(&hasher);
     }

@@ -307,7 +307,7 @@ fn validateEventLedgerRollover(
         snippet: []const u8,
     }{
         .{ .path = source_path, .source = source, .snippet = "oldest_retained_sequence: u64 = 0" },
-        .{ .path = source_path, .source = source, .snippet = "self.events.slotIndexOf(oldest_sequence)" },
+        .{ .path = source_path, .source = source, .snippet = "backing.event_order_index.head(EVENT_ORDER_KEY)" },
         .{ .path = source_path, .source = source, .snippet = "fn nextOldestSequence(" },
         .{ .path = test_path, .source = test_source, .snippet = "event ledger evicts oldest events instead of jamming past MAX_EVENTS" },
         .{ .path = test_path, .source = test_source, .snippet = "ledger.oldest_retained_sequence" },
@@ -2973,7 +2973,12 @@ fn validateSecretVaultHardwareProviderBoundary(
         "HardwareProviderUnavailable",
         "self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable",
         "secret.hardware_provider_used = true",
-        "self.secrets.insertIndex(secret_id, .{ .secret = secret })",
+        "if (hardware_backed and !exportable)",
+        "secret.resident_material = false",
+        "secret.value_len = 0",
+        "const slot = &self.secrets[slot_index]",
+        "slot.* = secret",
+        "self.secret_count += 1",
         "secure secret store requires a hardware provider before hardware-backed imports",
     };
     for (store_snippets) |snippet| {
