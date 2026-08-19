@@ -51,6 +51,17 @@ comptime {
     }
 }
 
+comptime {
+    if (MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_CONTENT_TYPE_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("object metadata text exceeds its compact length fields");
+    }
+    if (MAX_PAYLOAD_BYTES > std.math.maxInt(u32)) {
+        @compileError("object payload capacity exceeds its compact length field");
+    }
+}
+
 pub const StoreConfig = struct {
     max_objects: usize = MAX_OBJECTS,
     max_versions: usize = MAX_VERSIONS,

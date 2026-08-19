@@ -43,7 +43,6 @@ test "object type index uses capacity-sized resident links" {
 
     try std.testing.expectEqual(@as(usize, 213), @sizeOf(ObjectTypeIndex));
 }
-
 test "versions retain only compact canonical blob references" {
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(VersionBlobSlotIndex));
     try std.testing.expect(!@hasField(object_store.VersionRecord, "blob_address"));

@@ -388,7 +388,6 @@ test "endpoint queues use capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 1_112), @sizeOf(EndpointSlot));
     try std.testing.expectEqual(@as(usize, 74_016), @sizeOf(Table));
 }
-
 test "endpoints connect and exchange queued messages" {
     var table = Table.init();
     const left = try table.create(ids.task(10), "left", .{ .local_only = true });
