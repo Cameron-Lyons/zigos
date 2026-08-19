@@ -113,6 +113,15 @@ const PrincipalKeyArena = indexed_arena.IndexedArenaWithKey(u64, PrincipalKeySlo
 const PrincipalKeyPrincipalIndex = indexed_arena.MultimapIndex(MAX_PRINCIPAL_KEYS, MAX_PRINCIPAL_KEYS, PRINCIPAL_KEY_INDEX_CAPACITY);
 const PrincipalKeyPublisherIndex = indexed_arena.MultimapIndex(MAX_PRINCIPAL_KEYS, MAX_PRINCIPAL_KEYS, PRINCIPAL_KEY_INDEX_CAPACITY);
 
+fn initializeKeyringIndex(index: anytype) void {
+    const Index = @TypeOf(index.*);
+    const CompactIndex = @FieldType(Index, "free_bucket_head");
+    const compact_no_index: CompactIndex = @intCast(@max(index.links.len, index.buckets.len));
+    @memset(std.mem.asBytes(index), 0);
+    for (&index.links) |*link| link.bucket = compact_no_index;
+    index.free_bucket_head = compact_no_index;
+}
+
 pub const Keyring = struct {
     slots: PrincipalKeyArena = PrincipalKeyArena.init(),
     principal_index: PrincipalKeyPrincipalIndex = PrincipalKeyPrincipalIndex.init(),
@@ -120,6 +129,13 @@ pub const Keyring = struct {
 
     pub fn init() Keyring {
         return .{};
+    }
+
+    pub fn initializeAllocated(self: *Keyring) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.slots.free_head = indexed_arena.reusableNoIndex(MAX_PRINCIPAL_KEYS);
+        initializeKeyringIndex(&self.principal_index);
+        initializeKeyringIndex(&self.publisher_index);
     }
 
     pub fn bindPolicyAuthorityRoot(
@@ -293,7 +309,8 @@ test "principal records preserve identity and labels" {
 }
 
 test "principal keyring binds publishers to trusted keys and supports revocation" {
-    var keyring = Keyring.init();
+    var keyring: Keyring = undefined;
+    keyring.initializeAllocated();
     const root = PrincipalId{ .kind = .policy_authority, .serial = 1 };
     const publisher = PrincipalId{ .kind = .app, .serial = 7 };
     const root_key = signing.publicKeyFromByte(0xA1);
