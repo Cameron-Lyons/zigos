@@ -192,6 +192,13 @@ pub const indexed_hot_path_tables = .{
     },
     .background_dispatch = .{
         .uses_bounded_record_scan = background_dispatch.BOUNDED_RECORD_SCAN,
+        .stores_compact_dispatch_metadata = background_dispatch.COMPACT_DISPATCH_METADATA and
+            @FieldType(background_dispatch.DispatchRecord, "background_task_id_len") == u8 and
+            @FieldType(background_dispatch.Controller, "active_count") == u8 and
+            @FieldType(background_dispatch.Controller, "record_count") == u8 and
+            @FieldType(background_dispatch.Controller, "next_reusable_slot") == u8,
+        .keeps_dispatch_state_within_ceilings = @sizeOf(background_dispatch.DispatchRecord) <= background_dispatch.DISPATCH_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(background_dispatch.Controller) <= background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
         .tracks_active_count = @hasField(background_dispatch.Controller, "active_count"),
         .uses_fair_reuse_cursor = @hasField(background_dispatch.Controller, "next_reusable_slot"),
         .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
@@ -419,10 +426,24 @@ pub const indexed_hot_path_tables = .{
         .supports_ordered_flow_lookup = @hasDecl(native_ux.Controller, "flowAtOrder"),
     },
     .sync_transport_harness = .{
+        .stores_compact_relay_metadata = sync_transport_harness.COMPACT_RELAY_METADATA and
+            @FieldType(sync_transport_harness.EncryptedPacket, "ciphertext_len") == u16 and
+            @FieldType(sync_transport_harness.BootedOverlayRelayService, "relay_domain_len") == u8 and
+            @FieldType(sync_transport_harness.TransportSession, "relay_domain_len") == u8,
+        .keeps_relay_state_within_ceilings = @sizeOf(sync_transport_harness.EncryptedPacket) <= sync_transport_harness.ENCRYPTED_PACKET_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.SignedEncryptedFrame) <= sync_transport_harness.SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.Relay) <= sync_transport_harness.RELAY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.BootedOverlayRelayService) <= sync_transport_harness.BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.TransportSession) <= sync_transport_harness.TRANSPORT_SESSION_SIZE_CEILING_BYTES,
         .uses_relay_packet_arena = @hasField(sync_transport_harness.Relay, "packets"),
         .uses_relay_session_index = @hasField(sync_transport_harness.Relay, "session_index"),
     },
     .sync_transport = .{
+        .stores_compact_capture_metadata = sync_transport.COMPACT_CAPTURE_METADATA and
+            @FieldType(sync_transport.CapturedPacket, "len") == u16,
+        .keeps_capture_state_within_ceilings = @sizeOf(sync_transport.CapturedPacket) <= sync_transport.CAPTURED_PACKET_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport.PacketCapture) <= sync_transport.PACKET_CAPTURE_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport.NativeTransportService) <= sync_transport.NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES,
         .uses_packet_capture_arena = @hasDecl(@FieldType(sync_transport.PacketCapture, "packets"), "reserveIndex"),
         .tracks_last_packet_id = @hasField(sync_transport.PacketCapture, "last_packet_id"),
     },
@@ -443,6 +464,35 @@ pub const indexed_hot_path_tables = .{
         .rebuilds_loaded_indexes = @hasDecl(device_graph.Graph, "rebuildIndexes"),
     },
     .sync_service = .{
+        .stores_compact_overlay_session_metadata = sync_service.COMPACT_OVERLAY_SESSION_METADATA and
+            @FieldType(sync_service.OverlaySession, "service_identity_len") == u8 and
+            @FieldType(sync_service.OverlaySession, "relay_domain_len") == u8 and
+            @FieldType(sync_service.OverlaySession, "private_service_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "service_identity_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "relay_domain_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "private_service_len") == u8,
+        .keeps_overlay_session_state_within_ceilings = @sizeOf(sync_service.OverlaySession) <= sync_service.OVERLAY_SESSION_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.OverlayRelayFrameResult) <= sync_service.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.Service) <= sync_service.SERVICE_SIZE_CEILING_BYTES,
+        .stores_compact_service_queue_metadata = sync_service.COMPACT_SERVICE_QUEUE_METADATA and
+            @FieldType(sync_service.Service, "outbound_transport_frame_count") == u8 and
+            @FieldType(sync_service.Service, "inbound_transport_frame_count") == u8 and
+            @FieldType(sync_service.Service, "next_outbound_transport_frame_slot_index") == u8 and
+            @FieldType(sync_service.Service, "next_inbound_transport_frame_slot_index") == u8 and
+            @FieldType(sync_service.Service, "active_overlay_session_count") == u8,
+        .stores_compact_replication_result_metadata = sync_service.COMPACT_REPLICATION_SUMMARY_METADATA and
+            sync_service.COMPACT_PEER_REPLICATION_RESULT_METADATA and
+            @FieldType(sync_service.ReplicationSummary, "selected_entry_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "skipped_entry_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "snapshot_count") == u16 and
+            @FieldType(sync_service.ReplicationSummary, "conflict_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "transport_frame_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "accepted_frame_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "persisted_object_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "relay_delivery_count") == u32 and
+            @FieldType(sync_service.PeerReplicationResult, "payload_bytes") == u32,
+        .keeps_replication_results_within_ceilings = @sizeOf(sync_service.ReplicationSummary) <= sync_service.REPLICATION_SUMMARY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.PeerReplicationResult) <= sync_service.PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES,
         .stores_compact_sync_record_metadata = sync_state_support.COMPACT_RECORD_METADATA and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_count") == u8 and
             @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_lens") == [sync_state_support.MAX_SELECTIVE_PREFIXES]u8 and
@@ -508,6 +558,12 @@ pub const indexed_hot_path_tables = .{
             @hasField(@FieldType(sync_state_support.PersistentState, "database_contracts"), "next_unclaimed_index"),
     },
     .sync_adapters = .{
+        .stores_compact_document_log_metadata = sync_adapters.COMPACT_DOCUMENT_LOG_METADATA and
+            @FieldType(sync_adapters.DocumentOperation, "text_len") == u8 and
+            @FieldType(sync_adapters.DocumentOperationLog, "operation_count") == u8 and
+            @FieldType(sync_adapters.DocumentOperationLog, "clock_count") == u8,
+        .keeps_document_log_state_within_ceilings = @sizeOf(sync_adapters.DocumentOperation) <= sync_adapters.DOCUMENT_OPERATION_SIZE_CEILING_BYTES and
+            @sizeOf(sync_adapters.DocumentOperationLog) <= sync_adapters.DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES,
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),
         .uses_transport_frame_target_index = @hasField(sync_adapters.TransportQueue, "target_index"),
         .uses_transport_frame_path_index = @hasField(sync_adapters.TransportQueue, "path_index"),

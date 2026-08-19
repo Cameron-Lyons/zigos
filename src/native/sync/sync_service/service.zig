@@ -35,6 +35,16 @@ pub const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_OVERLAY_SESSIONS = overlay_model.MAX_OVERLAY_SESSIONS;
+pub const COMPACT_OVERLAY_SESSION_METADATA = overlay_model.COMPACT_OVERLAY_SESSION_METADATA;
+pub const OVERLAY_SESSION_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SIZE_CEILING_BYTES;
+pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES;
+pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
+pub const COMPACT_SERVICE_QUEUE_METADATA = true;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 89_760;
+pub const COMPACT_REPLICATION_SUMMARY_METADATA = state_support.COMPACT_REPLICATION_SUMMARY_METADATA;
+pub const REPLICATION_SUMMARY_SIZE_CEILING_BYTES = state_support.REPLICATION_SUMMARY_SIZE_CEILING_BYTES;
+pub const COMPACT_PEER_REPLICATION_RESULT_METADATA = replication_model.COMPACT_PEER_REPLICATION_RESULT_METADATA;
+pub const PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES = replication_model.PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES;
 pub const ServiceConfig = overlay_model.ServiceConfig;
 pub const TransportMode = state_support.TransportMode;
 pub const SyncSemantic = state_support.SyncSemantic;
@@ -160,6 +170,9 @@ pub fn authorityContext(
 
 pub fn ServiceWith(comptime config: ServiceConfig) type {
     config.validate();
+    if (MAX_TRANSPORT_FRAMES > std.math.maxInt(u8)) {
+        @compileError("sync transport queue count no longer fits compact metadata");
+    }
     return struct {
         const Self = @This();
         const MAX_SERVICE_OVERLAY_SESSIONS = config.max_overlay_sessions;
@@ -191,14 +204,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         inbound_transport_target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
         inbound_source_high_water_index: InboundSourceHighWaterIndex = InboundSourceHighWaterIndex.init(),
         inbound_source_frame_index: InboundSourceFrameIndex = InboundSourceFrameIndex.init(),
-        outbound_transport_frame_count: usize = 0,
-        inbound_transport_frame_count: usize = 0,
-        next_outbound_transport_frame_slot_index: usize = 0,
-        next_inbound_transport_frame_slot_index: usize = 0,
+        outbound_transport_frame_count: u8 = 0,
+        inbound_transport_frame_count: u8 = 0,
+        next_outbound_transport_frame_slot_index: u8 = 0,
+        next_inbound_transport_frame_slot_index: u8 = 0,
         next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
         closed_overlay_sessions: ClosedOverlaySessionIndex = ClosedOverlaySessionIndex.init(),
-        active_overlay_session_count: usize = 0,
+        active_overlay_session_count: u8 = 0,
         mergeable_document_adapter: MergeableDocumentAdapter = sync_adapters.default_mergeable_document_adapter,
         chunk_media_adapter: ChunkMediaAdapter = sync_adapters.default_chunk_media_adapter,
         secret_transfer_adapter: SecretTransferAdapter = sync_adapters.default_secret_transfer_adapter,
@@ -559,7 +572,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         pub fn activeOverlaySessionCount(self: *const Self) usize {
-            return self.active_overlay_session_count;
+            return @intCast(self.active_overlay_session_count);
         }
 
         pub fn openOverlaySession(
@@ -601,7 +614,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .open_tick = tick,
                 .last_activity_tick = tick,
             };
-            session.service_identity_len = native_util.copyTextExact(&session.service_identity, overlay.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong;
+            session.service_identity_len = @intCast(native_util.copyTextExact(&session.service_identity, overlay.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong);
 
             switch (usage) {
                 .sync_replication => {},
@@ -612,13 +625,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .private_service => {
                     const label = private_service_label orelse return error.PrivateServiceNotPublished;
                     if (!overlay.hasPrivateService(label)) return error.PrivateServiceNotPublished;
-                    session.private_service_len = native_util.copyTextExact(&session.private_service, label) catch return error.ServiceIdentityTooLong;
+                    session.private_service_len = @intCast(native_util.copyTextExact(&session.private_service, label) catch return error.ServiceIdentityTooLong);
                     session.remote_access = overlay.remote_access_enabled and transport == .relay_assisted;
                 },
             }
 
             if (transport == .relay_assisted) {
-                session.relay_domain_len = native_util.copyTextExact(&session.relay_domain, policy.relayDomainSlice()) catch return error.NetworkTargetTooLong;
+                session.relay_domain_len = @intCast(native_util.copyTextExact(&session.relay_domain, policy.relayDomainSlice()) catch return error.NetworkTargetTooLong);
                 session.remote_access = true;
             }
 
@@ -821,7 +834,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 if (frame.encrypted) summary.encrypted_transport_count += 1;
                 try self.setReplicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash, entry.object_id, entry.version_id, mutation.generation);
             }
-            summary.conflict_count = self.countConflictsFor(workspace_id, to_device);
+            summary.conflict_count = @intCast(self.countConflictsFor(workspace_id, to_device));
             if (summary.selected_entry_count != 0 or summary.conflict_count != 0) {
                 try self.checkpoint();
             }
@@ -1699,7 +1712,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                     },
                 }
             }
-            self.transportFrameSlotCountPtr(queue_kind).* = count;
+            self.transportFrameSlotCountPtr(queue_kind).* = @intCast(count);
         }
 
         fn allocateConflictIndex(self: *Self, workspace_id: u64, device_id: principal.PrincipalId, path: []const u8) ?usize {
@@ -1765,13 +1778,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (self.transportFrameSlotCount(queue_kind) == MAX_TRANSPORT_FRAMES) return null;
             const arena = self.transportFrameArena(queue_kind);
             const cursor = self.transportFrameSlotCursorPtr(queue_kind);
-            const start_index = cursor.*;
+            const start_index: usize = @intCast(cursor.*);
             var offset: usize = 0;
             while (offset < MAX_TRANSPORT_FRAMES) : (offset += 1) {
                 const slot_index = (start_index + offset) % MAX_TRANSPORT_FRAMES;
                 if (arena.slots[slot_index].in_use) continue;
                 const reserved_index = arena.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), slot_index) orelse continue;
-                cursor.* = (reserved_index + 1) % MAX_TRANSPORT_FRAMES;
+                cursor.* = @intCast((reserved_index + 1) % MAX_TRANSPORT_FRAMES);
                 return reserved_index;
             }
             native_util.impossibleByInvariant("transport frame count found a free slot but allocation cursor did not");
@@ -1797,7 +1810,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             _ = frames.removeIndex(index);
             self.decrementTransportFrameSlotCount(.inbound);
             const slot_index = frames.reserveIndexAt(state_support.transportFrameArenaKey(frame_id), index) orelse return null;
-            self.transportFrameSlotCursorPtr(.inbound).* = (slot_index + 1) % MAX_TRANSPORT_FRAMES;
+            self.transportFrameSlotCursorPtr(.inbound).* = @intCast((slot_index + 1) % MAX_TRANSPORT_FRAMES);
             return slot_index;
         }
 
@@ -1807,10 +1820,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn transportFrameSlotCount(self: *const Self, queue_kind: TransportQueueKind) usize {
-            return switch (queue_kind) {
+            return @intCast(switch (queue_kind) {
                 .outbound => self.outbound_transport_frame_count,
                 .inbound => self.inbound_transport_frame_count,
-            };
+            });
         }
 
         fn incrementTransportFrameSlotCount(self: *Self, queue_kind: TransportQueueKind) void {
@@ -1825,14 +1838,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             count.* -= 1;
         }
 
-        fn transportFrameSlotCountPtr(self: *Self, queue_kind: TransportQueueKind) *usize {
+        fn transportFrameSlotCountPtr(self: *Self, queue_kind: TransportQueueKind) *u8 {
             return switch (queue_kind) {
                 .outbound => &self.outbound_transport_frame_count,
                 .inbound => &self.inbound_transport_frame_count,
             };
         }
 
-        fn transportFrameSlotCursorPtr(self: *Self, queue_kind: TransportQueueKind) *usize {
+        fn transportFrameSlotCursorPtr(self: *Self, queue_kind: TransportQueueKind) *u8 {
             return switch (queue_kind) {
                 .outbound => &self.next_outbound_transport_frame_slot_index,
                 .inbound => &self.next_inbound_transport_frame_slot_index,
