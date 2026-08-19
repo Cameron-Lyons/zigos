@@ -1,6 +1,5 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -10,6 +9,10 @@ const copyText = native_util.copyText;
 pub const MAX_GRANTS: usize = 16;
 pub const MAX_PAYLOAD_BYTES: usize = 512;
 pub const MAX_PURPOSE_BYTES: usize = 96;
+pub const BOUNDED_GRANT_SCAN = true;
+pub const RECLAIMS_TERMINAL_GRANTS = true;
+pub const COMPACT_GRANT_LENGTHS = true;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 11_168;
 
 pub const Error = event_ledger.Error || error{
     EmptyPayload,
@@ -80,34 +83,31 @@ pub const Grant = struct {
     read_once: bool = true,
     consumed: bool = false,
     revoked: bool = false,
-    payload_len: usize = 0,
+    payload_len: u16 = 0,
     payload: [MAX_PAYLOAD_BYTES]u8 = [_]u8{0} ** MAX_PAYLOAD_BYTES,
-    purpose_len: usize = 0,
+    purpose_len: u8 = 0,
     purpose: [MAX_PURPOSE_BYTES]u8 = [_]u8{0} ** MAX_PURPOSE_BYTES,
 
     pub fn payloadSlice(self: *const Grant) []const u8 {
-        return self.payload[0..self.payload_len];
+        return self.payload[0..@as(usize, self.payload_len)];
     }
 
     pub fn purposeSlice(self: *const Grant) []const u8 {
-        return self.purpose[0..self.purpose_len];
+        return self.purpose[0..@as(usize, self.purpose_len)];
     }
 };
 
-const Slot = struct {
-    in_use: bool = false,
-    grant: Grant = .{},
-};
-
-fn slotTokenKey(slot: *const Slot) u64 {
-    return slot.grant.token_id;
-}
-
-const GrantArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_GRANTS, MAX_GRANTS * 2, slotTokenKey);
-
 pub const Service = struct {
     next_token_id: u64 = 1,
-    slots: GrantArena = GrantArena.init(),
+    grants: [MAX_GRANTS]Grant = [_]Grant{.{}} ** MAX_GRANTS,
+    grant_count: u8 = 0,
+    next_reusable_grant: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) {
+            @compileError("secure pasteboard service exceeds its fixed-state size ceiling");
+        }
+    }
 
     pub fn init() Service {
         return .{};
@@ -147,15 +147,15 @@ pub const Service = struct {
             return error.PayloadTooLarge;
         }
 
-        if (self.slots.countInUse() >= MAX_GRANTS) {
-            try recordOffer(ledger, request, 0, false, "pasteboard offer denied: grant table full");
-            return error.GrantTableFull;
-        }
         const token_id = self.next_token_id;
         if (token_id == 0) {
             try recordOffer(ledger, request, 0, false, "pasteboard offer denied: token id exhausted");
             return error.PasteboardTokenIdExhausted;
         }
+        const grant_index = self.availableGrantIndex(request.now_ticks) orelse {
+            try recordOffer(ledger, request, 0, false, "pasteboard offer denied: grant table full");
+            return error.GrantTableFull;
+        };
         const grant = Grant{
             .token_id = token_id,
             .subject = request.subject,
@@ -167,21 +167,18 @@ pub const Service = struct {
             .expires_at_ticks = request.expires_at_ticks,
             .sensitivity = request.sensitivity,
             .read_once = request.read_once,
-            .payload_len = request.payload.len,
+            .payload_len = @intCast(request.payload.len),
             .payload = copyPayloadInto(request.payload),
-            .purpose_len = request.purpose.len,
+            .purpose_len = @intCast(request.purpose.len),
             .purpose = copyPurposeInto(request.purpose),
         };
 
-        const slot = self.slots.reserve(token_id) orelse {
-            try recordOffer(ledger, request, 0, false, "pasteboard offer denied: grant table full");
-            return error.GrantTableFull;
-        };
-        errdefer _ = self.slots.remove(token_id);
         try recordOffer(ledger, request, token_id, true, request.detail);
-        slot.grant = grant;
+        if (self.grants[grant_index].token_id == 0) self.grant_count += 1;
+        self.grants[grant_index] = grant;
+        self.next_reusable_grant = @intCast((grant_index + 1) % MAX_GRANTS);
         self.next_token_id +%= 1;
-        return &slot.grant;
+        return &self.grants[grant_index];
     }
 
     pub fn read(self: *Service, request: ReadRequest, output: []u8, ledger: ?*event_ledger.Ledger) Error![]const u8 {
@@ -226,15 +223,16 @@ pub const Service = struct {
             try recordRead(ledger, request, false, request.detail);
             return error.PurposeMismatch;
         }
-        if (output.len < grant.payload_len) {
+        const payload_len = @as(usize, grant.payload_len);
+        if (output.len < payload_len) {
             try recordRead(ledger, request, false, "pasteboard read denied: output buffer too small");
             return error.OutputBufferTooSmall;
         }
 
         try recordRead(ledger, request, true, request.detail);
-        @memcpy(output[0..grant.payload_len], grant.payloadSlice());
+        @memcpy(output[0..payload_len], grant.payloadSlice());
         grant.consumed = true;
-        return output[0..grant.payload_len];
+        return output[0..payload_len];
     }
 
     pub fn revoke(self: *Service, request: RevokeRequest, ledger: ?*event_ledger.Ledger) Error!void {
@@ -251,11 +249,34 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, token_id: u64) ?*Grant {
-        const slot = self.slots.get(token_id) orelse return null;
-        return &slot.grant;
+        if (token_id == 0) return null;
+        for (&self.grants) |*grant| {
+            if (grant.token_id == token_id) return grant;
+        }
+        return null;
+    }
+
+    pub fn grantCount(self: *const Service) usize {
+        return @as(usize, self.grant_count);
+    }
+
+    fn availableGrantIndex(self: *const Service, now_ticks: u64) ?usize {
+        for (0..MAX_GRANTS) |offset| {
+            const grant_index = (@as(usize, self.next_reusable_grant) + offset) % MAX_GRANTS;
+            if (self.grants[grant_index].token_id == 0) return grant_index;
+        }
+        for (0..MAX_GRANTS) |offset| {
+            const grant_index = (@as(usize, self.next_reusable_grant) + offset) % MAX_GRANTS;
+            if (grantReusableAt(&self.grants[grant_index], now_ticks)) return grant_index;
+        }
+        return null;
     }
 
 };
+
+fn grantReusableAt(grant: *const Grant, now_ticks: u64) bool {
+    return grant.revoked or (grant.read_once and grant.consumed) or now_ticks >= grant.expires_at_ticks;
+}
 
 fn recordOffer(ledger: ?*event_ledger.Ledger, request: OfferRequest, token_id: u64, allowed: bool, detail: []const u8) event_ledger.Error!void {
     if (ledger) |active| {
@@ -335,7 +356,7 @@ test "secure pasteboard rejects overlong purposes without issuing grants" {
         .purpose = oversized_purpose[0..],
         .payload = "private pasteboard payload",
     }, null));
-    try std.testing.expectEqual(@as(usize, 0), service.slots.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), service.grantCount());
     try std.testing.expect(service.find(1) == null);
     try std.testing.expectEqual(@as(u64, 1), service.next_token_id);
 
@@ -353,7 +374,7 @@ test "secure pasteboard rejects overlong purposes without issuing grants" {
     }, null);
     try std.testing.expectEqual(@as(u64, 1), grant.token_id);
     try std.testing.expectEqualStrings("paste into note", grant.purposeSlice());
-    try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.grantCount());
 }
 
 test "secure pasteboard token ids stop at exhaustion" {
@@ -390,7 +411,7 @@ test "secure pasteboard token ids stop at exhaustion" {
         .purpose = "paste into note",
         .payload = "private pasteboard payload",
     }, null));
-    try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.grantCount());
 
     var full_service = Service.init();
     for (0..MAX_GRANTS) |index| {
@@ -555,6 +576,63 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
         .expected_purpose = "paste into note",
         .detail = "revoked private pasteboard payload",
     }, buffer[0..], &ledger));
+
+    const consumed_token_id = grant.token_id;
+    const revoked_token_id = revoked.token_id;
+    const persistent = try service.offer(.{
+        .subject = source,
+        .destination = destination,
+        .source_task_id = 80,
+        .destination_task_id = 81,
+        .user_gesture_id = 11,
+        .foreground_session_id = 8,
+        .expires_at_ticks = 1_000,
+        .now_ticks = 23,
+        .purpose = "paste repeatedly",
+        .payload = "persistent private pasteboard payload",
+        .read_once = false,
+    }, null);
+    const persistent_token_id = persistent.token_id;
+    const expired = try service.offer(.{
+        .subject = source,
+        .destination = destination,
+        .source_task_id = 82,
+        .destination_task_id = 83,
+        .user_gesture_id = 12,
+        .foreground_session_id = 8,
+        .expires_at_ticks = 24,
+        .now_ticks = 23,
+        .purpose = "paste before expiry",
+        .payload = "expiring private pasteboard payload",
+    }, null);
+    const expired_token_id = expired.token_id;
+
+    for (0..MAX_GRANTS - 1) |index| {
+        const source_task_id: u64 = @intCast(100 + index);
+        const rolling = try service.offer(.{
+            .subject = source,
+            .destination = destination,
+            .source_task_id = source_task_id,
+            .destination_task_id = 200 + index,
+            .user_gesture_id = 20 + index,
+            .foreground_session_id = 8,
+            .expires_at_ticks = 200,
+            .now_ticks = 50 + index,
+            .purpose = "paste rolling payload",
+            .payload = "rolling private pasteboard payload",
+        }, null);
+        try service.revoke(.{
+            .subject = source,
+            .source_task_id = source_task_id,
+            .token_id = rolling.token_id,
+            .now_ticks = 51 + index,
+        }, null);
+    }
+    try std.testing.expectEqual(MAX_GRANTS, service.grantCount());
+    try std.testing.expect(service.find(consumed_token_id) == null);
+    try std.testing.expect(service.find(revoked_token_id) == null);
+    try std.testing.expect(service.find(expired_token_id) == null);
+    try std.testing.expect(service.find(persistent_token_id) != null);
 
     const summary = ledger.userVisibleDiagnosticSummary();
     try std.testing.expect(summary.pasteboard_events >= 9);
