@@ -171,6 +171,10 @@ const EventLedgerContext = struct {
     ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
 };
 
+const AcceleratorContext = struct {
+    shared: shared_memory.Table = shared_memory.Table.init(),
+};
+
 const SecretStoreContext = struct {
     store: secure_secret_store.Store = secure_secret_store.Store.init(),
     owner: principal.PrincipalId = .{ .kind = .user, .serial = 61 },
@@ -461,6 +465,7 @@ var package_context = PackageContext{};
 var indexing_context = IndexingContext{};
 var media_context = MediaContext{};
 var event_ledger_context = EventLedgerContext{};
+var accelerator_context = AcceleratorContext{};
 var secret_store_context = SecretStoreContext{};
 var overlay_session_context = OverlaySessionContext{};
 var capability_lookup_context = CapabilityLookupContext{};
@@ -504,8 +509,10 @@ fn prepareFixtures() void {
     prepareIndexingFixture();
     prepareOverlaySessionFixture();
     prepareWorkspaceCommitFixture();
-    prepareTaskCheckpointFixture();
     preparePackageFixture();
+    prepareEventLedgerFixture();
+    prepareAcceleratorFixture();
+    prepareTaskCheckpointFixture();
     restoreStorageVolumeSeedImage();
 }
 
@@ -874,14 +881,35 @@ fn prepareTaskCheckpointFixture() void {
 }
 
 fn preparePackageFixture() void {
-    package_context.service = package_service.Service.init();
+    package_context.service.reset();
     package_context.signed_v1 = signedPackageBundle(package_bundle_v1);
     package_context.signed_v2 = signedPackageBundle(package_bundle_v2);
     trustBenchmarkPackagePublisher(&package_context.service);
-    const slot = &package_context.service.slots.slots[0];
-    slot.in_use = true;
-    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    package_context.service.rebuildIndexes();
+    _ = package_context.service.install(.{
+        .bundle = package_context.signed_v1,
+        .source_identity = "benchmark:zigos",
+    }, null) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+}
+
+fn prepareEventLedgerFixture() void {
+    event_ledger_context.ledger.resetRetainingBacking();
+    event_ledger_context.ledger.recordProcessCrash(
+        .network_stack,
+        service(1),
+        1,
+        1,
+        "benchmark backing warmup",
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    event_ledger_context.ledger.resetRetainingBacking();
+}
+
+fn prepareAcceleratorFixture() void {
+    const object = accelerator_context.shared.createWithAccess(ids.task(1), kibibytes(4), .{
+        .cpu = true,
+        .gpu = true,
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = accelerator_context.shared.revoke(object.id) catch |err|
+        benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn trustBenchmarkPackagePublisher(service_ref: *package_service.Service) void {
@@ -1316,7 +1344,7 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
         .media_available = true,
     });
 
-    var shared = shared_memory.Table.init();
+    const shared = &accelerator_context.shared;
     const task_id = ids.task(800 + iteration);
     const object = shared.createWithAccess(task_id, kibibytes(64), .{
         .cpu = true,
@@ -1330,12 +1358,13 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
             .shared_memory_bytes = object.size_bytes,
         },
         .shared_memory_object_id = object.id,
-    }, &shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    }, shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     std.mem.doNotOptimizeAway(&controller);
-    std.mem.doNotOptimizeAway(&shared);
-    const released = controller.releaseClaim(claim.id, &shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    std.mem.doNotOptimizeAway(shared);
+    const released = controller.releaseClaim(claim.id, shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     std.mem.doNotOptimizeAway(&controller);
-    std.mem.doNotOptimizeAway(&shared);
+    std.mem.doNotOptimizeAway(shared);
+    _ = shared.revoke(object.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return claim.id + object.id.raw() + @intFromBool(released) + @intFromEnum(claim.engine);
 }
 
@@ -1421,23 +1450,23 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
 
 fn benchmarkPackageRevision(iteration: u32) u64 {
     _ = iteration;
-    const slot = &package_context.service.slots.slots[0];
-    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const bundle = package_context.service.find("app.notes") orelse benchmark_reporting.benchStepFailure("benchmark suite", error.BundleNotFound);
+    package_service_bundle_ops.installNew(bundle, package_context.signed_v1, "benchmark:zigos", 1, crypto_hash.digestFromByte(0x11)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     package_service_bundle_ops.installRevision(
-        &slot.bundle,
+        bundle,
         package_context.signed_v2,
-        "store:zigos",
+        "benchmark:zigos",
         2,
         crypto_hash.digestFromByte(0x22),
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    const active = package_service_bundle_ops.resolveActiveManifest(&slot.bundle, &package_context.resolved);
+    const active = package_service_bundle_ops.resolveActiveManifest(bundle, &package_context.resolved);
     const launch_plan = package_context.service.buildLaunchPlan("app.notes") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    package_service_bundle_ops.rollback(&slot.bundle);
+    package_service_bundle_ops.rollback(bundle);
     return active.version_minor +
         launch_plan.components.len +
         launch_plan.assets.len +
-        slot.bundle.activeRevision().version_minor +
-        @intFromBool(slot.bundle.rollbackAvailable());
+        bundle.activeRevision().version_minor +
+        @intFromBool(bundle.rollbackAvailable());
 }
 
 fn benchmarkIndexingQuery(iteration: u32) u64 {
@@ -1491,7 +1520,7 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
 }
 
 fn benchmarkEventLedgerExport(iteration: u32) u64 {
-    event_ledger_context.ledger = event_ledger.Ledger.init();
+    event_ledger_context.ledger.resetRetainingBacking();
     const user_subject = user(7 + iteration);
     const service_subject = service(9 + iteration);
     const device_subject = device(42 + iteration);
@@ -1738,13 +1767,14 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
 
     var runtime = DriverRecoveryRuntime{};
     var notifications = notification_center.Center.init();
-    var ledger = event_ledger.Ledger.init();
+    const ledger = &event_ledger_context.ledger;
+    ledger.resetRetainingBacking();
     const recovery = supervisor.recoverDriverCrash(
         compositor.id,
         &directory,
         &runtime,
         &notifications,
-        &ledger,
+        ledger,
         10 + iteration,
         0xD1,
         "display driver restart",
@@ -2498,9 +2528,10 @@ fn prepareUpdateHealthFixture(iteration: u32) void {
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     update_health_context.sync = sync_service.Service.init(1_500, 401, owner);
     update_health_context.sync_capabilities = capability.CapabilityTable.init();
+    update_health_context.compositor.deinit();
     update_health_context.compositor = compositor_session.Session.init();
     update_health_context.supervisor = supervisor_mod.Supervisor.init();
-    update_health_context.ledger = event_ledger.Ledger.init();
+    update_health_context.ledger.reset();
 
     const network_probe = seedUpdateHealthNetworkProbe(
         &update_health_context.sync,

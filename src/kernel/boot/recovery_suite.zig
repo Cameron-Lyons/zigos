@@ -54,6 +54,7 @@ fn runRecoveryBoot() !void {
     try prepareFixture(storage_owner, sync_owner, user, primary, tablet);
 
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const recovery_boot = try context.environment.enterBreakGlassRecoveryBootProfile(&ledger, .{
         .profile = .recovery,
         .requester = storage_owner,
