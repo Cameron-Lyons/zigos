@@ -1004,7 +1004,7 @@ fn presentSurfaceForKernel(
     const session: *compositor_session.Session = @ptrCast(@alignCast(context));
     return switch (session.presentSurface(task, presentation) catch |err| switch (err) {
         error.StalePresentation, error.PresentationConflict => return .stale,
-        error.SurfaceTableFull => return .full,
+        error.SurfaceTableFull, error.OutOfMemory => return .full,
         else => return .invalid_surface,
     }) {
         .accepted => .accepted,

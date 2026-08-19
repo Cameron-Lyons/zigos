@@ -5291,8 +5291,8 @@ fn attentionBrokerEvidence() AttentionBrokerEvidence {
     }, &ledger) catch return evidence;
     evidence.brokered_post = passive.id != 0 and service.activeVisible(10) == 1;
     evidence.default_task_binding = missing_task_denied and
-        passive.task_id != null and
-        passive.task_id.? == 91;
+        passive.taskId() != null and
+        passive.taskId().? == 91;
 
     evidence.quiet_denial = if (service.post(&policies, subjects, .{
         .subject = app,
