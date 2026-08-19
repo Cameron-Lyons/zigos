@@ -28,10 +28,27 @@ pub const MAX_RESOURCE_BYTES: usize = 96;
 pub const MAX_WINDOW_DETAIL_BYTES: usize = 96;
 pub const MAX_PRESENTED_SURFACES: usize = MAX_WINDOWS;
 pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
+pub const COMPACT_RECORD_METADATA = true;
+pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
+pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 520;
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_712;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_720;
 const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
 const heap_backed_review_items = builtin.target.os.tag == .freestanding;
 pub const HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING = true;
 const heap_backed_surface_arena = builtin.target.os.tag == .freestanding and HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING;
+
+comptime {
+    if (MAX_REVIEW_ITEMS > std.math.maxInt(u8) or
+        MAX_TITLE_BYTES > std.math.maxInt(u8) or
+        MAX_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_REASON_BYTES > std.math.maxInt(u8) or
+        MAX_RESOURCE_BYTES > std.math.maxInt(u8) or
+        MAX_WINDOW_DETAIL_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("compositor record metadata no longer fits compact counters");
+    }
+}
 
 pub const ViewType = enum(u8) {
     document_view,
@@ -71,45 +88,51 @@ pub const WindowRecord = struct {
     visible: bool = true,
     modal: bool = true,
     workspace_id: u64 = 0,
-    bundle_id_len: usize = 0,
+    bundle_id_len: u8 = 0,
     bundle_id: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    display_name_len: usize = 0,
+    display_name_len: u8 = 0,
     display_name: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    title_len: usize = 0,
+    title_len: u8 = 0,
     title: [MAX_TITLE_BYTES]u8 = [_]u8{0} ** MAX_TITLE_BYTES,
-    detail_len: usize = 0,
+    detail_len: u8 = 0,
     detail: [MAX_WINDOW_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_WINDOW_DETAIL_BYTES,
-    item_count: usize = 0,
+    item_count: u8 = 0,
 
     pub fn bundleIdSlice(self: *const WindowRecord) []const u8 {
-        return self.bundle_id[0..self.bundle_id_len];
+        return self.bundle_id[0..@as(usize, self.bundle_id_len)];
     }
 
     pub fn displayNameSlice(self: *const WindowRecord) []const u8 {
-        return self.display_name[0..self.display_name_len];
+        return self.display_name[0..@as(usize, self.display_name_len)];
     }
 
     pub fn titleSlice(self: *const WindowRecord) []const u8 {
-        return self.title[0..self.title_len];
+        return self.title[0..@as(usize, self.title_len)];
     }
 
     pub fn detailSlice(self: *const WindowRecord) []const u8 {
-        return self.detail[0..self.detail_len];
+        return self.detail[0..@as(usize, self.detail_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > WINDOW_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("compositor window record exceeds its compact size ceiling");
+        }
     }
 };
 
 pub const ReviewItemRecord = struct {
     window_id: u64 = 0,
     kind: manifest.PermissionKind = .object_access,
-    label_len: usize = 0,
+    label_len: u8 = 0,
     label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    resource_len: usize = 0,
+    resource_len: u8 = 0,
     resource: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
-    reason_len: usize = 0,
+    reason_len: u8 = 0,
     reason: [MAX_REASON_BYTES]u8 = [_]u8{0} ** MAX_REASON_BYTES,
-    object_scope_len: usize = 0,
+    object_scope_len: u8 = 0,
     object_scope: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
-    network_path_len: usize = 0,
+    network_path_len: u8 = 0,
     network_path: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
     requested_local_only: bool = false,
     requested_lease_ticks: u64 = 0,
@@ -119,23 +142,29 @@ pub const ReviewItemRecord = struct {
     decision_lease_ticks: u64 = 0,
 
     pub fn labelSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn resourceSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.resource[0..self.resource_len];
+        return self.resource[0..@as(usize, self.resource_len)];
     }
 
     pub fn reasonSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.reason[0..self.reason_len];
+        return self.reason[0..@as(usize, self.reason_len)];
     }
 
     pub fn objectScopeSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.object_scope[0..self.object_scope_len];
+        return self.object_scope[0..@as(usize, self.object_scope_len)];
     }
 
     pub fn networkPathSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.network_path[0..self.network_path_len];
+        return self.network_path[0..@as(usize, self.network_path_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("compositor review item record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -303,6 +332,12 @@ pub const SessionSnapshot = struct {
     surface_task_index: SurfaceTaskIndex = SurfaceTaskIndex.init(),
     active_surface_head: u16 = NO_SURFACE_SLOT_INDEX,
     active_surface_tail: u16 = NO_SURFACE_SLOT_INDEX,
+
+    comptime {
+        if (@sizeOf(@This()) > SESSION_SNAPSHOT_SIZE_CEILING_BYTES) {
+            @compileError("compositor snapshot exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const CheckpointStore = struct {
@@ -311,6 +346,12 @@ pub const CheckpointStore = struct {
 
     pub fn reset(self: *CheckpointStore) void {
         self.* = .{};
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > CHECKPOINT_STORE_SIZE_CEILING_BYTES) {
+            @compileError("compositor checkpoint store exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -439,11 +480,11 @@ pub const Session = struct {
         window.view_type = .app_panel;
         window.visible = true;
         window.modal = true;
-        window.bundle_id_len = copyText(&window.bundle_id, bundle.bundle_id);
-        window.display_name_len = copyText(&window.display_name, bundle.display_name);
+        window.bundle_id_len = @intCast(copyText(&window.bundle_id, bundle.bundle_id));
+        window.display_name_len = @intCast(copyText(&window.display_name, bundle.display_name));
         const title = std.fmt.bufPrint(&window.title, "{s} permission review", .{bundle.display_name}) catch
             window.title[0..copyText(&window.title, bundle.display_name)];
-        window.title_len = title.len;
+        window.title_len = @intCast(title.len);
         self.indexWindowForTaskBundle(window);
         self.indexWindowForTask(window);
         self.indexWindowForReviewer(window);
@@ -506,11 +547,11 @@ pub const Session = struct {
         item.* = zeroItem();
         item.window_id = window_id;
         item.kind = request.kind;
-        item.label_len = copyText(&item.label, manifest.permissionDisplayLabel(request.kind));
-        item.resource_len = copyText(&item.resource, request.resource);
-        item.reason_len = deriveReason(&item.reason, bundle, request);
-        item.object_scope_len = deriveObjectScope(&item.object_scope, request);
-        item.network_path_len = deriveNetworkPath(&item.network_path, request);
+        item.label_len = @intCast(copyText(&item.label, manifest.permissionDisplayLabel(request.kind)));
+        item.resource_len = @intCast(copyText(&item.resource, request.resource));
+        item.reason_len = @intCast(deriveReason(&item.reason, bundle, request));
+        item.object_scope_len = @intCast(deriveObjectScope(&item.object_scope, request));
+        item.network_path_len = @intCast(deriveNetworkPath(&item.network_path, request));
         item.requested_local_only = request.local_only;
         item.requested_lease_ticks = request.max_lease_ticks;
         self.indexReviewItemForWindow(slot_index, item);
@@ -879,10 +920,10 @@ pub const Session = struct {
         window.visible = true;
         window.modal = modal;
         window.workspace_id = workspace_id;
-        window.bundle_id_len = copyText(&window.bundle_id, bundle_id);
-        window.display_name_len = copyText(&window.display_name, display_name);
-        window.title_len = deriveWindowTitle(&window.title, title_prefix, detail);
-        window.detail_len = copyText(&window.detail, detail);
+        window.bundle_id_len = @intCast(copyText(&window.bundle_id, bundle_id));
+        window.display_name_len = @intCast(copyText(&window.display_name, display_name));
+        window.title_len = @intCast(deriveWindowTitle(&window.title, title_prefix, detail));
+        window.detail_len = @intCast(copyText(&window.detail, detail));
         self.indexWindowForTask(window);
         self.active_window_id = window.id;
         return window;
@@ -1692,6 +1733,36 @@ const TEST_REVIEW_HEADER_BUFFER_BYTES: usize = 256;
 const TEST_REVIEW_ITEM_BUFFER_BYTES: usize = 512;
 const TEST_REVIEW_DECISION_BUFFER_BYTES: usize = 256;
 const TEST_COMPACT_RENDER_BUFFER_BYTES: usize = 320;
+
+test "compositor compact record metadata preserves exact text capacities" {
+    const long_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
+    const long_resource = [_]u8{'r'} ** (MAX_RESOURCE_BYTES + 1);
+    const long_reason = [_]u8{'d'} ** (MAX_REASON_BYTES + 1);
+
+    var window = zeroWindow();
+    window.bundle_id_len = @intCast(copyText(&window.bundle_id, &long_label));
+    window.display_name_len = @intCast(copyText(&window.display_name, &long_label));
+    window.title_len = @intCast(copyText(&window.title, &long_label));
+    window.detail_len = @intCast(copyText(&window.detail, &long_resource));
+    window.item_count = @intCast(MAX_REVIEW_ITEMS);
+    try std.testing.expectEqual(@as(usize, MAX_LABEL_BYTES), window.bundleIdSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_LABEL_BYTES), window.displayNameSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_TITLE_BYTES), window.titleSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_WINDOW_DETAIL_BYTES), window.detailSlice().len);
+    try std.testing.expectEqual(@as(u8, MAX_REVIEW_ITEMS), window.item_count);
+
+    var item = zeroItem();
+    item.label_len = @intCast(copyText(&item.label, &long_label));
+    item.resource_len = @intCast(copyText(&item.resource, &long_resource));
+    item.reason_len = @intCast(copyText(&item.reason, &long_reason));
+    item.object_scope_len = @intCast(copyText(&item.object_scope, &long_resource));
+    item.network_path_len = @intCast(copyText(&item.network_path, &long_resource));
+    try std.testing.expectEqual(@as(usize, MAX_LABEL_BYTES), item.labelSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.resourceSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_REASON_BYTES), item.reasonSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.objectScopeSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.networkPathSlice().len);
+}
 
 test "allocated compositor review backing initializes its arena order and index" {
     var review_items: ReviewItemBacking = undefined;

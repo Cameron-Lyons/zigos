@@ -1,3 +1,4 @@
+const std = @import("std");
 const principal = @import("../../core/principal.zig");
 const object_store = @import("../../storage/object_store.zig");
 const storage_service = @import("../../storage/storage_service.zig");
@@ -10,6 +11,12 @@ pub const ReplicationSummary = state_support.ReplicationSummary;
 pub const SyncSemantic = state_support.SyncSemantic;
 pub const WorkspacePolicy = state_support.WorkspacePolicy;
 pub const TransportFrameRequest = sync_adapters.QueueFrameRequest;
+
+comptime {
+    if (state_support.MAX_REPLICA_ENTRIES * sync_adapters.MAX_MEDIA_REPLICATION_CHUNKS > std.math.maxInt(u16)) {
+        @compileError("replication snapshot count no longer fits compact result metadata");
+    }
+}
 
 pub fn applyOutboundSemantic(
     service: anytype,
@@ -48,7 +55,11 @@ pub fn applyOutboundSemantic(
                 .store = store,
                 .entry = entry,
             });
-            if (result.snapshot_replicated) summary.snapshot_count += result.replicated_chunks;
+            if (result.snapshot_replicated) {
+                const remaining_capacity = std.math.maxInt(u16) - summary.snapshot_count;
+                if (result.replicated_chunks > @as(usize, remaining_capacity)) return error.StateTooLarge;
+                summary.snapshot_count += @intCast(result.replicated_chunks);
+            }
         },
         .secure_transfer => {
             const result = try service.secret_transfer_adapter.transfer(.{

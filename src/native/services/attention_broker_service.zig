@@ -109,7 +109,7 @@ pub const Service = struct {
             try recordAttention(ledger, request.subject, request.task_id, false, false, counts.visible, counts.interruptions, request.now_ticks, request.detail);
             return error.SourceMismatch;
         }
-        if (notification.task_id) |task_id| {
+        if (notification.taskId()) |task_id| {
             if (task_id != request.task_id) {
                 try recordAttention(ledger, request.subject, request.task_id, false, false, counts.visible, counts.interruptions, request.now_ticks, request.detail);
                 return error.NotificationTaskMismatch;
@@ -228,7 +228,7 @@ test "attention broker gates posts dismisses notifications and redacts policy de
         .now_ticks = 10,
     }, &ledger);
     try std.testing.expectEqual(@as(u64, 1), passive.id);
-    try std.testing.expectEqual(@as(u64, 900), passive.task_id.?);
+    try std.testing.expectEqual(@as(u64, 900), passive.taskId().?);
     try std.testing.expectEqual(@as(u16, 1), service.activeVisible(10));
 
     try std.testing.expectError(error.PolicyDenied, service.post(&policies, subjects, .{
