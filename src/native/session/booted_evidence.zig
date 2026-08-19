@@ -143,7 +143,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         .driver_directory = manager.driverDirectoryPtr(),
         .storage_service_instance = manager.storageServicePtr(),
         .storage_checkpoint_store = manager.storageCheckpointStorePtr(),
-        .export_package = manager.exportPackagePtr(),
+        .export_package = manager.exportPackagePtr() catch |err| native_util.bootProofFailure("booted export package", err),
         .policy_authority = graph.state.ids.policy_authority,
         .session_service = graph.state.ids.session_service,
         .session_user = graph.state.ids.session_user,
@@ -153,7 +153,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         .sync_service_id = graph.state.services.sync_service.id,
         .sync_task_id = graph.service_bindings.bindingFor(.sync_replication).task_id,
         .sync_service_principal = graph.state.ids.sync_service,
-        .sync_resident_state = manager.syncResidentStatePtr(),
+        .sync_resident_state = manager.syncResidentStatePtr() catch |err| native_util.bootProofFailure("booted sync state", err),
         .policy_service_id = graph.state.services.policy_service.id,
         .network_service_id = graph.state.services.network_service.id,
         .compositor_service_id = graph.state.services.compositor_service.id,
@@ -164,7 +164,8 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         .notes_object_capability = notes_review.object_capability,
     };
     const storage_state = storage_scenarios.run(&lifecycle_context);
-    const early_boot_ledger = lifecycle_context.update_ledger.*;
+    var early_boot_ledger = lifecycle_context.update_ledger.*;
+    defer early_boot_ledger.deinit();
     lifecycle_context.update_ledger.* = event_ledger.Ledger.initPersistent(
         lifecycle_context.storage_service_instance,
         lifecycle_context.package_service_principal,

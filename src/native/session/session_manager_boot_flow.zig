@@ -44,6 +44,11 @@ const workspace_mod = @import("../storage/workspace.zig");
 pub const BootstrapState = session_support.BootstrapState;
 pub const ServiceBindings = session_support.ServiceBindings;
 pub const Environment = session_support.Environment;
+pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = session_contexts.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
+pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
+pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
+pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
+pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
 const NETWORK_RECEIVE_SERVICE_BUDGET: usize = 8;
 
@@ -95,22 +100,28 @@ pub const SessionManager = struct {
         return .{};
     }
 
-    fn ensureConstructed(self: *SessionManager) void {
-        self.runtime_context.ensureConstructed();
+    fn ensureConstructed(self: *SessionManager) bool {
+        self.runtime_context.ensureConstructed() catch return false;
+        return true;
     }
 
     pub fn reset(self: *SessionManager) void {
         permission_review_service.clearSystemInputRouter();
-        if (self.runtime_context.constructed) {
-            self.runtime_context.userspace_scheduler.deinit();
-        }
+        self.runtime_context.releaseUserspaceScheduler();
         self.runtime_context.runtime_checkpoint_store.reset();
+        self.runtime_context.releaseTaskRuntime();
+        self.runtime_context.releaseUserspaceCatalog();
+        self.kernel_context.endpoint_table.deinit();
+        self.kernel_context.shared_memory_table.deinit();
+        self.kernel_context.releaseCapabilityTable();
+        self.recovery_context.review_compositor_session.deinit();
+        self.recovery_context.diagnostic_ledger.deinit();
+        self.service_graph_builder.releasePackageService();
         self.native_store.resetPersistent();
         self.* = SessionManager.init();
         bootstrap_driver_port.reset();
         session_service_bootstrap.resetBootedDataPlanes();
-        self.ensureConstructed();
-        self.runtime_context.resetScheduler();
+        if (self.ensureConstructed()) self.runtime_context.resetScheduler();
     }
 
     pub fn isInitialized(self: *const SessionManager) bool {
@@ -134,25 +145,36 @@ pub const SessionManager = struct {
     }
 
     pub fn runtimePtr(self: *SessionManager) *task_runtime.Runtime {
-        return &self.runtime_context.runtime;
+        if (!self.ensureConstructed()) {
+            native_util.impossibleByInvariant("task runtime access requires constructed session state");
+        }
+        return self.runtime_context.taskRuntime() orelse
+            native_util.impossibleByInvariant("constructed session state retains its task runtime");
     }
 
     pub fn runtimeServicePtr(self: *SessionManager) *task_runtime_service_mod.Service {
-        self.ensureConstructed();
+        if (!self.ensureConstructed()) {
+            native_util.impossibleByInvariant("runtime service access requires constructed session state");
+        }
         return &self.runtime_context.runtime_service;
     }
 
     pub fn capabilityTablePtr(self: *SessionManager) *capability.CapabilityTable {
-        return &self.kernel_context.capability_table;
+        return self.kernel_context.capabilityTable() orelse
+            native_util.impossibleByInvariant("session capability access follows table allocation");
     }
 
     pub fn userspaceCatalogPtr(self: *SessionManager) *userspace_loader.Catalog {
-        return &self.runtime_context.userspace_catalog;
+        return self.runtime_context.userspaceCatalog() orelse
+            native_util.impossibleByInvariant("session userspace catalog access follows allocation");
     }
 
     pub fn userspaceSchedulerPtr(self: *SessionManager) *userspace_scheduler.Scheduler {
-        self.ensureConstructed();
-        return &self.runtime_context.userspace_scheduler;
+        if (!self.ensureConstructed()) {
+            native_util.impossibleByInvariant("userspace scheduler access requires constructed session state");
+        }
+        return self.runtime_context.userspaceScheduler() orelse
+            native_util.impossibleByInvariant("constructed session state retains its userspace scheduler");
     }
 
     pub fn serviceDirectoryPtr(self: *SessionManager) *native_service_registry.Service {
@@ -176,19 +198,21 @@ pub const SessionManager = struct {
     }
 
     pub fn storageCheckpointStorePtr(self: *SessionManager) *storage_service_mod.CheckpointStore {
-        return &self.native_store.storage_checkpoint_store;
+        return self.native_store.checkpointStorePtr() orelse
+            native_util.impossibleByInvariant("booted storage service retains checkpoint state");
     }
 
-    pub fn exportPackagePtr(self: *SessionManager) *workspace_mod.ExportPackage {
-        return &self.native_store.export_package_buffer;
+    pub fn exportPackagePtr(self: *SessionManager) error{NoSpaceLeft}!*workspace_mod.ExportPackage {
+        return self.native_store.exportPackagePtr();
     }
 
-    pub fn syncResidentStatePtr(self: *SessionManager) *sync_service_mod.ResidentState {
-        return &self.native_store.sync_resident_state;
+    pub fn syncResidentStatePtr(self: *SessionManager) error{NoSpaceLeft}!*sync_service_mod.ResidentState {
+        return self.native_store.syncResidentStatePtr();
     }
 
     pub fn packageServicePtr(self: *SessionManager) *package_service.Service {
-        return &self.service_graph_builder.package_service_instance;
+        return self.service_graph_builder.ensurePackageService() catch
+            native_util.impossibleByInvariant("package service access requires allocated service-graph state");
     }
 
     pub fn reviewUxControllerPtr(self: *SessionManager) *native_ux.Controller {
@@ -220,8 +244,9 @@ pub const SessionManager = struct {
     }
 
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
-        _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(&self.runtime_context.runtime);
-        if (self.runtime_context.runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
+        const runtime = self.runtimePtr();
+        _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
+        if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
         return self.runtime_context.runScheduler(now_ticks);
@@ -236,7 +261,7 @@ pub const SessionManager = struct {
         if (service.frames_queued != 0) {
             const task_id = bootstrap_driver_port.activeNetworkTaskId();
             if (task_id != 0) {
-                _ = self.runtime_context.userspace_scheduler.wakeTask(
+                _ = self.userspaceSchedulerPtr().wakeTask(
                     task_id,
                     .external_event,
                     now_ticks,
@@ -259,7 +284,7 @@ pub const SessionManager = struct {
                 _ = self.input_router.dropForTask(task_id);
                 continue;
             }
-            _ = self.runtime_context.userspace_scheduler.wakeTask(
+            _ = self.userspaceSchedulerPtr().wakeTask(
                 task_id,
                 .external_event,
                 now_ticks,
@@ -270,9 +295,9 @@ pub const SessionManager = struct {
     }
 
     pub fn focusedInputCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
-        const task = self.runtime_context.runtime.find(task_id) orelse return null;
+        const task = self.runtimePtr().find(task_id) orelse return null;
         for (task.capabilityIds()) |capability_id| {
-            const granted = self.kernel_context.capability_table.requireUsable(capability_id, now_ticks) catch continue;
+            const granted = self.capabilityTablePtr().requireUsable(capability_id, now_ticks) catch continue;
             if (granted.target.kind != .task or granted.target.id != task_id) continue;
             if (granted.scope.task_id != task_id or !granted.rights.has(.input_recv)) continue;
             return capability_id;
@@ -282,9 +307,10 @@ pub const SessionManager = struct {
 
     fn ensureFocusedInputCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         if (self.focusedInputCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
-        const task = self.runtime_context.runtime.find(task_id) orelse return null;
+        const runtime = self.runtimePtr();
+        const task = runtime.find(task_id) orelse return null;
         if (self.compositor_broker_service_id == 0) return null;
-        const granted = self.kernel_context.capability_table.mintBootRoot(.{
+        const granted = self.capabilityTablePtr().mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
             .target = .{ .kind = .task, .id = task_id },
@@ -306,17 +332,17 @@ pub const SessionManager = struct {
                 .user_visible_entitlement = true,
             },
         }) catch return null;
-        self.runtime_context.runtime.grantCapability(task_id, granted.id) catch {
-            self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+        runtime.grantCapability(task_id, granted.id) catch {
+            self.capabilityTablePtr().revokeGrant(granted.id) catch {};
             return null;
         };
         return granted.id;
     }
 
     pub fn surfacePresentationCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
-        const task = self.runtime_context.runtime.find(task_id) orelse return null;
+        const task = self.runtimePtr().find(task_id) orelse return null;
         for (task.capabilityIds()) |capability_id| {
-            const granted = self.kernel_context.capability_table.requireUsable(capability_id, now_ticks) catch continue;
+            const granted = self.capabilityTablePtr().requireUsable(capability_id, now_ticks) catch continue;
             if (granted.target.kind != .task or granted.target.id != task_id) continue;
             if (granted.scope.task_id != task_id or !granted.rights.has(.surface_present)) continue;
             return capability_id;
@@ -326,9 +352,10 @@ pub const SessionManager = struct {
 
     fn ensureSurfacePresentationCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         if (self.surfacePresentationCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
-        const task = self.runtime_context.runtime.find(task_id) orelse return null;
+        const runtime = self.runtimePtr();
+        const task = runtime.find(task_id) orelse return null;
         if (!self.taskOwnsUiSurface(task) or self.compositor_broker_service_id == 0) return null;
-        const granted = self.kernel_context.capability_table.mintBootRoot(.{
+        const granted = self.capabilityTablePtr().mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
             .target = .{ .kind = .task, .id = task_id },
@@ -350,30 +377,31 @@ pub const SessionManager = struct {
                 .user_visible_entitlement = true,
             },
         }) catch return null;
-        self.runtime_context.runtime.grantCapability(task_id, granted.id) catch {
-            self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+        runtime.grantCapability(task_id, granted.id) catch {
+            self.capabilityTablePtr().revokeGrant(granted.id) catch {};
             return null;
         };
         return granted.id;
     }
 
     fn provisionSurfacePresentationCapabilities(self: *SessionManager, now_ticks: u64) bool {
+        const runtime = self.runtimePtr();
         var complete = true;
         var slot_index: usize = 0;
-        while (slot_index < self.runtime_context.runtime.taskSlotCapacity()) : (slot_index += 1) {
-            const slot = self.runtime_context.runtime.taskSlotAt(slot_index);
+        while (slot_index < runtime.taskSlotCapacity()) : (slot_index += 1) {
+            const slot = runtime.taskSlotAt(slot_index);
             if (!slot.in_use or !self.taskOwnsUiSurface(&slot.task)) continue;
             if (self.ensureSurfacePresentationCapability(slot.task.id, now_ticks) != null) continue;
             self.surface_authority_failures += 1;
             complete = false;
         }
-        if (complete) self.surface_authority_scanned_lifecycle_generation = self.runtime_context.runtime.taskLifecycleGeneration();
+        if (complete) self.surface_authority_scanned_lifecycle_generation = runtime.taskLifecycleGeneration();
         return complete;
     }
 
     fn taskOwnsUiSurface(self: *SessionManager, task: *const task_runtime.TaskRecord) bool {
         if (task.state != .active or task.ui_surface_id == null or task.ui_surface_id.? == 0) return false;
-        const image = self.runtime_context.userspace_catalog.findById(task.launch.image_id) orelse return false;
+        const image = self.userspaceCatalogPtr().findById(task.launch.image_id) orelse return false;
         return (image.contract_flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
     }
 
@@ -406,9 +434,9 @@ pub const SessionManager = struct {
                 return;
             }
             if (!runtime_negative_proofs.runFreestandingAndPrint(
-                &self.runtime_context.userspace_catalog,
-                &self.runtime_context.runtime,
-                &self.runtime_context.userspace_scheduler,
+                self.userspaceCatalogPtr(),
+                self.runtimePtr(),
+                self.userspaceSchedulerPtr(),
             )) {
                 self.failBoot();
                 return;
@@ -467,7 +495,10 @@ pub const SessionManager = struct {
             self.failBoot();
             return;
         }
-        self.bindProductionStorageService(&graph);
+        if (!self.bindProductionStorageService(&graph)) {
+            self.failBoot();
+            return;
+        }
         if (!storage_durability_qemu.run(&self.native_store.storage_service_instance)) {
             self.failBoot();
             return;
@@ -475,10 +506,22 @@ pub const SessionManager = struct {
     }
 
     pub fn beginServiceGraph(self: *SessionManager) ?ServiceGraph {
-        self.ensureConstructed();
+        if (!self.ensureConstructed()) return null;
         if (self.initialized) return null;
         self.initialized = true;
         self.kernel_context.resetPort();
+        _ = self.kernel_context.ensureCapabilityTable() catch {
+            self.failBoot();
+            return null;
+        };
+        _ = self.runtime_context.ensureUserspaceCatalog() catch {
+            self.failBoot();
+            return null;
+        };
+        _ = self.service_graph_builder.ensurePackageService() catch {
+            self.failBoot();
+            return null;
+        };
 
         const env = self.service_graph_builder.environment(
             &self.runtime_context,
@@ -489,7 +532,7 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         };
-        self.service_graph_builder.package_service_instance.bind(
+        self.packageServicePtr().bind(
             state.services.package_service.id,
             state.ids.package_service,
         );
@@ -512,7 +555,10 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         }
-        self.bindProductionStorageService(&graph);
+        if (!self.bindProductionStorageService(&graph)) {
+            self.failBoot();
+            return null;
+        }
         self.runtime_context.runtime_service.checkpoint(60) catch {
             self.failBoot();
             return null;
@@ -537,7 +583,7 @@ pub const SessionManager = struct {
 
     pub fn bindFocusedInputRouting(self: *SessionManager, graph: *const ServiceGraph) bool {
         const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
-        const compositor_task = self.runtime_context.runtime.find(compositor_task_id) orelse return false;
+        const compositor_task = self.runtimePtr().find(compositor_task_id) orelse return false;
         self.input_router.bindCompositor(
             &self.recovery_context.review_compositor_session,
             compositor_task_id,
@@ -563,15 +609,16 @@ pub const SessionManager = struct {
 
     fn finishUserspaceSurfacePresentation(self: *SessionManager, graph: *const ServiceGraph) bool {
         const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
-        const compositor_task = self.runtime_context.runtime.find(compositor_task_id) orelse return false;
+        const runtime = self.runtimePtr();
+        const compositor_task = runtime.find(compositor_task_id) orelse return false;
         if (builtin.target.os.tag == .freestanding) {
-            _ = self.runtime_context.userspace_scheduler.wakeTask(compositor_task_id, .external_event, 0, 1);
+            _ = self.userspaceSchedulerPtr().wakeTask(compositor_task_id, .external_event, 0, 1);
             var attempts: usize = 0;
-            const dispatch_budget = self.runtime_context.runtime.taskSlotCapacity() * 8;
+            const dispatch_budget = runtime.taskSlotCapacity() * 8;
             while (attempts < dispatch_budget and
                 self.recovery_context.review_compositor_session.surfacePresentation(compositor_task.ui_surface_id.?) == null) : (attempts += 1)
             {
-                if (!self.runtime_context.userspace_scheduler.hasReadyTasks()) break;
+                if (!self.userspaceSchedulerPtr().hasReadyTasks()) break;
                 _ = self.runUserspaceScheduler(@intCast(attempts + 1));
             }
             if (!self.proveUserspaceSurfacePresentation(compositor_task)) {
@@ -589,11 +636,11 @@ pub const SessionManager = struct {
         if (surface.task_id != compositor_task.id or surface.presentation.revision == 0) return false;
         const model = abi.surfaceModelKind(surface.presentation.model_kind) orelse return false;
         if (model != .compositor) return false;
-        const dispatch = self.runtime_context.userspace_scheduler.taskDispatchStats(compositor_task.id) orelse return false;
+        const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(compositor_task.id) orelse return false;
         if (dispatch.last_ui_state_revision != surface.presentation.revision) return false;
         const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
-            &self.runtime_context.userspace_catalog,
-            &self.runtime_context.runtime,
+            self.userspaceCatalogPtr(),
+            self.runtimePtr(),
             compositor_task.id,
         ) orelse return false;
         if (mailbox.surface_presentation_capability_id == 0 or
@@ -617,17 +664,18 @@ pub const SessionManager = struct {
     }
 
     fn printSurfacePresentationTelemetry(self: *SessionManager, task_id: u64) void {
+        const runtime = self.runtimePtr();
         const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
-            &self.runtime_context.userspace_catalog,
-            &self.runtime_context.runtime,
+            self.userspaceCatalogPtr(),
+            runtime,
             task_id,
         ) orelse {
             console.print("ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing\n");
             return;
         };
-        const dispatch = self.runtime_context.userspace_scheduler.taskDispatchStats(task_id);
-        const task = self.runtime_context.runtime.find(task_id);
-        const authority = self.kernel_context.capability_table.query(mailbox.authority_capability_id);
+        const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(task_id);
+        const task = runtime.find(task_id);
+        const authority = self.capabilityTablePtr().query(mailbox.authority_capability_id);
         var line_buffer: [512]u8 = undefined;
         const line = std.fmt.bufPrint(
             &line_buffer,
@@ -661,13 +709,14 @@ pub const SessionManager = struct {
         console.print(line);
     }
 
-    pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) void {
+    pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) bool {
         self.native_store.bindProduction(
             graph.state.services.storage_service.id,
             graph.service_bindings.bindingFor(.storage_object).task_id,
             graph.state.ids.storage_service,
-            &self.kernel_context.capability_table,
-        );
+            self.capabilityTablePtr(),
+        ) catch return false;
+        return true;
     }
 
     pub fn failBoot(self: *SessionManager) void {
@@ -721,10 +770,10 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
 
     const ids = session_bootstrap.principals();
     try session_bootstrap.initializeUserspace(
-        &self.runtime_context.userspace_catalog,
-        &self.runtime_context.runtime,
-        &self.kernel_context.capability_table,
-        &self.runtime_context.userspace_scheduler,
+        self.userspaceCatalogPtr(),
+        self.runtimePtr(),
+        self.capabilityTablePtr(),
+        self.userspaceSchedulerPtr(),
     );
     const services = try session_bootstrap.registerCoreServices(&self.service_graph_builder.supervisor, &self.runtime_context.runtime_service, ids);
 
@@ -785,8 +834,8 @@ fn launchNativeBootstrapService(
     if (launch.mode != .native_direct) return error.MissingBootstrapLaunch;
     const bundle_id = service_catalog.bundleIdForServiceClass(class) orelse return error.MissingUserspaceImage;
     return userspace_launch.launchRegisteredDirect(
-        &self.runtime_context.userspace_catalog,
-        &self.runtime_context.runtime,
+        self.userspaceCatalogPtr(),
+        self.runtimePtr(),
         bundle_id,
         .{
             .owner = session_bootstrap.ownerForServiceClass(ids, class) orelse return error.MissingBootstrapLaunch,
@@ -794,7 +843,7 @@ fn launchNativeBootstrapService(
             .ui_surface_id = launch.ui_surface_id,
             .local_only = true,
         },
-        &self.runtime_context.userspace_scheduler,
+        self.userspaceSchedulerPtr(),
     ) catch |err| {
         const record = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapLaunch;
         self.recordBootFailure(record.id, launch.tick, err);
@@ -821,7 +870,7 @@ fn mintNativeBootstrapGrant(
         .policy_mint_authority => services.policy_service.id,
         .service_task_authority => unreachable,
     };
-    return try self.kernel_context.capability_table.mintBootRoot(.{
+    return try self.capabilityTablePtr().mintBootRoot(.{
         .holder = ids.session_service,
         .issuer = ids.policy_authority,
         .target = target,
@@ -853,7 +902,7 @@ fn grantNativeServiceTaskAuthority(
 ) BootstrapError!void {
     if (!catalogDeclaresGrant(class, .service_task_authority)) return error.MissingBootstrapGrant;
     const service = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapGrant;
-    const granted = try self.kernel_context.capability_table.mintBootRoot(.{
+    const granted = try self.capabilityTablePtr().mintBootRoot(.{
         .holder = task.owner,
         .issuer = ids.policy_authority,
         .target = .{ .kind = .service, .id = service.id },
@@ -874,8 +923,8 @@ fn grantNativeServiceTaskAuthority(
             .broker_service_id = service.id,
         },
     });
-    self.runtime_context.runtime.grantCapability(task.id, granted.id) catch |err| {
-        self.kernel_context.capability_table.revokeGrant(granted.id) catch {};
+    self.runtimePtr().grantCapability(task.id, granted.id) catch |err| {
+        self.capabilityTablePtr().revokeGrant(granted.id) catch {};
         return err;
     };
 }
@@ -894,18 +943,19 @@ fn recordSessionTaskBootstrap(
     session_capability_id: u64,
     policy_capability_id: u64,
 ) task_runtime.Error!void {
-    try self.runtime_context.runtime.grantCapability(session_task_id, session_capability_id);
-    try self.runtime_context.runtime.grantCapability(session_task_id, policy_capability_id);
-    try self.runtime_context.runtime.audit(session_task_id, .{
+    const runtime = self.runtimePtr();
+    try runtime.grantCapability(session_task_id, session_capability_id);
+    try runtime.grantCapability(session_task_id, policy_capability_id);
+    try runtime.audit(session_task_id, .{
         .kind = .created,
         .tick = 0,
     });
-    try self.runtime_context.runtime.audit(session_task_id, .{
+    try runtime.audit(session_task_id, .{
         .kind = .capability_granted,
         .capability_id = session_capability_id,
         .tick = 0,
     });
-    try self.runtime_context.runtime.audit(session_task_id, .{
+    try runtime.audit(session_task_id, .{
         .kind = .capability_granted,
         .capability_id = policy_capability_id,
         .tick = 0,
@@ -954,7 +1004,7 @@ fn presentSurfaceForKernel(
     const session: *compositor_session.Session = @ptrCast(@alignCast(context));
     return switch (session.presentSurface(task, presentation) catch |err| switch (err) {
         error.StalePresentation, error.PresentationConflict => return .stale,
-        error.SurfaceTableFull => return .full,
+        error.SurfaceTableFull, error.OutOfMemory => return .full,
         else => return .invalid_surface,
     }) {
         .accepted => .accepted,
