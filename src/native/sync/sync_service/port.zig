@@ -303,12 +303,12 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
                 const delivery = try self.replicateFramePayloadToPeer(peer, request, frame);
                 result.accepted_frame_count += 1;
                 result.persisted_object_count += 1;
-                result.payload_bytes += delivery.payload_len;
+                result.payload_bytes += @intCast(delivery.payload_len);
                 acked_ids[acked_count] = frame.id;
                 acked_count += 1;
                 if (delivery.used_booted_relay_service) {
                     result.used_booted_relay_service = true;
-                    result.relay_delivery_count += delivery.relay_delivery_count;
+                    result.relay_delivery_count += @intCast(delivery.relay_delivery_count);
                 }
             }
             try peer.service.endReplicationBatch();

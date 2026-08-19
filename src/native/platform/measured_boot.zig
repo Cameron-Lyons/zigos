@@ -33,6 +33,23 @@ pub const MEASUREMENT_KIND_COUNT: usize = 5;
 pub const MAX_MANIFEST_ENTRIES: usize = MAX_RECORDS;
 pub const MAX_BUILD_ARTIFACTS: usize = 32;
 pub const state_workspace_label = "system-measured-boot";
+pub const COMPACT_MEASUREMENT_METADATA = true;
+pub const MEASUREMENT_RECORD_SIZE_CEILING_BYTES: usize = 82;
+pub const BUILD_ARTIFACT_ENTRY_SIZE_CEILING_BYTES: usize = 82;
+pub const ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 1_328;
+pub const BUILD_ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 2_760;
+pub const BOOT_RECORD_SIZE_CEILING_BYTES: usize = 1_360;
+pub const BOOTLOADER_HANDOFF_SIZE_CEILING_BYTES: usize = 1_360;
+pub const RECORDER_SIZE_CEILING_BYTES: usize = 1_328;
+
+comptime {
+    if (MAX_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_MANIFEST_ENTRIES > std.math.maxInt(u8) or
+        MAX_BUILD_ARTIFACTS > std.math.maxInt(u8))
+    {
+        @compileError("measured boot metadata no longer fits compact counters");
+    }
+}
 
 const state_entry_path = "state/latest";
 const state_magic = "ZMB1";
@@ -60,12 +77,18 @@ pub const RootProvenance = enum(u8) {
 
 pub const MeasurementRecord = struct {
     kind: MeasurementKind,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     digest: crypto_hash.Digest,
 
     pub fn labelSlice(self: *const MeasurementRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > MEASUREMENT_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("measurement record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -79,18 +102,24 @@ pub const BuildArtifactKind = enum(u8) {
 
 pub const BuildArtifactEntry = struct {
     kind: BuildArtifactKind,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     digest: crypto_hash.Digest,
 
     pub fn labelSlice(self: *const BuildArtifactEntry) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > BUILD_ARTIFACT_ENTRY_SIZE_CEILING_BYTES) {
+            @compileError("build artifact entry exceeds its compact size ceiling");
+        }
     }
 };
 
 pub const ArtifactManifest = struct {
     generation: u64,
-    entry_count: usize,
+    entry_count: u8,
     entries: [MAX_MANIFEST_ENTRIES]ArtifactManifestEntry,
 
     pub fn init(generation: u64) ArtifactManifest {
@@ -113,7 +142,7 @@ pub const ArtifactManifest = struct {
             .label = [_]u8{0} ** MAX_LABEL_BYTES,
             .digest = digest,
         };
-        self.entries[self.entry_count].label_len = copyText(&self.entries[self.entry_count].label, label);
+        self.entries[self.entry_count].label_len = @intCast(copyText(&self.entries[self.entry_count].label, label));
         self.entry_count += 1;
     }
 
@@ -143,6 +172,12 @@ pub const ArtifactManifest = struct {
         }
         return count;
     }
+
+    comptime {
+        if (@sizeOf(@This()) > ARTIFACT_MANIFEST_SIZE_CEILING_BYTES) {
+            @compileError("artifact manifest exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const SignedArtifactManifest = struct {
@@ -158,7 +193,7 @@ pub const SignedArtifactManifest = struct {
 
 pub const BuildArtifactManifest = struct {
     generation: u64,
-    entry_count: usize,
+    entry_count: u8,
     entries: [MAX_BUILD_ARTIFACTS]BuildArtifactEntry,
     signature: policy_manifest.Signature,
 
@@ -198,11 +233,17 @@ pub const BuildArtifactManifest = struct {
         return signing.verifyTrusted(self.signature, payload, build_artifact_manifest_signer) and
             requiredBuildArtifactShape(self);
     }
+
+    comptime {
+        if (@sizeOf(@This()) > BUILD_ARTIFACT_MANIFEST_SIZE_CEILING_BYTES) {
+            @compileError("build artifact manifest exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const BootRecord = struct {
     generation: u64,
-    record_count: usize,
+    record_count: u8,
     records: [MAX_RECORDS]MeasurementRecord,
     root_digest: crypto_hash.Digest,
     root_provenance: RootProvenance = .synthetic_host,
@@ -237,11 +278,17 @@ pub const BootRecord = struct {
         const computed = self.computedRootDigest() orelse return false;
         return std.mem.eql(u8, &self.root_digest, &computed);
     }
+
+    comptime {
+        if (@sizeOf(@This()) > BOOT_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("boot record exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const BootloaderMeasurementHandoff = struct {
     generation: u64,
-    record_count: usize,
+    record_count: u8,
     records: [MAX_RECORDS]MeasurementRecord,
     root_digest: crypto_hash.Digest,
 
@@ -255,6 +302,12 @@ pub const BootloaderMeasurementHandoff = struct {
         };
         @memcpy(handoff.records[0..boot.record_count], boot.records[0..boot.record_count]);
         return handoff;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > BOOTLOADER_HANDOFF_SIZE_CEILING_BYTES) {
+            @compileError("bootloader measurement handoff exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -322,7 +375,7 @@ pub const Error = error{
 pub const Recorder = struct {
     generation: u64 = 0,
     records: [MAX_RECORDS]MeasurementRecord = [_]MeasurementRecord{zeroRecord()} ** MAX_RECORDS,
-    record_count: usize = 0,
+    record_count: u8 = 0,
 
     pub fn init() Recorder {
         return .{};
@@ -346,7 +399,7 @@ pub const Recorder = struct {
             .label = [_]u8{0} ** MAX_LABEL_BYTES,
             .digest = digest,
         };
-        self.records[self.record_count].label_len = copyText(&self.records[self.record_count].label, label);
+        self.records[self.record_count].label_len = @intCast(copyText(&self.records[self.record_count].label, label));
         self.record_count += 1;
     }
 
@@ -380,6 +433,12 @@ pub const Recorder = struct {
             .records = self.records,
             .root_digest = root,
         };
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > RECORDER_SIZE_CEILING_BYTES) {
+            @compileError("measured boot recorder exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -506,7 +565,7 @@ pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
 pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!BuildArtifactEntry {
     var entry = zeroBuildArtifactEntry();
     entry.kind = kind;
-    entry.label_len = copyText(&entry.label, label);
+    entry.label_len = @intCast(copyText(&entry.label, label));
     entry.digest = digest;
     return entry;
 }
@@ -905,7 +964,7 @@ test "measured boot records kernel base image services policies and drivers" {
 
     const boot = recorder.finalize();
     try std.testing.expectEqual(@as(u64, 7), boot.generation);
-    try std.testing.expectEqual(@as(usize, 5), boot.record_count);
+    try std.testing.expectEqual(@as(u8, 5), boot.record_count);
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.kernel));
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.base_image));
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.critical_service));
@@ -916,6 +975,28 @@ test "measured boot records kernel base image services policies and drivers" {
     const summary = BootSummary.fromRecord(&boot);
     try std.testing.expect(summary.matchesRecord(&boot));
     try std.testing.expectEqual(@as(u16, 1), summary.countKind(.kernel));
+}
+
+test "measured boot compact counters stop at fixed capacities" {
+    var recorder = Recorder.init();
+    recorder.begin(8);
+    var artifact_manifest = ArtifactManifest.init(8);
+    for (0..MAX_RECORDS) |index| {
+        const digest = crypto_hash.digestFromByte(@intCast(index + 1));
+        try recorder.addDigest(.critical_service, "bounded-record", digest);
+        try artifact_manifest.addDigest(.critical_service, "bounded-record", digest);
+    }
+    try std.testing.expectEqual(@as(u8, MAX_RECORDS), recorder.record_count);
+    try std.testing.expectEqual(@as(u8, MAX_MANIFEST_ENTRIES), artifact_manifest.entry_count);
+    try std.testing.expectError(error.RecordTableFull, recorder.addDigest(.critical_service, "overflow", crypto_hash.zero_digest));
+    try std.testing.expectError(error.RecordTableFull, artifact_manifest.addDigest(.critical_service, "overflow", crypto_hash.zero_digest));
+
+    var build_manifest = BuildArtifactManifest.init(8);
+    for (0..MAX_BUILD_ARTIFACTS) |index| {
+        try build_manifest.addDigest(.userspace_image, "bounded-artifact", crypto_hash.digestFromByte(@intCast(index + 1)));
+    }
+    try std.testing.expectEqual(@as(u8, MAX_BUILD_ARTIFACTS), build_manifest.entry_count);
+    try std.testing.expectError(error.RecordTableFull, build_manifest.addDigest(.userspace_image, "overflow", crypto_hash.zero_digest));
 }
 
 test "critical service measurements bind launched userspace image artifacts" {

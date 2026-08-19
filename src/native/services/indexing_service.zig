@@ -1,7 +1,5 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
-const hash_seeds = @import("../core/hash_seeds.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const policy_object = @import("../policy/policy_object.zig");
@@ -12,6 +10,10 @@ pub const MAX_DOCUMENTS: usize = 32;
 pub const MAX_RESULTS: usize = 8;
 pub const MAX_TITLE_BYTES: usize = 64;
 pub const MAX_BODY_BYTES: usize = 192;
+pub const BOUNDED_DOCUMENT_SCAN = true;
+pub const DENSE_DOCUMENT_TABLE = true;
+pub const COMPACT_DOCUMENT_METADATA = true;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 9_232;
 
 pub const SearchResult = struct {
     workspace_id: u64,
@@ -39,21 +41,21 @@ pub const Error = error{
 };
 
 pub const DocumentRecord = struct {
-    workspace_id: u64,
-    object_id: u64,
-    version_id: u64,
-    title_len: usize,
-    title: [MAX_TITLE_BYTES]u8,
-    body_len: usize,
-    body: [MAX_BODY_BYTES]u8,
+    workspace_id: u64 = 0,
+    object_id: u64 = 0,
+    version_id: u64 = 0,
+    title_len: u8 = 0,
+    title: [MAX_TITLE_BYTES]u8 = [_]u8{0} ** MAX_TITLE_BYTES,
+    body_len: u8 = 0,
+    body: [MAX_BODY_BYTES]u8 = [_]u8{0} ** MAX_BODY_BYTES,
     sensitivity: manifest.DataSensitivity = .internal_data,
 
     pub fn titleSlice(self: *const DocumentRecord) []const u8 {
-        return self.title[0..self.title_len];
+        return self.title[0..@as(usize, self.title_len)];
     }
 
     pub fn bodySlice(self: *const DocumentRecord) []const u8 {
-        return self.body[0..self.body_len];
+        return self.body[0..@as(usize, self.body_len)];
     }
 };
 
@@ -69,18 +71,16 @@ pub const SemanticQueryRequest = struct {
     detail: []const u8 = "",
 };
 
-const DocumentSlot = struct {
-    in_use: bool = false,
-    record: DocumentRecord = zeroDocument(),
-};
-
-const DocumentArena = indexed_arena.IndexedArenaWithKey(u64, DocumentSlot, MAX_DOCUMENTS, MAX_DOCUMENTS * 2, documentSlotKey);
-const DocumentWorkspaceIndex = indexed_arena.MultimapIndex(MAX_DOCUMENTS, MAX_DOCUMENTS, MAX_DOCUMENTS * 2);
-
 pub const Service = struct {
     generation: u64 = 1,
-    documents: DocumentArena = DocumentArena.init(),
-    workspace_index: DocumentWorkspaceIndex = DocumentWorkspaceIndex.init(),
+    documents: [MAX_DOCUMENTS]DocumentRecord = [_]DocumentRecord{.{}} ** MAX_DOCUMENTS,
+    document_count: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) {
+            @compileError("indexing service exceeds its fixed-state size ceiling");
+        }
+    }
 
     pub fn init() Service {
         return .{};
@@ -107,34 +107,25 @@ pub const Service = struct {
         sensitivity: manifest.DataSensitivity,
     ) Error!void {
         const record = try makeDocument(workspace_id, object_id, version_id, title, body, sensitivity);
-        if (self.findSlot(workspace_id, object_id)) |slot| {
-            slot.record = record;
+        if (self.findSlot(workspace_id, object_id)) |existing| {
+            existing.* = record;
             self.bumpGeneration();
             return;
         }
 
-        const key = documentKey(workspace_id, object_id);
-        const slot_index = self.documents.reserveIndex(key) orelse return error.DocumentTableFull;
-        if (!self.workspace_index.append(workspace_id, slot_index)) {
-            _ = self.documents.removeIndex(slot_index);
-            return error.DocumentTableFull;
-        }
-        const slot = &self.documents.slots[slot_index];
-        slot.record = record;
+        const slot_index = self.documentCount();
+        if (slot_index >= MAX_DOCUMENTS) return error.DocumentTableFull;
+        self.documents[slot_index] = record;
+        self.document_count += 1;
         self.bumpGeneration();
     }
 
     pub fn remove(self: *Service, workspace_id: u64, object_id: u64) bool {
-        const key = documentKey(workspace_id, object_id);
-        const slot_index = self.documents.slotIndexOf(key) orelse return false;
-        const slot = &self.documents.slots[slot_index];
-        if (slot.record.workspace_id != workspace_id or slot.record.object_id != object_id) {
-            native_util.impossibleByInvariant("indexing service document key points at the wrong document");
-        }
-        _ = self.workspace_index.remove(workspace_id, slot_index);
-        if (!self.documents.removeIndex(slot_index)) {
-            native_util.impossibleByInvariant("indexed document slot disappeared during removal");
-        }
+        const slot_index = self.documentSlotIndex(workspace_id, object_id) orelse return false;
+        const last_slot_index = self.documentCount() - 1;
+        self.documents[slot_index] = self.documents[last_slot_index];
+        self.documents[last_slot_index] = .{};
+        self.document_count -= 1;
         self.bumpGeneration();
         return true;
     }
@@ -156,14 +147,10 @@ pub const Service = struct {
 
         const snapshot_generation = self.generation;
         var count: usize = 0;
-        for (permitted_workspaces, 0..) |workspace_id, workspace_scope_index| {
-            if (workspaceAlreadyVisited(permitted_workspaces[0..workspace_scope_index], workspace_id)) continue;
-            var slot_index = self.workspace_index.head(workspace_id);
-            while (slot_index != indexed_arena.no_index) : (slot_index = self.workspace_index.next(slot_index)) {
-                const slot = self.documentSlotForWorkspaceIndex(workspace_id, slot_index);
-                const candidate = scoreDocument(&slot.record, folded_needle, snapshot_generation) orelse continue;
-                retainRankedResult(output, &count, candidate);
-            }
+        for (self.documents[0..self.documentCount()]) |*record| {
+            if (!workspacePermitted(permitted_workspaces, record.workspace_id)) continue;
+            const candidate = scoreDocument(record, folded_needle, snapshot_generation) orelse continue;
+            retainRankedResult(output, &count, candidate);
         }
 
         std.sort.insertion(SearchResult, output[0..count], {}, compareResults);
@@ -200,41 +187,39 @@ pub const Service = struct {
 
     pub fn permittedWorkspaceSensitivity(self: *const Service, permitted_workspaces: []const u64) manifest.DataSensitivity {
         var result: manifest.DataSensitivity = .public_data;
-        for (permitted_workspaces, 0..) |workspace_id, workspace_scope_index| {
-            if (workspaceAlreadyVisited(permitted_workspaces[0..workspace_scope_index], workspace_id)) continue;
-            var slot_index = self.workspace_index.head(workspace_id);
-            while (slot_index != indexed_arena.no_index) : (slot_index = self.workspace_index.next(slot_index)) {
-                const slot = self.documentSlotForWorkspaceIndex(workspace_id, slot_index);
-                result = maxSensitivity(result, slot.record.sensitivity);
-            }
+        for (self.documents[0..self.documentCount()]) |*record| {
+            if (!workspacePermitted(permitted_workspaces, record.workspace_id)) continue;
+            result = maxSensitivity(result, record.sensitivity);
         }
         return result;
     }
 
-    fn findSlot(self: *Service, workspace_id: u64, object_id: u64) ?*DocumentSlot {
-        const slot = self.documents.get(documentKey(workspace_id, object_id)) orelse return null;
-        if (slot.record.workspace_id != workspace_id or slot.record.object_id != object_id) {
-            native_util.impossibleByInvariant("indexing service document index points at the wrong document");
+    pub fn documentCount(self: *const Service) usize {
+        return @intCast(self.document_count);
+    }
+
+    fn findSlot(self: *Service, workspace_id: u64, object_id: u64) ?*DocumentRecord {
+        const slot_index = self.documentSlotIndex(workspace_id, object_id) orelse return null;
+        return &self.documents[slot_index];
+    }
+
+    fn documentSlotIndex(self: *const Service, workspace_id: u64, object_id: u64) ?usize {
+        for (self.documents[0..self.documentCount()], 0..) |record, slot_index| {
+            if (record.workspace_id == workspace_id and record.object_id == object_id) return slot_index;
         }
-        return slot;
+        return null;
+    }
+
+    fn workspaceDocumentCount(self: *const Service, workspace_id: u64) usize {
+        var count: usize = 0;
+        for (self.documents[0..self.documentCount()]) |record| {
+            if (record.workspace_id == workspace_id) count += 1;
+        }
+        return count;
     }
 
     fn bumpGeneration(self: *Service) void {
         self.generation +|= 1;
-    }
-
-    fn documentSlotForWorkspaceIndex(self: *const Service, workspace_id: u64, slot_index: usize) *const DocumentSlot {
-        if (slot_index >= self.documents.slots.len) {
-            native_util.impossibleByInvariant("indexing service workspace index points outside document slots");
-        }
-        const slot = &self.documents.slots[slot_index];
-        if (!slot.in_use) {
-            native_util.impossibleByInvariant("indexing service workspace index points at a free document slot");
-        }
-        if (slot.record.workspace_id != workspace_id) {
-            native_util.impossibleByInvariant("indexing service workspace index points at the wrong workspace");
-        }
-        return slot;
     }
 };
 
@@ -256,18 +241,6 @@ fn recordSemanticQuery(
             request.detail,
         );
     }
-}
-
-fn documentSlotKey(slot: *const DocumentSlot) u64 {
-    return documentKey(slot.record.workspace_id, slot.record.object_id);
-}
-
-fn documentKey(workspace_id: u64, object_id: u64) u64 {
-    const DOCUMENT_KEY_BYTES: usize = 16;
-    var bytes: [DOCUMENT_KEY_BYTES]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..8], workspace_id, .little);
-    std.mem.writeInt(u64, bytes[8..16], object_id, .little);
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.document_index_key, &bytes));
 }
 
 fn compareResults(_: void, left: SearchResult, right: SearchResult) bool {
@@ -317,9 +290,9 @@ fn retainRankedResult(output: *[MAX_RESULTS]SearchResult, count: *usize, candida
     }
 }
 
-fn workspaceAlreadyVisited(previous_workspaces: []const u64, workspace_id: u64) bool {
-    for (previous_workspaces) |visited| {
-        if (visited == workspace_id) return true;
+fn workspacePermitted(permitted_workspaces: []const u64, workspace_id: u64) bool {
+    for (permitted_workspaces) |permitted| {
+        if (permitted == workspace_id) return true;
     }
     return false;
 }
@@ -336,12 +309,12 @@ fn makeDocument(
     body: []const u8,
     sensitivity: manifest.DataSensitivity,
 ) Error!DocumentRecord {
-    var record = zeroDocument();
+    var record = DocumentRecord{};
     record.workspace_id = workspace_id;
     record.object_id = object_id;
     record.version_id = version_id;
-    record.title_len = copyTextExact(&record.title, title) catch return error.TitleTooLong;
-    record.body_len = copyTextExact(&record.body, body) catch return error.BodyTooLong;
+    record.title_len = @intCast(copyTextExact(&record.title, title) catch return error.TitleTooLong);
+    record.body_len = @intCast(copyTextExact(&record.body, body) catch return error.BodyTooLong);
     record.sensitivity = sensitivity;
     return record;
 }
@@ -371,20 +344,8 @@ fn redactResultTitles(results: []SearchResult) void {
 }
 
 fn hashTitle(title: []const u8) u64 {
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x7365_6d61_6e74_6963, title));
-}
-
-fn zeroDocument() DocumentRecord {
-    return .{
-        .workspace_id = 0,
-        .object_id = 0,
-        .version_id = 0,
-        .title_len = 0,
-        .title = [_]u8{0} ** MAX_TITLE_BYTES,
-        .body_len = 0,
-        .body = [_]u8{0} ** MAX_BODY_BYTES,
-        .sensitivity = .internal_data,
-    };
+    const fingerprint = std.hash.Wyhash.hash(0x7365_6d61_6e74_6963, title);
+    return if (fingerprint == 0) 1 else fingerprint;
 }
 
 test "indexing service remains permission aware and updates ranked results" {
@@ -393,9 +354,9 @@ test "indexing service remains permission aware and updates ranked results" {
     try service.upsert(1, 101, 2, "Quarterly Report", "finance alpha summary");
     try service.upsert(2, 200, 1, "Private Contract", "alpha restricted");
     try std.testing.expectEqual(@as(u64, 4), service.generation);
-    try std.testing.expectEqual(@as(usize, 3), service.documents.countInUse());
-    try std.testing.expectEqual(@as(usize, 2), service.workspace_index.count(1));
-    try std.testing.expectEqual(@as(usize, 1), service.workspace_index.count(2));
+    try std.testing.expectEqual(@as(usize, 3), service.documentCount());
+    try std.testing.expectEqual(@as(usize, 2), service.workspaceDocumentCount(1));
+    try std.testing.expectEqual(@as(usize, 1), service.workspaceDocumentCount(2));
 
     var results_buffer: [MAX_RESULTS]SearchResult = undefined;
     const workspace_one = [_]u64{1};
@@ -417,8 +378,8 @@ test "indexing service remains permission aware and updates ranked results" {
 
     try std.testing.expect(service.remove(1, 100));
     try std.testing.expectEqual(@as(u64, 5), service.generation);
-    try std.testing.expectEqual(@as(usize, 2), service.documents.countInUse());
-    try std.testing.expectEqual(@as(usize, 1), service.workspace_index.count(1));
+    try std.testing.expectEqual(@as(usize, 2), service.documentCount());
+    try std.testing.expectEqual(@as(usize, 1), service.workspaceDocumentCount(1));
     const updated = service.query(&workspace_one, "alpha", &results_buffer);
     try std.testing.expectEqual(@as(usize, 1), updated.len);
     try std.testing.expectEqual(@as(u64, 101), updated[0].object_id);
@@ -432,18 +393,48 @@ test "indexing service rejects overlong document text without partial updates" {
     const oversized_body = [_]u8{'b'} ** (MAX_BODY_BYTES + 1);
 
     try std.testing.expectError(error.TitleTooLong, service.upsert(1, 100, 1, oversized_title[0..], "body"));
-    try std.testing.expectEqual(@as(usize, 0), service.documents.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), service.documentCount());
     try std.testing.expectEqual(@as(u64, 1), service.generation);
 
     try service.upsert(1, 100, 1, "Original", "body");
     try std.testing.expectEqual(@as(u64, 2), service.generation);
 
     try std.testing.expectError(error.BodyTooLong, service.upsert(1, 100, 2, "Updated", oversized_body[0..]));
-    const slot = service.findSlot(1, 100).?;
-    try std.testing.expectEqual(@as(u64, 1), slot.record.version_id);
-    try std.testing.expectEqualStrings("Original", slot.record.titleSlice());
-    try std.testing.expectEqualStrings("body", slot.record.bodySlice());
+    const record = service.findSlot(1, 100).?;
+    try std.testing.expectEqual(@as(u64, 1), record.version_id);
+    try std.testing.expectEqualStrings("Original", record.titleSlice());
+    try std.testing.expectEqualStrings("body", record.bodySlice());
     try std.testing.expectEqual(@as(u64, 2), service.generation);
+}
+
+test "indexing service compacts removals and refills its bounded table" {
+    var service = Service.init();
+    for (0..MAX_DOCUMENTS) |index| {
+        try service.upsert(
+            @intCast(1 + index % 2),
+            @intCast(100 + index),
+            1,
+            "bounded document",
+            "searchable body",
+        );
+    }
+    try std.testing.expectEqual(MAX_DOCUMENTS, service.documentCount());
+
+    const generation_before_full = service.generation;
+    try std.testing.expectError(error.DocumentTableFull, service.upsert(3, 999, 1, "overflow", "searchable overflow"));
+    try std.testing.expectEqual(generation_before_full, service.generation);
+
+    const retired_slot_index = service.documentSlotIndex(2, 105).?;
+    const last_object_id = service.documents[MAX_DOCUMENTS - 1].object_id;
+    try std.testing.expect(service.remove(2, 105));
+    try std.testing.expectEqual(MAX_DOCUMENTS - 1, service.documentCount());
+    try std.testing.expectEqual(last_object_id, service.documents[retired_slot_index].object_id);
+    try std.testing.expectEqual(@as(u64, 0), service.documents[MAX_DOCUMENTS - 1].object_id);
+
+    try service.upsert(3, 999, 2, "replacement", "searchable replacement");
+    try std.testing.expectEqual(MAX_DOCUMENTS, service.documentCount());
+    try std.testing.expectEqual(MAX_DOCUMENTS - 1, service.documentSlotIndex(3, 999).?);
+    try std.testing.expect(!service.remove(2, 105));
 }
 
 test "borrowed result titles follow document lifetime boundaries" {
@@ -451,22 +442,22 @@ test "borrowed result titles follow document lifetime boundaries" {
     try service.upsert(1, 100, 1, "Alpha Notes", "alpha roadmap");
 
     const workspace_one = [_]u64{1};
-    const source_slot_index = service.documents.slotIndexOf(documentKey(1, 100)).?;
+    const source_slot_index = service.documentSlotIndex(1, 100).?;
     var results_buffer: [MAX_RESULTS]SearchResult = undefined;
 
     {
         const results = service.query(&workspace_one, "alpha", &results_buffer);
-        const source = &service.documents.slots[source_slot_index].record;
+        const source = &service.documents[source_slot_index];
         try std.testing.expectEqual(@as(usize, 1), results.len);
         try std.testing.expect(results[0].title.ptr == source.titleSlice().ptr);
         try std.testing.expectEqualStrings("Alpha Notes", results[0].titleSlice());
     }
 
     try service.upsert(2, 200, 1, "Other Notes", "alpha reference");
-    try std.testing.expectEqual(source_slot_index, service.documents.slotIndexOf(documentKey(1, 100)).?);
+    try std.testing.expectEqual(source_slot_index, service.documentSlotIndex(1, 100).?);
     {
         const results = service.query(&workspace_one, "alpha", &results_buffer);
-        const source = &service.documents.slots[source_slot_index].record;
+        const source = &service.documents[source_slot_index];
         try std.testing.expectEqual(@as(usize, 1), results.len);
         try std.testing.expect(results[0].title.ptr == source.titleSlice().ptr);
     }
@@ -476,7 +467,7 @@ test "borrowed result titles follow document lifetime boundaries" {
     try std.testing.expect(service.generation > generation_before_update);
     {
         const results = service.query(&workspace_one, "alpha", &results_buffer);
-        const source = &service.documents.slots[source_slot_index].record;
+        const source = &service.documents[source_slot_index];
         try std.testing.expectEqual(@as(usize, 1), results.len);
         try std.testing.expectEqual(@as(u64, 2), results[0].version_id);
         try std.testing.expect(results[0].title.ptr == source.titleSlice().ptr);
