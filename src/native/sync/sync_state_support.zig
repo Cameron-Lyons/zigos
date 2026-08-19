@@ -23,6 +23,7 @@ pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TRANSPORT_FRAMES: usize = 64;
 pub const TRANSPORT_REPLAY_WINDOW: u64 = 32;
 pub const COMPACT_RECORD_METADATA = true;
+pub const COMPACT_REPLICATION_SUMMARY_METADATA = true;
 pub const SyncPathLength = workspace.WorkspacePathLength;
 pub const WORKSPACE_POLICY_SIZE_CEILING_BYTES: usize = 328;
 pub const OVERLAY_RECORD_SIZE_CEILING_BYTES: usize = 280;
@@ -31,6 +32,7 @@ pub const CONFLICT_RECORD_SIZE_CEILING_BYTES: usize = 152;
 pub const CONFLICT_REVIEW_RECORD_SIZE_CEILING_BYTES: usize = 152;
 pub const DATABASE_CONTRACT_SIZE_CEILING_BYTES: usize = 240;
 pub const TRANSPORT_FRAME_SIZE_CEILING_BYTES: usize = 176;
+pub const REPLICATION_SUMMARY_SIZE_CEILING_BYTES: usize = 18;
 pub const PERSISTENT_STATE_SIZE_CEILING_BYTES: usize = 55_640;
 pub const RESIDENT_STATE_SIZE_CEILING_BYTES: usize = 57_768;
 pub const state_workspace_label = "system-sync";
@@ -44,6 +46,10 @@ comptime {
         MAX_PRIVATE_SERVICES > std.math.maxInt(u8) or
         MAX_PREFIX_BYTES > std.math.maxInt(u8) or
         MAX_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_REPLICA_ENTRIES > std.math.maxInt(u8) or
+        MAX_CONFLICTS > std.math.maxInt(u8) or
+        MAX_TRANSPORT_FRAMES > std.math.maxInt(u8) or
+        workspace.MAX_WORKSPACE_ENTRY_MUTATIONS > std.math.maxInt(u8) or
         workspace.MAX_ENTRY_PATH_BYTES > std.math.maxInt(SyncPathLength))
     {
         @compileError("sync record metadata no longer fits compact counters");
@@ -246,14 +252,14 @@ pub const DatabaseContract = struct {
 };
 
 pub const ReplicationSummary = struct {
-    selected_entry_count: usize = 0,
-    skipped_entry_count: usize = 0,
-    share_denied_entry_count: usize = 0,
-    merged_count: usize = 0,
-    snapshot_count: usize = 0,
-    secret_transfer_count: usize = 0,
-    transactional_count: usize = 0,
-    conflict_count: usize = 0,
+    selected_entry_count: u8 = 0,
+    skipped_entry_count: u8 = 0,
+    share_denied_entry_count: u8 = 0,
+    merged_count: u8 = 0,
+    snapshot_count: u16 = 0,
+    secret_transfer_count: u8 = 0,
+    transactional_count: u8 = 0,
+    conflict_count: u8 = 0,
     used_device_to_device: bool = false,
     used_relay: bool = false,
     overlay_ready: bool = false,
@@ -261,8 +267,14 @@ pub const ReplicationSummary = struct {
     private_service_published: bool = false,
     personal_e2ee: bool = false,
     offline_first: bool = false,
-    transport_frame_count: usize = 0,
-    encrypted_transport_count: usize = 0,
+    transport_frame_count: u8 = 0,
+    encrypted_transport_count: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > REPLICATION_SUMMARY_SIZE_CEILING_BYTES) {
+            @compileError("replication summary exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const TransportQueueKind = enum(u8) {
@@ -826,4 +838,24 @@ test "compact sync record metadata preserves exact path and label capacities" {
     try std.testing.expectEqual(@as(usize, workspace.MAX_ENTRY_PATH_BYTES), replica.pathSlice().len);
     try std.testing.expectEqual(@as(usize, workspace.MAX_ENTRY_PATH_BYTES), conflict.pathSlice().len);
     try std.testing.expectEqual(@as(usize, workspace.MAX_ENTRY_PATH_BYTES), frame.pathSlice().len);
+}
+
+test "compact replication summary preserves bounded result capacities" {
+    const summary = ReplicationSummary{
+        .selected_entry_count = @intCast(MAX_REPLICA_ENTRIES),
+        .skipped_entry_count = @intCast(workspace.MAX_WORKSPACE_ENTRY_MUTATIONS),
+        .share_denied_entry_count = @intCast(workspace.MAX_WORKSPACE_ENTRIES),
+        .merged_count = @intCast(MAX_REPLICA_ENTRIES),
+        .snapshot_count = std.math.maxInt(u16),
+        .secret_transfer_count = @intCast(MAX_REPLICA_ENTRIES),
+        .transactional_count = @intCast(MAX_REPLICA_ENTRIES),
+        .conflict_count = @intCast(MAX_CONFLICTS),
+        .transport_frame_count = @intCast(MAX_TRANSPORT_FRAMES),
+        .encrypted_transport_count = @intCast(MAX_TRANSPORT_FRAMES),
+    };
+
+    try std.testing.expectEqual(@as(u8, MAX_REPLICA_ENTRIES), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, workspace.MAX_WORKSPACE_ENTRY_MUTATIONS), summary.skipped_entry_count);
+    try std.testing.expectEqual(std.math.maxInt(u16), summary.snapshot_count);
+    try std.testing.expectEqual(@as(u8, MAX_TRANSPORT_FRAMES), summary.transport_frame_count);
 }
