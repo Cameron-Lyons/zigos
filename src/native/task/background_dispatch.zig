@@ -13,6 +13,15 @@ const mebibytes = units.mebibytes;
 pub const MAX_RECORDS: usize = 16;
 pub const MAX_TASK_ID_BYTES: usize = 48;
 pub const BOUNDED_RECORD_SCAN = true;
+pub const COMPACT_DISPATCH_METADATA = true;
+pub const DISPATCH_RECORD_SIZE_CEILING_BYTES: usize = 120;
+pub const CONTROLLER_SIZE_CEILING_BYTES: usize = 2_056;
+
+comptime {
+    if (MAX_RECORDS > std.math.maxInt(u8) or MAX_TASK_ID_BYTES > std.math.maxInt(u8)) {
+        @compileError("background dispatch metadata no longer fits compact counters");
+    }
+}
 
 pub const RecordState = enum(u8) {
     running,
@@ -51,7 +60,7 @@ pub const DispatchPolicy = struct {
 pub const DispatchRecord = struct {
     id: u64,
     task_id: u64,
-    background_task_id_len: usize = 0,
+    background_task_id_len: u8 = 0,
     background_task_id: [MAX_TASK_ID_BYTES]u8 = [_]u8{0} ** MAX_TASK_ID_BYTES,
     trigger: manifest.BackgroundTrigger,
     expected_duration_seconds: u32,
@@ -64,7 +73,7 @@ pub const DispatchRecord = struct {
     completed_tick: u64 = 0,
 
     pub fn backgroundTaskIdSlice(self: *const DispatchRecord) []const u8 {
-        return self.background_task_id[0..self.background_task_id_len];
+        return self.background_task_id[0..@as(usize, self.background_task_id_len)];
     }
 
     pub fn deadlineTick(self: *const DispatchRecord) u64 {
@@ -73,6 +82,12 @@ pub const DispatchRecord = struct {
 
     pub fn isOverdue(self: *const DispatchRecord, now_tick: u64) bool {
         return self.state == .running and now_tick >= self.deadlineTick();
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DISPATCH_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("background dispatch record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -110,18 +125,18 @@ pub const Controller = struct {
     policy_directory: ?*const policy_object.Directory = null,
     policy_subjects: policy_object.SubjectSet = .{},
     next_record_id: u64 = 1,
-    active_count: usize = 0,
+    active_count: u8 = 0,
     latest_record_id: u64 = 0,
     records: [MAX_RECORDS]DispatchRecord = [_]DispatchRecord{zeroRecord()} ** MAX_RECORDS,
-    record_count: usize = 0,
-    next_reusable_slot: usize = 0,
+    record_count: u8 = 0,
+    next_reusable_slot: u8 = 0,
 
     pub fn init() Controller {
         return .{};
     }
 
     comptime {
-        if (@sizeOf(@This()) > 2_304) {
+        if (@sizeOf(@This()) > CONTROLLER_SIZE_CEILING_BYTES) {
             @compileError("background dispatch controller exceeds its compact bounded-log layout");
         }
     }
@@ -256,7 +271,7 @@ pub const Controller = struct {
     }
 
     pub fn activeRecordCount(self: *const Controller) usize {
-        return self.active_count;
+        return @intCast(self.active_count);
     }
 
     pub fn latestRecord(self: *const Controller) ?DispatchRecord {
@@ -276,7 +291,7 @@ pub const Controller = struct {
     }
 
     pub fn recordCount(self: *const Controller) usize {
-        return self.record_count;
+        return @intCast(self.record_count);
     }
 
     pub fn reusableRecordCount(self: *const Controller) usize {
@@ -379,7 +394,7 @@ pub const Controller = struct {
     fn reserveRecordSlot(self: *Controller, record_id: u64) ?usize {
         for (&self.records, 0..) |*record, slot_index| {
             if (record.id == record_id and record.state != .running) {
-                self.next_reusable_slot = (slot_index + 1) % MAX_RECORDS;
+                self.next_reusable_slot = @intCast((slot_index + 1) % MAX_RECORDS);
                 return slot_index;
             }
         }
@@ -392,10 +407,10 @@ pub const Controller = struct {
             native_util.impossibleByInvariant("background dispatch record count leaves an empty slot");
         }
         var attempts: usize = 0;
-        var slot_index = self.next_reusable_slot;
+        var slot_index: usize = self.next_reusable_slot;
         while (attempts < MAX_RECORDS) : (attempts += 1) {
             if (self.records[slot_index].state != .running) {
-                self.next_reusable_slot = (slot_index + 1) % MAX_RECORDS;
+                self.next_reusable_slot = @intCast((slot_index + 1) % MAX_RECORDS);
                 return slot_index;
             }
             slot_index = (slot_index + 1) % MAX_RECORDS;
@@ -508,7 +523,7 @@ fn makeRecord(
     var record = zeroRecord();
     record.id = record_id;
     record.task_id = task_id;
-    record.background_task_id_len = copyTextExact(&record.background_task_id, background_task_id) catch return error.BackgroundTaskIdTooLong;
+    record.background_task_id_len = @intCast(copyTextExact(&record.background_task_id, background_task_id) catch return error.BackgroundTaskIdTooLong);
     record.trigger = trigger;
     record.state = switch (reason) {
         .allowed => .running,
@@ -844,8 +859,12 @@ test "background dispatch requires the launched bundle and explicit run rights" 
 test "background dispatch rejects overlong task ids without publishing records" {
     var runtime = task_runtime.Runtime.init();
     var controller = Controller.init();
+    const full_id = [_]u8{'a'} ** MAX_TASK_ID_BYTES;
     const oversized_id = [_]u8{'b'} ** (MAX_TASK_ID_BYTES + 1);
     const empty_bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &.{}, &.{});
+
+    const exact_record = try makeRecord(1, 404, &full_id, .sync_completion, null, .task_not_found, 31);
+    try std.testing.expectEqualStrings(&full_id, exact_record.backgroundTaskIdSlice());
 
     try std.testing.expectError(error.BackgroundTaskIdTooLong, controller.dispatch(
         &runtime,
