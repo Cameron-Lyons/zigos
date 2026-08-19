@@ -12,7 +12,16 @@ const signing = @import("../core/signing.zig");
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TARGET_BYTES: usize = 64;
+pub const COMPACT_POLICY_METADATA = true;
+pub const POLICY_RECORD_SIZE_CEILING_BYTES: usize = 224;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_848;
 const POLICY_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
+
+comptime {
+    if (MAX_LABEL_BYTES > std.math.maxInt(u8) or MAX_TARGET_BYTES > std.math.maxInt(u8)) {
+        @compileError("network policy metadata no longer fits compact lengths");
+    }
+}
 
 pub const PolicyMode = enum(u8) {
     none,
@@ -58,10 +67,10 @@ pub const PolicyRecord = struct {
     id: u64,
     owner: principal.PrincipalId,
     workspace_id: ?u64,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     mode: PolicyMode,
-    target_len: usize,
+    target_len: u8,
     target: [MAX_TARGET_BYTES]u8,
     explicit_internet_grant: bool,
     require_remote_attestation: bool,
@@ -71,11 +80,17 @@ pub const PolicyRecord = struct {
     pinned_attestation_verifier_metadata_digest: crypto_hash.Digest,
 
     pub fn labelSlice(self: *const PolicyRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn targetSlice(self: *const PolicyRecord) []const u8 {
-        return self.target[0..self.target_len];
+        return self.target[0..@as(usize, self.target_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > POLICY_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("network policy record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -231,9 +246,9 @@ pub const Directory = struct {
         policy.id = policy_id;
         policy.owner = request.owner;
         policy.workspace_id = request.workspace_id;
-        policy.label_len = native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong;
+        policy.label_len = @intCast(native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong);
         policy.mode = request.mode;
-        policy.target_len = native_util.copyTextExact(&policy.target, request.target) catch return error.TargetTooLong;
+        policy.target_len = @intCast(native_util.copyTextExact(&policy.target, request.target) catch return error.TargetTooLong);
         policy.explicit_internet_grant = request.explicit_internet_grant;
         policy.require_remote_attestation = request.require_remote_attestation;
         if (request.pinned_root_digest) |digest| {
@@ -361,6 +376,12 @@ pub const Directory = struct {
         const request_key = policyRecordRequestKey(&slot.policy);
         if (!self.request_index.append(request_key, slot_index)) {
             native_util.impossibleByInvariant("network policy request index capacity covers policy slots");
+        }
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DIRECTORY_SIZE_CEILING_BYTES) {
+            @compileError("network policy directory exceeds its compact size ceiling");
         }
     }
 };
@@ -736,6 +757,24 @@ test "network policy objects enforce discovery inbound service domain and explic
     try std.testing.expect((try directory.authorize(inbound_policy.id, .{ .inbound_session_type = "document-review/v1" })).allowed);
     try std.testing.expect(!(try directory.authorize(inbound_policy.id, .{ .inbound_session_type = "pair-screen/v1" })).allowed);
     try std.testing.expect((try directory.authorize(internet_policy.id, .public_internet)).allowed);
+}
+
+test "compact network policy metadata preserves exact text capacities" {
+    const full_label = [_]u8{'l'} ** MAX_LABEL_BYTES;
+    const full_target = [_]u8{'t'} ** MAX_TARGET_BYTES;
+    var directory = Directory.init();
+    const policy = try directory.create(.{
+        .owner = .{ .kind = .service, .serial = 79 },
+        .label = &full_label,
+        .mode = .named_service_identity,
+        .target = &full_target,
+    });
+
+    try std.testing.expectEqual(@as(u8, MAX_LABEL_BYTES), policy.label_len);
+    try std.testing.expectEqual(@as(u8, MAX_TARGET_BYTES), policy.target_len);
+    try std.testing.expectEqualSlices(u8, &full_label, policy.labelSlice());
+    try std.testing.expectEqualSlices(u8, &full_target, policy.targetSlice());
+    try std.testing.expect((try directory.authorize(policy.id, .{ .service_identity = &full_target })).allowed);
 }
 
 test "network policy text rejects overlong values without publishing slots" {

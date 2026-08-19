@@ -1,7 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("../sync/device_graph.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -13,6 +12,11 @@ pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_RP_ID_BYTES: usize = 64;
 pub const MAX_ORIGIN_BYTES: usize = 96;
 pub const MAX_CHALLENGE_BYTES: usize = 64;
+pub const BOUNDED_CREDENTIAL_LOOKUP = true;
+pub const DENSE_CREDENTIAL_TABLE = true;
+pub const COMPACT_CREDENTIAL_METADATA = true;
+pub const CREDENTIAL_LOOKUP_COMPARISON_BOUND: usize = 5;
+pub const STORE_SIZE_CEILING_BYTES: usize = 5_008;
 
 pub const CredentialScope = enum(u8) {
     device_bound,
@@ -100,9 +104,9 @@ pub const CredentialRecord = struct {
     synced_to_device_graph: bool = false,
     hardware_backed_credential: bool = false,
     sealed_credential_secret: bool = false,
-    relying_party_id_len: usize,
+    relying_party_id_len: u8,
     relying_party_id: [MAX_RP_ID_BYTES]u8,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     secret_id: u64,
     sealed_secret_digest: crypto_hash.Digest,
@@ -116,11 +120,11 @@ pub const CredentialRecord = struct {
     revoked_at_ticks: u64 = 0,
 
     pub fn relyingPartySlice(self: *const CredentialRecord) []const u8 {
-        return self.relying_party_id[0..self.relying_party_id_len];
+        return self.relying_party_id[0..@as(usize, self.relying_party_id_len)];
     }
 
     pub fn labelSlice(self: *const CredentialRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn isActive(self: *const CredentialRecord) bool {
@@ -188,20 +192,22 @@ pub const Error = error{
     RelyingPartyTooLong,
 } || secure_secret_store.Error || device_graph.Error;
 
-const CredentialSlot = struct {
-    in_use: bool = false,
-    credential: CredentialRecord = zeroCredential(),
-};
-
-fn credentialSlotId(slot: *const CredentialSlot) u64 {
-    return slot.credential.id;
-}
-
-const CredentialArena = indexed_arena.IndexedArenaWithKey(u64, CredentialSlot, MAX_CREDENTIALS, MAX_CREDENTIALS * 2, credentialSlotId);
-
 pub const Store = struct {
     next_credential_id: u64 = 1,
-    credentials: CredentialArena = CredentialArena.init(),
+    credentials: [MAX_CREDENTIALS]CredentialRecord = [_]CredentialRecord{zeroCredential()} ** MAX_CREDENTIALS,
+    credential_count: u8 = 0,
+
+    comptime {
+        if (MAX_CREDENTIALS > std.math.maxInt(u8)) {
+            @compileError("credential count no longer fits compact storage");
+        }
+        if (MAX_RP_ID_BYTES > std.math.maxInt(u8) or MAX_LABEL_BYTES > std.math.maxInt(u8)) {
+            @compileError("credential text no longer fits compact length metadata");
+        }
+        if (@sizeOf(@This()) > STORE_SIZE_CEILING_BYTES) {
+            @compileError("OS identity store exceeds its fixed-state size ceiling");
+        }
+    }
 
     pub fn init() Store {
         return .{};
@@ -221,8 +227,8 @@ pub const Store = struct {
         if (self.countCredentials() >= MAX_CREDENTIALS) return error.CredentialTableFull;
         const credential_id = self.next_credential_id;
         if (credential_id == 0) return error.CredentialIdExhausted;
-        const slot_index = self.credentials.reserveIndex(credential_id) orelse return error.CredentialTableFull;
-        errdefer _ = self.credentials.removeIndex(slot_index);
+        if (self.findCredentialConst(credential_id) != null) return error.CredentialIdExhausted;
+        const slot_index = self.countCredentials();
 
         var credential = zeroCredential();
         credential.id = credential_id;
@@ -230,8 +236,8 @@ pub const Store = struct {
         credential.primary_device = request.device;
         credential.scope = request.scope;
         credential.synced_to_device_graph = request.scope == .synced;
-        credential.relying_party_id_len = native_util.copyTextExact(&credential.relying_party_id, request.relying_party_id) catch return error.RelyingPartyTooLong;
-        credential.label_len = native_util.copyTextExact(&credential.label, request.label) catch return error.LabelTooLong;
+        credential.relying_party_id_len = @intCast(native_util.copyTextExact(&credential.relying_party_id, request.relying_party_id) catch return error.RelyingPartyTooLong);
+        credential.label_len = @intCast(native_util.copyTextExact(&credential.label, request.label) catch return error.LabelTooLong);
         credential.credential_public_key = credential_public_key;
         credential.created_at_ticks = request.tick;
 
@@ -256,10 +262,11 @@ pub const Store = struct {
             credential.credential_generation,
         );
 
-        const slot = &self.credentials.slots[slot_index];
-        slot.credential = credential;
+        const slot = &self.credentials[slot_index];
+        slot.* = credential;
+        self.credential_count += 1;
         self.next_credential_id +%= 1;
-        return &slot.credential;
+        return slot;
     }
 
     pub fn assertCredential(
@@ -366,17 +373,34 @@ pub const Store = struct {
     }
 
     pub fn findCredential(self: *Store, credential_id: u64) ?*CredentialRecord {
-        const slot = self.credentials.get(credential_id) orelse return null;
-        return &slot.credential;
+        const slot_index = self.credentialSlotIndex(credential_id) orelse return null;
+        return &self.credentials[slot_index];
     }
 
     pub fn findCredentialConst(self: *const Store, credential_id: u64) ?*const CredentialRecord {
-        const slot = self.credentials.getConst(credential_id) orelse return null;
-        return &slot.credential;
+        const slot_index = self.credentialSlotIndex(credential_id) orelse return null;
+        return &self.credentials[slot_index];
     }
 
     fn countCredentials(self: *const Store) usize {
-        return self.credentials.countInUse();
+        return @intCast(self.credential_count);
+    }
+
+    fn credentialSlotIndex(self: *const Store, credential_id: u64) ?usize {
+        var low: usize = 0;
+        var high = self.countCredentials();
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            const candidate_id = self.credentials[middle].id;
+            if (credential_id < candidate_id) {
+                high = middle;
+            } else if (credential_id > candidate_id) {
+                low = middle + 1;
+            } else {
+                return middle;
+            }
+        }
+        return null;
     }
 };
 
@@ -858,11 +882,10 @@ test "os identity credential ids stop before consuming secrets at exhaustion" {
     var full_secrets = secure_secret_store.Store.init();
     for (0..MAX_CREDENTIALS) |index| {
         const credential_id: u64 = @intCast(index + 1);
-        const slot_index = full_identities.credentials.reserveIndex(credential_id) orelse unreachable;
-        const slot = &full_identities.credentials.slots[slot_index];
-        slot.credential = zeroCredential();
-        slot.credential.id = credential_id;
+        full_identities.credentials[index] = zeroCredential();
+        full_identities.credentials[index].id = credential_id;
     }
+    full_identities.credential_count = @intCast(MAX_CREDENTIALS);
     const credential_next_before = full_identities.next_credential_id;
     const secret_next_before = full_secrets.next_secret_id;
     try std.testing.expectError(error.CredentialTableFull, full_identities.registerCredential(&graph, &full_secrets, .{
@@ -993,7 +1016,7 @@ test "os identity recovers synced credentials through trusted device graph" {
     }));
 }
 
-test "os identity indexes credentials and rejects full tables before secret import" {
+test "os identity keeps dense credentials searchable and rejects full tables before secret import" {
     var graph = device_graph.Graph.init();
     var secrets = secure_secret_store.Store.init();
     secrets.attachHardwareProvider(testHardwareProvider());
@@ -1030,7 +1053,10 @@ test "os identity indexes credentials and rejects full tables before secret impo
         try std.testing.expectEqual(credential.id, identities.findCredentialConst(credential.id).?.id);
     }
 
-    try std.testing.expectEqual(@as(usize, MAX_CREDENTIALS), identities.credentials.countInUse());
+    try std.testing.expectEqual(@as(usize, MAX_CREDENTIALS), identities.countCredentials());
+    try std.testing.expectEqual(@as(u64, 1), identities.findCredentialConst(1).?.id);
+    try std.testing.expectEqual(@as(u64, MAX_CREDENTIALS), identities.findCredentialConst(MAX_CREDENTIALS).?.id);
+    try std.testing.expect(identities.findCredentialConst(MAX_CREDENTIALS + 1) == null);
     try std.testing.expectError(error.CredentialTableFull, identities.registerCredential(&graph, &secrets, .{
         .owner = user,
         .device = laptop,
@@ -1043,7 +1069,8 @@ test "os identity indexes credentials and rejects full tables before secret impo
         },
         .tick = 99,
     }));
-    try std.testing.expectEqual(@as(usize, MAX_CREDENTIALS), identities.credentials.countInUse());
+    try std.testing.expectEqual(@as(usize, MAX_CREDENTIALS), identities.countCredentials());
+    try std.testing.expect(@sizeOf(Store) <= STORE_SIZE_CEILING_BYTES);
 }
 
 test "os identity requires fresh local unlock and primary device for device-bound credentials" {
