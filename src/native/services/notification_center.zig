@@ -1,11 +1,14 @@
 const std = @import("std");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const copyText = native_util.copyText;
 
 pub const MAX_NOTIFICATIONS: usize = 32;
 pub const MAX_DETAIL_BYTES: usize = 96;
+pub const BOUNDED_NOTIFICATION_SCAN = true;
+pub const RECLAIMS_SUPPRESSED_NOTIFICATIONS = true;
+pub const COMPACT_NOTIFICATION_METADATA = true;
+pub const CENTER_SIZE_CEILING_BYTES: usize = 4_640;
 
 pub const Reason = enum(u8) {
     permission_request,
@@ -73,19 +76,23 @@ pub const PostRequest = struct {
 };
 
 pub const Notification = struct {
-    id: u64,
-    reason: Reason,
-    urgency: Urgency,
-    source: principal.PrincipalId,
-    task_id: ?u64,
-    expires_at_ticks: u64,
-    suppression_policy: SuppressionPolicy,
-    suppressed: bool,
-    detail_len: usize,
-    detail: [MAX_DETAIL_BYTES]u8,
+    id: u64 = 0,
+    reason: Reason = .permission_request,
+    urgency: Urgency = .normal,
+    source: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
+    task_id: u64 = 0,
+    expires_at_ticks: u64 = 0,
+    suppression_policy: SuppressionPolicy = .allow_repeat,
+    suppressed: bool = false,
+    detail_len: u8 = 0,
+    detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
 
     pub fn detailSlice(self: *const Notification) []const u8 {
-        return self.detail[0..self.detail_len];
+        return self.detail[0..@as(usize, self.detail_len)];
+    }
+
+    pub fn taskId(self: *const Notification) ?u64 {
+        return if (self.task_id == 0) null else self.task_id;
     }
 
     pub fn isActive(self: *const Notification, now_ticks: u64) bool {
@@ -100,42 +107,19 @@ pub const Error = error{
     NotificationNotFound,
 };
 
-const NotificationSlot = struct {
-    in_use: bool = false,
-    notification: Notification = zeroNotification(),
-};
-
-fn notificationSlotId(slot: *const NotificationSlot) u64 {
-    return slot.notification.id;
-}
-
-fn sourceReasonKey(source: principal.PrincipalId, reason: Reason) u64 {
-    const source_bytes = source.keyBytes();
-    var hash = native_util.fnv1a64(&source_bytes);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(reason));
-    return indexed_arena.nonZeroKey(hash);
-}
-
-const NotificationArena = indexed_arena.IndexedArenaWithKey(u64, NotificationSlot, MAX_NOTIFICATIONS, MAX_NOTIFICATIONS * 2, notificationSlotId);
-const SourceReasonIndex = indexed_arena.MultimapIndex(MAX_NOTIFICATIONS, MAX_NOTIFICATIONS, MAX_NOTIFICATIONS * 2);
-const ExpiringAttentionIndex = indexed_arena.MultimapIndex(MAX_NOTIFICATIONS, 1, 2);
-const SuppressedNotificationIndex = indexed_arena.MultimapIndex(MAX_NOTIFICATIONS, 1, 2);
-const EXPIRING_ATTENTION_KEY: u64 = 1;
-const SUPPRESSED_NOTIFICATION_KEY: u64 = 1;
-const NO_VISIBLE_SLOT = indexed_arena.no_index;
-
 pub const Center = struct {
     next_notification_id: u64 = 1,
-    notifications: NotificationArena = NotificationArena.init(),
-    source_reason_index: SourceReasonIndex = SourceReasonIndex.init(),
+    notifications: [MAX_NOTIFICATIONS]Notification = [_]Notification{.{}} ** MAX_NOTIFICATIONS,
     permanent_attention_counts: AttentionCounts = .{},
-    expiring_attention_index: ExpiringAttentionIndex = ExpiringAttentionIndex.init(),
-    suppressed_notification_index: SuppressedNotificationIndex = SuppressedNotificationIndex.init(),
-    visible_head_slot: usize = NO_VISIBLE_SLOT,
-    visible_tail_slot: usize = NO_VISIBLE_SLOT,
-    visible_prev_by_slot: [MAX_NOTIFICATIONS]usize = [_]usize{NO_VISIBLE_SLOT} ** MAX_NOTIFICATIONS,
-    visible_next_by_slot: [MAX_NOTIFICATIONS]usize = [_]usize{NO_VISIBLE_SLOT} ** MAX_NOTIFICATIONS,
-    visible_notification_count: usize = 0,
+    notification_count: u8 = 0,
+    visible_notification_count: u8 = 0,
+    next_reusable_notification: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > CENTER_SIZE_CEILING_BYTES) {
+            @compileError("notification center exceeds its fixed-state size ceiling");
+        }
+    }
 
     pub fn init() Center {
         return .{};
@@ -144,33 +128,31 @@ pub const Center = struct {
     pub fn post(self: *Center, request: PostRequest) Error!*Notification {
         const notification_id = self.next_notification_id;
         if (notification_id == 0) return error.NotificationIdExhausted;
-        if (self.notifications.get(notification_id) != null) return error.NotificationIdExhausted;
-        var notification = zeroNotification();
+        if (self.notificationSlotIndex(notification_id) != null) return error.NotificationIdExhausted;
+        var notification = Notification{};
         notification.id = notification_id;
         notification.reason = request.reason;
         notification.urgency = request.urgency;
         notification.source = request.source;
-        notification.task_id = request.task_id;
+        notification.task_id = request.task_id orelse 0;
         notification.expires_at_ticks = request.expires_at_ticks;
         notification.suppression_policy = request.suppression_policy;
-        notification.detail_len = copyText(&notification.detail, request.detail);
+        notification.detail_len = @intCast(copyText(&notification.detail, request.detail));
 
-        const slot_index = if (self.reserveNotificationSlotIndex(notification_id)) |reserved_index| reserved: {
+        const slot_index = if (self.reserveNotificationSlotIndex()) |reserved_index| reserved: {
             self.applySuppressionPolicy(request);
             break :reserved reserved_index;
         } else replacement: {
             const retired_index = self.suppressionReplacementSlotIndex(request) orelse return error.NotificationTableFull;
             self.applySuppressionPolicy(request);
-            break :replacement self.reuseSuppressedNotificationSlotIndex(notification_id, retired_index);
+            break :replacement self.reuseSuppressedNotificationSlotIndex(retired_index);
         };
-        const slot = &self.notifications.slots[slot_index];
-        slot.notification = notification;
-        if (!self.source_reason_index.append(sourceReasonKey(request.source, request.reason), slot_index)) {
-            native_util.impossibleByInvariant("notification source/reason index covers notification slots");
-        }
-        self.accountPostedAttention(slot_index, &slot.notification);
+        if (slot_index == self.countNotifications()) self.notification_count += 1;
+        const slot = &self.notifications[slot_index];
+        slot.* = notification;
+        self.accountPostedAttention(slot);
         self.next_notification_id +%= 1;
-        return &slot.notification;
+        return slot;
     }
 
     pub fn postWithAttentionPolicy(
@@ -224,24 +206,22 @@ pub const Center = struct {
 
     pub fn suppressBySourceReason(self: *Center, source: principal.PrincipalId, reason: Reason) usize {
         var count: usize = 0;
-        var slot_index = self.source_reason_index.head(sourceReasonKey(source, reason));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.source_reason_index.next(slot_index)) {
-            const slot = &self.notifications.slots[slot_index];
-            if (!slot.notification.source.eql(source) or slot.notification.reason != reason) continue;
+        for (self.notifications[0..self.countNotifications()], 0..) |*notification, slot_index| {
+            if (!notification.source.eql(source) or notification.reason != reason) continue;
             if (self.suppressNotificationSlot(slot_index)) count += 1;
         }
         return count;
     }
 
     pub fn find(self: *Center, notification_id: u64) ?*Notification {
-        const slot = self.notifications.get(notification_id) orelse return null;
-        return &slot.notification;
+        const slot_index = self.notificationSlotIndex(notification_id) orelse return null;
+        return &self.notifications[slot_index];
     }
 
     pub fn dismiss(self: *Center, notification_id: u64) Error!*Notification {
-        const slot_index = self.notifications.slotIndexOf(notification_id) orelse return error.NotificationNotFound;
+        const slot_index = self.notificationSlotIndex(notification_id) orelse return error.NotificationNotFound;
         _ = self.suppressNotificationSlot(slot_index);
-        return &self.notifications.slots[slot_index].notification;
+        return &self.notifications[slot_index];
     }
 
     pub fn activeInterruptionCount(self: *const Center, now_ticks: u64) usize {
@@ -254,77 +234,56 @@ pub const Center = struct {
 
     pub fn activeAttentionCounts(self: *const Center, now_ticks: u64) AttentionCounts {
         var counts = self.permanent_attention_counts;
-        var slot_index = self.expiring_attention_index.head(EXPIRING_ATTENTION_KEY);
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.expiring_attention_index.next(slot_index)) {
-            if (slot_index >= MAX_NOTIFICATIONS) native_util.impossibleByInvariant("expiring notification index points outside slots");
-            const slot = &self.notifications.slots[slot_index];
-            if (!slot.in_use) native_util.impossibleByInvariant("expiring notification index points at a free slot");
-            if (slot.notification.suppressed) native_util.impossibleByInvariant("expiring notification index points at a suppressed slot");
-            if (!slot.notification.isActive(now_ticks)) continue;
+        for (self.notifications[0..self.countNotifications()]) |*notification| {
+            if (notification.suppressed or notification.expires_at_ticks == 0) continue;
+            if (!notification.isActive(now_ticks)) continue;
             counts.active_visible += 1;
-            if (isInterruptive(slot.notification.urgency)) counts.active_interruptions += 1;
+            if (isInterruptive(notification.urgency)) counts.active_interruptions += 1;
         }
         return counts;
     }
 
     /// The returned notification remains valid only until the center is mutated.
     pub fn latestVisible(self: *const Center, now_ticks: u64) ?*const Notification {
-        var slot_index = self.visible_tail_slot;
-        while (slot_index != NO_VISIBLE_SLOT) : (slot_index = self.visible_prev_by_slot[slot_index]) {
-            const slot = self.visibleNotificationSlotAt(slot_index);
-            if (slot.notification.isActive(now_ticks)) return &slot.notification;
+        var latest: ?*const Notification = null;
+        for (self.notifications[0..self.countNotifications()]) |*notification| {
+            if (!notification.isActive(now_ticks)) continue;
+            if (latest == null or notification.id > latest.?.id) latest = notification;
         }
-        return null;
+        return latest;
     }
 
-    fn reserveNotificationSlotIndex(self: *Center, notification_id: u64) ?usize {
-        if (self.notifications.reserveIndex(notification_id)) |slot_index| return slot_index;
-        const retired_index = self.suppressed_notification_index.head(SUPPRESSED_NOTIFICATION_KEY);
-        if (retired_index == indexed_arena.no_index) return null;
-        if (retired_index >= MAX_NOTIFICATIONS) native_util.impossibleByInvariant("suppressed notification index points outside slots");
-        return self.reuseSuppressedNotificationSlotIndex(notification_id, retired_index);
+    fn reserveNotificationSlotIndex(self: *Center) ?usize {
+        const count = self.countNotifications();
+        if (count < MAX_NOTIFICATIONS) return count;
+        const retired_index = self.suppressedNotificationSlot() orelse return null;
+        return self.reuseSuppressedNotificationSlotIndex(retired_index);
     }
 
-    fn reuseSuppressedNotificationSlotIndex(self: *Center, notification_id: u64, retired_index: usize) usize {
-        const retired_slot = &self.notifications.slots[retired_index];
-        if (!retired_slot.in_use or !retired_slot.notification.suppressed) {
+    fn reuseSuppressedNotificationSlotIndex(self: *Center, retired_index: usize) usize {
+        const retired = &self.notifications[retired_index];
+        if (retired.id == 0 or !retired.suppressed) {
             native_util.impossibleByInvariant("notification replacement slot must be suppressed");
         }
-        if (!self.suppressed_notification_index.remove(SUPPRESSED_NOTIFICATION_KEY, retired_index)) {
-            native_util.impossibleByInvariant("suppressed notification index is missing its reusable slot");
-        }
-        const retired_notification = &retired_slot.notification;
-        if (!self.source_reason_index.remove(sourceReasonKey(retired_notification.source, retired_notification.reason), retired_index)) {
-            native_util.impossibleByInvariant("suppressed notification missing source/reason index");
-        }
-        if (!self.notifications.removeIndex(retired_index)) {
-            native_util.impossibleByInvariant("suppressed notification slot disappeared during replacement");
-        }
-        return self.notifications.reserveIndexAt(notification_id, retired_index) orelse
-            native_util.impossibleByInvariant("retired notification slot is immediately reusable");
+        self.next_reusable_notification = @intCast((retired_index + 1) % MAX_NOTIFICATIONS);
+        return retired_index;
     }
 
     fn suppressionReplacementSlotIndex(self: *const Center, request: PostRequest) ?usize {
         if (request.suppression_policy == .allow_repeat) return null;
-        var slot_index = self.source_reason_index.head(sourceReasonKey(request.source, request.reason));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.source_reason_index.next(slot_index)) {
-            const slot = &self.notifications.slots[slot_index];
-            if (!slot.in_use or slot.notification.suppressed) continue;
-            if (!slot.notification.source.eql(request.source) or slot.notification.reason != request.reason) continue;
+        const request_task_id = request.task_id orelse 0;
+        for (self.notifications[0..self.countNotifications()], 0..) |*notification, slot_index| {
+            if (notification.suppressed) continue;
+            if (!notification.source.eql(request.source) or notification.reason != request.reason) continue;
             if (request.suppression_policy == .replace_same_source_reason_task and
-                slot.notification.task_id != request.task_id) continue;
+                notification.task_id != request_task_id) continue;
             return slot_index;
         }
         return null;
     }
 
-    fn hasReusableNotificationSlot(self: *const Center) bool {
-        if (self.countNotifications() < MAX_NOTIFICATIONS) return true;
-        return self.suppressed_notification_index.head(SUPPRESSED_NOTIFICATION_KEY) != indexed_arena.no_index;
-    }
-
     fn countNotifications(self: *const Center) usize {
-        return self.notifications.countInUse();
+        return @intCast(self.notification_count);
     }
 
     fn applySuppressionPolicy(self: *Center, request: PostRequest) void {
@@ -334,12 +293,11 @@ pub const Center = struct {
                 _ = self.suppressBySourceReason(request.source, request.reason);
             },
             .replace_same_source_reason_task => {
-                var slot_index = self.source_reason_index.head(sourceReasonKey(request.source, request.reason));
-                while (slot_index != indexed_arena.no_index) : (slot_index = self.source_reason_index.next(slot_index)) {
-                    const slot = &self.notifications.slots[slot_index];
-                    if (!slot.notification.source.eql(request.source)) continue;
-                    if (slot.notification.reason != request.reason) continue;
-                    if (slot.notification.task_id != request.task_id) continue;
+                const request_task_id = request.task_id orelse 0;
+                for (self.notifications[0..self.countNotifications()], 0..) |*notification, slot_index| {
+                    if (!notification.source.eql(request.source)) continue;
+                    if (notification.reason != request.reason) continue;
+                    if (notification.task_id != request_task_id) continue;
                     _ = self.suppressNotificationSlot(slot_index);
                 }
             },
@@ -347,34 +305,28 @@ pub const Center = struct {
     }
 
     fn suppressNotificationSlot(self: *Center, slot_index: usize) bool {
-        if (slot_index >= MAX_NOTIFICATIONS) native_util.impossibleByInvariant("notification suppression points outside slots");
-        const slot = &self.notifications.slots[slot_index];
-        if (!slot.in_use) native_util.impossibleByInvariant("notification suppression points at a free slot");
-        if (slot.notification.suppressed) return false;
-        self.unaccountSuppressedAttention(slot_index, &slot.notification);
-        slot.notification.suppressed = true;
-        if (!self.suppressed_notification_index.append(SUPPRESSED_NOTIFICATION_KEY, slot_index)) {
-            native_util.impossibleByInvariant("suppressed notification index covers notification slots");
-        }
+        if (slot_index >= self.countNotifications()) native_util.impossibleByInvariant("notification suppression points outside live slots");
+        const notification = &self.notifications[slot_index];
+        if (notification.id == 0) native_util.impossibleByInvariant("notification suppression points at a free slot");
+        if (notification.suppressed) return false;
+        self.unaccountSuppressedAttention(notification);
+        notification.suppressed = true;
         return true;
     }
 
-    fn accountPostedAttention(self: *Center, slot_index: usize, notification: *const Notification) void {
+    fn accountPostedAttention(self: *Center, notification: *const Notification) void {
         if (notification.suppressed) return;
-        self.linkVisibleNotification(slot_index);
+        self.visible_notification_count += 1;
         if (notification.expires_at_ticks == 0) {
             self.permanent_attention_counts.active_visible += 1;
             if (isInterruptive(notification.urgency)) self.permanent_attention_counts.active_interruptions += 1;
-            return;
-        }
-        if (!self.expiring_attention_index.append(EXPIRING_ATTENTION_KEY, slot_index)) {
-            native_util.impossibleByInvariant("expiring notification index covers notification slots");
         }
     }
 
-    fn unaccountSuppressedAttention(self: *Center, slot_index: usize, notification: *const Notification) void {
+    fn unaccountSuppressedAttention(self: *Center, notification: *const Notification) void {
         if (notification.suppressed) return;
-        self.unlinkVisibleNotification(slot_index);
+        if (self.visible_notification_count == 0) native_util.impossibleByInvariant("visible notification count underflow");
+        self.visible_notification_count -= 1;
         if (notification.expires_at_ticks == 0) {
             if (self.permanent_attention_counts.active_visible == 0) native_util.impossibleByInvariant("permanent notification count underflow");
             self.permanent_attention_counts.active_visible -= 1;
@@ -382,80 +334,42 @@ pub const Center = struct {
                 if (self.permanent_attention_counts.active_interruptions == 0) native_util.impossibleByInvariant("permanent interruption count underflow");
                 self.permanent_attention_counts.active_interruptions -= 1;
             }
-            return;
-        }
-        if (!self.expiring_attention_index.remove(EXPIRING_ATTENTION_KEY, slot_index)) {
-            native_util.impossibleByInvariant("expiring notification index missing live notification");
         }
     }
 
-    fn linkVisibleNotification(self: *Center, slot_index: usize) void {
-        const slot = self.visibleNotificationSlotAt(slot_index);
-        if (slot.notification.suppressed) native_util.impossibleByInvariant("suppressed notification cannot be linked as visible");
-        if (self.visible_prev_by_slot[slot_index] != NO_VISIBLE_SLOT or
-            self.visible_next_by_slot[slot_index] != NO_VISIBLE_SLOT or
-            self.visible_head_slot == slot_index or
-            self.visible_tail_slot == slot_index)
-        {
-            native_util.impossibleByInvariant("notification linked into visible chain more than once");
+    fn notificationSlotIndex(self: *const Center, notification_id: u64) ?usize {
+        if (notification_id == 0) return null;
+        for (self.notifications[0..self.countNotifications()], 0..) |notification, slot_index| {
+            if (notification.id == notification_id) return slot_index;
         }
-
-        if (self.visible_tail_slot == NO_VISIBLE_SLOT) {
-            if (self.visible_head_slot != NO_VISIBLE_SLOT or self.visible_notification_count != 0) {
-                native_util.impossibleByInvariant("empty visible notification chain has stale head");
-            }
-            self.visible_head_slot = slot_index;
-            self.visible_tail_slot = slot_index;
-        } else {
-            const old_tail = self.visible_tail_slot;
-            if (old_tail >= MAX_NOTIFICATIONS) native_util.impossibleByInvariant("visible notification tail points outside slots");
-            self.visible_next_by_slot[old_tail] = slot_index;
-            self.visible_prev_by_slot[slot_index] = old_tail;
-            self.visible_tail_slot = slot_index;
-        }
-        self.visible_notification_count += 1;
+        return null;
     }
 
-    fn unlinkVisibleNotification(self: *Center, slot_index: usize) void {
-        _ = self.visibleNotificationSlotAt(slot_index);
-        if (self.visible_notification_count == 0) native_util.impossibleByInvariant("visible notification count underflow");
-        const previous = self.visible_prev_by_slot[slot_index];
-        const next = self.visible_next_by_slot[slot_index];
-        const linked_as_singleton = self.visible_head_slot == slot_index and self.visible_tail_slot == slot_index;
-        const linked_in_chain = previous != NO_VISIBLE_SLOT or next != NO_VISIBLE_SLOT or linked_as_singleton;
-        if (!linked_in_chain) native_util.impossibleByInvariant("visible notification chain missing live notification");
-
-        if (previous == NO_VISIBLE_SLOT) {
-            if (self.visible_head_slot != slot_index) native_util.impossibleByInvariant("visible notification chain head mismatch");
-            self.visible_head_slot = next;
-        } else {
-            if (previous >= MAX_NOTIFICATIONS) native_util.impossibleByInvariant("visible notification previous pointer outside slots");
-            self.visible_next_by_slot[previous] = next;
+    fn suppressedNotificationSlot(self: *const Center) ?usize {
+        const count = self.countNotifications();
+        if (count == 0) return null;
+        const start = @as(usize, self.next_reusable_notification) % count;
+        for (0..count) |offset| {
+            const slot_index = (start + offset) % count;
+            if (self.notifications[slot_index].suppressed) return slot_index;
         }
-
-        if (next == NO_VISIBLE_SLOT) {
-            if (self.visible_tail_slot != slot_index) native_util.impossibleByInvariant("visible notification chain tail mismatch");
-            self.visible_tail_slot = previous;
-        } else {
-            if (next >= MAX_NOTIFICATIONS) native_util.impossibleByInvariant("visible notification next pointer outside slots");
-            self.visible_prev_by_slot[next] = previous;
-        }
-
-        self.visible_prev_by_slot[slot_index] = NO_VISIBLE_SLOT;
-        self.visible_next_by_slot[slot_index] = NO_VISIBLE_SLOT;
-        self.visible_notification_count -= 1;
-        if (self.visible_notification_count == 0 and
-            (self.visible_head_slot != NO_VISIBLE_SLOT or self.visible_tail_slot != NO_VISIBLE_SLOT))
-        {
-            native_util.impossibleByInvariant("empty visible notification chain retained endpoints");
-        }
+        return null;
     }
 
-    fn visibleNotificationSlotAt(self: *const Center, slot_index: usize) *const NotificationSlot {
-        if (slot_index >= MAX_NOTIFICATIONS) native_util.impossibleByInvariant("visible notification index points outside slots");
-        const slot = &self.notifications.slots[slot_index];
-        if (!slot.in_use) native_util.impossibleByInvariant("visible notification index points at a free slot");
-        return slot;
+    fn suppressedNotificationCount(self: *const Center) usize {
+        var count: usize = 0;
+        for (self.notifications[0..self.countNotifications()]) |notification| {
+            if (notification.suppressed) count += 1;
+        }
+        return count;
+    }
+
+    fn sourceReasonCount(self: *const Center, source: principal.PrincipalId, reason: Reason) usize {
+        var count: usize = 0;
+        for (self.notifications[0..self.countNotifications()]) |notification| {
+            if (notification.source.eql(source) and notification.reason == reason) count += 1;
+        }
+        return count;
     }
 };
 
@@ -475,21 +389,6 @@ pub fn isInterruptive(urgency: Urgency) bool {
     return switch (urgency) {
         .passive, .normal => false,
         .high, .critical => true,
-    };
-}
-
-fn zeroNotification() Notification {
-    return .{
-        .id = 0,
-        .reason = .permission_request,
-        .urgency = .normal,
-        .source = .{ .kind = .service, .serial = 0 },
-        .task_id = null,
-        .expires_at_ticks = 0,
-        .suppression_policy = .allow_repeat,
-        .suppressed = false,
-        .detail_len = 0,
-        .detail = [_]u8{0} ** MAX_DETAIL_BYTES,
     };
 }
 
@@ -515,7 +414,7 @@ test "notification center keeps structured objects task links expiry and suppres
     try std.testing.expectEqual(@as(usize, 2), center.activeCount(20));
     try std.testing.expectEqual(@as(usize, 2), center.activeCount(49));
     try std.testing.expectEqual(@as(usize, 1), center.activeCount(50));
-    try std.testing.expectEqual(@as(usize, 2), center.visible_notification_count);
+    try std.testing.expectEqual(@as(u8, 2), center.visible_notification_count);
     try std.testing.expect(update_notification == center.latestVisible(20).?);
     try std.testing.expectEqual(update_notification.id, center.latestVisible(20).?.id);
     try std.testing.expectEqualStrings("notes update ready", update_notification.detailSlice());
@@ -523,16 +422,15 @@ test "notification center keeps structured objects task links expiry and suppres
 
     try std.testing.expectEqual(@as(usize, 1), center.suppressBySourceReason(sync_source, .sync_conflict));
     try std.testing.expectEqual(@as(usize, 1), center.activeCount(20));
-    try std.testing.expectEqual(@as(usize, 1), center.visible_notification_count);
+    try std.testing.expectEqual(@as(u8, 1), center.visible_notification_count);
     try std.testing.expectEqual(update_notification.id, center.latestVisible(60).?.id);
 
     const dismissed = try center.dismiss(update_notification.id);
     try std.testing.expect(dismissed.suppressed);
-    try std.testing.expectEqual(@as(usize, 2), center.suppressed_notification_index.count(SUPPRESSED_NOTIFICATION_KEY));
+    try std.testing.expectEqual(@as(usize, 2), center.suppressedNotificationCount());
     _ = try center.dismiss(update_notification.id);
-    try std.testing.expectEqual(@as(usize, 2), center.suppressed_notification_index.count(SUPPRESSED_NOTIFICATION_KEY));
-    try std.testing.expectEqual(@as(usize, 0), center.visible_notification_count);
-    try std.testing.expectEqual(NO_VISIBLE_SLOT, center.visible_tail_slot);
+    try std.testing.expectEqual(@as(usize, 2), center.suppressedNotificationCount());
+    try std.testing.expectEqual(@as(u8, 0), center.visible_notification_count);
     try std.testing.expect(center.latestVisible(60) == null);
     try std.testing.expectError(error.NotificationNotFound, center.dismiss(update_notification.id + 100));
 }
@@ -581,13 +479,38 @@ test "notification center applies structured suppression policies before posting
     });
 
     try std.testing.expectEqual(@as(usize, 3), center.activeCount(1));
-    try std.testing.expect(center.notifications.slots[0].notification.suppressed);
-    try std.testing.expect(center.notifications.slots[2].notification.suppressed);
-    try std.testing.expectEqual(@as(usize, 2), center.suppressed_notification_index.count(SUPPRESSED_NOTIFICATION_KEY));
-    try std.testing.expectEqual(@as(usize, 3), center.visible_notification_count);
+    try std.testing.expect(center.notifications[0].suppressed);
+    try std.testing.expect(center.notifications[2].suppressed);
+    try std.testing.expectEqual(@as(usize, 2), center.suppressedNotificationCount());
+    try std.testing.expectEqual(@as(u8, 3), center.visible_notification_count);
     try std.testing.expectEqualStrings("other task survives", center.latestVisible(1).?.detailSlice());
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason, replacement.suppression_policy);
     try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason_task, task_replacement.suppression_policy);
+}
+
+test "notification center commits new slots after suppression scans" {
+    var center = Center.init();
+    const source = principal.PrincipalId{ .kind = .service, .serial = 0 };
+
+    const first = try center.post(.{
+        .source = source,
+        .reason = .permission_request,
+        .urgency = .normal,
+        .detail = "first default-shaped notification",
+        .suppression_policy = .replace_same_source_reason,
+    });
+    try std.testing.expect(!first.suppressed);
+
+    const replacement = try center.post(.{
+        .source = source,
+        .reason = .permission_request,
+        .urgency = .normal,
+        .detail = "replacement default-shaped notification",
+        .suppression_policy = .replace_same_source_reason,
+    });
+    try std.testing.expect(center.find(first.id).?.suppressed);
+    try std.testing.expect(!replacement.suppressed);
+    try std.testing.expectEqual(@as(usize, 1), center.activeCount(1));
 }
 
 test "notification center stops at id exhaustion and full posts require matching replacement" {
@@ -664,11 +587,11 @@ test "notification center reclaims suppressed slots when the table is full" {
             .detail = "table filler",
         });
     }
-    const first_dismissed_slot = center.notifications.slotIndexOf(3).?;
-    const second_dismissed_slot = center.notifications.slotIndexOf(5).?;
+    const first_dismissed_slot = center.notificationSlotIndex(3).?;
+    const second_dismissed_slot = center.notificationSlotIndex(5).?;
     try std.testing.expect((try center.dismiss(3)).suppressed);
     try std.testing.expect((try center.dismiss(5)).suppressed);
-    try std.testing.expectEqual(first_dismissed_slot, center.suppressed_notification_index.head(SUPPRESSED_NOTIFICATION_KEY));
+    try std.testing.expectEqual(first_dismissed_slot, center.suppressedNotificationSlot().?);
 
     const first_replacement = try center.post(.{
         .source = source,
@@ -678,7 +601,7 @@ test "notification center reclaims suppressed slots when the table is full" {
     });
     try std.testing.expect(center.find(3) == null);
     try std.testing.expect(center.find(5) != null);
-    try std.testing.expectEqual(second_dismissed_slot, center.suppressed_notification_index.head(SUPPRESSED_NOTIFICATION_KEY));
+    try std.testing.expectEqual(second_dismissed_slot, center.suppressedNotificationSlot().?);
 
     const second_replacement = try center.post(.{
         .source = source,
@@ -690,9 +613,9 @@ test "notification center reclaims suppressed slots when the table is full" {
     try std.testing.expect(center.find(5) == null);
     try std.testing.expectEqualStrings("first reclaimed slot notification", first_replacement.detailSlice());
     try std.testing.expectEqualStrings("second reclaimed slot notification", second_replacement.detailSlice());
-    try std.testing.expectEqual(MAX_NOTIFICATIONS - 2, center.source_reason_index.count(sourceReasonKey(source, .policy_notice)));
-    try std.testing.expectEqual(@as(usize, 2), center.source_reason_index.count(sourceReasonKey(source, .sync_conflict)));
-    try std.testing.expectEqual(@as(usize, 0), center.suppressed_notification_index.count(SUPPRESSED_NOTIFICATION_KEY));
+    try std.testing.expectEqual(MAX_NOTIFICATIONS - 2, center.sourceReasonCount(source, .policy_notice));
+    try std.testing.expectEqual(@as(usize, 2), center.sourceReasonCount(source, .sync_conflict));
+    try std.testing.expectEqual(@as(usize, 0), center.suppressedNotificationCount());
 
     try std.testing.expectError(error.NotificationTableFull, center.post(.{
         .source = source,
@@ -769,7 +692,6 @@ test "notification center counts permanent attention separately from expiring no
 
     try std.testing.expectEqual(@as(usize, 2), center.permanent_attention_counts.active_visible);
     try std.testing.expectEqual(@as(usize, 1), center.permanent_attention_counts.active_interruptions);
-    try std.testing.expect(center.expiring_attention_index.head(EXPIRING_ATTENTION_KEY) != indexed_arena.no_index);
     try std.testing.expectEqual(@as(usize, 3), center.activeCount(5));
     try std.testing.expectEqual(@as(usize, 2), center.activeInterruptionCount(5));
     try std.testing.expectEqual(@as(usize, 2), center.activeCount(10));
@@ -783,12 +705,11 @@ test "notification center counts permanent attention separately from expiring no
     try std.testing.expectEqual(@as(usize, 1), center.activeCount(10));
 
     try std.testing.expectEqual(@as(usize, 1), center.suppressBySourceReason(source, .sync_conflict));
-    try std.testing.expectEqual(indexed_arena.no_index, center.expiring_attention_index.head(EXPIRING_ATTENTION_KEY));
     try std.testing.expectEqual(@as(usize, 1), center.activeCount(5));
     try std.testing.expectEqual(@as(usize, 0), center.activeInterruptionCount(5));
 }
 
-test "notification center reads latest visible from maintained visible chain" {
+test "notification center finds latest visible with a bounded scan" {
     var center = Center.init();
     const source = principal.PrincipalId{ .kind = .service, .serial = 31 };
 
@@ -806,12 +727,11 @@ test "notification center reads latest visible from maintained visible chain" {
         .expires_at_ticks = 20,
     });
 
-    try std.testing.expectEqual(@as(usize, 2), center.visible_notification_count);
+    try std.testing.expectEqual(@as(u8, 2), center.visible_notification_count);
     try std.testing.expectEqual(temporary.id, center.latestVisible(19).?.id);
     try std.testing.expectEqual(permanent.id, center.latestVisible(20).?.id);
-    try std.testing.expectEqual(temporary.id, center.notifications.slots[center.visible_tail_slot].notification.id);
 
     _ = try center.dismiss(permanent.id);
-    try std.testing.expectEqual(@as(usize, 1), center.visible_notification_count);
+    try std.testing.expectEqual(@as(u8, 1), center.visible_notification_count);
     try std.testing.expect(center.latestVisible(20) == null);
 }

@@ -19,10 +19,16 @@ const root = @import("root");
 
 pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = true;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = true;
+pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = true;
+pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = true;
 const heap_backed_capability_table = builtin.target.os.tag == .freestanding and HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
 const heap_backed_userspace_catalog = builtin.target.os.tag == .freestanding and HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
+const heap_backed_userspace_scheduler = builtin.target.os.tag == .freestanding and HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
+const heap_backed_task_runtime = builtin.target.os.tag == .freestanding and HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
 const CapabilityTableBacking = if (heap_backed_capability_table) ?*capability.CapabilityTable else capability.CapabilityTable;
 const UserspaceCatalogBacking = if (heap_backed_userspace_catalog) ?*userspace_loader.Catalog else userspace_loader.Catalog;
+const UserspaceSchedulerBacking = if (heap_backed_userspace_scheduler) ?*userspace_scheduler.Scheduler else userspace_scheduler.Scheduler;
+const TaskRuntimeBacking = if (heap_backed_task_runtime) ?*task_runtime.Runtime else task_runtime.Runtime;
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
 else
@@ -106,16 +112,16 @@ pub const KernelContext = struct {
 };
 
 pub const RuntimeContext = struct {
-    runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
+    runtime: TaskRuntimeBacking = if (heap_backed_task_runtime) null else task_runtime.Runtime.init(),
     runtime_checkpoint_store: task_runtime_service_mod.CheckpointStore = .{},
     runtime_service: task_runtime_service_mod.Service = undefined,
     userspace_executor: userspace_executor.Executor = .{},
-    userspace_scheduler: userspace_scheduler.Scheduler = undefined,
+    userspace_scheduler: UserspaceSchedulerBacking = if (heap_backed_userspace_scheduler) null else undefined,
     userspace_catalog: UserspaceCatalogBacking = if (heap_backed_userspace_catalog) null else userspace_loader.Catalog.init(),
     constructed: bool = false,
 
     comptime {
-        if (heap_backed_userspace_catalog and @sizeOf(@This()) > 104 * 1024) {
+        if ((heap_backed_userspace_catalog or heap_backed_userspace_scheduler or heap_backed_task_runtime) and @sizeOf(@This()) > 1024) {
             @compileError("heap-backed runtime contexts exceed their compact resident layout");
         }
     }
@@ -124,14 +130,85 @@ pub const RuntimeContext = struct {
         return .{};
     }
 
-    pub fn ensureConstructed(self: *RuntimeContext) void {
+    pub fn ensureConstructed(self: *RuntimeContext) error{NoSpaceLeft}!void {
         if (self.constructed) return;
+        const runtime = try self.ensureTaskRuntime();
+        if (comptime heap_backed_userspace_scheduler) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(userspace_scheduler.Scheduler)) orelse {
+                self.releaseTaskRuntime();
+                return error.NoSpaceLeft;
+            };
+            const scheduler: *userspace_scheduler.Scheduler = @ptrCast(@alignCast(allocation));
+            scheduler.initializeAllocated(&self.userspace_executor);
+            self.userspace_scheduler = scheduler;
+        } else {
+            self.userspace_scheduler = userspace_scheduler.Scheduler.init(&self.userspace_executor);
+        }
         self.runtime_service.initWithStoreInPlace(
-            &self.runtime,
+            runtime,
             &self.runtime_checkpoint_store,
         );
-        self.userspace_scheduler = userspace_scheduler.Scheduler.init(&self.userspace_executor);
         self.constructed = true;
+    }
+
+    pub fn taskRuntime(self: *RuntimeContext) ?*task_runtime.Runtime {
+        if (comptime heap_backed_task_runtime) return self.runtime;
+        return &self.runtime;
+    }
+
+    pub fn taskRuntimeConst(self: *const RuntimeContext) ?*const task_runtime.Runtime {
+        if (comptime heap_backed_task_runtime) return self.runtime;
+        return &self.runtime;
+    }
+
+    fn ensureTaskRuntime(self: *RuntimeContext) error{NoSpaceLeft}!*task_runtime.Runtime {
+        if (self.taskRuntime()) |runtime| return runtime;
+        if (comptime heap_backed_task_runtime) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(task_runtime.Runtime)) orelse return error.NoSpaceLeft;
+            const runtime: *task_runtime.Runtime = @ptrCast(@alignCast(allocation));
+            runtime.initializeAllocated();
+            self.runtime = runtime;
+            return runtime;
+        }
+        return &self.runtime;
+    }
+
+    pub fn releaseTaskRuntime(self: *RuntimeContext) void {
+        if (comptime heap_backed_task_runtime) {
+            if (self.runtime) |runtime| {
+                runtime.reset();
+                @memset(std.mem.asBytes(runtime), 0);
+                kernel_memory.kfree(@ptrCast(runtime));
+                self.runtime = null;
+            }
+        } else {
+            self.runtime.reset();
+        }
+    }
+
+    pub fn userspaceScheduler(self: *RuntimeContext) ?*userspace_scheduler.Scheduler {
+        if (comptime heap_backed_userspace_scheduler) return self.userspace_scheduler;
+        return &self.userspace_scheduler;
+    }
+
+    pub fn userspaceSchedulerConst(self: *const RuntimeContext) ?*const userspace_scheduler.Scheduler {
+        if (comptime heap_backed_userspace_scheduler) return self.userspace_scheduler;
+        return &self.userspace_scheduler;
+    }
+
+    pub fn releaseUserspaceScheduler(self: *RuntimeContext) void {
+        if (!self.constructed) return;
+        if (comptime heap_backed_userspace_scheduler) {
+            if (self.userspace_scheduler) |scheduler| {
+                scheduler.deinit();
+                @memset(std.mem.asBytes(scheduler), 0);
+                kernel_memory.kfree(@ptrCast(scheduler));
+                self.userspace_scheduler = null;
+            }
+        } else {
+            self.userspace_scheduler.deinit();
+        }
+        self.constructed = false;
     }
 
     pub fn userspaceCatalog(self: *RuntimeContext) ?*userspace_loader.Catalog {
@@ -164,31 +241,38 @@ pub const RuntimeContext = struct {
     }
 
     pub fn resetScheduler(self: *RuntimeContext) void {
-        self.userspace_scheduler.reset();
+        const scheduler = self.userspaceScheduler() orelse return;
+        scheduler.reset();
     }
 
     pub fn countTasks(self: *const RuntimeContext) usize {
-        return self.runtime.taskCount();
+        const runtime = self.taskRuntimeConst() orelse return 0;
+        return runtime.taskCount();
     }
 
     pub fn countTasksInState(self: *const RuntimeContext, state: task_runtime.TaskState) usize {
-        return self.runtime.countTasksInState(state);
+        const runtime = self.taskRuntimeConst() orelse return 0;
+        return runtime.countTasksInState(state);
     }
 
     pub fn findTask(self: *RuntimeContext, label: []const u8) ?*task_runtime.TaskRecord {
-        return self.runtime.findByInitialComponentLabel(label);
+        const runtime = self.taskRuntime() orelse return null;
+        return runtime.findByInitialComponentLabel(label);
     }
 
     pub fn executeUserspaceProbe(self: *RuntimeContext, task_id: u64) void {
-        _ = self.userspace_scheduler.executeTask(task_id, 0);
+        const scheduler = self.userspaceScheduler() orelse return;
+        _ = scheduler.executeTask(task_id, 0);
     }
 
     pub fn runScheduler(self: *RuntimeContext, now_ticks: u64) bool {
-        return self.userspace_scheduler.runNext(now_ticks);
+        const scheduler = self.userspaceScheduler() orelse return false;
+        return scheduler.runNext(now_ticks);
     }
 
     pub fn schedulerHasReadyTasks(self: *const RuntimeContext) bool {
-        return self.userspace_scheduler.hasReadyTasks();
+        const scheduler = self.userspaceSchedulerConst() orelse return false;
+        return scheduler.hasReadyTasks();
     }
 };
 

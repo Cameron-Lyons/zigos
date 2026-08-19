@@ -1,7 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const indexing_service = @import("indexing_service.zig");
 const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
@@ -9,6 +8,9 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 
 pub const MAX_CONTEXT_LEASES: usize = 16;
+pub const BOUNDED_LEASE_SCAN = true;
+pub const RECLAIMS_TERMINAL_LEASES = true;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 1_448;
 
 pub const Error = event_ledger.Error || indexing_service.Error || error{
     LeaseExpired,
@@ -154,21 +156,18 @@ pub const PACK_FLAG_REDACTED: u16 = 0x0001;
 pub const PACK_FLAG_LOCAL_MODEL: u16 = 0x0002;
 pub const PACK_FLAG_ENCRYPTED_INDEX: u16 = 0x0004;
 
-const Slot = struct {
-    in_use: bool = false,
-    lease: ContextLease = .{},
-};
-
-fn slotLeaseKey(slot: *const Slot) u64 {
-    return slot.lease.id;
-}
-
-const LeaseArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_CONTEXT_LEASES, MAX_CONTEXT_LEASES * 2, slotLeaseKey);
-
 pub const Service = struct {
     next_lease_id: u64 = 1,
     next_receipt_id: u64 = 1,
-    slots: LeaseArena = LeaseArena.init(),
+    leases: [MAX_CONTEXT_LEASES]ContextLease = [_]ContextLease{.{}} ** MAX_CONTEXT_LEASES,
+    lease_count: u8 = 0,
+    next_reusable_lease: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) {
+            @compileError("personal context service exceeds its fixed-state size ceiling");
+        }
+    }
 
     pub fn init() Service {
         return .{};
@@ -198,10 +197,10 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        if (self.slots.countInUse() >= MAX_CONTEXT_LEASES) {
+        const lease_index = self.availableLeaseIndex(request.now_ticks) orelse {
             try recordSemantic(ledger, request.subject, request.task_id, false, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
             return error.LeaseTableFull;
-        }
+        };
         const lease_id = self.next_lease_id;
         if (lease_id == 0) {
             try recordSemantic(ledger, request.subject, request.task_id, false, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
@@ -220,15 +219,12 @@ pub const Service = struct {
             .redacted_snippets = request.redacted_snippets,
         };
 
-        const slot = self.slots.reserve(lease_id) orelse {
-            try recordSemantic(ledger, request.subject, request.task_id, false, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
-            return error.LeaseTableFull;
-        };
-        errdefer _ = self.slots.remove(lease_id);
         try recordSemantic(ledger, request.subject, request.task_id, true, request.local_model, request.encrypted_index, request.redacted_snippets, request.max_query_bytes, request.now_ticks, request.detail);
-        slot.lease = lease;
+        if (self.leases[lease_index].id == 0) self.lease_count += 1;
+        self.leases[lease_index] = lease;
+        self.next_reusable_lease = @intCast((lease_index + 1) % MAX_CONTEXT_LEASES);
         self.next_lease_id = nextPersonalContextIdAfter(lease_id);
-        return &slot.lease;
+        return &self.leases[lease_index];
     }
 
     pub fn query(
@@ -347,13 +343,23 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, lease_id: u64) ?*ContextLease {
-        const slot = self.slots.get(lease_id) orelse return null;
-        return &slot.lease;
+        if (lease_id == 0) return null;
+        for (&self.leases) |*lease| {
+            if (lease.id == lease_id) return lease;
+        }
+        return null;
     }
 
     pub fn findConst(self: *const Service, lease_id: u64) ?*const ContextLease {
-        const slot = self.slots.getConst(lease_id) orelse return null;
-        return &slot.lease;
+        if (lease_id == 0) return null;
+        for (&self.leases) |*lease| {
+            if (lease.id == lease_id) return lease;
+        }
+        return null;
+    }
+
+    pub fn leaseCount(self: *const Service) usize {
+        return @as(usize, self.lease_count);
     }
 
     pub fn consumePackReceipt(
@@ -430,7 +436,23 @@ pub const Service = struct {
         }
         return lease;
     }
+
+    fn availableLeaseIndex(self: *const Service, now_ticks: u64) ?usize {
+        for (0..MAX_CONTEXT_LEASES) |offset| {
+            const lease_index = (@as(usize, self.next_reusable_lease) + offset) % MAX_CONTEXT_LEASES;
+            if (self.leases[lease_index].id == 0) return lease_index;
+        }
+        for (0..MAX_CONTEXT_LEASES) |offset| {
+            const lease_index = (@as(usize, self.next_reusable_lease) + offset) % MAX_CONTEXT_LEASES;
+            if (leaseReusableAt(&self.leases[lease_index], now_ticks)) return lease_index;
+        }
+        return null;
+    }
 };
+
+fn leaseReusableAt(lease: *const ContextLease, now_ticks: u64) bool {
+    return lease.revoked or now_ticks >= lease.expires_at_ticks;
+}
 
 fn nextPersonalContextIdAfter(id: u64) u64 {
     return if (id == std.math.maxInt(u64)) 0 else id + 1;
@@ -965,6 +987,39 @@ test "personal context service leases local semantic memory with scoped audit" {
         .detail = "private expired retrieval",
     }, &ledger));
 
+    const revoked_lease_id = lease.id;
+    const expired_lease_id = short.id;
+    const persistent = try service.issueLease(&policies, subjects, .{
+        .subject = app,
+        .task_id = 702,
+        .workspace_id = 42,
+        .max_query_bytes = 32,
+        .expires_at_ticks = 1_000,
+        .now_ticks = 21,
+    }, null);
+    const persistent_lease_id = persistent.id;
+    for (0..MAX_CONTEXT_LEASES - 1) |index| {
+        const task_id: u64 = @intCast(1_000 + index);
+        const rolling = try service.issueLease(&policies, subjects, .{
+            .subject = app,
+            .task_id = task_id,
+            .workspace_id = 42,
+            .max_query_bytes = 8,
+            .expires_at_ticks = 200,
+            .now_ticks = 30 + index,
+        }, null);
+        try service.revoke(.{
+            .subject = app,
+            .task_id = task_id,
+            .lease_id = rolling.id,
+            .now_ticks = 31 + index,
+        }, null);
+    }
+    try std.testing.expectEqual(MAX_CONTEXT_LEASES, service.leaseCount());
+    try std.testing.expect(service.find(revoked_lease_id) == null);
+    try std.testing.expect(service.find(expired_lease_id) == null);
+    try std.testing.expect(service.find(persistent_lease_id) != null);
+
     var full_service = Service.init();
     for (0..MAX_CONTEXT_LEASES) |index| {
         _ = try full_service.issueLease(&policies, subjects, .{
@@ -1377,6 +1432,6 @@ test "personal context lease ids stop at exhaustion" {
         .detail = "private personal context lease",
     }, null));
     try std.testing.expectEqual(@as(u64, 0), service.next_lease_id);
-    try std.testing.expectEqual(@as(usize, 1), service.slots.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.leaseCount());
     try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }
