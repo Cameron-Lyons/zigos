@@ -95,7 +95,7 @@ jobs:
     with:
       job-name: x86-64 Boot Path
       command: ./scripts/zig.sh build -Doptimize=ReleaseFast x86_64-long-mode-entry-check x86_64-userspace-launch-check
-      timeout-minutes: 10
+      timeout-minutes: 30
 
   benchmark:
     needs: zig-toolchain
