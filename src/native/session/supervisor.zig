@@ -98,14 +98,12 @@ const ServiceSlot = struct {
 
 const ServiceArena = indexed_arena.IndexedArena(ServiceSlot, MAX_SERVICES, SERVICE_INDEX_CAPACITY, serviceSlotId);
 const ServiceClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
-const DiagnosticServiceIndex = indexed_arena.MultimapIndex(MAX_DIAGNOSTICS, MAX_DIAGNOSTICS, MAX_DIAGNOSTICS * 2);
-const DiagnosticServiceKindIndex = indexed_arena.MultimapIndex(MAX_DIAGNOSTICS, MAX_DIAGNOSTICS, MAX_DIAGNOSTICS * 2);
 
 pub const supervisor_indexing = .{
     .uses_service_arena = @hasDecl(ServiceArena, "reserveIndex"),
     .uses_service_class_index = @hasDecl(ServiceClassIndex, "lookup"),
-    .uses_diagnostic_service_index = @hasDecl(DiagnosticServiceIndex, "append"),
-    .uses_diagnostic_service_kind_index = @hasDecl(DiagnosticServiceKindIndex, "append"),
+    .scans_bounded_diagnostic_ring = true,
+    .scans_diagnostics_newest_first = true,
 };
 
 pub const Supervisor = struct {
@@ -117,11 +115,15 @@ pub const Supervisor = struct {
     diagnostics: [MAX_DIAGNOSTICS]DiagnosticEvent = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
     diagnostic_count: usize = 0,
     next_diagnostic_slot: usize = 0,
-    diagnostic_service_index: DiagnosticServiceIndex = DiagnosticServiceIndex.init(),
-    diagnostic_service_kind_index: DiagnosticServiceKindIndex = DiagnosticServiceKindIndex.init(),
 
     pub fn init() Supervisor {
         return Supervisor{};
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > 6 * 1024) {
+            @compileError("supervisor exceeds its compact resident layout");
+        }
     }
 
     pub fn register(self: *Supervisor, class: contract.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
@@ -366,19 +368,23 @@ pub const Supervisor = struct {
     }
 
     pub fn hasDiagnostic(self: *const Supervisor, service_id: u64, kind: DiagnosticKind) bool {
-        var slot_index = self.diagnostic_service_kind_index.head(diagnosticServiceKindKey(service_id, kind));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.diagnostic_service_kind_index.next(slot_index)) {
-            const event = self.diagnosticAt(slot_index) orelse continue;
-            if (event.service_id == service_id and event.kind == kind) return true;
-        }
-        return false;
+        return self.newestDiagnostic(service_id, kind) != null;
     }
 
     pub fn latestDiagnostic(self: *const Supervisor, service_id: u64) ?DiagnosticEvent {
-        const slot_index = self.diagnostic_service_index.tail(diagnosticServiceKey(service_id));
-        const event = self.diagnosticAt(slot_index) orelse return null;
-        if (event.service_id != service_id) return null;
-        return event;
+        return self.newestDiagnostic(service_id, null);
+    }
+
+    fn newestDiagnostic(self: *const Supervisor, service_id: u64, kind: ?DiagnosticKind) ?DiagnosticEvent {
+        if (self.diagnostic_count == 0) return null;
+        var remaining = self.diagnostic_count;
+        var slot_index = (self.next_diagnostic_slot + MAX_DIAGNOSTICS - 1) % MAX_DIAGNOSTICS;
+        while (remaining != 0) : (remaining -= 1) {
+            const event = self.diagnostics[slot_index];
+            if (event.service_id == service_id and (kind == null or event.kind == kind.?)) return event;
+            slot_index = if (slot_index == 0) MAX_DIAGNOSTICS - 1 else slot_index - 1;
+        }
+        return null;
     }
 
     fn nextReservableServiceId(self: *const Supervisor) ?u64 {
@@ -455,39 +461,13 @@ pub const Supervisor = struct {
 
         const slot_index = self.nextDiagnosticSlot();
         if (slot_index >= self.diagnostic_count) self.diagnostic_count = slot_index + 1;
-        self.removeDiagnosticIndexes(slot_index);
         self.diagnostics[slot_index] = event;
-        self.indexDiagnostic(slot_index, event);
     }
 
     fn nextDiagnosticSlot(self: *Supervisor) usize {
         const slot_index = self.next_diagnostic_slot;
         self.next_diagnostic_slot = (self.next_diagnostic_slot + 1) % MAX_DIAGNOSTICS;
         return slot_index;
-    }
-
-    fn indexDiagnostic(self: *Supervisor, slot_index: usize, event: DiagnosticEvent) void {
-        if (!self.diagnostic_service_index.append(diagnosticServiceKey(event.service_id), slot_index)) {
-            native_util.impossibleByInvariant("supervisor diagnostic service index capacity covers diagnostic slots");
-        }
-        if (!self.diagnostic_service_kind_index.append(diagnosticServiceKindKey(event.service_id, event.kind), slot_index)) {
-            native_util.impossibleByInvariant("supervisor diagnostic service-kind index capacity covers diagnostic slots");
-        }
-    }
-
-    fn removeDiagnosticIndexes(self: *Supervisor, slot_index: usize) void {
-        if (slot_index >= self.diagnostic_count) return;
-        const old = self.diagnostics[slot_index];
-        if (old.sequence == 0) return;
-        _ = self.diagnostic_service_index.remove(diagnosticServiceKey(old.service_id), slot_index);
-        _ = self.diagnostic_service_kind_index.remove(diagnosticServiceKindKey(old.service_id, old.kind), slot_index);
-    }
-
-    fn diagnosticAt(self: *const Supervisor, slot_index: usize) ?DiagnosticEvent {
-        if (slot_index == indexed_arena.no_index or slot_index >= self.diagnostic_count) return null;
-        const event = self.diagnostics[slot_index];
-        if (event.sequence == 0) return null;
-        return event;
     }
 
     fn nextDiagnosticSequence(self: *Supervisor) u64 {
@@ -519,15 +499,6 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
 
 fn serviceClassKey(class: contract.ServiceClass) u64 {
     return @as(u64, @intFromEnum(class)) + 1;
-}
-
-fn diagnosticServiceKey(service_id: u64) u64 {
-    return indexed_arena.nonZeroKey(service_id);
-}
-
-fn diagnosticServiceKindKey(service_id: u64, kind: DiagnosticKind) u64 {
-    const kind_value = @as(u64, @intFromEnum(kind)) + 1;
-    return indexed_arena.nonZeroKey((service_id *% 16) ^ kind_value);
 }
 
 fn zeroService() ServiceRecord {
@@ -705,7 +676,7 @@ test "supervisor emits structured crash and restart diagnostics" {
     try std.testing.expectEqual(@as(u64, 9), supervisor.latestDiagnostic(network.id).?.tick);
 }
 
-test "supervisor keeps diagnostics indexed while recycling the bounded ring" {
+test "supervisor keeps diagnostics queryable while recycling the bounded ring" {
     var supervisor = Supervisor.init();
     const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 40 });
     try std.testing.expect(supervisor.hasDiagnostic(network.id, .registered));
@@ -717,12 +688,21 @@ test "supervisor keeps diagnostics indexed while recycling the bounded ring" {
 
     try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_count);
     try std.testing.expectEqual(@as(usize, 1), supervisor.next_diagnostic_slot);
-    try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_service_index.count(diagnosticServiceKey(network.id)));
-    try std.testing.expectEqual(@as(usize, 0), supervisor.diagnostic_service_kind_index.count(diagnosticServiceKindKey(network.id, .registered)));
-    try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_service_kind_index.count(diagnosticServiceKindKey(network.id, .healthy)));
     try std.testing.expect(!supervisor.hasDiagnostic(network.id, .registered));
     try std.testing.expect(supervisor.hasDiagnostic(network.id, .healthy));
     try std.testing.expectEqual(@as(u64, 100 + MAX_DIAGNOSTICS - 1), supervisor.latestDiagnostic(network.id).?.tick);
+}
+
+test "supervisor diagnostic ring scan selects the newest event per service" {
+    var supervisor = Supervisor.init();
+    const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 42 });
+    const storage = try supervisor.register(.storage_object, .{ .kind = .service, .serial = 43 });
+
+    try std.testing.expect(supervisor.markHealthy(storage.id, 10));
+    try std.testing.expect(supervisor.markHealthy(network.id, 11));
+    try std.testing.expectEqual(@as(u64, 11), supervisor.latestDiagnostic(network.id).?.tick);
+    try std.testing.expectEqual(@as(u64, 10), supervisor.latestDiagnostic(storage.id).?.tick);
+    try std.testing.expect(!supervisor.hasDiagnostic(storage.id, .crash));
 }
 
 test "service readiness is live state independent of diagnostic retention" {

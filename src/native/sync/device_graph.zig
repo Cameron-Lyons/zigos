@@ -13,11 +13,25 @@ const addDeviceGraphMeasuredArtifact = measured_boot.addMeasuredArtifact;
 pub const MAX_USER_ROOTS: usize = 4;
 pub const MAX_DEVICES: usize = 8;
 pub const MAX_LABEL_BYTES: usize = 48;
+pub const COMPACT_IDENTITY_METADATA = true;
+pub const PLATFORM_DEVICE_ROOT_SIZE_CEILING_BYTES: usize = 112;
+pub const USER_ROOT_RECORD_SIZE_CEILING_BYTES: usize = 192;
+pub const DEVICE_RECORD_SIZE_CEILING_BYTES: usize = 720;
+pub const GRAPH_SIZE_CEILING_BYTES: usize = 7_040;
 const ROOT_MESSAGE_BUFFER_BYTES: usize = 128;
 const DEVICE_MESSAGE_BUFFER_BYTES: usize = 192;
 const ENROLLMENT_MESSAGE_BUFFER_BYTES: usize = 256;
 const ROTATION_MESSAGE_BUFFER_BYTES: usize = 256;
 const REVOCATION_MESSAGE_BUFFER_BYTES: usize = 160;
+
+comptime {
+    if (MAX_USER_ROOTS > std.math.maxInt(u8) or
+        MAX_DEVICES > std.math.maxInt(u8) or
+        MAX_LABEL_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("device graph metadata no longer fits compact counters");
+    }
+}
 
 pub const DeviceStatus = enum(u8) {
     trusted,
@@ -36,7 +50,7 @@ pub const PlatformDeviceRoot = struct {
     boot_generation: u64,
     root_provenance: measured_boot.RootProvenance,
     root_digest: crypto_hash.Digest,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
 
     pub fn fromBootRecord(
@@ -59,12 +73,18 @@ pub const PlatformDeviceRoot = struct {
             .label_len = 0,
             .label = [_]u8{0} ** MAX_LABEL_BYTES,
         };
-        root.label_len = native_util.copyTextExact(&root.label, label) catch return error.LabelTooLong;
+        root.label_len = @intCast(native_util.copyTextExact(&root.label, label) catch return error.LabelTooLong);
         return root;
     }
 
     pub fn labelSlice(self: *const PlatformDeviceRoot) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > PLATFORM_DEVICE_ROOT_SIZE_CEILING_BYTES) {
+            @compileError("platform device root exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -74,19 +94,25 @@ pub const PlatformKeyBindingRequest = struct {
 
 pub const UserRootRecord = struct {
     principal_id: principal.PrincipalId,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     root_signature: manifest.Signature = .{},
 
     pub fn labelSlice(self: *const UserRootRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > USER_ROOT_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("user root record exceeds its compact size ceiling");
+        }
     }
 };
 
 pub const DeviceRecord = struct {
     principal_id: principal.PrincipalId,
     owner: principal.PrincipalId,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     overlay_id: u64,
     status: DeviceStatus = .trusted,
@@ -100,7 +126,7 @@ pub const DeviceRecord = struct {
     revoked_at_ticks: u64 = 0,
     device_key_origin: DeviceKeyOrigin = .software,
     platform_key_bound: bool = false,
-    platform_key_label_len: usize = 0,
+    platform_key_label_len: u8 = 0,
     platform_key_label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     platform_key_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     platform_root_generation: u64 = 0,
@@ -108,11 +134,11 @@ pub const DeviceRecord = struct {
     platform_root_digest: crypto_hash.Digest = crypto_hash.zero_digest,
 
     pub fn labelSlice(self: *const DeviceRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn platformKeyLabelSlice(self: *const DeviceRecord) []const u8 {
-        return self.platform_key_label[0..self.platform_key_label_len];
+        return self.platform_key_label[0..@as(usize, self.platform_key_label_len)];
     }
 
     pub fn isTrusted(self: *const DeviceRecord) bool {
@@ -128,6 +154,12 @@ pub const DeviceRecord = struct {
             self.platform_root_provenance == .bootloader_provided and
             self.platform_root_generation != 0 and
             !std.mem.allEqual(u8, &self.platform_root_digest, 0);
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DEVICE_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("device graph record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -183,7 +215,7 @@ const DeviceArena = indexed_arena.IndexedArenaWithKey(u64, DeviceSlot, MAX_DEVIC
 pub const Graph = struct {
     user_roots: UserRootArena = UserRootArena.init(),
     devices: DeviceArena = DeviceArena.init(),
-    trusted_device_count: usize = 0,
+    trusted_device_count: u8 = 0,
 
     pub fn init() Graph {
         return .{};
@@ -216,7 +248,7 @@ pub const Graph = struct {
 
         var root = zeroUserRoot();
         root.principal_id = user_principal;
-        root.label_len = native_util.copyTextExact(&root.label, label) catch return error.LabelTooLong;
+        root.label_len = @intCast(native_util.copyTextExact(&root.label, label) catch return error.LabelTooLong);
 
         var message_buffer: [ROOT_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = rootMessage(&message_buffer, user_principal, label) catch return error.InvalidRootSignature;
@@ -274,7 +306,7 @@ pub const Graph = struct {
         var device = zeroDevice();
         device.principal_id = device_principal;
         device.owner = user_principal;
-        device.label_len = native_util.copyTextExact(&device.label, label) catch return error.LabelTooLong;
+        device.label_len = @intCast(native_util.copyTextExact(&device.label, label) catch return error.LabelTooLong);
         device.overlay_id = overlay_id;
 
         var device_message_buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
@@ -442,7 +474,7 @@ pub const Graph = struct {
     }
 
     pub fn trustedDeviceCount(self: *const Graph) usize {
-        return self.trusted_device_count;
+        return @intCast(self.trusted_device_count);
     }
 
     pub fn installUserRootRecord(self: *Graph, root: UserRootRecord) ?usize {
@@ -456,6 +488,12 @@ pub const Graph = struct {
         self.devices.slots[slot_index].device = device;
         if (device.status == .trusted) self.trusted_device_count += 1;
         return slot_index;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > GRAPH_SIZE_CEILING_BYTES) {
+            @compileError("device graph exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -497,7 +535,7 @@ fn zeroDevice() DeviceRecord {
 
 const ResolvedPlatformKeyBinding = struct {
     origin: DeviceKeyOrigin,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     digest: crypto_hash.Digest,
     root_generation: u64,
@@ -528,7 +566,7 @@ fn buildPlatformKeyBinding(
         .root_provenance = request.root.root_provenance,
         .root_digest = request.root.root_digest,
     };
-    binding.label_len = native_util.copyTextExact(&binding.label, request.root.labelSlice()) catch return error.LabelTooLong;
+    binding.label_len = @intCast(native_util.copyTextExact(&binding.label, request.root.labelSlice()) catch return error.LabelTooLong);
     return binding;
 }
 
@@ -720,6 +758,33 @@ test "device graph roots user principals and manages enrollment rotation and rev
     try std.testing.expectEqual(@as(usize, 1), graph.trustedDeviceCount());
     try std.testing.expectEqual(@as(?u64, null), graph.overlayIdFor(tablet));
     try std.testing.expectEqual(@as(u64, 30), graph.findDevice(tablet).?.revoked_at_ticks);
+}
+
+test "compact device graph metadata preserves exact label capacities" {
+    const full_label = [_]u8{'d'} ** MAX_LABEL_BYTES;
+    const user = principal.PrincipalId{ .kind = .user, .serial = 21 };
+    const device = principal.PrincipalId{ .kind = .device, .serial = 22 };
+    const user_identity = signing.SignerIdentity{
+        .label = "compact-user-root",
+        .seed = signing.seedFromByte(0x71),
+    };
+    const device_identity = signing.SignerIdentity{
+        .label = "compact-device-key",
+        .seed = signing.seedFromByte(0x72),
+    };
+
+    var graph = Graph.init();
+    const root = try graph.ensureUserRoot(user, &full_label, user_identity);
+    const record = try graph.enrollDevice(user, device, &full_label, user_identity, device_identity, 1);
+    record.platform_key_label_len = @intCast(try native_util.copyTextExact(&record.platform_key_label, &full_label));
+
+    try std.testing.expectEqual(@as(u8, MAX_LABEL_BYTES), root.label_len);
+    try std.testing.expectEqual(@as(u8, MAX_LABEL_BYTES), record.label_len);
+    try std.testing.expectEqual(@as(u8, MAX_LABEL_BYTES), record.platform_key_label_len);
+    try std.testing.expectEqualSlices(u8, &full_label, root.labelSlice());
+    try std.testing.expectEqualSlices(u8, &full_label, record.labelSlice());
+    try std.testing.expectEqualSlices(u8, &full_label, record.platformKeyLabelSlice());
+    try std.testing.expectEqual(@as(u8, 1), graph.trusted_device_count);
 }
 
 test "device graph binds platform-backed device keys and rejects synthetic downgrade" {
