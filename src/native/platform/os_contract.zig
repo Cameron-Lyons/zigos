@@ -1474,6 +1474,7 @@ pub fn currentRepositorySixthContract() SixthChecklist {
 
 fn sessionPostureRedactionCheck() bool {
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     ledger.recordSessionPosture(
         principal.PrincipalId{ .kind = .user, .serial = 2026 },
         2606,
@@ -1863,6 +1864,7 @@ fn notificationInterruptionBudgetCheck() bool {
 
 fn attentionRedactionCheck() bool {
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     ledger.recordAttentionDecision(
         principal.PrincipalId{ .kind = .user, .serial = 2026 },
         2607,
@@ -2045,6 +2047,7 @@ fn accessibilityPolicyDenies(expected: policy_object.DecisionReason) bool {
 
 fn accessibilityRedactionCheck() bool {
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     ledger.recordAccessibilityProfile(
         principal.PrincipalId{ .kind = .user, .serial = 2028 },
         2807,
@@ -2288,6 +2291,7 @@ fn agentSessionPolicyDenies(expected: policy_object.DecisionReason) bool {
 
 fn agentSessionRedactionCheck() bool {
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     ledger.recordAgentSessionBoundary(
         principal.PrincipalId{ .kind = .user, .serial = 2029 },
         2907,
@@ -2395,6 +2399,7 @@ fn agentActionBindingCheck() bool {
 
     var service = agent_delegation_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const subject = principal.PrincipalId{ .kind = .app, .serial = 2034 };
     const delegation = service.authorize(&directory, .{ .organization_id = 2034 }, .{
         .subject = subject,
@@ -2472,6 +2477,7 @@ fn agentActionDenialAuditCheck() bool {
 
     var service = agent_delegation_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const subject = principal.PrincipalId{ .kind = .app, .serial = 2036 };
     const delegation = service.authorize(&directory, .{ .organization_id = 2036 }, .{
         .subject = subject,
@@ -2910,6 +2916,7 @@ fn backgroundExpirationWatchdogCheck(bundle: manifest.BundleManifest) bool {
 
 fn backgroundActivityRedactionCheck() bool {
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     ledger.recordBackgroundActivity(
         principal.PrincipalId{ .kind = .user, .serial = 2030 },
         3030,
@@ -3017,6 +3024,7 @@ fn securePasteboardContractEvidence() PasteboardContractEvidence {
     var evidence = PasteboardContractEvidence{};
     var service = secure_pasteboard.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const source = principal.PrincipalId{ .kind = .app, .serial = 2050 };
     const destination = principal.PrincipalId{ .kind = .app, .serial = 2051 };
     const imposter = principal.PrincipalId{ .kind = .app, .serial = 2052 };
@@ -3394,6 +3402,7 @@ fn objectResilienceEvidence() ObjectResilienceEvidence {
     };
     var service = object_resilience_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const subject = principal.PrincipalId{ .kind = .app, .serial = 2035 };
     const other_subject = principal.PrincipalId{ .kind = .app, .serial = 2038 };
 
@@ -3755,6 +3764,7 @@ fn semanticMemoryEvidence() SemanticMemoryEvidence {
     service.upsertClassified(2, 200, 1, "Cross Workspace", "private semantic memory roadmap", .private_user_data) catch return evidence;
 
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     var results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
     const workspace_one = [_]u64{1};
     const subjects = policy_object.SubjectSet{
@@ -3982,6 +3992,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
     secrets.attachHardwareProvider(credentialContractHardwareProvider());
     var identities = os_identity.Store.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     var policies = policy_object.Directory.init();
     _ = policies.create(.{
         .scope = .organization,
@@ -4353,6 +4364,7 @@ fn privateSyncEvidence() PrivateSyncEvidence {
         sync_allowed.allowed;
 
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     ledger.recordSyncConflict(
         .{ .kind = .user, .serial = 306 },
         71,
@@ -4485,6 +4497,7 @@ fn sensitiveCaptureEvidence() SensitiveCaptureEvidence {
     const locked_subjects = policy_object.SubjectSet{ .user_id = 403 };
     var service = sensitive_capture_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
 
     evidence.foreground_gate = if (service.start(&policies, subjects, .{
         .subject = app,
@@ -4808,6 +4821,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
     var service = secret_vault_service.Service.init();
     service.attachHardwareProvider(secretVaultContractHardwareProvider());
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
 
     evidence.hardware_policy_gate = if (service.importSecret(&policies, subjects, .{
         .owner = user,
@@ -4885,6 +4899,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
     var expiry_service = secret_vault_service.Service.init();
     expiry_service.attachHardwareProvider(secretVaultContractHardwareProvider());
     var expiry_ledger = event_ledger.Ledger.init();
+    defer expiry_ledger.deinit();
     const expiring_secret = expiry_service.importSecret(&policies, subjects, .{
         .owner = user,
         .task_id = 83,
@@ -4941,6 +4956,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
     var export_service = secret_vault_service.Service.init();
     export_service.attachHardwareProvider(secretVaultContractHardwareProvider());
     var export_ledger = event_ledger.Ledger.init();
+    defer export_ledger.deinit();
     const sealed_only = export_service.importSecret(&export_policies, subjects, .{
         .owner = user,
         .task_id = 85,
@@ -5229,9 +5245,11 @@ fn attentionBrokerEvidence() AttentionBrokerEvidence {
     const subjects = policy_object.SubjectSet{ .user_id = user.serial };
     var service = attention_broker_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
 
     var expiry_service = attention_broker_service.Service.init();
     var expiry_ledger = event_ledger.Ledger.init();
+    defer expiry_ledger.deinit();
     const expiring = expiry_service.post(&policies, subjects, .{
         .subject = app,
         .task_id = 94,
@@ -5273,8 +5291,8 @@ fn attentionBrokerEvidence() AttentionBrokerEvidence {
     }, &ledger) catch return evidence;
     evidence.brokered_post = passive.id != 0 and service.activeVisible(10) == 1;
     evidence.default_task_binding = missing_task_denied and
-        passive.task_id != null and
-        passive.task_id.? == 91;
+        passive.taskId() != null and
+        passive.taskId().? == 91;
 
     evidence.quiet_denial = if (service.post(&policies, subjects, .{
         .subject = app,
@@ -5481,6 +5499,7 @@ fn taskLifecycleEvidence() TaskLifecycleEvidence {
     const subjects = policy_object.SubjectSet{ .user_id = user.serial };
     var service = task_lifecycle_service.Service.init(&runtime);
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
 
     evidence.target_owner_binding = if (service.control(&policies, subjects, .{
         .subject = user,
@@ -5663,6 +5682,7 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
     }).allowed;
 
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     evidence.policy_gate = if (service.offboard(&policies, subjects, .{
         .subject = user,
         .task_id = 7601,
@@ -5936,6 +5956,7 @@ fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
         scheduler.resource_state.cpu_budget_ticks < 50_000;
 
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     const user = principal.PrincipalId{ .kind = .user, .serial = 770 };
     ledger.recordResourceGovernance(
         user,
@@ -6189,6 +6210,7 @@ fn networkSessionEvidence() NetworkSessionEvidence {
 
     var service = network_session_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     evidence.destination_gate = if (service.open(
         &network_policies,
         &capabilities,
@@ -6348,6 +6370,7 @@ fn networkSessionEvidence() NetworkSessionEvidence {
 
     var expiry_service = network_session_service.Service.init();
     var expiry_ledger = event_ledger.Ledger.init();
+    defer expiry_ledger.deinit();
     const instant_expiry_rejected = if (expiry_service.open(
         &network_policies,
         &capabilities,
@@ -6431,6 +6454,7 @@ fn networkSessionEvidence() NetworkSessionEvidence {
 
     var budget_service = network_session_service.Service.init();
     var budget_ledger = event_ledger.Ledger.init();
+    defer budget_ledger.deinit();
     evidence.effective_budget_policy = if (budget_service.open(
         &network_policies,
         &capabilities,
@@ -6626,6 +6650,7 @@ fn personalContextEvidence() PersonalContextEvidence {
     var service = personal_context_service.Service.init();
     var semantic_index = indexing_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     semantic_index.upsertClassified(42, 7062, 1, "Context Notes", "private personal context contract roadmap", .private_user_data) catch return evidence;
     semantic_index.upsertClassified(43, 7063, 1, "Other Context", "private personal context contract roadmap", .private_user_data) catch return evidence;
 
@@ -6654,6 +6679,7 @@ fn personalContextEvidence() PersonalContextEvidence {
 
     var metered_service = personal_context_service.Service.init();
     var metered_ledger = event_ledger.Ledger.init();
+    defer metered_ledger.deinit();
     const metered_lease = metered_service.issueLease(&policies, subjects, .{
         .subject = subject,
         .task_id = 7065,
@@ -6907,6 +6933,7 @@ fn personalContextEmptyReceiptCheck() bool {
     var service = personal_context_service.Service.init();
     var semantic_index = indexing_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     semantic_index.upsertClassified(82, 9082, 1, "Present Context", "private present context only", .private_user_data) catch return false;
 
     const lease = service.issueLease(&policies, subjects, .{
@@ -6971,6 +6998,7 @@ fn personalContextSensitivityEnvelopeCheck() bool {
     var service = personal_context_service.Service.init();
     var semantic_index = indexing_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     semantic_index.upsertClassified(92, 9092, 1, "Secret Context", "private secret context envelope", .secret_user_data) catch return false;
     if (semantic_index.permittedWorkspaceSensitivity(&[_]u64{92}) != .secret_user_data) return false;
 
@@ -7030,6 +7058,7 @@ fn personalContextIndexStalenessCheck() bool {
     var service = personal_context_service.Service.init();
     var semantic_index = indexing_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     semantic_index.upsertClassified(102, 9102, 1, "Stable Context", "private stable context envelope", .private_user_data) catch return false;
 
     const lease = service.issueLease(&policies, subjects, .{
@@ -7091,6 +7120,7 @@ fn personalContextAccountingSnapshotCheck() bool {
     var service = personal_context_service.Service.init();
     var semantic_index = indexing_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     semantic_index.upsertClassified(112, 9112, 1, "Stable Context", "private stable context envelope", .private_user_data) catch return false;
 
     const lease = service.issueLease(&policies, subjects, .{
@@ -7155,6 +7185,7 @@ fn personalContextPrivacyModeBindingCheck() bool {
     var service = personal_context_service.Service.init();
     var semantic_index = indexing_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
 
     const lease = service.issueLease(&policies, subjects, .{
         .subject = subject,
@@ -7239,6 +7270,7 @@ fn personalContextReceiptPolicyReauthorizationCheck() bool {
     var service = personal_context_service.Service.init();
     var semantic_index = indexing_service.Service.init();
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     semantic_index.upsertClassified(62, 8062, 1, "Policy Drift", "private receipt policy reauthorization", .private_user_data) catch return false;
 
     const lease = service.issueLease(&policies, subjects, .{

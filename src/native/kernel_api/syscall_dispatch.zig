@@ -333,6 +333,7 @@ pub fn mapError(err: anyerror) DispatchResult {
         err == error.ComponentTableFull or
         err == error.CapabilityTableFull or
         err == error.TaskTableFull or
+        err == error.NoSpaceLeft or
         err == error.ResourceBudgetExceeded or
         err == error.EndpointBusy or
         err == error.QueueFull or
