@@ -54,7 +54,8 @@ var proof_shared: shared_memory.Table = shared_memory.Table.init();
 fn resetProofFixtures() void {
     proof_runtime.reset();
     proof_capabilities = capability.CapabilityTable.init();
-    proof_endpoints = endpoint.Table.init();
+    proof_endpoints.reset();
+    proof_shared.deinit();
     proof_shared = shared_memory.Table.init();
 }
 

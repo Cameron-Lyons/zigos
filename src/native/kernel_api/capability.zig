@@ -172,6 +172,21 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return Self{};
         }
 
+        pub fn initializeAllocated(self: *Self) void {
+            @memset(std.mem.asBytes(self), 0);
+            self.slots.free_head = indexed_arena.reusableNoIndex(MAX_TABLE_CAPABILITIES);
+
+            const CompactIndex = @FieldType(HolderIndex, "free_bucket_head");
+            const compact_no_index: CompactIndex = @intCast(MAX_TABLE_CAPABILITIES);
+            for (&self.holder_index.links) |*link| link.bucket = compact_no_index;
+            self.holder_index.free_bucket_head = compact_no_index;
+            for (&self.target_index.links) |*link| link.bucket = compact_no_index;
+            self.target_index.free_bucket_head = compact_no_index;
+
+            self.target_generations.free_head = indexed_arena.reusableNoIndex(MAX_TABLE_TARGET_GENERATIONS);
+            self.mutation_generation = 1;
+        }
+
         pub fn mutationGeneration(self: *const Self) u64 {
             return self.mutation_generation;
         }
@@ -756,6 +771,28 @@ fn fullSessionRights() CapabilityRights {
         .resource_query = true,
         .accounting_query = true,
     } };
+}
+
+test "allocated capability table initialization preserves empty table invariants" {
+    var table: CapabilityTable = undefined;
+    table.initializeAllocated();
+
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
+    try std.testing.expectEqual(@as(u64, 1), table.mutationGeneration());
+    const minted = try table.mintBootRoot(.{
+        .holder = .{ .kind = .service, .serial = 1 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 1 },
+        .rights = fullSessionRights(),
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
+    });
+    try std.testing.expectEqual(minted.id, table.query(minted.id).?.id);
+    var matches: [1]Capability = undefined;
+    try std.testing.expectEqual(minted.id, table.queryByHolder(minted.holder, &matches)[0].id);
+    try std.testing.expectEqual(minted.id, table.queryByTarget(minted.target, &matches)[0].id);
+    try table.revokeGrant(minted.id);
+    try std.testing.expect(table.query(minted.id) == null);
 }
 
 test "capability table mutation generation tracks insert removal and wrap" {
