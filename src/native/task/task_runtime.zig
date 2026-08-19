@@ -287,9 +287,9 @@ pub const Runtime = struct {
         return &self.task_cold;
     }
 
-    fn clearTaskColdRecords(self: *Runtime) void {
+    fn clearTaskColdRecords(self: *Runtime, count: usize) void {
         const records = self.taskColdRecords() orelse return;
-        for (records) |*cold| resetTaskCold(cold);
+        for (records[0..@min(count, records.len)]) |*cold| resetTaskCold(cold);
     }
 
     fn releaseTaskColdRecords(self: *Runtime) void {
@@ -300,7 +300,7 @@ pub const Runtime = struct {
                 self.task_cold = null;
             }
         } else {
-            self.clearTaskColdRecords();
+            self.clearTaskColdRecords(MAX_TASKS);
         }
     }
 
@@ -390,13 +390,14 @@ pub const Runtime = struct {
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) error{NoSpaceLeft}!void {
         const task_cold = if (state.task_count == 0) null else try self.ensureTaskColdRecords();
+        const cold_records_to_clear = @max(self.tasks.claimedCount(), state.task_count);
         const restored_address_spaces = if (state.address_space_count == 0) null else try self.ensureAddressSpaceArena();
         const retirements = self.captureAddressSpaceRetirements(.snapshot_restore);
         self.resetForSnapshotRestore();
         if (state.task_count == 0 and heap_backed_task_cold) {
             self.releaseTaskColdRecords();
         } else {
-            self.clearTaskColdRecords();
+            self.clearTaskColdRecords(cold_records_to_clear);
         }
         if (state.address_space_count == 0 and heap_backed_address_spaces) {
             self.releaseAddressSpaceArena();

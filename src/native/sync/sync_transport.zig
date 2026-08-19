@@ -741,7 +741,7 @@ pub fn decodeNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
         .capability_id = capability_id,
         .source_device = .{ .kind = source_kind, .serial = source_serial },
         .target_device = .{ .kind = target_kind, .serial = target_serial },
-        .ciphertext_len = ciphertext.len,
+        .ciphertext_len = ciphertext_len,
         .ciphertext = [_]u8{0} ** MAX_PACKET_BYTES,
         .payload_digest = payload_digest[0..32].*,
         .encrypted = encrypted,
