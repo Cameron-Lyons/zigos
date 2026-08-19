@@ -48,8 +48,11 @@ jobs:
 
     - name: Install shellcheck
       run: |
-        sudo apt-get update
-        sudo apt-get install -y shellcheck
+        curl -fsSL --retry 4 --retry-all-errors --connect-timeout 15 --max-time 120 \
+          https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz \
+          -o /tmp/shellcheck.tar.xz
+        tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+        install /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
 
     - name: Run lint target
       env:
