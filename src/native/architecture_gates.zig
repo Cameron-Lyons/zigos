@@ -11,6 +11,7 @@ const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
 const indexing_service = @import("services/indexing_service.zig");
 const event_ledger = @import("platform/event_ledger.zig");
+const measured_boot = @import("platform/measured_boot.zig");
 const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
 const native_ux = @import("platform/native_ux.zig");
@@ -30,6 +31,7 @@ const secure_secret_store = @import("platform/secure_secret_store.zig");
 const os_identity = @import("platform/os_identity.zig");
 const secret_vault_service = @import("services/secret_vault_service.zig");
 const media_print_service = @import("services/media_print_service.zig");
+const network_session_service = @import("services/network_session_service.zig");
 const notification_center = @import("services/notification_center.zig");
 const secure_pasteboard = @import("services/secure_pasteboard.zig");
 const capability = @import("kernel_api/capability.zig");
@@ -90,7 +92,8 @@ pub const indexed_hot_path_tables = .{
     },
     .service_registry = .{
         .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),
-        .uses_typed_interface_ids = @hasField(service_registry.Binding, "interface_id"),
+        .uses_typed_interface_ids = @hasDecl(service_registry.Binding, "interfaceId"),
+        .derives_static_contract_metadata = service_registry.DERIVES_STATIC_CONTRACT_METADATA,
     },
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
@@ -188,51 +191,99 @@ pub const indexed_hot_path_tables = .{
         .uses_claim_task_index = @hasField(accelerator_scheduler.Controller, "claim_task_index"),
     },
     .background_dispatch = .{
-        .uses_record_arena = @hasDecl(@FieldType(background_dispatch.Controller, "records"), "reserveIndex"),
+        .uses_bounded_record_scan = background_dispatch.BOUNDED_RECORD_SCAN,
+        .stores_compact_dispatch_metadata = background_dispatch.COMPACT_DISPATCH_METADATA and
+            @FieldType(background_dispatch.DispatchRecord, "background_task_id_len") == u8 and
+            @FieldType(background_dispatch.Controller, "active_count") == u8 and
+            @FieldType(background_dispatch.Controller, "record_count") == u8 and
+            @FieldType(background_dispatch.Controller, "next_reusable_slot") == u8,
+        .keeps_dispatch_state_within_ceilings = @sizeOf(background_dispatch.DispatchRecord) <= background_dispatch.DISPATCH_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(background_dispatch.Controller) <= background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
         .tracks_active_count = @hasField(background_dispatch.Controller, "active_count"),
-        .uses_active_record_index = @hasField(background_dispatch.Controller, "active_record_index"),
-        .uses_reusable_record_index = @hasField(background_dispatch.Controller, "reusable_record_index"),
+        .uses_fair_reuse_cursor = @hasField(background_dispatch.Controller, "next_reusable_slot"),
         .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
     },
     .indexing_service = .{
-        .uses_document_arena = @hasField(indexing_service.Service, "documents"),
-        .uses_workspace_index = @hasField(indexing_service.Service, "workspace_index"),
+        .uses_bounded_document_scan = indexing_service.BOUNDED_DOCUMENT_SCAN,
+        .uses_dense_document_table = indexing_service.DENSE_DOCUMENT_TABLE,
+        .stores_compact_document_metadata = indexing_service.COMPACT_DOCUMENT_METADATA,
+        .drops_document_indexes = !@hasField(indexing_service.Service, "workspace_index") and
+            @FieldType(indexing_service.Service, "documents") == [indexing_service.MAX_DOCUMENTS]indexing_service.DocumentRecord,
+        .keeps_fixed_state_within_ceiling = @sizeOf(indexing_service.Service) <= indexing_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .secure_secret_store = .{
-        .uses_secret_arena = @hasDecl(@FieldType(secure_secret_store.Store, "secrets"), "reserve"),
+        .uses_bounded_secret_lookup = secure_secret_store.BOUNDED_SECRET_LOOKUP,
+        .uses_dense_secret_table = secure_secret_store.DENSE_SECRET_TABLE and
+            @FieldType(secure_secret_store.Store, "secrets") == [secure_secret_store.MAX_SECRETS]secure_secret_store.SecretRecord,
+        .stores_compact_secret_metadata = secure_secret_store.COMPACT_SECRET_METADATA and
+            @FieldType(secure_secret_store.SecretRecord, "label_len") == u8 and
+            @FieldType(secure_secret_store.SecretRecord, "value_len") == u8,
+        .bounds_secret_lookup_comparisons = secure_secret_store.SECRET_LOOKUP_COMPARISON_BOUND == 5,
+        .drops_secret_arena = @FieldType(secure_secret_store.Store, "secrets") == [secure_secret_store.MAX_SECRETS]secure_secret_store.SecretRecord,
         .uses_handle_arena = @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "reserve"),
+        .supports_handle_replacement = @hasDecl(secure_secret_store.Store, "replaceHandle"),
+        .keeps_fixed_state_within_ceiling = @sizeOf(secure_secret_store.Store) <= secure_secret_store.STORE_SIZE_CEILING_BYTES,
     },
     .os_identity = .{
-        .uses_credential_arena = @hasDecl(@FieldType(os_identity.Store, "credentials"), "reserveIndex"),
+        .uses_bounded_credential_lookup = os_identity.BOUNDED_CREDENTIAL_LOOKUP,
+        .uses_dense_credential_table = os_identity.DENSE_CREDENTIAL_TABLE and
+            @FieldType(os_identity.Store, "credentials") == [os_identity.MAX_CREDENTIALS]os_identity.CredentialRecord,
+        .stores_compact_credential_metadata = os_identity.COMPACT_CREDENTIAL_METADATA and
+            @FieldType(os_identity.CredentialRecord, "relying_party_id_len") == u8 and
+            @FieldType(os_identity.CredentialRecord, "label_len") == u8,
+        .bounds_credential_lookup_comparisons = os_identity.CREDENTIAL_LOOKUP_COMPARISON_BOUND == 5,
+        .drops_credential_arena = @FieldType(os_identity.Store, "credentials") == [os_identity.MAX_CREDENTIALS]os_identity.CredentialRecord,
+        .keeps_fixed_state_within_ceiling = @sizeOf(os_identity.Store) <= os_identity.STORE_SIZE_CEILING_BYTES,
     },
 
     .secret_vault_service = .{
         .uses_handle_arena = @hasDecl(@FieldType(secret_vault_service.Service, "handles"), "reserve"),
-        .uses_secret_handle_index = @hasField(secret_vault_service.Service, "secret_handle_index"),
-        .uses_active_handle_index = @hasField(secret_vault_service.Service, "active_handle_index"),
+        .uses_bounded_handle_scan = secret_vault_service.BOUNDED_HANDLE_SCAN,
+        .reclaims_terminal_handles = secret_vault_service.RECLAIMS_TERMINAL_HANDLES,
+        .drops_secondary_handle_indexes = !@hasField(secret_vault_service.Service, "secret_handle_index") and
+            !@hasField(secret_vault_service.Service, "active_handle_index"),
         .tracks_active_handles = @hasField(secret_vault_service.Service, "active_handle_count"),
+        .uses_fair_terminal_reuse = @hasField(secret_vault_service.Service, "next_reusable_handle"),
+        .keeps_fixed_state_within_ceiling = @sizeOf(secret_vault_service.Service) <= secret_vault_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .media_print_service = .{
-        .uses_job_arena = @hasDecl(@FieldType(media_print_service.Service, "jobs"), "reserveIndex"),
-        .uses_completed_job_index = @hasField(media_print_service.Service, "completed_job_index"),
+        .uses_bounded_job_scan = media_print_service.BOUNDED_JOB_SCAN,
+        .uses_compact_completion_queue = media_print_service.COMPACT_COMPLETION_QUEUE,
+        .keeps_fixed_state_within_ceiling = @sizeOf(media_print_service.Service) <= media_print_service.SERVICE_SIZE_CEILING_BYTES,
+    },
+    .network_session_service = .{
+        .uses_bounded_session_scan = network_session_service.BOUNDED_SESSION_SCAN,
+        .reclaims_terminal_sessions = network_session_service.RECLAIMS_TERMINAL_SESSIONS,
+        .stores_compact_destination_length = network_session_service.COMPACT_DESTINATION_LENGTH,
+        .keeps_fixed_state_within_ceiling = @sizeOf(network_session_service.Service) <= network_session_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .notification_center = .{
-        .uses_notification_arena = @hasDecl(@FieldType(notification_center.Center, "notifications"), "reserveIndex"),
-        .uses_source_reason_index = @hasField(notification_center.Center, "source_reason_index"),
+        .uses_bounded_notification_scan = notification_center.BOUNDED_NOTIFICATION_SCAN,
+        .reclaims_suppressed_notifications = notification_center.RECLAIMS_SUPPRESSED_NOTIFICATIONS,
+        .stores_compact_notification_metadata = notification_center.COMPACT_NOTIFICATION_METADATA,
+        .uses_fixed_notification_table = @FieldType(notification_center.Center, "notifications") == [notification_center.MAX_NOTIFICATIONS]notification_center.Notification,
+        .drops_secondary_notification_indexes = !@hasField(notification_center.Center, "source_reason_index") and
+            !@hasField(notification_center.Center, "expiring_attention_index") and
+            !@hasField(notification_center.Center, "suppressed_notification_index"),
         .tracks_permanent_attention_counts = @hasField(notification_center.Center, "permanent_attention_counts"),
-        .uses_expiring_attention_index = @hasField(notification_center.Center, "expiring_attention_index"),
-        .tracks_visible_notification_chain = @hasField(notification_center.Center, "visible_tail_slot"),
+        .drops_visible_notification_chain = !@hasField(notification_center.Center, "visible_tail_slot") and
+            !@hasField(notification_center.Center, "visible_prev_by_slot") and
+            !@hasField(notification_center.Center, "visible_next_by_slot"),
         .tracks_visible_notification_count = @hasField(notification_center.Center, "visible_notification_count"),
+        .keeps_fixed_state_within_ceiling = @sizeOf(notification_center.Center) <= notification_center.CENTER_SIZE_CEILING_BYTES,
     },
     .secure_pasteboard = .{
-        .uses_grant_arena = @hasDecl(@FieldType(secure_pasteboard.Service, "slots"), "reserve"),
+        .uses_bounded_grant_scan = secure_pasteboard.BOUNDED_GRANT_SCAN,
+        .reclaims_terminal_grants = secure_pasteboard.RECLAIMS_TERMINAL_GRANTS,
+        .stores_compact_grant_lengths = secure_pasteboard.COMPACT_GRANT_LENGTHS,
+        .keeps_fixed_state_within_ceiling = @sizeOf(secure_pasteboard.Service) <= secure_pasteboard.SERVICE_SIZE_CEILING_BYTES,
     },
     .sensitive_capture_service = .{
-        .uses_session_arena = @hasDecl(@FieldType(sensitive_capture_service.Service, "slots"), "reserve"),
+        .uses_bounded_session_scan = sensitive_capture_service.BOUNDED_SESSION_SCAN,
+        .reclaims_inactive_session_slots = sensitive_capture_service.RECLAIMS_INACTIVE_SESSION_SLOTS,
+        .keeps_fixed_state_within_ceiling = @sizeOf(sensitive_capture_service.Service) <= sensitive_capture_service.SERVICE_SIZE_CEILING_BYTES,
         .tracks_active_sessions = @hasField(sensitive_capture_service.Service, "active_session_count"),
         .tracks_privacy_indicators = @hasField(sensitive_capture_service.Service, "privacy_indicator_counts"),
-        .uses_active_session_index = @hasField(sensitive_capture_service.Service, "active_session_index"),
-        .uses_active_kind_index = @hasField(sensitive_capture_service.Service, "active_kind_index"),
     },
     .agent_delegation_service = .{
         .uses_delegation_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "slots"), "reserve"),
@@ -243,10 +294,14 @@ pub const indexed_hot_path_tables = .{
         .uses_active_generation_bucket_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "active_generation_buckets"), "reserve"),
     },
     .object_resilience_service = .{
-        .uses_snapshot_arena = @hasDecl(@FieldType(object_resilience_service.Service, "slots"), "reserve"),
+        .uses_bounded_snapshot_scan = object_resilience_service.BOUNDED_SNAPSHOT_SCAN,
+        .reclaims_revoked_snapshots = object_resilience_service.RECLAIMS_REVOKED_SNAPSHOTS,
+        .keeps_fixed_state_within_ceiling = @sizeOf(object_resilience_service.Service) <= object_resilience_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .personal_context_service = .{
-        .uses_lease_arena = @hasDecl(@FieldType(personal_context_service.Service, "slots"), "reserve"),
+        .uses_bounded_lease_scan = personal_context_service.BOUNDED_LEASE_SCAN,
+        .reclaims_terminal_leases = personal_context_service.RECLAIMS_TERMINAL_LEASES,
+        .keeps_fixed_state_within_ceiling = @sizeOf(personal_context_service.Service) <= personal_context_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .package_service = .{
         .uses_bundle_arena = @hasDecl(package_service.BundleArena, "reserve"),
@@ -255,9 +310,17 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(package_service.StoredPermission) < package_service.MAX_PERMISSION_RESOURCE_BYTES,
     },
     .public_store = .{
-        .uses_release_arena = @hasDecl(@FieldType(public_store.Channel, "releases"), "reserveIndexAt"),
-        .uses_bundle_release_index = @hasField(public_store.Channel, "bundle_release_index"),
-        .uses_trusted_publisher_arena = @hasDecl(@FieldType(public_store.Channel, "trusted_publishers"), "reserve"),
+        .uses_bounded_release_scan = public_store.BOUNDED_RELEASE_SCAN and
+            public_store.RELEASE_SCAN_BOUND == public_store.MAX_RELEASES_PER_CHANNEL,
+        .uses_bounded_trusted_publisher_scan = public_store.BOUNDED_TRUSTED_PUBLISHER_SCAN and
+            public_store.TRUSTED_PUBLISHER_SCAN_BOUND == public_store.MAX_TRUSTED_PUBLISHERS_PER_CHANNEL,
+        .uses_dense_release_table = public_store.DENSE_RELEASE_TABLE and
+            @FieldType(public_store.Channel, "releases") == [public_store.MAX_RELEASES_PER_CHANNEL]public_store.Release,
+        .uses_dense_trusted_publisher_table = public_store.DENSE_TRUSTED_PUBLISHER_TABLE and
+            @FieldType(public_store.Channel, "trusted_publishers") == [public_store.MAX_TRUSTED_PUBLISHERS_PER_CHANNEL]public_store.TrustedPublisherRecord,
+        .uses_direct_release_identity_comparison = public_store.DIRECT_RELEASE_IDENTITY_COMPARISON,
+        .drops_public_store_indexes = !@hasField(public_store.Channel, "bundle_release_index"),
+        .keeps_fixed_state_within_ceiling = @sizeOf(public_store.Channel) <= public_store.CHANNEL_SIZE_CEILING_BYTES,
     },
     .driver_service = .{
         .uses_driver_arena = @hasDecl(@FieldType(driver_service.Directory, "slots"), "reserve"),
@@ -276,9 +339,24 @@ pub const indexed_hot_path_tables = .{
         .uses_dma_program_device_index = device_broker.dma_program_indexing.uses_device_index,
     },
     .network_policy = .{
+        .stores_compact_policy_metadata = network_policy.COMPACT_POLICY_METADATA and
+            @FieldType(network_policy.PolicyRecord, "label_len") == u8 and
+            @FieldType(network_policy.PolicyRecord, "target_len") == u8,
+        .keeps_policy_state_within_ceilings = @sizeOf(network_policy.PolicyRecord) <= network_policy.POLICY_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(network_policy.Directory) <= network_policy.DIRECTORY_SIZE_CEILING_BYTES,
         .uses_policy_arena = @hasDecl(@FieldType(network_policy.Directory, "policies"), "reserve"),
     },
     .policy_object = .{
+        .stores_compact_policy_metadata = policy_object.COMPACT_POLICY_METADATA and
+            @FieldType(policy_object.PolicyObject, "label_len") == u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_install_source_count") == u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_install_source_lens") == [policy_object.MAX_ALLOW_LIST]u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_network_destination_count") == u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_network_destination_lens") == [policy_object.MAX_ALLOW_LIST]u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_sync_destination_count") == u8 and
+            @FieldType(policy_object.PolicyObject, "allowed_sync_destination_lens") == [policy_object.MAX_ALLOW_LIST]u8,
+        .keeps_policy_state_within_ceilings = @sizeOf(policy_object.PolicyObject) <= policy_object.POLICY_OBJECT_SIZE_CEILING_BYTES and
+            @sizeOf(policy_object.Directory) <= policy_object.DIRECTORY_SIZE_CEILING_BYTES,
         .uses_policy_arena = @hasDecl(@FieldType(policy_object.Directory, "policies"), "reserve"),
         .uses_scope_index = @hasField(policy_object.Directory, "scope_index"),
     },
@@ -290,7 +368,39 @@ pub const indexed_hot_path_tables = .{
         .visits_indexes = @hasDecl(event_ledger.Ledger, "queryEvents"),
         .removes_evicted_indexes = @hasDecl(event_ledger.Ledger, "removeEventIndexes"),
     },
+    .measured_boot = .{
+        .stores_compact_measurement_metadata = measured_boot.COMPACT_MEASUREMENT_METADATA and
+            @FieldType(measured_boot.MeasurementRecord, "label_len") == u8 and
+            @FieldType(measured_boot.BuildArtifactEntry, "label_len") == u8,
+        .stores_compact_manifest_counts = @FieldType(measured_boot.ArtifactManifest, "entry_count") == u8 and
+            @FieldType(measured_boot.BuildArtifactManifest, "entry_count") == u8,
+        .stores_compact_boot_record_counts = @FieldType(measured_boot.BootRecord, "record_count") == u8 and
+            @FieldType(measured_boot.BootloaderMeasurementHandoff, "record_count") == u8 and
+            @FieldType(measured_boot.Recorder, "record_count") == u8,
+        .keeps_measurement_records_within_ceiling = @sizeOf(measured_boot.MeasurementRecord) <= measured_boot.MEASUREMENT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(measured_boot.BuildArtifactEntry) <= measured_boot.BUILD_ARTIFACT_ENTRY_SIZE_CEILING_BYTES,
+        .keeps_manifests_within_ceilings = @sizeOf(measured_boot.ArtifactManifest) <= measured_boot.ARTIFACT_MANIFEST_SIZE_CEILING_BYTES and
+            @sizeOf(measured_boot.BuildArtifactManifest) <= measured_boot.BUILD_ARTIFACT_MANIFEST_SIZE_CEILING_BYTES,
+        .keeps_boot_state_within_ceilings = @sizeOf(measured_boot.BootRecord) <= measured_boot.BOOT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(measured_boot.BootloaderMeasurementHandoff) <= measured_boot.BOOTLOADER_HANDOFF_SIZE_CEILING_BYTES and
+            @sizeOf(measured_boot.Recorder) <= measured_boot.RECORDER_SIZE_CEILING_BYTES,
+    },
     .compositor_session = .{
+        .stores_compact_window_metadata = compositor_session.COMPACT_RECORD_METADATA and
+            @FieldType(compositor_session.WindowRecord, "bundle_id_len") == u8 and
+            @FieldType(compositor_session.WindowRecord, "display_name_len") == u8 and
+            @FieldType(compositor_session.WindowRecord, "title_len") == u8 and
+            @FieldType(compositor_session.WindowRecord, "detail_len") == u8 and
+            @FieldType(compositor_session.WindowRecord, "item_count") == u8,
+        .stores_compact_review_item_metadata = @FieldType(compositor_session.ReviewItemRecord, "label_len") == u8 and
+            @FieldType(compositor_session.ReviewItemRecord, "resource_len") == u8 and
+            @FieldType(compositor_session.ReviewItemRecord, "reason_len") == u8 and
+            @FieldType(compositor_session.ReviewItemRecord, "object_scope_len") == u8 and
+            @FieldType(compositor_session.ReviewItemRecord, "network_path_len") == u8,
+        .keeps_records_within_ceilings = @sizeOf(compositor_session.WindowRecord) <= compositor_session.WINDOW_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(compositor_session.ReviewItemRecord) <= compositor_session.REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES,
+        .keeps_snapshot_state_within_ceilings = @sizeOf(compositor_session.SessionSnapshot) <= compositor_session.SESSION_SNAPSHOT_SIZE_CEILING_BYTES and
+            @sizeOf(compositor_session.CheckpointStore) <= compositor_session.CHECKPOINT_STORE_SIZE_CEILING_BYTES,
         .uses_window_arena = @hasField(compositor_session.Session, "windows"),
         .uses_review_item_arena = @hasDecl(compositor_session.ReviewItemArena, "reserveIndex"),
         .uses_task_bundle_index = @hasField(compositor_session.Session, "task_bundle_index"),
@@ -310,24 +420,101 @@ pub const indexed_hot_path_tables = .{
         .tracks_active_inbox_chain = @hasField(input_router.Router, "active_inbox_head"),
     },
     .native_ux = .{
-        .uses_flow_arena = @hasField(native_ux.Controller, "flows"),
+        .uses_append_only_flow_log = native_ux.APPEND_ONLY_FLOW_LOG,
+        .uses_compact_flow_lengths = @FieldType(native_ux.FlowRecord, "detail_len") == u8 and
+            @FieldType(native_ux.FlowRecord, "bundle_id_len") == u8,
         .supports_ordered_flow_lookup = @hasDecl(native_ux.Controller, "flowAtOrder"),
     },
     .sync_transport_harness = .{
+        .stores_compact_relay_metadata = sync_transport_harness.COMPACT_RELAY_METADATA and
+            @FieldType(sync_transport_harness.EncryptedPacket, "ciphertext_len") == u16 and
+            @FieldType(sync_transport_harness.BootedOverlayRelayService, "relay_domain_len") == u8 and
+            @FieldType(sync_transport_harness.TransportSession, "relay_domain_len") == u8,
+        .keeps_relay_state_within_ceilings = @sizeOf(sync_transport_harness.EncryptedPacket) <= sync_transport_harness.ENCRYPTED_PACKET_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.SignedEncryptedFrame) <= sync_transport_harness.SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.Relay) <= sync_transport_harness.RELAY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.BootedOverlayRelayService) <= sync_transport_harness.BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport_harness.TransportSession) <= sync_transport_harness.TRANSPORT_SESSION_SIZE_CEILING_BYTES,
         .uses_relay_packet_arena = @hasField(sync_transport_harness.Relay, "packets"),
         .uses_relay_session_index = @hasField(sync_transport_harness.Relay, "session_index"),
     },
     .sync_transport = .{
+        .stores_compact_capture_metadata = sync_transport.COMPACT_CAPTURE_METADATA and
+            @FieldType(sync_transport.CapturedPacket, "len") == u16,
+        .keeps_capture_state_within_ceilings = @sizeOf(sync_transport.CapturedPacket) <= sync_transport.CAPTURED_PACKET_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport.PacketCapture) <= sync_transport.PACKET_CAPTURE_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport.NativeTransportService) <= sync_transport.NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES,
         .uses_packet_capture_arena = @hasDecl(@FieldType(sync_transport.PacketCapture, "packets"), "reserveIndex"),
         .tracks_last_packet_id = @hasField(sync_transport.PacketCapture, "last_packet_id"),
     },
     .device_graph = .{
+        .stores_compact_identity_metadata = device_graph.COMPACT_IDENTITY_METADATA and
+            @FieldType(device_graph.PlatformDeviceRoot, "label_len") == u8 and
+            @FieldType(device_graph.UserRootRecord, "label_len") == u8 and
+            @FieldType(device_graph.DeviceRecord, "label_len") == u8 and
+            @FieldType(device_graph.DeviceRecord, "platform_key_label_len") == u8 and
+            @FieldType(device_graph.Graph, "trusted_device_count") == u8,
+        .keeps_identity_state_within_ceilings = @sizeOf(device_graph.PlatformDeviceRoot) <= device_graph.PLATFORM_DEVICE_ROOT_SIZE_CEILING_BYTES and
+            @sizeOf(device_graph.UserRootRecord) <= device_graph.USER_ROOT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(device_graph.DeviceRecord) <= device_graph.DEVICE_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(device_graph.Graph) <= device_graph.GRAPH_SIZE_CEILING_BYTES,
         .uses_user_root_arena = @hasDecl(@FieldType(device_graph.Graph, "user_roots"), "reserveIndex"),
         .uses_device_arena = @hasDecl(@FieldType(device_graph.Graph, "devices"), "reserveIndex"),
         .tracks_trusted_device_count = @hasField(device_graph.Graph, "trusted_device_count"),
         .rebuilds_loaded_indexes = @hasDecl(device_graph.Graph, "rebuildIndexes"),
     },
     .sync_service = .{
+        .stores_compact_overlay_session_metadata = sync_service.COMPACT_OVERLAY_SESSION_METADATA and
+            @FieldType(sync_service.OverlaySession, "service_identity_len") == u8 and
+            @FieldType(sync_service.OverlaySession, "relay_domain_len") == u8 and
+            @FieldType(sync_service.OverlaySession, "private_service_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "service_identity_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "relay_domain_len") == u8 and
+            @FieldType(sync_service.OverlayRelayFrameResult, "private_service_len") == u8,
+        .keeps_overlay_session_state_within_ceilings = @sizeOf(sync_service.OverlaySession) <= sync_service.OVERLAY_SESSION_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.OverlayRelayFrameResult) <= sync_service.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.Service) <= sync_service.SERVICE_SIZE_CEILING_BYTES,
+        .stores_compact_service_queue_metadata = sync_service.COMPACT_SERVICE_QUEUE_METADATA and
+            @FieldType(sync_service.Service, "outbound_transport_frame_count") == u8 and
+            @FieldType(sync_service.Service, "inbound_transport_frame_count") == u8 and
+            @FieldType(sync_service.Service, "next_outbound_transport_frame_slot_index") == u8 and
+            @FieldType(sync_service.Service, "next_inbound_transport_frame_slot_index") == u8 and
+            @FieldType(sync_service.Service, "active_overlay_session_count") == u8,
+        .stores_compact_replication_result_metadata = sync_service.COMPACT_REPLICATION_SUMMARY_METADATA and
+            sync_service.COMPACT_PEER_REPLICATION_RESULT_METADATA and
+            @FieldType(sync_service.ReplicationSummary, "selected_entry_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "skipped_entry_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "snapshot_count") == u16 and
+            @FieldType(sync_service.ReplicationSummary, "conflict_count") == u8 and
+            @FieldType(sync_service.ReplicationSummary, "transport_frame_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "accepted_frame_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "persisted_object_count") == u8 and
+            @FieldType(sync_service.PeerReplicationResult, "relay_delivery_count") == u32 and
+            @FieldType(sync_service.PeerReplicationResult, "payload_bytes") == u32,
+        .keeps_replication_results_within_ceilings = @sizeOf(sync_service.ReplicationSummary) <= sync_service.REPLICATION_SUMMARY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_service.PeerReplicationResult) <= sync_service.PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES,
+        .stores_compact_sync_record_metadata = sync_state_support.COMPACT_RECORD_METADATA and
+            @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_count") == u8 and
+            @FieldType(sync_state_support.WorkspacePolicy, "selective_prefix_lens") == [sync_state_support.MAX_SELECTIVE_PREFIXES]u8 and
+            @FieldType(sync_state_support.WorkspacePolicy, "relay_domain_len") == u8 and
+            @FieldType(sync_state_support.OverlayRecord, "service_identity_len") == u8 and
+            @FieldType(sync_state_support.OverlayRecord, "private_service_count") == u8 and
+            @FieldType(sync_state_support.OverlayRecord, "private_service_lens") == [sync_state_support.MAX_PRIVATE_SERVICES]u8 and
+            @FieldType(sync_state_support.DatabaseContract, "bundle_id_len") == u8 and
+            @FieldType(sync_state_support.DatabaseContract, "label_len") == u8,
+        .stores_compact_sync_paths = @FieldType(sync_state_support.ReplicaEntry, "path_len") == sync_state_support.SyncPathLength and
+            @FieldType(sync_state_support.ConflictRecord, "path_len") == sync_state_support.SyncPathLength and
+            @FieldType(sync_state_support.ConflictReviewRecord, "path_len") == sync_state_support.SyncPathLength and
+            @FieldType(sync_state_support.TransportFrame, "path_len") == sync_state_support.SyncPathLength,
+        .keeps_sync_records_within_ceilings = @sizeOf(sync_state_support.WorkspacePolicy) <= sync_state_support.WORKSPACE_POLICY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.OverlayRecord) <= sync_state_support.OVERLAY_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.ReplicaEntry) <= sync_state_support.REPLICA_ENTRY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.ConflictRecord) <= sync_state_support.CONFLICT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.ConflictReviewRecord) <= sync_state_support.CONFLICT_REVIEW_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.DatabaseContract) <= sync_state_support.DATABASE_CONTRACT_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.TransportFrame) <= sync_state_support.TRANSPORT_FRAME_SIZE_CEILING_BYTES,
+        .keeps_sync_state_within_ceilings = @sizeOf(sync_state_support.PersistentState) <= sync_state_support.PERSISTENT_STATE_SIZE_CEILING_BYTES and
+            @sizeOf(sync_state_support.ResidentState) <= sync_state_support.RESIDENT_STATE_SIZE_CEILING_BYTES,
         .uses_overlay_session_arena = @hasField(sync_service.Service, "overlay_sessions"),
         .uses_workspace_policy_index = @hasField(sync_service.Service, "workspace_policy_index"),
         .uses_overlay_index = @hasField(sync_service.Service, "overlay_index"),
@@ -371,6 +558,12 @@ pub const indexed_hot_path_tables = .{
             @hasField(@FieldType(sync_state_support.PersistentState, "database_contracts"), "next_unclaimed_index"),
     },
     .sync_adapters = .{
+        .stores_compact_document_log_metadata = sync_adapters.COMPACT_DOCUMENT_LOG_METADATA and
+            @FieldType(sync_adapters.DocumentOperation, "text_len") == u8 and
+            @FieldType(sync_adapters.DocumentOperationLog, "operation_count") == u8 and
+            @FieldType(sync_adapters.DocumentOperationLog, "clock_count") == u8,
+        .keeps_document_log_state_within_ceilings = @sizeOf(sync_adapters.DocumentOperation) <= sync_adapters.DOCUMENT_OPERATION_SIZE_CEILING_BYTES and
+            @sizeOf(sync_adapters.DocumentOperationLog) <= sync_adapters.DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES,
         .uses_transport_frame_arena = @hasField(sync_adapters.TransportQueue, "frames"),
         .uses_transport_frame_target_index = @hasField(sync_adapters.TransportQueue, "target_index"),
         .uses_transport_frame_path_index = @hasField(sync_adapters.TransportQueue, "path_index"),
