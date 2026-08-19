@@ -10,6 +10,12 @@ const units = @import("../core/units.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
+const root = @import("root");
+
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 const x86 = if (builtin.target.os.tag == .freestanding)
     @import("../../arch/x86.zig")
@@ -305,13 +311,15 @@ fn mappingSlotAddressSpaceId(slot: *const MappingSlot) u64 {
     return slot.mapping.address_space_id;
 }
 
-const MappingArena = indexed_arena.PagedIndexedArena(
+pub const MappingArena = indexed_arena.PagedIndexedArena(
     MappingSlot,
     task_runtime.MAX_TASKS,
     1,
     MAPPING_INDEX_CAPACITY,
     mappingSlotAddressSpaceId,
 );
+const heap_backed_mappings = builtin.target.os.tag == .freestanding;
+const MappingArenaBacking = if (heap_backed_mappings) ?*MappingArena else MappingArena;
 
 pub const MappingHandle = MappingArena.Handle;
 
@@ -350,7 +358,45 @@ pub const Executor = struct {
     last_fault_error_code: u32 = 0,
     user_page_fault_count: u64 = 0,
     active_nx_probe_target: NxProbeTarget = if (include_verification_evidence) 0 else {},
-    mappings: MappingArena = MappingArena.init(),
+    mappings: MappingArenaBacking = if (heap_backed_mappings) null else MappingArena.init(),
+
+    comptime {
+        if (heap_backed_mappings and @sizeOf(@This()) > units.kibibytes(1)) {
+            @compileError("heap-backed userspace executors exceed their compact resident layout");
+        }
+    }
+
+    fn mappingArena(self: *Executor) ?*MappingArena {
+        if (comptime heap_backed_mappings) return self.mappings;
+        return &self.mappings;
+    }
+
+    fn mappingArenaConst(self: *const Executor) ?*const MappingArena {
+        if (comptime heap_backed_mappings) return self.mappings;
+        return &self.mappings;
+    }
+
+    fn ensureMappingArena(self: *Executor) error{OutOfMemory}!*MappingArena {
+        if (self.mappingArena()) |mappings| return mappings;
+        if (comptime heap_backed_mappings) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(MappingArena)) orelse return error.OutOfMemory;
+            const mappings: *MappingArena = @ptrCast(@alignCast(allocation));
+            initializeMappingArena(mappings);
+            self.mappings = mappings;
+            return mappings;
+        }
+        return &self.mappings;
+    }
+
+    fn releaseMappingArena(self: *Executor) void {
+        if (comptime heap_backed_mappings) {
+            if (self.mappings) |mappings| {
+                @memset(std.mem.asBytes(mappings), 0);
+                kernel_memory.kfree(@ptrCast(mappings));
+                self.mappings = null;
+            }
+        }
+    }
 
     pub fn init(self: *Executor) void {
         if (builtin.target.os.tag != .freestanding) return;
@@ -406,7 +452,9 @@ pub const Executor = struct {
         const resolution = self.findMappingWithHandle(event.address_space_id) orelse return;
         const mapping = resolution.entry;
         if (self.active_task_id != 0 and self.active_mapping == mapping) {
-            const active_slot = self.mappings.getByHandle(self.active_mapping_handle) orelse
+            const mappings = self.mappingArena() orelse
+                native_util.impossibleByInvariant("active userspace mapping has no arena");
+            const active_slot = mappings.getByHandle(self.active_mapping_handle) orelse
                 native_util.impossibleByInvariant("active userspace mapping has no live arena handle");
             if (&active_slot.mapping != mapping) {
                 native_util.impossibleByInvariant("active userspace mapping handle points at a different slot");
@@ -420,7 +468,8 @@ pub const Executor = struct {
     }
 
     pub fn materializedCount(self: *const Executor) usize {
-        return self.mappings.countInUse();
+        const mappings = self.mappingArenaConst() orelse return 0;
+        return mappings.countInUse();
     }
 
     pub fn reset(self: *Executor) void {
@@ -751,8 +800,9 @@ pub const Executor = struct {
             return resolution;
         }
 
-        const handle = self.mappings.reserveHandle(address_space.id) orelse return error.MappingTableFull;
-        const slot = self.mappings.getByHandle(handle) orelse
+        const mappings = try self.ensureMappingArena();
+        const handle = mappings.reserveHandle(address_space.id) orelse return error.MappingTableFull;
+        const slot = mappings.getByHandle(handle) orelse
             native_util.impossibleByInvariant("reserved userspace mapping handle is not live");
         const entry = &slot.mapping;
         entry.* = .{
@@ -767,7 +817,7 @@ pub const Executor = struct {
         for (address_space.regions[0..address_space.region_count]) |region| {
             switch (region.kind) {
                 .load_segment => try mapLoadRegion(&entry.address_space.?, region, image.elf_file),
-                .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, region.size_bytes, region.access),
+                .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, @as(usize, region.size_bytes), region.access),
             }
         }
 
@@ -790,14 +840,15 @@ pub const Executor = struct {
     }
 
     fn findMappingWithHandle(self: *Executor, address_space_id: u64) ?MappingResolution {
-        const slot_index = self.mappings.slotIndexOf(address_space_id) orelse return null;
-        const slot = self.mappings.slotAt(slot_index);
+        const mappings = self.mappingArena() orelse return null;
+        const slot_index = mappings.slotIndexOf(address_space_id) orelse return null;
+        const slot = mappings.slotAt(slot_index);
         const entry = &slot.mapping;
         if (entry.state != .live and entry.state != .retire_pending) {
             native_util.impossibleByInvariant("executor mapping index points at a non-live mapping");
         }
         if (entry.address_space_id != address_space_id) native_util.impossibleByInvariant("executor mapping index points at the wrong mapping");
-        const handle = self.mappings.handleForIndex(slot_index) orelse
+        const handle = mappings.handleForIndex(slot_index) orelse
             native_util.impossibleByInvariant("executor mapping index points at an unclaimed slot");
         return .{
             .entry = entry,
@@ -806,7 +857,8 @@ pub const Executor = struct {
     }
 
     fn findMappingByHandle(self: *Executor, handle: MappingHandle, expected_address_space_id: u64) ?*MappingEntry {
-        const slot = self.mappings.getByHandle(handle) orelse return null;
+        const mappings = self.mappingArena() orelse return null;
+        const slot = mappings.getByHandle(handle) orelse return null;
         const entry = &slot.mapping;
         if (entry.state != .live) return null;
         if (entry.address_space_id != expected_address_space_id) return null;
@@ -826,31 +878,36 @@ pub const Executor = struct {
     }
 
     fn releaseMapping(self: *Executor, handle: MappingHandle) void {
-        const slot = self.mappings.getByHandle(handle) orelse return;
+        const mappings = self.mappingArena() orelse return;
+        const slot = mappings.getByHandle(handle) orelse return;
         const entry = &slot.mapping;
         if (entry.address_space) |*space| {
             freestanding.paging.destroyUserAddressSpace(space) catch
                 native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
         }
-        if (!self.mappings.removeHandle(handle)) {
+        if (!mappings.removeHandle(handle)) {
             native_util.impossibleByInvariant("live userspace mapping disappeared during release");
         }
     }
 
     fn releaseAllMappings(self: *Executor) void {
-        const claimed_count = self.mappings.claimedCount();
+        const mappings = self.mappingArena() orelse return;
+        const claimed_count = mappings.claimedCount();
         var slot_index: usize = 0;
         while (slot_index < claimed_count) : (slot_index += 1) {
-            const handle = self.mappings.handleForIndex(slot_index) orelse continue;
+            const handle = mappings.handleForIndex(slot_index) orelse continue;
             self.releaseMapping(handle);
         }
+        self.releaseMappingArena();
     }
 
     fn releaseRetiredMappingAfterHandoff(self: *Executor, completed_mapping_handle: MappingHandle) void {
         if (self.active_task_id != 0) {
             native_util.impossibleByInvariant("cannot release a userspace mapping while an address space is active");
         }
-        const slot = self.mappings.getByHandle(completed_mapping_handle) orelse
+        const mappings = self.mappingArena() orelse
+            native_util.impossibleByInvariant("completed userspace mapping has no arena");
+        const slot = mappings.getByHandle(completed_mapping_handle) orelse
             native_util.impossibleByInvariant("completed userspace mapping handle is no longer live");
         if (slot.mapping.state == .retire_pending) self.releaseMapping(completed_mapping_handle);
     }
@@ -862,6 +919,13 @@ pub const Executor = struct {
         self.last_fault_error_code = 0;
     }
 };
+
+fn initializeMappingArena(mappings: *MappingArena) void {
+    @memset(std.mem.asBytes(mappings), 0);
+    const free_no_index = indexed_arena.reusableNoIndex(MappingArena.slot_capacity);
+    @memset(mappings.free_next[0..], free_no_index);
+    mappings.free_head = free_no_index;
+}
 
 fn prepareMappingDispatchMetadata(
     owner_task_id: u64,
@@ -1292,7 +1356,7 @@ fn addressSpaceAllowsExecution(address_space: *const task_runtime.AddressSpaceRe
     const address64: u64 = address;
     for (address_space.regions[0..address_space.region_count]) |region| {
         if (region.kind != .load_segment or !region.access.execute) continue;
-        const region_end = std.math.add(u64, region.virtual_address, region.size_bytes) catch continue;
+        const region_end = std.math.add(u64, region.virtual_address, @as(u64, region.size_bytes)) catch continue;
         if (address64 >= region.virtual_address and address64 < region_end) return true;
     }
     return false;
@@ -1384,7 +1448,6 @@ fn recordUserPageFault(self: *Executor, task_id: u64, address_space_id: u64, fau
 
 fn publishRootActiveTaskId(task_id: u64) void {
     if (builtin.target.os.tag != .freestanding) return;
-    const root = @import("root");
     if (@hasDecl(root, "publishUserspaceActiveTaskId")) {
         root.publishUserspaceActiveTaskId(task_id);
     }
@@ -1767,6 +1830,23 @@ test "executor runtime binding has one owner and compare-release semantics" {
 
     try std.testing.expect(executor.claimRuntimeBinding(&second_owner, &second_runtime));
     try std.testing.expect(executor.releaseRuntimeBinding(&second_owner, &second_runtime));
+}
+
+test "zero-initialized mapping arenas preserve generational reuse" {
+    var mappings: MappingArena = undefined;
+    initializeMappingArena(&mappings);
+
+    const first = mappings.reserveHandle(41).?;
+    mappings.getByHandle(first).?.mapping.address_space_id = 41;
+    try std.testing.expectEqual(@as(usize, 1), mappings.countInUse());
+    try std.testing.expect(mappings.removeHandle(first));
+
+    const replacement = mappings.reserveHandle(42).?;
+    mappings.getByHandle(replacement).?.mapping.address_space_id = 42;
+    try std.testing.expectEqual(first.slotIndex(), replacement.slotIndex());
+    try std.testing.expect(!first.eql(replacement));
+    try std.testing.expect(mappings.getByHandle(first) == null);
+    try std.testing.expect(mappings.getByHandle(replacement) != null);
 }
 
 test "executor retires inactive address spaces with mailbox caches and reuses slots" {

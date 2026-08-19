@@ -307,7 +307,7 @@ fn validateEventLedgerRollover(
         snippet: []const u8,
     }{
         .{ .path = source_path, .source = source, .snippet = "oldest_retained_sequence: u64 = 0" },
-        .{ .path = source_path, .source = source, .snippet = "self.events.slotIndexOf(oldest_sequence)" },
+        .{ .path = source_path, .source = source, .snippet = "backing.event_order_index.head(EVENT_ORDER_KEY)" },
         .{ .path = source_path, .source = source, .snippet = "fn nextOldestSequence(" },
         .{ .path = test_path, .source = test_source, .snippet = "event ledger evicts oldest events instead of jamming past MAX_EVENTS" },
         .{ .path = test_path, .source = test_source, .snippet = "ledger.oldest_retained_sequence" },
@@ -827,6 +827,8 @@ fn validateNuc11tnki5KernelProofSources(
     const timer_path = "src/kernel/timer/timer.zig";
     const qemu_harness_path = "scripts/qemu-harness.sh";
     const kernel_build_path = "build_support/kernel.zig";
+    const bootloader_path = "src/boot/boot_x86_64.S";
+    const kernel_linker_path = "src/arch/x86_64/linker.ld";
     const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
     const production_grub_path = "src/boot/grub-x86_64-kernel.cfg";
     const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
@@ -941,6 +943,14 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (!common.pathExists(io, kernel_build_path)) {
         try common.addError(errors, allocator, "kernel build support is missing: {s}", .{kernel_build_path});
+        return;
+    }
+    if (!common.pathExists(io, bootloader_path)) {
+        try common.addError(errors, allocator, "x86-64 bootloader source is missing: {s}", .{bootloader_path});
+        return;
+    }
+    if (!common.pathExists(io, kernel_linker_path)) {
+        try common.addError(errors, allocator, "x86-64 kernel linker source is missing: {s}", .{kernel_linker_path});
         return;
     }
     if (!common.pathExists(io, qemu_grub_path)) {
@@ -1061,6 +1071,8 @@ fn validateNuc11tnki5KernelProofSources(
     const timer_source = try common.readFileAlloc(allocator, io, timer_path, common.source_file_max_bytes);
     const qemu_harness_source = try common.readFileAlloc(allocator, io, qemu_harness_path, common.source_file_max_bytes);
     const kernel_build_source = try common.readFileAlloc(allocator, io, kernel_build_path, common.source_file_max_bytes);
+    const bootloader_source = try common.readFileAlloc(allocator, io, bootloader_path, common.source_file_max_bytes);
+    const kernel_linker_source = try common.readFileAlloc(allocator, io, kernel_linker_path, common.source_file_max_bytes);
     const qemu_grub_source = try common.readFileAlloc(allocator, io, qemu_grub_path, common.source_file_max_bytes);
     const production_grub_source = try common.readFileAlloc(allocator, io, production_grub_path, common.source_file_max_bytes);
     const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
@@ -1790,6 +1802,40 @@ fn validateNuc11tnki5KernelProofSources(
     for (required_boot_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, handoff_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must remain Multiboot2-only: {s}", .{snippet});
+        }
+    }
+    const required_bootloader_load_contract_snippets = [_][]const u8{
+        "MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS",
+        ".long _start",
+    };
+    for (required_bootloader_load_contract_snippets) |snippet| {
+        if (std.mem.indexOf(u8, bootloader_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86-64 bootloader must retain its explicit Multiboot2 entry contract: {s}", .{snippet});
+        }
+    }
+    const required_kernel_load_contract_snippets = [_][]const u8{
+        "PHDRS",
+        "kernel PT_LOAD FLAGS(6);",
+        "__kernel_start = .;",
+        "__kernel_data_end = .;",
+        "__kernel_end = .;",
+    };
+    for (required_kernel_load_contract_snippets) |snippet| {
+        if (std.mem.indexOf(u8, kernel_linker_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86-64 linker must retain its single contiguous boot payload: {s}", .{snippet});
+        }
+    }
+    if (std.mem.count(u8, kernel_linker_source, ":kernel") != 6) {
+        try common.addError(errors, allocator, "x86-64 linker must bind all six runtime regions to one boot payload", .{});
+    }
+    const retired_bootloader_address_tag_snippets = [_][]const u8{
+        "MULTIBOOT2_HEADER_TAG_ADDRESS",
+        ".long multiboot2_header_start",
+        ".long __kernel_data_end",
+    };
+    for (retired_bootloader_address_tag_snippets) |snippet| {
+        if (std.mem.indexOf(u8, bootloader_source, snippet) != null) {
+            try common.addError(errors, allocator, "x86-64 bootloader must not restore the size-sensitive address-tag relocator path: {s}", .{snippet});
         }
     }
     const required_multiboot2_acpi_snippets = [_][]const u8{
@@ -2927,7 +2973,12 @@ fn validateSecretVaultHardwareProviderBoundary(
         "HardwareProviderUnavailable",
         "self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable",
         "secret.hardware_provider_used = true",
-        "self.secrets.insertIndex(secret_id, .{ .secret = secret })",
+        "if (hardware_backed and !exportable)",
+        "secret.resident_material = false",
+        "secret.value_len = 0",
+        "const slot = &self.secrets[slot_index]",
+        "slot.* = secret",
+        "self.secret_count += 1",
         "secure secret store requires a hardware provider before hardware-backed imports",
     };
     for (store_snippets) |snippet| {

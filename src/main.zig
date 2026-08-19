@@ -1,6 +1,7 @@
 pub const kernel = @import("kernel/boot/entry.zig");
 pub const isr = @import("kernel/interrupts/isr.zig");
 pub const panic = @import("kernel/utils/builtin.zig").panic;
+pub const kernel_memory = @import("kernel/memory/memory.zig");
 pub const session_manager = if (config.isNativeProfile())
     @import("native/session/session_manager.zig")
 else

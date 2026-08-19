@@ -2,11 +2,19 @@
 .align 8
 .equ MULTIBOOT2_HEADER_MAGIC, 0xe85250d6
 .equ MULTIBOOT2_ARCH_I386, 0
+.equ MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS, 3
 multiboot2_header_start:
     .long MULTIBOOT2_HEADER_MAGIC
     .long MULTIBOOT2_ARCH_I386
     .long multiboot2_header_end - multiboot2_header_start
     .long -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT2_ARCH_I386 + (multiboot2_header_end - multiboot2_header_start))
+
+    .short MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS
+    .short 0
+    .long 12
+    .long _start
+    .align 8
+
     .short 0
     .short 0
     .long 8

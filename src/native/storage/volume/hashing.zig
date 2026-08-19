@@ -14,7 +14,7 @@ pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) volume_error
     hash = hashBytes(hash, &record.path_index.root_address);
 
     hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.mutation_log.entry_mutation_count));
-    for (record.mutation_log.entry_mutations[0..record.mutation_log.entry_mutation_count]) |mutation| {
+    for (record.mutation_log.entriesConst()[0..record.mutation_log.entry_mutation_count]) |mutation| {
         hash = native_util.fnv1a64AppendU32LittleEndian(hash, mutation.generation);
         hash = hashEntry(hash, mutation.entry);
     }

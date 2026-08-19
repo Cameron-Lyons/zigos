@@ -38,7 +38,7 @@ fn bundleIndexKey(bundle_id: []const u8) u64 {
     return if (hash == 0) 1 else hash;
 }
 
-fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot(BUNDLE_INDEX_CAPACITY) {
+fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
     for (archive.artifacts, 0..) |artifact, artifact_index| {

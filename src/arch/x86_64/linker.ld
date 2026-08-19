@@ -1,5 +1,10 @@
 ENTRY(_start)
 
+PHDRS
+{
+    kernel PT_LOAD FLAGS(6);
+}
+
 SECTIONS
 {
     . = 1M;
@@ -16,7 +21,7 @@ SECTIONS
         *(.text.*)
         . = ALIGN(4K);
         __kernel_text_end = .;
-    }
+    } :kernel
 
     .rodata : ALIGN(4K)
     {
@@ -31,7 +36,7 @@ SECTIONS
         *(.gcc_except_table.*)
         . = ALIGN(4K);
         __kernel_rodata_end = .;
-    }
+    } :kernel
     __kernel_measure_end = .;
 
     .zigos_userspace_archive : ALIGN(4K)
@@ -40,7 +45,7 @@ SECTIONS
         *(.rodata.zigos_userspace_archive)
         . = ALIGN(4K);
         __kernel_archive_end = .;
-    }
+    } :kernel
 
     .relro : ALIGN(4K)
     {
@@ -51,7 +56,7 @@ SECTIONS
         *(.got.*)
         . = ALIGN(4K);
         __kernel_relro_end = .;
-    }
+    } :kernel
 
     .data : ALIGN(4K)
     {
@@ -60,7 +65,7 @@ SECTIONS
         *(.data.*)
         . = ALIGN(4K);
         __kernel_data_end = .;
-    }
+    } :kernel
 
     .bss : ALIGN(4K)
     {
@@ -70,7 +75,7 @@ SECTIONS
         *(.bss.*)
         . = ALIGN(4K);
         __kernel_bss_end = .;
-    }
+    } :kernel
 
     __kernel_end = .;
 

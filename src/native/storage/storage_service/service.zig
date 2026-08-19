@@ -382,7 +382,7 @@ pub const StorageCore = struct {
     ) SharedPayloadError!object_store.PayloadTransferSummary {
         const descriptor = try transfer.table.descriptor(transfer.object_id);
         const blob_record = self.versionBlob(version_record) orelse return error.BlobNotFound;
-        if (descriptor.size_bytes != transfer.bytes.len or transfer.bytes.len < blob_record.payload_len) {
+        if (descriptor.size_bytes != transfer.bytes.len or transfer.bytes.len < blob_record.payloadLen()) {
             return error.SharedMemorySizeMismatch;
         }
         if (descriptor.owner_task_id != transfer.consumer_task_id.raw()) return error.PermissionDenied;

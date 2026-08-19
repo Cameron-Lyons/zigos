@@ -125,7 +125,7 @@ fn executableImageFromArtifact(artifact: anytype) task_runtime.ExecutableImageSp
         .stack_size_bytes = artifact.stack_size_bytes,
         .file_size_bytes = artifact.file_size_bytes,
         .file_sha256 = artifact.file_sha256,
-        .segment_count = artifact.segment_count,
+        .segment_count = @intCast(artifact.segment_count),
     };
 
     var index: usize = 0;

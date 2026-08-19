@@ -17,8 +17,8 @@ const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 const record_magic = "ZGSYNCR";
-const record_version: u16 = 7;
-const record_prefix = "state/v7/";
+const record_version: u16 = 8;
+const record_prefix = "state/v8/";
 const transport_cursor_path = record_prefix ++ "qc";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
@@ -434,8 +434,8 @@ fn encodeWorkspacePolicy(buffer: []u8, policy: *const state_support.WorkspacePol
     try writeText(&writer, policy.relayDomainSlice());
     try writer.writeU16(@intCast(policy.selective_prefix_count));
     var prefix_index: usize = 0;
-    while (prefix_index < policy.selective_prefix_count) : (prefix_index += 1) {
-        try writeText(&writer, policy.selective_prefixes[prefix_index][0..policy.selective_prefix_lens[prefix_index]]);
+    while (prefix_index < @as(usize, policy.selective_prefix_count)) : (prefix_index += 1) {
+        try writeText(&writer, policy.selective_prefixes[prefix_index][0..@as(usize, policy.selective_prefix_lens[prefix_index])]);
     }
     try writer.writeByte(@intFromBool(policy.require_shared_access));
     return buffer[0..writer.offset];
@@ -487,8 +487,8 @@ fn encodeOverlay(buffer: []u8, overlay: *const state_support.OverlayRecord) Erro
     try writer.writeByte(@intFromBool(overlay.remote_access_enabled));
     try writer.writeU16(@intCast(overlay.private_service_count));
     var service_index: usize = 0;
-    while (service_index < overlay.private_service_count) : (service_index += 1) {
-        try writeText(&writer, overlay.private_services[service_index][0..overlay.private_service_lens[service_index]]);
+    while (service_index < @as(usize, overlay.private_service_count)) : (service_index += 1) {
+        try writeText(&writer, overlay.private_services[service_index][0..@as(usize, overlay.private_service_lens[service_index])]);
     }
     return buffer[0..writer.offset];
 }
@@ -603,7 +603,7 @@ fn decodeWorkspacePolicy(resident: *state_support.ResidentState, reader: *Cursor
     try readTextInto(reader, &policy.relay_domain, &policy.relay_domain_len);
     const prefix_count = try reader.readU16();
     if (prefix_count > state_support.MAX_SELECTIVE_PREFIXES) return error.CorruptState;
-    policy.selective_prefix_count = prefix_count;
+    policy.selective_prefix_count = @intCast(prefix_count);
     var prefix_index: usize = 0;
     while (prefix_index < prefix_count) : (prefix_index += 1) {
         try readTextInto(reader, &policy.selective_prefixes[prefix_index], &policy.selective_prefix_lens[prefix_index]);
@@ -658,7 +658,7 @@ fn decodeOverlay(resident: *state_support.ResidentState, reader: *CursorReader) 
     overlay.remote_access_enabled = (try reader.readByte()) != 0;
     const private_service_count = try reader.readU16();
     if (private_service_count > state_support.MAX_PRIVATE_SERVICES) return error.CorruptState;
-    overlay.private_service_count = private_service_count;
+    overlay.private_service_count = @intCast(private_service_count);
     var service_index: usize = 0;
     while (service_index < private_service_count) : (service_index += 1) {
         try readTextInto(reader, &overlay.private_services[service_index], &overlay.private_service_lens[service_index]);
@@ -776,12 +776,12 @@ fn writeText(writer: *CursorWriter, text: []const u8) Error!void {
     try writer.writeBytes(text);
 }
 
-fn readTextInto(reader: *CursorReader, buffer: []u8, out_len: *usize) Error!void {
+fn readTextInto(reader: *CursorReader, buffer: []u8, out_len: anytype) Error!void {
     const text_len = try reader.readU16();
     if (text_len > buffer.len) return error.CorruptState;
     @memset(buffer, 0);
     try reader.readBytes(buffer[0..text_len]);
-    out_len.* = text_len;
+    out_len.* = @intCast(text_len);
 }
 
 fn writeSignature(writer: *CursorWriter, signature: manifest.Signature) Error!void {
@@ -792,9 +792,9 @@ fn writeSignature(writer: *CursorWriter, signature: manifest.Signature) Error!vo
     if (signature.signer.len > state_support.MAX_LABEL_BYTES) return error.StateTooLarge;
     try writer.writeByte(1);
     try writeText(writer, signature.signer);
-    try writer.writeU16(@intCast(signature.public_key_len));
+    try writer.writeByte(signature.public_key_len);
     try writer.writeBytes(signature.public_key[0..signature.public_key_len]);
-    try writer.writeU16(@intCast(signature.value_len));
+    try writer.writeByte(signature.value_len);
     try writer.writeBytes(signature.value[0..signature.value_len]);
 }
 
@@ -802,18 +802,20 @@ fn readSignature(reader: *CursorReader, signer_storage: *[state_support.MAX_LABE
     if ((try reader.readByte()) == 0) return .{};
 
     var signature = manifest.Signature{
-        .format = manifest.SIGNATURE_FORMAT_ED25519,
+        .format = .ed25519,
         .signer = signer_storage[0..0],
     };
     var signer_len: usize = 0;
     try readTextInto(reader, signer_storage, &signer_len);
     signature.signer = signer_storage[0..signer_len];
-    signature.public_key_len = try reader.readU16();
-    if (signature.public_key_len > signature.public_key.len) return error.InvalidStateSignatureEncoding;
-    try reader.readBytes(signature.public_key[0..signature.public_key_len]);
-    signature.value_len = try reader.readU16();
-    if (signature.value_len > signature.value.len) return error.InvalidStateSignatureEncoding;
-    try reader.readBytes(signature.value[0..signature.value_len]);
+    const public_key_len = try reader.readByte();
+    if (public_key_len > signature.public_key.len) return error.InvalidStateSignatureEncoding;
+    signature.public_key_len = @intCast(public_key_len);
+    try reader.readBytes(signature.public_key[0..public_key_len]);
+    const value_len = try reader.readByte();
+    if (value_len > signature.value.len) return error.InvalidStateSignatureEncoding;
+    signature.value_len = @intCast(value_len);
+    try reader.readBytes(signature.value[0..value_len]);
     return signature;
 }
 

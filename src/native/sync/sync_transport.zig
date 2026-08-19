@@ -49,8 +49,18 @@ pub const Error = harness.Error || endpoint.Error || network_driver_task.Error |
 pub const MAX_CAPTURED_PACKETS: usize = 16;
 pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
 pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 3;
+pub const COMPACT_CAPTURE_METADATA = true;
+pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
+pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_880;
+pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_104;
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PacketTooLarge);
 const NativeFrameReader = binary_cursor.Reader(Error, error.NativeTransportMalformedFrame);
+
+comptime {
+    if (network_driver_task.MAX_NATIVE_FRAME_BYTES > std.math.maxInt(u16)) {
+        @compileError("native captured frame length no longer fits compact metadata");
+    }
+}
 
 pub const NativeTransportAbi = struct {
     pub const magic = [_]u8{ 'Z', 'G', 'S', 'T' };
@@ -135,11 +145,17 @@ fn sameRingPlan(left: intel_i225.RingPlan, right: intel_i225.RingPlan) bool {
 pub const CapturedPacket = struct {
     in_use: bool = false,
     packet_id: u64 = 0,
-    len: usize = 0,
+    len: u16 = 0,
     bytes: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES,
 
     pub fn slice(self: *const CapturedPacket) []const u8 {
-        return self.bytes[0..self.len];
+        return self.bytes[0..@as(usize, self.len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > CAPTURED_PACKET_SIZE_CEILING_BYTES) {
+            @compileError("captured packet exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -171,7 +187,7 @@ pub const PacketCapture = struct {
         };
         const slot = &self.packets.slots[slot_index];
         slot.packet_id = packet_id;
-        slot.len = frame.len;
+        slot.len = @intCast(frame.len);
         @memcpy(slot.bytes[0..frame.len], frame);
         self.last_packet_id = packet_id;
         self.captured_count += 1;
@@ -192,6 +208,12 @@ pub const PacketCapture = struct {
         self.next_packet_id +%= 1;
         if (self.next_packet_id == 0) self.next_packet_id = 1;
         return packet_id;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > PACKET_CAPTURE_SIZE_CEILING_BYTES) {
+            @compileError("packet capture exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -264,6 +286,16 @@ pub const NativeTransportService = struct {
 
     pub fn init() NativeTransportService {
         return .{};
+    }
+
+    pub fn deinit(self: *NativeTransportService) void {
+        self.endpoints.deinit();
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES) {
+            @compileError("native transport service exceeds its compact size ceiling");
+        }
     }
 
     pub fn bindTrustedDeviceGraph(self: *NativeTransportService, graph: *const device_graph.Graph) void {
@@ -551,10 +583,10 @@ pub const NativeTransportService = struct {
             return error.NativeTransportFrameMissing;
         message.sender_task_id = received.sender_task_id;
         message.correlation_id = received.correlation_id;
-        message.attached_capability_id = received.attached_capability_id;
+        message.attached_capability_id = received.attached_capability_id orelse ids.CapabilityId.zero;
         message.move_attached_capability = received.move_attached_capability;
         message.flags = received.flags;
-        message.len = received.len;
+        message.len = @intCast(received.len);
         return message;
     }
 
@@ -709,7 +741,7 @@ pub fn decodeNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
         .capability_id = capability_id,
         .source_device = .{ .kind = source_kind, .serial = source_serial },
         .target_device = .{ .kind = target_kind, .serial = target_serial },
-        .ciphertext_len = ciphertext.len,
+        .ciphertext_len = ciphertext_len,
         .ciphertext = [_]u8{0} ** MAX_PACKET_BYTES,
         .payload_digest = payload_digest[0..32].*,
         .encrypted = encrypted,
@@ -1611,4 +1643,14 @@ test "native sync transport falls back through booted relay and encrypts object 
     try std.testing.expectEqual(@as(u64, 0), connection.next_sequence);
     try std.testing.expectEqual(accepted_before_exhaustion, relay_service.accepted_packets);
     try std.testing.expectEqual(fallbacks_before_exhaustion, native_transport.relay_fallback_count);
+}
+
+test "compact capture metadata preserves maximum native frames" {
+    const frame = [_]u8{0xA5} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
+    var capture = PacketCapture{};
+    try capture.record(&frame);
+
+    const captured = capture.lastPtr().?;
+    try std.testing.expectEqual(@as(u16, network_driver_task.MAX_NATIVE_FRAME_BYTES), captured.len);
+    try std.testing.expectEqualSlices(u8, &frame, captured.slice());
 }

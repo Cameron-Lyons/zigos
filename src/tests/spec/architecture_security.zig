@@ -149,7 +149,7 @@ pub fn explicitGrantsRequireAuthority() !void {
         .publisher = "zigos.spec",
         .requested_permissions = &bundle_requests,
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-spec-bundle",
         },
     };
@@ -337,7 +337,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
             .entry = "app.typed.launcher",
         },
     });
-    runtime_service_instance.checkpoint(12);
+    try runtime_service_instance.checkpoint(12);
     _ = try runtime.createTask(.{
         .owner = spec_support.app(31),
         .component_class = .app_component,
@@ -360,7 +360,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
         .components = &.{.{ .id = "accounting-ui", .entry = "app.accounting.ui" }},
         .assets = &.{.{ .path = "assets/accounting/icon.svg", .content_type = "image/svg+xml" }},
         .signature = .{
-            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .format = .ed25519,
             .signer = "zigos-spec-app",
         },
     };

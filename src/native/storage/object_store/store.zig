@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../../core/crypto_hash.zig");
@@ -6,6 +7,10 @@ const indexed_arena = @import("../../core/indexed_arena.zig");
 const manifest = @import("../../policy/manifest.zig");
 const native_util = @import("../../core/util.zig");
 const signing = @import("../../core/signing.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../../kernel/memory/memory.zig")
+else
+    struct {};
 
 pub const MAX_OBJECTS: usize = 192;
 pub const MAX_VERSIONS: usize = 768;
@@ -18,6 +23,8 @@ pub const BlobChunkSlotIndex = u16;
 pub const VersionBlobSlotIndex = u16;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
+pub const MAX_INLINE_PAYLOAD_CHUNKS: usize = 2;
+pub const MAX_INLINE_PAYLOAD_BYTES: usize = MAX_CHUNK_BYTES * MAX_INLINE_PAYLOAD_CHUNKS;
 pub const MAX_VERSION_PARENTS: usize = 2;
 pub const MAX_OBJECT_QUERY_RESULTS: usize = 16;
 pub const MAX_OBJECT_HISTORY_RESULTS: usize = 16;
@@ -30,6 +37,30 @@ const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
 const CHUNK_INDEX_CAPACITY: usize = MAX_CHUNKS * 2;
 const BLOB_PAGE_SIZE: usize = 64;
 const CHUNK_PAGE_SIZE: usize = 32;
+const heap_backed_chunk_payloads = builtin.target.os.tag == .freestanding;
+const ChunkPayload = if (heap_backed_chunk_payloads) ?[*]u8 else [MAX_CHUNK_BYTES]u8;
+
+comptime {
+    if (MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_CONTENT_TYPE_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("object metadata text exceeds its compact length fields");
+    }
+    if (MAX_PAYLOAD_BYTES > std.math.maxInt(u32)) {
+        @compileError("object payload capacity exceeds its compact length field");
+    }
+}
+
+comptime {
+    if (MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_CONTENT_TYPE_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("object metadata text exceeds its compact length fields");
+    }
+    if (MAX_PAYLOAD_BYTES > std.math.maxInt(u32)) {
+        @compileError("object payload capacity exceeds its compact length field");
+    }
+}
 
 pub const StoreConfig = struct {
     max_objects: usize = MAX_OBJECTS,
@@ -74,9 +105,9 @@ pub const VersionAddress = crypto_hash.Digest;
 
 pub const SignedMetadata = struct {
     signature: manifest.Signature = .{},
-    label_len: usize = 0,
+    label_len: u8 = 0,
     label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
-    content_type_len: usize = 0,
+    content_type_len: u8 = 0,
     content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
     created_at_ticks: u64 = 0,
 
@@ -90,17 +121,17 @@ pub const SignedMetadata = struct {
             .signature = signature,
             .created_at_ticks = created_at_ticks,
         };
-        metadata.label_len = native_util.copyTextExact(&metadata.label, label) catch return error.LabelTooLong;
-        metadata.content_type_len = native_util.copyTextExact(&metadata.content_type, content_type) catch return error.ContentTypeTooLong;
+        metadata.label_len = @intCast(native_util.copyTextExact(&metadata.label, label) catch return error.LabelTooLong);
+        metadata.content_type_len = @intCast(native_util.copyTextExact(&metadata.content_type, content_type) catch return error.ContentTypeTooLong);
         return metadata;
     }
 
     pub fn labelSlice(self: *const SignedMetadata) []const u8 {
-        return self.label[0..@min(self.label_len, self.label.len)];
+        return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
     }
 
     pub fn contentTypeSlice(self: *const SignedMetadata) []const u8 {
-        return self.content_type[0..@min(self.content_type_len, self.content_type.len)];
+        return self.content_type[0..@min(@as(usize, self.content_type_len), self.content_type.len)];
     }
 
     pub fn isSigned(self: *const SignedMetadata) bool {
@@ -330,20 +361,66 @@ pub const ChunkRef = struct {
 pub const BlobRecord = struct {
     address: BlobAddress,
     merkle_root: BlobAddress,
-    payload_len: usize,
+    payload_len: u32,
     chunk_count: u16,
     chunk_slot_indexes: [MAX_BLOB_CHUNKS]BlobChunkSlotIndex,
     ref_count: u16,
     manifest_verified: bool = false,
+
+    pub fn payloadLen(self: *const BlobRecord) usize {
+        return @intCast(self.payload_len);
+    }
 };
 
 pub const ChunkRecord = struct {
     address: ChunkAddress,
     payload_len: u16,
-    payload: [MAX_CHUNK_BYTES]u8,
+    payload: ChunkPayload,
 
     pub fn chunkSlice(self: *const ChunkRecord) []const u8 {
-        return self.payload[0..@as(usize, @intCast(self.payload_len))];
+        const payload_len: usize = @intCast(self.payload_len);
+        if (payload_len > MAX_CHUNK_BYTES) {
+            native_util.impossibleByInvariant("object store chunk payload length fits its backing");
+        }
+        if (comptime heap_backed_chunk_payloads) {
+            if (payload_len == 0) return "";
+            const payload = self.payload orelse
+                native_util.impossibleByInvariant("live object store chunks retain payload backing");
+            return payload[0..payload_len];
+        }
+        return self.payload[0..payload_len];
+    }
+
+    fn writePayload(self: *ChunkRecord, bytes: []const u8) Error!void {
+        if (bytes.len > MAX_CHUNK_BYTES) return error.PayloadTooLarge;
+        if (comptime heap_backed_chunk_payloads) {
+            if (self.payload != null) {
+                native_util.impossibleByInvariant("object store chunk payload backing is assigned once");
+            }
+            if (bytes.len != 0) {
+                const allocation = kernel_memory.kmalloc(bytes.len) orelse return error.NoSpaceLeft;
+                const payload: [*]u8 = @ptrCast(allocation);
+                @memcpy(payload[0..bytes.len], bytes);
+                self.payload = payload;
+            }
+        } else {
+            @memcpy(self.payload[0..bytes.len], bytes);
+            @memset(self.payload[bytes.len..], 0);
+        }
+        self.payload_len = @intCast(bytes.len);
+    }
+
+    fn releasePayload(self: *ChunkRecord) void {
+        if (comptime heap_backed_chunk_payloads) {
+            if (self.payload) |payload| {
+                @memset(payload[0..@as(usize, @intCast(self.payload_len))], 0);
+                kernel_memory.kfree(@ptrCast(payload));
+                self.payload = null;
+            }
+        } else {
+            @memset(&self.payload, 0);
+        }
+        self.payload_len = 0;
     }
 };
 
@@ -357,6 +434,7 @@ pub const Error = error{
     ObjectTableFull,
     ParentMismatch,
     PayloadTooLarge,
+    PayloadRequiresStreaming,
     SigningFailed,
     TypeMismatch,
     UnsignedMetadata,
@@ -426,9 +504,18 @@ pub const ChunkSlot = struct {
     chunk: ChunkRecord = .{
         .address = crypto_hash.zero_digest,
         .payload_len = 0,
-        .payload = [_]u8{0} ** MAX_CHUNK_BYTES,
+        .payload = if (heap_backed_chunk_payloads) null else [_]u8{0} ** MAX_CHUNK_BYTES,
     },
 };
+
+comptime {
+    if (heap_backed_chunk_payloads and @sizeOf(ChunkRecord) > 48) {
+        @compileError("heap-backed object store chunk records exceed their compact layout");
+    }
+    if (heap_backed_chunk_payloads and @sizeOf(ChunkSlot) > 56) {
+        @compileError("heap-backed object store chunk slots exceed their compact layout");
+    }
+}
 
 fn objectSlotId(slot: *const ObjectSlot) ids.ObjectId {
     return slot.object.id;
@@ -459,11 +546,13 @@ pub const Store = StoreWith(.{});
 fn ObjectTypeIndexWith(comptime capacity: usize) type {
     return struct {
         const Self = @This();
+        const SlotIndex = indexed_arena.ReusableIndex(capacity);
+        const no_slot = indexed_arena.reusableNoIndex(capacity);
 
-        heads: [OBJECT_TYPE_COUNT]usize = [_]usize{indexed_arena.no_index} ** OBJECT_TYPE_COUNT,
-        tails: [OBJECT_TYPE_COUNT]usize = [_]usize{indexed_arena.no_index} ** OBJECT_TYPE_COUNT,
-        counts: [OBJECT_TYPE_COUNT]usize = [_]usize{0} ** OBJECT_TYPE_COUNT,
-        next_by_slot: [capacity]usize = [_]usize{indexed_arena.no_index} ** capacity,
+        heads: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{no_slot} ** OBJECT_TYPE_COUNT,
+        tails: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{no_slot} ** OBJECT_TYPE_COUNT,
+        counts: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{0} ** OBJECT_TYPE_COUNT,
+        next_by_slot: [capacity]SlotIndex = [_]SlotIndex{no_slot} ** capacity,
 
         pub fn init() Self {
             return .{};
@@ -474,30 +563,35 @@ fn ObjectTypeIndexWith(comptime capacity: usize) type {
         }
 
         pub fn count(self: *const Self, object_type: ObjectType) usize {
-            return self.counts[objectTypeBucket(object_type)];
+            return @intCast(self.counts[objectTypeBucket(object_type)]);
         }
 
         pub fn head(self: *const Self, object_type: ObjectType) usize {
-            return self.heads[objectTypeBucket(object_type)];
+            return publicIndex(self.heads[objectTypeBucket(object_type)]);
         }
 
         pub fn next(self: *const Self, slot_index: usize) usize {
             if (slot_index >= capacity) return indexed_arena.no_index;
-            return self.next_by_slot[slot_index];
+            return publicIndex(self.next_by_slot[slot_index]);
         }
 
         pub fn append(self: *Self, object_type: ObjectType, slot_index: usize) bool {
             if (slot_index >= capacity) return false;
             const bucket = objectTypeBucket(object_type);
-            self.next_by_slot[slot_index] = indexed_arena.no_index;
-            if (self.tails[bucket] == indexed_arena.no_index) {
-                self.heads[bucket] = slot_index;
+            const compact_slot_index: SlotIndex = @intCast(slot_index);
+            self.next_by_slot[slot_index] = no_slot;
+            if (self.tails[bucket] == no_slot) {
+                self.heads[bucket] = compact_slot_index;
             } else {
-                self.next_by_slot[self.tails[bucket]] = slot_index;
+                self.next_by_slot[self.tails[bucket]] = compact_slot_index;
             }
-            self.tails[bucket] = slot_index;
+            self.tails[bucket] = compact_slot_index;
             self.counts[bucket] += 1;
             return true;
+        }
+
+        fn publicIndex(index: SlotIndex) usize {
+            return if (index == no_slot) indexed_arena.no_index else @intCast(index);
         }
     };
 }
@@ -562,7 +656,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         versions: VersionArena = VersionArena.init(),
         blobs: BlobArena = BlobArena.init(),
         chunks: ChunkArena = ChunkArena.init(),
-        payload_read_buffer: [MAX_PAYLOAD_BYTES]u8 = undefined,
+        inline_payload_read_buffer: [MAX_INLINE_PAYLOAD_BYTES]u8 = undefined,
 
         pub fn init() Self {
             return .{};
@@ -593,7 +687,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot_index = 0;
             while (slot_index < self.chunks.next_unclaimed_index) : (slot_index += 1) {
                 const slot = self.chunks.slotAt(slot_index);
-                if (slot.in_use) slot.* = ChunkSlot{};
+                if (slot.in_use) {
+                    slot.chunk.releasePayload();
+                    slot.* = ChunkSlot{};
+                }
             }
             self.chunks.resetRetainingPayloads();
         }
@@ -841,7 +938,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             while (!current_version_id.isZero() and count < output.len) {
                 const version_record = self.versionConst(current_version_id) orelse return error.VersionNotFound;
                 const blob_record = self.versionBlob(version_record) orelse return error.BlobNotFound;
-                output[count] = historyEntryFor(version_record, blob_record.payload_len);
+                output[count] = historyEntryFor(version_record, blob_record.payloadLen());
                 count += 1;
                 current_version_id = version_record.previous_version_id;
             }
@@ -856,10 +953,13 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return model;
         }
 
+        /// Materializes small objects into store-owned scratch memory. Larger objects remain
+        /// available through versionChunkCursor, versionPayloadInto, or shared-memory transfer.
         pub fn versionPayload(self: *Self, version_record: *const VersionRecord) Error![]const u8 {
             const blob_record = try self.checkedVersionBlob(version_record);
-            if (blob_record.payload_len > self.payload_read_buffer.len) return error.PayloadTooLarge;
-            return self.versionPayloadInto(version_record, self.payload_read_buffer[0..blob_record.payload_len]);
+            const payload_len = blob_record.payloadLen();
+            if (payload_len > self.inline_payload_read_buffer.len) return error.PayloadRequiresStreaming;
+            return self.versionPayloadInto(version_record, self.inline_payload_read_buffer[0..payload_len]);
         }
 
         pub fn versionChunkCursor(self: *Self, version_record: *const VersionRecord) Error!VersionChunkCursor {
@@ -877,7 +977,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             out: []u8,
         ) Error!PayloadTransferSummary {
             const blob_record = try self.verifiedBlobManifest(version_record);
-            const payload_len = blob_record.payload_len;
+            const payload_len = blob_record.payloadLen();
             if (out.len < payload_len) return error.PayloadTooLarge;
             var cursor = VersionChunkCursor{
                 .store = self,
@@ -1132,7 +1232,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             while (blob_slot_index < self.blobSlotCapacity()) : (blob_slot_index += 1) {
                 const slot = self.blobSlotAtConst(blob_slot_index);
                 if (!slot.in_use) continue;
-                self.recordBlobPayloadBytes(slot.blob.payload_len);
+                self.recordBlobPayloadBytes(slot.blob.payloadLen());
             }
         }
 
@@ -1177,7 +1277,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot = self.blobSlotAt(slot_index);
             slot.blob.address = address;
             slot.blob.merkle_root = merkle_root;
-            slot.blob.payload_len = payload.len;
+            slot.blob.payload_len = @intCast(payload.len);
             slot.blob.chunk_count = @intCast(chunk_count);
             slot.blob.chunk_slot_indexes = chunk_slot_indexes;
             slot.blob.ref_count = 1;
@@ -1202,9 +1302,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot_index = self.chunks.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
             const slot = self.chunkSlotAt(slot_index);
             slot.chunk.address = address;
-            slot.chunk.payload_len = @intCast(payload.len);
-            @memcpy(slot.chunk.payload[0..payload.len], payload);
-            @memset(slot.chunk.payload[payload.len..], 0);
+            slot.chunk.writePayload(payload) catch |err| {
+                std.debug.assert(self.chunks.removeIndex(slot_index));
+                return err;
+            };
             return slot_index;
         }
 
@@ -1231,7 +1332,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             if (!std.mem.eql(u8, &computeBlobMerkleRoot(live_chunk_refs), &slot.blob.merkle_root)) {
                 return error.CorruptBlob;
             }
-            if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payload_len, live_chunk_refs), &slot.blob.address)) {
+            if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payloadLen(), live_chunk_refs), &slot.blob.address)) {
                 return error.CorruptBlob;
             }
 
@@ -1369,12 +1470,7 @@ fn indexOfFold(haystack: []const u8, needle: []const u8) ?usize {
 }
 
 fn writeMetadata(dest: *SignedMetadata, src: *const SignedMetadata) void {
-    dest.signature.format = src.signature.format;
-    dest.signature.signer = src.signature.signer;
-    dest.signature.public_key_len = src.signature.public_key_len;
-    dest.signature.value_len = src.signature.value_len;
-    dest.signature.public_key = src.signature.public_key;
-    dest.signature.value = src.signature.value;
+    dest.signature = src.signature;
     dest.label_len = src.label_len;
     dest.label = src.label;
     dest.content_type_len = src.content_type_len;
@@ -1503,7 +1599,7 @@ fn parentCount(parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId) u8 {
 }
 
 fn blobManifestMatches(store: anytype, blob_record: BlobRecord, payload_len: usize, chunk_refs: []const ChunkRef) bool {
-    if (blob_record.payload_len != payload_len) return false;
+    if (blob_record.payloadLen() != payload_len) return false;
     const chunk_count: usize = @intCast(blob_record.chunk_count);
     if (chunk_count != chunk_refs.len) return false;
     if (!std.mem.eql(u8, &blob_record.merkle_root, &computeBlobMerkleRoot(chunk_refs))) return false;
@@ -1584,7 +1680,7 @@ test "store reset scrubs live records before retaining arena capacity" {
     try std.testing.expectEqual(@as(usize, 0), store.blobs.countInUse());
     try std.testing.expectEqual(@as(usize, 0), store.chunks.countInUse());
     try std.testing.expect(object_slot.object.id.isZero());
-    try std.testing.expectEqual(@as(usize, 0), version_slot.version.metadata.label_len);
+    try std.testing.expectEqual(@as(u8, 0), version_slot.version.metadata.label_len);
     try std.testing.expectEqual(@as(u16, 0), blob_slot.blob.ref_count);
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 6), chunk_slot.chunk.payload[0..6]);
 }

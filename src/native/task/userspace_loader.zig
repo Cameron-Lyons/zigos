@@ -40,6 +40,23 @@ const TEST_TASK_MEMORY_BYTES: usize = units.kibibytes(4);
 const TEST_TASK_SHARED_MEMORY_BYTES: usize = units.kibibytes(2);
 const copyTextExact = native_util.copyTextExact;
 
+comptime {
+    const byte_capacities = [_]usize{
+        MAX_IMAGES,
+        MAX_BUNDLE_ID_BYTES,
+        MAX_DISPLAY_NAME_BYTES,
+        MAX_PUBLISHER_BYTES,
+        MAX_LABEL_BYTES,
+        MAX_ENTRY_BYTES,
+        task_runtime.MAX_EXECUTABLE_SEGMENTS,
+    };
+    for (byte_capacities) |capacity| {
+        if (capacity > std.math.maxInt(u8)) {
+            @compileError("userspace catalog capacity exceeds its compact field");
+        }
+    }
+}
+
 pub const Error = manifest.ValidationError || component_port.Error || task_runtime.Error || elf_image_inspector.Error || error{
     EmptyLabel,
     EmptyEntry,
@@ -122,21 +139,21 @@ pub const ImageRecord = struct {
     substrate: task_runtime.ExecutionSubstrate,
     artifact_source: ArtifactSource,
     entry_point: u64,
-    loadable_segment_count: u16,
+    loadable_segment_count: u8,
     byte_len: usize,
     bootstrap_mailbox_address: u64,
     file_sha256: crypto_hash.Digest,
     executable_image: task_runtime.ExecutableImageSpec,
     elf_file: embedded_file.File,
-    bundle_id_len: usize,
+    bundle_id_len: u8,
     bundle_id: [MAX_BUNDLE_ID_BYTES]u8,
-    display_name_len: usize,
+    display_name_len: u8,
     display_name: [MAX_DISPLAY_NAME_BYTES]u8,
-    publisher_len: usize,
+    publisher_len: u8,
     publisher: [MAX_PUBLISHER_BYTES]u8,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
-    entry_len: usize,
+    entry_len: u8,
     entry: [MAX_ENTRY_BYTES]u8,
 
     pub fn bundleIdSlice(self: *const ImageRecord) []const u8 {
@@ -183,6 +200,16 @@ pub const Catalog = struct {
 
     pub fn init() Catalog {
         return Catalog{};
+    }
+
+    pub fn initializeAllocated(self: *Catalog) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.next_image_id = 1;
+        self.images.free_head = indexed_arena.reusableNoIndex(MAX_IMAGES);
+    }
+
+    pub fn reset(self: *Catalog) void {
+        self.initializeAllocated();
     }
 
     pub fn register(self: *Catalog, request: ImageRegisterRequest) Error!*const ImageRecord {
@@ -299,11 +326,11 @@ pub const Catalog = struct {
         image.file_sha256 = executable_image.file_sha256;
         image.executable_image = executable_image;
         image.elf_file = elf_file;
-        image.bundle_id_len = copyTextExact(image.bundle_id[0..], request.bundle.bundle_id) catch return error.BundleIdTooLong;
-        image.display_name_len = copyTextExact(image.display_name[0..], request.bundle.display_name) catch return error.DisplayNameTooLong;
-        image.publisher_len = copyTextExact(image.publisher[0..], request.bundle.publisher) catch return error.PublisherTooLong;
-        image.label_len = copyTextExact(image.label[0..], request.initial_component.label) catch return error.InitialComponentLabelTooLong;
-        image.entry_len = copyTextExact(image.entry[0..], request.initial_component.entry) catch return error.InitialComponentEntryTooLong;
+        image.bundle_id_len = @intCast(copyTextExact(image.bundle_id[0..], request.bundle.bundle_id) catch return error.BundleIdTooLong);
+        image.display_name_len = @intCast(copyTextExact(image.display_name[0..], request.bundle.display_name) catch return error.DisplayNameTooLong);
+        image.publisher_len = @intCast(copyTextExact(image.publisher[0..], request.bundle.publisher) catch return error.PublisherTooLong);
+        image.label_len = @intCast(copyTextExact(image.label[0..], request.initial_component.label) catch return error.InitialComponentLabelTooLong);
+        image.entry_len = @intCast(copyTextExact(image.entry[0..], request.initial_component.entry) catch return error.InitialComponentEntryTooLong);
 
         const slot_index = self.images.reserveIndex(image.id) orelse return error.ImageTableFull;
         const slot = &self.images.slots[slot_index];
@@ -329,6 +356,13 @@ pub const Catalog = struct {
         self.next_image_id = nextImageIdAfter(image_id);
     }
 };
+
+test "userspace catalog uses capacity-sized resident metadata" {
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(ImageRecord, "loadable_segment_count")));
+    try std.testing.expectEqual(@as(usize, 728), @sizeOf(ImageRecord));
+    try std.testing.expectEqual(@as(usize, 736), @sizeOf(ImageSlot));
+    try std.testing.expectEqual(@as(usize, 25_160), @sizeOf(Catalog));
+}
 
 fn normalizeImageId(image_id: u64) u64 {
     return if (image_id == 0) 1 else image_id;
@@ -650,6 +684,28 @@ fn signedTestBundle(bundle_id: []const u8, display_name: []const u8) !manifest.B
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
     return bundle;
+}
+
+test "allocated userspace catalog initialization preserves empty catalog invariants" {
+    var catalog: Catalog = undefined;
+    catalog.initializeAllocated();
+
+    try std.testing.expectEqual(@as(usize, 0), catalog.imageCount());
+    const bundle = try signedTestBundle("app.allocated-catalog", "Allocated Catalog");
+    const image_bytes = makeSyntheticElf32ForTest(0x4000_5000, 2, 2);
+    const image = try catalog.registerEmbeddedArtifact(.{
+        .bundle = bundle,
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "main",
+            .entry = "app.main",
+        },
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
+    });
+
+    try std.testing.expectEqual(@as(u64, 1), image.id);
+    try std.testing.expectEqual(image.id, catalog.findById(image.id).?.id);
+    try std.testing.expectEqualStrings(bundle.bundle_id, catalog.findByBundleId(bundle.bundle_id).?.bundleIdSlice());
 }
 
 test "userspace image launch records bundle provenance and isolated process state" {

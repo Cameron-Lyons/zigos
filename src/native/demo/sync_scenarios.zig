@@ -434,6 +434,7 @@ fn proveNativeDriverPacketCapture(
 
     var broker = sync_service.egressBroker(context.capability_table);
     var native_transport = sync_transport.NativeTransportService.init();
+    defer native_transport.deinit();
     var connection = native_transport.openRelay(&broker, .{
         .task_id = context.sync_task_id,
         .principal_id = context.sync_service_principal,

@@ -568,6 +568,10 @@ test "storage volume image reloads the latest persisted state across slot genera
     try std.testing.expectEqual(second.version_id, loaded_store.latestVersion(900).?.id);
     try std.testing.expectEqualStrings("hello again", try loaded_store.versionPayload(loaded_store.latestVersion(900).?));
     try std.testing.expectEqualStrings("zigos-storage-key", loaded_store.latestVersion(900).?.metadata.signature.signer);
+    const loaded_first = loaded_store.version(first.version_id).?;
+    const loaded_second = loaded_store.version(second.version_id).?;
+    try std.testing.expect(loaded_first.metadata.signature.signer.ptr == loaded_second.metadata.signature.signer.ptr);
+    try std.testing.expectEqual(@as(usize, 1 + signer.label.len), storage_volume.testing.signerTextBytes());
     const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "notes").?;
     try std.testing.expectEqual(second.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
 }
@@ -960,6 +964,8 @@ test "storage volume falls back when a partial-sector corruption hits only the n
     try std.testing.expectEqual(generation_one.generation, loaded_generation);
     try std.testing.expectEqual(first.version_id, loaded_store.latestVersion(907).?.id);
     try std.testing.expectEqualStrings("sector-safe-v1", try loaded_store.versionPayload(loaded_store.latestVersion(907).?));
+    try std.testing.expectEqualStrings(signer.label, loaded_store.latestVersion(907).?.metadata.signature.signer);
+    try std.testing.expectEqual(@as(usize, 1 + signer.label.len), storage_volume.testing.signerTextBytes());
 }
 
 test "storage volume gates long-running replay by compacting before record and segment limits" {

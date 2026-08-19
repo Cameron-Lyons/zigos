@@ -208,7 +208,10 @@ pub const ProductionJourneyService = struct {
             response.failure = err;
         };
         if (response.status == .ok and request.control != .recover_system) {
-            self.runtime_service.checkpoint(request.tick);
+            self.runtime_service.checkpoint(request.tick) catch |err| {
+                response.status = statusForProductionJourneyError(err);
+                response.failure = err;
+            };
         }
         self.refreshResponse(&response);
         return response;
@@ -441,7 +444,7 @@ pub const ProductionJourneyService = struct {
         self.document_object_id = entry.object_id.raw();
         self.document_version_id = entry.version_id.raw();
         self.document_payload_bytes = if (self.storage.latestVersion(entry.object_id)) |version|
-            if (self.storage.versionBlob(version)) |blob| blob.payload_len else 0
+            if (self.storage.versionBlob(version)) |blob| blob.payloadLen() else 0
         else
             0;
         _ = try self.dispatchCompositor(.{

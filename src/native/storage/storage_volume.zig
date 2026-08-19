@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const ids = @import("../core/ids.zig");
@@ -12,6 +13,10 @@ const volume_log = @import("volume/log.zig");
 const volume_quota = @import("volume/quota.zig");
 const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/memory/memory.zig")
+else
+    struct {};
 
 pub const sector_size = volume_layout.sector_size;
 pub const slot_sectors = volume_layout.slot_sectors;
@@ -23,10 +28,19 @@ pub const image_bytes = volume_layout.image_bytes;
 pub const max_payload_bytes = volume_layout.max_payload_bytes;
 pub const required_device_sectors = volume_layout.required_device_sectors;
 pub const max_signer_bytes = volume_layout.max_signer_bytes;
+pub const SIGNER_TEXT_POOL_BYTES: usize = 12 * 1024;
 pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
+const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
+const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
+
+comptime {
+    if (SIGNER_TEXT_POOL_BYTES > std.math.maxInt(u16)) {
+        @compileError("signer text pool exceeds its compact length field");
+    }
+}
 
 const data_start_byte = volume_layout.data_start_byte;
 const data_region_bytes = DATA_REGION_BYTES;
@@ -84,7 +98,7 @@ pub const Backend = volume_backend.Backend;
 pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 
 pub const Volume = struct {
-    io_log_buffer: [IO_LOG_WORKSPACE_BYTES]u8 = undefined,
+    io_log_buffer: IoLogWorkspace = if (heap_backed_io_workspace) null else undefined,
     sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size,
     attached_backend_present: bool = false,
     attached_backend_sector_count: u64 = 0,
@@ -92,21 +106,16 @@ pub const Volume = struct {
     attached_backend_write: *const fn (u64, [*]const u8, usize) callconv(.c) bool = volume_backend.unattachedWrite,
     attached_backend_flush: *const fn () callconv(.c) bool = volume_backend.unattachedFlush,
     attached_backend_kind: volume_backend.AttachedBackendKind = .none,
-    version_signers: [object_store.MAX_VERSIONS][max_signer_bytes]u8 =
-        [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_VERSIONS,
-    object_signers: [object_store.MAX_OBJECTS][max_signer_bytes]u8 =
-        [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_OBJECTS,
-    snapshot_signers: [workspace.MAX_SNAPSHOTS][max_signer_bytes]u8 =
-        [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** workspace.MAX_SNAPSHOTS,
+    signer_text_len: u16 = 0,
+    signer_text_pool: [SIGNER_TEXT_POOL_BYTES]u8 = [_]u8{0} ** SIGNER_TEXT_POOL_BYTES,
     workspace_state_hashes: WorkspaceStateHashCache = .{},
 
     pub fn init() Volume {
-        var volume: Volume = undefined;
-        volume.reset();
-        return volume;
+        return .{};
     }
 
     pub fn reset(self: *Volume) void {
+        self.releaseIoLogWorkspace();
         @memset(self.sector_buffer[0..], 0);
         self.attached_backend_present = false;
         self.attached_backend_sector_count = 0;
@@ -114,10 +123,62 @@ pub const Volume = struct {
         self.attached_backend_write = volume_backend.unattachedWrite;
         self.attached_backend_flush = volume_backend.unattachedFlush;
         self.attached_backend_kind = .none;
-        @memset(std.mem.sliceAsBytes(self.version_signers[0..]), 0);
-        @memset(std.mem.sliceAsBytes(self.object_signers[0..]), 0);
-        @memset(std.mem.sliceAsBytes(self.snapshot_signers[0..]), 0);
+        self.resetSignerText();
         self.workspace_state_hashes = .{};
+    }
+
+    fn ioLogWorkspace(self: *Volume) Error![]u8 {
+        if (comptime heap_backed_io_workspace) {
+            if (self.io_log_buffer) |buffer| return buffer[0..IO_LOG_WORKSPACE_BYTES];
+            const allocation = kernel_memory.kmalloc(IO_LOG_WORKSPACE_BYTES) orelse return error.NoSpaceLeft;
+            const buffer: [*]u8 = @ptrCast(allocation);
+            self.io_log_buffer = buffer;
+            return buffer[0..IO_LOG_WORKSPACE_BYTES];
+        }
+        return self.io_log_buffer[0..];
+    }
+
+    fn releaseIoLogWorkspace(self: *Volume) void {
+        if (comptime heap_backed_io_workspace) {
+            if (self.io_log_buffer) |buffer| {
+                @memset(buffer[0..IO_LOG_WORKSPACE_BYTES], 0);
+                kernel_memory.kfree(@ptrCast(buffer));
+                self.io_log_buffer = null;
+            }
+        }
+    }
+
+    fn resetSignerText(self: *Volume) void {
+        self.signer_text_len = 0;
+        @memset(&self.signer_text_pool, 0);
+    }
+
+    fn internSigner(self: *Volume, signer: []const u8) Error![]const u8 {
+        if (signer.len == 0) return "";
+        if (signer.len > max_signer_bytes or signer.len > std.math.maxInt(u8)) {
+            return error.InvalidSignatureEncoding;
+        }
+
+        const used: usize = self.signer_text_len;
+        var offset: usize = 0;
+        while (offset < used) {
+            const stored_len: usize = self.signer_text_pool[offset];
+            const start = offset + 1;
+            const end = start + stored_len;
+            if (end > used) return error.InvalidSignatureEncoding;
+            if (std.mem.eql(u8, self.signer_text_pool[start..end], signer)) {
+                return self.signer_text_pool[start..end];
+            }
+            offset = end;
+        }
+
+        const start = used + 1;
+        const end = start + signer.len;
+        if (end > self.signer_text_pool.len) return error.InvalidSignatureEncoding;
+        self.signer_text_pool[used] = @intCast(signer.len);
+        @memcpy(self.signer_text_pool[start..end], signer);
+        self.signer_text_len = @intCast(end);
+        return self.signer_text_pool[start..end];
     }
 
     pub fn attachBackend(self: *Volume, backend: Backend) void {
@@ -213,6 +274,12 @@ pub const Volume = struct {
     }
 };
 
+comptime {
+    if (heap_backed_io_workspace and @sizeOf(Volume) > 16 * 1024) {
+        @compileError("heap-backed storage volumes exceed their compact resident layout");
+    }
+}
+
 var default_volume = Volume.init();
 
 pub fn defaultVolume() *Volume {
@@ -297,6 +364,7 @@ fn saveIncremental(
     writer: anytype,
 ) Error!PersistResult {
     try ensureWithinProductCapacityEnvelope(store, workspaces);
+    const io_log_buffer = try self.ioLogWorkspace();
     const started_dirty = store.dirtyObjectIds().len != 0 or
         store.dirtyVersionIds().len != 0 or
         workspaces.dirtyWorkspaceIds().len != 0 or
@@ -312,7 +380,7 @@ fn saveIncremental(
     }
     const delta = if (current) |loaded|
         if (can_append)
-            try tryBuildAppendDelta(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
+            try tryBuildAppendDelta(io_log_buffer, loaded.root, store, workspaces, state_hashes)
         else
             null
     else
@@ -338,7 +406,7 @@ fn saveIncremental(
         next_root.compacted_generation = current.?.root.compacted_generation;
         const next_root_sector = volume_root_slot.nextRootSector(current);
 
-        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, self.io_log_buffer[0..delta.?.bytes_len]);
+        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, io_log_buffer[0..delta.?.bytes_len]);
         try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
         try flushWrites(writer);
@@ -350,7 +418,7 @@ fn saveIncremental(
     const checkpoint_log_len = try serializeCheckpointRecord(
         store,
         workspaces,
-        self.io_log_buffer[0..data_region_bytes],
+        io_log_buffer[0..data_region_bytes],
     );
 
     const next_generation = current_generation + 1;
@@ -365,7 +433,7 @@ fn saveIncremental(
     next_root.log_segment_count = 0;
     next_root.compacted_generation = next_generation;
     const next_root_sector = volume_root_slot.nextRootSector(current);
-    try writeBytes(writer, data_start_byte + next_data_offset, self.io_log_buffer[0..checkpoint_log_len]);
+    try writeBytes(writer, data_start_byte + next_data_offset, io_log_buffer[0..checkpoint_log_len]);
     try flushWrites(writer);
     try writeRoot(writer, next_root_sector, next_root);
     try flushWrites(writer);
@@ -440,6 +508,7 @@ fn loadLatestValidImageRoot(
 
     store.reset();
     workspaces.reset();
+    self.resetSignerText();
     return last_error orelse error.CorruptImage;
 }
 
@@ -468,6 +537,7 @@ fn loadLatestValidBackendRoot(
 
     store.reset();
     workspaces.reset();
+    self.resetSignerText();
     return last_error orelse error.CorruptImage;
 }
 
@@ -510,8 +580,9 @@ fn loadBackendRootCandidate(
     loaded: LoadedRoot,
 ) Error!void {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
-    if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, self.io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
-    try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+    const io_log_buffer = try self.ioLogWorkspace();
+    if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
+    try replayLog(self, store, workspaces, io_log_buffer[0..loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
@@ -771,6 +842,7 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     if (!volume_root_slot.hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     store.reset();
     workspaces.reset();
+    self.resetSignerText();
 
     self.workspace_state_hashes.reset();
     if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
@@ -898,7 +970,7 @@ fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, re
     try writer.writeBytes(&blob.address);
     try writer.writeBytes(&record.version_address);
     try writeMetadata(writer, record.metadata);
-    try writer.writeU32(@intCast(blob.payload_len));
+    try writer.writeU32(blob.payload_len);
     try writer.writeU16(blob.chunk_count);
 }
 
@@ -919,7 +991,7 @@ fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadCh
 fn encodeBlobBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
     try writer.writeBytes(&record.address);
     try writer.writeBytes(&record.merkle_root);
-    try writer.writeU32(@intCast(record.payload_len));
+    try writer.writeU32(record.payload_len);
     try writer.writeU16(record.ref_count);
     try writer.writeU16(record.chunk_count);
     const chunk_count: usize = @intCast(record.chunk_count);
@@ -946,7 +1018,7 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.Workspace
         try writeEntry(writer, entry);
     }
     try writer.writeU16(@intCast(record.mutation_log.entry_mutation_count));
-    for (record.mutation_log.entry_mutations[0..record.mutation_log.entry_mutation_count]) |mutation| {
+    for (record.mutation_log.entriesConst()[0..record.mutation_log.entry_mutation_count]) |mutation| {
         try writer.writeU32(mutation.generation);
         try writeEntry(writer, mutation.entry);
     }
@@ -983,7 +1055,7 @@ fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const
         .latest_version_id = latest_version_id,
         .version_count = version_count,
     };
-    try readObjectUserDataTail(&reader, &object_record, &self.object_signers[slot_index]);
+    try readObjectUserDataTail(self, &reader, &object_record);
     store.objects.slots[slot_index].object = object_record;
 }
 
@@ -1004,14 +1076,14 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     var blob_address: object_store.BlobAddress = undefined;
     try reader.readBytes(&blob_address);
     try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
-    store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
+    store.versions.slots[slot_index].version.metadata = try readMetadata(self, &reader);
     const payload_len: usize = @intCast(try reader.readU32());
     if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
     const chunk_count_value = try reader.readU16();
     if (chunk_count_value > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
     const blob_slot_index = findBlobSlotIndex(store, blob_address) orelse return error.CorruptImage;
     const blob = &store.blobSlotAtConst(blob_slot_index).blob;
-    if (blob.payload_len != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
+    if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
     store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
 }
 
@@ -1045,7 +1117,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     const slot = store.blobSlotAt(slot_index);
     slot.blob.address = address;
     slot.blob.merkle_root = merkle_root;
-    slot.blob.payload_len = payload_len;
+    slot.blob.payload_len = @intCast(payload_len);
     slot.blob.ref_count = ref_count;
     slot.blob.chunk_count = @intCast(chunk_count);
     slot.blob.chunk_slot_indexes = chunk_slot_indexes;
@@ -1066,8 +1138,13 @@ fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void 
 fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
     const workspace_id = ids.workspace(try reader.readU64());
-    const slot = workspaces.workspaces.get(workspace_id) orelse
+    const existing_slot = workspaces.workspaces.get(workspace_id);
+    const slot = existing_slot orelse
         workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
+    slot.workspace.mutation_log.ensureBacking() catch {
+        if (existing_slot == null) std.debug.assert(workspaces.workspaces.remove(workspace_id));
+        return error.NoSpaceLeft;
+    };
 
     const previous_entry_count = slot.workspace.path_index.entry_count;
     const previous_mutation_count = slot.workspace.mutation_log.entry_mutation_count;
@@ -1094,14 +1171,15 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     }
     slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
     if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+    const mutations = slot.workspace.mutation_log.entries();
     for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
-        slot.workspace.mutation_log.entry_mutations[mutation_index] = .{
+        mutations[mutation_index] = .{
             .generation = try reader.readU32(),
             .entry = try readEntry(&reader),
         };
     }
     if (slot.workspace.mutation_log.entry_mutation_count < previous_mutation_tail) {
-        for (slot.workspace.mutation_log.entry_mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_tail]) |*mutation| {
+        for (mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_tail]) |*mutation| {
             mutation.* = .{};
         }
     }
@@ -1141,7 +1219,7 @@ fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload:
     workspaces.snapshots.slots[slot_index].snapshot.generation = try reader.readU32();
     readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
     try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
-    workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
+    workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
     workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
     if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
 }
@@ -1246,7 +1324,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         slot.object.object_type = try parseObjectType(try reader.readByte());
         slot.object.latest_version_id = ids.version(try reader.readU64());
         slot.object.version_count = try reader.readU16();
-        try readObjectUserDataTail(&reader, &slot.object, &self.object_signers[slot_index]);
+        try readObjectUserDataTail(self, &reader, &slot.object);
     }
 
     for (0..@as(usize, chunk_count)) |_| {
@@ -1292,20 +1370,24 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         var blob_address: object_store.BlobAddress = undefined;
         try reader.readBytes(&blob_address);
         try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
-        store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
+        store.versions.slots[slot_index].version.metadata = try readMetadata(self, &reader);
         const payload_len: usize = @intCast(try reader.readU32());
         if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
         const chunk_count_value = try reader.readU16();
         if (chunk_count_value > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
         const blob_slot_index = findBlobSlotIndex(store, blob_address) orelse return error.CorruptImage;
         const blob = &store.blobSlotAtConst(blob_slot_index).blob;
-        if (blob.payload_len != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
+        if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
         store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
     }
 
     for (0..@as(usize, workspace_count_value)) |_| {
         const workspace_id = ids.workspace(try reader.readU64());
         const slot = workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
+        slot.workspace.mutation_log.ensureBacking() catch {
+            std.debug.assert(workspaces.workspaces.remove(workspace_id));
+            return error.NoSpaceLeft;
+        };
         slot.workspace.id = workspace_id;
         slot.workspace.owner = try readPrincipal(&reader);
         readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
@@ -1317,8 +1399,9 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         }
         slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
         if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+        const mutations = slot.workspace.mutation_log.entries();
         for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
-            slot.workspace.mutation_log.entry_mutations[mutation_index] = .{
+            mutations[mutation_index] = .{
                 .generation = try reader.readU32(),
                 .entry = try readEntry(&reader),
             };
@@ -1343,7 +1426,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         workspaces.snapshots.slots[slot_index].snapshot.generation = try reader.readU32();
         readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
         try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
-        workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
+        workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
         workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
         if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
     }
@@ -1356,23 +1439,23 @@ fn writeMetadata(writer: *CursorWriter, metadata: object_store.SignedMetadata) E
     try writeSignature(writer, metadata.signature);
 }
 
-fn readMetadata(reader: *CursorReader, signer_storage: *[max_signer_bytes]u8) Error!object_store.SignedMetadata {
+fn readMetadata(self: *Volume, reader: *CursorReader) Error!object_store.SignedMetadata {
     var metadata = object_store.SignedMetadata{};
     readTextInto(reader, &metadata.label, &metadata.label_len) catch return error.CorruptImage;
     readTextInto(reader, &metadata.content_type, &metadata.content_type_len) catch return error.CorruptImage;
     metadata.created_at_ticks = try reader.readU64();
-    metadata.signature = try readSignature(reader, signer_storage);
+    metadata.signature = try readSignature(self, reader);
     return metadata;
 }
 
 fn readObjectUserDataTail(
+    self: *Volume,
     reader: *CursorReader,
     record: *object_store.ObjectRecord,
-    signer_storage: *[max_signer_bytes]u8,
 ) Error!void {
     record.provenance.created_at_ticks = try reader.readU64();
     record.provenance.updated_at_ticks = try reader.readU64();
-    record.provenance.creator_signature = try readSignature(reader, signer_storage);
+    record.provenance.creator_signature = try readSignature(self, reader);
     record.provenance.latest_version_addressed = (try reader.readByte()) != 0;
     record.snapshot_state.snapshot_count = try reader.readU16();
     record.snapshot_state.latest_snapshot_version_id = ids.version(try reader.readU64());
@@ -1393,39 +1476,42 @@ fn writeSignature(writer: *CursorWriter, signature: anytype) Error!void {
             signature.signer
         else
             "invalid-signer";
-        const public_key_len = @min(signature.public_key_len, signature.public_key.len);
-        const value_len = @min(signature.value_len, signature.value.len);
+        const public_key_len = @min(@as(usize, signature.public_key_len), signature.public_key.len);
+        const value_len = @min(@as(usize, signature.value_len), signature.value.len);
         try writer.writeByte(1);
         try writeText(writer, signer);
-        try writer.writeU16(@intCast(public_key_len));
+        try writer.writeByte(@intCast(public_key_len));
         try writer.writeBytes(signature.public_key[0..public_key_len]);
-        try writer.writeU16(@intCast(value_len));
+        try writer.writeByte(@intCast(value_len));
         try writer.writeBytes(signature.value[0..value_len]);
         return;
     }
     try writer.writeByte(0);
 }
 
-fn readSignature(reader: *CursorReader, signer_storage: *[max_signer_bytes]u8) Error!@import("../policy/manifest.zig").Signature {
+fn readSignature(self: *Volume, reader: *CursorReader) Error!@import("../policy/manifest.zig").Signature {
     const manifest = @import("../policy/manifest.zig");
     const present = try reader.readByte();
     if (present == 0) return .{};
 
     const signer_len = try reader.readU16();
     if (signer_len > max_signer_bytes) return error.InvalidSignatureEncoding;
-    @memset(signer_storage[0..], 0);
+    var signer_storage: [max_signer_bytes]u8 = undefined;
     try reader.readBytes(signer_storage[0..signer_len]);
+    const signer = try self.internSigner(signer_storage[0..signer_len]);
 
     var signature = manifest.Signature{
-        .format = manifest.SIGNATURE_FORMAT_ED25519,
-        .signer = signer_storage[0..signer_len],
+        .format = .ed25519,
+        .signer = signer,
     };
-    signature.public_key_len = try reader.readU16();
-    if (signature.public_key_len > signature.public_key.len) return error.InvalidSignatureEncoding;
-    try reader.readBytes(signature.public_key[0..signature.public_key_len]);
-    signature.value_len = try reader.readU16();
-    if (signature.value_len > signature.value.len) return error.InvalidSignatureEncoding;
-    try reader.readBytes(signature.value[0..signature.value_len]);
+    const public_key_len = try reader.readByte();
+    if (public_key_len > signature.public_key.len) return error.InvalidSignatureEncoding;
+    signature.public_key_len = @intCast(public_key_len);
+    try reader.readBytes(signature.public_key[0..public_key_len]);
+    const value_len = try reader.readByte();
+    if (value_len > signature.value.len) return error.InvalidSignatureEncoding;
+    signature.value_len = @intCast(value_len);
+    try reader.readBytes(signature.value[0..value_len]);
     return signature;
 }
 
@@ -1568,7 +1654,11 @@ test "storage volume bounds its log io workspace to one durable data region" {
     try std.testing.expect(@hasField(Volume, "io_log_buffer"));
     try std.testing.expect(!@hasField(Volume, "io_payload_buffer"));
     try std.testing.expectEqual(DATA_REGION_BYTES, IO_LOG_WORKSPACE_BYTES);
-    try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
+    if (heap_backed_io_workspace) {
+        try std.testing.expect(@sizeOf(@FieldType(Volume, "io_log_buffer")) <= @sizeOf(usize));
+    } else {
+        try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
+    }
 }
 
 test "append workspace exhaustion falls back to checkpoint compaction" {
@@ -1693,8 +1783,8 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     live.path_index.entries[0] = try workspace.Entry.init("documents/keep.md", ids.object(1), ids.version(1), .document);
     live.path_index.entries[1] = try workspace.Entry.init("documents/retired.md", ids.object(2), ids.version(2), .document);
     live.mutation_log.entry_mutation_count = 2;
-    live.mutation_log.entry_mutations[0] = .{ .generation = 1, .entry = live.path_index.entries[0] };
-    live.mutation_log.entry_mutations[1] = .{ .generation = 2, .entry = live.path_index.entries[1] };
+    live.mutation_log.entries()[0] = .{ .generation = 1, .entry = live.path_index.entries[0] };
+    live.mutation_log.entries()[1] = .{ .generation = 2, .entry = live.path_index.entries[1] };
     live.share_table.share_grant_count = 2;
     live.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 42 } };
     live.share_table.share_grants[1] = .{ .principal_id = .{ .kind = .user, .serial = 43 } };
@@ -1704,7 +1794,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     live.staging.transaction_open = true;
     live.staging.staged_entry_count = 1;
     live.staging.staged_effective_entry_count = 2;
-    live.mutation_log.entry_mutations[live.mutation_log.entry_mutation_count] = .{
+    live.mutation_log.entries()[live.mutation_log.entry_mutation_count] = .{
         .entry = try workspace.Entry.init("documents/staged-secret.md", ids.object(3), ids.version(3), .document),
     };
 
@@ -1719,7 +1809,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     replacement.path_index.entry_count = 1;
     replacement.path_index.entries[0] = try workspace.Entry.init("documents/current.md", ids.object(4), ids.version(4), .document);
     replacement.mutation_log.entry_mutation_count = 1;
-    replacement.mutation_log.entry_mutations[0] = .{ .generation = 7, .entry = replacement.path_index.entries[0] };
+    replacement.mutation_log.entries()[0] = .{ .generation = 7, .entry = replacement.path_index.entries[0] };
     replacement.share_table.share_grant_count = 1;
     replacement.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 44 } };
     replacement.recoverable_deletes.deleted_count = 1;
@@ -1736,13 +1826,13 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     try std.testing.expectEqual(@as(usize, 1), live.path_index.entry_count);
     try std.testing.expectEqualStrings("documents/current.md", live.path_index.entries[0].pathSlice());
     try std.testing.expectEqualDeep(workspace.Entry{}, live.path_index.entries[1]);
-    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entry_mutations[1]);
+    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[1]);
     try std.testing.expectEqual(principal.PrincipalKind.service, live.share_table.share_grants[1].principal_id.kind);
     try std.testing.expectEqual(@as(u64, 0), live.share_table.share_grants[1].principal_id.serial);
     try std.testing.expectEqualDeep(workspace.Entry{}, live.recoverable_deletes.deleted_entries[1]);
     try std.testing.expect(!live.staging.transaction_open);
     try std.testing.expectEqual(@as(usize, 0), live.staging.staged_entry_count);
-    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entry_mutations[2]);
+    try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[2]);
 }
 
 test "storage append rejects issuance watermark rewind" {
@@ -1767,7 +1857,34 @@ test "storage append rejects issuance watermark rewind" {
     }, store, workspaces));
 }
 
+test "storage volume interns repeated signer labels within a bounded pool" {
+    var volume = Volume.init();
+    const first = try volume.internSigner("persistent-key");
+    const repeated = try volume.internSigner("persistent-key");
+    try std.testing.expect(first.ptr == repeated.ptr);
+    try std.testing.expectEqualStrings(first, repeated);
+    try std.testing.expectEqual(@as(u16, 1 + "persistent-key".len), volume.signer_text_len);
+
+    var overflowed = false;
+    const attempts = SIGNER_TEXT_POOL_BYTES / (max_signer_bytes + 1) + 2;
+    for (0..attempts) |index| {
+        var signer = [_]u8{'s'} ** max_signer_bytes;
+        std.mem.writeInt(u32, signer[0..@sizeOf(u32)], @intCast(index), .little);
+        _ = volume.internSigner(&signer) catch |err| {
+            try std.testing.expect(err == error.InvalidSignatureEncoding);
+            overflowed = true;
+            break;
+        };
+    }
+    try std.testing.expect(overflowed);
+    try std.testing.expect(@as(usize, volume.signer_text_len) <= volume.signer_text_pool.len);
+}
+
 pub const testing = struct {
+    pub fn signerTextBytes() usize {
+        return default_volume.signer_text_len;
+    }
+
     pub fn latestImageLogBytes(image: []const u8) Error!u32 {
         return (try volume_root_slot.findLatestImageRoot(image)).?.root.log_bytes;
     }

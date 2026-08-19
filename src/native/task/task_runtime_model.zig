@@ -41,6 +41,31 @@ pub const USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_VIRTUAL_
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = USER_VIRTUAL_ADDRESS_MIN;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: usize = units.kibibytes(8);
 
+comptime {
+    const byte_capacities = [_]usize{
+        MAX_TASK_CAPABILITIES,
+        MAX_TASK_COMPONENTS,
+        MAX_AUDIT_EVENTS,
+        MAX_TASK_PROVENANCE_EVENTS,
+        MAX_TASK_BUNDLE_ID_BYTES,
+        MAX_TASK_SOURCE_IDENTITY_BYTES,
+        MAX_COMPONENT_LABEL_BYTES,
+        MAX_COMPONENT_ENTRY_BYTES,
+        MAX_EXECUTABLE_SEGMENTS + 1,
+    };
+    for (byte_capacities) |capacity| {
+        if (capacity > std.math.maxInt(u8)) {
+            @compileError("task runtime capacity exceeds its compact field");
+        }
+    }
+    if (MAX_TASKS > std.math.maxInt(u16)) {
+        @compileError("task capacity exceeds its compact snapshot count");
+    }
+    if (USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE - USER_STACK_ADDRESS_MIN > std.math.maxInt(u32)) {
+        @compileError("userspace stack aperture exceeds its compact byte extent");
+    }
+}
+
 fn includesVerificationEvidence() bool {
     if (!@hasDecl(root, "includes_verification_evidence")) return false;
     return root.includes_verification_evidence;
@@ -104,7 +129,7 @@ pub const ExecutableImageSpec = struct {
     stack_size_bytes: usize = DEFAULT_USER_STACK_SIZE_BYTES,
     file_size_bytes: usize = 0,
     file_sha256: crypto_hash.Digest = crypto_hash.zero_digest,
-    segment_count: usize = 0,
+    segment_count: u8 = 0,
     segments: [MAX_EXECUTABLE_SEGMENTS]ExecutableSegmentSpec = [_]ExecutableSegmentSpec{ExecutableSegmentSpec{}} ** MAX_EXECUTABLE_SEGMENTS,
 
     pub fn isPresent(self: *const ExecutableImageSpec) bool {
@@ -149,7 +174,7 @@ pub const AddressSpaceRegionKind = enum(u8) {
 pub const AddressSpaceRegionRecord = struct {
     kind: AddressSpaceRegionKind,
     virtual_address: u64,
-    size_bytes: usize,
+    size_bytes: u32,
     file_offset: u32,
     file_size: u32,
     access: SegmentAccess,
@@ -165,9 +190,9 @@ pub const AddressSpaceRecord = struct {
     instruction_pointer: u64,
     stack_pointer: u64,
     stack_top: u64,
-    stack_size_bytes: usize,
-    load_segment_count: usize,
-    region_count: usize,
+    stack_size_bytes: u32,
+    load_segment_count: u8,
+    region_count: u8,
     image_sha256: [MAX_IMAGE_HASH_BYTES]u8,
     regions: [MAX_EXECUTABLE_SEGMENTS + 1]AddressSpaceRegionRecord,
 
@@ -185,9 +210,9 @@ pub const ExecutionComponentSpec = struct {
 pub const ExecutionComponentRecord = struct {
     id: u64,
     substrate: ExecutionSubstrate,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_COMPONENT_LABEL_BYTES]u8,
-    entry_len: usize,
+    entry_len: u8,
     entry: [MAX_COMPONENT_ENTRY_BYTES]u8,
 
     pub fn labelSlice(self: *const ExecutionComponentRecord) []const u8 {
@@ -387,9 +412,9 @@ pub const LaunchProvenanceRecord = struct {
     image_id: u64,
     component_abi_version: u16,
     signed: bool,
-    bundle_id_len: usize,
+    bundle_id_len: u8,
     bundle_id: [MAX_TASK_BUNDLE_ID_BYTES]u8,
-    source_identity_len: usize,
+    source_identity_len: u8,
     source_identity: [MAX_TASK_SOURCE_IDENTITY_BYTES]u8,
     release_transparency_sequence: u64,
     release_transparency_root: crypto_hash.Digest,
@@ -440,13 +465,13 @@ pub const TaskRecord = struct {
     owner: principal.PrincipalId,
     state: TaskState,
     component_class: ComponentClass,
-    execution_component_count: usize,
-    capability_count: usize,
+    execution_component_count: u8,
+    capability_count: u8,
     budget: ResourceBudget,
-    audit_start: usize,
-    audit_count: usize,
-    provenance_start: usize,
-    provenance_count: usize,
+    audit_start: u8,
+    audit_count: u8,
+    provenance_start: u8,
+    provenance_count: u8,
     ui_surface_id: ?u64,
     resource_class: accelerator_scheduler.ResourceClass,
     background_allowed: bool,
@@ -524,7 +549,7 @@ pub const TaskRecord = struct {
         }
 
         cold.audit_trail[self.audit_start] = event;
-        self.audit_start = (self.audit_start + 1) % MAX_AUDIT_EVENTS;
+        self.audit_start = @intCast((self.audit_start + 1) % MAX_AUDIT_EVENTS);
     }
 
     pub fn provenanceEventAt(self: *const TaskRecord, index: usize) ?TaskProvenanceRecord {
@@ -543,6 +568,7 @@ pub const Error = error{
     ComponentTableFull,
     CapabilityTableFull,
     InvalidUserspaceImage,
+    NoSpaceLeft,
     TaskNotFound,
     TaskTableFull,
 };
@@ -582,12 +608,29 @@ pub const Snapshot = struct {
     next_address_space_id: u64 = 1,
     next_namespace_id: u64 = 1,
     next_component_id: u64 = 1,
-    task_count: usize = 0,
+    task_count: u16 = 0,
     tasks: [MAX_TASKS]TaskSlot = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
     task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
-    address_space_count: usize = 0,
+    address_space_count: u16 = 0,
     address_spaces: [MAX_TASKS]AddressSpaceSlot = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
 };
+
+test "task runtime uses capacity-sized resident metadata" {
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(ExecutableImageSpec, "segment_count")));
+    try std.testing.expectEqual(@as(usize, 128), @sizeOf(ExecutionComponentRecord));
+    try std.testing.expectEqual(@as(usize, 248), @sizeOf(LaunchProvenanceRecord));
+    try std.testing.expectEqual(@as(usize, 424), @sizeOf(TaskRecord));
+    try std.testing.expectEqual(@as(usize, 432), @sizeOf(TaskSlot));
+    try std.testing.expectEqual(@as(usize, 320), @sizeOf(AddressSpaceRecord));
+    try std.testing.expectEqual(@as(usize, 328), @sizeOf(AddressSpaceSlot));
+
+    const expected_cold_bytes = 1_608 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(TaskProvenanceRecord);
+    try std.testing.expectEqual(expected_cold_bytes, @sizeOf(TaskColdRecord));
+    const expected_snapshot_bytes = 48 + MAX_TASKS * (
+        @sizeOf(TaskSlot) + expected_cold_bytes + @sizeOf(AddressSpaceSlot)
+    );
+    try std.testing.expectEqual(expected_snapshot_bytes, @sizeOf(Snapshot));
+}
 
 const detached_task_cold = zeroTaskCold();
 

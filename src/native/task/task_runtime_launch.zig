@@ -69,8 +69,8 @@ pub fn makeLaunchProvenance(RecordType: type, spec: anytype) RecordType {
     record.image_id = spec.image_id;
     record.component_abi_version = spec.component_abi_version;
     record.signed = spec.signed;
-    record.bundle_id_len = native_util.copyTextWithReserve(record.bundle_id[0..], spec.bundle_id, 1);
-    record.source_identity_len = native_util.copyTextWithReserve(record.source_identity[0..], spec.source_identity, 1);
+    record.bundle_id_len = @intCast(native_util.copyTextWithReserve(record.bundle_id[0..], spec.bundle_id, 1));
+    record.source_identity_len = @intCast(native_util.copyTextWithReserve(record.source_identity[0..], spec.source_identity, 1));
     record.release_transparency_sequence = spec.release_transparency_sequence;
     record.release_transparency_root = spec.release_transparency_root;
     record.release_transparency_log_head = spec.release_transparency_log_head;

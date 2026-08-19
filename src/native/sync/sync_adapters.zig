@@ -15,9 +15,24 @@ pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_DOCUMENT_OPERATIONS: usize = 16;
 pub const MAX_DOCUMENT_OPERATION_TEXT_BYTES: usize = 64;
 pub const MAX_DOCUMENT_VECTOR_CLOCKS: usize = 8;
+pub const COMPACT_DOCUMENT_LOG_METADATA = true;
+pub const DOCUMENT_OPERATION_SIZE_CEILING_BYTES: usize = 112;
+pub const DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES: usize = 2_472;
+pub const MEDIA_REPLICATION_CHUNK_BYTES: usize = 128;
+pub const MAX_MEDIA_REPLICATION_CHUNKS: usize =
+    (object_store.MAX_PAYLOAD_BYTES + MEDIA_REPLICATION_CHUNK_BYTES - 1) / MEDIA_REPLICATION_CHUNK_BYTES;
 const DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES: usize = 160;
 const DOCUMENT_MERGE_TEST_BUFFER_BYTES: usize = 96;
 const DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES: usize = 128;
+
+comptime {
+    if (MAX_DOCUMENT_OPERATIONS > std.math.maxInt(u8) or
+        MAX_DOCUMENT_VECTOR_CLOCKS > std.math.maxInt(u8) or
+        MAX_DOCUMENT_OPERATION_TEXT_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("document operation metadata no longer fits compact lengths and counters");
+    }
+}
 
 pub const DocumentOperationKind = enum(u8) {
     insert,
@@ -28,7 +43,7 @@ pub const DocumentOperation = struct {
     kind: DocumentOperationKind,
     position: usize,
     delete_len: usize = 0,
-    text_len: usize = 0,
+    text_len: u8 = 0,
     text: [MAX_DOCUMENT_OPERATION_TEXT_BYTES]u8 = [_]u8{0} ** MAX_DOCUMENT_OPERATION_TEXT_BYTES,
     actor: principal.PrincipalId,
     lamport: u64,
@@ -41,7 +56,7 @@ pub const DocumentOperation = struct {
             .actor = actor,
             .lamport = lamport,
         };
-        operation.text_len = text.len;
+        operation.text_len = @intCast(text.len);
         @memcpy(operation.text[0..text.len], text);
         return operation;
     }
@@ -57,7 +72,13 @@ pub const DocumentOperation = struct {
     }
 
     pub fn textSlice(self: *const DocumentOperation) []const u8 {
-        return self.text[0..self.text_len];
+        return self.text[0..@as(usize, self.text_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DOCUMENT_OPERATION_SIZE_CEILING_BYTES) {
+            @compileError("document operation exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -82,10 +103,10 @@ const DocumentVectorClockIndex = indexed_arena.UniqueIndex(DOCUMENT_VECTOR_CLOCK
 
 pub const DocumentOperationLog = struct {
     operations: [MAX_DOCUMENT_OPERATIONS]DocumentOperation = undefined,
-    operation_count: usize = 0,
+    operation_count: u8 = 0,
     operation_index: DocumentOperationIndex = DocumentOperationIndex.init(),
     clocks: [MAX_DOCUMENT_VECTOR_CLOCKS]DocumentVectorClock = [_]DocumentVectorClock{.{}} ** MAX_DOCUMENT_VECTOR_CLOCKS,
-    clock_count: usize = 0,
+    clock_count: u8 = 0,
     clock_index: DocumentVectorClockIndex = DocumentVectorClockIndex.init(),
 
     pub fn append(self: *DocumentOperationLog, operation: DocumentOperation) Error!void {
@@ -111,7 +132,7 @@ pub const DocumentOperationLog = struct {
     }
 
     pub fn slice(self: *const DocumentOperationLog) []const DocumentOperation {
-        return self.operations[0..self.operation_count];
+        return self.operations[0..@as(usize, self.operation_count)];
     }
 
     pub fn clockFor(self: *const DocumentOperationLog, actor: principal.PrincipalId) u64 {
@@ -162,10 +183,16 @@ pub const DocumentOperationLog = struct {
     }
 
     fn clockIndexByScan(self: *const DocumentOperationLog, actor: principal.PrincipalId) ?usize {
-        for (self.clocks[0..self.clock_count], 0..) |clock, slot_index| {
+        for (self.clocks[0..@as(usize, self.clock_count)], 0..) |clock, slot_index| {
             if (clock.actor.eql(actor)) return slot_index;
         }
         return null;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES) {
+            @compileError("document operation log exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -522,7 +549,7 @@ pub const DefaultChunkMediaAdapter = struct {
         const blob = request.store.versionBlob(version) orelse return error.BlobNotFound;
         return .{
             .snapshot_replicated = true,
-            .replicated_chunks = @max(@max(@as(usize, blob.chunk_count), chunk_count), chunkCountForPayload(blob.payload_len)),
+            .replicated_chunks = @max(@max(@as(usize, blob.chunk_count), chunk_count), chunkCountForPayload(blob.payloadLen())),
         };
     }
 };
@@ -577,13 +604,12 @@ pub const default_chunk_media_adapter = DefaultChunkMediaAdapter.adapter();
 pub const default_secret_transfer_adapter = DefaultSecretTransferAdapter.adapter();
 pub const default_database_sync_adapter = DefaultDatabaseSyncAdapter.adapter();
 
-const PAYLOAD_CHUNK_BYTES: usize = 128;
 const VERSION_PREFIX_BUFFER_BYTES: usize = 16;
 const SMALL_DOCUMENT_MERGE_BUFFER_BYTES: usize = 8;
 
 fn chunkCountForPayload(payload_len: usize) usize {
     if (payload_len == 0) return 0;
-    return (payload_len + PAYLOAD_CHUNK_BYTES - 1) / PAYLOAD_CHUNK_BYTES;
+    return (payload_len + MEDIA_REPLICATION_CHUNK_BYTES - 1) / MEDIA_REPLICATION_CHUNK_BYTES;
 }
 
 fn versionStartsWith(
@@ -633,14 +659,15 @@ fn applyDocumentOperation(operation: DocumentOperation, output: []u8, current_le
 
 fn applyInsert(operation: DocumentOperation, output: []u8, current_len: usize) Error!usize {
     if (operation.text_len == 0) return current_len;
-    if (current_len + operation.text_len > output.len) return error.DocumentBufferTooSmall;
+    const text_len: usize = @intCast(operation.text_len);
+    if (current_len + text_len > output.len) return error.DocumentBufferTooSmall;
     const position = @min(operation.position, current_len);
     var index = current_len;
     while (index > position) : (index -= 1) {
-        output[index + operation.text_len - 1] = output[index - 1];
+        output[index + text_len - 1] = output[index - 1];
     }
-    @memcpy(output[position .. position + operation.text_len], operation.textSlice());
-    return current_len + operation.text_len;
+    @memcpy(output[position .. position + text_len], operation.textSlice());
+    return current_len + text_len;
 }
 
 fn applyDelete(operation: DocumentOperation, output: []u8, current_len: usize) Error!usize {
@@ -727,8 +754,8 @@ test "document operation log merges CRDT operations idempotently with vector clo
     var merge_buffer: [DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
     const merged = try mergeDocumentOperationLogs("hello ", &laptop_log, &tablet_log, &merged_log, merge_buffer[0..]);
     try std.testing.expectEqualStrings("hello from tablet todayfrom laptop ", merged);
-    try std.testing.expectEqual(@as(usize, 4), merged_log.operation_count);
-    try std.testing.expectEqual(@as(usize, 2), merged_log.clock_count);
+    try std.testing.expectEqual(@as(u8, 4), merged_log.operation_count);
+    try std.testing.expectEqual(@as(u8, 2), merged_log.clock_count);
     try std.testing.expectEqual(@as(u64, 2), merged_log.clockFor(laptop));
     try std.testing.expectEqual(@as(u64, 2), merged_log.clockFor(tablet));
     try std.testing.expect(merged_log.operation_index.lookup(operationIdIndexKey(operationId(laptop_log.slice()[0]))) != null);
@@ -737,12 +764,36 @@ test "document operation log merges CRDT operations idempotently with vector clo
     try std.testing.expect(merged_log.clock_index.lookup(actorClockIndexKey(tablet)) != null);
 
     try merged_log.mergeFrom(&tablet_log);
-    try std.testing.expectEqual(@as(usize, 4), merged_log.operation_count);
+    try std.testing.expectEqual(@as(u8, 4), merged_log.operation_count);
     var replay_buffer: [DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
     const replayed = try merged_log.apply("hello ", replay_buffer[0..]);
     try std.testing.expectEqualStrings(merged, replayed);
 
     try std.testing.expectError(error.DuplicateDocumentOperation, laptop_log.append(try DocumentOperation.insert(6, "duplicate", laptop, 1)));
+}
+
+test "compact document log metadata preserves exact capacities" {
+    const full_text = [_]u8{'d'} ** MAX_DOCUMENT_OPERATION_TEXT_BYTES;
+    var log = DocumentOperationLog{};
+    var operation_index: usize = 0;
+    while (operation_index < MAX_DOCUMENT_OPERATIONS) : (operation_index += 1) {
+        const actor = principal.PrincipalId{
+            .kind = .device,
+            .serial = (operation_index % MAX_DOCUMENT_VECTOR_CLOCKS) + 1,
+        };
+        try log.append(try DocumentOperation.insert(operation_index, &full_text, actor, operation_index + 1));
+    }
+
+    try std.testing.expectEqual(@as(u8, MAX_DOCUMENT_OPERATIONS), log.operation_count);
+    try std.testing.expectEqual(@as(u8, MAX_DOCUMENT_VECTOR_CLOCKS), log.clock_count);
+    try std.testing.expectEqual(@as(u8, MAX_DOCUMENT_OPERATION_TEXT_BYTES), log.slice()[0].text_len);
+    try std.testing.expectEqualSlices(u8, &full_text, log.slice()[0].textSlice());
+    try std.testing.expectError(error.DocumentOperationLogFull, log.append(try DocumentOperation.insert(
+        0,
+        "overflow",
+        .{ .kind = .device, .serial = 1 },
+        MAX_DOCUMENT_OPERATIONS + 1,
+    )));
 }
 
 test "default chunk media adapter reports concrete payload chunks" {

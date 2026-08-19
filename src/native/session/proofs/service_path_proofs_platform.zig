@@ -143,12 +143,13 @@ pub fn proveBootedPostActivationHealthChecks(
     const workspace_id = try seedBootedHealthStorageProbe(storage, owner, object_signer);
 
     const sync_record = supervisor.findByClass(.sync_replication) orelse return error.MissingBootedHealthService;
+    const sync_resident_state = try session_manager.system().syncResidentStatePtr();
     var sync_instance = try sync_service.Service.initWithStorage(
         sync_record.id,
         sync_task.id,
         sync_record.owner,
         storage,
-        session_manager.system().syncResidentStatePtr(),
+        sync_resident_state,
     );
     const network_probe = try seedBootedHealthNetworkProbe(&sync_instance, capability_table, workspace_id, 600);
 
@@ -171,6 +172,7 @@ pub fn proveBootedPostActivationHealthChecks(
 
     var manager = try immutable_base.Manager.init(storage, owner, state_signer);
     var ledger = event_ledger.Ledger.init();
+    defer ledger.deinit();
     _ = try manager.stageImage(0, "booted-stable-a", "kernel=booted-v1", image_signer, 610);
     try manager.beginActivation(0, 611);
     try update_health.recordBootSuccess(&manager, 612);

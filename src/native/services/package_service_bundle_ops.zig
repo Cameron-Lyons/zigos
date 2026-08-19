@@ -60,7 +60,7 @@ pub fn validateInstallStorageShape(
     try validateTextLen(bundle.accessibility.profile_notes, arrayFieldLen(StoredAccessibilityType, "profile_notes"), error.AccessibilityProfileTooLong);
     try validateTextLen(bundle.object_resilience.backup_format, arrayFieldLen(StoredObjectResilienceType, "backup_format"), error.ObjectBackupFormatTooLong);
     try validateTextLen(bundle.semantic_index.model_digest, arrayFieldLen(StoredSemanticIndexType, "model_digest"), error.SemanticIndexModelDigestTooLong);
-    try validateTextLen(bundle.signature.format, arrayFieldLen(StoredSignatureType, "format"), error.SignatureFormatTooLong);
+    try validateTextLen(bundle.signature.formatSlice(), arrayFieldLen(StoredSignatureType, "format"), error.SignatureFormatTooLong);
     try validateTextLen(bundle.signature.signer, arrayFieldLen(StoredSignatureType, "signer"), error.SignatureSignerTooLong);
 
     for (bundle.provided_interfaces) |interface| {
@@ -313,11 +313,11 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .model_digest = revision.semantic_index.modelDigestSlice(),
     };
     resolved.signature = .{
-        .format = revision.signature.formatSlice(),
+        .format = manifest.parseSignatureFormat(revision.signature.formatSlice()),
         .signer = revision.signature.signerSlice(),
-        .public_key_len = revision.signature.public_key_len,
+        .public_key_len = @intCast(revision.signature.public_key_len),
         .public_key = revision.signature.public_key,
-        .value_len = revision.signature.value_len,
+        .value_len = @intCast(revision.signature.value_len),
         .value = revision.signature.value,
     };
 
@@ -356,7 +356,7 @@ fn writeRevision(
     revision.revision_id = revision_id;
     revision.display_name_len = copyValidatedText(&revision.display_name, source.display_name);
     revision.publisher_len = copyValidatedText(&revision.publisher, source.publisher);
-    revision.source_identity_len = copyTextExact(&revision.source_identity, source_identity) catch return error.InstallSourceTooLong;
+    revision.source_identity_len = @intCast(copyTextExact(&revision.source_identity, source_identity) catch return error.InstallSourceTooLong);
     revision.version_major = source.version_major;
     revision.version_minor = source.version_minor;
     revision.channel = source.update_channel;
@@ -370,14 +370,14 @@ fn writeRevision(
 }
 
 fn writeLaunchMetadata(revision: anytype, source: manifest.BundleManifest) Error!void {
-    revision.component_count = source.components.len;
+    revision.component_count = @intCast(source.components.len);
     for (source.components, 0..) |component, component_index| {
         revision.components[component_index].id_len = copyValidatedText(&revision.components[component_index].id, component.id);
         revision.components[component_index].entry_len = copyValidatedText(&revision.components[component_index].entry, component.entry);
         revision.components[component_index].abi = component.abi;
     }
 
-    revision.asset_count = source.assets.len;
+    revision.asset_count = @intCast(source.assets.len);
     for (source.assets, 0..) |asset, asset_index| {
         revision.assets[asset_index].path_len = copyValidatedText(&revision.assets[asset_index].path, asset.path);
         revision.assets[asset_index].content_type_len = copyValidatedText(&revision.assets[asset_index].content_type, asset.content_type);
@@ -385,21 +385,21 @@ fn writeLaunchMetadata(revision: anytype, source: manifest.BundleManifest) Error
 }
 
 fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Error!void {
-    revision.provided_interface_count = source.provided_interfaces.len;
+    revision.provided_interface_count = @intCast(source.provided_interfaces.len);
     for (source.provided_interfaces, 0..) |interface, interface_index| {
         revision.provided_interfaces[interface_index].name_len = copyValidatedText(&revision.provided_interfaces[interface_index].name, interface.name);
         revision.provided_interfaces[interface_index].version_major = interface.version_major;
         revision.provided_interfaces[interface_index].version_minor = interface.version_minor;
     }
 
-    revision.consumed_interface_count = source.consumed_interfaces.len;
+    revision.consumed_interface_count = @intCast(source.consumed_interfaces.len);
     for (source.consumed_interfaces, 0..) |interface, interface_index| {
         revision.consumed_interfaces[interface_index].name_len = copyValidatedText(&revision.consumed_interfaces[interface_index].name, interface.name);
         revision.consumed_interfaces[interface_index].version_major = interface.version_major;
         revision.consumed_interfaces[interface_index].version_minor = interface.version_minor;
     }
 
-    revision.requested_permission_count = source.requested_permissions.len;
+    revision.requested_permission_count = @intCast(source.requested_permissions.len);
     const previous_permission_text_len = @min(
         @as(usize, @intCast(revision.permission_text_len)),
         revision.permission_text.len,
@@ -430,7 +430,7 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
         @memset(revision.permission_text[permission_text_len..previous_permission_text_len], 0);
     }
 
-    revision.background_task_count = source.background_tasks.len;
+    revision.background_task_count = @intCast(source.background_tasks.len);
     for (source.background_tasks, 0..) |task, background_index| {
         revision.background_tasks[background_index].id_len = copyValidatedText(&revision.background_tasks[background_index].id, task.id);
         revision.background_tasks[background_index].trigger = task.trigger;
@@ -505,7 +505,7 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.semantic_index.model_digest_len = copyValidatedText(&revision.semantic_index.model_digest, source.semantic_index.model_digest);
 
     revision.signature = .{};
-    revision.signature.format_len = copyValidatedText(&revision.signature.format, source.signature.format);
+    revision.signature.format_len = copyValidatedText(&revision.signature.format, source.signature.formatSlice());
     revision.signature.signer_len = copyValidatedText(&revision.signature.signer, source.signature.signer);
     revision.signature.public_key_len = source.signature.public_key_len;
     revision.signature.public_key = source.signature.public_key;
@@ -513,9 +513,9 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.signature.value = source.signature.value;
 }
 
-fn copyValidatedText(dest: []u8, src: []const u8) usize {
+fn copyValidatedText(dest: []u8, src: []const u8) u8 {
     @memcpy(dest[0..src.len], src);
-    return src.len;
+    return @intCast(src.len);
 }
 
 fn writePermissionText(revision: anytype, destination: anytype, text: []const u8) Error!void {
