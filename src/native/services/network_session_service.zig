@@ -1,7 +1,6 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const network_policy = @import("../sync/network_policy.zig");
@@ -10,7 +9,10 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_SESSIONS: usize = 32;
 pub const MAX_DESTINATION_BYTES: usize = 96;
-const SESSION_INDEX_CAPACITY: usize = MAX_SESSIONS * 2;
+pub const BOUNDED_SESSION_SCAN = true;
+pub const RECLAIMS_TERMINAL_SESSIONS = true;
+pub const COMPACT_DESTINATION_LENGTH = true;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 5_920;
 
 pub const SessionState = enum(u8) {
     active,
@@ -26,7 +28,7 @@ pub const SessionRecord = struct {
     capability_id: u64,
     matched_mode: network_policy.PolicyMode,
     sensitivity: manifest.DataSensitivity,
-    destination_len: usize,
+    destination_len: u8,
     destination: [MAX_DESTINATION_BYTES]u8,
     byte_limit: usize,
     bytes_used: usize = 0,
@@ -37,7 +39,7 @@ pub const SessionRecord = struct {
     state: SessionState = .active,
 
     pub fn destinationSlice(self: *const SessionRecord) []const u8 {
-        return self.destination[0..self.destination_len];
+        return self.destination[0..@as(usize, self.destination_len)];
     }
 
     pub fn remainingBytes(self: *const SessionRecord) usize {
@@ -95,16 +97,15 @@ pub const Error = network_policy.Error || event_ledger.Error || error{
     SourceMismatch,
 };
 
-const SessionSlot = struct {
-    in_use: bool = false,
-    record: SessionRecord = zeroSession(),
-};
-
-const SessionArena = indexed_arena.IndexedArenaWithKey(u64, SessionSlot, MAX_SESSIONS, SESSION_INDEX_CAPACITY, sessionSlotId);
-
 pub const Service = struct {
     next_session_id: u64 = 1,
-    sessions: SessionArena = SessionArena.init(),
+    sessions: [MAX_SESSIONS]SessionRecord = [_]SessionRecord{zeroSession()} ** MAX_SESSIONS,
+    session_count: u8 = 0,
+    next_reusable_session: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) @compileError("network session service exceeds its fixed-state size ceiling");
+    }
 
     pub fn init() Service {
         return .{};
@@ -173,7 +174,7 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        if (self.sessions.countInUse() >= MAX_SESSIONS) return error.SessionTableFull;
+        const session_index = self.availableSessionIndex(request.now_ticks) orelse return error.SessionTableFull;
         const session_id = self.next_session_id;
         if (session_id == 0) return error.SessionIdExhausted;
         var record = zeroSession();
@@ -184,15 +185,13 @@ pub const Service = struct {
         record.capability_id = request.capability_id;
         record.matched_mode = decision.policy_decision.matched_mode;
         record.sensitivity = request.sensitivity;
-        record.destination_len = native_util.copyTextExact(&record.destination, destination) catch return error.DestinationTooLong;
+        record.destination_len = @intCast(native_util.copyTextExact(&record.destination, destination) catch return error.DestinationTooLong);
         record.byte_limit = byte_limit;
         record.opened_at_ticks = request.now_ticks;
         record.expires_at_ticks = request.expires_at_ticks;
         record.attested = request.evidence.hasVerifiedRemoteAttestation();
         record.identity_pinned = decision.policy_decision.identity_pinned;
 
-        const slot_index = self.sessions.reserveIndex(session_id) orelse return error.SessionTableFull;
-        errdefer _ = self.sessions.removeIndex(slot_index);
         try recordNetworkSession(
             ledger,
             request.subject,
@@ -207,10 +206,11 @@ pub const Service = struct {
             request.now_ticks,
             request.detail,
         );
-        const slot = &self.sessions.slots[slot_index];
-        slot.record = record;
+        if (self.sessions[session_index].id == 0) self.session_count += 1;
+        self.sessions[session_index] = record;
+        self.next_reusable_session = @intCast((session_index + 1) % MAX_SESSIONS);
         self.next_session_id +%= 1;
-        return &slot.record;
+        return &self.sessions[session_index];
     }
 
     pub fn recordTransfer(
@@ -333,8 +333,9 @@ pub const Service = struct {
     }
 
     pub fn find(self: *const Service, session_id: u64) ?*const SessionRecord {
-        const slot = self.sessions.getConst(session_id) orelse return null;
-        return &slot.record;
+        if (session_id == 0) return null;
+        for (&self.sessions) |*session| if (session.id == session_id) return session;
+        return null;
     }
 
     fn sessionForRequest(
@@ -349,8 +350,7 @@ pub const Service = struct {
         action: event_ledger.NetworkSessionAction,
         detail: []const u8,
     ) Error!*SessionRecord {
-        const slot = self.sessions.get(session_id) orelse return error.SessionNotFound;
-        const session = &slot.record;
+        const session = self.findMutable(session_id) orelse return error.SessionNotFound;
         const private_data = manifest.isSensitive(session.sensitivity);
         if (!session.subject.eql(subject) or session.task_id != task_id) {
             try recordNetworkSession(ledger, subject, task_id, session_id, action, .source_mismatch, false, session.attested, session.identity_pinned, private_data, now_ticks, detail);
@@ -374,7 +374,33 @@ pub const Service = struct {
         }
         return session;
     }
+
+    pub fn sessionCount(self: *const Service) usize {
+        return @as(usize, self.session_count);
+    }
+
+    fn findMutable(self: *Service, session_id: u64) ?*SessionRecord {
+        if (session_id == 0) return null;
+        for (&self.sessions) |*session| if (session.id == session_id) return session;
+        return null;
+    }
+
+    fn availableSessionIndex(self: *const Service, now_ticks: u64) ?usize {
+        for (0..MAX_SESSIONS) |offset| {
+            const index = (@as(usize, self.next_reusable_session) + offset) % MAX_SESSIONS;
+            if (self.sessions[index].id == 0) return index;
+        }
+        for (0..MAX_SESSIONS) |offset| {
+            const index = (@as(usize, self.next_reusable_session) + offset) % MAX_SESSIONS;
+            if (sessionReusableAt(&self.sessions[index], now_ticks)) return index;
+        }
+        return null;
+    }
 };
+
+fn sessionReusableAt(session: *const SessionRecord, now_ticks: u64) bool {
+    return session.state != .active or now_ticks >= session.expires_at_ticks;
+}
 
 fn zeroSession() SessionRecord {
     return .{
@@ -391,10 +417,6 @@ fn zeroSession() SessionRecord {
         .opened_at_ticks = 0,
         .expires_at_ticks = 0,
     };
-}
-
-fn sessionSlotId(slot: *const SessionSlot) u64 {
-    return slot.record.id;
 }
 
 fn sessionByteLimit(request: OpenRequest) usize {
@@ -525,7 +547,7 @@ test "network session open validates destinations and stops at id exhaustion" {
         },
         null,
     ));
-    try std.testing.expectEqual(@as(usize, 0), service.sessions.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), service.sessionCount());
     try std.testing.expect(service.find(1) == null);
     try std.testing.expectEqual(@as(u64, 1), service.next_session_id);
 
@@ -553,7 +575,7 @@ test "network session open validates destinations and stops at id exhaustion" {
     try std.testing.expectEqual(std.math.maxInt(u64), session.id);
     try std.testing.expectEqualStrings("updates.example", session.destinationSlice());
     try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
-    try std.testing.expectEqual(@as(usize, 1), service.sessions.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.sessionCount());
     try std.testing.expectError(error.SessionIdExhausted, service.open(
         &network_policies,
         &capabilities,
@@ -563,7 +585,7 @@ test "network session open validates destinations and stops at id exhaustion" {
         null,
     ));
     try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
-    try std.testing.expectEqual(@as(usize, 1), service.sessions.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.sessionCount());
     try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
 }
 
@@ -790,6 +812,52 @@ test "network session service opens leased attested sessions and audits revocati
         .now_ticks = 18,
         .detail = "private completed relay transfer",
     }, &ledger));
+
+    const revoked_session_id = session.id;
+    const completed_session_id = completed_session.id;
+    const persistent_session = try service.open(&network_policies, &capabilities, &policies, subjects, .{
+        .subject = app,
+        .task_id = 8802,
+        .policy_id = relay.id,
+        .capability_id = network_capability.id,
+        .evidence = attested_evidence,
+        .sensitivity = .private_user_data,
+        .remote_bytes = 16,
+        .max_session_bytes = 16,
+        .expires_at_ticks = 90,
+        .now_ticks = 19,
+        .detail = "private persistent relay session",
+    }, null);
+    const persistent_session_id = persistent_session.id;
+    for (0..MAX_SESSIONS - 1) |index| {
+        const now_ticks = 20 + index;
+        const rolling = try service.open(&network_policies, &capabilities, &policies, subjects, .{
+            .subject = app,
+            .task_id = 8802,
+            .policy_id = relay.id,
+            .capability_id = network_capability.id,
+            .evidence = attested_evidence,
+            .sensitivity = .private_user_data,
+            .remote_bytes = 16,
+            .max_session_bytes = 16,
+            .expires_at_ticks = 90,
+            .now_ticks = now_ticks,
+            .detail = "private rolling relay session",
+        }, null);
+        _ = try service.complete(.{
+            .subject = app,
+            .task_id = 8802,
+            .session_id = rolling.id,
+            .expected_policy_id = relay.id,
+            .expected_capability_id = network_capability.id,
+            .now_ticks = now_ticks,
+            .detail = "private rolling relay session completed",
+        }, null);
+    }
+    try std.testing.expectEqual(MAX_SESSIONS, service.sessionCount());
+    try std.testing.expect(service.find(revoked_session_id) == null);
+    try std.testing.expect(service.find(completed_session_id) == null);
+    try std.testing.expect(service.find(persistent_session_id) != null);
 
     var expiry_service = Service.init();
     var expiry_ledger = event_ledger.Ledger.init();
