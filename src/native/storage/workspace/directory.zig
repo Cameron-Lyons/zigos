@@ -1173,6 +1173,11 @@ pub fn emptyExportPackage() ExportPackage {
     return zeroExportPackage();
 }
 
+pub fn resetExportPackage(package: *ExportPackage) void {
+    @memset(std.mem.asBytes(package), 0);
+    package.signature.signer = "";
+}
+
 fn copyEntries(dest: []Entry, src: []const Entry) void {
     for (src, 0..) |entry, index| {
         dest[index] = entry;

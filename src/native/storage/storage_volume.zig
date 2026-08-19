@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const ids = @import("../core/ids.zig");
@@ -12,6 +13,10 @@ const volume_log = @import("volume/log.zig");
 const volume_quota = @import("volume/quota.zig");
 const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/memory/memory.zig")
+else
+    struct {};
 
 pub const sector_size = volume_layout.sector_size;
 pub const slot_sectors = volume_layout.slot_sectors;
@@ -28,6 +33,8 @@ pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
+const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
+const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 
 comptime {
     if (SIGNER_TEXT_POOL_BYTES > std.math.maxInt(u16)) {
@@ -91,7 +98,7 @@ pub const Backend = volume_backend.Backend;
 pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 
 pub const Volume = struct {
-    io_log_buffer: [IO_LOG_WORKSPACE_BYTES]u8 = undefined,
+    io_log_buffer: IoLogWorkspace = if (heap_backed_io_workspace) null else undefined,
     sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size,
     attached_backend_present: bool = false,
     attached_backend_sector_count: u64 = 0,
@@ -104,12 +111,11 @@ pub const Volume = struct {
     workspace_state_hashes: WorkspaceStateHashCache = .{},
 
     pub fn init() Volume {
-        var volume: Volume = undefined;
-        volume.reset();
-        return volume;
+        return .{};
     }
 
     pub fn reset(self: *Volume) void {
+        self.releaseIoLogWorkspace();
         @memset(self.sector_buffer[0..], 0);
         self.attached_backend_present = false;
         self.attached_backend_sector_count = 0;
@@ -119,6 +125,27 @@ pub const Volume = struct {
         self.attached_backend_kind = .none;
         self.resetSignerText();
         self.workspace_state_hashes = .{};
+    }
+
+    fn ioLogWorkspace(self: *Volume) Error![]u8 {
+        if (comptime heap_backed_io_workspace) {
+            if (self.io_log_buffer) |buffer| return buffer[0..IO_LOG_WORKSPACE_BYTES];
+            const allocation = kernel_memory.kmalloc(IO_LOG_WORKSPACE_BYTES) orelse return error.NoSpaceLeft;
+            const buffer: [*]u8 = @ptrCast(allocation);
+            self.io_log_buffer = buffer;
+            return buffer[0..IO_LOG_WORKSPACE_BYTES];
+        }
+        return self.io_log_buffer[0..];
+    }
+
+    fn releaseIoLogWorkspace(self: *Volume) void {
+        if (comptime heap_backed_io_workspace) {
+            if (self.io_log_buffer) |buffer| {
+                @memset(buffer[0..IO_LOG_WORKSPACE_BYTES], 0);
+                kernel_memory.kfree(@ptrCast(buffer));
+                self.io_log_buffer = null;
+            }
+        }
     }
 
     fn resetSignerText(self: *Volume) void {
@@ -247,6 +274,12 @@ pub const Volume = struct {
     }
 };
 
+comptime {
+    if (heap_backed_io_workspace and @sizeOf(Volume) > 16 * 1024) {
+        @compileError("heap-backed storage volumes exceed their compact resident layout");
+    }
+}
+
 var default_volume = Volume.init();
 
 pub fn defaultVolume() *Volume {
@@ -331,6 +364,7 @@ fn saveIncremental(
     writer: anytype,
 ) Error!PersistResult {
     try ensureWithinProductCapacityEnvelope(store, workspaces);
+    const io_log_buffer = try self.ioLogWorkspace();
     const started_dirty = store.dirtyObjectIds().len != 0 or
         store.dirtyVersionIds().len != 0 or
         workspaces.dirtyWorkspaceIds().len != 0 or
@@ -346,7 +380,7 @@ fn saveIncremental(
     }
     const delta = if (current) |loaded|
         if (can_append)
-            try tryBuildAppendDelta(self.io_log_buffer[0..], loaded.root, store, workspaces, state_hashes)
+            try tryBuildAppendDelta(io_log_buffer, loaded.root, store, workspaces, state_hashes)
         else
             null
     else
@@ -372,7 +406,7 @@ fn saveIncremental(
         next_root.compacted_generation = current.?.root.compacted_generation;
         const next_root_sector = volume_root_slot.nextRootSector(current);
 
-        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, self.io_log_buffer[0..delta.?.bytes_len]);
+        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, io_log_buffer[0..delta.?.bytes_len]);
         try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
         try flushWrites(writer);
@@ -384,7 +418,7 @@ fn saveIncremental(
     const checkpoint_log_len = try serializeCheckpointRecord(
         store,
         workspaces,
-        self.io_log_buffer[0..data_region_bytes],
+        io_log_buffer[0..data_region_bytes],
     );
 
     const next_generation = current_generation + 1;
@@ -399,7 +433,7 @@ fn saveIncremental(
     next_root.log_segment_count = 0;
     next_root.compacted_generation = next_generation;
     const next_root_sector = volume_root_slot.nextRootSector(current);
-    try writeBytes(writer, data_start_byte + next_data_offset, self.io_log_buffer[0..checkpoint_log_len]);
+    try writeBytes(writer, data_start_byte + next_data_offset, io_log_buffer[0..checkpoint_log_len]);
     try flushWrites(writer);
     try writeRoot(writer, next_root_sector, next_root);
     try flushWrites(writer);
@@ -546,8 +580,9 @@ fn loadBackendRootCandidate(
     loaded: LoadedRoot,
 ) Error!void {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
-    if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, self.io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
-    try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+    const io_log_buffer = try self.ioLogWorkspace();
+    if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
+    try replayLog(self, store, workspaces, io_log_buffer[0..loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
@@ -1619,7 +1654,11 @@ test "storage volume bounds its log io workspace to one durable data region" {
     try std.testing.expect(@hasField(Volume, "io_log_buffer"));
     try std.testing.expect(!@hasField(Volume, "io_payload_buffer"));
     try std.testing.expectEqual(DATA_REGION_BYTES, IO_LOG_WORKSPACE_BYTES);
-    try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
+    if (heap_backed_io_workspace) {
+        try std.testing.expect(@sizeOf(@FieldType(Volume, "io_log_buffer")) <= @sizeOf(usize));
+    } else {
+        try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
+    }
 }
 
 test "append workspace exhaustion falls back to checkpoint compaction" {

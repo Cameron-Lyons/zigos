@@ -118,7 +118,7 @@ pub const TaskShellService = struct {
         switch (request.operation) {
             .click => {
                 try self.click(request.control, request.tick);
-                self.runtime_service.checkpoint(request.tick);
+                try self.runtime_service.checkpoint(request.tick);
                 self.checkpoint();
             },
             .recover_state => try self.recover(request.tick, response),

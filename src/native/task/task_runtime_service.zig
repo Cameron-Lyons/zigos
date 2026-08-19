@@ -1,20 +1,59 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const principal = @import("../core/principal.zig");
 const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
+const native_util = @import("../core/util.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/memory/memory.zig")
+else
+    struct {};
+
+const heap_backed_checkpoints = builtin.target.os.tag == .freestanding;
+const SnapshotBacking = if (heap_backed_checkpoints) ?*task_runtime.Snapshot else task_runtime.Snapshot;
 
 pub const CheckpointStore = struct {
-    checkpoint_state: task_runtime.Snapshot = task_runtime.Runtime.initSnapshot(),
+    checkpoint_state: SnapshotBacking = if (heap_backed_checkpoints) null else task_runtime.Runtime.initSnapshot(),
     has_checkpoint: bool = false,
     last_checkpoint_tick: u64 = 0,
 
     pub fn reset(self: *CheckpointStore) void {
-        self.checkpoint_state.task_count = 0;
-        self.checkpoint_state.address_space_count = 0;
+        if (comptime heap_backed_checkpoints) {
+            if (self.checkpoint_state) |checkpoint_state| {
+                @memset(std.mem.asBytes(checkpoint_state), 0);
+                kernel_memory.kfree(@ptrCast(checkpoint_state));
+                self.checkpoint_state = null;
+            }
+        } else {
+            self.checkpoint_state = task_runtime.Runtime.initSnapshot();
+        }
         self.has_checkpoint = false;
         self.last_checkpoint_tick = 0;
     }
+
+    fn prepareSnapshot(self: *CheckpointStore) error{NoSpaceLeft}!*task_runtime.Snapshot {
+        if (comptime heap_backed_checkpoints) {
+            if (self.checkpoint_state) |checkpoint_state| return checkpoint_state;
+            const allocation = kernel_memory.kmalloc(@sizeOf(task_runtime.Snapshot)) orelse return error.NoSpaceLeft;
+            const checkpoint_state: *task_runtime.Snapshot = @ptrCast(@alignCast(allocation));
+            @memset(std.mem.asBytes(checkpoint_state), 0);
+            self.checkpoint_state = checkpoint_state;
+            return checkpoint_state;
+        }
+        return &self.checkpoint_state;
+    }
+
+    fn snapshotConst(self: *const CheckpointStore) ?*const task_runtime.Snapshot {
+        if (comptime heap_backed_checkpoints) return self.checkpoint_state;
+        return &self.checkpoint_state;
+    }
 };
+
+comptime {
+    if (heap_backed_checkpoints and @sizeOf(CheckpointStore) > 24) {
+        @compileError("heap-backed task checkpoint stores exceed their compact layout");
+    }
+}
 
 pub const Service = struct {
     service_id: u64 = 0,
@@ -67,9 +106,10 @@ pub const Service = struct {
         return self.runtime;
     }
 
-    pub fn checkpoint(self: *Service, tick: u64) void {
+    pub fn checkpoint(self: *Service, tick: u64) error{NoSpaceLeft}!void {
         if (self.checkpoint_store) |checkpoint_store| {
-            self.runtime.writeSnapshot(&checkpoint_store.checkpoint_state);
+            const checkpoint_state = try checkpoint_store.prepareSnapshot();
+            self.runtime.writeSnapshot(checkpoint_state);
             checkpoint_store.has_checkpoint = true;
             checkpoint_store.last_checkpoint_tick = tick;
             self.has_checkpoint = true;
@@ -80,8 +120,10 @@ pub const Service = struct {
     pub fn restartFromCheckpoint(self: *Service, tick: u64) bool {
         const checkpoint_store = self.checkpoint_store orelse return false;
         if (!checkpoint_store.has_checkpoint) return false;
+        const checkpoint_state = checkpoint_store.snapshotConst() orelse
+            native_util.impossibleByInvariant("checkpointed task runtime retains snapshot backing");
 
-        self.runtime.restoreFromSnapshot(&checkpoint_store.checkpoint_state);
+        self.runtime.restoreFromSnapshot(checkpoint_state) catch return false;
         self.has_checkpoint = true;
         self.last_checkpoint_tick = checkpoint_store.last_checkpoint_tick;
         self.restart_generation += 1;
@@ -115,7 +157,7 @@ test "task runtime service restores checkpointed task state on restart" {
         },
     });
 
-    service.checkpoint(20);
+    try service.checkpoint(20);
     _ = try runtime.createTask(.{
         .owner = owner,
         .component_class = .app_component,
@@ -171,7 +213,7 @@ test "task runtime service can restore a persisted checkpoint after service re-i
         .entry = "app.sidecar",
     }, 43);
     try checkpointed_runtime.grantCapability(task.id, 91);
-    service.checkpoint(44);
+    try service.checkpoint(44);
 
     var restarted_runtime = task_runtime.Runtime.init();
     var restarted = Service.initWithStore(&restarted_runtime, &checkpoint_store);

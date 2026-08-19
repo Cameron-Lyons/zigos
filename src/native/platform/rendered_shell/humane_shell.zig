@@ -351,7 +351,7 @@ pub const HumaneShell = struct {
             .focus_next => self.focusNext(),
             .focus_previous => self.focusPrevious(),
         }
-        self.runtime_service.checkpoint(tick);
+        try self.runtime_service.checkpoint(tick);
         self.checkpoint();
     }
 

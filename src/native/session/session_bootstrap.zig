@@ -97,7 +97,7 @@ pub fn initializeUserspace(
     capability_table: *const capability.CapabilityTable,
     scheduler: *userspace_scheduler.Scheduler,
 ) userspace_boot_registry.Error!void {
-    catalog.* = userspace_loader.Catalog.init();
+    catalog.reset();
     try userspace_boot_registry.registerAll(catalog);
     scheduler.bind(catalog, runtime, capability_table);
     if (catalog.imageCount() != 0) {

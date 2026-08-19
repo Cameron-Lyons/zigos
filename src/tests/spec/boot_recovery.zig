@@ -133,7 +133,7 @@ pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
     const boot = recorder.finalize();
 
     try std.testing.expectEqual(rollback.activation_generation, boot.generation);
-    try std.testing.expectEqual(@as(usize, 5), boot.record_count);
+    try std.testing.expectEqual(@as(u8, 5), boot.record_count);
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.kernel));
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.base_image));
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.critical_service));

@@ -54,7 +54,8 @@ var proof_shared: shared_memory.Table = shared_memory.Table.init();
 fn resetProofFixtures() void {
     proof_runtime.reset();
     proof_capabilities = capability.CapabilityTable.init();
-    proof_endpoints = endpoint.Table.init();
+    proof_endpoints.reset();
+    proof_shared.deinit();
     proof_shared = shared_memory.Table.init();
 }
 
@@ -352,9 +353,9 @@ pub fn rebootGrantAndRevocationStatePersists() bool {
     const task_id = task.id;
     reboot_proof_runtime.grantCapability(task_id, 91) catch return false;
     reboot_proof_runtime.grantCapability(task_id, 92) catch return false;
-    service_instance.checkpoint(1);
+    service_instance.checkpoint(1) catch return false;
     if (!(reboot_proof_runtime.revokeCapability(task_id, 91) catch return false)) return false;
-    service_instance.checkpoint(2);
+    service_instance.checkpoint(2) catch return false;
 
     var restarted = task_runtime_service.Service.initWithStore(&reboot_proof_restarted_runtime, &reboot_proof_checkpoint_store);
     restarted.bind(50, service(50));
