@@ -232,7 +232,9 @@ pub const indexed_hot_path_tables = .{
         .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and
             @FieldType(debug_contract.DenialExplanation, "operation_len") == u8 and
             @FieldType(debug_contract.DenialExplanation, "required_authority_len") == u8 and
-            @FieldType(debug_contract.DenialExplanation, "blocking_policy_len") == u8,
+            @FieldType(debug_contract.DenialExplanation, "blocking_policy_len") == u8 and
+            @FieldType(debug_contract.ProvenanceRecord, "operation_len") == u8 and
+            @FieldType(debug_contract.ProvenanceRecord, "detail_len") == u8,
         .keeps_debug_state_within_ceilings = @sizeOf(debug_contract.DenialExplanation) <= debug_contract.DENIAL_EXPLANATION_SIZE_CEILING_BYTES and
             @sizeOf(debug_contract.ProvenanceRecord) <= debug_contract.PROVENANCE_RECORD_SIZE_CEILING_BYTES,
     },
