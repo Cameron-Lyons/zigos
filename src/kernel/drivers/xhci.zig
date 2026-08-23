@@ -32,6 +32,10 @@ pub const HID_BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const HID_BOOT_KEY_SLOTS: usize = 6;
 pub const HID_EVENT_QUEUE_CAPACITY: usize = 8;
 pub const HARDWARE_HID_REPORT_QUEUE_CAPACITY: usize = 64;
+pub const COMPACT_INPUT_QUEUE_METADATA = true;
+pub const HID_REPORT_SIZE_CEILING_BYTES: usize = 24;
+pub const BOOT_KEYBOARD_REPORT_PUBLISHER_SIZE_CEILING_BYTES: usize = 1_584;
+pub const HID_CONTROLLER_SIZE_CEILING_BYTES: usize = 2_032;
 pub const USB_DESCRIPTOR_DEVICE: u8 = 0x01;
 pub const USB_DESCRIPTOR_CONFIGURATION: u8 = 0x02;
 pub const USB_DESCRIPTOR_INTERFACE: u8 = 0x04;
@@ -62,6 +66,17 @@ pub const MAX_EXTENDED_CAPABILITY_OFFSET: u32 = @as(u32, std.math.maxInt(u16)) <
 pub const MAX_EXTENDED_CAPABILITIES: usize = 64;
 pub const CONTROLLER_HALT_TIMEOUT_MILLISECONDS: u64 = 16;
 pub const CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS: u64 = 1_000;
+
+comptime {
+    if (HID_BOOT_KEYBOARD_REPORT_BYTES > std.math.maxInt(u8) or
+        HID_EVENT_QUEUE_CAPACITY > std.math.maxInt(u8) or
+        HARDWARE_HID_REPORT_QUEUE_CAPACITY > std.math.maxInt(u8) or
+        MAX_DEVICE_SLOTS > std.math.maxInt(u8))
+    {
+        @compileError("xHCI input queues no longer fit compact metadata");
+    }
+}
+
 pub const ContextSize = enum(u8) {
     bytes_32 = 32,
     bytes_64 = 64,
@@ -1707,11 +1722,11 @@ const MmioState = struct {
 pub const HidReport = struct {
     device_id: u64,
     endpoint_id: u8,
-    report_len: usize,
+    report_len: u8,
     report: [HID_BOOT_KEYBOARD_REPORT_BYTES]u8,
 
     pub fn reportSlice(self: *const HidReport) []const u8 {
-        return self.report[0..self.report_len];
+        return self.report[0..@as(usize, self.report_len)];
     }
 
     pub fn modifiers(self: *const HidReport) u8 {
@@ -1721,6 +1736,12 @@ pub const HidReport = struct {
     pub fn keySlots(self: *const HidReport) []const u8 {
         if (self.report_len != HID_BOOT_KEYBOARD_REPORT_BYTES) return &.{};
         return self.report[2..8];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > HID_REPORT_SIZE_CEILING_BYTES) {
+            @compileError("xHCI HID report exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -1738,9 +1759,9 @@ pub const HardwareBootKeyboardReport = struct {
 pub const BootKeyboardReportPublisher = struct {
     sequence: u64 = 0,
     latest: ?HardwareBootKeyboardReport = null,
-    head: usize = 0,
-    tail: usize = 0,
-    count: usize = 0,
+    head: u8 = 0,
+    tail: u8 = 0,
+    count: u8 = 0,
     reports: [HARDWARE_HID_REPORT_QUEUE_CAPACITY]HardwareBootKeyboardReport =
         [_]HardwareBootKeyboardReport{.{}} ** HARDWARE_HID_REPORT_QUEUE_CAPACITY,
 
@@ -1772,7 +1793,7 @@ pub const BootKeyboardReportPublisher = struct {
         };
         @memcpy(published.bytes[0..], report);
         self.reports[self.tail] = published;
-        self.tail = (self.tail + 1) % self.reports.len;
+        self.tail = @intCast((@as(usize, self.tail) + 1) % self.reports.len);
         self.count += 1;
         self.latest = published;
         return published;
@@ -1782,17 +1803,17 @@ pub const BootKeyboardReportPublisher = struct {
         if (self.count == 0) return null;
         const report = self.reports[self.head];
         self.reports[self.head] = .{};
-        self.head = (self.head + 1) % self.reports.len;
+        self.head = @intCast((@as(usize, self.head) + 1) % self.reports.len);
         self.count -= 1;
         return report;
     }
 
     pub fn pendingCount(self: *const BootKeyboardReportPublisher) usize {
-        return self.count;
+        return @intCast(self.count);
     }
 
     pub fn hasCapacity(self: *const BootKeyboardReportPublisher, additional: usize) bool {
-        return additional <= self.reports.len - self.count;
+        return additional <= self.reports.len - @as(usize, self.count);
     }
 
     pub fn latestAfter(
@@ -1808,29 +1829,35 @@ pub const BootKeyboardReportPublisher = struct {
             HARDWARE_HID_REPORT_QUEUE_CAPACITY;
         var retained: usize = 0;
         var offset: usize = 0;
-        while (offset < self.count) : (offset += 1) {
-            const report = self.reports[(self.head + offset) % self.reports.len];
+        while (offset < @as(usize, self.count)) : (offset += 1) {
+            const report = self.reports[(@as(usize, self.head) + offset) % self.reports.len];
             if (report.port_id == port_id) continue;
             retained_reports[retained] = report;
             retained += 1;
         }
         self.reports = retained_reports;
         self.head = 0;
-        self.tail = retained % self.reports.len;
-        self.count = retained;
+        self.tail = @intCast(retained % self.reports.len);
+        self.count = @intCast(retained);
         if (self.latest) |report| {
             if (report.port_id == port_id) {
                 self.latest = if (retained == 0) null else self.reports[retained - 1];
             }
         }
     }
+
+    comptime {
+        if (@sizeOf(@This()) > BOOT_KEYBOARD_REPORT_PUBLISHER_SIZE_CEILING_BYTES) {
+            @compileError("xHCI boot keyboard report publisher exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const HidController = struct {
     ring_plan: RingPlan,
-    head: usize = 0,
-    tail: usize = 0,
-    count: usize = 0,
+    head: u8 = 0,
+    tail: u8 = 0,
+    count: u8 = 0,
     boot_keyboard: ?HidBootKeyboardDevice = null,
     ports: [MAX_BOOT_PORTS]PortState = [_]PortState{.{}} ** MAX_BOOT_PORTS,
     slots: [DEVICE_SLOT_TABLE_ENTRIES]DeviceSlot = [_]DeviceSlot{.{}} ** DEVICE_SLOT_TABLE_ENTRIES,
@@ -1841,7 +1868,7 @@ pub const HidController = struct {
     mmio: ?MmioState = null,
     next_unclaimed_slot: u8 = 1,
     recycled_slots: [MAX_DEVICE_SLOTS]u8 = [_]u8{0} ** MAX_DEVICE_SLOTS,
-    recycled_slot_count: usize = 0,
+    recycled_slot_count: u8 = 0,
 
     pub fn init(ring_plan: RingPlan) Error!HidController {
         try validateRingPlan(ring_plan);
@@ -1881,7 +1908,7 @@ pub const HidController = struct {
         if (report.report_len == 0 or report.report_len > report.report.len) return error.ReportTooLarge;
         if (self.count == self.reports.len) return error.EventRingFull;
         self.reports[self.tail] = report;
-        self.tail = (self.tail + 1) % self.reports.len;
+        self.tail = @intCast((@as(usize, self.tail) + 1) % self.reports.len);
         self.count += 1;
     }
 
@@ -2042,7 +2069,7 @@ pub const HidController = struct {
         if (self.count == 0) return error.EventRingEmpty;
         const report = self.reports[self.head];
         self.reports[self.head] = emptyHidReport();
-        self.head = (self.head + 1) % self.reports.len;
+        self.head = @intCast((@as(usize, self.head) + 1) % self.reports.len);
         self.count -= 1;
         return report;
     }
@@ -2087,6 +2114,12 @@ pub const HidController = struct {
             mmio.transfer_doorbells = 0;
             mmio.event_ring_dequeue_count = 0;
             mmio.interrupt_events = 0;
+        }
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > HID_CONTROLLER_SIZE_CEILING_BYTES) {
+            @compileError("xHCI HID controller exceeds its compact size ceiling");
         }
     }
 };
@@ -5354,6 +5387,23 @@ test "xHCI hardware keyboard publisher preserves queued port-scoped reports" {
     }
     try std.testing.expect(publisher.poll() == null);
     try std.testing.expect(publisher.hasCapacity(HARDWARE_HID_REPORT_QUEUE_CAPACITY));
+}
+
+test "xHCI input queues use capacity-sized resident metadata" {
+    try std.testing.expect(@FieldType(HidReport, "report_len") == u8);
+    try std.testing.expect(@FieldType(BootKeyboardReportPublisher, "head") == u8);
+    try std.testing.expect(@FieldType(BootKeyboardReportPublisher, "tail") == u8);
+    try std.testing.expect(@FieldType(BootKeyboardReportPublisher, "count") == u8);
+    try std.testing.expect(@FieldType(HidController, "head") == u8);
+    try std.testing.expect(@FieldType(HidController, "tail") == u8);
+    try std.testing.expect(@FieldType(HidController, "count") == u8);
+    try std.testing.expect(@FieldType(HidController, "recycled_slot_count") == u8);
+    try std.testing.expectEqual(@as(usize, HID_REPORT_SIZE_CEILING_BYTES), @sizeOf(HidReport));
+    try std.testing.expectEqual(
+        @as(usize, BOOT_KEYBOARD_REPORT_PUBLISHER_SIZE_CEILING_BYTES),
+        @sizeOf(BootKeyboardReportPublisher),
+    );
+    try std.testing.expectEqual(@as(usize, HID_CONTROLLER_SIZE_CEILING_BYTES), @sizeOf(HidController));
 }
 
 test "xHCI HID controller requires port slot address and event delivery for input proof" {

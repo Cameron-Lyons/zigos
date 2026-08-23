@@ -3,6 +3,14 @@ const std = @import("std");
 pub const BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const BOOT_KEY_SLOTS: usize = 6;
 pub const EVENT_QUEUE_CAPACITY: usize = 32;
+pub const COMPACT_EVENT_QUEUE_METADATA = true;
+pub const DECODER_SIZE_CEILING_BYTES: usize = 96;
+
+comptime {
+    if (EVENT_QUEUE_CAPACITY > std.math.maxInt(u8)) {
+        @compileError("input decoder event queue no longer fits compact metadata");
+    }
+}
 
 const LEFT_CONTROL: u8 = 1 << 0;
 const LEFT_SHIFT: u8 = 1 << 1;
@@ -39,9 +47,9 @@ pub const Error = error{
 pub const Decoder = struct {
     previous_keys: [BOOT_KEY_SLOTS]u8 = [_]u8{0} ** BOOT_KEY_SLOTS,
     events: [EVENT_QUEUE_CAPACITY]KeyboardEvent = [_]KeyboardEvent{.{ .kind = .activate }} ** EVENT_QUEUE_CAPACITY,
-    head: usize = 0,
-    tail: usize = 0,
-    count: usize = 0,
+    head: u8 = 0,
+    tail: u8 = 0,
+    count: u8 = 0,
     reports_consumed: usize = 0,
     events_emitted: usize = 0,
 
@@ -62,11 +70,11 @@ pub const Decoder = struct {
             staged[staged_count] = event;
             staged_count += 1;
         }
-        if (staged_count > self.events.len - self.count) return error.EventQueueFull;
+        if (staged_count > self.events.len - @as(usize, self.count)) return error.EventQueueFull;
 
         for (staged[0..staged_count]) |event| {
             self.events[self.tail] = event;
-            self.tail = (self.tail + 1) % self.events.len;
+            self.tail = @intCast((@as(usize, self.tail) + 1) % self.events.len);
             self.count += 1;
         }
         @memcpy(self.previous_keys[0..], keys);
@@ -79,17 +87,23 @@ pub const Decoder = struct {
         if (self.count == 0) return null;
         const event = self.events[self.head];
         self.events[self.head] = .{ .kind = .activate };
-        self.head = (self.head + 1) % self.events.len;
+        self.head = @intCast((@as(usize, self.head) + 1) % self.events.len);
         self.count -= 1;
         return event;
     }
 
     pub fn pendingCount(self: *const Decoder) usize {
-        return self.count;
+        return @intCast(self.count);
     }
 
     pub fn reset(self: *Decoder) void {
         self.* = .{};
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DECODER_SIZE_CEILING_BYTES) {
+            @compileError("input decoder exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -235,4 +249,8 @@ test "input decoder rejects malformed reports and applies queue backpressure ato
     try std.testing.expectError(error.EventQueueFull, decoder.submit(testReport(0, &.{0x05})));
     try std.testing.expectEqual(EVENT_QUEUE_CAPACITY, decoder.pendingCount());
     try std.testing.expectEqual(@as(usize, EVENT_QUEUE_CAPACITY * 2), decoder.reports_consumed);
+    try std.testing.expect(@FieldType(Decoder, "head") == u8);
+    try std.testing.expect(@FieldType(Decoder, "tail") == u8);
+    try std.testing.expect(@FieldType(Decoder, "count") == u8);
+    try std.testing.expectEqual(@as(usize, DECODER_SIZE_CEILING_BYTES), @sizeOf(Decoder));
 }

@@ -59,6 +59,17 @@ pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
+pub const COMPACT_COMMAND_QUEUE_METADATA = true;
+pub const COMMAND_INPUT_SIZE_CEILING_BYTES: usize = 1_664;
+
+comptime {
+    if (MAX_INPUT_LINE > std.math.maxInt(u8) or
+        MAX_PHYSICAL_INPUT_COMMANDS > std.math.maxInt(u8))
+    {
+        @compileError("permission review command queue no longer fits compact metadata");
+    }
+}
+
 pub const InputError = xhci.Error || input_driver_task.Error || error{ UnsupportedTextInput, InputCommandQueueFull };
 pub const Error = task_runtime.Error || manifest.ValidationError || compositor_display.Error || event_ledger.Error || permission_review.SessionError || error{
     ReviewCommandTooLong,
@@ -78,13 +89,13 @@ pub const ScriptedPlanEntry = struct {
 
 pub const CommandInput = struct {
     pending_line: [MAX_INPUT_LINE]u8 = [_]u8{0} ** MAX_INPUT_LINE,
-    pending_line_len: usize = 0,
+    pending_line_len: u8 = 0,
     pending_commands: [MAX_PHYSICAL_INPUT_COMMANDS][MAX_INPUT_LINE]u8 =
         [_][MAX_INPUT_LINE]u8{[_]u8{0} ** MAX_INPUT_LINE} ** MAX_PHYSICAL_INPUT_COMMANDS,
-    pending_command_lens: [MAX_PHYSICAL_INPUT_COMMANDS]usize = [_]usize{0} ** MAX_PHYSICAL_INPUT_COMMANDS,
-    pending_command_head: usize = 0,
-    pending_command_tail: usize = 0,
-    pending_command_count: usize = 0,
+    pending_command_lens: [MAX_PHYSICAL_INPUT_COMMANDS]u8 = [_]u8{0} ** MAX_PHYSICAL_INPUT_COMMANDS,
+    pending_command_head: u8 = 0,
+    pending_command_tail: u8 = 0,
+    pending_command_count: u8 = 0,
     commands_completed: usize = 0,
 
     pub fn submit(self: *CommandInput, event: input_driver_task.KeyboardEvent) InputError!bool {
@@ -111,7 +122,7 @@ pub const CommandInput = struct {
                     self.pending_line[0..self.pending_line_len],
                 );
                 self.pending_command_lens[index] = self.pending_line_len;
-                self.pending_command_tail = (self.pending_command_tail + 1) % self.pending_commands.len;
+                self.pending_command_tail = @intCast((@as(usize, self.pending_command_tail) + 1) % self.pending_commands.len);
                 self.pending_command_count += 1;
                 self.commands_completed += 1;
                 self.pending_line_len = 0;
@@ -136,9 +147,15 @@ pub const CommandInput = struct {
         @memcpy(buffer[0..len], self.pending_commands[index][0..len]);
         @memset(self.pending_commands[index][0..], 0);
         self.pending_command_lens[index] = 0;
-        self.pending_command_head = (self.pending_command_head + 1) % self.pending_commands.len;
+        self.pending_command_head = @intCast((@as(usize, self.pending_command_head) + 1) % self.pending_commands.len);
         self.pending_command_count -= 1;
         return buffer[0..len];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > COMMAND_INPUT_SIZE_CEILING_BYTES) {
+            @compileError("permission review command input exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -204,7 +221,7 @@ pub const ModeledInputSource = struct {
     }
 
     pub fn queuedCommandCount(self: *const ModeledInputSource) usize {
-        return self.commands.pending_command_count;
+        return @intCast(self.commands.pending_command_count);
     }
 
     pub fn inputProof(self: *const ModeledInputSource) ?xhci.InputProof {
@@ -1028,6 +1045,26 @@ fn createReviewTestTask(
         .ui_surface_id = ui_surface_id,
         .local_only = true,
     });
+}
+
+test "permission command queue retains its full compact capacity" {
+    var input = CommandInput{};
+    for (0..MAX_PHYSICAL_INPUT_COMMANDS) |_| {
+        try std.testing.expect(!try input.submit(.{ .kind = .text, .text = 'a' }));
+        try std.testing.expect(try input.submit(.{ .kind = .activate }));
+    }
+
+    try std.testing.expectEqual(@as(u8, MAX_PHYSICAL_INPUT_COMMANDS), input.pending_command_count);
+    try std.testing.expect(!try input.submit(.{ .kind = .text, .text = 'b' }));
+    try std.testing.expectError(error.InputCommandQueueFull, input.submit(.{ .kind = .activate }));
+
+    var buffer: [MAX_INPUT_LINE]u8 = undefined;
+    for (0..MAX_PHYSICAL_INPUT_COMMANDS) |_| {
+        try std.testing.expectEqualStrings("a", input.take(&buffer).?);
+    }
+    try std.testing.expect(input.take(&buffer) == null);
+    try std.testing.expectEqual(input.pending_command_head, input.pending_command_tail);
+    try std.testing.expectEqual(@as(usize, COMMAND_INPUT_SIZE_CEILING_BYTES), @sizeOf(CommandInput));
 }
 
 test "review service retries invalid commands clamps leases and records audits" {
