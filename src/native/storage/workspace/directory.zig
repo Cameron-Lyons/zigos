@@ -34,6 +34,7 @@ pub const WORKSPACE_STAGING_STATE_SIZE_CEILING_BYTES: usize = 3;
 pub const COMPACT_SNAPSHOT_EXPORT_METADATA = true;
 pub const SNAPSHOT_RECORD_SIZE_CEILING_BYTES: usize = 224;
 pub const EXPORT_PACKAGE_SIZE_CEILING_BYTES: usize = 11_808;
+pub const COMPACT_WORKSPACE_LABEL_METADATA = true;
 pub const NO_SNAPSHOT_GENERATION: u32 = std.math.maxInt(u32);
 
 comptime {
@@ -50,7 +51,7 @@ comptime {
         MAX_EXPORT_SIGNATURE_FORMAT_BYTES > std.math.maxInt(u8) or
         MAX_EXPORT_SIGNATURE_SIGNER_BYTES > std.math.maxInt(u8))
     {
-        @compileError("workspace snapshot or export metadata exceeds u8 capacity");
+        @compileError("workspace text metadata exceeds u8 capacity");
     }
 }
 const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
@@ -157,8 +158,8 @@ pub const EntryMutation = struct {
 };
 const MutationEntries = [MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation;
 const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
-pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 19_400 else 43_968;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 161_176 else 357_720;
+pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 19_392 else 43_960;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 161_112 else 357_656;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 
 pub const CreateRequest = struct {
@@ -381,7 +382,7 @@ pub const RecoverableDeleteLog = struct {
 pub const WorkspaceRecord = struct {
     id: ids.WorkspaceId,
     owner: principal.PrincipalId,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_WORKSPACE_LABEL_BYTES]u8,
     generation: u32,
     path_index: WorkspacePathIndex,
@@ -392,7 +393,7 @@ pub const WorkspaceRecord = struct {
     oldest_snapshot_generation: u32 = NO_SNAPSHOT_GENERATION,
 
     pub fn labelSlice(self: *const WorkspaceRecord) []const u8 {
-        return self.label[0..@min(self.label_len, self.label.len)];
+        return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
     }
 
     pub fn entryCount(self: *const WorkspaceRecord) usize {
@@ -448,7 +449,7 @@ comptime {
     if (heap_backed_mutation_logs and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
         @compileError("heap-backed workspace records exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and @sizeOf(WorkspaceSlot) > 19_408) {
+    if (heap_backed_mutation_logs and @sizeOf(WorkspaceSlot) > 19_400) {
         @compileError("heap-backed workspace slots exceed their compact layout");
     }
 }
@@ -612,7 +613,7 @@ pub const Directory = struct {
         slot.workspace.id = workspace_id;
         slot.workspace.owner = request.owner;
         slot.workspace.label = label;
-        slot.workspace.label_len = label_len;
+        slot.workspace.label_len = @intCast(label_len);
         rebuildWorkspaceEntryIndex(&slot.workspace);
         self.indexWorkspace(slot_index);
         return &slot.workspace;
@@ -1822,6 +1823,10 @@ test "workspace snapshot and export metadata stay compact" {
     try std.testing.expectEqual(@as(usize, 11_808), @sizeOf(ExportPackage));
 }
 
+test "workspace label metadata stays compact" {
+    try std.testing.expectEqual(u8, @FieldType(WorkspaceRecord, "label_len"));
+}
+
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
@@ -1830,9 +1835,9 @@ test "workspace sharing uses capacity-sized resident indexes" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ShareGrantPrincipalIndexSlot));
     try std.testing.expectEqual(@as(usize, 384), @sizeOf(ShareGrantPrincipalIndex));
     try std.testing.expectEqual(@as(usize, 1_480), @sizeOf(WorkspaceShareTable));
-    try std.testing.expectEqual(@as(usize, 43_968), @sizeOf(WorkspaceRecord));
-    try std.testing.expectEqual(@as(usize, 43_976), @sizeOf(WorkspaceSlot));
-    try std.testing.expectEqual(@as(usize, 357_720), @sizeOf(Directory));
+    try std.testing.expectEqual(@as(usize, 43_960), @sizeOf(WorkspaceRecord));
+    try std.testing.expectEqual(@as(usize, 43_968), @sizeOf(WorkspaceSlot));
+    try std.testing.expectEqual(@as(usize, 357_656), @sizeOf(Directory));
 }
 
 test "workspace borrowed resolution returns the directory owned entry" {
