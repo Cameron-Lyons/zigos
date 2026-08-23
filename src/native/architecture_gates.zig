@@ -118,6 +118,10 @@ pub const indexed_hot_path_tables = .{
         .uses_key_arena = @hasDecl(@FieldType(principal.Keyring, "slots"), "reserveIndex"),
         .uses_principal_index = @hasField(principal.Keyring, "principal_index"),
         .uses_publisher_index = @hasField(principal.Keyring, "publisher_index"),
+        .stores_compact_key_metadata = principal.COMPACT_KEY_RECORD_METADATA and
+            @FieldType(principal.PrincipalKeyRecord, "publisher_len") == u8,
+        .keeps_keyring_state_within_ceilings = @sizeOf(principal.PrincipalKeyRecord) <= principal.PRINCIPAL_KEY_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(principal.Keyring) <= principal.KEYRING_SIZE_CEILING_BYTES,
     },
     .capability_table = .{
         .uses_capability_arena = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandle"),
