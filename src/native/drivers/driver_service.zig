@@ -10,6 +10,9 @@ const units = @import("../core/units.zig");
 
 pub const MAX_DRIVER_SERVICES: usize = 8;
 pub const MAX_SIGNER_BYTES: usize = 32;
+pub const COMPACT_DRIVER_RECORD_METADATA = true;
+pub const DRIVER_RECORD_SIZE_CEILING_BYTES: usize = 152;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 2_328;
 const DRIVER_INDEX_CAPACITY: usize = MAX_DRIVER_SERVICES * 2;
 
 pub const DeviceClass = enum(u8) {
@@ -43,6 +46,14 @@ const DEFAULT_COMPOSITOR_DMA_WINDOW_BYTES: u64 = units.kibibytes(512);
 const DMA_TEST_PAGE_BASE: u64 = 0x1000;
 const DMA_TEST_PAGE_BYTES: u64 = 4096;
 
+comptime {
+    if (MAX_DMA_RANGES > std.math.maxInt(u8) or
+        MAX_SIGNER_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("driver record capacities no longer fit compact metadata");
+    }
+}
+
 pub const DmaProtection = enum(u8) {
     iommu_enforced,
 };
@@ -69,21 +80,27 @@ pub const DriverRecord = struct {
     bootstrap_transport: BootstrapTransport,
     dma_domain_id: u64,
     dma_protection: DmaProtection,
-    dma_range_count: usize,
+    dma_range_count: u8,
     dma_ranges: [MAX_DMA_RANGES]DmaRange,
-    signer_len: usize,
+    signer_len: u8,
     signer: [MAX_SIGNER_BYTES]u8,
 
     pub fn signerSlice(self: *const DriverRecord) []const u8 {
-        return self.signer[0..self.signer_len];
+        return self.signer[0..@as(usize, self.signer_len)];
     }
 
     pub fn allowsDma(self: *const DriverRecord, address: u64, length: u64) bool {
         var index: usize = 0;
-        while (index < self.dma_range_count) : (index += 1) {
+        while (index < @as(usize, self.dma_range_count)) : (index += 1) {
             if (self.dma_ranges[index].contains(address, length)) return true;
         }
         return false;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DRIVER_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("driver record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -303,9 +320,15 @@ pub const Directory = struct {
             .signer_len = 0,
             .signer = [_]u8{0} ** MAX_SIGNER_BYTES,
         };
-        record.dma_range_count = defaultDmaRanges(record.dma_ranges[0..], request.device_class, request.device_id);
+        record.dma_range_count = @intCast(defaultDmaRanges(record.dma_ranges[0..], request.device_class, request.device_id));
         writeSigner(&record, request.signer);
         return record;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DIRECTORY_SIZE_CEILING_BYTES) {
+            @compileError("driver directory exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -479,8 +502,9 @@ fn validateSignedRequest(request: SignedRegistrationRequest) Error!u64 {
 }
 
 fn writeSigner(record: *DriverRecord, signer: []const u8) void {
-    record.signer_len = @min(signer.len, record.signer.len);
-    @memcpy(record.signer[0..record.signer_len], signer[0..record.signer_len]);
+    const signer_len = @min(signer.len, record.signer.len);
+    record.signer_len = @intCast(signer_len);
+    @memcpy(record.signer[0..signer_len], signer[0..signer_len]);
 }
 
 fn zeroDmaRange() DmaRange {
@@ -564,6 +588,14 @@ fn registerDriverForTest(
         .now_ticks = 1,
         .signer = signer,
     });
+}
+
+test "driver directory uses compact bounded record metadata" {
+    try std.testing.expect(COMPACT_DRIVER_RECORD_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(DriverRecord, "dma_range_count"));
+    try std.testing.expectEqual(u8, @FieldType(DriverRecord, "signer_len"));
+    try std.testing.expectEqual(@as(usize, DRIVER_RECORD_SIZE_CEILING_BYTES), @sizeOf(DriverRecord));
+    try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
 }
 
 test "driver services require signed least-privilege device authority" {
