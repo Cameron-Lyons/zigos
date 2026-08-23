@@ -19,7 +19,7 @@ pub const ReceiveStatus = enum(u8) {
 
 pub const ReceiveResult = struct {
     status: ReceiveStatus,
-    length: usize = 0,
+    length: u16 = 0,
 };
 
 pub fn noNetworkFrame(_: []u8) ReceiveResult {
@@ -39,6 +39,7 @@ pub const NetworkDevice = struct {
 
 pub const BROADCAST_MAC: [6]u8 = [_]u8{0xFF} ** 6;
 pub const MAX_PEER_LINKS: usize = 32;
+pub const COMPACT_BOUNDED_METADATA = true;
 const PEER_LINK_INDEX_CAPACITY: usize = MAX_PEER_LINKS * 2;
 const PeerLinkIndex = indexed_arena.UniqueIndex(PEER_LINK_INDEX_CAPACITY);
 
@@ -126,9 +127,26 @@ pub const MAX_NATIVE_PAYLOAD_BYTES: usize = 160;
 pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
 pub const MAX_RECEIVE_FRAME_BYTES: usize = 1500;
 pub const RECEIVE_QUEUE_CAPACITY: usize = 32;
+pub const RECEIVE_RESULT_SIZE_CEILING_BYTES: usize = 4;
+pub const SERVICE_IDENTITY_CONNECTION_SIZE_CEILING_BYTES: usize = 320;
+pub const LOCAL_DISCOVERY_CONNECTION_SIZE_CEILING_BYTES: usize = 192;
+pub const LOCAL_DISCOVERY_FRAME_SIZE_CEILING_BYTES: usize = 288;
+pub const QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES: usize = 1_502;
 const SERVICE_IDENTITY_FRAME_MAGIC = "ZGNI";
 const DISCOVERY_FRAME_MAGIC = "ZGND";
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PayloadTooLarge);
+
+comptime {
+    if (RECEIVE_QUEUE_CAPACITY > std.math.maxInt(u8)) {
+        @compileError("network driver queue metadata exceeds u8 capacity");
+    }
+    if (network_policy.MAX_TARGET_BYTES > std.math.maxInt(u8) or MAX_NATIVE_PAYLOAD_BYTES > std.math.maxInt(u8)) {
+        @compileError("network driver identity or payload metadata exceeds u8 capacity");
+    }
+    if (MAX_NATIVE_FRAME_BYTES > std.math.maxInt(u16) or MAX_RECEIVE_FRAME_BYTES > std.math.maxInt(u16)) {
+        @compileError("network driver frame metadata exceeds u16 capacity");
+    }
+}
 
 pub const Error = error{
     EgressDenied,
@@ -149,7 +167,7 @@ pub const NativeServiceIdentityConnection = struct {
     target_device: principal.PrincipalId,
     source_mac: [6]u8,
     target_mac: [6]u8,
-    service_identity_len: usize = 0,
+    service_identity_len: u8 = 0,
     service_identity: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     peer_root_digest: crypto_hash.Digest,
     attestation_request_digest: crypto_hash.Digest = crypto_hash.zero_digest,
@@ -166,7 +184,7 @@ pub const NativeServiceIdentityConnection = struct {
     egress_decision: network_policy.EgressDecision,
 
     pub fn serviceIdentitySlice(self: *const NativeServiceIdentityConnection) []const u8 {
-        return self.service_identity[0..self.service_identity_len];
+        return self.service_identity[0..@as(usize, self.service_identity_len)];
     }
 };
 
@@ -202,14 +220,14 @@ pub const NativeLocalDiscoveryConnection = struct {
     capability_id: u64,
     source_device: principal.PrincipalId,
     source_mac: [6]u8,
-    discovery_class_len: usize = 0,
+    discovery_class_len: u8 = 0,
     discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     key: crypto_hash.Digest,
     scoped_discovery: bool,
     egress_decision: network_policy.EgressDecision,
 
     pub fn discoveryClassSlice(self: *const NativeLocalDiscoveryConnection) []const u8 {
-        return self.discovery_class[0..self.discovery_class_len];
+        return self.discovery_class[0..@as(usize, self.discovery_class_len)];
     }
 };
 
@@ -217,23 +235,33 @@ pub const NativeLocalDiscoveryFrame = struct {
     connection_id: u64,
     policy_id: u64,
     capability_id: u64,
-    probe_len: usize,
+    probe_len: u8,
     ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
     probe_digest: crypto_hash.Digest,
-    discovery_class_len: usize = 0,
+    discovery_class_len: u8 = 0,
     discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     encrypted: bool,
     egress_allowed: bool,
     scoped_discovery: bool,
 
     pub fn ciphertextSlice(self: *const NativeLocalDiscoveryFrame) []const u8 {
-        return self.ciphertext[0..self.probe_len];
+        return self.ciphertext[0..@as(usize, self.probe_len)];
     }
 
     pub fn discoveryClassSlice(self: *const NativeLocalDiscoveryFrame) []const u8 {
-        return self.discovery_class[0..self.discovery_class_len];
+        return self.discovery_class[0..@as(usize, self.discovery_class_len)];
     }
 };
+
+comptime {
+    if (@sizeOf(ReceiveResult) > RECEIVE_RESULT_SIZE_CEILING_BYTES or
+        @sizeOf(NativeServiceIdentityConnection) > SERVICE_IDENTITY_CONNECTION_SIZE_CEILING_BYTES or
+        @sizeOf(NativeLocalDiscoveryConnection) > LOCAL_DISCOVERY_CONNECTION_SIZE_CEILING_BYTES or
+        @sizeOf(NativeLocalDiscoveryFrame) > LOCAL_DISCOVERY_FRAME_SIZE_CEILING_BYTES)
+    {
+        @compileError("network driver bounded metadata exceeds compact layout ceilings");
+    }
+}
 
 pub const NativeNetworkStack = struct {
     peer_links: PeerLinkDirectory = .{},
@@ -294,7 +322,7 @@ pub const NativeNetworkStack = struct {
             .identity_pinned = decision.policy_decision.identity_pinned,
             .egress_decision = decision,
         };
-        connection.service_identity_len = native_util.copyTextExact(&connection.service_identity, service_identity) catch return error.ServiceIdentityTooLong;
+        connection.service_identity_len = @intCast(native_util.copyTextExact(&connection.service_identity, service_identity) catch return error.ServiceIdentityTooLong);
         connection.key = nativeConnectionKey(&connection);
         self.opened_connections += 1;
         return connection;
@@ -371,7 +399,7 @@ pub const NativeNetworkStack = struct {
             .scoped_discovery = true,
             .egress_decision = decision,
         };
-        connection.discovery_class_len = native_util.copyTextExact(&connection.discovery_class, discovery_class) catch return error.DiscoveryClassTooLong;
+        connection.discovery_class_len = @intCast(native_util.copyTextExact(&connection.discovery_class, discovery_class) catch return error.DiscoveryClassTooLong);
         connection.key = nativeDiscoveryKey(&connection);
         self.opened_connections += 1;
         return connection;
@@ -458,14 +486,14 @@ pub const NativeNetworkStack = struct {
             .connection_id = connection.id,
             .policy_id = connection.policy_id,
             .capability_id = connection.capability_id,
-            .probe_len = payload.len,
+            .probe_len = @intCast(payload.len),
             .ciphertext = [_]u8{0} ** MAX_NATIVE_PAYLOAD_BYTES,
             .probe_digest = nativeDiscoveryDigest(connection, payload),
             .encrypted = true,
             .egress_allowed = true,
             .scoped_discovery = true,
         };
-        frame.discovery_class_len = native_util.copyTextExact(&frame.discovery_class, connection.discoveryClassSlice()) catch return error.DiscoveryClassTooLong;
+        frame.discovery_class_len = @intCast(native_util.copyTextExact(&frame.discovery_class, connection.discoveryClassSlice()) catch return error.DiscoveryClassTooLong);
         applyModeledKeystream(&frame.ciphertext, payload, &connection.key);
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
@@ -520,22 +548,36 @@ var egress_broker: ?EgressBroker = null;
 var active_egress_capability_id: u64 = 0;
 var active_network_policy_id: u64 = 0;
 var active_driver_tx_count: usize = 0;
-var last_active_driver_frame_len: usize = 0;
+var last_active_driver_frame_len: u16 = 0;
 var last_active_driver_frame: [MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_NATIVE_FRAME_BYTES;
 var active_driver_rx_count: usize = 0;
 var active_driver_rx_drop_count: usize = 0;
 var active_driver_rx_failure_count: usize = 0;
-var last_active_driver_rx_frame_len: usize = 0;
+var last_active_driver_rx_frame_len: u16 = 0;
 var last_active_driver_rx_frame: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES;
 const QueuedReceiveFrame = struct {
-    length: usize = 0,
+    length: u16 = 0,
     bytes: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES,
 };
+comptime {
+    if (@sizeOf(QueuedReceiveFrame) > QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES) {
+        @compileError("network driver receive queue frame exceeds its compact layout ceiling");
+    }
+}
 var receive_queue: [RECEIVE_QUEUE_CAPACITY]QueuedReceiveFrame = [_]QueuedReceiveFrame{.{}} ** RECEIVE_QUEUE_CAPACITY;
-var receive_queue_head: usize = 0;
-var receive_queue_tail: usize = 0;
-var receive_queue_count: usize = 0;
+var receive_queue_head: u8 = 0;
+var receive_queue_tail: u8 = 0;
+var receive_queue_count: u8 = 0;
 var receive_overflow_scratch: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES;
+
+pub const bounded_metadata_layout = .{
+    .queued_receive_frame_size_bytes = @sizeOf(QueuedReceiveFrame),
+    .uses_compact_active_frame_lengths = @TypeOf(last_active_driver_frame_len) == u16 and
+        @TypeOf(last_active_driver_rx_frame_len) == u16,
+    .uses_compact_receive_queue_indices = @TypeOf(receive_queue_head) == u8 and
+        @TypeOf(receive_queue_tail) == u8 and
+        @TypeOf(receive_queue_count) == u8,
+};
 
 pub const ReceiveServiceResult = struct {
     polls: usize = 0,
@@ -632,7 +674,7 @@ pub fn activeDriverTransmitCount() usize {
 }
 
 pub fn lastActiveDriverFrame() []const u8 {
-    return last_active_driver_frame[0..last_active_driver_frame_len];
+    return last_active_driver_frame[0..@as(usize, last_active_driver_frame_len)];
 }
 
 pub fn activeDriverReceiveCount() usize {
@@ -648,7 +690,7 @@ pub fn activeDriverReceiveFailureCount() usize {
 }
 
 pub fn lastActiveDriverReceivedFrame() []const u8 {
-    return last_active_driver_rx_frame[0..last_active_driver_rx_frame_len];
+    return last_active_driver_rx_frame[0..@as(usize, last_active_driver_rx_frame_len)];
 }
 
 pub fn queuedReceiveFrameCount() usize {
@@ -675,7 +717,7 @@ pub fn sendActiveFrame(destination: [6]u8, frame: []const u8) bool {
     const device = active_device orelse return false;
     if (!device.send(destination, frame)) return false;
     active_driver_tx_count += 1;
-    last_active_driver_frame_len = frame.len;
+    last_active_driver_frame_len = @intCast(frame.len);
     @memcpy(last_active_driver_frame[0..frame.len], frame);
     return true;
 }
@@ -694,10 +736,11 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
         }
     }
 
-    const frame = &receive_queue[receive_queue_head];
+    const queue_head: usize = receive_queue_head;
+    const frame = &receive_queue[queue_head];
     defer {
         frame.length = 0;
-        receive_queue_head = (receive_queue_head + 1) % RECEIVE_QUEUE_CAPACITY;
+        receive_queue_head = @intCast((queue_head + 1) % RECEIVE_QUEUE_CAPACITY);
         receive_queue_count -= 1;
     }
     if (frame.length > output.len) {
@@ -718,8 +761,9 @@ fn serviceReceiveFrames(device: *const NetworkDevice, budget: usize) ReceiveServ
     var service = ReceiveServiceResult{};
     while (service.polls < budget) {
         const queue_has_space = receive_queue_count < RECEIVE_QUEUE_CAPACITY;
+        const queue_tail: usize = receive_queue_tail;
         const output = if (queue_has_space)
-            receive_queue[receive_queue_tail].bytes[0..]
+            receive_queue[queue_tail].bytes[0..]
         else
             receive_overflow_scratch[0..];
         const result = device.receive(output);
@@ -757,9 +801,9 @@ fn serviceReceiveFrames(device: *const NetworkDevice, budget: usize) ReceiveServ
                     service.dropped += 1;
                     continue;
                 }
-                const frame = &receive_queue[receive_queue_tail];
+                const frame = &receive_queue[queue_tail];
                 frame.length = result.length;
-                receive_queue_tail = (receive_queue_tail + 1) % RECEIVE_QUEUE_CAPACITY;
+                receive_queue_tail = @intCast((queue_tail + 1) % RECEIVE_QUEUE_CAPACITY);
                 receive_queue_count += 1;
                 active_driver_rx_count += 1;
                 last_active_driver_rx_frame_len = result.length;
@@ -943,6 +987,21 @@ test "peer link directory binds stable unicast routes and rejects ambiguity" {
     try std.testing.expectEqual(@as(usize, 1), directory.link_count);
 }
 
+test "network driver keeps bounded frame metadata compact" {
+    try std.testing.expectEqual(u16, @FieldType(ReceiveResult, "length"));
+    try std.testing.expectEqual(u8, @FieldType(NativeServiceIdentityConnection, "service_identity_len"));
+    try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryConnection, "discovery_class_len"));
+    try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryFrame, "probe_len"));
+    try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryFrame, "discovery_class_len"));
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(ReceiveResult));
+    try std.testing.expectEqual(@as(usize, 320), @sizeOf(NativeServiceIdentityConnection));
+    try std.testing.expectEqual(@as(usize, 192), @sizeOf(NativeLocalDiscoveryConnection));
+    try std.testing.expectEqual(@as(usize, 288), @sizeOf(NativeLocalDiscoveryFrame));
+    try std.testing.expectEqual(@as(usize, 1_502), bounded_metadata_layout.queued_receive_frame_size_bytes);
+    try std.testing.expect(bounded_metadata_layout.uses_compact_active_frame_lengths);
+    try std.testing.expect(bounded_metadata_layout.uses_compact_receive_queue_indices);
+}
+
 test "peer link directory has a fixed fail-closed capacity" {
     var directory = PeerLinkDirectory{};
     for (0..MAX_PEER_LINKS) |index| {
@@ -1056,7 +1115,7 @@ test "network receive polling distinguishes empty drop failure and owned frame" 
                 },
                 .dropped => .{ .status = .dropped },
                 .failed => .{ .status = .failed },
-                .malformed => .{ .status = .frame, .length = output.len + 1 },
+                .malformed => .{ .status = .frame, .length = @intCast(output.len + 1) },
             };
         }
 
@@ -1080,7 +1139,7 @@ test "network receive polling distinguishes empty drop failure and owned frame" 
     Harness.mode = .frame;
     const frame = receiveActiveFrame(&output);
     try std.testing.expectEqual(ReceiveStatus.frame, frame.status);
-    try std.testing.expectEqual(@as(usize, 8), frame.length);
+    try std.testing.expectEqual(@as(u16, 8), frame.length);
     try std.testing.expectEqualStrings("incoming", output[0..frame.length]);
     try std.testing.expectEqual(@as(usize, 1), activeDriverReceiveCount());
     try std.testing.expectEqualStrings("incoming", lastActiveDriverReceivedFrame());
@@ -1110,7 +1169,7 @@ test "pending network work is budgeted into the deferred receive queue" {
             if (next_frame == frame_count) return .{ .status = .empty };
             const frame = std.fmt.bufPrint(output, "frame-{d}", .{next_frame}) catch unreachable;
             next_frame += 1;
-            return .{ .status = .frame, .length = frame.len };
+            return .{ .status = .frame, .length = @intCast(frame.len) };
         }
 
         fn workPending() bool {

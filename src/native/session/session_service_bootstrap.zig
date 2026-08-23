@@ -70,7 +70,7 @@ const i225_bridge = if (builtin.target.os.tag == .freestanding)
                     2 => .dropped,
                     else => .failed,
                 },
-                .length = length,
+                .length = std.math.cast(u16, length) orelse std.math.maxInt(u16),
             };
         }
 

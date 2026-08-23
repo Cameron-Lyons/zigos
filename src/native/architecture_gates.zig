@@ -50,6 +50,7 @@ const public_store = @import("services/public_store.zig");
 const driver_service = @import("drivers/driver_service.zig");
 const driver_runtime = @import("drivers/driver_runtime.zig");
 const bootstrap_driver_port = @import("drivers/bootstrap_driver_port.zig");
+const network_driver_task = @import("drivers/network_driver_task.zig");
 const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
 const supervisor = @import("session/supervisor.zig");
@@ -388,6 +389,21 @@ pub const indexed_hot_path_tables = .{
             @FieldType(driver_runtime.ActivationRecord, "publisher_len") == u8,
         .keeps_activation_state_within_ceilings = @sizeOf(driver_runtime.ActivationRecord) <= driver_runtime.ACTIVATION_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(driver_runtime.Runtime) <= driver_runtime.RUNTIME_SIZE_CEILING_BYTES,
+    },
+    .network_driver_task = .{
+        .stores_compact_bounded_metadata = network_driver_task.COMPACT_BOUNDED_METADATA and
+            @FieldType(network_driver_task.ReceiveResult, "length") == u16 and
+            @FieldType(network_driver_task.NativeServiceIdentityConnection, "service_identity_len") == u8 and
+            @FieldType(network_driver_task.NativeLocalDiscoveryConnection, "discovery_class_len") == u8 and
+            @FieldType(network_driver_task.NativeLocalDiscoveryFrame, "probe_len") == u8 and
+            @FieldType(network_driver_task.NativeLocalDiscoveryFrame, "discovery_class_len") == u8 and
+            network_driver_task.bounded_metadata_layout.uses_compact_active_frame_lengths and
+            network_driver_task.bounded_metadata_layout.uses_compact_receive_queue_indices,
+        .keeps_bounded_state_within_ceilings = @sizeOf(network_driver_task.ReceiveResult) <= network_driver_task.RECEIVE_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(network_driver_task.NativeServiceIdentityConnection) <= network_driver_task.SERVICE_IDENTITY_CONNECTION_SIZE_CEILING_BYTES and
+            @sizeOf(network_driver_task.NativeLocalDiscoveryConnection) <= network_driver_task.LOCAL_DISCOVERY_CONNECTION_SIZE_CEILING_BYTES and
+            @sizeOf(network_driver_task.NativeLocalDiscoveryFrame) <= network_driver_task.LOCAL_DISCOVERY_FRAME_SIZE_CEILING_BYTES and
+            network_driver_task.bounded_metadata_layout.queued_receive_frame_size_bytes <= network_driver_task.QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES,
     },
     .device_broker = .{
         .uses_controller_arena = device_broker.dma_program_indexing.uses_controller_arena,
