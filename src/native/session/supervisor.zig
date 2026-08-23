@@ -11,7 +11,15 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_SERVICES: usize = 24;
 pub const MAX_DIAGNOSTICS: usize = 64;
+pub const COMPACT_DIAGNOSTIC_RING_METADATA = true;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 5_504;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
+
+comptime {
+    if (MAX_DIAGNOSTICS > std.math.maxInt(u8)) {
+        @compileError("supervisor diagnostic ring metadata exceeds u8 capacity");
+    }
+}
 
 pub const ServiceState = enum(u8) {
     registered,
@@ -113,15 +121,15 @@ pub const Supervisor = struct {
     service_class_index: ServiceClassIndex = ServiceClassIndex.init(),
     next_diagnostic_sequence: u64 = 1,
     diagnostics: [MAX_DIAGNOSTICS]DiagnosticEvent = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
-    diagnostic_count: usize = 0,
-    next_diagnostic_slot: usize = 0,
+    diagnostic_count: u8 = 0,
+    next_diagnostic_slot: u8 = 0,
 
     pub fn init() Supervisor {
         return Supervisor{};
     }
 
     comptime {
-        if (@sizeOf(@This()) > 6 * 1024) {
+        if (@sizeOf(@This()) > SUPERVISOR_SIZE_CEILING_BYTES) {
             @compileError("supervisor exceeds its compact resident layout");
         }
     }
@@ -377,8 +385,8 @@ pub const Supervisor = struct {
 
     fn newestDiagnostic(self: *const Supervisor, service_id: u64, kind: ?DiagnosticKind) ?DiagnosticEvent {
         if (self.diagnostic_count == 0) return null;
-        var remaining = self.diagnostic_count;
-        var slot_index = (self.next_diagnostic_slot + MAX_DIAGNOSTICS - 1) % MAX_DIAGNOSTICS;
+        var remaining: usize = self.diagnostic_count;
+        var slot_index = (@as(usize, self.next_diagnostic_slot) + MAX_DIAGNOSTICS - 1) % MAX_DIAGNOSTICS;
         while (remaining != 0) : (remaining -= 1) {
             const event = self.diagnostics[slot_index];
             if (event.service_id == service_id and (kind == null or event.kind == kind.?)) return event;
@@ -460,13 +468,13 @@ pub const Supervisor = struct {
         };
 
         const slot_index = self.nextDiagnosticSlot();
-        if (slot_index >= self.diagnostic_count) self.diagnostic_count = slot_index + 1;
+        if (slot_index >= self.diagnostic_count) self.diagnostic_count = @intCast(slot_index + 1);
         self.diagnostics[slot_index] = event;
     }
 
     fn nextDiagnosticSlot(self: *Supervisor) usize {
-        const slot_index = self.next_diagnostic_slot;
-        self.next_diagnostic_slot = (self.next_diagnostic_slot + 1) % MAX_DIAGNOSTICS;
+        const slot_index: usize = self.next_diagnostic_slot;
+        self.next_diagnostic_slot = @intCast((slot_index + 1) % MAX_DIAGNOSTICS);
         return slot_index;
     }
 
@@ -686,11 +694,17 @@ test "supervisor keeps diagnostics queryable while recycling the bounded ring" {
         try std.testing.expect(supervisor.markHealthy(network.id, 100 + @as(u64, @intCast(index))));
     }
 
-    try std.testing.expectEqual(MAX_DIAGNOSTICS, supervisor.diagnostic_count);
-    try std.testing.expectEqual(@as(usize, 1), supervisor.next_diagnostic_slot);
+    try std.testing.expectEqual(@as(u8, MAX_DIAGNOSTICS), supervisor.diagnostic_count);
+    try std.testing.expectEqual(@as(u8, 1), supervisor.next_diagnostic_slot);
     try std.testing.expect(!supervisor.hasDiagnostic(network.id, .registered));
     try std.testing.expect(supervisor.hasDiagnostic(network.id, .healthy));
     try std.testing.expectEqual(@as(u64, 100 + MAX_DIAGNOSTICS - 1), supervisor.latestDiagnostic(network.id).?.tick);
+}
+
+test "supervisor keeps bounded diagnostic metadata compact" {
+    try std.testing.expectEqual(u8, @FieldType(Supervisor, "diagnostic_count"));
+    try std.testing.expectEqual(u8, @FieldType(Supervisor, "next_diagnostic_slot"));
+    try std.testing.expectEqual(@as(usize, 5_504), @sizeOf(Supervisor));
 }
 
 test "supervisor diagnostic ring scan selects the newest event per service" {

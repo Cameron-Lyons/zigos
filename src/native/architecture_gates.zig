@@ -758,6 +758,10 @@ pub const indexed_hot_path_tables = .{
         .scans_bounded_diagnostic_ring = supervisor.supervisor_indexing.scans_bounded_diagnostic_ring,
         .scans_diagnostics_newest_first = supervisor.supervisor_indexing.scans_diagnostics_newest_first,
         .uses_diagnostic_ring_cursor = @hasField(supervisor.Supervisor, "next_diagnostic_slot"),
+        .stores_compact_diagnostic_ring_metadata = supervisor.COMPACT_DIAGNOSTIC_RING_METADATA and
+            @FieldType(supervisor.Supervisor, "diagnostic_count") == u8 and
+            @FieldType(supervisor.Supervisor, "next_diagnostic_slot") == u8,
+        .keeps_supervisor_within_ceiling = @sizeOf(supervisor.Supervisor) <= supervisor.SUPERVISOR_SIZE_CEILING_BYTES,
     },
     .session_bootstrap = .{
         .uses_catalog_owner_lookup = @hasDecl(session_bootstrap, "ownerForServiceClass"),
