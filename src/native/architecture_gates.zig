@@ -287,6 +287,9 @@ pub const indexed_hot_path_tables = .{
     },
     .agent_delegation_service = .{
         .uses_delegation_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "slots"), "reserve"),
+        .stores_compact_active_delegation_metadata = agent_delegation_service.COMPACT_ACTIVE_DELEGATION_METADATA and
+            @FieldType(agent_delegation_service.Service, "active_delegation_count") == u8,
+        .keeps_fixed_state_within_ceiling = @sizeOf(agent_delegation_service.Service) <= agent_delegation_service.SERVICE_SIZE_CEILING_BYTES,
         .tracks_active_delegations = @hasField(agent_delegation_service.Service, "active_delegation_count"),
         .tracks_lowest_active_generation = @hasField(agent_delegation_service.Service, "lowest_active_generation"),
         .uses_generation_index = @hasField(agent_delegation_service.Service, "delegation_generation_index"),
