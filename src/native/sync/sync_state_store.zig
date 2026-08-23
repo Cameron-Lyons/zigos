@@ -23,6 +23,16 @@ const transport_cursor_path = record_prefix ++ "qc";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
 const max_record_bytes: usize = 2048;
+pub const COMPACT_PATH_SET_METADATA = true;
+pub const PATH_SET_SIZE_CEILING_BYTES: usize = 10_088;
+
+comptime {
+    if (workspace.MAX_WORKSPACE_ENTRIES > std.math.maxInt(u8) or
+        workspace.MAX_ENTRY_PATH_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("sync persistence path metadata no longer fits in u8");
+    }
+}
 
 const RecordKind = enum(u8) {
     user_root = 1,
@@ -41,32 +51,40 @@ const Envelope = struct {
     kind: RecordKind,
 };
 
-const PathSet = struct {
+pub const PathSet = struct {
     paths: [workspace.MAX_WORKSPACE_ENTRIES][workspace.MAX_ENTRY_PATH_BYTES]u8 =
         [_][workspace.MAX_ENTRY_PATH_BYTES]u8{[_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES} ** workspace.MAX_WORKSPACE_ENTRIES,
-    lens: [workspace.MAX_WORKSPACE_ENTRIES]usize = [_]usize{0} ** workspace.MAX_WORKSPACE_ENTRIES,
+    lens: [workspace.MAX_WORKSPACE_ENTRIES]u8 = [_]u8{0} ** workspace.MAX_WORKSPACE_ENTRIES,
     hashes: [workspace.MAX_WORKSPACE_ENTRIES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACE_ENTRIES,
-    count: usize = 0,
+    count: u8 = 0,
 
     fn add(self: *PathSet, path: []const u8) Error!void {
         if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
         if (self.contains(path)) return;
-        if (self.count >= workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
-        @memset(self.paths[self.count][0..], 0);
-        @memcpy(self.paths[self.count][0..path.len], path);
-        self.lens[self.count] = path.len;
-        self.hashes[self.count] = workspace.pathHash(path);
+        const index: usize = self.count;
+        if (index >= workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
+        @memset(self.paths[index][0..], 0);
+        @memcpy(self.paths[index][0..path.len], path);
+        self.lens[index] = @intCast(path.len);
+        self.hashes[index] = workspace.pathHash(path);
         self.count += 1;
     }
 
     fn contains(self: *const PathSet, path: []const u8) bool {
         const hash = workspace.pathHash(path);
         var index: usize = 0;
-        while (index < self.count) : (index += 1) {
-            if (self.hashes[index] != hash or self.lens[index] != path.len) continue;
-            if (std.mem.eql(u8, self.paths[index][0..self.lens[index]], path)) return true;
+        while (index < @as(usize, self.count)) : (index += 1) {
+            const path_len: usize = self.lens[index];
+            if (self.hashes[index] != hash or path_len != path.len) continue;
+            if (std.mem.eql(u8, self.paths[index][0..path_len], path)) return true;
         }
         return false;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > PATH_SET_SIZE_CEILING_BYTES) {
+            @compileError("sync persistence path set exceeded its stack-size ceiling");
+        }
     }
 };
 
@@ -193,8 +211,8 @@ fn deleteStaleRecords(
     const tick = resident.nextPersistTick();
     try storage.beginTransaction(workspace_id);
     var index: usize = 0;
-    while (index < stale.count) : (index += 1) {
-        try storage.stageDelete(workspace_id, stale.paths[index][0..stale.lens[index]]);
+    while (index < @as(usize, stale.count)) : (index += 1) {
+        try storage.stageDelete(workspace_id, stale.paths[index][0..@as(usize, stale.lens[index])]);
     }
     _ = try storage.commit(workspace_id, tick);
 }
@@ -1030,6 +1048,32 @@ fn parseTransportQueueKind(raw: u8) Error!state_support.TransportQueueKind {
         1 => .inbound,
         else => error.CorruptState,
     };
+}
+
+test "persistence path sets retain full capacity with compact metadata" {
+    try std.testing.expect(@FieldType(PathSet, "lens") == [workspace.MAX_WORKSPACE_ENTRIES]u8);
+    try std.testing.expect(@FieldType(PathSet, "count") == u8);
+    try std.testing.expectEqual(@as(usize, PATH_SET_SIZE_CEILING_BYTES), @sizeOf(PathSet));
+
+    var paths = PathSet{};
+    var path = [_]u8{ 'p', 0 };
+    for (0..workspace.MAX_WORKSPACE_ENTRIES) |index| {
+        path[1] = @intCast(index);
+        try paths.add(&path);
+    }
+    try std.testing.expectEqual(@as(u8, @intCast(workspace.MAX_WORKSPACE_ENTRIES)), paths.count);
+    try std.testing.expect(paths.contains(&[_]u8{ 'p', 0 }));
+
+    try paths.add(&[_]u8{ 'p', 0 });
+    try std.testing.expectEqual(@as(u8, @intCast(workspace.MAX_WORKSPACE_ENTRIES)), paths.count);
+    try std.testing.expectError(error.StateTooLarge, paths.add(&[_]u8{'q'}));
+
+    var boundary_paths = PathSet{};
+    const max_path = [_]u8{'x'} ** workspace.MAX_ENTRY_PATH_BYTES;
+    try boundary_paths.add(&max_path);
+    try std.testing.expect(boundary_paths.contains(&max_path));
+    const overlong_path = [_]u8{'x'} ** (workspace.MAX_ENTRY_PATH_BYTES + 1);
+    try std.testing.expectError(error.PathTooLong, boundary_paths.add(&overlong_path));
 }
 
 test "transport frame cursor persists without retained frames and preserves exhaustion" {
