@@ -698,6 +698,14 @@ pub const indexed_hot_path_tables = .{
             !@hasField(object_store.VersionRecord, "blob_address") and
             !@hasField(object_store.VersionRecord, "payload_len") and
             !@hasField(object_store.VersionRecord, "chunk_count"),
+        .uses_compact_object_result_metadata = object_store.COMPACT_OBJECT_RESULT_METADATA and
+            @FieldType(object_store.ObjectQueryResult, "label_len") == u8 and
+            @FieldType(object_store.ObjectQueryResult, "content_type_len") == u8 and
+            @FieldType(object_store.ObjectHistoryEntry, "payload_len") == u32 and
+            @FieldType(object_store.ObjectHistoryEntry, "label_len") == u8 and
+            @FieldType(object_store.ObjectHistoryEntry, "content_type_len") == u8,
+        .keeps_object_results_within_ceilings = @sizeOf(object_store.ObjectQueryResult) <= object_store.OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(object_store.ObjectHistoryEntry) <= object_store.OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES,
         .uses_object_type_index = @hasField(object_store.Store, "object_type_index"),
         .tracks_max_blob_payload_bytes = @hasField(object_store.Store, "max_blob_payload_bytes"),
         .exposes_max_blob_payload_bytes = @hasDecl(object_store.Store, "maxBlobPayloadBytes"),
