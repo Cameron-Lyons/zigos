@@ -148,6 +148,18 @@ pub const indexed_hot_path_tables = .{
         .uses_accelerator_deadline_heads = @hasField(userspace_scheduler.Scheduler, "accelerator_deadline_heads"),
         .uses_accelerator_claim_task_index = @hasField(userspace_scheduler.AcceleratorClaimBacking, "task_index"),
         .grants_next_accelerator_claim = @hasDecl(userspace_scheduler.Scheduler, "grantNextAcceleratorClaim"),
+        .stores_compact_queue_metadata = userspace_scheduler.COMPACT_QUEUE_METADATA and
+            @FieldType(userspace_scheduler.Scheduler, "ready_heads") == [userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "ready_tails") == [userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "ready_counts") == [userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "ready_task_count") == userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "accelerator_claim_heads") == [userspace_scheduler.ENGINE_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "accelerator_claim_tails") == [userspace_scheduler.ENGINE_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "accelerator_deadline_heads") == [userspace_scheduler.ENGINE_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "accelerator_deadline_tails") == [userspace_scheduler.ENGINE_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "accelerator_claim_counts") == [userspace_scheduler.ENGINE_COUNT]userspace_scheduler.QueueSlotIndex,
+        .keeps_queue_state_within_ceilings = @sizeOf(userspace_scheduler.Scheduler) <= userspace_scheduler.SCHEDULER_SIZE_CEILING_BYTES and
+            @sizeOf(userspace_scheduler.AcceleratorClaimBacking) <= userspace_scheduler.ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES,
         .caches_ui_presentation_eligibility = userspace_scheduler.STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS == 0,
         .uses_generational_task_handles_for_dispatch = @hasDecl(task_runtime.Runtime, "findByHandle") and
             userspace_scheduler.SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH == 0,
