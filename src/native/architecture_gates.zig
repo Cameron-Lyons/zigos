@@ -12,6 +12,7 @@ const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
 const indexing_service = @import("services/indexing_service.zig");
 const event_ledger = @import("platform/event_ledger.zig");
+const attestation_service = @import("platform/attestation_service.zig");
 const measured_boot = @import("platform/measured_boot.zig");
 const kernel_dmar = @import("../kernel/platform/dmar.zig");
 const compositor_session = @import("platform/compositor_session.zig");
@@ -458,6 +459,18 @@ pub const indexed_hot_path_tables = .{
         .indexes_task = @hasField(event_ledger.EventBacking, "task_index"),
         .visits_indexes = @hasDecl(event_ledger.Ledger, "queryEvents"),
         .removes_evicted_indexes = @hasDecl(event_ledger.Ledger, "removeEventIndexes"),
+    },
+    .attestation_service = .{
+        .stores_compact_bounded_metadata = attestation_service.COMPACT_ATTESTATION_METADATA and
+            @FieldType(attestation_service.Statement, "record_count") == u8 and
+            @FieldType(attestation_service.Statement, "remote_party_len") == u8 and
+            @FieldType(attestation_service.RemoteAttestationRequest, "revoked_root_generation_count") == u8 and
+            @FieldType(attestation_service.RemoteAttestationResponse, "policy_label_len") == u8 and
+            @FieldType(attestation_service.Service, "remote_nonce_history_count") == u8,
+        .keeps_attestation_state_within_ceilings = @sizeOf(attestation_service.Statement) <= attestation_service.STATEMENT_SIZE_CEILING_BYTES and
+            @sizeOf(attestation_service.RemoteAttestationRequest) <= attestation_service.REMOTE_REQUEST_SIZE_CEILING_BYTES and
+            @sizeOf(attestation_service.RemoteAttestationResponse) <= attestation_service.REMOTE_RESPONSE_SIZE_CEILING_BYTES and
+            @sizeOf(attestation_service.Service) <= attestation_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .dmar = .{
         .stores_compact_summary_counts = kernel_dmar.COMPACT_SUMMARY_COUNT_METADATA and
