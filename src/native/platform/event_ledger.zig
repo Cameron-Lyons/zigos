@@ -27,6 +27,9 @@ else
 
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 512;
+pub const COMPACT_EVENT_TEXT_METADATA = true;
+pub const EVENT_SIZE_CEILING_BYTES: usize = 688;
+pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 53_192;
 pub const state_workspace_label = "system-diagnostics";
 
 const MAX_PERSISTED_EVENTS: usize = MAX_EVENTS;
@@ -45,6 +48,15 @@ const persistent_event_flag_retry_safe: u8 = 1 << 2;
 const persistent_event_flag_detail_protected: u8 = 1 << 3;
 const semantic_memory_flag_receipt_audit: u32 = @as(u32, 1) << @as(u5, 28);
 const semantic_memory_query_byte_mask: usize = 0x0fff_ffff;
+const PERSISTENT_EVENT_SIZE_CEILING_BYTES: usize = 688;
+
+comptime {
+    if (denial_explanation.MAX_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_DETAIL_BYTES > std.math.maxInt(u16))
+    {
+        @compileError("event ledger text metadata exceeds compact length capacity");
+    }
+}
 
 const PersistentHeader = extern struct {
     magic: u32 = persistent_header_magic,
@@ -208,24 +220,30 @@ pub const Event = struct {
     denial_reason: abi.DenialReason = .none,
     user_approval_can_resolve: bool = false,
     retry_safe: bool = false,
-    policy_label_len: usize = 0,
+    policy_label_len: u8 = 0,
     policy_label: [denial_explanation.MAX_LABEL_BYTES]u8 = [_]u8{0} ** denial_explanation.MAX_LABEL_BYTES,
-    missing_capability_len: usize = 0,
+    missing_capability_len: u8 = 0,
     missing_capability: [denial_explanation.MAX_LABEL_BYTES]u8 = [_]u8{0} ** denial_explanation.MAX_LABEL_BYTES,
     detail_protected: bool = false,
-    detail_len: usize = 0,
+    detail_len: u16 = 0,
     detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
 
+    comptime {
+        if (@sizeOf(@This()) > EVENT_SIZE_CEILING_BYTES) {
+            @compileError("event ledger record exceeds its compact layout ceiling");
+        }
+    }
+
     pub fn detailSlice(self: *const Event) []const u8 {
-        return self.detail[0..self.detail_len];
+        return self.detail[0..@as(usize, self.detail_len)];
     }
 
     pub fn policyLabelSlice(self: *const Event) []const u8 {
-        return self.policy_label[0..self.policy_label_len];
+        return self.policy_label[0..@as(usize, self.policy_label_len)];
     }
 
     pub fn missingCapabilitySlice(self: *const Event) []const u8 {
-        return self.missing_capability[0..self.missing_capability_len];
+        return self.missing_capability[0..@as(usize, self.missing_capability_len)];
     }
 };
 
@@ -281,6 +299,12 @@ pub const EventBacking = struct {
     subject_index: SubjectEventIndex = SubjectEventIndex.init(),
     task_index: TaskEventIndex = TaskEventIndex.init(),
     event_order_index: EventOrderIndex = EventOrderIndex.init(),
+
+    comptime {
+        if (@sizeOf(@This()) > EVENT_BACKING_SIZE_CEILING_BYTES) {
+            @compileError("event ledger backing exceeds its compact layout ceiling");
+        }
+    }
 
     fn init() EventBacking {
         return .{};
@@ -1824,9 +1848,9 @@ pub const Ledger = struct {
             .retry_safe = input.retry_safe,
             .detail_protected = input.detail_protected,
         };
-        event.policy_label_len = copyText(&event.policy_label, input.policy_label);
-        event.missing_capability_len = copyText(&event.missing_capability, input.missing_capability);
-        event.detail_len = copyText(&event.detail, input.detail);
+        event.policy_label_len = @intCast(copyText(&event.policy_label, input.policy_label));
+        event.missing_capability_len = @intCast(copyText(&event.missing_capability, input.missing_capability));
+        event.detail_len = @intCast(copyText(&event.detail, input.detail));
         try self.appendEvent(&event);
     }
 
@@ -2166,11 +2190,11 @@ const PersistentEvent = struct {
     user_approval_can_resolve: bool = false,
     retry_safe: bool = false,
     detail_protected: bool = false,
-    policy_label_len: usize = 0,
+    policy_label_len: u8 = 0,
     policy_label: [MAX_PERSISTED_LABEL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_LABEL_BYTES,
-    missing_capability_len: usize = 0,
+    missing_capability_len: u8 = 0,
     missing_capability: [MAX_PERSISTED_LABEL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_LABEL_BYTES,
-    detail_len: usize = 0,
+    detail_len: u16 = 0,
     detail: [MAX_PERSISTED_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_DETAIL_BYTES,
 
     fn fromEvent(event: Event) PersistentEvent {
@@ -2190,9 +2214,9 @@ const PersistentEvent = struct {
         persisted.user_approval_can_resolve = event.user_approval_can_resolve;
         persisted.retry_safe = event.retry_safe;
         persisted.detail_protected = event.detail_protected;
-        persisted.policy_label_len = copyText(&persisted.policy_label, event.policyLabelSlice());
-        persisted.missing_capability_len = copyText(&persisted.missing_capability, event.missingCapabilitySlice());
-        persisted.detail_len = copyText(&persisted.detail, event.detailSlice());
+        persisted.policy_label_len = @intCast(copyText(&persisted.policy_label, event.policyLabelSlice()));
+        persisted.missing_capability_len = @intCast(copyText(&persisted.missing_capability, event.missingCapabilitySlice()));
+        persisted.detail_len = @intCast(copyText(&persisted.detail, event.detailSlice()));
         return persisted;
     }
 
@@ -2213,12 +2237,18 @@ const PersistentEvent = struct {
         event.user_approval_can_resolve = self.user_approval_can_resolve;
         event.retry_safe = self.retry_safe;
         event.detail_protected = self.detail_protected;
-        event.policy_label_len = copyText(&event.policy_label, self.policy_label[0..self.policy_label_len]);
-        event.missing_capability_len = copyText(&event.missing_capability, self.missing_capability[0..self.missing_capability_len]);
-        event.detail_len = copyText(&event.detail, self.detail[0..self.detail_len]);
+        event.policy_label_len = @intCast(copyText(&event.policy_label, self.policy_label[0..@as(usize, self.policy_label_len)]));
+        event.missing_capability_len = @intCast(copyText(&event.missing_capability, self.missing_capability[0..@as(usize, self.missing_capability_len)]));
+        event.detail_len = @intCast(copyText(&event.detail, self.detail[0..@as(usize, self.detail_len)]));
         return event;
     }
 };
+
+comptime {
+    if (@sizeOf(PersistentEvent) > PERSISTENT_EVENT_SIZE_CEILING_BYTES) {
+        @compileError("persistent event staging record exceeds its compact layout ceiling");
+    }
+}
 
 const PersistentEventRecord = extern struct {
     sequence: u64 = 0,
@@ -2294,9 +2324,9 @@ const PersistentEventRecord = extern struct {
         event.user_approval_can_resolve = (self.flags & persistent_event_flag_user_approval_can_resolve) != 0;
         event.retry_safe = (self.flags & persistent_event_flag_retry_safe) != 0;
         event.detail_protected = (self.flags & persistent_event_flag_detail_protected) != 0;
-        event.policy_label_len = @min(@as(usize, self.policy_label_len), MAX_PERSISTED_LABEL_BYTES);
-        event.missing_capability_len = @min(@as(usize, self.missing_capability_len), MAX_PERSISTED_LABEL_BYTES);
-        event.detail_len = @min(@as(usize, self.detail_len), MAX_PERSISTED_DETAIL_BYTES);
+        event.policy_label_len = @intCast(@min(@as(usize, self.policy_label_len), MAX_PERSISTED_LABEL_BYTES));
+        event.missing_capability_len = @intCast(@min(@as(usize, self.missing_capability_len), MAX_PERSISTED_LABEL_BYTES));
+        event.detail_len = @intCast(@min(@as(usize, self.detail_len), MAX_PERSISTED_DETAIL_BYTES));
         event.policy_label = self.policy_label;
         event.missing_capability = self.missing_capability;
         event.detail = self.detail;
@@ -2433,7 +2463,7 @@ fn containsCapabilityId(capability_ids: []const u64, capability_id: u64) bool {
 fn redactedForQuery(event: *const Event, query: Query) Event {
     if (!event.detail_protected or query.include_protected_content) return event.*;
     var redacted = event.*;
-    redacted.detail_len = copyText(&redacted.detail, "redacted");
+    redacted.detail_len = @intCast(copyText(&redacted.detail, "redacted"));
     return redacted;
 }
 
