@@ -728,6 +728,15 @@ pub const indexed_hot_path_tables = .{
             @FieldType(workspace.WorkspaceStagingState, "staged_entry_count") == u8 and
             @FieldType(workspace.WorkspaceStagingState, "staged_effective_entry_count") == u8,
         .keeps_staging_state_within_ceiling = @sizeOf(workspace.WorkspaceStagingState) <= workspace.WORKSPACE_STAGING_STATE_SIZE_CEILING_BYTES,
+        .stores_compact_snapshot_export_metadata = workspace.COMPACT_SNAPSHOT_EXPORT_METADATA and
+            @FieldType(workspace.SnapshotRecord, "label_len") == u8 and
+            @FieldType(workspace.SnapshotRecord, "entry_count") == u8 and
+            @FieldType(workspace.ExportPackage, "label_len") == u8 and
+            @FieldType(workspace.ExportPackage, "entry_count") == u8 and
+            @FieldType(workspace.ExportPackage, "signature_format_len") == u8 and
+            @FieldType(workspace.ExportPackage, "signature_signer_len") == u8,
+        .keeps_snapshot_export_state_within_ceilings = @sizeOf(workspace.SnapshotRecord) <= workspace.SNAPSHOT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(workspace.ExportPackage) <= workspace.EXPORT_PACKAGE_SIZE_CEILING_BYTES,
         .keeps_workspace_state_within_ceilings = @sizeOf(workspace.WorkspaceRecord) <= workspace.WORKSPACE_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(workspace.Directory) <= workspace.DIRECTORY_SIZE_CEILING_BYTES,
         .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),
