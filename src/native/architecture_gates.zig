@@ -13,6 +13,7 @@ const background_dispatch = @import("task/background_dispatch.zig");
 const indexing_service = @import("services/indexing_service.zig");
 const event_ledger = @import("platform/event_ledger.zig");
 const attestation_service = @import("platform/attestation_service.zig");
+const immutable_base = @import("platform/immutable_base.zig");
 const measured_boot = @import("platform/measured_boot.zig");
 const kernel_dmar = @import("../kernel/platform/dmar.zig");
 const compositor_session = @import("platform/compositor_session.zig");
@@ -473,6 +474,15 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(attestation_service.RemoteAttestationRequest) <= attestation_service.REMOTE_REQUEST_SIZE_CEILING_BYTES and
             @sizeOf(attestation_service.RemoteAttestationResponse) <= attestation_service.REMOTE_RESPONSE_SIZE_CEILING_BYTES and
             @sizeOf(attestation_service.Service) <= attestation_service.SERVICE_SIZE_CEILING_BYTES,
+    },
+    .immutable_base = .{
+        .stores_compact_image_metadata = immutable_base.COMPACT_IMMUTABLE_BASE_METADATA and
+            @FieldType(immutable_base.SystemImage, "label_len") == u8 and
+            @FieldType(immutable_base.SystemImage, "signer_len") == u8 and
+            @FieldType(immutable_base.BootSelection, "signer_len") == u8,
+        .keeps_image_state_within_ceilings = @sizeOf(immutable_base.SystemImage) <= immutable_base.SYSTEM_IMAGE_SIZE_CEILING_BYTES and
+            @sizeOf(immutable_base.BootSelection) <= immutable_base.BOOT_SELECTION_SIZE_CEILING_BYTES and
+            @sizeOf(immutable_base.Manager) <= immutable_base.MANAGER_SIZE_CEILING_BYTES,
     },
     .dmar = .{
         .stores_compact_summary_counts = kernel_dmar.COMPACT_SUMMARY_COUNT_METADATA and
