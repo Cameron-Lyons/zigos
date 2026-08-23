@@ -31,6 +31,9 @@ pub const MAX_OBJECT_HISTORY_RESULTS: usize = 16;
 const MAX_METADATA_MESSAGE_BYTES: usize = 256;
 pub const MAX_METADATA_LABEL_BYTES: usize = 48;
 pub const MAX_CONTENT_TYPE_BYTES: usize = 64;
+pub const COMPACT_OBJECT_RESULT_METADATA = true;
+pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
+pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -39,17 +42,6 @@ const BLOB_PAGE_SIZE: usize = 64;
 const CHUNK_PAGE_SIZE: usize = 32;
 const heap_backed_chunk_payloads = builtin.target.os.tag == .freestanding;
 const ChunkPayload = if (heap_backed_chunk_payloads) ?[*]u8 else [MAX_CHUNK_BYTES]u8;
-
-comptime {
-    if (MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
-        MAX_CONTENT_TYPE_BYTES > std.math.maxInt(u8))
-    {
-        @compileError("object metadata text exceeds its compact length fields");
-    }
-    if (MAX_PAYLOAD_BYTES > std.math.maxInt(u32)) {
-        @compileError("object payload capacity exceeds its compact length field");
-    }
-}
 
 comptime {
     if (MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
@@ -190,17 +182,23 @@ pub const ObjectQueryResult = struct {
     version_count: u16 = 0,
     snapshot_count: u16 = 0,
     updated_at_ticks: u64 = 0,
-    label_len: usize = 0,
+    label_len: u8 = 0,
     label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
-    content_type_len: usize = 0,
+    content_type_len: u8 = 0,
     content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
 
     pub fn labelSlice(self: *const ObjectQueryResult) []const u8 {
-        return self.label[0..@min(self.label_len, self.label.len)];
+        return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
     }
 
     pub fn contentTypeSlice(self: *const ObjectQueryResult) []const u8 {
-        return self.content_type[0..@min(self.content_type_len, self.content_type.len)];
+        return self.content_type[0..@min(@as(usize, self.content_type_len), self.content_type.len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES) {
+            @compileError("object query result exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -210,19 +208,25 @@ pub const ObjectHistoryEntry = struct {
     previous_version_id: ids.VersionId = ids.VersionId.zero,
     parent_count: u8 = 0,
     object_type: ObjectType = .blob,
-    payload_len: usize = 0,
+    payload_len: u32 = 0,
     created_at_ticks: u64 = 0,
-    label_len: usize = 0,
+    label_len: u8 = 0,
     label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
-    content_type_len: usize = 0,
+    content_type_len: u8 = 0,
     content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
 
     pub fn labelSlice(self: *const ObjectHistoryEntry) []const u8 {
-        return self.label[0..@min(self.label_len, self.label.len)];
+        return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
     }
 
     pub fn contentTypeSlice(self: *const ObjectHistoryEntry) []const u8 {
-        return self.content_type[0..@min(self.content_type_len, self.content_type.len)];
+        return self.content_type[0..@min(@as(usize, self.content_type_len), self.content_type.len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES) {
+            @compileError("object history entry exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -1401,7 +1405,7 @@ fn historyEntryFor(version_record: *const VersionRecord, payload_len: usize) Obj
         .previous_version_id = version_record.previous_version_id,
         .parent_count = version_record.parent_count,
         .object_type = version_record.object_type,
-        .payload_len = payload_len,
+        .payload_len = @intCast(payload_len),
         .created_at_ticks = version_record.metadata.created_at_ticks,
     };
     entry.label_len = version_record.metadata.label_len;

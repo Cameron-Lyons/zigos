@@ -38,6 +38,23 @@ test "resident object metadata uses capacity-sized length fields" {
     try std.testing.expectEqual(@as(usize, 136), @sizeOf(BlobSlot));
 }
 
+test "object query and history outputs use compact bounded metadata" {
+    try std.testing.expect(object_store.COMPACT_OBJECT_RESULT_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(object_store.ObjectQueryResult, "label_len"));
+    try std.testing.expectEqual(u8, @FieldType(object_store.ObjectQueryResult, "content_type_len"));
+    try std.testing.expectEqual(u32, @FieldType(object_store.ObjectHistoryEntry, "payload_len"));
+    try std.testing.expectEqual(u8, @FieldType(object_store.ObjectHistoryEntry, "label_len"));
+    try std.testing.expectEqual(u8, @FieldType(object_store.ObjectHistoryEntry, "content_type_len"));
+    try std.testing.expectEqual(
+        @as(usize, object_store.OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES),
+        @sizeOf(object_store.ObjectQueryResult),
+    );
+    try std.testing.expectEqual(
+        @as(usize, object_store.OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES),
+        @sizeOf(object_store.ObjectHistoryEntry),
+    );
+}
+
 test "object type index uses capacity-sized resident links" {
     const ObjectTypeIndex = @FieldType(Store, "object_type_index");
 
