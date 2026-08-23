@@ -120,6 +120,11 @@ pub const indexed_hot_path_tables = .{
     .capability_table = .{
         .uses_capability_arena = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandle"),
         .uses_generational_capability_ids = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "getByHandle"),
+        .stores_compact_grant_metadata = capability.COMPACT_GRANT_METADATA and
+            @FieldType(capability.GrantPlan, "entry_count") == u8 and
+            @FieldType(capability.GrantReservation, "slot_indexes") == [capability.MAX_GRANT_PLAN_ENTRIES]capability.CapabilitySlotIndex and
+            @FieldType(capability.GrantReservation, "new_target_count") == u8,
+        .keeps_grant_reservation_within_ceiling = @sizeOf(capability.GrantReservation) <= capability.GRANT_RESERVATION_SIZE_CEILING_BYTES,
         .avoids_capability_primary_index_lookups = capability.CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY == 0,
         .avoids_capability_id_collision_probes = capability.CAPABILITY_ID_COLLISION_PROBES_PER_INSERT == 0,
         .uses_target_generation_arena = @hasDecl(@FieldType(capability.CapabilityTable, "target_generations"), "reserveIndex"),
