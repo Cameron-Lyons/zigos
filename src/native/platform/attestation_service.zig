@@ -17,6 +17,25 @@ pub const MAX_ROOT_KEY_ID_BYTES: usize = 64;
 pub const MAX_REVOKED_ROOT_GENERATIONS: usize = 8;
 pub const MIN_REMOTE_NONCE_BYTES: usize = 16;
 pub const MAX_REMOTE_NONCE_HISTORY: usize = 8;
+pub const COMPACT_ATTESTATION_METADATA = true;
+pub const STATEMENT_SIZE_CEILING_BYTES: usize = 408;
+pub const REMOTE_REQUEST_SIZE_CEILING_BYTES: usize = 344;
+pub const REMOTE_RESPONSE_SIZE_CEILING_BYTES: usize = 616;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 696;
+
+comptime {
+    if (MAX_REMOTE_PARTY_BYTES > std.math.maxInt(u8) or
+        MAX_NONCE_BYTES > std.math.maxInt(u8) or
+        MAX_POLICY_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_ROOT_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_ROOT_KEY_ID_BYTES > std.math.maxInt(u8) or
+        MAX_REVOKED_ROOT_GENERATIONS > std.math.maxInt(u8) or
+        MAX_REMOTE_NONCE_HISTORY > std.math.maxInt(u8) or
+        measured_boot.MAX_RECORDS > std.math.maxInt(u8))
+    {
+        @compileError("attestation metadata exceeds compact field capacity");
+    }
+}
 
 pub const KeyOrigin = enum(u8) {
     software,
@@ -477,19 +496,19 @@ pub const TestSoftwareRootProvider = struct {
 pub const Statement = struct {
     device: principal.PrincipalId,
     generation: u64,
-    record_count: usize,
-    critical_service_count: usize,
-    policy_count: usize,
-    driver_count: usize,
+    record_count: u8,
+    critical_service_count: u8,
+    policy_count: u8,
+    driver_count: u8,
     user_visible: bool,
-    remote_party_len: usize,
+    remote_party_len: u8,
     remote_party: [MAX_REMOTE_PARTY_BYTES]u8,
-    nonce_len: usize,
+    nonce_len: u8,
     nonce: [MAX_NONCE_BYTES]u8,
     key_origin: KeyOrigin,
-    root_label_len: usize,
+    root_label_len: u8,
     root_label: [MAX_ROOT_LABEL_BYTES]u8,
-    root_key_id_len: usize,
+    root_key_id_len: u8,
     root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8,
     root_key_generation: u64,
     root_digest: crypto_hash.Digest,
@@ -498,19 +517,19 @@ pub const Statement = struct {
     signature: manifest.Signature,
 
     pub fn remotePartySlice(self: *const Statement) []const u8 {
-        return self.remote_party[0..self.remote_party_len];
+        return self.remote_party[0..@as(usize, self.remote_party_len)];
     }
 
     pub fn nonceSlice(self: *const Statement) []const u8 {
-        return self.nonce[0..self.nonce_len];
+        return self.nonce[0..@as(usize, self.nonce_len)];
     }
 
     pub fn rootLabelSlice(self: *const Statement) []const u8 {
-        return self.root_label[0..self.root_label_len];
+        return self.root_label[0..@as(usize, self.root_label_len)];
     }
 
     pub fn rootKeyIdSlice(self: *const Statement) []const u8 {
-        return self.root_key_id[0..self.root_key_id_len];
+        return self.root_key_id[0..@as(usize, self.root_key_id_len)];
     }
 };
 
@@ -540,18 +559,18 @@ pub const RemoteAttestationRequestInit = struct {
 };
 
 pub const RemoteAttestationRequest = struct {
-    remote_party_len: usize = 0,
+    remote_party_len: u8 = 0,
     remote_party: [MAX_REMOTE_PARTY_BYTES]u8 = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
-    nonce_len: usize = 0,
+    nonce_len: u8 = 0,
     nonce: [MAX_NONCE_BYTES]u8 = [_]u8{0} ** MAX_NONCE_BYTES,
-    policy_label_len: usize = 0,
+    policy_label_len: u8 = 0,
     policy_label: [MAX_POLICY_LABEL_BYTES]u8 = [_]u8{0} ** MAX_POLICY_LABEL_BYTES,
     user_visible: bool = true,
     expected_key_origin: ?KeyOrigin = null,
-    root_key_id_len: usize = 0,
+    root_key_id_len: u8 = 0,
     root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8 = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES,
     minimum_root_generation: u64 = 0,
-    revoked_root_generation_count: usize = 0,
+    revoked_root_generation_count: u8 = 0,
     revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = [_]u64{0} ** MAX_REVOKED_ROOT_GENERATIONS,
     attestation_verifier_metadata_digest_required: bool = false,
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
@@ -567,14 +586,14 @@ pub const RemoteAttestationRequest = struct {
             .user_visible = args.user_visible,
             .expected_key_origin = args.expected_key_origin,
             .minimum_root_generation = args.minimum_root_generation,
-            .revoked_root_generation_count = args.revoked_root_generations.len,
+            .revoked_root_generation_count = @intCast(args.revoked_root_generations.len),
             .attestation_verifier_metadata_digest_required = args.attestation_verifier_metadata_digest_required,
             .attestation_verifier_metadata_digest = args.attestation_verifier_metadata_digest,
         };
-        request.remote_party_len = native_util.copyTextExact(&request.remote_party, args.remote_party) catch return error.RemotePartyTooLong;
-        request.nonce_len = native_util.copyTextExact(&request.nonce, args.nonce) catch return error.NonceTooLong;
-        request.policy_label_len = native_util.copyTextExact(&request.policy_label, args.policy_label) catch return error.PolicyLabelTooLong;
-        request.root_key_id_len = native_util.copyTextExact(&request.root_key_id, args.root_key_id) catch return error.RootKeyIdTooLong;
+        request.remote_party_len = @intCast(native_util.copyTextExact(&request.remote_party, args.remote_party) catch return error.RemotePartyTooLong);
+        request.nonce_len = @intCast(native_util.copyTextExact(&request.nonce, args.nonce) catch return error.NonceTooLong);
+        request.policy_label_len = @intCast(native_util.copyTextExact(&request.policy_label, args.policy_label) catch return error.PolicyLabelTooLong);
+        request.root_key_id_len = @intCast(native_util.copyTextExact(&request.root_key_id, args.root_key_id) catch return error.RootKeyIdTooLong);
         for (args.revoked_root_generations, 0..) |generation, index| {
             request.revoked_root_generations[index] = generation;
         }
@@ -582,23 +601,23 @@ pub const RemoteAttestationRequest = struct {
     }
 
     pub fn remotePartySlice(self: *const RemoteAttestationRequest) []const u8 {
-        return self.remote_party[0..self.remote_party_len];
+        return self.remote_party[0..@as(usize, self.remote_party_len)];
     }
 
     pub fn nonceSlice(self: *const RemoteAttestationRequest) []const u8 {
-        return self.nonce[0..self.nonce_len];
+        return self.nonce[0..@as(usize, self.nonce_len)];
     }
 
     pub fn policyLabelSlice(self: *const RemoteAttestationRequest) []const u8 {
-        return self.policy_label[0..self.policy_label_len];
+        return self.policy_label[0..@as(usize, self.policy_label_len)];
     }
 
     pub fn rootKeyIdSlice(self: *const RemoteAttestationRequest) []const u8 {
-        return self.root_key_id[0..self.root_key_id_len];
+        return self.root_key_id[0..@as(usize, self.root_key_id_len)];
     }
 
     pub fn revokedRootGenerationsSlice(self: *const RemoteAttestationRequest) []const u64 {
-        return self.revoked_root_generations[0..self.revoked_root_generation_count];
+        return self.revoked_root_generations[0..@as(usize, self.revoked_root_generation_count)];
     }
 
     pub fn digest(self: *const RemoteAttestationRequest) crypto_hash.Digest {
@@ -627,21 +646,21 @@ pub const RemoteAttestationRequest = struct {
 
 pub const RemoteAttestationResponse = struct {
     request_digest: crypto_hash.Digest,
-    policy_label_len: usize = 0,
+    policy_label_len: u8 = 0,
     policy_label: [MAX_POLICY_LABEL_BYTES]u8 = [_]u8{0} ** MAX_POLICY_LABEL_BYTES,
     minimum_root_generation: u64 = 0,
-    revoked_root_generation_count: usize = 0,
+    revoked_root_generation_count: u8 = 0,
     revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = [_]u64{0} ** MAX_REVOKED_ROOT_GENERATIONS,
     attestation_verifier_metadata_digest_present: bool = false,
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     statement: Statement,
 
     pub fn policyLabelSlice(self: *const RemoteAttestationResponse) []const u8 {
-        return self.policy_label[0..self.policy_label_len];
+        return self.policy_label[0..@as(usize, self.policy_label_len)];
     }
 
     pub fn revokedRootGenerationsSlice(self: *const RemoteAttestationResponse) []const u64 {
-        return self.revoked_root_generations[0..self.revoked_root_generation_count];
+        return self.revoked_root_generations[0..@as(usize, self.revoked_root_generation_count)];
     }
 };
 
@@ -676,20 +695,20 @@ pub const Error = error{
 pub const Service = struct {
     device: principal.PrincipalId,
     visible_request_count: usize = 0,
-    last_remote_party_len: usize = 0,
+    last_remote_party_len: u8 = 0,
     last_remote_party: [MAX_REMOTE_PARTY_BYTES]u8 = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
-    last_remote_nonce_len: usize = 0,
+    last_remote_nonce_len: u8 = 0,
     last_remote_nonce: [MAX_NONCE_BYTES]u8 = [_]u8{0} ** MAX_NONCE_BYTES,
-    remote_nonce_history_count: usize = 0,
+    remote_nonce_history_count: u8 = 0,
     remote_nonce_history: [MAX_REMOTE_NONCE_HISTORY]crypto_hash.Digest = [_]crypto_hash.Digest{crypto_hash.zero_digest} ** MAX_REMOTE_NONCE_HISTORY,
     has_provisioned_root: bool = false,
     root_origin: KeyOrigin = .software,
-    root_label_len: usize = 0,
+    root_label_len: u8 = 0,
     root_label: [MAX_ROOT_LABEL_BYTES]u8 = [_]u8{0} ** MAX_ROOT_LABEL_BYTES,
-    root_key_id_len: usize = 0,
+    root_key_id_len: u8 = 0,
     root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8 = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES,
     root_key_generation: u64 = 0,
-    revoked_root_generation_count: usize = 0,
+    revoked_root_generation_count: u8 = 0,
     revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = [_]u64{0} ** MAX_REVOKED_ROOT_GENERATIONS,
     root_verifier_metadata_digest_present: bool = false,
     root_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
@@ -715,8 +734,8 @@ pub const Service = struct {
         }
         self.has_provisioned_root = true;
         self.root_origin = provider.origin();
-        self.root_label_len = native_util.copyTextExact(&self.root_label, provider.label()) catch return error.RootLabelTooLong;
-        self.root_key_id_len = native_util.copyTextExact(&self.root_key_id, provider.keyId()) catch return error.RootLabelTooLong;
+        self.root_label_len = @intCast(native_util.copyTextExact(&self.root_label, provider.label()) catch return error.RootLabelTooLong);
+        self.root_key_id_len = @intCast(native_util.copyTextExact(&self.root_key_id, provider.keyId()) catch return error.RootLabelTooLong);
         self.root_key_generation = provider.keyGeneration();
         self.root_verifier_metadata_digest_present = verifier_metadata_digest != null;
         self.root_verifier_metadata_digest = verifier_metadata_digest orelse crypto_hash.zero_digest;
@@ -813,7 +832,7 @@ pub const Service = struct {
             response.attestation_verifier_metadata_digest_present = true;
             response.attestation_verifier_metadata_digest = self.root_verifier_metadata_digest;
         }
-        response.policy_label_len = native_util.copyTextExact(&response.policy_label, request.policyLabelSlice()) catch return error.PolicyLabelTooLong;
+        response.policy_label_len = @intCast(native_util.copyTextExact(&response.policy_label, request.policyLabelSlice()) catch return error.PolicyLabelTooLong);
         for (request.revokedRootGenerationsSlice(), 0..) |generation, index| {
             response.revoked_root_generations[index] = generation;
         }
@@ -919,9 +938,9 @@ pub const Service = struct {
             .device = self.device,
             .generation = boot.generation,
             .record_count = boot.record_count,
-            .critical_service_count = boot.countKind(.critical_service),
-            .policy_count = boot.countKind(.policy),
-            .driver_count = boot.countKind(.driver_set),
+            .critical_service_count = @intCast(boot.countKind(.critical_service)),
+            .policy_count = @intCast(boot.countKind(.policy)),
+            .driver_count = @intCast(boot.countKind(.driver_set)),
             .user_visible = user_visible,
             .remote_party_len = 0,
             .remote_party = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
@@ -938,16 +957,16 @@ pub const Service = struct {
             .manifest_verified = boot.artifact_manifest_verified,
             .signature = .{},
         };
-        statement.remote_party_len = native_util.copyTextExact(&statement.remote_party, remote_party) catch return error.RemotePartyTooLong;
-        statement.nonce_len = native_util.copyTextExact(&statement.nonce, nonce) catch return error.NonceTooLong;
-        statement.root_label_len = native_util.copyTextExact(&statement.root_label, root_label) catch return error.RootLabelTooLong;
-        statement.root_key_id_len = native_util.copyTextExact(&statement.root_key_id, root_key_id) catch return error.RootLabelTooLong;
+        statement.remote_party_len = @intCast(native_util.copyTextExact(&statement.remote_party, remote_party) catch return error.RemotePartyTooLong);
+        statement.nonce_len = @intCast(native_util.copyTextExact(&statement.nonce, nonce) catch return error.NonceTooLong);
+        statement.root_label_len = @intCast(native_util.copyTextExact(&statement.root_label, root_label) catch return error.RootLabelTooLong);
+        statement.root_key_id_len = @intCast(native_util.copyTextExact(&statement.root_key_id, root_key_id) catch return error.RootLabelTooLong);
 
         if (user_visible) {
             self.visible_request_count += 1;
-            self.last_remote_party_len = native_util.copyTextExact(&self.last_remote_party, remote_party) catch return error.RemotePartyTooLong;
+            self.last_remote_party_len = @intCast(native_util.copyTextExact(&self.last_remote_party, remote_party) catch return error.RemotePartyTooLong);
             if (remote_party.len != 0) {
-                self.last_remote_nonce_len = native_util.copyTextExact(&self.last_remote_nonce, nonce) catch return error.NonceTooLong;
+                self.last_remote_nonce_len = @intCast(native_util.copyTextExact(&self.last_remote_nonce, nonce) catch return error.NonceTooLong);
                 self.rememberRemoteChallenge(remote_party, nonce);
             }
         }
@@ -1004,13 +1023,23 @@ pub const Service = struct {
     }
 
     fn rootLabelSlice(self: *const Service) []const u8 {
-        return self.root_label[0..self.root_label_len];
+        return self.root_label[0..@as(usize, self.root_label_len)];
     }
 
     fn rootKeyIdSlice(self: *const Service) []const u8 {
-        return self.root_key_id[0..self.root_key_id_len];
+        return self.root_key_id[0..@as(usize, self.root_key_id_len)];
     }
 };
+
+comptime {
+    if (@sizeOf(Statement) > STATEMENT_SIZE_CEILING_BYTES or
+        @sizeOf(RemoteAttestationRequest) > REMOTE_REQUEST_SIZE_CEILING_BYTES or
+        @sizeOf(RemoteAttestationResponse) > REMOTE_RESPONSE_SIZE_CEILING_BYTES or
+        @sizeOf(Service) > SERVICE_SIZE_CEILING_BYTES)
+    {
+        @compileError("attestation state exceeds compact layout ceilings");
+    }
+}
 
 fn isBackedRootOrigin(origin: KeyOrigin) bool {
     return origin != .software;
@@ -1043,6 +1072,18 @@ fn remoteChallengeDigest(remote_party: []const u8, nonce: []const u8) crypto_has
     crypto_hash.updateBytes(&hasher, "remote-party", remote_party);
     crypto_hash.updateBytes(&hasher, "nonce", nonce);
     return crypto_hash.finalize(&hasher);
+}
+
+test "attestation metadata stays compact" {
+    try std.testing.expectEqual(u8, @FieldType(Statement, "record_count"));
+    try std.testing.expectEqual(u8, @FieldType(Statement, "remote_party_len"));
+    try std.testing.expectEqual(u8, @FieldType(RemoteAttestationRequest, "revoked_root_generation_count"));
+    try std.testing.expectEqual(u8, @FieldType(RemoteAttestationResponse, "policy_label_len"));
+    try std.testing.expectEqual(u8, @FieldType(Service, "remote_nonce_history_count"));
+    try std.testing.expectEqual(@as(usize, 408), @sizeOf(Statement));
+    try std.testing.expectEqual(@as(usize, 344), @sizeOf(RemoteAttestationRequest));
+    try std.testing.expectEqual(@as(usize, 616), @sizeOf(RemoteAttestationResponse));
+    try std.testing.expectEqual(@as(usize, 696), @sizeOf(Service));
 }
 
 fn verifiedTestBoot(generation: u64, root_provenance: measured_boot.RootProvenance) !measured_boot.BootRecord {
@@ -1084,9 +1125,9 @@ test "attestation service signs measured state and records user visible requests
     }, true);
 
     try std.testing.expectEqual(@as(u64, 12), statement.generation);
-    try std.testing.expectEqual(@as(usize, 1), statement.critical_service_count);
-    try std.testing.expectEqual(@as(usize, 1), statement.policy_count);
-    try std.testing.expectEqual(@as(usize, 1), statement.driver_count);
+    try std.testing.expectEqual(@as(u8, 1), statement.critical_service_count);
+    try std.testing.expectEqual(@as(u8, 1), statement.policy_count);
+    try std.testing.expectEqual(@as(u8, 1), statement.driver_count);
     try std.testing.expectEqualStrings("", statement.remotePartySlice());
     try std.testing.expect(statement.user_visible);
     try std.testing.expect(Service.verify(statement));
