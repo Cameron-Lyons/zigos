@@ -208,7 +208,9 @@ pub const indexed_hot_path_tables = .{
         .stores_compact_task_provenance = @sizeOf(task_runtime.TaskProvenanceRecord) < @sizeOf(task_runtime.ProvenanceRecord),
         .keeps_executable_mapping_only_in_address_space = !@hasField(task_runtime.TaskColdRecord, "userspace_image"),
         .uses_initial_component_label_index = @hasField(task_runtime.Runtime, "task_initial_component_label_index"),
-        .tracks_task_state_counts = @hasField(task_runtime.Runtime, "task_state_counts"),
+        .tracks_task_state_counts = task_runtime.COMPACT_LIFECYCLE_METADATA and
+            @FieldType(task_runtime.Runtime, "task_state_counts") == [@typeInfo(task_runtime.TaskState).@"enum".fields.len]task_runtime.TaskStateCount,
+        .keeps_runtime_within_target_ceiling = @sizeOf(task_runtime.Runtime) <= task_runtime.RUNTIME_SIZE_CEILING_BYTES,
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
         .bounds_task_capability_scans = task_runtime.TASK_CAPABILITY_SCAN_BOUND == task_runtime.MAX_TASK_CAPABILITIES,
         .avoids_task_capability_primary_index_lookups = task_runtime.TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
