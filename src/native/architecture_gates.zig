@@ -724,6 +724,12 @@ pub const indexed_hot_path_tables = .{
         .uses_share_grant_principal_index = @hasField(workspace.WorkspaceShareTable, "share_grant_principal_index"),
         .tracks_staging_state = @hasField(workspace.WorkspaceRecord, "staging"),
         .reuses_mutation_log_tail_for_staging = !@hasField(workspace.WorkspaceStagingState, "staged_entries"),
+        .stores_compact_staging_metadata = workspace.COMPACT_STAGING_METADATA and
+            @FieldType(workspace.WorkspaceStagingState, "staged_entry_count") == u8 and
+            @FieldType(workspace.WorkspaceStagingState, "staged_effective_entry_count") == u8,
+        .keeps_staging_state_within_ceiling = @sizeOf(workspace.WorkspaceStagingState) <= workspace.WORKSPACE_STAGING_STATE_SIZE_CEILING_BYTES,
+        .keeps_workspace_state_within_ceilings = @sizeOf(workspace.WorkspaceRecord) <= workspace.WORKSPACE_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(workspace.Directory) <= workspace.DIRECTORY_SIZE_CEILING_BYTES,
         .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),
         .uses_compact_path_lengths = @sizeOf(workspace.WorkspacePathLength) == 1,
         .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
