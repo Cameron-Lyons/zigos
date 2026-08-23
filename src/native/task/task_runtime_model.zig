@@ -385,8 +385,8 @@ test "task provenance clamps untrusted text lengths to compact storage" {
     var source = ProvenanceRecord{};
     @memset(&source.operation, 'o');
     @memset(&source.detail, 'd');
-    source.operation_len = std.math.maxInt(usize);
-    source.detail_len = std.math.maxInt(usize);
+    source.operation_len = std.math.maxInt(u8);
+    source.detail_len = std.math.maxInt(u8);
 
     const compact = TaskProvenanceRecord.from(source);
     try std.testing.expectEqual(@as(usize, debug_contract.MAX_LABEL_BYTES), compact.operationSlice().len);

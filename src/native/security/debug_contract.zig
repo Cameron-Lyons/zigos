@@ -10,7 +10,7 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 96;
 pub const COMPACT_DEBUG_TEXT_METADATA = true;
 pub const DENIAL_EXPLANATION_SIZE_CEILING_BYTES: usize = 240;
-pub const PROVENANCE_RECORD_SIZE_CEILING_BYTES: usize = 520;
+pub const PROVENANCE_RECORD_SIZE_CEILING_BYTES: usize = 504;
 const DENIAL_RENDER_TEST_BUFFER_BYTES: usize = 256;
 
 comptime {
@@ -95,9 +95,9 @@ pub const ProvenanceRecord = struct {
     target_id: u64 = 0,
     target_kind: ?capability.CapabilityTargetKind = null,
     tick: u64 = 0,
-    operation_len: usize = 0,
+    operation_len: u8 = 0,
     operation: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    detail_len: usize = 0,
+    detail_len: u8 = 0,
     detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
     source_identity_fingerprint: u64 = 0,
     release_transparency_sequence: u64 = 0,
@@ -106,11 +106,11 @@ pub const ProvenanceRecord = struct {
     denial: DenialExplanation = .{},
 
     pub fn operationSlice(self: *const ProvenanceRecord) []const u8 {
-        return self.operation[0..self.operation_len];
+        return self.operation[0..@as(usize, self.operation_len)];
     }
 
     pub fn detailSlice(self: *const ProvenanceRecord) []const u8 {
-        return self.detail[0..self.detail_len];
+        return self.detail[0..@as(usize, self.detail_len)];
     }
 
     pub fn hasReleaseTransparency(self: *const ProvenanceRecord) bool {
@@ -256,8 +256,8 @@ pub fn provenance(
         .tick = tick,
         .denial = denial,
     };
-    record.operation_len = native_util.copyTextWithReserve(&record.operation, operation, 1);
-    record.detail_len = native_util.copyTextWithReserve(&record.detail, detail, 1);
+    record.operation_len = @intCast(native_util.copyTextWithReserve(&record.operation, operation, 1));
+    record.detail_len = @intCast(native_util.copyTextWithReserve(&record.detail, detail, 1));
     record.trace_id = provenanceFingerprint(record);
     return record;
 }
@@ -507,8 +507,10 @@ test "debug contract keeps bounded text metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(DenialExplanation, "operation_len"));
     try std.testing.expectEqual(u8, @FieldType(DenialExplanation, "required_authority_len"));
     try std.testing.expectEqual(u8, @FieldType(DenialExplanation, "blocking_policy_len"));
+    try std.testing.expectEqual(u8, @FieldType(ProvenanceRecord, "operation_len"));
+    try std.testing.expectEqual(u8, @FieldType(ProvenanceRecord, "detail_len"));
     try std.testing.expectEqual(@as(usize, 240), @sizeOf(DenialExplanation));
-    try std.testing.expectEqual(@as(usize, 520), @sizeOf(ProvenanceRecord));
+    try std.testing.expectEqual(@as(usize, 504), @sizeOf(ProvenanceRecord));
 }
 
 test "denial explanations render deterministic why-denied metadata" {
