@@ -31,6 +31,9 @@ pub const MAX_EXPORT_SIGNATURE_SIGNER_BYTES: usize = MAX_WORKSPACE_LABEL_BYTES;
 pub const WorkspacePathLength = u8;
 pub const COMPACT_STAGING_METADATA = true;
 pub const WORKSPACE_STAGING_STATE_SIZE_CEILING_BYTES: usize = 3;
+pub const COMPACT_SNAPSHOT_EXPORT_METADATA = true;
+pub const SNAPSHOT_RECORD_SIZE_CEILING_BYTES: usize = 224;
+pub const EXPORT_PACKAGE_SIZE_CEILING_BYTES: usize = 11_808;
 pub const NO_SNAPSHOT_GENERATION: u32 = std.math.maxInt(u32);
 
 comptime {
@@ -42,6 +45,12 @@ comptime {
     }
     if (MAX_WORKSPACE_ENTRIES > std.math.maxInt(u8)) {
         @compileError("workspace staging metadata exceeds u8 capacity");
+    }
+    if (MAX_WORKSPACE_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_EXPORT_SIGNATURE_FORMAT_BYTES > std.math.maxInt(u8) or
+        MAX_EXPORT_SIGNATURE_SIGNER_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("workspace snapshot or export metadata exceeds u8 capacity");
     }
 }
 const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
@@ -149,7 +158,7 @@ pub const EntryMutation = struct {
 const MutationEntries = [MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation;
 const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
 pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 19_400 else 43_968;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 161_432 else 357_976;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 161_176 else 357_720;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 
 pub const CreateRequest = struct {
@@ -239,14 +248,20 @@ pub const SnapshotRecord = struct {
     id: ids.SnapshotId,
     workspace_id: ids.WorkspaceId,
     generation: u32,
-    label_len: usize,
+    label_len: u8,
+    entry_count: u8,
     label: [MAX_WORKSPACE_LABEL_BYTES]u8,
     root_address: SnapshotRootAddress,
     signature: manifest.Signature = .{},
-    entry_count: usize,
+
+    comptime {
+        if (@sizeOf(@This()) > SNAPSHOT_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("workspace snapshot record exceeds its compact layout ceiling");
+        }
+    }
 
     pub fn labelSlice(self: *const SnapshotRecord) []const u8 {
-        return self.label[0..@min(self.label_len, self.label.len)];
+        return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
     }
 
     pub fn signerSlice(self: *const SnapshotRecord) []const u8 {
@@ -258,19 +273,25 @@ pub const ExportPackage = struct {
     workspace_id: ids.WorkspaceId,
     snapshot_id: ids.SnapshotId,
     generation: u32,
-    label_len: usize,
+    label_len: u8,
+    entry_count: u8,
+    signature_format_len: u8 = 0,
+    signature_signer_len: u8 = 0,
     label: [MAX_WORKSPACE_LABEL_BYTES]u8,
     root_address: SnapshotRootAddress,
     signature: manifest.Signature = .{},
-    signature_format_len: usize = 0,
     signature_format_storage: [MAX_EXPORT_SIGNATURE_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_EXPORT_SIGNATURE_FORMAT_BYTES,
-    signature_signer_len: usize = 0,
     signature_signer_storage: [MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8 = [_]u8{0} ** MAX_EXPORT_SIGNATURE_SIGNER_BYTES,
-    entry_count: usize,
     entries: [MAX_WORKSPACE_ENTRIES]Entry,
 
+    comptime {
+        if (@sizeOf(@This()) > EXPORT_PACKAGE_SIZE_CEILING_BYTES) {
+            @compileError("workspace export package exceeds its compact layout ceiling");
+        }
+    }
+
     pub fn labelSlice(self: *const ExportPackage) []const u8 {
-        return self.label[0..@min(self.label_len, self.label.len)];
+        return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
     }
 
     pub fn signerSlice(self: *const ExportPackage) []const u8 {
@@ -857,9 +878,9 @@ pub const Directory = struct {
         snapshot_record.workspace_id = workspace.id;
         snapshot_record.generation = workspace.generation;
         snapshot_record.label = label_copy;
-        snapshot_record.label_len = label_len;
+        snapshot_record.label_len = @intCast(label_len);
         const snapshot_entries = workspace.path_index.entries[0..workspace.path_index.entry_count];
-        snapshot_record.entry_count = snapshot_entries.len;
+        snapshot_record.entry_count = @intCast(snapshot_entries.len);
         snapshot_record.root_address = workspace.path_index.root_address;
         signSnapshotRecord(&snapshot_record, snapshot_entries, identity) catch return error.InvalidSignature;
 
@@ -955,8 +976,8 @@ pub const Directory = struct {
         out.snapshot_id = snapshot_id;
         out.generation = snapshot_record.generation;
         out.root_address = snapshot_record.root_address;
-        out.entry_count = snapshot_entries.len;
-        out.label_len = native_util.copyTextExact(&out.label, snapshot_record.labelSlice()) catch return error.LabelTooLong;
+        out.entry_count = @intCast(snapshot_entries.len);
+        out.label_len = @intCast(native_util.copyTextExact(&out.label, snapshot_record.labelSlice()) catch return error.LabelTooLong);
         copyEntries(out.entries[0..snapshot_entries.len], snapshot_entries);
         signExportPackage(out, identity) catch return error.InvalidSignature;
     }
@@ -1245,7 +1266,7 @@ fn verifySnapshotRecord(snapshot: *const SnapshotRecord, entries: []const Entry)
 }
 
 fn signExportPackage(package: *ExportPackage, identity: signing.SignerIdentity) !void {
-    package.root_address = workspaceRootAddress(package.entries[0..package.entry_count]);
+    package.root_address = workspaceRootAddress(package.entries[0..@as(usize, package.entry_count)]);
     var message_buffer: [snapshot_message_buffer_bytes]u8 = undefined;
     const message = try snapshotMessage(
         &message_buffer,
@@ -1263,7 +1284,7 @@ fn signExportPackage(package: *ExportPackage, identity: signing.SignerIdentity) 
 fn verifyExportPackage(package: *const ExportPackage) bool {
     const signature = exportPackageSignature(package);
     if (!signature.isPresent()) return false;
-    const root_address = workspaceRootAddress(package.entries[0..package.entry_count]);
+    const root_address = workspaceRootAddress(package.entries[0..@as(usize, package.entry_count)]);
     if (!std.mem.eql(u8, &package.root_address, &root_address)) return false;
     var message_buffer: [snapshot_message_buffer_bytes]u8 = undefined;
     const message = snapshotMessage(
@@ -1279,19 +1300,19 @@ fn verifyExportPackage(package: *const ExportPackage) bool {
 }
 
 fn persistExportPackageSignature(package: *ExportPackage) Error!void {
-    package.signature_format_len = native_util.copyTextExact(&package.signature_format_storage, package.signature.formatSlice()) catch return error.SignatureFormatTooLong;
-    package.signature_signer_len = native_util.copyTextExact(&package.signature_signer_storage, package.signature.signer) catch return error.SignatureSignerTooLong;
-    package.signature.format = manifest.parseSignatureFormat(package.signature_format_storage[0..package.signature_format_len]);
-    package.signature.signer = package.signature_signer_storage[0..package.signature_signer_len];
+    package.signature_format_len = @intCast(native_util.copyTextExact(&package.signature_format_storage, package.signature.formatSlice()) catch return error.SignatureFormatTooLong);
+    package.signature_signer_len = @intCast(native_util.copyTextExact(&package.signature_signer_storage, package.signature.signer) catch return error.SignatureSignerTooLong);
+    package.signature.format = manifest.parseSignatureFormat(package.signature_format_storage[0..@as(usize, package.signature_format_len)]);
+    package.signature.signer = package.signature_signer_storage[0..@as(usize, package.signature_signer_len)];
 }
 
 fn exportPackageSignature(package: *const ExportPackage) manifest.Signature {
     var signature = package.signature;
     if (package.signature_format_len != 0) {
-        signature.format = manifest.parseSignatureFormat(package.signature_format_storage[0..package.signature_format_len]);
+        signature.format = manifest.parseSignatureFormat(package.signature_format_storage[0..@as(usize, package.signature_format_len)]);
     }
     if (package.signature_signer_len != 0) {
-        signature.signer = package.signature_signer_storage[0..package.signature_signer_len];
+        signature.signer = package.signature_signer_storage[0..@as(usize, package.signature_signer_len)];
     }
     return signature;
 }
@@ -1789,6 +1810,18 @@ test "workspace staging metadata stays compact" {
     try std.testing.expectEqual(@as(usize, 3), @sizeOf(WorkspaceStagingState));
 }
 
+test "workspace snapshot and export metadata stay compact" {
+    try std.testing.expectEqual(u8, @FieldType(SnapshotRecord, "label_len"));
+    try std.testing.expectEqual(u8, @FieldType(SnapshotRecord, "entry_count"));
+    try std.testing.expectEqual(@as(usize, 224), @sizeOf(SnapshotRecord));
+    try std.testing.expectEqual(@as(usize, 232), @sizeOf(SnapshotSlot));
+    try std.testing.expectEqual(u8, @FieldType(ExportPackage, "label_len"));
+    try std.testing.expectEqual(u8, @FieldType(ExportPackage, "entry_count"));
+    try std.testing.expectEqual(u8, @FieldType(ExportPackage, "signature_format_len"));
+    try std.testing.expectEqual(u8, @FieldType(ExportPackage, "signature_signer_len"));
+    try std.testing.expectEqual(@as(usize, 11_808), @sizeOf(ExportPackage));
+}
+
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
@@ -1799,7 +1832,7 @@ test "workspace sharing uses capacity-sized resident indexes" {
     try std.testing.expectEqual(@as(usize, 1_480), @sizeOf(WorkspaceShareTable));
     try std.testing.expectEqual(@as(usize, 43_968), @sizeOf(WorkspaceRecord));
     try std.testing.expectEqual(@as(usize, 43_976), @sizeOf(WorkspaceSlot));
-    try std.testing.expectEqual(@as(usize, 357_976), @sizeOf(Directory));
+    try std.testing.expectEqual(@as(usize, 357_720), @sizeOf(Directory));
 }
 
 test "workspace borrowed resolution returns the directory owned entry" {
