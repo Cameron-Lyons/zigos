@@ -25,6 +25,16 @@ pub const DEFAULT_OWNER = principal.PrincipalId{ .kind = .service, .serial = 64_
 pub const DEFAULT_USER = principal.PrincipalId{ .kind = .user, .serial = 64_103 };
 pub const DEFAULT_LOCAL_DEVICE = principal.PrincipalId{ .kind = .device, .serial = 64_104 };
 pub const DEFAULT_PEER_DEVICE = principal.PrincipalId{ .kind = .device, .serial = 64_105 };
+pub const COMPACT_PREFIX_METADATA = true;
+pub const LOCAL_FIRST_WORKSPACE_SIZE_CEILING_BYTES: usize = 208;
+
+comptime {
+    if (sync_service.MAX_SELECTIVE_PREFIXES > std.math.maxInt(u8) or
+        sync_service.MAX_PREFIX_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("sync SDK prefix metadata exceeds u8 capacity");
+    }
+}
 
 pub const user_identity = signing.SignerIdentity{
     .label = "sdk.sync.user",
@@ -43,15 +53,21 @@ pub const LocalFirstWorkspace = struct {
     workspace_id: u64,
     offline_first: bool = true,
     personal_e2ee: bool = true,
-    prefix_count: usize = 0,
+    prefix_count: u8 = 0,
     prefixes: [sync_service.MAX_SELECTIVE_PREFIXES][sync_service.MAX_PREFIX_BYTES]u8 =
         [_][sync_service.MAX_PREFIX_BYTES]u8{[_]u8{0} ** sync_service.MAX_PREFIX_BYTES} ** sync_service.MAX_SELECTIVE_PREFIXES,
-    prefix_lens: [sync_service.MAX_SELECTIVE_PREFIXES]usize = [_]usize{0} ** sync_service.MAX_SELECTIVE_PREFIXES,
+    prefix_lens: [sync_service.MAX_SELECTIVE_PREFIXES]u8 = [_]u8{0} ** sync_service.MAX_SELECTIVE_PREFIXES,
+
+    comptime {
+        if (@sizeOf(@This()) > LOCAL_FIRST_WORKSPACE_SIZE_CEILING_BYTES) {
+            @compileError("sync SDK local-first workspace exceeds its compact layout ceiling");
+        }
+    }
 
     pub fn matchesPath(self: *const LocalFirstWorkspace, path: []const u8) bool {
         if (self.prefix_count == 0) return true;
-        for (self.prefixes[0..self.prefix_count], 0..) |prefix, index| {
-            if (std.mem.startsWith(u8, path, prefix[0..self.prefix_lens[index]])) return true;
+        for (self.prefixes[0..@as(usize, self.prefix_count)], 0..) |prefix, index| {
+            if (std.mem.startsWith(u8, path, prefix[0..@as(usize, self.prefix_lens[index])])) return true;
         }
         return false;
     }
@@ -230,10 +246,10 @@ fn workspaceHandleFromPolicy(policy: *const WorkspacePolicy) Error!LocalFirstWor
         .prefix_count = policy.selective_prefix_count,
     };
     for (policy.selective_prefixes[0..policy.selective_prefix_count], 0..) |prefix, index| {
-        const len = policy.selective_prefix_lens[index];
+        const len: usize = policy.selective_prefix_lens[index];
         if (len > handle.prefixes[index].len) return error.PrefixTooLong;
         @memcpy(handle.prefixes[index][0..len], prefix[0..len]);
-        handle.prefix_lens[index] = len;
+        handle.prefix_lens[index] = @intCast(len);
     }
     return handle;
 }
@@ -244,6 +260,12 @@ pub fn objectId(raw: u64) object_store.ids.ObjectId {
 
 pub fn versionId(raw: u64) object_store.ids.VersionId {
     return object_store.ids.version(raw);
+}
+
+test "sync SDK keeps local-first prefix metadata compact" {
+    try std.testing.expectEqual(u8, @FieldType(LocalFirstWorkspace, "prefix_count"));
+    try std.testing.expectEqual([sync_service.MAX_SELECTIVE_PREFIXES]u8, @FieldType(LocalFirstWorkspace, "prefix_lens"));
+    try std.testing.expectEqual(@as(usize, 208), @sizeOf(LocalFirstWorkspace));
 }
 
 test "sync SDK configures local-first policy and records replica state" {
