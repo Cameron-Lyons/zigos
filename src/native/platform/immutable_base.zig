@@ -10,6 +10,16 @@ const storage_service = @import("../storage/storage_service.zig");
 pub const MAX_SYSTEM_IMAGES: usize = 2;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const state_workspace_label = "system-base";
+pub const COMPACT_IMMUTABLE_BASE_METADATA = true;
+pub const SYSTEM_IMAGE_SIZE_CEILING_BYTES: usize = 160;
+pub const BOOT_SELECTION_SIZE_CEILING_BYTES: usize = 120;
+pub const MANAGER_SIZE_CEILING_BYTES: usize = 424;
+
+comptime {
+    if (MAX_SYSTEM_IMAGES > std.math.maxInt(u8) or MAX_LABEL_BYTES > std.math.maxInt(u8)) {
+        @compileError("immutable base metadata exceeds compact field capacity");
+    }
+}
 
 const PERSISTED_STATE_PAYLOAD_BUFFER_BYTES: usize = 512;
 const state_entry_path = "state/activation";
@@ -47,22 +57,22 @@ pub const HealthReport = struct {
 
 pub const SystemImage = struct {
     slot_index: u8,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
     object_id: u64,
     version_id: u64,
     read_only: bool,
     activation_generation: u64,
-    signer_len: usize,
+    signer_len: u8,
     signer: [MAX_LABEL_BYTES]u8,
     measurement: object_store.BlobAddress,
 
     pub fn labelSlice(self: *const SystemImage) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn signerSlice(self: *const SystemImage) []const u8 {
-        return self.signer[0..self.signer_len];
+        return self.signer[0..@as(usize, self.signer_len)];
     }
 };
 
@@ -81,11 +91,11 @@ pub const BootSelection = struct {
     activation_generation: u64,
     rollback_generation: u64,
     measurement: object_store.BlobAddress,
-    signer_len: usize,
+    signer_len: u8,
     signer: [MAX_LABEL_BYTES]u8,
 
     pub fn signerSlice(self: *const BootSelection) []const u8 {
-        return self.signer[0..self.signer_len];
+        return self.signer[0..@as(usize, self.signer_len)];
     }
 };
 
@@ -164,12 +174,12 @@ pub const Manager = struct {
         const slot = &self.slots[slot_index];
         slot.* = zeroImage();
         slot.slot_index = @intCast(slot_index);
-        slot.label_len = try native_util.copyTextExact(&slot.label, label);
+        slot.label_len = @intCast(try native_util.copyTextExact(&slot.label, label));
         slot.object_id = result.object_id.raw();
         slot.version_id = result.version_id.raw();
         slot.read_only = true;
         slot.activation_generation = self.activation_generation;
-        slot.signer_len = try native_util.copyTextExact(&slot.signer, signer.label);
+        slot.signer_len = @intCast(try native_util.copyTextExact(&slot.signer, signer.label));
         slot.measurement = result.blob_address;
         try self.persist(tick);
         return slot;
@@ -364,7 +374,7 @@ pub const Manager = struct {
         const slot = &self.slots[slot_index];
         slot.* = zeroImage();
         slot.slot_index = @intCast(slot_index);
-        slot.label_len = try native_util.copyTextExact(&slot.label, label);
+        slot.label_len = @intCast(try native_util.copyTextExact(&slot.label, label));
         slot.object_id = try reader.readU64();
         slot.version_id = try reader.readU64();
         slot.read_only = switch (try reader.readByte()) {
@@ -379,10 +389,19 @@ pub const Manager = struct {
         const slot = &self.slots[slot_index];
         const version = self.storage.version(slot.version_id) orelse return error.CorruptState;
         const blob = self.storage.versionBlob(version) orelse return error.CorruptState;
-        slot.signer_len = try native_util.copyTextExact(&slot.signer, version.metadata.signature.signer);
+        slot.signer_len = @intCast(try native_util.copyTextExact(&slot.signer, version.metadata.signature.signer));
         slot.measurement = blob.address;
     }
 };
+
+comptime {
+    if (@sizeOf(SystemImage) > SYSTEM_IMAGE_SIZE_CEILING_BYTES or
+        @sizeOf(BootSelection) > BOOT_SELECTION_SIZE_CEILING_BYTES or
+        @sizeOf(Manager) > MANAGER_SIZE_CEILING_BYTES)
+    {
+        @compileError("immutable base state exceeds compact layout ceilings");
+    }
+}
 
 fn zeroImage() SystemImage {
     return .{
@@ -426,6 +445,15 @@ fn hashId(seed: u64, text: []const u8) u64 {
 
 fn stateObjectId() u64 {
     return hashId(0xB66D4D66A5A5C001, "platform:immutable-base:state");
+}
+
+test "immutable base metadata stays compact" {
+    try std.testing.expectEqual(u8, @FieldType(SystemImage, "label_len"));
+    try std.testing.expectEqual(u8, @FieldType(SystemImage, "signer_len"));
+    try std.testing.expectEqual(u8, @FieldType(BootSelection, "signer_len"));
+    try std.testing.expectEqual(@as(usize, 160), @sizeOf(SystemImage));
+    try std.testing.expectEqual(@as(usize, 120), @sizeOf(BootSelection));
+    try std.testing.expectEqual(@as(usize, 424), @sizeOf(Manager));
 }
 
 fn imageObjectId(slot_index: usize) u64 {
