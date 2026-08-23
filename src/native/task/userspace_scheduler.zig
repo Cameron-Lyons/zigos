@@ -26,9 +26,9 @@ else
     };
 
 const DISPATCH_CPU_TICK_COST: u64 = 1_000;
-const RESOURCE_CLASS_COUNT: usize = std.meta.fields(accelerator_scheduler.ResourceClass).len;
-const ENGINE_COUNT: usize = std.meta.fields(accelerator_scheduler.Engine).len;
-const MAX_ACCELERATOR_CLAIMS: usize = task_runtime.MAX_TASKS;
+pub const RESOURCE_CLASS_COUNT: usize = std.meta.fields(accelerator_scheduler.ResourceClass).len;
+pub const ENGINE_COUNT: usize = std.meta.fields(accelerator_scheduler.Engine).len;
+pub const MAX_ACCELERATOR_CLAIMS: usize = task_runtime.MAX_TASKS;
 const EMERGENCY_DEADLINE_DELTA_TICKS: u64 = 1_000;
 const FOREGROUND_DEADLINE_DELTA_TICKS: u64 = 5_000;
 const MEDIA_EXPORT_DEADLINE_DELTA_TICKS: u64 = 20_000;
@@ -40,9 +40,20 @@ const TEST_TASK_SHARED_MEMORY_BYTES: usize = 1024;
 const TEST_ACCELERATOR_SHARED_MEMORY_BYTES: usize = 4096;
 const TEST_ACCELERATOR_DEADLINE_TICKS: u64 = 20;
 const MEMORY_BANDWIDTH_UNIT_BYTES: usize = 1024;
-const no_index = indexed_arena.no_index;
+const arena_no_index = indexed_arena.no_index;
+pub const QueueSlotIndex = u8;
+pub const QUEUE_NO_INDEX: QueueSlotIndex = @intCast(task_runtime.MAX_TASKS);
+pub const COMPACT_QUEUE_METADATA = true;
 pub const STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS: u8 = 0;
 pub const SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
+
+comptime {
+    if (task_runtime.MAX_TASKS > std.math.maxInt(QueueSlotIndex) or
+        MAX_ACCELERATOR_CLAIMS > std.math.maxInt(QueueSlotIndex))
+    {
+        @compileError("userspace scheduler queues no longer fit compact slot indexes");
+    }
+}
 
 pub const WakeReason = enum(u8) {
     registered,
@@ -101,8 +112,8 @@ const Slot = struct {
     mapping_handle: userspace_executor.MappingHandle = .{},
     resource_class: accelerator_scheduler.ResourceClass = .foreground_interactive,
     queued_ready: bool = false,
-    prev_ready_index: usize = no_index,
-    next_ready_index: usize = no_index,
+    prev_ready_index: QueueSlotIndex = QUEUE_NO_INDEX,
+    next_ready_index: QueueSlotIndex = QUEUE_NO_INDEX,
     dispatch_count: u64 = 0,
     event_wait_count: u64 = 0,
     ui_state_update_count: u64 = 0,
@@ -128,21 +139,37 @@ const Slot = struct {
     last_policy_delay_tick: u64 = 0,
     delayed_dispatch_count: u64 = 0,
     denied_dispatch_count: u64 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > SCHEDULER_SLOT_SIZE_CEILING_BYTES) {
+            @compileError("userspace scheduler slot exceeds its compact size ceiling");
+        }
+    }
 };
 
 const AcceleratorClaimSlot = struct {
     in_use: bool = false,
     record: AcceleratorClaimRecord = zeroAcceleratorClaim(),
-    prev_claim_index: usize = no_index,
-    next_claim_index: usize = no_index,
-    prev_deadline_index: usize = no_index,
-    next_deadline_index: usize = no_index,
+    prev_claim_index: QueueSlotIndex = QUEUE_NO_INDEX,
+    next_claim_index: QueueSlotIndex = QUEUE_NO_INDEX,
+    prev_deadline_index: QueueSlotIndex = QUEUE_NO_INDEX,
+    next_deadline_index: QueueSlotIndex = QUEUE_NO_INDEX,
+
+    comptime {
+        if (@sizeOf(@This()) > ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES) {
+            @compileError("userspace accelerator claim slot exceeds its compact size ceiling");
+        }
+    }
 };
 
 const SchedulerSlotArena = indexed_arena.IndexedArenaWithKey(u64, Slot, task_runtime.MAX_TASKS, task_runtime.MAX_TASKS * 2, schedulerSlotTaskId);
 const AcceleratorClaimArena = indexed_arena.IndexedArenaWithKey(u64, AcceleratorClaimSlot, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2, acceleratorClaimSlotId);
 const AcceleratorClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2);
 const heap_backed_accelerator_claims = builtin.target.os.tag == .freestanding;
+pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 208;
+pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
+pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_912;
+pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_568 else 46_472;
 
 pub const AcceleratorClaimBacking = struct {
     claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),
@@ -160,6 +187,12 @@ pub const AcceleratorClaimBacking = struct {
         for (&self.task_index.links) |*link| link.bucket = compact_no_index;
         self.task_index.free_bucket_head = compact_no_index;
     }
+
+    comptime {
+        if (@sizeOf(@This()) > ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES) {
+            @compileError("userspace accelerator claim backing exceeds its compact size ceiling");
+        }
+    }
 };
 
 const AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) ?*AcceleratorClaimBacking else AcceleratorClaimBacking;
@@ -172,16 +205,16 @@ pub const Scheduler = struct {
     runtime_ptr: ?*task_runtime.Runtime = null,
     capability_table_ptr: ?*const capability.CapabilityTable = null,
     slots: SchedulerSlotArena = SchedulerSlotArena.init(),
-    ready_heads: [RESOURCE_CLASS_COUNT]usize = [_]usize{no_index} ** RESOURCE_CLASS_COUNT,
-    ready_tails: [RESOURCE_CLASS_COUNT]usize = [_]usize{no_index} ** RESOURCE_CLASS_COUNT,
-    ready_counts: [RESOURCE_CLASS_COUNT]usize = [_]usize{0} ** RESOURCE_CLASS_COUNT,
-    ready_task_count: usize = 0,
+    ready_heads: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT,
+    ready_tails: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT,
+    ready_counts: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{0} ** RESOURCE_CLASS_COUNT,
+    ready_task_count: QueueSlotIndex = 0,
     accelerator_claim_backing: AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) null else AcceleratorClaimBacking.init(),
-    accelerator_claim_heads: [ENGINE_COUNT]usize = [_]usize{no_index} ** ENGINE_COUNT,
-    accelerator_claim_tails: [ENGINE_COUNT]usize = [_]usize{no_index} ** ENGINE_COUNT,
-    accelerator_deadline_heads: [ENGINE_COUNT]usize = [_]usize{no_index} ** ENGINE_COUNT,
-    accelerator_deadline_tails: [ENGINE_COUNT]usize = [_]usize{no_index} ** ENGINE_COUNT,
-    accelerator_claim_counts: [ENGINE_COUNT]usize = [_]usize{0} ** ENGINE_COUNT,
+    accelerator_claim_heads: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
+    accelerator_claim_tails: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
+    accelerator_deadline_heads: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
+    accelerator_deadline_tails: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
+    accelerator_claim_counts: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{0} ** ENGINE_COUNT,
     engine_dispatch_counts: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
     engine_denial_counts: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
     next_accelerator_claim_id: u64 = 1,
@@ -196,8 +229,8 @@ pub const Scheduler = struct {
     ui_state_marker_printed: bool = false,
 
     comptime {
-        if (heap_backed_accelerator_claims and @sizeOf(@This()) > 36 * 1024) {
-            @compileError("heap-backed accelerator claim state exceeds its compact resident layout");
+        if (@sizeOf(@This()) > SCHEDULER_SIZE_CEILING_BYTES) {
+            @compileError("userspace scheduler exceeds its compact resident size ceiling");
         }
     }
 
@@ -209,12 +242,12 @@ pub const Scheduler = struct {
         @memset(std.mem.asBytes(self), 0);
         self.executor = executor;
         self.slots.free_head = indexed_arena.reusableNoIndex(task_runtime.MAX_TASKS);
-        for (&self.ready_heads) |*head| head.* = no_index;
-        for (&self.ready_tails) |*tail| tail.* = no_index;
-        for (&self.accelerator_claim_heads) |*head| head.* = no_index;
-        for (&self.accelerator_claim_tails) |*tail| tail.* = no_index;
-        for (&self.accelerator_deadline_heads) |*head| head.* = no_index;
-        for (&self.accelerator_deadline_tails) |*tail| tail.* = no_index;
+        for (&self.ready_heads) |*head| head.* = QUEUE_NO_INDEX;
+        for (&self.ready_tails) |*tail| tail.* = QUEUE_NO_INDEX;
+        for (&self.accelerator_claim_heads) |*head| head.* = QUEUE_NO_INDEX;
+        for (&self.accelerator_claim_tails) |*tail| tail.* = QUEUE_NO_INDEX;
+        for (&self.accelerator_deadline_heads) |*head| head.* = QUEUE_NO_INDEX;
+        for (&self.accelerator_deadline_tails) |*tail| tail.* = QUEUE_NO_INDEX;
         self.next_accelerator_claim_id = 1;
         self.resource_state = .{};
         self.resource_telemetry_source = .synthetic;
@@ -435,7 +468,7 @@ pub const Scheduler = struct {
     }
 
     pub fn readyQueueDepth(self: *const Scheduler, class: accelerator_scheduler.ResourceClass) usize {
-        return self.ready_counts[resourceClassIndex(class)];
+        return @intCast(self.ready_counts[resourceClassIndex(class)]);
     }
 
     pub fn hasReadyTasks(self: *const Scheduler) bool {
@@ -522,7 +555,7 @@ pub const Scheduler = struct {
     }
 
     pub fn acceleratorClaimQueueDepth(self: *const Scheduler, engine: accelerator_scheduler.Engine) usize {
-        return self.accelerator_claim_counts[engineIndex(engine)];
+        return @intCast(self.accelerator_claim_counts[engineIndex(engine)]);
     }
 
     pub fn engineDispatchCount(self: *const Scheduler, engine: accelerator_scheduler.Engine) u64 {
@@ -675,13 +708,13 @@ pub const Scheduler = struct {
         const queue_index = resourceClassIndex(class);
         slot.resource_class = class;
         slot.prev_ready_index = self.ready_tails[queue_index];
-        slot.next_ready_index = no_index;
-        if (self.ready_tails[queue_index] == no_index) {
-            self.ready_heads[queue_index] = slot_index;
+        slot.next_ready_index = QUEUE_NO_INDEX;
+        if (self.ready_tails[queue_index] == QUEUE_NO_INDEX) {
+            self.ready_heads[queue_index] = compactQueueIndex(slot_index);
         } else {
-            self.slots.slots[self.ready_tails[queue_index]].next_ready_index = slot_index;
+            self.slots.slots[self.ready_tails[queue_index]].next_ready_index = compactQueueIndex(slot_index);
         }
-        self.ready_tails[queue_index] = slot_index;
+        self.ready_tails[queue_index] = compactQueueIndex(slot_index);
         self.ready_counts[queue_index] += 1;
         self.ready_task_count += 1;
         slot.queued_ready = true;
@@ -691,22 +724,22 @@ pub const Scheduler = struct {
     fn popReadyIndex(self: *Scheduler, class: accelerator_scheduler.ResourceClass) ?usize {
         const queue_index = resourceClassIndex(class);
         const slot_index = self.ready_heads[queue_index];
-        if (slot_index == no_index) return null;
+        if (slot_index == QUEUE_NO_INDEX) return null;
         if (slot_index >= self.slots.slots.len) return null;
 
         const slot = &self.slots.slots[slot_index];
         const next = slot.next_ready_index;
         self.ready_heads[queue_index] = next;
-        if (self.ready_heads[queue_index] == no_index) self.ready_tails[queue_index] = no_index;
-        if (next != no_index) self.slots.slots[next].prev_ready_index = no_index;
-        slot.prev_ready_index = no_index;
-        slot.next_ready_index = no_index;
+        if (self.ready_heads[queue_index] == QUEUE_NO_INDEX) self.ready_tails[queue_index] = QUEUE_NO_INDEX;
+        if (next != QUEUE_NO_INDEX) self.slots.slots[next].prev_ready_index = QUEUE_NO_INDEX;
+        slot.prev_ready_index = QUEUE_NO_INDEX;
+        slot.next_ready_index = QUEUE_NO_INDEX;
         if (slot.queued_ready) {
             slot.queued_ready = false;
             self.ready_counts[queue_index] -= 1;
             self.ready_task_count -= 1;
         }
-        return slot_index;
+        return @intCast(slot_index);
     }
 
     fn unlinkReadyIndex(self: *Scheduler, slot_index: usize) void {
@@ -718,20 +751,20 @@ pub const Scheduler = struct {
         const previous = target.prev_ready_index;
         const next = target.next_ready_index;
 
-        if (previous == no_index) {
+        if (previous == QUEUE_NO_INDEX) {
             self.ready_heads[queue_index] = next;
         } else {
             self.slots.slots[previous].next_ready_index = next;
         }
-        if (next == no_index) {
+        if (next == QUEUE_NO_INDEX) {
             self.ready_tails[queue_index] = previous;
         } else {
             self.slots.slots[next].prev_ready_index = previous;
         }
 
         target.queued_ready = false;
-        target.prev_ready_index = no_index;
-        target.next_ready_index = no_index;
+        target.prev_ready_index = QUEUE_NO_INDEX;
+        target.next_ready_index = QUEUE_NO_INDEX;
         self.ready_counts[queue_index] -= 1;
         self.ready_task_count -= 1;
     }
@@ -745,7 +778,7 @@ pub const Scheduler = struct {
             if (!self.resourceClassDispatchable(class)) continue;
             const queue_index = resourceClassIndex(class);
             const head = self.ready_heads[queue_index];
-            if (head == no_index) continue;
+            if (head == QUEUE_NO_INDEX) continue;
             const slot = &self.slots.slots[head];
             const deadline = slot.deadline_tick;
             if (deadline != 0 and
@@ -761,7 +794,7 @@ pub const Scheduler = struct {
         if (deadline_class) |class| return class;
         for (resource_priority_order) |class| {
             if (!self.resourceClassDispatchable(class)) continue;
-            if (self.ready_heads[resourceClassIndex(class)] != no_index) return class;
+            if (self.ready_heads[resourceClassIndex(class)] != QUEUE_NO_INDEX) return class;
         }
         return null;
     }
@@ -781,7 +814,7 @@ pub const Scheduler = struct {
             if (self.resourceClassDispatchable(class)) continue;
             const queue_index = resourceClassIndex(class);
             const slot_index = self.ready_heads[queue_index];
-            if (slot_index == no_index) continue;
+            if (slot_index == QUEUE_NO_INDEX) continue;
             if (slot_index >= self.slots.slots.len) continue;
 
             const slot = &self.slots.slots[slot_index];
@@ -980,28 +1013,28 @@ pub const Scheduler = struct {
             native_util.impossibleByInvariant("accelerator claim insertion requires allocated backing");
         const queue_index = engineIndex(engine);
         const claim = &backing.claims.slots[claim_index];
-        claim.prev_claim_index = no_index;
-        claim.next_claim_index = no_index;
-        claim.prev_deadline_index = no_index;
-        claim.next_deadline_index = no_index;
+        claim.prev_claim_index = QUEUE_NO_INDEX;
+        claim.next_claim_index = QUEUE_NO_INDEX;
+        claim.prev_deadline_index = QUEUE_NO_INDEX;
+        claim.next_deadline_index = QUEUE_NO_INDEX;
 
         var current = self.accelerator_claim_heads[queue_index];
-        while (current != no_index) : (current = backing.claims.slots[current].next_claim_index) {
-            if (self.acceleratorClaimPriorityBeats(claim_index, current)) {
-                self.linkAcceleratorClaimBefore(queue_index, claim_index, current);
+        while (current != QUEUE_NO_INDEX) : (current = backing.claims.slots[current].next_claim_index) {
+            if (self.acceleratorClaimPriorityBeats(claim_index, @intCast(current))) {
+                self.linkAcceleratorClaimBefore(queue_index, claim_index, @intCast(current));
                 self.insertAcceleratorDeadlineIndex(queue_index, claim_index);
                 self.accelerator_claim_counts[queue_index] += 1;
                 return;
             }
         }
 
-        if (self.accelerator_claim_tails[queue_index] == no_index) {
-            self.accelerator_claim_heads[queue_index] = claim_index;
+        if (self.accelerator_claim_tails[queue_index] == QUEUE_NO_INDEX) {
+            self.accelerator_claim_heads[queue_index] = compactQueueIndex(claim_index);
         } else {
             claim.prev_claim_index = self.accelerator_claim_tails[queue_index];
-            backing.claims.slots[self.accelerator_claim_tails[queue_index]].next_claim_index = claim_index;
+            backing.claims.slots[self.accelerator_claim_tails[queue_index]].next_claim_index = compactQueueIndex(claim_index);
         }
-        self.accelerator_claim_tails[queue_index] = claim_index;
+        self.accelerator_claim_tails[queue_index] = compactQueueIndex(claim_index);
         self.insertAcceleratorDeadlineIndex(queue_index, claim_index);
         self.accelerator_claim_counts[queue_index] += 1;
     }
@@ -1016,12 +1049,12 @@ pub const Scheduler = struct {
             native_util.impossibleByInvariant("linked accelerator claims retain their backing");
         const previous = backing.claims.slots[before_index].prev_claim_index;
         backing.claims.slots[claim_index].prev_claim_index = previous;
-        backing.claims.slots[claim_index].next_claim_index = before_index;
-        backing.claims.slots[before_index].prev_claim_index = claim_index;
-        if (previous == no_index) {
-            self.accelerator_claim_heads[queue_index] = claim_index;
+        backing.claims.slots[claim_index].next_claim_index = compactQueueIndex(before_index);
+        backing.claims.slots[before_index].prev_claim_index = compactQueueIndex(claim_index);
+        if (previous == QUEUE_NO_INDEX) {
+            self.accelerator_claim_heads[queue_index] = compactQueueIndex(claim_index);
         } else {
-            backing.claims.slots[previous].next_claim_index = claim_index;
+            backing.claims.slots[previous].next_claim_index = compactQueueIndex(claim_index);
         }
     }
 
@@ -1032,20 +1065,20 @@ pub const Scheduler = struct {
         if (claim.record.deadline_tick == 0) return;
 
         var current = self.accelerator_deadline_heads[queue_index];
-        while (current != no_index) : (current = backing.claims.slots[current].next_deadline_index) {
-            if (self.acceleratorClaimDeadlineBeats(claim_index, current)) {
-                self.linkAcceleratorDeadlineBefore(queue_index, claim_index, current);
+        while (current != QUEUE_NO_INDEX) : (current = backing.claims.slots[current].next_deadline_index) {
+            if (self.acceleratorClaimDeadlineBeats(claim_index, @intCast(current))) {
+                self.linkAcceleratorDeadlineBefore(queue_index, claim_index, @intCast(current));
                 return;
             }
         }
 
-        if (self.accelerator_deadline_tails[queue_index] == no_index) {
-            self.accelerator_deadline_heads[queue_index] = claim_index;
+        if (self.accelerator_deadline_tails[queue_index] == QUEUE_NO_INDEX) {
+            self.accelerator_deadline_heads[queue_index] = compactQueueIndex(claim_index);
         } else {
             claim.prev_deadline_index = self.accelerator_deadline_tails[queue_index];
-            backing.claims.slots[self.accelerator_deadline_tails[queue_index]].next_deadline_index = claim_index;
+            backing.claims.slots[self.accelerator_deadline_tails[queue_index]].next_deadline_index = compactQueueIndex(claim_index);
         }
-        self.accelerator_deadline_tails[queue_index] = claim_index;
+        self.accelerator_deadline_tails[queue_index] = compactQueueIndex(claim_index);
     }
 
     fn linkAcceleratorDeadlineBefore(
@@ -1058,12 +1091,12 @@ pub const Scheduler = struct {
             native_util.impossibleByInvariant("linked accelerator deadlines retain their backing");
         const previous = backing.claims.slots[before_index].prev_deadline_index;
         backing.claims.slots[claim_index].prev_deadline_index = previous;
-        backing.claims.slots[claim_index].next_deadline_index = before_index;
-        backing.claims.slots[before_index].prev_deadline_index = claim_index;
-        if (previous == no_index) {
-            self.accelerator_deadline_heads[queue_index] = claim_index;
+        backing.claims.slots[claim_index].next_deadline_index = compactQueueIndex(before_index);
+        backing.claims.slots[before_index].prev_deadline_index = compactQueueIndex(claim_index);
+        if (previous == QUEUE_NO_INDEX) {
+            self.accelerator_deadline_heads[queue_index] = compactQueueIndex(claim_index);
         } else {
-            backing.claims.slots[previous].next_deadline_index = claim_index;
+            backing.claims.slots[previous].next_deadline_index = compactQueueIndex(claim_index);
         }
     }
 
@@ -1075,16 +1108,16 @@ pub const Scheduler = struct {
         const backing = self.acceleratorClaimBacking() orelse return null;
         const queue_index = engineIndex(engine);
         const deadline_head = self.accelerator_deadline_heads[queue_index];
-        const best = if (deadline_head != no_index and
+        const best = if (deadline_head != QUEUE_NO_INDEX and
             claimDeadlineExpired(backing.claims.slots[deadline_head].record, now_ticks))
             deadline_head
         else
             self.accelerator_claim_heads[queue_index];
-        if (best == no_index or best >= backing.claims.slots.len) return null;
+        if (best == QUEUE_NO_INDEX or best >= backing.claims.slots.len) return null;
 
-        self.unlinkAcceleratorClaimIndex(engine, best);
+        self.unlinkAcceleratorClaimIndex(engine, @intCast(best));
         self.accelerator_claim_counts[queue_index] -= 1;
-        return best;
+        return @intCast(best);
     }
 
     fn unlinkAcceleratorClaimIndex(
@@ -1097,12 +1130,12 @@ pub const Scheduler = struct {
         const queue_index = engineIndex(engine);
         const previous = backing.claims.slots[claim_index].prev_claim_index;
         const next = backing.claims.slots[claim_index].next_claim_index;
-        if (previous == no_index) {
+        if (previous == QUEUE_NO_INDEX) {
             self.accelerator_claim_heads[queue_index] = next;
         } else {
             backing.claims.slots[previous].next_claim_index = next;
         }
-        if (next == no_index) {
+        if (next == QUEUE_NO_INDEX) {
             self.accelerator_claim_tails[queue_index] = previous;
         } else {
             backing.claims.slots[next].prev_claim_index = previous;
@@ -1111,12 +1144,12 @@ pub const Scheduler = struct {
         const previous_deadline = backing.claims.slots[claim_index].prev_deadline_index;
         const next_deadline = backing.claims.slots[claim_index].next_deadline_index;
         if (backing.claims.slots[claim_index].record.deadline_tick != 0) {
-            if (previous_deadline == no_index) {
+            if (previous_deadline == QUEUE_NO_INDEX) {
                 self.accelerator_deadline_heads[queue_index] = next_deadline;
             } else {
                 backing.claims.slots[previous_deadline].next_deadline_index = next_deadline;
             }
-            if (next_deadline == no_index) {
+            if (next_deadline == QUEUE_NO_INDEX) {
                 self.accelerator_deadline_tails[queue_index] = previous_deadline;
             } else {
                 backing.claims.slots[next_deadline].prev_deadline_index = previous_deadline;
@@ -1127,10 +1160,10 @@ pub const Scheduler = struct {
             acceleratorClaimTaskKey(backing.claims.slots[claim_index].record.task_id),
             claim_index,
         );
-        backing.claims.slots[claim_index].prev_claim_index = no_index;
-        backing.claims.slots[claim_index].next_claim_index = no_index;
-        backing.claims.slots[claim_index].prev_deadline_index = no_index;
-        backing.claims.slots[claim_index].next_deadline_index = no_index;
+        backing.claims.slots[claim_index].prev_claim_index = QUEUE_NO_INDEX;
+        backing.claims.slots[claim_index].next_claim_index = QUEUE_NO_INDEX;
+        backing.claims.slots[claim_index].prev_deadline_index = QUEUE_NO_INDEX;
+        backing.claims.slots[claim_index].next_deadline_index = QUEUE_NO_INDEX;
     }
 
     fn acceleratorClaimPriorityBeats(
@@ -1194,7 +1227,7 @@ pub const Scheduler = struct {
         const backing = self.acceleratorClaimBacking() orelse return;
         const task_key = acceleratorClaimTaskKey(task_id);
         var current = backing.task_index.head(task_key);
-        while (current != no_index) {
+        while (current != arena_no_index) {
             if (current >= backing.claims.slots.len) {
                 native_util.impossibleByInvariant("accelerator claim task index points outside claim slots");
             }
@@ -1226,7 +1259,7 @@ pub const Scheduler = struct {
         const backing = self.acceleratorClaimBackingConst() orelse return null;
         const task_key = acceleratorClaimTaskKey(task_id);
         var current = backing.task_index.head(task_key);
-        while (current != no_index) : (current = backing.task_index.next(current)) {
+        while (current != arena_no_index) : (current = backing.task_index.next(current)) {
             if (current >= backing.claims.slots.len) {
                 native_util.impossibleByInvariant("accelerator claim task index points outside claim slots");
             }
@@ -1250,6 +1283,10 @@ pub const Scheduler = struct {
 
 fn schedulerSlotTaskId(slot: *const Slot) u64 {
     return slot.task_id;
+}
+
+fn compactQueueIndex(index: usize) QueueSlotIndex {
+    return @intCast(index);
 }
 
 fn acceleratorClaimSlotId(slot: *const AcceleratorClaimSlot) u64 {
@@ -1733,22 +1770,30 @@ test "userspace scheduler unlinks ready queue slots through prev links" {
     const second_index = scheduler.slots.slotIndexOf(second_task.id).?;
     const third_index = scheduler.slots.slotIndexOf(third_task.id).?;
     const queue_index = resourceClassIndex(.foreground_interactive);
-    try std.testing.expectEqual(first_index, scheduler.ready_heads[queue_index]);
-    try std.testing.expectEqual(third_index, scheduler.ready_tails[queue_index]);
-    try std.testing.expectEqual(first_index, scheduler.slots.slots[second_index].prev_ready_index);
-    try std.testing.expectEqual(third_index, scheduler.slots.slots[second_index].next_ready_index);
+    try std.testing.expectEqual(compactQueueIndex(first_index), scheduler.ready_heads[queue_index]);
+    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_tails[queue_index]);
+    try std.testing.expectEqual(compactQueueIndex(first_index), scheduler.slots.slots[second_index].prev_ready_index);
+    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.slots.slots[second_index].next_ready_index);
 
     try std.testing.expect(scheduler.parkTaskUntilEvent(second_task.id));
     try std.testing.expectEqual(@as(usize, 2), scheduler.readyQueueDepth(.foreground_interactive));
-    try std.testing.expectEqual(third_index, scheduler.slots.slots[first_index].next_ready_index);
-    try std.testing.expectEqual(first_index, scheduler.slots.slots[third_index].prev_ready_index);
-    try std.testing.expectEqual(no_index, scheduler.slots.slots[second_index].prev_ready_index);
-    try std.testing.expectEqual(no_index, scheduler.slots.slots[second_index].next_ready_index);
+    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.slots.slots[first_index].next_ready_index);
+    try std.testing.expectEqual(compactQueueIndex(first_index), scheduler.slots.slots[third_index].prev_ready_index);
+    try std.testing.expectEqual(QUEUE_NO_INDEX, scheduler.slots.slots[second_index].prev_ready_index);
+    try std.testing.expectEqual(QUEUE_NO_INDEX, scheduler.slots.slots[second_index].next_ready_index);
 
     try std.testing.expect(scheduler.unregisterTask(first_task.id));
-    try std.testing.expectEqual(third_index, scheduler.ready_heads[queue_index]);
-    try std.testing.expectEqual(third_index, scheduler.ready_tails[queue_index]);
-    try std.testing.expectEqual(no_index, scheduler.slots.slots[third_index].prev_ready_index);
+    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_heads[queue_index]);
+    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_tails[queue_index]);
+    try std.testing.expectEqual(QUEUE_NO_INDEX, scheduler.slots.slots[third_index].prev_ready_index);
+}
+
+test "userspace scheduler compact queue indexes cover every task slot" {
+    try std.testing.expectEqual(@as(usize, task_runtime.MAX_TASKS), @as(usize, QUEUE_NO_INDEX));
+    try std.testing.expectEqual(
+        @as(QueueSlotIndex, @intCast(task_runtime.MAX_TASKS - 1)),
+        compactQueueIndex(task_runtime.MAX_TASKS - 1),
+    );
 }
 
 test "userspace scheduler parks only explicit event-wait yields" {
