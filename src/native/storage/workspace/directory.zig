@@ -1774,7 +1774,7 @@ test "workspace sharing uses capacity-sized resident indexes" {
     try std.testing.expectEqual(@as(usize, 1_480), @sizeOf(WorkspaceShareTable));
     try std.testing.expectEqual(@as(usize, 43_984), @sizeOf(WorkspaceRecord));
     try std.testing.expectEqual(@as(usize, 43_992), @sizeOf(WorkspaceSlot));
-    try std.testing.expectEqual(@as(usize, 358_152), @sizeOf(Directory));
+    try std.testing.expectEqual(@as(usize, 358_104), @sizeOf(Directory));
 }
 
 test "workspace borrowed resolution returns the directory owned entry" {
