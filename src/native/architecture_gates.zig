@@ -14,6 +14,9 @@ const event_ledger = @import("platform/event_ledger.zig");
 const measured_boot = @import("platform/measured_boot.zig");
 const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
+const input_driver_task = @import("drivers/input_driver_task.zig");
+const permission_review_service = @import("policy/permission_review_service.zig");
+const xhci = @import("../kernel/drivers/xhci.zig");
 const native_ux = @import("platform/native_ux.zig");
 const sync_transport_harness = @import("sync/sync_transport_harness.zig");
 const sync_transport = @import("sync/sync_transport.zig");
@@ -443,6 +446,32 @@ pub const indexed_hot_path_tables = .{
     .input_router = .{
         .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
         .tracks_active_inbox_chain = @hasField(input_router.Router, "active_inbox_head"),
+    },
+    .input_queues = .{
+        .stores_compact_xhci_metadata = xhci.COMPACT_INPUT_QUEUE_METADATA and
+            @FieldType(xhci.HidReport, "report_len") == u8 and
+            @FieldType(xhci.BootKeyboardReportPublisher, "head") == u8 and
+            @FieldType(xhci.BootKeyboardReportPublisher, "tail") == u8 and
+            @FieldType(xhci.BootKeyboardReportPublisher, "count") == u8 and
+            @FieldType(xhci.HidController, "head") == u8 and
+            @FieldType(xhci.HidController, "tail") == u8 and
+            @FieldType(xhci.HidController, "count") == u8 and
+            @FieldType(xhci.HidController, "recycled_slot_count") == u8,
+        .stores_compact_decoder_metadata = input_driver_task.COMPACT_EVENT_QUEUE_METADATA and
+            @FieldType(input_driver_task.Decoder, "head") == u8 and
+            @FieldType(input_driver_task.Decoder, "tail") == u8 and
+            @FieldType(input_driver_task.Decoder, "count") == u8,
+        .stores_compact_command_metadata = permission_review_service.COMPACT_COMMAND_QUEUE_METADATA and
+            @FieldType(permission_review_service.CommandInput, "pending_line_len") == u8 and
+            @FieldType(permission_review_service.CommandInput, "pending_command_lens") == [permission_review_service.MAX_PHYSICAL_INPUT_COMMANDS]u8 and
+            @FieldType(permission_review_service.CommandInput, "pending_command_head") == u8 and
+            @FieldType(permission_review_service.CommandInput, "pending_command_tail") == u8 and
+            @FieldType(permission_review_service.CommandInput, "pending_command_count") == u8,
+        .keeps_input_state_within_ceilings = @sizeOf(xhci.HidReport) <= xhci.HID_REPORT_SIZE_CEILING_BYTES and
+            @sizeOf(xhci.BootKeyboardReportPublisher) <= xhci.BOOT_KEYBOARD_REPORT_PUBLISHER_SIZE_CEILING_BYTES and
+            @sizeOf(xhci.HidController) <= xhci.HID_CONTROLLER_SIZE_CEILING_BYTES and
+            @sizeOf(input_driver_task.Decoder) <= input_driver_task.DECODER_SIZE_CEILING_BYTES and
+            @sizeOf(permission_review_service.CommandInput) <= permission_review_service.COMMAND_INPUT_SIZE_CEILING_BYTES,
     },
     .native_ux = .{
         .uses_append_only_flow_log = native_ux.APPEND_ONLY_FLOW_LOG,
