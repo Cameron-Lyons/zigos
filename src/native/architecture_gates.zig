@@ -489,6 +489,13 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(input_driver_task.Decoder) <= input_driver_task.DECODER_SIZE_CEILING_BYTES and
             @sizeOf(permission_review_service.CommandInput) <= permission_review_service.COMMAND_INPUT_SIZE_CEILING_BYTES,
     },
+    .permission_review = .{
+        .stores_compact_rendered_progress = permission_review_service.COMPACT_REVIEW_PROGRESS_METADATA and
+            @FieldType(permission_review_service.RenderedReviewSurface, "active_index") == u8 and
+            @FieldType(permission_review_service.RenderedReviewSurface, "decision_count") == u8,
+        .keeps_rendered_surface_within_ceiling = @sizeOf(permission_review_service.RenderedReviewSurface) <=
+            permission_review_service.RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES,
+    },
     .native_ux = .{
         .uses_append_only_flow_log = native_ux.APPEND_ONLY_FLOW_LOG,
         .uses_compact_flow_lengths = @FieldType(native_ux.FlowRecord, "detail_len") == u8 and
