@@ -6,7 +6,16 @@ const native_util = @import("../core/util.zig");
 
 pub const MAX_EVENTS: usize = 96;
 pub const MAX_LABEL_BYTES: usize = 96;
+pub const COMPACT_EVENT_METADATA = true;
+pub const EVENT_SIZE_CEILING_BYTES: usize = 240;
+pub const SESSION_SIZE_CEILING_BYTES: usize = 23_048;
 const EXPORT_TEXT_TEST_BUFFER_BYTES: usize = 1024;
+
+comptime {
+    if (MAX_EVENTS > std.math.maxInt(u8) or MAX_LABEL_BYTES > std.math.maxInt(u8)) {
+        @compileError("debugger event metadata exceeds u8 capacity");
+    }
+}
 
 pub const EventKind = enum(u8) {
     idl_parsed,
@@ -33,9 +42,9 @@ pub const Event = struct {
     kind: EventKind = .idl_parsed,
     tick: u64 = 0,
     accepted: bool = false,
-    label_len: usize = 0,
+    label_len: u8 = 0,
     label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    detail_len: usize = 0,
+    detail_len: u8 = 0,
     detail: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     source_identity_fingerprint: u64 = 0,
     release_transparency_sequence: u64 = 0,
@@ -43,11 +52,11 @@ pub const Event = struct {
     release_transparency_log_head_fingerprint: u64 = 0,
 
     pub fn labelSlice(self: *const Event) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn detailSlice(self: *const Event) []const u8 {
-        return self.detail[0..self.detail_len];
+        return self.detail[0..@as(usize, self.detail_len)];
     }
 
     pub fn hasStructuredProvenance(self: *const Event) bool {
@@ -72,11 +81,17 @@ pub const Error = typed_component_abi.Error || error{
 };
 
 pub const Session = struct {
-    event_count: usize = 0,
+    event_count: u8 = 0,
     events: [MAX_EVENTS]Event = [_]Event{.{}} ** MAX_EVENTS,
 
     pub fn init() Session {
         return .{};
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > SESSION_SIZE_CEILING_BYTES) {
+            @compileError("debugger session exceeds its compact layout ceiling");
+        }
     }
 
     pub fn record(
@@ -88,20 +103,21 @@ pub const Session = struct {
         accepted: bool,
     ) Error!void {
         if (self.event_count >= self.events.len) return error.DebugEventLogFull;
+        const event_index: usize = self.event_count;
         var event = Event{
             .kind = kind,
             .tick = tick,
             .accepted = accepted,
         };
-        event.label_len = native_util.copyTextExact(&event.label, label) catch return error.DebugLabelTooLong;
-        event.detail_len = native_util.copyTextExact(&event.detail, detail) catch return error.DebugDetailTooLong;
-        self.events[self.event_count] = event;
+        event.label_len = @intCast(native_util.copyTextExact(&event.label, label) catch return error.DebugLabelTooLong);
+        event.detail_len = @intCast(native_util.copyTextExact(&event.detail, detail) catch return error.DebugDetailTooLong);
+        self.events[event_index] = event;
         self.event_count += 1;
     }
 
     pub fn countKind(self: *const Session, kind: EventKind) usize {
         var count: usize = 0;
-        for (self.events[0..self.event_count]) |event| {
+        for (self.events[0..@as(usize, self.event_count)]) |event| {
             if (event.kind == kind) count += 1;
         }
         return count;
@@ -109,7 +125,7 @@ pub const Session = struct {
 
     pub fn latest(self: *const Session) ?*const Event {
         if (self.event_count == 0) return null;
-        return &self.events[self.event_count - 1];
+        return &self.events[@as(usize, self.event_count) - 1];
     }
 
     pub fn inspectMessage(
@@ -158,7 +174,7 @@ pub const Session = struct {
             detail,
             provenance_record.decision == .allowed,
         );
-        const event = &self.events[self.event_count - 1];
+        const event = &self.events[@as(usize, self.event_count) - 1];
         event.source_identity_fingerprint = provenance_record.source_identity_fingerprint;
         event.release_transparency_sequence = provenance_record.release_transparency_sequence;
         event.release_transparency_root_fingerprint = provenance_record.release_transparency_root_fingerprint;
@@ -181,7 +197,7 @@ pub const Session = struct {
 
     pub fn exportText(self: *const Session, output: []u8) Error![]const u8 {
         var cursor: usize = 0;
-        for (self.events[0..self.event_count]) |event| {
+        for (self.events[0..@as(usize, self.event_count)]) |event| {
             try appendFmt(
                 output,
                 &cursor,
@@ -213,6 +229,12 @@ pub const Session = struct {
     }
 };
 
+comptime {
+    if (@sizeOf(Event) > EVENT_SIZE_CEILING_BYTES) {
+        @compileError("debugger event exceeds its compact layout ceiling");
+    }
+}
+
 fn eventKindForProvenance(kind: debug_contract.ProvenanceKind) EventKind {
     return switch (kind) {
         .launch => .launch_provenance,
@@ -226,6 +248,14 @@ fn eventKindForProvenance(kind: debug_contract.ProvenanceKind) EventKind {
 fn appendFmt(output: []u8, cursor: *usize, comptime fmt: []const u8, args: anytype) Error!void {
     const written = std.fmt.bufPrint(output[cursor.*..], fmt, args) catch return error.DebugOutputTooLong;
     cursor.* += written.len;
+}
+
+test "debugger keeps bounded event metadata compact" {
+    try std.testing.expectEqual(u8, @FieldType(Event, "label_len"));
+    try std.testing.expectEqual(u8, @FieldType(Event, "detail_len"));
+    try std.testing.expectEqual(u8, @FieldType(Session, "event_count"));
+    try std.testing.expectEqual(@as(usize, 240), @sizeOf(Event));
+    try std.testing.expectEqual(@as(usize, 23_048), @sizeOf(Session));
 }
 
 test "debugger records ABI checks and exports a redaction-safe trace" {

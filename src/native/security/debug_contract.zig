@@ -8,7 +8,16 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 96;
+pub const COMPACT_DEBUG_TEXT_METADATA = true;
+pub const DENIAL_EXPLANATION_SIZE_CEILING_BYTES: usize = 240;
+pub const PROVENANCE_RECORD_SIZE_CEILING_BYTES: usize = 520;
 const DENIAL_RENDER_TEST_BUFFER_BYTES: usize = 256;
+
+comptime {
+    if (MAX_LABEL_BYTES > std.math.maxInt(u8) or MAX_DETAIL_BYTES > std.math.maxInt(u8)) {
+        @compileError("debug contract text metadata exceeds u8 capacity");
+    }
+}
 
 pub const Decision = enum(u8) {
     allowed,
@@ -31,26 +40,26 @@ pub const DenialExplanation = struct {
     capability_id: u64 = 0,
     target_id: u64 = 0,
     target_kind: ?capability.CapabilityTargetKind = null,
-    operation_len: usize = 0,
+    operation_len: u8 = 0,
     operation: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    required_authority_len: usize = 0,
+    required_authority_len: u8 = 0,
     required_authority: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    blocking_policy_len: usize = 0,
+    blocking_policy_len: u8 = 0,
     blocking_policy: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     user_action_available: bool = false,
     retry_safe: bool = false,
     fingerprint: u64 = 0,
 
     pub fn operationSlice(self: *const DenialExplanation) []const u8 {
-        return self.operation[0..self.operation_len];
+        return self.operation[0..@as(usize, self.operation_len)];
     }
 
     pub fn requiredAuthoritySlice(self: *const DenialExplanation) []const u8 {
-        return self.required_authority[0..self.required_authority_len];
+        return self.required_authority[0..@as(usize, self.required_authority_len)];
     }
 
     pub fn blockingPolicySlice(self: *const DenialExplanation) []const u8 {
-        return self.blocking_policy[0..self.blocking_policy_len];
+        return self.blocking_policy[0..@as(usize, self.blocking_policy_len)];
     }
 
     pub fn render(self: *const DenialExplanation, buffer: []u8) []const u8 {
@@ -136,6 +145,14 @@ pub const ProvenanceRecord = struct {
     }
 };
 
+comptime {
+    if (@sizeOf(DenialExplanation) > DENIAL_EXPLANATION_SIZE_CEILING_BYTES or
+        @sizeOf(ProvenanceRecord) > PROVENANCE_RECORD_SIZE_CEILING_BYTES)
+    {
+        @compileError("debug contract records exceed compact layout ceilings");
+    }
+}
+
 pub const AuthorityGraphEdge = struct {
     task_id: u64 = 0,
     capability_id: u64 = 0,
@@ -206,9 +223,9 @@ pub fn explainDenied(
         .user_action_available = denial_explanation.approvalCanResolve(reason),
         .retry_safe = denial_explanation.retrySafe(reason),
     };
-    explanation.operation_len = native_util.copyTextWithReserve(&explanation.operation, operation, 1);
-    explanation.required_authority_len = native_util.copyTextWithReserve(&explanation.required_authority, required_authority, 1);
-    explanation.blocking_policy_len = native_util.copyTextWithReserve(&explanation.blocking_policy, denial_explanation.policyLabel(reason), 1);
+    explanation.operation_len = @intCast(native_util.copyTextWithReserve(&explanation.operation, operation, 1));
+    explanation.required_authority_len = @intCast(native_util.copyTextWithReserve(&explanation.required_authority, required_authority, 1));
+    explanation.blocking_policy_len = @intCast(native_util.copyTextWithReserve(&explanation.blocking_policy, denial_explanation.policyLabel(reason), 1));
     explanation.fingerprint = denialFingerprint(explanation);
     return explanation;
 }
@@ -484,6 +501,14 @@ pub fn provenanceFingerprint(record: ProvenanceRecord) u64 {
 fn digestFingerprint(digest: crypto_hash.Digest) u64 {
     if (std.mem.eql(u8, &digest, &crypto_hash.zero_digest)) return 0;
     return native_util.fnv1a64(&digest);
+}
+
+test "debug contract keeps bounded text metadata compact" {
+    try std.testing.expectEqual(u8, @FieldType(DenialExplanation, "operation_len"));
+    try std.testing.expectEqual(u8, @FieldType(DenialExplanation, "required_authority_len"));
+    try std.testing.expectEqual(u8, @FieldType(DenialExplanation, "blocking_policy_len"));
+    try std.testing.expectEqual(@as(usize, 240), @sizeOf(DenialExplanation));
+    try std.testing.expectEqual(@as(usize, 520), @sizeOf(ProvenanceRecord));
 }
 
 test "denial explanations render deterministic why-denied metadata" {
