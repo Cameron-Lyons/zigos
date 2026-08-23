@@ -432,10 +432,19 @@ pub const indexed_hot_path_tables = .{
             @FieldType(compositor_session.ReviewItemRecord, "reason_len") == u8 and
             @FieldType(compositor_session.ReviewItemRecord, "object_scope_len") == u8 and
             @FieldType(compositor_session.ReviewItemRecord, "network_path_len") == u8,
+        .stores_compact_session_counts = compositor_session.COMPACT_SESSION_COUNT_METADATA and
+            @FieldType(compositor_session.WindowSlot, "order_index") == compositor_session.WindowOrderIndex and
+            @FieldType(compositor_session.Session, "window_count") == compositor_session.SessionCount and
+            @FieldType(compositor_session.Session, "visible_window_count") == compositor_session.SessionCount and
+            @FieldType(compositor_session.Session, "item_count") == compositor_session.SessionCount and
+            @FieldType(compositor_session.SessionSnapshot, "window_count") == compositor_session.SessionCount and
+            @FieldType(compositor_session.SessionSnapshot, "visible_window_count") == compositor_session.SessionCount and
+            @FieldType(compositor_session.SessionSnapshot, "item_count") == compositor_session.SessionCount,
         .keeps_records_within_ceilings = @sizeOf(compositor_session.WindowRecord) <= compositor_session.WINDOW_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(compositor_session.ReviewItemRecord) <= compositor_session.REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES,
         .keeps_snapshot_state_within_ceilings = @sizeOf(compositor_session.SessionSnapshot) <= compositor_session.SESSION_SNAPSHOT_SIZE_CEILING_BYTES and
             @sizeOf(compositor_session.CheckpointStore) <= compositor_session.CHECKPOINT_STORE_SIZE_CEILING_BYTES,
+        .keeps_session_within_target_ceiling = @sizeOf(compositor_session.Session) <= compositor_session.SESSION_SIZE_CEILING_BYTES,
         .uses_window_arena = @hasField(compositor_session.Session, "windows"),
         .uses_review_item_arena = @hasDecl(compositor_session.ReviewItemArena, "reserveIndex"),
         .uses_task_bundle_index = @hasField(compositor_session.Session, "task_bundle_index"),

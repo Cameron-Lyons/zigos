@@ -29,17 +29,27 @@ pub const MAX_WINDOW_DETAIL_BYTES: usize = 96;
 pub const MAX_PRESENTED_SURFACES: usize = MAX_WINDOWS;
 pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 pub const COMPACT_RECORD_METADATA = true;
+pub const COMPACT_SESSION_COUNT_METADATA = true;
+pub const WindowOrderIndex = u8;
+pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
 pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 520;
-pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_712;
-pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_720;
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_552;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_560;
+pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_560;
+pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 4_128;
+pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
+    FREESTANDING_SESSION_SIZE_CEILING_BYTES
+else
+    HOST_SESSION_SIZE_CEILING_BYTES;
 const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
 const heap_backed_review_items = builtin.target.os.tag == .freestanding;
 pub const HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING = true;
 const heap_backed_surface_arena = builtin.target.os.tag == .freestanding and HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING;
 
 comptime {
-    if (MAX_REVIEW_ITEMS > std.math.maxInt(u8) or
+    if (MAX_WINDOWS > std.math.maxInt(WindowOrderIndex) or
+        MAX_REVIEW_ITEMS > std.math.maxInt(SessionCount) or
         MAX_TITLE_BYTES > std.math.maxInt(u8) or
         MAX_LABEL_BYTES > std.math.maxInt(u8) or
         MAX_REASON_BYTES > std.math.maxInt(u8) or
@@ -199,7 +209,7 @@ pub const Error = error{
 };
 
 const WINDOW_INDEX_CAPACITY: usize = MAX_WINDOWS * 2;
-const NO_WINDOW_ORDER_INDEX: usize = MAX_WINDOWS;
+const NO_WINDOW_ORDER_INDEX: WindowOrderIndex = @intCast(MAX_WINDOWS);
 const REVIEW_ITEM_INDEX_CAPACITY: usize = MAX_REVIEW_ITEMS * 2;
 const SURFACE_INDEX_CAPACITY: usize = MAX_PRESENTED_SURFACES * 2;
 const NO_SURFACE_SLOT_INDEX: u16 = std.math.maxInt(u16);
@@ -209,9 +219,9 @@ const RequestWriter = binary_cursor.Writer(Error, error.RequestTooLarge);
 const ResponseWriter = binary_cursor.Writer(Error, error.ResponseTooLarge);
 const WireReader = binary_cursor.Reader(Error, error.MalformedRequest);
 
-const WindowSlot = struct {
+pub const WindowSlot = struct {
     in_use: bool = false,
-    order_index: usize = NO_WINDOW_ORDER_INDEX,
+    order_index: WindowOrderIndex = NO_WINDOW_ORDER_INDEX,
     window: WindowRecord = zeroWindow(),
 };
 
@@ -319,11 +329,11 @@ pub const SessionSnapshot = struct {
     active_window_id: u64 = 0,
     windows: WindowArena = WindowArena.init(),
     window_order: [MAX_WINDOWS]u64 = [_]u64{0} ** MAX_WINDOWS,
-    window_count: usize = 0,
-    visible_window_count: usize = 0,
+    window_count: SessionCount = 0,
+    visible_window_count: SessionCount = 0,
     items: ReviewItemArena = ReviewItemArena.init(),
     item_order: [MAX_REVIEW_ITEMS]u64 = [_]u64{0} ** MAX_REVIEW_ITEMS,
-    item_count: usize = 0,
+    item_count: SessionCount = 0,
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
     reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
@@ -360,10 +370,10 @@ pub const Session = struct {
     active_window_id: u64 = 0,
     windows: WindowArena = WindowArena.init(),
     window_order: [MAX_WINDOWS]u64 = [_]u64{0} ** MAX_WINDOWS,
-    window_count: usize = 0,
-    visible_window_count: usize = 0,
+    window_count: SessionCount = 0,
+    visible_window_count: SessionCount = 0,
     review_items: ReviewItemBackingStorage = if (heap_backed_review_items) null else ReviewItemBacking.init(),
-    item_count: usize = 0,
+    item_count: SessionCount = 0,
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
     reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
@@ -378,8 +388,8 @@ pub const Session = struct {
     }
 
     comptime {
-        if ((heap_backed_review_items or heap_backed_surface_arena) and @sizeOf(@This()) > 5 * 1024) {
-            @compileError("heap-backed compositor sessions exceed their compact resident layout");
+        if (@sizeOf(@This()) > SESSION_SIZE_CEILING_BYTES) {
+            @compileError("compositor session exceeded its target-specific compact size ceiling");
         }
     }
 
@@ -555,7 +565,7 @@ pub const Session = struct {
         item.requested_local_only = request.local_only;
         item.requested_lease_ticks = request.max_lease_ticks;
         self.indexReviewItemForWindow(slot_index, item);
-        review_items.item_order[self.item_count] = key;
+        review_items.item_order[@as(usize, self.item_count)] = key;
         self.item_count += 1;
         window.item_count += 1;
         return item;
@@ -701,7 +711,7 @@ pub const Session = struct {
     }
 
     pub fn probeVisibleWindow(self: *const Session, buffer: []u8) bool {
-        for (self.window_order[0..self.window_count]) |window_id| {
+        for (self.window_order[0..@as(usize, self.window_count)]) |window_id| {
             const window = self.findWindowConst(window_id) orelse continue;
             if (!window.visible) continue;
             _ = renderWindowToBuffer(buffer, window) catch return false;
@@ -737,16 +747,16 @@ pub const Session = struct {
     }
 
     pub fn windowAtOrder(self: *const Session, index: usize) ?*const WindowRecord {
-        if (index >= self.window_count) return null;
+        if (index >= @as(usize, self.window_count)) return null;
         const window_id = self.window_order[index];
         const slot = self.windows.getConst(window_id) orelse
             native_util.impossibleByInvariant("window order points at a missing window");
-        if (slot.order_index != index) native_util.impossibleByInvariant("window order index matches its array position");
+        if (@as(usize, slot.order_index) != index) native_util.impossibleByInvariant("window order index matches its array position");
         return &slot.window;
     }
 
     pub fn itemAtOrder(self: *const Session, index: usize) ?*const ReviewItemRecord {
-        if (index >= self.item_count) return null;
+        if (index >= @as(usize, self.item_count)) return null;
         const review_items = self.reviewItemsConst() orelse
             native_util.impossibleByInvariant("non-empty compositor review order retains backing");
         const slot = review_items.items.getConst(review_items.item_order[index]) orelse return null;
@@ -754,7 +764,7 @@ pub const Session = struct {
     }
 
     pub fn visibleWindowCount(self: *const Session) usize {
-        return self.visible_window_count;
+        return @intCast(self.visible_window_count);
     }
 
     pub fn taskOwnsVisibleWindow(self: *const Session, task_id: u64) bool {
@@ -771,10 +781,10 @@ pub const Session = struct {
         if (self.active_window_id == 0) return null;
         const slot = self.windows.getConst(self.active_window_id) orelse return null;
         if (slot.order_index >= self.window_count) native_util.impossibleByInvariant("active window order index fits the live order");
-        if (self.window_order[slot.order_index] != self.active_window_id) {
+        if (self.window_order[@as(usize, slot.order_index)] != self.active_window_id) {
             native_util.impossibleByInvariant("active window order index points at the active window");
         }
-        return slot.order_index;
+        return @intCast(slot.order_index);
     }
 
     pub fn switchVisible(self: *Session, direction: SwitchDirection) Error!SwitchResult {
@@ -782,20 +792,21 @@ pub const Session = struct {
         if (self.visible_window_count != self.window_count) {
             native_util.impossibleByInvariant("every live compositor window participates in visible order");
         }
+        const visible_window_count: usize = self.visible_window_count;
 
         const target_index = if (self.activeWindowOrderIndex()) |current|
             switch (direction) {
-                .next => (current + 1) % self.visible_window_count,
-                .previous => (current + self.visible_window_count - 1) % self.visible_window_count,
+                .next => (current + 1) % visible_window_count,
+                .previous => (current + visible_window_count - 1) % visible_window_count,
             }
         else switch (direction) {
             .next => 0,
-            .previous => self.visible_window_count - 1,
+            .previous => visible_window_count - 1,
         };
         const window_id = self.window_order[target_index];
         const slot = self.windows.get(window_id) orelse
             native_util.impossibleByInvariant("visible window order points at a live window");
-        if (slot.order_index != target_index or !slot.window.visible) {
+        if (@as(usize, slot.order_index) != target_index or !slot.window.visible) {
             native_util.impossibleByInvariant("visible window order index points at the expected window");
         }
         self.active_window_id = window_id;
@@ -938,8 +949,9 @@ pub const Session = struct {
         const slot = &self.windows.slots[slot_index];
         slot.window = zeroWindow();
         slot.window.id = window_id;
-        slot.order_index = self.window_count;
-        self.window_order[self.window_count] = window_id;
+        const order_index: usize = self.window_count;
+        slot.order_index = @intCast(order_index);
+        self.window_order[order_index] = window_id;
         self.window_count += 1;
         if (slot.window.visible) self.visible_window_count += 1;
         return &slot.window;
@@ -1082,7 +1094,7 @@ pub const Session = struct {
         self.removeWindowFromTaskIndex(slot_index, window);
         self.removeWindowFromReviewerIndex(slot_index, window);
         if (window.visible and self.visible_window_count != 0) self.visible_window_count -= 1;
-        self.removeWindowOrderAt(slot.order_index, window_id);
+        self.removeWindowOrderAt(@intCast(slot.order_index), window_id);
         _ = self.windows.removeIndex(slot_index);
         return true;
     }
@@ -1126,41 +1138,43 @@ pub const Session = struct {
     }
 
     fn removeWindowOrderAt(self: *Session, order_index: usize, window_id: u64) void {
-        if (order_index >= self.window_count or self.window_order[order_index] != window_id) {
+        const window_count: usize = self.window_count;
+        if (order_index >= window_count or self.window_order[order_index] != window_id) {
             native_util.impossibleByInvariant("removed window order index points at the removed window");
         }
         var index = order_index;
-        while (index + 1 < self.window_count) : (index += 1) {
+        while (index + 1 < window_count) : (index += 1) {
             const shifted_window_id = self.window_order[index + 1];
             const shifted_slot = self.windows.get(shifted_window_id) orelse
                 native_util.impossibleByInvariant("shifted window order points at a live window");
-            shifted_slot.order_index = index;
+            shifted_slot.order_index = @intCast(index);
             self.window_order[index] = shifted_window_id;
         }
         self.window_count -= 1;
-        self.window_order[self.window_count] = 0;
+        self.window_order[@as(usize, self.window_count)] = 0;
         const removed_slot = self.windows.get(window_id) orelse
             native_util.impossibleByInvariant("removed window remains live while order compacts");
         removed_slot.order_index = NO_WINDOW_ORDER_INDEX;
     }
 
     fn removeItemOrderAt(self: *Session, order_index: usize) void {
-        if (order_index >= self.item_count) return;
+        const item_count: usize = self.item_count;
+        if (order_index >= item_count) return;
         const review_items = self.reviewItemsPtr() orelse
             native_util.impossibleByInvariant("non-empty compositor review order retains backing");
         var index = order_index;
-        while (index + 1 < self.item_count) : (index += 1) {
+        while (index + 1 < item_count) : (index += 1) {
             review_items.item_order[index] = review_items.item_order[index + 1];
         }
         self.item_count -= 1;
-        review_items.item_order[self.item_count] = 0;
+        review_items.item_order[@as(usize, self.item_count)] = 0;
         if (self.item_count == 0) self.releaseReviewItems();
     }
 
     fn removeItemOrderByKey(self: *Session, key: u64) void {
         const review_items = self.reviewItemsPtr() orelse return;
         var order_index: usize = 0;
-        while (order_index < self.item_count) : (order_index += 1) {
+        while (order_index < @as(usize, self.item_count)) : (order_index += 1) {
             if (review_items.item_order[order_index] == key) {
                 self.removeItemOrderAt(order_index);
                 return;
@@ -1735,6 +1749,14 @@ const TEST_REVIEW_DECISION_BUFFER_BYTES: usize = 256;
 const TEST_COMPACT_RENDER_BUFFER_BYTES: usize = 320;
 
 test "compositor compact record metadata preserves exact text capacities" {
+    try std.testing.expect(@FieldType(WindowSlot, "order_index") == WindowOrderIndex);
+    try std.testing.expect(@FieldType(Session, "window_count") == SessionCount);
+    try std.testing.expect(@FieldType(Session, "visible_window_count") == SessionCount);
+    try std.testing.expect(@FieldType(Session, "item_count") == SessionCount);
+    try std.testing.expectEqual(@as(usize, SESSION_SNAPSHOT_SIZE_CEILING_BYTES), @sizeOf(SessionSnapshot));
+    try std.testing.expectEqual(@as(usize, CHECKPOINT_STORE_SIZE_CEILING_BYTES), @sizeOf(CheckpointStore));
+    try std.testing.expectEqual(@as(usize, SESSION_SIZE_CEILING_BYTES), @sizeOf(Session));
+
     const long_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
     const long_resource = [_]u8{'r'} ** (MAX_RESOURCE_BYTES + 1);
     const long_reason = [_]u8{'d'} ** (MAX_REASON_BYTES + 1);
