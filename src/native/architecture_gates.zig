@@ -737,6 +737,8 @@ pub const indexed_hot_path_tables = .{
             @FieldType(workspace.ExportPackage, "signature_signer_len") == u8,
         .keeps_snapshot_export_state_within_ceilings = @sizeOf(workspace.SnapshotRecord) <= workspace.SNAPSHOT_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(workspace.ExportPackage) <= workspace.EXPORT_PACKAGE_SIZE_CEILING_BYTES,
+        .stores_compact_workspace_label_metadata = workspace.COMPACT_WORKSPACE_LABEL_METADATA and
+            @FieldType(workspace.WorkspaceRecord, "label_len") == u8,
         .keeps_workspace_state_within_ceilings = @sizeOf(workspace.WorkspaceRecord) <= workspace.WORKSPACE_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(workspace.Directory) <= workspace.DIRECTORY_SIZE_CEILING_BYTES,
         .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),
