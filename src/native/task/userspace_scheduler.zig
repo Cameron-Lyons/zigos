@@ -168,8 +168,8 @@ const AcceleratorClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ACCELERATOR_CL
 const heap_backed_accelerator_claims = builtin.target.os.tag == .freestanding;
 pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 208;
 pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
-pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_912;
-pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_568 else 46_472;
+pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_888;
+pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_544 else 46_424;
 
 pub const AcceleratorClaimBacking = struct {
     claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),

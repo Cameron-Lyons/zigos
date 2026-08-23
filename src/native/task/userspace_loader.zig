@@ -361,7 +361,7 @@ test "userspace catalog uses capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(ImageRecord, "loadable_segment_count")));
     try std.testing.expectEqual(@as(usize, 728), @sizeOf(ImageRecord));
     try std.testing.expectEqual(@as(usize, 736), @sizeOf(ImageSlot));
-    try std.testing.expectEqual(@as(usize, 25_160), @sizeOf(Catalog));
+    try std.testing.expectEqual(@as(usize, 25_136), @sizeOf(Catalog));
 }
 
 fn normalizeImageId(image_id: u64) u64 {

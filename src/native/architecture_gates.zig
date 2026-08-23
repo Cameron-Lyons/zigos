@@ -59,6 +59,8 @@ fn probeArenaKey(_: *const ProbeArenaSlot) u64 {
     return 0;
 }
 const ProbeArena = indexed_arena.IndexedArenaWithKey(u64, ProbeArenaSlot, 1, 2, probeArenaKey);
+const ProbeGenerationalArena = indexed_arena.GenerationalArena("ProbeHandle", ProbeArenaSlot, 1);
+const ProbePagedArena = indexed_arena.PagedIndexedArenaWithKey(u64, ProbeArenaSlot, 1, 1, 2, probeArenaKey);
 
 pub const sync_private_overlay = .{
     .native_transport = .{
@@ -89,6 +91,14 @@ pub const indexed_hot_path_tables = .{
             indexed_arena.ReusableIndex(256) == u16 and
             @sizeOf(@FieldType(ProbeArena, "free_next")) == 1 and
             @sizeOf(@FieldType(ProbeArena, "free_head")) == 1,
+        .uses_capacity_sized_arena_metadata = indexed_arena.COMPACT_ARENA_METADATA and
+            @FieldType(ProbeArena, "next_unclaimed_index") == u8 and
+            @FieldType(ProbeArena, "used_count") == u8 and
+            @FieldType(ProbeArena, "dirty_count") == u8 and
+            @FieldType(ProbeGenerationalArena, "next_unclaimed_index") == u8 and
+            @FieldType(ProbeGenerationalArena, "used_count") == u8 and
+            @FieldType(ProbePagedArena, "next_unclaimed_index") == u8 and
+            @FieldType(ProbePagedArena, "used_count") == u8,
     },
     .service_registry = .{
         .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),

@@ -5,6 +5,7 @@ const ids = @import("ids.zig");
 const native_util = @import("util.zig");
 
 pub const no_index = std.math.maxInt(usize);
+pub const COMPACT_ARENA_METADATA = true;
 
 pub fn ReusableIndex(comptime capacity: usize) type {
     if (capacity == 0) @compileError("reusable indexes require at least one slot");
@@ -31,7 +32,7 @@ inline fn popReusableIndex(
     claimed_count: usize,
     free_head: *ReusableIndex(capacity),
     free_next: *[capacity]ReusableIndex(capacity),
-    next_unclaimed_index: *usize,
+    next_unclaimed_index: *ReusableIndex(capacity),
 ) ?usize {
     if (publicReusableIndex(capacity, free_head.*)) |slot_index| {
         if (slot_index >= claimed_count) return null;
@@ -41,7 +42,7 @@ inline fn popReusableIndex(
     }
 
     if (claimed_count >= capacity) return null;
-    next_unclaimed_index.* += 1;
+    next_unclaimed_index.* = @intCast(claimed_count + 1);
     return claimed_count;
 }
 
@@ -89,14 +90,14 @@ inline fn claimReusableIndex(
     claimed_count: usize,
     free_head: *ReusableIndex(capacity),
     free_next: *[capacity]ReusableIndex(capacity),
-    next_unclaimed_index: *usize,
+    next_unclaimed_index: *ReusableIndex(capacity),
     slot_index: usize,
 ) bool {
     if (slot_index >= claimed_count) {
-        while (next_unclaimed_index.* < slot_index) : (next_unclaimed_index.* += 1) {
-            pushReusableIndex(capacity, free_head, free_next, next_unclaimed_index.*);
+        while (@as(usize, @intCast(next_unclaimed_index.*)) < slot_index) : (next_unclaimed_index.* += 1) {
+            pushReusableIndex(capacity, free_head, free_next, @intCast(next_unclaimed_index.*));
         }
-        next_unclaimed_index.* = slot_index + 1;
+        next_unclaimed_index.* = @intCast(slot_index + 1);
         return true;
     }
 
@@ -400,6 +401,7 @@ pub fn IndexedArenaWithKeyOptions(
     return struct {
         const Self = @This();
         const FreeIndex = ReusableIndex(capacity);
+        const Count = ReusableIndex(capacity);
         const free_no_index = reusableNoIndex(capacity);
 
         slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
@@ -407,9 +409,9 @@ pub fn IndexedArenaWithKeyOptions(
         slot_keys: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
         free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
         free_head: FreeIndex = free_no_index,
-        next_unclaimed_index: usize = 0,
-        used_count: usize = 0,
-        dirty_count: usize = 0,
+        next_unclaimed_index: Count = 0,
+        used_count: Count = 0,
+        dirty_count: Count = 0,
         dirty_ids: [dirty_capacity]Key = [_]Key{ids.zero(Key)} ** dirty_capacity,
         dirty_id_index: DirtyIdIndex = .{},
 
@@ -587,7 +589,7 @@ pub fn IndexedArenaWithKeyOptions(
             self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
             self.free_next = [_]FreeIndex{free_no_index} ** capacity;
             self.free_head = free_no_index;
-            self.next_unclaimed_index = capacity;
+            self.next_unclaimed_index = @intCast(capacity);
             self.used_count = 0;
 
             for (&self.slots, 0..) |*slot, slot_index| {
@@ -610,7 +612,7 @@ pub fn IndexedArenaWithKeyOptions(
         }
 
         pub fn countInUse(self: *const Self) usize {
-            return self.used_count;
+            return @intCast(self.used_count);
         }
 
         fn findMatching(self: *Self, context: anytype, comptime matches: anytype) ?*Slot {
@@ -689,7 +691,7 @@ pub fn IndexedArenaWithKeyOptions(
             if (self.dirty_id_index.contains(raw_key)) return;
             if (self.dirty_count >= dirty_capacity) native_util.impossibleByInvariant("indexed arena dirty id capacity covers slot capacity");
             self.dirty_ids[self.dirty_count] = key;
-            self.dirty_id_index.insertAbsent(raw_key, self.dirty_count);
+            self.dirty_id_index.insertAbsent(raw_key, @intCast(self.dirty_count));
             self.dirty_count += 1;
         }
 
@@ -741,7 +743,7 @@ pub fn IndexedArenaWithKeyOptions(
             if (self.next_unclaimed_index > capacity) {
                 native_util.impossibleByInvariant("indexed arena claimed prefix fits its slots");
             }
-            return self.next_unclaimed_index;
+            return @intCast(self.next_unclaimed_index);
         }
 
         inline fn popFreeIndex(self: *Self) ?usize {
@@ -806,6 +808,7 @@ pub fn GenerationalArena(
     return struct {
         const Self = @This();
         const FreeIndex = ReusableIndex(capacity);
+        const Count = ReusableIndex(capacity);
         const free_no_index = reusableNoIndex(capacity);
         pub const Handle = GenerationalHandle(display_name);
         pub const slot_capacity = capacity;
@@ -814,8 +817,8 @@ pub fn GenerationalArena(
         slot_generations: [capacity]u32 = [_]u32{0} ** capacity,
         free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
         free_head: FreeIndex = free_no_index,
-        next_unclaimed_index: usize = 0,
-        used_count: usize = 0,
+        next_unclaimed_index: Count = 0,
+        used_count: Count = 0,
 
         pub fn init() Self {
             return .{};
@@ -918,14 +921,14 @@ pub fn GenerationalArena(
         }
 
         pub fn countInUse(self: *const Self) usize {
-            return self.used_count;
+            return @intCast(self.used_count);
         }
 
         pub inline fn claimedCount(self: *const Self) usize {
             if (self.next_unclaimed_index > capacity) {
                 native_util.impossibleByInvariant("generational arena claimed prefix fits its slots");
             }
-            return self.next_unclaimed_index;
+            return @intCast(self.next_unclaimed_index);
         }
 
         fn claimSlot(self: *Self, slot_index: usize) void {
@@ -986,6 +989,7 @@ pub fn PagedIndexedArenaWithKey(
     return struct {
         const Self = @This();
         const FreeIndex = ReusableIndex(capacity);
+        const Count = ReusableIndex(capacity);
         const free_no_index = reusableNoIndex(capacity);
         pub const Handle = GenerationalHandle("PagedArenaHandle");
         pub const slot_capacity = capacity;
@@ -1002,8 +1006,8 @@ pub fn PagedIndexedArenaWithKey(
         slot_generations: [capacity]u32 = [_]u32{0} ** capacity,
         free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
         free_head: FreeIndex = free_no_index,
-        next_unclaimed_index: usize = 0,
-        used_count: usize = 0,
+        next_unclaimed_index: Count = 0,
+        used_count: Count = 0,
 
         pub fn init() Self {
             return .{};
@@ -1141,7 +1145,7 @@ pub fn PagedIndexedArenaWithKey(
             self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
             self.free_next = [_]FreeIndex{free_no_index} ** capacity;
             self.free_head = free_no_index;
-            self.next_unclaimed_index = capacity;
+            self.next_unclaimed_index = @intCast(capacity);
             self.used_count = 0;
 
             var slot_index: usize = 0;
@@ -1167,7 +1171,7 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         pub fn countInUse(self: *const Self) usize {
-            return self.used_count;
+            return @intCast(self.used_count);
         }
 
         fn reserveIndexInternal(self: *Self, key: Key, requested_slot_index: ?usize) ?usize {
@@ -1225,7 +1229,7 @@ pub fn PagedIndexedArenaWithKey(
             if (self.next_unclaimed_index > capacity) {
                 native_util.impossibleByInvariant("paged indexed arena claimed prefix fits its slots");
             }
-            return self.next_unclaimed_index;
+            return @intCast(self.next_unclaimed_index);
         }
 
         fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
@@ -1276,6 +1280,40 @@ test "arena free lists select the narrowest lossless reusable index" {
     const WordArena = IndexedArena(TestSlot, 256, 512, testSlotId);
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(@FieldType(ByteArena, "free_next")));
     try std.testing.expectEqual(@as(usize, 512), @sizeOf(@FieldType(WordArena, "free_next")));
+}
+
+test "arena cursors and counts select the narrowest lossless capacity type" {
+    const Indexed = IndexedArena(TestSlot, 8, 16, testSlotId);
+    const Dirty = DirtyTrackedIndexedArenaWithKey(u64, TestSlot, 8, 16, testSlotId);
+    const Generational = GenerationalArena("CompactMetadataHandle", TestSlot, 8);
+    const Paged = PagedIndexedArena(TestSlot, 4, 2, 16, testSlotId);
+    const Wide = IndexedArena(TestSlot, 256, 512, testSlotId);
+
+    try std.testing.expect(@FieldType(Indexed, "next_unclaimed_index") == u8);
+    try std.testing.expect(@FieldType(Indexed, "used_count") == u8);
+    try std.testing.expect(@FieldType(Dirty, "dirty_count") == u8);
+    try std.testing.expect(@FieldType(Generational, "next_unclaimed_index") == u8);
+    try std.testing.expect(@FieldType(Generational, "used_count") == u8);
+    try std.testing.expect(@FieldType(Paged, "next_unclaimed_index") == u8);
+    try std.testing.expect(@FieldType(Paged, "used_count") == u8);
+    try std.testing.expect(@FieldType(Wide, "next_unclaimed_index") == u16);
+    try std.testing.expect(@FieldType(Wide, "used_count") == u16);
+}
+
+test "compact arena counts retain the full byte-width capacity" {
+    const Arena = DirtyTrackedIndexedArenaWithKey(u64, TestSlot, 255, 510, testSlotId);
+    var arena = Arena.init();
+
+    for (0..255) |index| {
+        const key: u64 = @intCast(index + 1);
+        const slot_index = arena.reserveIndex(key).?;
+        arena.slots[slot_index].record.id = key;
+    }
+
+    try std.testing.expectEqual(@as(usize, 255), arena.claimedCount());
+    try std.testing.expectEqual(@as(usize, 255), arena.countInUse());
+    try std.testing.expectEqual(@as(usize, 255), arena.dirtyIds().len);
+    try std.testing.expectEqual(@as(?usize, null), arena.reserveIndex(256));
 }
 
 test "arena free lists retain the highest reusable index at width boundaries" {
