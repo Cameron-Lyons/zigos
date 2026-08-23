@@ -12,6 +12,7 @@ const background_dispatch = @import("task/background_dispatch.zig");
 const indexing_service = @import("services/indexing_service.zig");
 const event_ledger = @import("platform/event_ledger.zig");
 const measured_boot = @import("platform/measured_boot.zig");
+const kernel_dmar = @import("../kernel/platform/dmar.zig");
 const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
 const input_driver_task = @import("drivers/input_driver_task.zig");
@@ -402,6 +403,14 @@ pub const indexed_hot_path_tables = .{
         .indexes_task = @hasField(event_ledger.EventBacking, "task_index"),
         .visits_indexes = @hasDecl(event_ledger.Ledger, "queryEvents"),
         .removes_evicted_indexes = @hasDecl(event_ledger.Ledger, "removeEventIndexes"),
+    },
+    .dmar = .{
+        .stores_compact_summary_counts = kernel_dmar.COMPACT_SUMMARY_COUNT_METADATA and
+            @FieldType(kernel_dmar.Summary, "remapping_unit_count") == u8 and
+            @FieldType(kernel_dmar.Summary, "reserved_memory_region_count") == u32 and
+            @FieldType(kernel_dmar.Summary, "reserved_memory_with_non_pci_scope_count") == u32 and
+            @FieldType(kernel_dmar.Summary, "ats_capability_count") == u32,
+        .keeps_summary_within_ceiling = @sizeOf(kernel_dmar.Summary) <= kernel_dmar.SUMMARY_SIZE_CEILING_BYTES,
     },
     .measured_boot = .{
         .stores_compact_measurement_metadata = measured_boot.COMPACT_MEASUREMENT_METADATA and

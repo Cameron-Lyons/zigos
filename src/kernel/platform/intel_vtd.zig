@@ -262,9 +262,10 @@ pub fn enforceDevices(
     }
     const address_width = chooseAddressWidth(common_sagaw) orelse
         return error.UnsupportedAddressWidth;
+    const remapping_unit_count: usize = summary.remapping_unit_count;
 
     const retained_page_count = FIRST_INVALIDATION_QUEUE_PAGE +
-        @as(u32, @intCast(summary.remapping_unit_count));
+        @as(u32, @intCast(remapping_unit_count));
     const table_base = paging.alloc_frames(retained_page_count) orelse
         return error.TableAllocationFailed;
     var may_release_tables = true;
@@ -274,7 +275,7 @@ pub fn enforceDevices(
     const interrupt_table_base = tablePagePhysical(table_base, INTERRUPT_TABLE_PAGE);
     const interrupt_table: *InterruptTable = @ptrFromInt(interrupt_table_base);
     @memset(std.mem.asBytes(interrupt_table), 0);
-    for (0..summary.remapping_unit_count) |index| {
+    for (0..remapping_unit_count) |index| {
         const queue_base = tablePagePhysical(
             table_base,
             FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
@@ -284,7 +285,7 @@ pub fn enforceDevices(
     publishTables();
 
     may_release_tables = false;
-    for (units[0..summary.remapping_unit_count], 0..) |unit, index| {
+    for (units[0..remapping_unit_count], 0..) |unit, index| {
         const queue_base = tablePagePhysical(
             table_base,
             FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
@@ -304,7 +305,7 @@ pub fn enforceDevices(
     for (domains, 0..) |domain, index| {
         protected_requester_ids[index] = requesterId(domain.device);
     }
-    active_unit_count = summary.remapping_unit_count;
+    active_unit_count = remapping_unit_count;
     active_interrupt_table = interrupt_table;
     interrupt_remapping_enabled = true;
     fault_monitoring_enabled = true;
