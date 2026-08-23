@@ -29,6 +29,8 @@ pub const MAX_SHARE_GRANTS: usize = 8;
 pub const MAX_EXPORT_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_EXPORT_SIGNATURE_SIGNER_BYTES: usize = MAX_WORKSPACE_LABEL_BYTES;
 pub const WorkspacePathLength = u8;
+pub const COMPACT_STAGING_METADATA = true;
+pub const WORKSPACE_STAGING_STATE_SIZE_CEILING_BYTES: usize = 3;
 pub const NO_SNAPSHOT_GENERATION: u32 = std.math.maxInt(u32);
 
 comptime {
@@ -37,6 +39,9 @@ comptime {
     }
     if (MAX_SHARE_GRANTS > std.math.maxInt(u8)) {
         @compileError("workspace share capacity exceeds its compact index");
+    }
+    if (MAX_WORKSPACE_ENTRIES > std.math.maxInt(u8)) {
+        @compileError("workspace staging metadata exceeds u8 capacity");
     }
 }
 const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
@@ -143,6 +148,8 @@ pub const EntryMutation = struct {
 };
 const MutationEntries = [MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation;
 const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
+pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 19_400 else 43_968;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 161_432 else 357_976;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 
 pub const CreateRequest = struct {
@@ -335,8 +342,14 @@ pub const WorkspaceShareTable = struct {
 
 pub const WorkspaceStagingState = struct {
     transaction_open: bool = false,
-    staged_entry_count: usize = 0,
-    staged_effective_entry_count: usize = 0,
+    staged_entry_count: u8 = 0,
+    staged_effective_entry_count: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > WORKSPACE_STAGING_STATE_SIZE_CEILING_BYTES) {
+            @compileError("workspace staging state exceeds its compact layout ceiling");
+        }
+    }
 };
 
 pub const RecoverableDeleteLog = struct {
@@ -411,10 +424,10 @@ comptime {
     if (heap_backed_mutation_logs and @sizeOf(WorkspaceMutationLog) > 16) {
         @compileError("heap-backed workspace mutation logs exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and @sizeOf(WorkspaceRecord) > 19_416) {
+    if (heap_backed_mutation_logs and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
         @compileError("heap-backed workspace records exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and @sizeOf(WorkspaceSlot) > 19_424) {
+    if (heap_backed_mutation_logs and @sizeOf(WorkspaceSlot) > 19_408) {
         @compileError("heap-backed workspace slots exceed their compact layout");
     }
 }
@@ -507,6 +520,12 @@ pub const Directory = struct {
 
     pub fn init() Directory {
         return .{};
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DIRECTORY_SIZE_CEILING_BYTES) {
+            @compileError("workspace directory exceeds its compact layout ceiling");
+        }
     }
 
     pub fn reset(self: *Directory) void {
@@ -643,14 +662,14 @@ pub const Directory = struct {
         if (workspace.staging.transaction_open) return error.TransactionAlreadyOpen;
         workspace.staging.transaction_open = true;
         workspace.staging.staged_entry_count = 0;
-        workspace.staging.staged_effective_entry_count = workspace.path_index.entry_count;
+        workspace.staging.staged_effective_entry_count = @intCast(workspace.path_index.entry_count);
     }
 
     pub fn abortTransaction(self: *Directory, workspace_id: ids.WorkspaceId) Error!void {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (!workspace.staging.transaction_open) return error.NoActiveTransaction;
         discardTransactionState(workspace);
-        workspace.staging.staged_effective_entry_count = workspace.path_index.entry_count;
+        workspace.staging.staged_effective_entry_count = @intCast(workspace.path_index.entry_count);
     }
 
     pub fn stagePut(
@@ -1388,7 +1407,7 @@ fn findWorkspaceEntryObjectIndex(workspace: *const WorkspaceRecord, object_id: i
 
 fn findStagedEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
     var left: usize = 0;
-    var right = workspace.staging.staged_entry_count;
+    var right: usize = workspace.staging.staged_entry_count;
     while (left < right) {
         const middle = left + (right - left) / 2;
         switch (compareEntryPath(stagedEntryAtConst(workspace, middle).pathSlice(), path)) {
@@ -1410,14 +1429,14 @@ fn stagedEntryAtConst(workspace: *const WorkspaceRecord, staged_index: usize) *c
 
 fn stagedMutationIndex(workspace: *const WorkspaceRecord, staged_index: usize) usize {
     const mutation_index = workspace.mutation_log.entry_mutation_count + staged_index;
-    if (staged_index >= workspace.staging.staged_entry_count or mutation_index >= MAX_WORKSPACE_ENTRY_MUTATIONS) {
+    if (staged_index >= @as(usize, workspace.staging.staged_entry_count) or mutation_index >= MAX_WORKSPACE_ENTRY_MUTATIONS) {
         native_util.impossibleByInvariant("staged workspace entry occupies the unused mutation-log tail");
     }
     return mutation_index;
 }
 
 fn insertSortedStagedEntry(workspace: *WorkspaceRecord, entry: Entry) Error!void {
-    const staged_count = workspace.staging.staged_entry_count;
+    const staged_count: usize = workspace.staging.staged_entry_count;
     if (staged_count >= MAX_WORKSPACE_ENTRIES or
         workspace.mutation_log.entry_mutation_count + staged_count >= MAX_WORKSPACE_ENTRY_MUTATIONS)
     {
@@ -1441,7 +1460,7 @@ fn insertSortedStagedEntry(workspace: *WorkspaceRecord, entry: Entry) Error!void
 }
 
 fn removeStagedEntry(workspace: *WorkspaceRecord, staged_index: usize) void {
-    const staged_count = workspace.staging.staged_entry_count;
+    const staged_count: usize = workspace.staging.staged_entry_count;
     if (staged_index >= staged_count) native_util.impossibleByInvariant("staged workspace entry removal stays within the transaction");
     const base_index = workspace.mutation_log.entry_mutation_count;
     const mutations = workspace.mutation_log.entries();
@@ -1705,10 +1724,10 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
 
 fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
     debugAssertEntriesSorted(workspace.path_index.entries[0..workspace.path_index.entry_count]);
-    if (workspace.mutation_log.entry_mutation_count + workspace.staging.staged_entry_count > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
+    if (workspace.mutation_log.entry_mutation_count + @as(usize, workspace.staging.staged_entry_count) > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
     const next_generation = workspace.generation + 1;
     const staged_entry_start = workspace.mutation_log.entry_mutation_count;
-    const staged_entry_count = workspace.staging.staged_entry_count;
+    const staged_entry_count: usize = workspace.staging.staged_entry_count;
     const mutations = workspace.mutation_log.entries();
     var structural_change = false;
     var object_index_dirty = false;
@@ -1751,7 +1770,7 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
 
 fn discardTransactionState(workspace: *WorkspaceRecord) void {
     const staged_entry_start = workspace.mutation_log.entry_mutation_count;
-    const staged_entry_end = @min(staged_entry_start + workspace.staging.staged_entry_count, MAX_WORKSPACE_ENTRY_MUTATIONS);
+    const staged_entry_end = @min(staged_entry_start + @as(usize, workspace.staging.staged_entry_count), MAX_WORKSPACE_ENTRY_MUTATIONS);
     for (workspace.mutation_log.entries()[staged_entry_start..staged_entry_end]) |*mutation| {
         mutation.* = .{};
     }
@@ -1764,6 +1783,12 @@ fn closeTransactionState(workspace: *WorkspaceRecord) void {
     workspace.staging.staged_effective_entry_count = 0;
 }
 
+test "workspace staging metadata stays compact" {
+    try std.testing.expectEqual(u8, @FieldType(WorkspaceStagingState, "staged_entry_count"));
+    try std.testing.expectEqual(u8, @FieldType(WorkspaceStagingState, "staged_effective_entry_count"));
+    try std.testing.expectEqual(@as(usize, 3), @sizeOf(WorkspaceStagingState));
+}
+
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
@@ -1772,9 +1797,9 @@ test "workspace sharing uses capacity-sized resident indexes" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ShareGrantPrincipalIndexSlot));
     try std.testing.expectEqual(@as(usize, 384), @sizeOf(ShareGrantPrincipalIndex));
     try std.testing.expectEqual(@as(usize, 1_480), @sizeOf(WorkspaceShareTable));
-    try std.testing.expectEqual(@as(usize, 43_984), @sizeOf(WorkspaceRecord));
-    try std.testing.expectEqual(@as(usize, 43_992), @sizeOf(WorkspaceSlot));
-    try std.testing.expectEqual(@as(usize, 358_104), @sizeOf(Directory));
+    try std.testing.expectEqual(@as(usize, 43_968), @sizeOf(WorkspaceRecord));
+    try std.testing.expectEqual(@as(usize, 43_976), @sizeOf(WorkspaceSlot));
+    try std.testing.expectEqual(@as(usize, 357_976), @sizeOf(Directory));
 }
 
 test "workspace borrowed resolution returns the directory owned entry" {
