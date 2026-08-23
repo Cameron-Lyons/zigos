@@ -302,6 +302,10 @@ pub const indexed_hot_path_tables = .{
     .media_print_service = .{
         .uses_bounded_job_scan = media_print_service.BOUNDED_JOB_SCAN,
         .uses_compact_completion_queue = media_print_service.COMPACT_COMPLETION_QUEUE,
+        .stores_compact_job_text_metadata = media_print_service.COMPACT_JOB_TEXT_METADATA and
+            @FieldType(media_print_service.JobRecord, "label_len") == u8 and
+            @FieldType(media_print_service.JobRecord, "printer_identity_len") == u8,
+        .keeps_job_records_within_ceiling = @sizeOf(media_print_service.JobRecord) <= media_print_service.JOB_RECORD_SIZE_CEILING_BYTES,
         .keeps_fixed_state_within_ceiling = @sizeOf(media_print_service.Service) <= media_print_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .network_session_service = .{
