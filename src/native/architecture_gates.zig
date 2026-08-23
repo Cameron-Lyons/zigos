@@ -625,6 +625,10 @@ pub const indexed_hot_path_tables = .{
     .sync_state_store = .{
         .persists_state_records = @hasDecl(sync_state_store, "persist"),
         .loads_state_records = @hasDecl(sync_state_store, "load"),
+        .stores_compact_path_set_metadata = sync_state_store.COMPACT_PATH_SET_METADATA and
+            @FieldType(sync_state_store.PathSet, "lens") == [workspace.MAX_WORKSPACE_ENTRIES]u8 and
+            @FieldType(sync_state_store.PathSet, "count") == u8,
+        .keeps_path_set_within_ceiling = @sizeOf(sync_state_store.PathSet) <= sync_state_store.PATH_SET_SIZE_CEILING_BYTES,
         .uses_workspace_policy_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "workspace_policies"), "reserveIndex"),
         .uses_replica_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "replica_entries"), "reserveIndex"),
         .uses_conflict_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "conflicts"), "reserveIndex"),
