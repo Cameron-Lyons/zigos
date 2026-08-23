@@ -31,6 +31,7 @@ const sync_state_store = @import("sync/sync_state_store.zig");
 const object_store = @import("storage/object_store.zig");
 const workspace = @import("storage/workspace.zig");
 const storage_volume = @import("storage/storage_volume.zig");
+const storage_root_slot = @import("storage/volume/root_slot.zig");
 const policy_object = @import("policy/policy_object.zig");
 const secure_secret_store = @import("platform/secure_secret_store.zig");
 const os_identity = @import("platform/os_identity.zig");
@@ -762,6 +763,9 @@ pub const indexed_hot_path_tables = .{
         .exposes_oldest_snapshot_generation = @hasDecl(workspace.WorkspaceRecord, "oldestSnapshotGeneration"),
     },
     .storage_volume = .{
+        .stores_compact_root_summary_metadata = storage_root_slot.COMPACT_ROOT_SUMMARY_METADATA and
+            @FieldType(storage_root_slot.RootState, "workspace_summary_count") == u8,
+        .keeps_root_state_within_ceiling = @sizeOf(storage_root_slot.RootState) <= storage_root_slot.ROOT_STATE_SIZE_CEILING_BYTES,
         .persists_workspace_state = @hasDecl(storage_volume, "saveToImage"),
         .replays_state_by_primary_index = @hasDecl(storage_volume, "loadFromImage"),
         .requires_target_nvme_attachment = @hasDecl(storage_volume.Volume, "hasProductionStorageBackend"),
