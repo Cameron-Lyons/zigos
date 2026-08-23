@@ -16,7 +16,16 @@ const units = @import("../core/units.zig");
 
 pub const MAX_ACTIVATIONS: usize = 8;
 pub const MAX_ACTIVATION_PUBLISHER_BYTES: usize = bootstrap_driver_port.MAX_PUBLISHER_BYTES;
+pub const COMPACT_ACTIVATION_METADATA = true;
+pub const ACTIVATION_RECORD_SIZE_CEILING_BYTES: usize = 72;
+pub const RUNTIME_SIZE_CEILING_BYTES: usize = 1_376;
 const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
+
+comptime {
+    if (MAX_ACTIVATION_PUBLISHER_BYTES > std.math.maxInt(u8)) {
+        @compileError("driver activation publisher text no longer fits compact metadata");
+    }
+}
 
 pub const ActivationMode = enum(u8) {
     control_only,
@@ -34,11 +43,17 @@ pub const ActivationRecord = struct {
     exclusive_claim: bool,
     activation_generation: u32,
     kernel_bootstrap: bool,
-    publisher_len: usize,
+    publisher_len: u8,
     publisher: [MAX_ACTIVATION_PUBLISHER_BYTES]u8,
 
     pub fn publisherSlice(self: *const ActivationRecord) []const u8 {
-        return self.publisher[0..self.publisher_len];
+        return self.publisher[0..@as(usize, self.publisher_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > ACTIVATION_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("driver activation record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -238,6 +253,12 @@ pub const Runtime = struct {
         defer self.next_activation_generation += 1;
         return self.next_activation_generation;
     }
+
+    comptime {
+        if (@sizeOf(@This()) > RUNTIME_SIZE_CEILING_BYTES) {
+            @compileError("driver runtime exceeds its compact size ceiling");
+        }
+    }
 };
 
 fn activationSlotKey(slot: *const ActivationSlot) u64 {
@@ -256,7 +277,7 @@ fn recordPublishedActivation(record: *ActivationRecord, mode: ActivationMode, pu
     record.mode = mode;
     record.exclusive_claim = true;
     record.kernel_bootstrap = publication.kernel_bootstrap;
-    record.publisher_len = native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong;
+    record.publisher_len = @intCast(native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong);
 }
 
 fn deviceClassKey(device_class: driver_service.DeviceClass) u64 {
@@ -277,6 +298,13 @@ fn zeroActivation() ActivationRecord {
         .publisher_len = 0,
         .publisher = [_]u8{0} ** MAX_ACTIVATION_PUBLISHER_BYTES,
     };
+}
+
+test "driver runtime uses compact bounded activation metadata" {
+    try std.testing.expect(COMPACT_ACTIVATION_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(ActivationRecord, "publisher_len"));
+    try std.testing.expectEqual(@as(usize, ACTIVATION_RECORD_SIZE_CEILING_BYTES), @sizeOf(ActivationRecord));
+    try std.testing.expectEqual(@as(usize, RUNTIME_SIZE_CEILING_BYTES), @sizeOf(Runtime));
 }
 
 test "kernel bootstrap cannot publish network data-plane transports" {

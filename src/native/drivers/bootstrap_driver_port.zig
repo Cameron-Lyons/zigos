@@ -57,6 +57,16 @@ pub const EgressBroker = network_driver_task.EgressBroker;
 pub const NetworkActivator = *const fn (device_id: u64) ?*const NetworkDevice;
 pub const StorageActivator = *const fn (device_id: u64) ?storage_volume.Backend;
 pub const MAX_PUBLISHER_BYTES: usize = 32;
+pub const COMPACT_PUBLICATION_METADATA = true;
+pub const DEVICE_DATA_PLANE_PUBLICATION_SIZE_CEILING_BYTES: usize = 56;
+pub const NETWORK_PUBLICATION_SIZE_CEILING_BYTES: usize = 72;
+pub const STORAGE_PUBLICATION_SIZE_CEILING_BYTES: usize = 328;
+
+comptime {
+    if (MAX_PUBLISHER_BYTES > std.math.maxInt(u8)) {
+        @compileError("driver publication text no longer fits compact metadata");
+    }
+}
 
 pub const StorageControllerSession = struct {
     kernel_port: *component_port.KernelPort,
@@ -74,13 +84,19 @@ pub const StorageControllerSession = struct {
 pub const DeviceDataPlanePublication = struct {
     device_class: driver_service.DeviceClass = .graphics_adapter,
     device_id: u64,
-    publisher_len: usize = 0,
+    publisher_len: u8 = 0,
     publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     kernel_bootstrap: bool = true,
     active_service_id: u64 = 0,
 
     pub fn publisherSlice(self: *const DeviceDataPlanePublication) []const u8 {
-        return self.publisher[0..self.publisher_len];
+        return self.publisher[0..@as(usize, self.publisher_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DEVICE_DATA_PLANE_PUBLICATION_SIZE_CEILING_BYTES) {
+            @compileError("device data-plane publication exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -90,7 +106,7 @@ pub const Error = error{
 
 pub const NetworkPublication = struct {
     device_id: u64,
-    publisher_len: usize = 0,
+    publisher_len: u8 = 0,
     publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     network_device: ?*const NetworkDevice = null,
     activator: ?NetworkActivator = null,
@@ -98,13 +114,19 @@ pub const NetworkPublication = struct {
     active_service_id: u64 = 0,
 
     pub fn publisherSlice(self: *const NetworkPublication) []const u8 {
-        return self.publisher[0..self.publisher_len];
+        return self.publisher[0..@as(usize, self.publisher_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > NETWORK_PUBLICATION_SIZE_CEILING_BYTES) {
+            @compileError("network publication exceeds its compact size ceiling");
+        }
     }
 };
 
 pub const StoragePublication = struct {
     device_id: u64,
-    publisher_len: usize = 0,
+    publisher_len: u8 = 0,
     publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     backend: ?storage_volume.Backend = null,
     controller_session: ?StorageControllerSession = null,
@@ -113,7 +135,13 @@ pub const StoragePublication = struct {
     active_service_id: u64 = 0,
 
     pub fn publisherSlice(self: *const StoragePublication) []const u8 {
-        return self.publisher[0..self.publisher_len];
+        return self.publisher[0..@as(usize, self.publisher_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > STORAGE_PUBLICATION_SIZE_CEILING_BYTES) {
+            @compileError("storage publication exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -521,7 +549,7 @@ fn initPublication(comptime T: type, device_id: u64, publisher: []const u8, kern
         .device_id = device_id,
         .kernel_bootstrap = kernel_bootstrap,
     };
-    publication.publisher_len = native_util.copyTextExact(publication.publisher[0..], publisher) catch return error.PublisherTooLong;
+    publication.publisher_len = @intCast(native_util.copyTextExact(publication.publisher[0..], publisher) catch return error.PublisherTooLong);
     return publication;
 }
 
@@ -541,6 +569,19 @@ const device_class_count = std.meta.fields(driver_service.DeviceClass).len;
 
 fn deviceClassIndex(device_class: driver_service.DeviceClass) usize {
     return @intFromEnum(device_class);
+}
+
+test "bootstrap driver publications use compact bounded metadata" {
+    try std.testing.expect(COMPACT_PUBLICATION_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(DeviceDataPlanePublication, "publisher_len"));
+    try std.testing.expectEqual(u8, @FieldType(NetworkPublication, "publisher_len"));
+    try std.testing.expectEqual(u8, @FieldType(StoragePublication, "publisher_len"));
+    try std.testing.expectEqual(
+        @as(usize, DEVICE_DATA_PLANE_PUBLICATION_SIZE_CEILING_BYTES),
+        @sizeOf(DeviceDataPlanePublication),
+    );
+    try std.testing.expectEqual(@as(usize, NETWORK_PUBLICATION_SIZE_CEILING_BYTES), @sizeOf(NetworkPublication));
+    try std.testing.expectEqual(@as(usize, STORAGE_PUBLICATION_SIZE_CEILING_BYTES), @sizeOf(StoragePublication));
 }
 
 test "driver-backed network tx fails closed without capability-backed egress decision" {

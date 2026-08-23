@@ -49,6 +49,7 @@ const package_service = @import("services/package_service.zig");
 const public_store = @import("services/public_store.zig");
 const driver_service = @import("drivers/driver_service.zig");
 const driver_runtime = @import("drivers/driver_runtime.zig");
+const bootstrap_driver_port = @import("drivers/bootstrap_driver_port.zig");
 const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
 const supervisor = @import("session/supervisor.zig");
@@ -360,11 +361,29 @@ pub const indexed_hot_path_tables = .{
     },
     .driver_service = .{
         .uses_driver_arena = @hasDecl(@FieldType(driver_service.Directory, "slots"), "reserve"),
+        .stores_compact_record_metadata = driver_service.COMPACT_DRIVER_RECORD_METADATA and
+            @FieldType(driver_service.DriverRecord, "dma_range_count") == u8 and
+            @FieldType(driver_service.DriverRecord, "signer_len") == u8,
+        .keeps_driver_state_within_ceilings = @sizeOf(driver_service.DriverRecord) <= driver_service.DRIVER_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(driver_service.Directory) <= driver_service.DIRECTORY_SIZE_CEILING_BYTES,
+    },
+    .driver_publication = .{
+        .stores_compact_publisher_lengths = bootstrap_driver_port.COMPACT_PUBLICATION_METADATA and
+            @FieldType(bootstrap_driver_port.DeviceDataPlanePublication, "publisher_len") == u8 and
+            @FieldType(bootstrap_driver_port.NetworkPublication, "publisher_len") == u8 and
+            @FieldType(bootstrap_driver_port.StoragePublication, "publisher_len") == u8,
+        .keeps_publications_within_ceilings = @sizeOf(bootstrap_driver_port.DeviceDataPlanePublication) <= bootstrap_driver_port.DEVICE_DATA_PLANE_PUBLICATION_SIZE_CEILING_BYTES and
+            @sizeOf(bootstrap_driver_port.NetworkPublication) <= bootstrap_driver_port.NETWORK_PUBLICATION_SIZE_CEILING_BYTES and
+            @sizeOf(bootstrap_driver_port.StoragePublication) <= bootstrap_driver_port.STORAGE_PUBLICATION_SIZE_CEILING_BYTES,
     },
     .driver_runtime = .{
         .uses_activation_arena = @hasDecl(@FieldType(driver_runtime.Runtime, "arena"), "reserveIndex"),
         .uses_activation_class_index = @hasField(driver_runtime.Runtime, "class_index"),
         .uses_activation_service_index = @hasField(driver_runtime.Runtime, "service_index"),
+        .stores_compact_activation_metadata = driver_runtime.COMPACT_ACTIVATION_METADATA and
+            @FieldType(driver_runtime.ActivationRecord, "publisher_len") == u8,
+        .keeps_activation_state_within_ceilings = @sizeOf(driver_runtime.ActivationRecord) <= driver_runtime.ACTIVATION_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(driver_runtime.Runtime) <= driver_runtime.RUNTIME_SIZE_CEILING_BYTES,
     },
     .device_broker = .{
         .uses_controller_arena = device_broker.dma_program_indexing.uses_controller_arena,
