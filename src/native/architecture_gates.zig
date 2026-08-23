@@ -445,6 +445,12 @@ pub const indexed_hot_path_tables = .{
         .uses_scope_index = @hasField(policy_object.Directory, "scope_index"),
     },
     .event_ledger = .{
+        .stores_compact_event_text_metadata = event_ledger.COMPACT_EVENT_TEXT_METADATA and
+            @FieldType(event_ledger.Event, "policy_label_len") == u8 and
+            @FieldType(event_ledger.Event, "missing_capability_len") == u8 and
+            @FieldType(event_ledger.Event, "detail_len") == u16,
+        .keeps_event_state_within_ceilings = @sizeOf(event_ledger.Event) <= event_ledger.EVENT_SIZE_CEILING_BYTES and
+            @sizeOf(event_ledger.EventBacking) <= event_ledger.EVENT_BACKING_SIZE_CEILING_BYTES,
         .uses_event_arena = @hasField(event_ledger.EventBacking, "events"),
         .indexes_kind = @hasField(event_ledger.EventBacking, "kind_index"),
         .indexes_subject = @hasField(event_ledger.EventBacking, "subject_index"),

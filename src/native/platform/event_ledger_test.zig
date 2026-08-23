@@ -19,6 +19,14 @@ const DOCUMENT_KNOWLEDGE_BUFFER_BYTES: usize = 512;
 const DETAIL_PAYLOAD_BUFFER_BYTES: usize = 96;
 const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
 
+test "event ledger text metadata stays compact" {
+    try std.testing.expectEqual(u8, @FieldType(Event, "policy_label_len"));
+    try std.testing.expectEqual(u8, @FieldType(Event, "missing_capability_len"));
+    try std.testing.expectEqual(u16, @FieldType(Event, "detail_len"));
+    try std.testing.expectEqual(@as(usize, 688), @sizeOf(Event));
+    try std.testing.expectEqual(@as(usize, 53_192), @sizeOf(event_ledger.EventBacking));
+}
+
 test "event ledger reset clears events indexes and sequence state" {
     var ledger = Ledger.init();
     try ledger.recordProcessCrash(
@@ -63,12 +71,12 @@ test "event ledger compact inputs preserve truncation and zeroed tails" {
     const matched = ledger.queryEvents(.{ .kind = .update_transition }, &events);
     try std.testing.expectEqual(@as(usize, 1), matched.len);
     try std.testing.expectEqualStrings("short detail", matched[0].detailSlice());
-    try std.testing.expect(std.mem.allEqual(u8, matched[0].detail[matched[0].detail_len..], 0));
+    try std.testing.expect(std.mem.allEqual(u8, matched[0].detail[@as(usize, matched[0].detail_len)..], 0));
 
     var oversized = [_]u8{'x'} ** (event_ledger.MAX_DETAIL_BYTES + 8);
     try ledger.recordProcessCrash(.network_stack, subject, 23, 5002, &oversized);
     const crash = ledger.latestKind(.process_crash).?;
-    try std.testing.expectEqual(event_ledger.MAX_DETAIL_BYTES, crash.detail_len);
+    try std.testing.expectEqual(@as(u16, event_ledger.MAX_DETAIL_BYTES), crash.detail_len);
     try std.testing.expect(std.mem.allEqual(u8, crash.detailSlice(), 'x'));
 }
 
