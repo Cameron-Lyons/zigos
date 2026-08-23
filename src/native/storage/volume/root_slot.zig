@@ -7,9 +7,17 @@ const volume_layout = @import("layout.zig");
 const workspace = @import("../workspace.zig");
 
 pub const Error = volume_errors.Error;
+pub const COMPACT_ROOT_SUMMARY_METADATA = true;
+pub const ROOT_STATE_SIZE_CEILING_BYTES: usize = 272;
 
 const CursorWriter = binary_cursor.Writer(Error, error.NoSpaceLeft);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptImage);
+
+comptime {
+    if (workspace.MAX_WORKSPACES > std.math.maxInt(u8)) {
+        @compileError("workspace root summaries exceed compact count capacity");
+    }
+}
 
 pub const WorkspaceSummary = struct {
     id: u64 = 0,
@@ -31,9 +39,15 @@ pub const RootState = struct {
     log_record_count: u16 = 0,
     log_segment_count: u16 = 0,
     compacted_generation: u64 = 0,
-    workspace_summary_count: usize = 0,
+    workspace_summary_count: u8 = 0,
     workspace_summaries: [workspace.MAX_WORKSPACES]WorkspaceSummary =
         [_]WorkspaceSummary{WorkspaceSummary{}} ** workspace.MAX_WORKSPACES,
+
+    comptime {
+        if (@sizeOf(@This()) > ROOT_STATE_SIZE_CEILING_BYTES) {
+            @compileError("storage root state exceeds its compact layout ceiling");
+        }
+    }
 };
 
 pub const LoadedRoot = struct {
@@ -147,7 +161,7 @@ pub fn encodeRoot(buffer: []u8, root: RootState) Error!void {
     try writer.writeU16(root.log_segment_count);
     try writer.writeU64(root.compacted_generation);
     try writer.writeU16(@intCast(root.workspace_summary_count));
-    for (root.workspace_summaries[0..root.workspace_summary_count]) |summary| {
+    for (root.workspace_summaries[0..@as(usize, root.workspace_summary_count)]) |summary| {
         try writer.writeU64(summary.id);
         try writer.writeU32(summary.generation);
         try writer.writeU64(summary.state_hash);
@@ -177,8 +191,9 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
     root.log_record_count = try reader.readU16();
     root.log_segment_count = try reader.readU16();
     root.compacted_generation = try reader.readU64();
-    root.workspace_summary_count = try reader.readU16();
-    if (root.workspace_summary_count > root.workspace_summaries.len) return error.CorruptImage;
+    const workspace_summary_count = try reader.readU16();
+    if (workspace_summary_count > root.workspace_summaries.len) return error.CorruptImage;
+    root.workspace_summary_count = @intCast(workspace_summary_count);
     for (0..root.workspace_summary_count) |index| {
         root.workspace_summaries[index] = .{
             .id = try reader.readU64(),
@@ -196,4 +211,10 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
     if (checksum != volume_hashing.checksumBytes(buffer[0..checksum_offset])) return error.ChecksumMismatch;
     if (!hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     return root;
+}
+
+test "storage root summary metadata stays compact" {
+    try std.testing.expectEqual(u8, @FieldType(RootState, "workspace_summary_count"));
+    try std.testing.expectEqual(@as(usize, 272), @sizeOf(RootState));
+    try std.testing.expectEqual(@as(usize, 280), @sizeOf(LoadedRoot));
 }
