@@ -8,6 +8,15 @@ const signing = @import("signing.zig");
 pub const MAX_PRINCIPAL_KEYS = 32;
 pub const MAX_PRINCIPAL_LABEL_BYTES = 48;
 pub const MAX_PUBLISHER_BYTES = 64;
+pub const COMPACT_KEY_RECORD_METADATA = true;
+pub const PRINCIPAL_KEY_RECORD_SIZE_CEILING_BYTES: usize = 136;
+pub const KEYRING_SIZE_CEILING_BYTES: usize = 8_056;
+
+comptime {
+    if (MAX_PUBLISHER_BYTES > std.math.maxInt(u8)) {
+        @compileError("principal publisher text no longer fits compact metadata");
+    }
+}
 
 pub const PrincipalKind = enum(u8) {
     user,
@@ -61,18 +70,24 @@ pub const PrincipalKeyRecord = struct {
     principal_id: PrincipalId,
     issuer: PrincipalId,
     public_key: signing.PublicKey,
-    publisher_len: usize = 0,
+    publisher_len: u8 = 0,
     publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     policy_authority_root: bool = false,
     revoked: bool = false,
     revocation_generation: u32 = 0,
 
     pub fn publisherSlice(self: *const PrincipalKeyRecord) []const u8 {
-        return self.publisher[0..self.publisher_len];
+        return self.publisher[0..@as(usize, self.publisher_len)];
     }
 
     pub fn fingerprint(self: *const PrincipalKeyRecord) u64 {
         return std.hash.Wyhash.hash(hash_seeds.principal_key_fingerprint, &self.public_key);
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > PRINCIPAL_KEY_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("principal key record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -165,7 +180,7 @@ pub const Keyring = struct {
             .issuer = issuer,
             .public_key = public_key,
         };
-        record.publisher_len = publisher.len;
+        record.publisher_len = @intCast(publisher.len);
         @memcpy(record.publisher[0..publisher.len], publisher);
         return self.put(record);
     }
@@ -285,6 +300,12 @@ pub const Keyring = struct {
         if (record.publisher_len == 0) return;
         _ = self.publisher_index.remove(publisherIndexKey(record.publisherSlice()), slot_index);
     }
+
+    comptime {
+        if (@sizeOf(@This()) > KEYRING_SIZE_CEILING_BYTES) {
+            @compileError("principal keyring exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub fn kindName(kind: PrincipalKind) []const u8 {
@@ -296,6 +317,13 @@ pub fn kindName(kind: PrincipalKind) []const u8 {
         .service => "ServicePrincipal",
         .policy_authority => "PolicyAuthorityPrincipal",
     };
+}
+
+test "principal keyring uses compact bounded publisher metadata" {
+    try std.testing.expect(COMPACT_KEY_RECORD_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(PrincipalKeyRecord, "publisher_len"));
+    try std.testing.expectEqual(@as(usize, PRINCIPAL_KEY_RECORD_SIZE_CEILING_BYTES), @sizeOf(PrincipalKeyRecord));
+    try std.testing.expectEqual(@as(usize, KEYRING_SIZE_CEILING_BYTES), @sizeOf(Keyring));
 }
 
 test "principal records preserve identity and labels" {
