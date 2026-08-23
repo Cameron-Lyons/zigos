@@ -7,6 +7,8 @@ pub const DMAR_SIGNATURE = "DMAR";
 pub const DMAR_HEADER_LENGTH: usize = acpi.SDT_HEADER_LENGTH + 12;
 pub const MAX_REMAPPING_UNITS: usize = 16;
 pub const MIN_PRODUCTION_HOST_ADDRESS_WIDTH: u8 = 39;
+pub const COMPACT_SUMMARY_COUNT_METADATA = true;
+pub const SUMMARY_SIZE_CEILING_BYTES: usize = 408;
 
 const HOST_ADDRESS_WIDTH_OFFSET: usize = acpi.SDT_HEADER_LENGTH;
 const FLAGS_OFFSET: usize = HOST_ADDRESS_WIDTH_OFFSET + 1;
@@ -34,6 +36,12 @@ const ATSR_MIN_BYTES: usize = 8;
 const DRHD_FLAG_INCLUDE_PCI_ALL: u8 = 1 << 0;
 const ATSR_FLAG_ALL_PORTS: u8 = 1 << 0;
 const PAGE_SIZE: u64 = 4096;
+
+comptime {
+    if (MAX_REMAPPING_UNITS > std.math.maxInt(u8)) {
+        @compileError("DMAR remapping units no longer fit compact summary metadata");
+    }
+}
 
 const DEVICE_SCOPE_HEADER_BYTES: usize = 6;
 const DEVICE_SCOPE_MIN_BYTES: usize = DEVICE_SCOPE_HEADER_BYTES + 2;
@@ -83,13 +91,13 @@ pub const Summary = struct {
     dma_remapping_opt_out: bool,
     remapping_units: [MAX_REMAPPING_UNITS]RemappingUnit =
         [_]RemappingUnit{.{}} ** MAX_REMAPPING_UNITS,
-    remapping_unit_count: usize = 0,
-    reserved_memory_region_count: usize = 0,
-    reserved_memory_with_non_pci_scope_count: usize = 0,
-    ats_capability_count: usize = 0,
+    remapping_unit_count: u8 = 0,
+    reserved_memory_region_count: u32 = 0,
+    reserved_memory_with_non_pci_scope_count: u32 = 0,
+    ats_capability_count: u32 = 0,
 
     pub fn units(self: *const Summary) []const RemappingUnit {
-        return self.remapping_units[0..self.remapping_unit_count];
+        return self.remapping_units[0..@as(usize, self.remapping_unit_count)];
     }
 
     pub fn segmentZeroCatchAll(self: *const Summary) ?*const RemappingUnit {
@@ -122,6 +130,12 @@ pub const Summary = struct {
             if (unit.segment != 0) return false;
         }
         return true;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > SUMMARY_SIZE_CEILING_BYTES) {
+            @compileError("DMAR summary exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -193,7 +207,8 @@ pub fn parseDmar(table: []const u8) Error!Summary {
         switch (structure_type) {
             DRHD_TYPE => {
                 const unit = try parseRemappingUnit(structure, host_address_width);
-                if (summary.remapping_unit_count >= summary.remapping_units.len) {
+                const unit_count: usize = summary.remapping_unit_count;
+                if (unit_count >= summary.remapping_units.len) {
                     return error.TooManyRemappingUnits;
                 }
                 for (summary.units()) |prior| {
@@ -207,7 +222,7 @@ pub fn parseDmar(table: []const u8) Error!Summary {
                         unit.registerBytes(),
                     )) return error.InvalidRemappingUnit;
                 }
-                summary.remapping_units[summary.remapping_unit_count] = unit;
+                summary.remapping_units[unit_count] = unit;
                 summary.remapping_unit_count += 1;
             },
             RMRR_TYPE => {
@@ -405,6 +420,15 @@ fn validDmar() [TEST_TABLE_BYTES]u8 {
     return table;
 }
 
+test "DMAR summary uses capacity-sized discovery counts" {
+    try std.testing.expect(COMPACT_SUMMARY_COUNT_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(Summary, "remapping_unit_count"));
+    try std.testing.expectEqual(u32, @FieldType(Summary, "reserved_memory_region_count"));
+    try std.testing.expectEqual(u32, @FieldType(Summary, "reserved_memory_with_non_pci_scope_count"));
+    try std.testing.expectEqual(u32, @FieldType(Summary, "ats_capability_count"));
+    try std.testing.expectEqual(@as(usize, SUMMARY_SIZE_CEILING_BYTES), @sizeOf(Summary));
+}
+
 test "DMAR parser discovers production-policy segment-zero VT-d units" {
     const table = validDmar();
     const summary = try parseDmar(table[0..]);
@@ -414,8 +438,8 @@ test "DMAR parser discovers production-policy segment-zero VT-d units" {
     try std.testing.expect(!summary.x2apic_opt_out);
     try std.testing.expect(!summary.dma_remapping_opt_out);
     try std.testing.expectEqual(@as(usize, 2), summary.units().len);
-    try std.testing.expectEqual(@as(usize, 1), summary.reserved_memory_region_count);
-    try std.testing.expectEqual(@as(usize, 0), summary.reserved_memory_with_non_pci_scope_count);
+    try std.testing.expectEqual(@as(u32, 1), summary.reserved_memory_region_count);
+    try std.testing.expectEqual(@as(u32, 0), summary.reserved_memory_with_non_pci_scope_count);
     const catch_all = summary.segmentZeroCatchAll().?;
     try std.testing.expectEqual(@as(u64, 0xFED9_1000), catch_all.register_base_address);
     try std.testing.expectEqual(@as(u32, 1), catch_all.register_page_count);
@@ -430,14 +454,15 @@ test "DMAR enforcement policy rejects reserved memory owned by non-PCI DMA devic
 
     const summary = try parseDmar(table[0..]);
     try std.testing.expect(summary.productionDiscoveryReady());
-    try std.testing.expectEqual(@as(usize, 1), summary.reserved_memory_with_non_pci_scope_count);
+    try std.testing.expectEqual(@as(u32, 1), summary.reserved_memory_with_non_pci_scope_count);
     try std.testing.expect(!summary.productionEnforcementReady());
 }
 
 test "DMAR enforcement policy rejects units outside the only scanned PCI segment" {
     const table = validDmar();
     var summary = try parseDmar(table[0..]);
-    summary.remapping_units[summary.remapping_unit_count] = .{
+    const next_unit_index: usize = summary.remapping_unit_count;
+    summary.remapping_units[next_unit_index] = .{
         .register_base_address = 0x0000_0000_FEDA_0000,
         .register_page_count = 1,
         .segment = 1,
