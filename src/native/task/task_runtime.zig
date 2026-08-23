@@ -34,6 +34,14 @@ pub const DEFAULT_USER_STACK_TOP = model.DEFAULT_USER_STACK_TOP;
 pub const DEFAULT_USER_STACK_SIZE_BYTES = model.DEFAULT_USER_STACK_SIZE_BYTES;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT = model.DEFAULT_SYNTHETIC_ENTRY_POINT;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES = model.DEFAULT_SYNTHETIC_IMAGE_BYTES;
+pub const TaskStateCount = u8;
+pub const COMPACT_LIFECYCLE_METADATA = true;
+pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
+pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_624;
+pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
+    FREESTANDING_RUNTIME_SIZE_CEILING_BYTES
+else
+    HOST_RUNTIME_SIZE_CEILING_BYTES;
 pub const TaskState = model.TaskState;
 pub const ComponentClass = model.ComponentClass;
 pub const ProcessClass = model.ProcessClass;
@@ -64,6 +72,12 @@ pub const TaskRecord = model.TaskRecord;
 pub const Error = model.Error;
 pub const Snapshot = model.Snapshot;
 pub const syntheticUserspaceImage = model.syntheticUserspaceImage;
+
+comptime {
+    if (MAX_TASKS > std.math.maxInt(TaskStateCount)) {
+        @compileError("task state counts no longer fit in u8");
+    }
+}
 
 pub const BackgroundWorkReservation = struct {
     task_id: u64,
@@ -213,15 +227,15 @@ pub const Runtime = struct {
     tasks: TaskArena = TaskArena.init(),
     task_owner_index: TaskOwnerIndex = TaskOwnerIndex.init(),
     task_initial_component_label_index: TaskInitialComponentLabelIndex = TaskInitialComponentLabelIndex.init(),
-    task_state_counts: [TASK_STATE_COUNT]usize = [_]usize{0} ** TASK_STATE_COUNT,
+    task_state_counts: [TASK_STATE_COUNT]TaskStateCount = [_]TaskStateCount{0} ** TASK_STATE_COUNT,
     task_lifecycle_generation: u64 = 1,
     task_cold: TaskColdBacking = if (heap_backed_task_cold) null else [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
     address_spaces: AddressSpaceBacking = if (heap_backed_address_spaces) null else model.AddressSpaceArena.init(),
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
 
     comptime {
-        if (heap_backed_address_spaces and @sizeOf(@This()) > 72 * 1024) {
-            @compileError("heap-backed task runtimes exceed their compact hot layout");
+        if (@sizeOf(@This()) > RUNTIME_SIZE_CEILING_BYTES) {
+            @compileError("task runtime exceeded its target-specific compact size ceiling");
         }
     }
 
@@ -349,7 +363,7 @@ pub const Runtime = struct {
         self.tasks.reset();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
-        self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
+        self.task_state_counts = [_]TaskStateCount{0} ** TASK_STATE_COUNT;
         self.releaseTaskColdRecords();
         self.releaseAddressSpaceArena();
         self.advanceTaskLifecycleGeneration();
@@ -451,7 +465,7 @@ pub const Runtime = struct {
         self.tasks.resetRetainingPayloads();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
-        self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
+        self.task_state_counts = [_]TaskStateCount{0} ** TASK_STATE_COUNT;
         if (self.addressSpaceArena()) |address_spaces| address_spaces.resetRetainingPayloads();
     }
 
@@ -459,7 +473,7 @@ pub const Runtime = struct {
         self.tasks.rebuildPrimaryIndex();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
-        self.task_state_counts = [_]usize{0} ** TASK_STATE_COUNT;
+        self.task_state_counts = [_]TaskStateCount{0} ** TASK_STATE_COUNT;
         if (self.addressSpaceArena()) |address_spaces| address_spaces.rebuildPrimaryIndex();
 
         var slot_index: usize = 0;
@@ -579,7 +593,7 @@ pub const Runtime = struct {
     }
 
     pub fn countTasksInState(self: *const Runtime, state: TaskState) usize {
-        return self.task_state_counts[taskStateIndex(state)];
+        return @intCast(self.task_state_counts[taskStateIndex(state)]);
     }
 
     pub fn taskLifecycleGeneration(self: *const Runtime) u64 {
@@ -2262,6 +2276,9 @@ test "address-space retirement on snapshot restore replaces only runtime state a
 }
 
 test "task state counts track lifecycle transitions and snapshot restore" {
+    try std.testing.expect(@FieldType(Runtime, "task_state_counts") == [TASK_STATE_COUNT]TaskStateCount);
+    try std.testing.expectEqual(@as(usize, RUNTIME_SIZE_CEILING_BYTES), @sizeOf(Runtime));
+
     var runtime = Runtime.init();
     try std.testing.expectEqual(@as(u64, 1), runtime.taskLifecycleGeneration());
     const first = try runtime.createTask(.{
