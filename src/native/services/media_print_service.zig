@@ -9,7 +9,15 @@ pub const MAX_JOBS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
 pub const BOUNDED_JOB_SCAN = true;
 pub const COMPACT_COMPLETION_QUEUE = true;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_648;
+pub const COMPACT_JOB_TEXT_METADATA = true;
+pub const JOB_RECORD_SIZE_CEILING_BYTES: usize = 208;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_360;
+
+comptime {
+    if (MAX_JOBS > std.math.maxInt(u8) or MAX_LABEL_BYTES > std.math.maxInt(u8)) {
+        @compileError("media and print metadata exceeds compact field capacity");
+    }
+}
 
 pub const JobKind = enum(u8) {
     media_export,
@@ -51,17 +59,17 @@ pub const JobRecord = struct {
     engine: accelerator_scheduler.Engine,
     claim_id: ?u64,
     notification_id: ?u64,
-    label_len: usize,
+    label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
-    printer_identity_len: usize,
+    printer_identity_len: u8,
     printer_identity: [MAX_LABEL_BYTES]u8,
 
     pub fn labelSlice(self: *const JobRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@as(usize, self.label_len)];
     }
 
     pub fn printerIdentitySlice(self: *const JobRecord) []const u8 {
-        return self.printer_identity[0..self.printer_identity_len];
+        return self.printer_identity[0..@as(usize, self.printer_identity_len)];
     }
 };
 
@@ -116,8 +124,8 @@ pub const Service = struct {
         job.state = .running;
         job.visibility = request.visibility;
         job.local_only = request.local_only;
-        job.label_len = native_util.copyTextExact(&job.label, request.label) catch return error.LabelTooLong;
-        job.printer_identity_len = native_util.copyTextExact(&job.printer_identity, request.printer_identity) catch return error.PrinterIdentityTooLong;
+        job.label_len = @intCast(native_util.copyTextExact(&job.label, request.label) catch return error.LabelTooLong);
+        job.printer_identity_len = @intCast(native_util.copyTextExact(&job.printer_identity, request.printer_identity) catch return error.PrinterIdentityTooLong);
 
         const claim = try scheduler.claim(.{
             .task_id = request.task_id,
@@ -299,6 +307,13 @@ fn zeroJob() JobRecord {
         .printer_identity_len = 0,
         .printer_identity = [_]u8{0} ** MAX_LABEL_BYTES,
     };
+}
+
+test "media and print job metadata stays compact" {
+    try std.testing.expectEqual(u8, @FieldType(JobRecord, "label_len"));
+    try std.testing.expectEqual(u8, @FieldType(JobRecord, "printer_identity_len"));
+    try std.testing.expectEqual(@as(usize, 208), @sizeOf(JobRecord));
+    try std.testing.expectEqual(@as(usize, 3_360), @sizeOf(Service));
 }
 
 test "media print service uses scheduled engines and emits completion notifications" {
