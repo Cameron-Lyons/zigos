@@ -60,13 +60,18 @@ pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
 pub const COMPACT_COMMAND_QUEUE_METADATA = true;
+pub const COMPACT_REVIEW_PROGRESS_METADATA = true;
 pub const COMMAND_INPUT_SIZE_CEILING_BYTES: usize = 1_664;
+pub const RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES: usize = 1_272;
 
 comptime {
     if (MAX_INPUT_LINE > std.math.maxInt(u8) or
         MAX_PHYSICAL_INPUT_COMMANDS > std.math.maxInt(u8))
     {
         @compileError("permission review command queue no longer fits compact metadata");
+    }
+    if (MAX_REVIEW_DECISIONS > std.math.maxInt(u8)) {
+        @compileError("rendered permission review progress no longer fits compact metadata");
     }
 }
 
@@ -409,8 +414,8 @@ pub const RenderedReviewSurface = struct {
     display: *compositor_display.Framebuffer,
     ledger: ?*event_ledger.Ledger = null,
     review_window_id: ?u64 = null,
-    active_index: usize = 0,
-    decision_count: usize = 0,
+    active_index: u8 = 0,
+    decision_count: u8 = 0,
     decisions: [MAX_REVIEW_DECISIONS]permission_review.ReviewDecision = [_]permission_review.ReviewDecision{.{
         .kind = .object_access,
         .resource = "",
@@ -456,18 +461,20 @@ pub const RenderedReviewSurface = struct {
 
     pub fn click(self: *RenderedReviewSurface, control: SurfaceControl) Error!void {
         if (self.review_window_id == null) return error.ReviewWindowMissing;
-        if (self.active_index >= self.bundle.requested_permissions.len) return error.ReviewComplete;
-        if (self.decision_count >= self.decisions.len) return error.ReviewComplete;
+        const active_index: usize = self.active_index;
+        const decision_count: usize = self.decision_count;
+        if (active_index >= self.bundle.requested_permissions.len) return error.ReviewComplete;
+        if (decision_count >= self.decisions.len) return error.ReviewComplete;
 
-        const request = self.bundle.requested_permissions[self.active_index];
+        const request = self.bundle.requested_permissions[active_index];
         const command = commandForControl(control, request);
         const decision = permission_review.decisionFromCommand(request, command);
         self.service.recordDecision(self.app_task_id, self.review_window_id, self.bundle, request, decision);
         try self.recordLedgerDecision(request, decision);
-        self.decisions[self.decision_count] = decision;
+        self.decisions[decision_count] = decision;
         self.decision_count += 1;
         self.active_index += 1;
-        if (self.active_index < self.bundle.requested_permissions.len) {
+        if (@as(usize, self.active_index) < self.bundle.requested_permissions.len) {
             try self.presentCurrentRequest();
         }
         try self.render();
@@ -478,11 +485,11 @@ pub const RenderedReviewSurface = struct {
         output: *[MAX_REVIEW_DECISIONS]policy_mediation.UserGrant,
     ) Error![]const policy_mediation.UserGrant {
         if (self.review_window_id == null) return error.ReviewWindowMissing;
-        if (self.active_index < self.bundle.requested_permissions.len) return error.ReviewIncomplete;
+        if (@as(usize, self.active_index) < self.bundle.requested_permissions.len) return error.ReviewIncomplete;
         const reviewed_session = try permission_review.initSession(
             self.app_task_id,
             &self.bundle,
-            self.decisions[0..self.decision_count],
+            self.decisions[0..@as(usize, self.decision_count)],
         );
         var review_buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
         const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session) catch return error.ReviewRenderTooLarge;
@@ -509,11 +516,12 @@ pub const RenderedReviewSurface = struct {
     }
 
     fn presentCurrentRequest(self: *RenderedReviewSurface) Error!void {
-        if (self.active_index >= self.bundle.requested_permissions.len) return;
+        const active_index: usize = self.active_index;
+        if (active_index >= self.bundle.requested_permissions.len) return;
         self.service.presentReviewRequest(
             self.review_window_id,
             self.bundle,
-            self.bundle.requested_permissions[self.active_index],
+            self.bundle.requested_permissions[active_index],
         );
     }
 
@@ -535,7 +543,7 @@ pub const RenderedReviewSurface = struct {
             task.id,
             request.kind,
             decision.allow,
-            self.now_ticks + @as(u64, @intCast(self.decision_count * 2)),
+            self.now_ticks + @as(u64, self.decision_count) * 2,
             rendered_item,
             false,
         );
@@ -548,10 +556,16 @@ pub const RenderedReviewSurface = struct {
             request.kind,
             decision.allow,
             if (decision.allow) abi.DenialReason.none else abi.DenialReason.policy_denied,
-            self.now_ticks + @as(u64, @intCast(self.decision_count * 2 + 1)),
+            self.now_ticks + @as(u64, self.decision_count) * 2 + 1,
             rendered_decision,
             false,
         );
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES) {
+            @compileError("rendered permission review surface exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -1504,18 +1518,25 @@ test "rendered permission review surface drives allow deny controls through comp
     try std.testing.expectError(error.ReviewWindowMissing, surface.finish(&grants_buffer));
 
     try surface.begin();
+    try std.testing.expectEqual(@as(u8, 0), surface.active_index);
+    try std.testing.expectEqual(@as(u8, 0), surface.decision_count);
     try std.testing.expect(display.containsText("active_type=app_panel"));
     try std.testing.expect(display.containsText("permission kind=object_access resource=workspace:trip"));
     try std.testing.expect(display.containsText("permission_scope object=workspace:trip network=none local=yes lease=400"));
     try std.testing.expect(display.containsText("control=allow_local_requested_lease window=1 kind=object_access resource=workspace:trip lease=400"));
 
     try surface.click(.allow_local_requested_lease);
+    try std.testing.expectEqual(@as(u8, 1), surface.active_index);
+    try std.testing.expectEqual(@as(u8, 1), surface.decision_count);
     try std.testing.expect(display.containsText("permission_decision kind=object_access resource=workspace:trip decision=allow"));
     try std.testing.expect(display.containsText("permission kind=network_egress resource=net:trip"));
     try std.testing.expect(display.containsText("permission_scope object=none network=net:trip local=no lease=80"));
     try std.testing.expect(display.containsText("control=deny window=1 kind=network_egress resource=net:trip"));
 
     try surface.click(.deny);
+    try std.testing.expectEqual(@as(u8, 2), surface.active_index);
+    try std.testing.expectEqual(@as(u8, 2), surface.decision_count);
+    try std.testing.expectEqual(@as(usize, RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES), @sizeOf(RenderedReviewSurface));
     const grants = try surface.finish(&grants_buffer);
     try std.testing.expectEqual(@as(usize, 1), grants.len);
     try std.testing.expectEqual(manifest.PermissionKind.object_access, grants[0].kind);
