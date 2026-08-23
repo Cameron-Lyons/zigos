@@ -7,6 +7,7 @@ const userspace_scheduler = @import("task/userspace_scheduler.zig");
 const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
 const task_runtime = @import("task/task_runtime.zig");
+const debug_contract = @import("security/debug_contract.zig");
 const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
 const indexing_service = @import("services/indexing_service.zig");
@@ -224,6 +225,14 @@ pub const indexed_hot_path_tables = .{
         .tracks_task_capability_generation = @hasDecl(task_runtime.TaskRecord, "capabilityGeneration"),
         .removes_retired_capability_attachments = @hasDecl(task_runtime.Runtime, "revokeCapabilityEverywhere"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
+    },
+    .debug_contract = .{
+        .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and
+            @FieldType(debug_contract.DenialExplanation, "operation_len") == u8 and
+            @FieldType(debug_contract.DenialExplanation, "required_authority_len") == u8 and
+            @FieldType(debug_contract.DenialExplanation, "blocking_policy_len") == u8,
+        .keeps_debug_state_within_ceilings = @sizeOf(debug_contract.DenialExplanation) <= debug_contract.DENIAL_EXPLANATION_SIZE_CEILING_BYTES and
+            @sizeOf(debug_contract.ProvenanceRecord) <= debug_contract.PROVENANCE_RECORD_SIZE_CEILING_BYTES,
     },
     .accelerator_scheduler = .{
         .uses_claim_arena = @hasField(accelerator_scheduler.Controller, "claims"),
