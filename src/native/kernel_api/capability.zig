@@ -10,8 +10,20 @@ pub const MAX_CAPABILITIES: usize = 128;
 pub const CAPABILITY_INDEX_CAPACITY: usize = MAX_CAPABILITIES * 2;
 pub const MAX_TARGET_GENERATIONS: usize = 128;
 pub const MAX_GRANT_PLAN_ENTRIES: usize = 16;
+pub const CapabilitySlotIndex = indexed_arena.ReusableIndex(MAX_CAPABILITIES);
+pub const COMPACT_GRANT_METADATA = true;
+pub const GRANT_RESERVATION_SIZE_CEILING_BYTES: usize = 312;
 pub const CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY: u8 = 0;
 pub const CAPABILITY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
+
+comptime {
+    if (MAX_GRANT_PLAN_ENTRIES > std.math.maxInt(u8)) {
+        @compileError("capability grant plan count no longer fits in u8");
+    }
+    if (@sizeOf(CapabilitySlotIndex) != 1) {
+        @compileError("capability grant reservation slot indexes no longer fit in u8");
+    }
+}
 
 pub const TableConfig = struct {
     max_capabilities: usize = MAX_CAPABILITIES,
@@ -57,12 +69,13 @@ pub const GrantPlanEntry = struct {
 };
 
 pub const GrantPlan = struct {
-    entry_count: usize = 0,
+    entry_count: u8 = 0,
     entries: [MAX_GRANT_PLAN_ENTRIES]GrantPlanEntry = [_]GrantPlanEntry{emptyGrantPlanEntry()} ** MAX_GRANT_PLAN_ENTRIES,
 
     pub fn addMint(self: *GrantPlan, task_id: u64, request: MintRequest) Error!void {
-        if (self.entry_count >= self.entries.len) return error.GrantPlanFull;
-        self.entries[self.entry_count] = .{
+        const entry_index: usize = self.entry_count;
+        if (entry_index >= self.entries.len) return error.GrantPlanFull;
+        self.entries[entry_index] = .{
             .task_id = task_id,
             .request = request,
         };
@@ -70,7 +83,7 @@ pub const GrantPlan = struct {
     }
 
     pub fn slice(self: *const GrantPlan) []const GrantPlanEntry {
-        return self.entries[0..self.entry_count];
+        return self.entries[0..@as(usize, self.entry_count)];
     }
 };
 
@@ -135,14 +148,24 @@ fn targetGenerationKey(slot: *const TargetGeneration) u64 {
     return targetKey(slot.target);
 }
 
-const GrantReservation = struct {
-    entry_count: usize = 0,
-    slot_indexes: [MAX_GRANT_PLAN_ENTRIES]usize = [_]usize{0} ** MAX_GRANT_PLAN_ENTRIES,
-    target_generation_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = [_]u8{0} ** MAX_GRANT_PLAN_ENTRIES,
-    new_target_count: usize = 0,
-    new_target_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = [_]u8{0} ** MAX_GRANT_PLAN_ENTRIES,
-    new_targets: [MAX_GRANT_PLAN_ENTRIES]CapabilityTarget = [_]CapabilityTarget{.{ .kind = .task, .id = 0 }} ** MAX_GRANT_PLAN_ENTRIES,
-};
+pub fn GrantReservationFor(comptime max_capabilities: usize) type {
+    const SlotIndex = indexed_arena.ReusableIndex(max_capabilities);
+    return struct {
+        slot_indexes: [MAX_GRANT_PLAN_ENTRIES]SlotIndex = [_]SlotIndex{0} ** MAX_GRANT_PLAN_ENTRIES,
+        target_generation_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = [_]u8{0} ** MAX_GRANT_PLAN_ENTRIES,
+        new_target_count: u8 = 0,
+        new_target_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = [_]u8{0} ** MAX_GRANT_PLAN_ENTRIES,
+        new_targets: [MAX_GRANT_PLAN_ENTRIES]CapabilityTarget = [_]CapabilityTarget{.{ .kind = .task, .id = 0 }} ** MAX_GRANT_PLAN_ENTRIES,
+
+        comptime {
+            if (max_capabilities == MAX_CAPABILITIES and @sizeOf(@This()) > GRANT_RESERVATION_SIZE_CEILING_BYTES) {
+                @compileError("production capability grant reservation exceeded its stack-size ceiling");
+            }
+        }
+    };
+}
+
+pub const GrantReservation = GrantReservationFor(MAX_CAPABILITIES);
 
 pub const CapabilityTable = CapabilityTableWith(.{});
 
@@ -158,8 +181,17 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         const TargetGenerationArena = indexed_arena.IndexedArenaWithKey(u64, TargetGeneration, MAX_TABLE_TARGET_GENERATIONS, TABLE_INDEX_CAPACITY, targetGenerationKey);
         const HolderIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
         const TargetIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
+        const TableCapabilitySlotIndex = indexed_arena.ReusableIndex(MAX_TABLE_CAPABILITIES);
+        const TableGrantReservation = GrantReservationFor(MAX_TABLE_CAPABILITIES);
         const InsertedCapabilitySlot = struct {
             slot_index: usize,
+        };
+        const SlotReservationContext = struct {
+            reservation: *const TableGrantReservation,
+            used_count: usize,
+        };
+        const TargetGenerationReservationContext = struct {
+            reservation: *const TableGrantReservation,
         };
 
         slots: CapabilityArena = CapabilityArena.init(),
@@ -200,10 +232,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn applyGrantPlan(self: *Self, plan: *const GrantPlan, output: []Capability) Error![]Capability {
-            if (output.len < plan.entry_count) return error.TableFull;
+            const entry_count: usize = plan.entry_count;
+            if (output.len < entry_count) return error.TableFull;
             const reservation = try self.reserveGrantPlan(plan);
             self.commitGrantPlan(plan, reservation, output);
-            return output[0..plan.entry_count];
+            return output[0..entry_count];
         }
 
         pub fn rollbackGrant(self: *Self, capabilities: []const Capability) void {
@@ -472,8 +505,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return &self.target_generations.slots[target_generation_index];
         }
 
-        fn reserveGrantPlan(self: *const Self, plan: *const GrantPlan) Error!GrantReservation {
-            var reservation = GrantReservation{ .entry_count = plan.entry_count };
+        fn reserveGrantPlan(self: *const Self, plan: *const GrantPlan) Error!TableGrantReservation {
+            var reservation = TableGrantReservation{};
             for (plan.slice(), 0..) |entry, index| {
                 if (!rightsAreValidForTarget(entry.request.target, entry.request.rights)) return error.InvalidCapabilityRights;
                 reservation.slot_indexes[index] = try self.reserveCapabilitySlot(&reservation, index);
@@ -485,11 +518,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         fn commitGrantPlan(
             self: *Self,
             plan: *const GrantPlan,
-            reservation: GrantReservation,
+            reservation: TableGrantReservation,
             output: []Capability,
         ) void {
             var new_target_index: usize = 0;
-            while (new_target_index < reservation.new_target_count) : (new_target_index += 1) {
+            while (new_target_index < @as(usize, reservation.new_target_count)) : (new_target_index += 1) {
                 const table_index: usize = reservation.new_target_indexes[new_target_index];
                 const target = reservation.new_targets[new_target_index];
                 _ = self.target_generations.insertIndexAt(targetKey(target), table_index, .{
@@ -515,7 +548,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 const inserted_slot = self.insertCapabilitySlot(
                     granted_capability,
                     reservation.target_generation_indexes[index],
-                    reservation.slot_indexes[index],
+                    @as(usize, reservation.slot_indexes[index]),
                 ) orelse {
                     native_util.impossibleByInvariant("grant plan slot reservations cover capability id allocation");
                 };
@@ -525,18 +558,19 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             }
         }
 
-        fn reserveCapabilitySlot(self: *const Self, reservation: *const GrantReservation, used_count: usize) Error!usize {
-            return self.slots.availableIndexExcluding(
+        fn reserveCapabilitySlot(self: *const Self, reservation: *const TableGrantReservation, used_count: usize) Error!TableCapabilitySlotIndex {
+            const slot_index = self.slots.availableIndexExcluding(
                 SlotReservationContext{ .reservation = reservation, .used_count = used_count },
                 reservationExcludesSlot,
-            ) orelse error.TableFull;
+            ) orelse return error.TableFull;
+            return @intCast(slot_index);
         }
 
-        fn reserveTargetGeneration(self: *const Self, target: CapabilityTarget, reservation: *GrantReservation) Error!u8 {
+        fn reserveTargetGeneration(self: *const Self, target: CapabilityTarget, reservation: *TableGrantReservation) Error!u8 {
             if (self.findTargetGenerationIndex(target)) |index| return index;
 
             var reserved_index: usize = 0;
-            while (reserved_index < reservation.new_target_count) : (reserved_index += 1) {
+            while (reserved_index < @as(usize, reservation.new_target_count)) : (reserved_index += 1) {
                 if (reservation.new_targets[reserved_index].eql(target)) {
                     return reservation.new_target_indexes[reserved_index];
                 }
@@ -546,12 +580,37 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 TargetGenerationReservationContext{ .reservation = reservation },
                 reservationExcludesTargetGeneration,
             ) orelse return error.TargetTableFull;
-            if (reservation.new_target_count >= reservation.new_target_indexes.len) return error.TargetTableFull;
+            const new_target_count: usize = reservation.new_target_count;
+            if (new_target_count >= reservation.new_target_indexes.len) return error.TargetTableFull;
             const target_generation_index: u8 = @intCast(slot_index);
-            reservation.new_target_indexes[reservation.new_target_count] = target_generation_index;
-            reservation.new_targets[reservation.new_target_count] = target;
+            reservation.new_target_indexes[new_target_count] = target_generation_index;
+            reservation.new_targets[new_target_count] = target;
             reservation.new_target_count += 1;
             return target_generation_index;
+        }
+
+        fn reservationContainsSlot(reservation: *const TableGrantReservation, used_count: usize, slot_index: usize) bool {
+            var index: usize = 0;
+            while (index < used_count) : (index += 1) {
+                if (@as(usize, reservation.slot_indexes[index]) == slot_index) return true;
+            }
+            return false;
+        }
+
+        fn reservationExcludesSlot(context: SlotReservationContext, slot_index: usize) bool {
+            return reservationContainsSlot(context.reservation, context.used_count, slot_index);
+        }
+
+        fn reservationContainsTargetGeneration(reservation: *const TableGrantReservation, target_generation_index: u8) bool {
+            var index: usize = 0;
+            while (index < @as(usize, reservation.new_target_count)) : (index += 1) {
+                if (reservation.new_target_indexes[index] == target_generation_index) return true;
+            }
+            return false;
+        }
+
+        fn reservationExcludesTargetGeneration(context: TargetGenerationReservationContext, slot_index: usize) bool {
+            return reservationContainsTargetGeneration(context.reservation, @intCast(slot_index));
         }
 
         fn findTargetGenerationIndex(self: *const Self, target: CapabilityTarget) ?u8 {
@@ -647,39 +706,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
     };
 }
 
-fn reservationContainsSlot(reservation: *const GrantReservation, used_count: usize, slot_index: usize) bool {
-    var index: usize = 0;
-    while (index < used_count) : (index += 1) {
-        if (reservation.slot_indexes[index] == slot_index) return true;
-    }
-    return false;
-}
-
-const SlotReservationContext = struct {
-    reservation: *const GrantReservation,
-    used_count: usize,
-};
-
-fn reservationExcludesSlot(context: SlotReservationContext, slot_index: usize) bool {
-    return reservationContainsSlot(context.reservation, context.used_count, slot_index);
-}
-
-fn reservationContainsTargetGeneration(reservation: *const GrantReservation, target_generation_index: u8) bool {
-    var index: usize = 0;
-    while (index < reservation.new_target_count) : (index += 1) {
-        if (reservation.new_target_indexes[index] == target_generation_index) return true;
-    }
-    return false;
-}
-
-const TargetGenerationReservationContext = struct {
-    reservation: *const GrantReservation,
-};
-
-fn reservationExcludesTargetGeneration(context: TargetGenerationReservationContext, slot_index: usize) bool {
-    return reservationContainsTargetGeneration(context.reservation, @intCast(slot_index));
-}
-
 fn holderKey(holder: principal.PrincipalId) u64 {
     return nonZeroKey((@as(u64, @intFromEnum(holder.kind)) << 56) ^ holder.serial);
 }
@@ -771,6 +797,28 @@ fn fullSessionRights() CapabilityRights {
         .resource_query = true,
         .accounting_query = true,
     } };
+}
+
+test "capability grant metadata retains full atomic plan capacity" {
+    try std.testing.expect(@FieldType(GrantPlan, "entry_count") == u8);
+    try std.testing.expect(@FieldType(GrantReservation, "slot_indexes") == [MAX_GRANT_PLAN_ENTRIES]CapabilitySlotIndex);
+    try std.testing.expect(@FieldType(GrantReservation, "new_target_count") == u8);
+    try std.testing.expectEqual(@as(usize, GRANT_RESERVATION_SIZE_CEILING_BYTES), @sizeOf(GrantReservation));
+
+    var plan = GrantPlan{};
+    const request = emptyGrantPlanEntry().request;
+    for (0..MAX_GRANT_PLAN_ENTRIES) |index| {
+        try plan.addMint(index, request);
+    }
+    try std.testing.expectEqual(@as(u8, @intCast(MAX_GRANT_PLAN_ENTRIES)), plan.entry_count);
+    try std.testing.expectEqual(@as(usize, MAX_GRANT_PLAN_ENTRIES), plan.slice().len);
+    try std.testing.expectError(error.GrantPlanFull, plan.addMint(MAX_GRANT_PLAN_ENTRIES, request));
+
+    var table = CapabilityTable.init();
+    var output: [MAX_GRANT_PLAN_ENTRIES]Capability = undefined;
+    const granted = try table.applyGrantPlan(&plan, &output);
+    try std.testing.expectEqual(@as(usize, MAX_GRANT_PLAN_ENTRIES), granted.len);
+    try std.testing.expectEqual(@as(usize, MAX_GRANT_PLAN_ENTRIES), table.activeCount());
 }
 
 test "allocated capability table initialization preserves empty table invariants" {
