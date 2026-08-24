@@ -3740,7 +3740,8 @@ fn semanticMemoryEvidence() SemanticMemoryEvidence {
     var evidence = SemanticMemoryEvidence{
         .service_model = @hasDecl(indexing_service.Service, "upsertClassified") and
             @hasDecl(indexing_service.Service, "semanticQuery") and
-            @hasField(indexing_service.DocumentRecord, "sensitivity"),
+            @hasField(indexing_service.DocumentRecord, "metadata") and
+            @hasDecl(indexing_service.DocumentRecord, "sensitivity"),
         .top_k_ranking = semanticTopKRankingCheck(),
     };
     var policies = policy_object.Directory.init();

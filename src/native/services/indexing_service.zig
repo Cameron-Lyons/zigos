@@ -13,7 +13,20 @@ pub const MAX_BODY_BYTES: usize = 192;
 pub const BOUNDED_DOCUMENT_SCAN = true;
 pub const DENSE_DOCUMENT_TABLE = true;
 pub const COMPACT_DOCUMENT_METADATA = true;
+pub const CACHED_TITLE_FINGERPRINT = true;
+pub const PACKED_DOCUMENT_METADATA = true;
+pub const DOCUMENT_RECORD_SIZE_CEILING_BYTES: usize = 288;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 9_232;
+const DOCUMENT_TITLE_LENGTH_BITS: u6 = 7;
+const DOCUMENT_BODY_LENGTH_BITS: u6 = 8;
+const DOCUMENT_SENSITIVITY_BITS: u6 = 2;
+const DOCUMENT_BODY_LENGTH_SHIFT: u6 = DOCUMENT_TITLE_LENGTH_BITS;
+const DOCUMENT_SENSITIVITY_SHIFT: u6 = DOCUMENT_BODY_LENGTH_SHIFT + DOCUMENT_BODY_LENGTH_BITS;
+const DOCUMENT_TITLE_FINGERPRINT_SHIFT: u6 = DOCUMENT_SENSITIVITY_SHIFT + DOCUMENT_SENSITIVITY_BITS;
+const DOCUMENT_TITLE_LENGTH_MASK: u64 = (@as(u64, 1) << DOCUMENT_TITLE_LENGTH_BITS) - 1;
+const DOCUMENT_BODY_LENGTH_MASK: u64 = (@as(u64, 1) << DOCUMENT_BODY_LENGTH_BITS) - 1;
+const DOCUMENT_SENSITIVITY_MASK: u64 = (@as(u64, 1) << DOCUMENT_SENSITIVITY_BITS) - 1;
+const DOCUMENT_TITLE_FINGERPRINT_MASK: u64 = std.math.maxInt(u64) >> DOCUMENT_TITLE_FINGERPRINT_SHIFT;
 
 pub const SearchResult = struct {
     workspace_id: u64,
@@ -44,20 +57,71 @@ pub const DocumentRecord = struct {
     workspace_id: u64 = 0,
     object_id: u64 = 0,
     version_id: u64 = 0,
-    title_len: u8 = 0,
+    metadata: u64 = @as(u64, @intFromEnum(manifest.DataSensitivity.internal_data)) << DOCUMENT_SENSITIVITY_SHIFT,
     title: [MAX_TITLE_BYTES]u8 = [_]u8{0} ** MAX_TITLE_BYTES,
-    body_len: u8 = 0,
     body: [MAX_BODY_BYTES]u8 = [_]u8{0} ** MAX_BODY_BYTES,
-    sensitivity: manifest.DataSensitivity = .internal_data,
 
     pub fn titleSlice(self: *const DocumentRecord) []const u8 {
-        return self.title[0..@as(usize, self.title_len)];
+        return self.title[0..self.titleLength()];
     }
 
     pub fn bodySlice(self: *const DocumentRecord) []const u8 {
-        return self.body[0..@as(usize, self.body_len)];
+        return self.body[0..self.bodyLength()];
+    }
+
+    pub fn sensitivity(self: *const DocumentRecord) manifest.DataSensitivity {
+        return @enumFromInt((self.metadata >> DOCUMENT_SENSITIVITY_SHIFT) & DOCUMENT_SENSITIVITY_MASK);
+    }
+
+    pub fn titleFingerprint(self: *const DocumentRecord) u64 {
+        return self.metadata >> DOCUMENT_TITLE_FINGERPRINT_SHIFT;
+    }
+
+    fn titleLength(self: *const DocumentRecord) usize {
+        return @intCast(self.metadata & DOCUMENT_TITLE_LENGTH_MASK);
+    }
+
+    fn bodyLength(self: *const DocumentRecord) usize {
+        return @intCast((self.metadata >> DOCUMENT_BODY_LENGTH_SHIFT) & DOCUMENT_BODY_LENGTH_MASK);
+    }
+
+    fn setMetadata(
+        self: *DocumentRecord,
+        title_length: u8,
+        body_length: u8,
+        data_sensitivity: manifest.DataSensitivity,
+        title_fingerprint: u64,
+    ) void {
+        if (title_length > DOCUMENT_TITLE_LENGTH_MASK or body_length > DOCUMENT_BODY_LENGTH_MASK) {
+            native_util.impossibleByInvariant("indexed document lengths fit packed metadata");
+        }
+        const sensitivity_value = @intFromEnum(data_sensitivity);
+        if (sensitivity_value > DOCUMENT_SENSITIVITY_MASK) {
+            native_util.impossibleByInvariant("indexed document sensitivity fits packed metadata");
+        }
+        if (title_fingerprint == 0 or title_fingerprint > DOCUMENT_TITLE_FINGERPRINT_MASK) {
+            native_util.impossibleByInvariant("indexed title fingerprint fits packed metadata");
+        }
+        self.metadata = @as(u64, title_length) |
+            (@as(u64, body_length) << DOCUMENT_BODY_LENGTH_SHIFT) |
+            (@as(u64, sensitivity_value) << DOCUMENT_SENSITIVITY_SHIFT) |
+            (title_fingerprint << DOCUMENT_TITLE_FINGERPRINT_SHIFT);
     }
 };
+
+comptime {
+    if (MAX_TITLE_BYTES > DOCUMENT_TITLE_LENGTH_MASK or MAX_BODY_BYTES > DOCUMENT_BODY_LENGTH_MASK) {
+        @compileError("indexed document text capacity no longer fits packed metadata");
+    }
+    for (std.meta.fields(manifest.DataSensitivity)) |field| {
+        if (field.value > DOCUMENT_SENSITIVITY_MASK) {
+            @compileError("data sensitivity no longer fits indexed document metadata");
+        }
+    }
+    if (@sizeOf(DocumentRecord) > DOCUMENT_RECORD_SIZE_CEILING_BYTES) {
+        @compileError("indexed document exceeds its compact record size ceiling");
+    }
+}
 
 pub const SemanticQueryRequest = struct {
     subject: principal.PrincipalId,
@@ -189,7 +253,7 @@ pub const Service = struct {
         var result: manifest.DataSensitivity = .public_data;
         for (self.documents[0..self.documentCount()]) |*record| {
             if (!workspacePermitted(permitted_workspaces, record.workspace_id)) continue;
-            result = maxSensitivity(result, record.sensitivity);
+            result = maxSensitivity(result, record.sensitivity());
         }
         return result;
     }
@@ -271,8 +335,8 @@ fn scoreDocument(record: *const DocumentRecord, folded_needle: []const u8, gener
         .score = @intCast(score),
         .title_hits = @intCast(title_hits),
         .body_hits = @intCast(body_hits),
-        .sensitivity = record.sensitivity,
-        .title_fingerprint = hashTitle(record.titleSlice()),
+        .sensitivity = record.sensitivity(),
+        .title_fingerprint = record.titleFingerprint(),
         .title = record.titleSlice(),
     };
 }
@@ -313,9 +377,9 @@ fn makeDocument(
     record.workspace_id = workspace_id;
     record.object_id = object_id;
     record.version_id = version_id;
-    record.title_len = @intCast(copyTextExact(&record.title, title) catch return error.TitleTooLong);
-    record.body_len = @intCast(copyTextExact(&record.body, body) catch return error.BodyTooLong);
-    record.sensitivity = sensitivity;
+    const title_length: u8 = @intCast(copyTextExact(&record.title, title) catch return error.TitleTooLong);
+    const body_length: u8 = @intCast(copyTextExact(&record.body, body) catch return error.BodyTooLong);
+    record.setMetadata(title_length, body_length, sensitivity, hashTitle(record.title[0..title_length]));
     return record;
 }
 
@@ -344,7 +408,7 @@ fn redactResultTitles(results: []SearchResult) void {
 }
 
 fn hashTitle(title: []const u8) u64 {
-    const fingerprint = std.hash.Wyhash.hash(0x7365_6d61_6e74_6963, title);
+    const fingerprint = std.hash.Wyhash.hash(0x7365_6d61_6e74_6963, title) & DOCUMENT_TITLE_FINGERPRINT_MASK;
     return if (fingerprint == 0) 1 else fingerprint;
 }
 
@@ -496,6 +560,35 @@ test "indexing service keeps highest ranked results after buffer fills" {
     for (results) |result| {
         try std.testing.expect(result.object_id != 107);
     }
+}
+
+test "indexing service caches compact title fingerprints without growing records" {
+    var service = Service.init();
+    try service.upsert(1, 100, 1, "Original Title", "searchable body");
+    const original_fingerprint = service.findSlot(1, 100).?.titleFingerprint();
+    try std.testing.expectEqual(hashTitle("Original Title"), original_fingerprint);
+    try std.testing.expect(original_fingerprint != 0);
+    try std.testing.expectEqual(DOCUMENT_RECORD_SIZE_CEILING_BYTES, @sizeOf(DocumentRecord));
+    try std.testing.expectEqual(SERVICE_SIZE_CEILING_BYTES, @sizeOf(Service));
+
+    var results_buffer: [MAX_RESULTS]SearchResult = undefined;
+    const results = service.query(&.{1}, "searchable", &results_buffer);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(@as(u64, original_fingerprint), results[0].title_fingerprint);
+
+    try service.upsert(1, 100, 2, "Updated Title", "searchable body");
+    const updated_fingerprint = service.findSlot(1, 100).?.titleFingerprint();
+    try std.testing.expectEqual(hashTitle("Updated Title"), updated_fingerprint);
+    try std.testing.expect(updated_fingerprint != original_fingerprint);
+
+    const max_title = [_]u8{'t'} ** MAX_TITLE_BYTES;
+    const max_body = [_]u8{'b'} ** MAX_BODY_BYTES;
+    try service.upsertClassified(2, 200, 1, &max_title, &max_body, .secret_user_data);
+    const maximum = service.findSlot(2, 200).?;
+    try std.testing.expectEqual(MAX_TITLE_BYTES, maximum.titleSlice().len);
+    try std.testing.expectEqual(MAX_BODY_BYTES, maximum.bodySlice().len);
+    try std.testing.expectEqual(manifest.DataSensitivity.secret_user_data, maximum.sensitivity());
+    try std.testing.expect(maximum.titleFingerprint() != 0);
 }
 
 test "semantic memory queries are local policy gated and redacted" {

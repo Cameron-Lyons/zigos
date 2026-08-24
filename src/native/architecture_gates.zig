@@ -372,7 +372,16 @@ pub const indexed_hot_path_tables = .{
     .indexing_service = .{
         .uses_bounded_document_scan = indexing_service.BOUNDED_DOCUMENT_SCAN,
         .uses_dense_document_table = indexing_service.DENSE_DOCUMENT_TABLE,
-        .stores_compact_document_metadata = indexing_service.COMPACT_DOCUMENT_METADATA,
+        .stores_compact_document_metadata = indexing_service.COMPACT_DOCUMENT_METADATA and
+            indexing_service.PACKED_DOCUMENT_METADATA and
+            @FieldType(indexing_service.DocumentRecord, "metadata") == u64 and
+            !@hasField(indexing_service.DocumentRecord, "title_len") and
+            !@hasField(indexing_service.DocumentRecord, "body_len") and
+            !@hasField(indexing_service.DocumentRecord, "sensitivity") and
+            @sizeOf(indexing_service.DocumentRecord) <= indexing_service.DOCUMENT_RECORD_SIZE_CEILING_BYTES,
+        .caches_compact_title_fingerprint = indexing_service.CACHED_TITLE_FINGERPRINT and
+            @hasDecl(indexing_service.DocumentRecord, "titleFingerprint") and
+            !@hasField(indexing_service.DocumentRecord, "title_fingerprint"),
         .drops_document_indexes = !@hasField(indexing_service.Service, "workspace_index") and
             @FieldType(indexing_service.Service, "documents") == [indexing_service.MAX_DOCUMENTS]indexing_service.DocumentRecord,
         .keeps_fixed_state_within_ceiling = @sizeOf(indexing_service.Service) <= indexing_service.SERVICE_SIZE_CEILING_BYTES,
