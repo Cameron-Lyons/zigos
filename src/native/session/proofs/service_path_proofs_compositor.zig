@@ -691,9 +691,9 @@ fn proveBootedRenderedPermissionReviewSurface(
     mediator.attachLedger(&ledger);
     const summary = try mediator.applyManifest(app_task_id, bundle, grants, 158);
 
-    try std.testing.expectEqual(@as(usize, 1), summary.granted_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.denied_count);
-    try std.testing.expectEqual(@as(usize, 0), summary.required_denials);
+    try std.testing.expectEqual(@as(u8, 1), summary.granted_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.denied_count);
+    try std.testing.expectEqual(@as(u8, 0), summary.required_denials);
     const object_decision = summary.decisionForKind(.object_access).?;
     try std.testing.expect(object_decision.allowed);
     try std.testing.expect(object_decision.local_only);

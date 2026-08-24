@@ -1,3 +1,4 @@
+const std = @import("std");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const denial_explanation = @import("denial_explanation.zig");
@@ -11,8 +12,16 @@ const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
 
 pub const MAX_PERMISSION_DECISIONS: usize = 16;
+pub const COMPACT_ACTIVATION_SUMMARY_METADATA = true;
+pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 1_160;
 const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
 const REVOCATION_RECEIPT_BUFFER_BYTES: usize = 240;
+
+comptime {
+    if (MAX_PERMISSION_DECISIONS > std.math.maxInt(u8)) {
+        @compileError("permission decisions exceed compact activation summary capacity");
+    }
+}
 
 pub const ServiceTargets = struct {
     network_service_id: u64,
@@ -53,10 +62,10 @@ pub const Decision = struct {
 };
 
 pub const ActivationSummary = struct {
-    granted_count: usize = 0,
-    denied_count: usize = 0,
-    required_denials: usize = 0,
-    decision_count: usize = 0,
+    granted_count: u8 = 0,
+    denied_count: u8 = 0,
+    required_denials: u8 = 0,
+    decision_count: u8 = 0,
     decisions: [MAX_PERMISSION_DECISIONS]PermissionDecision = [_]PermissionDecision{emptyDecision()} ** MAX_PERMISSION_DECISIONS,
 
     pub fn addDecision(self: *ActivationSummary, decision: PermissionDecision, required: bool) void {
@@ -81,6 +90,12 @@ pub const ActivationSummary = struct {
         return null;
     }
 };
+
+comptime {
+    if (@sizeOf(ActivationSummary) > ACTIVATION_SUMMARY_SIZE_CEILING_BYTES) {
+        @compileError("policy activation summary exceeds its compact size ceiling");
+    }
+}
 
 pub const Error = task_runtime.Error || capability.Error || manifest.ValidationError || event_ledger.Error;
 
@@ -577,7 +592,13 @@ fn createMediationTestTask(
     });
 }
 
-const std = @import("std");
+test "policy activation summary keeps bounded counters compact" {
+    try std.testing.expectEqual(u8, @FieldType(ActivationSummary, "granted_count"));
+    try std.testing.expectEqual(u8, @FieldType(ActivationSummary, "denied_count"));
+    try std.testing.expectEqual(u8, @FieldType(ActivationSummary, "required_denials"));
+    try std.testing.expectEqual(u8, @FieldType(ActivationSummary, "decision_count"));
+    try std.testing.expect(@sizeOf(ActivationSummary) <= ACTIVATION_SUMMARY_SIZE_CEILING_BYTES);
+}
 
 test "policy mediation denies zero-authority requests without user grants" {
     var capability_table = capability.CapabilityTable.init();
@@ -671,8 +692,8 @@ test "policy mediation grants local-only object and network capabilities" {
 
     const summary = try mediator.applyManifest(task.id, bundle, &grants, 10);
 
-    try std.testing.expectEqual(@as(usize, 2), summary.granted_count);
-    try std.testing.expectEqual(@as(usize, 0), summary.required_denials);
+    try std.testing.expectEqual(@as(u8, 2), summary.granted_count);
+    try std.testing.expectEqual(@as(u8, 0), summary.required_denials);
     try std.testing.expectEqual(task_runtime.TaskState.active, task.state);
     try std.testing.expectEqual(@as(usize, 2), task.capability_count);
     try std.testing.expect(summary.decisionForKind(.network_egress).?.local_only);
@@ -796,8 +817,8 @@ test "policy mediation suspends tasks when required background permission is den
 
     const summary = try mediator.applyManifest(task.id, bundle, &grants, 5);
 
-    try std.testing.expectEqual(@as(usize, 0), summary.granted_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.required_denials);
+    try std.testing.expectEqual(@as(u8, 0), summary.granted_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.required_denials);
     try std.testing.expectEqual(abi.DenialReason.budget_exhausted, summary.decisionForKind(.background_execution).?.reason);
     try std.testing.expectEqualStrings("resource-budget-policy", summary.decisionForKind(.background_execution).?.explanation.policySlice());
     try std.testing.expect(summary.decisionForKind(.background_execution).?.explanation.retry_safe);
@@ -971,8 +992,8 @@ test "policy mediation rolls back activation grants when a required permission f
         .{ .kind = .background_execution, .resource = "sync", .expires_at_ticks = 30 },
     }, 10);
 
-    try std.testing.expectEqual(@as(usize, 1), summary.granted_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.required_denials);
+    try std.testing.expectEqual(@as(u8, 1), summary.granted_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.required_denials);
     try std.testing.expectEqual(task_runtime.TaskState.suspended, task.state);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
     try std.testing.expect(capability_table.query(summary.decisionForKind(.object_access).?.capability_id.?) == null);
@@ -1014,8 +1035,8 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
 
     const summary = try mediator.applyManifest(task.id, bundle, &grants, 10);
 
-    try std.testing.expectEqual(@as(usize, 4), summary.granted_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.denied_count);
+    try std.testing.expectEqual(@as(u8, 4), summary.granted_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.denied_count);
     try std.testing.expectEqual(task_runtime.TaskState.active, task.state);
     try std.testing.expect(summary.decisionForKind(.device_access).?.allowed);
     try std.testing.expect(summary.decisionForKind(.camera).?.allowed);
@@ -1272,9 +1293,9 @@ test "policy mediation denies clipboard and screen capture without explicit gran
 
     const summary = try mediator.applyManifest(task.id, bundle, &.{}, 10);
 
-    try std.testing.expectEqual(@as(usize, 0), summary.granted_count);
-    try std.testing.expectEqual(@as(usize, 2), summary.denied_count);
-    try std.testing.expectEqual(@as(usize, 0), summary.required_denials);
+    try std.testing.expectEqual(@as(u8, 0), summary.granted_count);
+    try std.testing.expectEqual(@as(u8, 2), summary.denied_count);
+    try std.testing.expectEqual(@as(u8, 0), summary.required_denials);
     try std.testing.expectEqual(task_runtime.TaskState.active, task.state);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
     try std.testing.expect(!summary.decisionForKind(.clipboard).?.allowed);

@@ -1561,9 +1561,9 @@ test "rendered permission review surface drives allow deny controls through comp
     mediator.attachLedger(&ledger);
     const summary = try mediator.applyManifest(task.id, bundle, grants, 55);
 
-    try std.testing.expectEqual(@as(usize, 1), summary.granted_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.denied_count);
-    try std.testing.expectEqual(@as(usize, 0), summary.required_denials);
+    try std.testing.expectEqual(@as(u8, 1), summary.granted_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.denied_count);
+    try std.testing.expectEqual(@as(u8, 0), summary.required_denials);
     try std.testing.expectEqual(task_runtime.TaskState.active, task.state);
     const object_decision = summary.decisionForKind(.object_access).?;
     try std.testing.expect(object_decision.allowed);

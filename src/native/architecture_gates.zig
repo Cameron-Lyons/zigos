@@ -21,6 +21,7 @@ const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
 const input_driver_task = @import("drivers/input_driver_task.zig");
 const permission_review_service = @import("policy/permission_review_service.zig");
+const policy_mediation = @import("policy/policy_mediation.zig");
 const xhci = @import("../kernel/drivers/xhci.zig");
 const native_ux = @import("platform/native_ux.zig");
 const sync_transport_harness = @import("sync/sync_transport_harness.zig");
@@ -636,6 +637,14 @@ pub const indexed_hot_path_tables = .{
             @FieldType(permission_review_service.RenderedReviewSurface, "decision_count") == u8,
         .keeps_rendered_surface_within_ceiling = @sizeOf(permission_review_service.RenderedReviewSurface) <=
             permission_review_service.RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES,
+    },
+    .policy_activation = .{
+        .stores_compact_summary_metadata = policy_mediation.COMPACT_ACTIVATION_SUMMARY_METADATA and
+            @FieldType(policy_mediation.ActivationSummary, "granted_count") == u8 and
+            @FieldType(policy_mediation.ActivationSummary, "denied_count") == u8 and
+            @FieldType(policy_mediation.ActivationSummary, "required_denials") == u8 and
+            @FieldType(policy_mediation.ActivationSummary, "decision_count") == u8,
+        .keeps_summary_within_ceiling = @sizeOf(policy_mediation.ActivationSummary) <= policy_mediation.ACTIVATION_SUMMARY_SIZE_CEILING_BYTES,
     },
     .native_ux = .{
         .uses_append_only_flow_log = native_ux.APPEND_ONLY_FLOW_LOG,

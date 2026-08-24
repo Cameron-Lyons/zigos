@@ -124,7 +124,7 @@ test "policy port validates headers and forwards apply manifest requests" {
         .bundle = bundle,
         .grants = &grants,
     }, 10);
-    try std.testing.expectEqual(@as(usize, 1), summary.granted_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.granted_count);
     try std.testing.expect(summary.decisionForKind(.object_access).?.allowed);
 
     try std.testing.expectError(error.UnexpectedOperation, port.applyManifest(.{
