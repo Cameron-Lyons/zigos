@@ -289,6 +289,31 @@ pub fn defaultVolume() *Volume {
 const CursorWriter = binary_cursor.Writer(Error, error.NoSpaceLeft);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptImage);
 
+fn readBoundedCount(comptime Count: type, reader: *CursorReader, comptime maximum: usize) Error!Count {
+    if (maximum > std.math.maxInt(Count)) {
+        @compileError("bounded persisted count exceeds its resident type");
+    }
+    const value = try reader.readU16();
+    if (value > maximum) return error.CorruptImage;
+    return @intCast(value);
+}
+
+test "bounded persisted counts reject invalid values before narrowing" {
+    const above_capacity = [_]u8{ 97, 0 };
+    var capacity_reader = CursorReader{ .buffer = &above_capacity };
+    try std.testing.expectError(
+        error.CorruptImage,
+        readBoundedCount(workspace.WorkspaceEntryCount, &capacity_reader, workspace.MAX_WORKSPACE_ENTRIES),
+    );
+
+    const above_resident_type = [_]u8{ 0, 1 };
+    var type_reader = CursorReader{ .buffer = &above_resident_type };
+    try std.testing.expectError(
+        error.CorruptImage,
+        readBoundedCount(workspace.WorkspaceEntryCount, &type_reader, workspace.MAX_WORKSPACE_ENTRIES),
+    );
+}
+
 const WorkspaceSummary = volume_root_slot.WorkspaceSummary;
 const RootState = volume_root_slot.RootState;
 const LoadedRoot = volume_root_slot.LoadedRoot;
@@ -597,7 +622,7 @@ pub fn ensureWithinProductCapacityEnvelope(store: *const object_store.Store, wor
     for (&workspaces.workspaces.slots) |*slot| {
         if (!slot.in_use) continue;
         if (!persistableWorkspaceSlot(slot)) return error.NoSpaceLeft;
-        if (slot.workspace.path_index.entry_count > envelope.max_workspace_entries_per_workspace) return error.NoSpaceLeft;
+        if (slot.workspace.counts.entry_count > envelope.max_workspace_entries_per_workspace) return error.NoSpaceLeft;
     }
 
     for (&workspaces.snapshots.slots) |*slot| {
@@ -1013,21 +1038,21 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.Workspace
     try writePrincipal(writer, record.owner);
     try writeText(writer, record.labelSlice());
     try writer.writeU32(record.generation);
-    try writer.writeU16(@intCast(record.path_index.entry_count));
-    for (record.path_index.entries[0..record.path_index.entry_count]) |entry| {
+    try writer.writeU16(@intCast(record.counts.entry_count));
+    for (record.path_index.entries[0..record.counts.entry_count]) |entry| {
         try writeEntry(writer, entry);
     }
-    try writer.writeU16(@intCast(record.mutation_log.entry_mutation_count));
-    for (record.mutation_log.entriesConst()[0..record.mutation_log.entry_mutation_count]) |mutation| {
+    try writer.writeU16(@intCast(record.counts.entry_mutation_count));
+    for (record.mutation_log.entriesConst()[0..record.counts.entry_mutation_count]) |mutation| {
         try writer.writeU32(mutation.generation);
         try writeEntry(writer, mutation.entry);
     }
-    try writer.writeU16(@intCast(record.share_table.share_grant_count));
-    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
+    try writer.writeU16(@intCast(record.counts.share_grant_count));
+    for (record.share_table.share_grants[0..record.counts.share_grant_count]) |grant| {
         try writeShareGrant(writer, grant);
     }
-    try writer.writeU16(@intCast(record.recoverable_deletes.deleted_count));
-    for (record.recoverable_deletes.deleted_entries[0..record.recoverable_deletes.deleted_count]) |entry| {
+    try writer.writeU16(@intCast(record.counts.deleted_count));
+    for (record.recoverable_deletes.deleted_entries[0..record.counts.deleted_count]) |entry| {
         try writeEntry(writer, entry);
     }
 }
@@ -1146,60 +1171,56 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
         return error.NoSpaceLeft;
     };
 
-    const previous_entry_count = slot.workspace.path_index.entry_count;
-    const previous_mutation_count = slot.workspace.mutation_log.entry_mutation_count;
-    const previous_share_grant_count = slot.workspace.share_table.share_grant_count;
+    const previous_entry_count = slot.workspace.counts.entry_count;
+    const previous_mutation_count = slot.workspace.counts.entry_mutation_count;
+    const previous_share_grant_count = slot.workspace.counts.share_grant_count;
     const previous_staged_entry_count = slot.workspace.staging.staged_entry_count;
     const previous_mutation_tail = @min(
         previous_mutation_count + previous_staged_entry_count,
         workspace.MAX_WORKSPACE_ENTRY_MUTATIONS,
     );
-    const previous_deleted_count = slot.workspace.recoverable_deletes.deleted_count;
+    const previous_deleted_count = slot.workspace.counts.deleted_count;
     slot.workspace.id = workspace_id;
     slot.workspace.owner = try readPrincipal(&reader);
     readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
     slot.workspace.generation = try reader.readU32();
-    slot.workspace.path_index.entry_count = @intCast(try reader.readU16());
-    if (slot.workspace.path_index.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
-    for (0..slot.workspace.path_index.entry_count) |entry_index| {
+    slot.workspace.counts.entry_count = try readBoundedCount(workspace.WorkspaceEntryCount, &reader, workspace.MAX_WORKSPACE_ENTRIES);
+    for (0..slot.workspace.counts.entry_count) |entry_index| {
         slot.workspace.path_index.entries[entry_index] = try readEntry(&reader);
     }
-    if (slot.workspace.path_index.entry_count < previous_entry_count) {
-        for (slot.workspace.path_index.entries[slot.workspace.path_index.entry_count..previous_entry_count]) |*entry| {
+    if (slot.workspace.counts.entry_count < previous_entry_count) {
+        for (slot.workspace.path_index.entries[slot.workspace.counts.entry_count..previous_entry_count]) |*entry| {
             entry.* = .{};
         }
     }
-    slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
-    if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+    slot.workspace.counts.entry_mutation_count = try readBoundedCount(workspace.WorkspaceMutationCount, &reader, workspace.MAX_WORKSPACE_ENTRY_MUTATIONS);
     const mutations = slot.workspace.mutation_log.entries();
-    for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
+    for (0..slot.workspace.counts.entry_mutation_count) |mutation_index| {
         mutations[mutation_index] = .{
             .generation = try reader.readU32(),
             .entry = try readEntry(&reader),
         };
     }
-    if (slot.workspace.mutation_log.entry_mutation_count < previous_mutation_tail) {
-        for (mutations[slot.workspace.mutation_log.entry_mutation_count..previous_mutation_tail]) |*mutation| {
+    if (slot.workspace.counts.entry_mutation_count < previous_mutation_tail) {
+        for (mutations[slot.workspace.counts.entry_mutation_count..previous_mutation_tail]) |*mutation| {
             mutation.* = .{};
         }
     }
-    slot.workspace.share_table.share_grant_count = @intCast(try reader.readU16());
-    if (slot.workspace.share_table.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
-    for (0..slot.workspace.share_table.share_grant_count) |grant_index| {
+    slot.workspace.counts.share_grant_count = try readBoundedCount(workspace.WorkspaceShareGrantCount, &reader, workspace.MAX_SHARE_GRANTS);
+    for (0..slot.workspace.counts.share_grant_count) |grant_index| {
         slot.workspace.share_table.share_grants[grant_index] = try readShareGrant(&reader);
     }
-    if (slot.workspace.share_table.share_grant_count < previous_share_grant_count) {
-        for (slot.workspace.share_table.share_grants[slot.workspace.share_table.share_grant_count..previous_share_grant_count]) |*grant| {
+    if (slot.workspace.counts.share_grant_count < previous_share_grant_count) {
+        for (slot.workspace.share_table.share_grants[slot.workspace.counts.share_grant_count..previous_share_grant_count]) |*grant| {
             grant.* = .{ .principal_id = .{ .kind = .service, .serial = 0 } };
         }
     }
-    slot.workspace.recoverable_deletes.deleted_count = @intCast(try reader.readU16());
-    if (slot.workspace.recoverable_deletes.deleted_count > workspace.MAX_RECOVERABLE_DELETES) return error.CorruptImage;
-    for (0..slot.workspace.recoverable_deletes.deleted_count) |entry_index| {
+    slot.workspace.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, &reader, workspace.MAX_RECOVERABLE_DELETES);
+    for (0..slot.workspace.counts.deleted_count) |entry_index| {
         slot.workspace.recoverable_deletes.deleted_entries[entry_index] = try readEntry(&reader);
     }
-    if (slot.workspace.recoverable_deletes.deleted_count < previous_deleted_count) {
-        for (slot.workspace.recoverable_deletes.deleted_entries[slot.workspace.recoverable_deletes.deleted_count..previous_deleted_count]) |*entry| {
+    if (slot.workspace.counts.deleted_count < previous_deleted_count) {
+        for (slot.workspace.recoverable_deletes.deleted_entries[slot.workspace.counts.deleted_count..previous_deleted_count]) |*entry| {
             entry.* = .{};
         }
     }
@@ -1220,8 +1241,7 @@ fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload:
     readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
     try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
     workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
-    workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
-    if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
+    workspaces.snapshots.slots[slot_index].snapshot.entry_count = try readBoundedCount(u8, &reader, workspace.MAX_WORKSPACE_ENTRIES);
 }
 
 fn serializeCheckpointRecord(
@@ -1392,28 +1412,24 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         slot.workspace.owner = try readPrincipal(&reader);
         readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
         slot.workspace.generation = try reader.readU32();
-        slot.workspace.path_index.entry_count = @intCast(try reader.readU16());
-        if (slot.workspace.path_index.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
-        for (0..slot.workspace.path_index.entry_count) |entry_index| {
+        slot.workspace.counts.entry_count = try readBoundedCount(workspace.WorkspaceEntryCount, &reader, workspace.MAX_WORKSPACE_ENTRIES);
+        for (0..slot.workspace.counts.entry_count) |entry_index| {
             slot.workspace.path_index.entries[entry_index] = try readEntry(&reader);
         }
-        slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
-        if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+        slot.workspace.counts.entry_mutation_count = try readBoundedCount(workspace.WorkspaceMutationCount, &reader, workspace.MAX_WORKSPACE_ENTRY_MUTATIONS);
         const mutations = slot.workspace.mutation_log.entries();
-        for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
+        for (0..slot.workspace.counts.entry_mutation_count) |mutation_index| {
             mutations[mutation_index] = .{
                 .generation = try reader.readU32(),
                 .entry = try readEntry(&reader),
             };
         }
-        slot.workspace.share_table.share_grant_count = @intCast(try reader.readU16());
-        if (slot.workspace.share_table.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
-        for (0..slot.workspace.share_table.share_grant_count) |grant_index| {
+        slot.workspace.counts.share_grant_count = try readBoundedCount(workspace.WorkspaceShareGrantCount, &reader, workspace.MAX_SHARE_GRANTS);
+        for (0..slot.workspace.counts.share_grant_count) |grant_index| {
             slot.workspace.share_table.share_grants[grant_index] = try readShareGrant(&reader);
         }
-        slot.workspace.recoverable_deletes.deleted_count = @intCast(try reader.readU16());
-        if (slot.workspace.recoverable_deletes.deleted_count > workspace.MAX_RECOVERABLE_DELETES) return error.CorruptImage;
-        for (0..slot.workspace.recoverable_deletes.deleted_count) |entry_index| {
+        slot.workspace.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, &reader, workspace.MAX_RECOVERABLE_DELETES);
+        for (0..slot.workspace.counts.deleted_count) |entry_index| {
             slot.workspace.recoverable_deletes.deleted_entries[entry_index] = try readEntry(&reader);
         }
     }
@@ -1427,8 +1443,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
         try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
         workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
-        workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
-        if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
+        workspaces.snapshots.slots[slot_index].snapshot.entry_count = try readBoundedCount(u8, &reader, workspace.MAX_WORKSPACE_ENTRIES);
     }
 }
 
@@ -1779,22 +1794,22 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
         .owner = .{ .kind = .user, .serial = 41 },
         .label = "live-workspace",
     });
-    live.path_index.entry_count = 2;
+    live.counts.entry_count = 2;
     live.path_index.entries[0] = try workspace.Entry.init("documents/keep.md", ids.object(1), ids.version(1), .document);
     live.path_index.entries[1] = try workspace.Entry.init("documents/retired.md", ids.object(2), ids.version(2), .document);
-    live.mutation_log.entry_mutation_count = 2;
+    live.counts.entry_mutation_count = 2;
     live.mutation_log.entries()[0] = .{ .generation = 1, .entry = live.path_index.entries[0] };
     live.mutation_log.entries()[1] = .{ .generation = 2, .entry = live.path_index.entries[1] };
-    live.share_table.share_grant_count = 2;
+    live.counts.share_grant_count = 2;
     live.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 42 } };
     live.share_table.share_grants[1] = .{ .principal_id = .{ .kind = .user, .serial = 43 } };
-    live.recoverable_deletes.deleted_count = 2;
+    live.counts.deleted_count = 2;
     live.recoverable_deletes.deleted_entries[0] = live.path_index.entries[0];
     live.recoverable_deletes.deleted_entries[1] = live.path_index.entries[1];
     live.staging.transaction_open = true;
     live.staging.staged_entry_count = 1;
     live.staging.staged_effective_entry_count = 2;
-    live.mutation_log.entries()[live.mutation_log.entry_mutation_count] = .{
+    live.mutation_log.entries()[live.counts.entry_mutation_count] = .{
         .entry = try workspace.Entry.init("documents/staged-secret.md", ids.object(3), ids.version(3), .document),
     };
 
@@ -1806,13 +1821,13 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
         .label = "replacement-workspace",
     });
     replacement.generation = 7;
-    replacement.path_index.entry_count = 1;
+    replacement.counts.entry_count = 1;
     replacement.path_index.entries[0] = try workspace.Entry.init("documents/current.md", ids.object(4), ids.version(4), .document);
-    replacement.mutation_log.entry_mutation_count = 1;
+    replacement.counts.entry_mutation_count = 1;
     replacement.mutation_log.entries()[0] = .{ .generation = 7, .entry = replacement.path_index.entries[0] };
-    replacement.share_table.share_grant_count = 1;
+    replacement.counts.share_grant_count = 1;
     replacement.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 44 } };
-    replacement.recoverable_deletes.deleted_count = 1;
+    replacement.counts.deleted_count = 1;
     replacement.recoverable_deletes.deleted_entries[0] = replacement.path_index.entries[0];
 
     const payload = try allocator.alloc(u8, max_payload_bytes);
@@ -1823,7 +1838,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
 
     try std.testing.expectEqualStrings("replacement-workspace", live.labelSlice());
     try std.testing.expectEqual(@as(u32, 7), live.generation);
-    try std.testing.expectEqual(@as(usize, 1), live.path_index.entry_count);
+    try std.testing.expectEqual(@as(usize, 1), live.counts.entry_count);
     try std.testing.expectEqualStrings("documents/current.md", live.path_index.entries[0].pathSlice());
     try std.testing.expectEqualDeep(workspace.Entry{}, live.path_index.entries[1]);
     try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[1]);

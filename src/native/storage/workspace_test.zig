@@ -326,7 +326,7 @@ test "structural workspace commits scrub the full inactive Merkle tail" {
     const poisoned_leaf = record.path_index.root_address;
     const zero_leaf = workspace_merkle.zeroRootAddress();
     try std.testing.expect(!std.mem.eql(u8, &poisoned_leaf, &zero_leaf));
-    for (record.path_index.leaf_hashes[record.path_index.entry_count..]) |*leaf_hash| {
+    for (record.path_index.leaf_hashes[record.counts.entry_count..]) |*leaf_hash| {
         leaf_hash.* = poisoned_leaf;
     }
 
@@ -336,9 +336,10 @@ test "structural workspace commits scrub the full inactive Merkle tail" {
     _ = try directory.commit(workspace.id, 48);
 
     const entries_after_structural_commit = try directory.entries(workspace.id);
-    const index_after = &directory.find(workspace.id).?.path_index;
+    const record_after = directory.find(workspace.id).?;
+    const index_after = &record_after.path_index;
     try std.testing.expectEqual(workspaceRootAddress(entries_after_structural_commit), index_after.root_address);
-    for (index_after.leaf_hashes[index_after.entry_count..]) |leaf_hash| {
+    for (index_after.leaf_hashes[record_after.counts.entry_count..]) |leaf_hash| {
         try std.testing.expectEqual(zero_leaf, leaf_hash);
     }
 }
@@ -626,7 +627,7 @@ test "aborting a transaction discards staged entries and reopens the workspace" 
     try directory.beginTransaction(notes.id);
     try directory.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try directory.commit(notes.id, 11);
-    try std.testing.expectEqual(@as(usize, 1), notes.mutation_log.entry_mutation_count);
+    try std.testing.expectEqual(@as(usize, 1), notes.counts.entry_mutation_count);
     try std.testing.expectEqualStrings("documents/notes.md", notes.mutation_log.entriesConst()[0].entry.pathSlice());
     try std.testing.expectEqualDeep(workspace_model.EntryMutation{}, notes.mutation_log.entriesConst()[1]);
     _ = try directory.resolve(notes.id, "documents/notes.md");
@@ -642,7 +643,7 @@ test "workspace staging is bounded by the unused mutation-log tail" {
         .owner = .{ .kind = .user, .serial = 2 },
         .label = "bounded-staging",
     });
-    workspace.mutation_log.entry_mutation_count = MAX_WORKSPACE_ENTRY_MUTATIONS - 1;
+    workspace.counts.entry_mutation_count = MAX_WORKSPACE_ENTRY_MUTATIONS - 1;
 
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "documents/last.md", ids.object(1), ids.version(1), .document);

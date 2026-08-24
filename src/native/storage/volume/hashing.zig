@@ -10,22 +10,22 @@ pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) volume_error
     hash = hashPrincipal(hash, record.owner);
     hash = hashBytes(hash, record.labelSlice());
     hash = native_util.fnv1a64AppendU32LittleEndian(hash, record.generation);
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.path_index.entry_count));
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.entry_count));
     hash = hashBytes(hash, &record.path_index.root_address);
 
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.mutation_log.entry_mutation_count));
-    for (record.mutation_log.entriesConst()[0..record.mutation_log.entry_mutation_count]) |mutation| {
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.entry_mutation_count));
+    for (record.mutation_log.entriesConst()[0..record.counts.entry_mutation_count]) |mutation| {
         hash = native_util.fnv1a64AppendU32LittleEndian(hash, mutation.generation);
         hash = hashEntry(hash, mutation.entry);
     }
 
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.share_table.share_grant_count));
-    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.share_grant_count));
+    for (record.share_table.share_grants[0..record.counts.share_grant_count]) |grant| {
         hash = hashShareGrant(hash, grant);
     }
 
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.recoverable_deletes.deleted_count));
-    for (record.recoverable_deletes.deleted_entries[0..record.recoverable_deletes.deleted_count]) |entry| {
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.deleted_count));
+    for (record.recoverable_deletes.deleted_entries[0..record.counts.deleted_count]) |entry| {
         hash = hashEntry(hash, entry);
     }
     return hash;

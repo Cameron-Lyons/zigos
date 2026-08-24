@@ -1094,7 +1094,7 @@ fn snapshotId(value: anytype) ids.SnapshotId {
 
 fn shareSlotAvailable(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) bool {
     if (workspace.shareGrantSlotIndex(record, principal_id) != null) return true;
-    return record.share_table.share_grant_count < workspace.MAX_SHARE_GRANTS;
+    return record.counts.share_grant_count < workspace.MAX_SHARE_GRANTS;
 }
 
 fn findGrantInRecord(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) ?workspace.ShareGrant {
@@ -1167,5 +1167,5 @@ fn auditVisibilityRank(visibility: workspace.AuditVisibility) u8 {
 
 fn shareAuditGeneration(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) u32 {
     if (workspace.shareGrantSlotIndex(record, principal_id)) |index| return @intCast(index + 1);
-    return @intCast(record.share_table.share_grant_count + 1);
+    return @intCast(record.counts.share_grant_count + 1);
 }
