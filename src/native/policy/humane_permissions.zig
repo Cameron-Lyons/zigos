@@ -244,19 +244,20 @@ pub fn revocationHint(kind: manifest.PermissionKind) []const u8 {
 
 fn appendRights(buffer: []u8, used: *usize, rights: capability.CapabilityRights) RenderError!void {
     var first = true;
-    try appendRight(buffer, used, &first, rights.has(.object_read) or rights.has(.contacts_read), "read");
-    try appendRight(buffer, used, &first, rights.has(.object_write), "write");
-    try appendRight(buffer, used, &first, rights.has(.device_use), "use device");
-    try appendRight(buffer, used, &first, rights.has(.clipboard_read), "read clipboard");
-    try appendRight(buffer, used, &first, rights.has(.clipboard_write), "write clipboard");
-    try appendRight(buffer, used, &first, rights.has(.sensor_read), "read sensor");
-    try appendRight(buffer, used, &first, rights.has(.background_run), "run in background");
-    try appendRight(buffer, used, &first, rights.has(.network_local), "local network");
-    try appendRight(buffer, used, &first, rights.has(.network_remote), "remote network");
-    try appendRight(buffer, used, &first, rights.has(.ipc_peer), "peer task");
-    try appendRight(buffer, used, &first, rights.has(.location_read), "read location");
-    try appendRight(buffer, used, &first, rights.has(.screen_capture), "capture screen");
-    try appendRight(buffer, used, &first, rights.has(.notification_post), "post notifications");
+    const bits = rights.toBits();
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .object_read) or capability.bitsContainRight(bits, .contacts_read), "read");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .object_write), "write");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .device_use), "use device");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .clipboard_read), "read clipboard");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .clipboard_write), "write clipboard");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .sensor_read), "read sensor");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .background_run), "run in background");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .network_local), "local network");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .network_remote), "remote network");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .ipc_peer), "peer task");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .location_read), "read location");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .screen_capture), "capture screen");
+    try appendRight(buffer, used, &first, capability.bitsContainRight(bits, .notification_post), "post notifications");
     if (first) try appendText(buffer, used, "none");
 }
 
