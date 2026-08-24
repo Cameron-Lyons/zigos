@@ -1,19 +1,19 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 
 pub const MAX_SESSIONS: usize = 16;
-pub const BOUNDED_SESSION_SCAN = true;
+pub const DIRECT_SESSION_LOOKUP = true;
 pub const RECLAIMS_INACTIVE_SESSION_SLOTS = true;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 1_440;
 
 pub const Error = event_ledger.Error || error{
     BackgroundCaptureDenied,
     CaptureBudgetExceeded,
-    CaptureSessionIdExhausted,
     CaptureSessionBindingMismatch,
     CaptureSessionExpired,
     CaptureSessionNotFound,
@@ -27,6 +27,8 @@ pub const Error = event_ledger.Error || error{
     SubjectMismatch,
     TaskMismatch,
 };
+
+const SessionHandle = indexed_arena.GenerationalHandle("SensitiveCaptureSession");
 
 pub const CaptureKind = enum(u8) {
     camera,
@@ -111,7 +113,6 @@ const Slot = struct {
 };
 
 pub const Service = struct {
-    next_session_id: u64 = 1,
     slots: [MAX_SESSIONS]Slot = [_]Slot{.{}} ** MAX_SESSIONS,
     session_count: u8 = 0,
     next_reusable_slot: u8 = 0,
@@ -165,15 +166,11 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const session_id = self.next_session_id;
-        if (session_id == 0) {
-            try recordStart(ledger, request, 0, false);
-            return error.CaptureSessionIdExhausted;
-        }
         const slot_index = self.availableSessionSlot(request.now_ticks) orelse {
             try recordStart(ledger, request, 0, false);
             return error.CaptureTableFull;
         };
+        const session_id = self.nextSessionId(slot_index);
         try recordStart(ledger, request, session_id, true);
         const slot = &self.slots[slot_index];
         if (slot.in_use) {
@@ -201,7 +198,6 @@ pub const Service = struct {
             .sensitivity = request.sensitivity,
         };
         self.accountActiveSession(&slot.session);
-        self.next_session_id +%= 1;
         return &slot.session;
     }
 
@@ -264,10 +260,10 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, session_id: u64) ?*Session {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.session.id == session_id) return &slot.session;
-        }
-        return null;
+        const slot_index = sessionSlotIndex(session_id) orelse return null;
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.session.id != session_id) return null;
+        return &slot.session;
     }
 
     pub fn sessionCount(self: *const Service) usize {
@@ -319,6 +315,13 @@ pub const Service = struct {
         return null;
     }
 
+    fn nextSessionId(self: *const Service, slot_index: usize) u64 {
+        const current_generation = (SessionHandle{ .value = self.slots[slot_index].session.id }).generation();
+        const incremented = current_generation +% 1;
+        const generation = if (incremented == 0) 1 else incremented;
+        return SessionHandle.fromParts(slot_index, generation).value;
+    }
+
     fn accountActiveSession(self: *Service, session: *const Session) void {
         if (!session.active or session.revoked) return;
         self.active_session_count += 1;
@@ -341,6 +344,13 @@ pub const Service = struct {
         if (revoked) session.revoked = true;
     }
 };
+
+fn sessionSlotIndex(session_id: u64) ?usize {
+    const handle = SessionHandle{ .value = session_id };
+    if (handle.isZero()) return null;
+    const slot_index = handle.slotIndex();
+    return if (slot_index < MAX_SESSIONS) slot_index else null;
+}
 
 fn captureKindIndex(kind: CaptureKind) usize {
     return @intFromEnum(kind);
@@ -746,7 +756,7 @@ test "sensitive capture broker requires foreground visible leased sessions and r
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=sensitive_capture") != null);
 }
 
-test "sensitive capture session ids stop at exhaustion" {
+test "sensitive capture sessions use direct generational handles" {
     const signing = @import("../core/signing.zig");
 
     var policies = policy_object.Directory.init();
@@ -768,7 +778,6 @@ test "sensitive capture session ids stop at exhaustion" {
 
     const subjects = policy_object.SubjectSet{ .user_id = user.serial };
     var service = Service.init();
-    service.next_session_id = std.math.maxInt(u64);
 
     const first = try service.start(&policies, subjects, .{
         .subject = app,
@@ -782,11 +791,11 @@ test "sensitive capture session ids stop at exhaustion" {
         .indicator_visible = true,
         .detail = "private camera frame allowed",
     }, null);
-    try std.testing.expectEqual(std.math.maxInt(u64), first.id);
-    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
+    try std.testing.expectEqual(@as(usize, 0), (SessionHandle{ .value = first.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 1), (SessionHandle{ .value = first.id }).generation());
     try std.testing.expect(service.find(0) == null);
 
-    try std.testing.expectError(error.CaptureSessionIdExhausted, service.start(&policies, subjects, .{
+    const second = try service.start(&policies, subjects, .{
         .subject = app,
         .task_id = 44,
         .device_id = 8,
@@ -797,9 +806,11 @@ test "sensitive capture session ids stop at exhaustion" {
         .sample_budget = 1,
         .indicator_visible = true,
         .detail = "private camera frame allowed",
-    }, null));
-    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
-    try std.testing.expectEqual(@as(usize, 1), service.activeSessionCount());
-    try std.testing.expectEqual(@as(usize, 1), service.sessionCount());
-    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
+    }, null);
+    try std.testing.expectEqual(@as(usize, 1), (SessionHandle{ .value = second.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 1), (SessionHandle{ .value = second.id }).generation());
+    try std.testing.expectEqual(@as(usize, 2), service.activeSessionCount());
+    try std.testing.expectEqual(@as(usize, 2), service.sessionCount());
+    try std.testing.expectEqual(first.id, service.find(first.id).?.id);
+    try std.testing.expectEqual(second.id, service.find(second.id).?.id);
 }

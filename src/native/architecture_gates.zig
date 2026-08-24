@@ -469,7 +469,7 @@ pub const indexed_hot_path_tables = .{
         .keeps_fixed_state_within_ceiling = @sizeOf(secure_pasteboard.Service) <= secure_pasteboard.SERVICE_SIZE_CEILING_BYTES,
     },
     .sensitive_capture_service = .{
-        .uses_bounded_session_scan = sensitive_capture_service.BOUNDED_SESSION_SCAN,
+        .uses_direct_session_lookup = sensitive_capture_service.DIRECT_SESSION_LOOKUP,
         .reclaims_inactive_session_slots = sensitive_capture_service.RECLAIMS_INACTIVE_SESSION_SLOTS,
         .keeps_fixed_state_within_ceiling = @sizeOf(sensitive_capture_service.Service) <= sensitive_capture_service.SERVICE_SIZE_CEILING_BYTES,
         .tracks_active_sessions = @hasField(sensitive_capture_service.Service, "active_session_count"),
