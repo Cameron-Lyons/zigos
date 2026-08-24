@@ -22,6 +22,7 @@ pub fn Main(comptime mode: EntryMode) type {
                 .contract => runtime.zigos_userspace_contract_main(
                     build_options.run_mmu_isolation_probe,
                     build_options.run_nx_isolation_probe,
+                    build_options.run_gp_isolation_probe,
                     build_options.bundle_id,
                     build_options.contract_flags,
                 ),

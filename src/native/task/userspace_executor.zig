@@ -48,9 +48,22 @@ pub const ExecutionOutcome = enum(u8) {
     unavailable,
     yielded,
     wait_for_event,
+    faulted,
 
     pub fn handedOff(self: ExecutionOutcome) bool {
         return self != .unavailable;
+    }
+};
+
+pub const UserException = struct {
+    vector: u8,
+    error_code: u32,
+    instruction_pointer: u64,
+
+    pub fn reasonFingerprint(self: UserException) u64 {
+        return self.instruction_pointer ^
+            (@as(u64, self.error_code) << 32) ^
+            @as(u64, self.vector);
     }
 };
 
@@ -146,6 +159,7 @@ const PAGE_SIZE: usize = 4096;
 pub const USER_RFLAGS_RESERVED: u64 = 1 << 1;
 pub const DEFAULT_USER_RFLAGS: u64 = USER_RFLAGS_RESERVED | (1 << 9);
 const USERSPACE_TRAP_VECTOR: u8 = 129;
+const GENERAL_PROTECTION_FAULT_VECTOR: u8 = 13;
 const PAGE_FAULT_VECTOR: u8 = 14;
 const TRAP_STACK_BYTES: usize = units.kibibytes(48);
 const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
@@ -352,6 +366,7 @@ pub const Executor = struct {
     last_trap_counter: u32 = 0,
     last_yield_disposition: userspace_bootstrap_mailbox.YieldDisposition = .runnable,
     last_yield_ui_revision: u64 = 0,
+    last_user_exception: ?UserException = null,
     last_fault_task_id: u64 = 0,
     last_fault_address_space_id: u64 = 0,
     last_fault_address: u32 = 0,
@@ -404,6 +419,7 @@ pub const Executor = struct {
         if (self.initialized) return;
         if (!trap_handler_registered) {
             freestanding.isr.registerHandler(USERSPACE_TRAP_VECTOR, userspaceTrapHandler);
+            freestanding.isr.registerHandler(GENERAL_PROTECTION_FAULT_VECTOR, userspaceGeneralProtectionFaultHandler);
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
             trap_handler_registered = true;
         }
@@ -488,6 +504,7 @@ pub const Executor = struct {
         self.last_trap_instruction_pointer = 0;
         self.last_trap_stack_pointer = 0;
         self.last_trap_counter = 0;
+        self.last_user_exception = null;
         self.last_fault_task_id = 0;
         self.last_fault_address_space_id = 0;
         self.last_fault_address = 0;
@@ -549,6 +566,10 @@ pub const Executor = struct {
 
     pub fn lastYieldUiRevision(self: *const Executor) u64 {
         return self.last_yield_ui_revision;
+    }
+
+    pub fn lastUserException(self: *const Executor) ?UserException {
+        return self.last_user_exception;
     }
 
     pub fn bootstrapMailboxSnapshot(
@@ -650,6 +671,7 @@ pub const Executor = struct {
         self.handoff_completed = false;
         self.last_yield_disposition = .runnable;
         self.last_yield_ui_revision = 0;
+        self.last_user_exception = null;
         zigos_userspace_resume_requested = 0;
 
         activateMappingForDispatch(mapping, mailbox_update);
@@ -669,11 +691,13 @@ pub const Executor = struct {
         publishRootActiveTaskId(0);
         zigos_userspace_resume_requested = 0;
 
-        if (self.handoff_completed and !self.probe_marker_printed) {
+        const user_faulted = self.last_user_exception != null;
+        if (!user_faulted and self.handoff_completed and !self.probe_marker_printed) {
             common.printBootMarker(boot_markers.userspace_exec_probe_ok);
             self.probe_marker_printed = true;
         }
-        if (self.handoff_completed and
+        if (!user_faulted and
+            self.handoff_completed and
             mapping.yield_count >= 2 and
             mapping.last_user_counter >= 2 and
             !self.resume_marker_printed)
@@ -683,6 +707,7 @@ pub const Executor = struct {
         }
         self.releaseRetiredMappingAfterHandoff(completed_mapping_handle);
         if (!self.handoff_completed) return .unavailable;
+        if (user_faulted) return .faulted;
         return switch (self.last_yield_disposition) {
             .runnable => .yielded,
             .wait_for_event => .wait_for_event,
@@ -1279,6 +1304,23 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
 
+    freestanding.paging.switchToKernelAddressSpace();
+}
+
+fn userspaceGeneralProtectionFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
+    const executor = registered_executor orelse freestanding.isr.haltUnhandledException(frame);
+    if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) {
+        freestanding.isr.haltUnhandledException(frame);
+    }
+    _ = executor.active_mapping orelse
+        native_util.impossibleByInvariant("active userspace task has no materialized mapping");
+    executor.last_user_exception = .{
+        .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+        .error_code = @intCast(frame.err_code),
+        .instruction_pointer = @intCast(frame.eip),
+    };
+    executor.handoff_completed = true;
+    zigos_userspace_resume_requested = 1;
     freestanding.paging.switchToKernelAddressSpace();
 }
 
@@ -1998,4 +2040,23 @@ test "executor distinguishes a present user NX instruction-fetch fault" {
     executor.last_fault_address = 0x4000_3000;
     executor.last_fault_error_code = 0x14;
     try std.testing.expect(!executor.consumeUserExecuteFault(7, 42, 0x4000_3000));
+}
+
+test "userspace exception records bind vector error and instruction context" {
+    const baseline = UserException{
+        .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+        .error_code = 0,
+        .instruction_pointer = 0x4000_3000,
+    };
+    try std.testing.expect(baseline.reasonFingerprint() != (UserException{
+        .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+        .error_code = 1,
+        .instruction_pointer = 0x4000_3000,
+    }).reasonFingerprint());
+    try std.testing.expect(baseline.reasonFingerprint() != (UserException{
+        .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+        .error_code = 0,
+        .instruction_pointer = 0x4000_3001,
+    }).reasonFingerprint());
+    try std.testing.expect(ExecutionOutcome.faulted.handedOff());
 }

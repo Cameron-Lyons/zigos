@@ -34,6 +34,8 @@ const FOREGROUND_DEADLINE_DELTA_TICKS: u64 = 5_000;
 const MEDIA_EXPORT_DEADLINE_DELTA_TICKS: u64 = 20_000;
 const BACKGROUND_DEADLINE_DELTA_TICKS: u64 = 50_000;
 const BATCH_DEADLINE_DELTA_TICKS: u64 = 100_000;
+const USER_EXCEPTION_CRASH_SERVICE_ID: u64 = 0;
+const USER_EXCEPTION_REDACTION_POLICY_VERSION: u16 = 1;
 const TEST_TASK_MEMORY_BYTES: usize = 1024;
 const TEST_TASK_ENDPOINT_SLOTS: u16 = 2;
 const TEST_TASK_SHARED_MEMORY_BYTES: usize = 1024;
@@ -575,7 +577,9 @@ pub const Scheduler = struct {
             &slot.mapping_handle
         else
             &uncached_mapping_handle;
-        return self.executePreparedTask(task, mapping_handle, now_ticks);
+        const outcome = self.executePreparedTask(task, mapping_handle, now_ticks);
+        if (outcome == .faulted) self.containUserException(runtime, task_id, now_ticks);
+        return outcome;
     }
 
     fn executePreparedTask(
@@ -673,6 +677,10 @@ pub const Scheduler = struct {
                 dispatch_memory_bandwidth_units,
             ) catch std.math.maxInt(usize);
             self.accountDispatchResources(dispatch_memory_bandwidth_units, decision);
+            if (outcome == .faulted) {
+                self.containUserException(runtime, task_id, now_ticks);
+                return true;
+            }
             if (builtin.target.os.tag == .freestanding and yielded and !self.active_marker_printed) {
                 common.printBootMarker(boot_markers.userspace_scheduler_active);
                 self.active_marker_printed = true;
@@ -693,6 +701,33 @@ pub const Scheduler = struct {
 
         self.last_dispatch_tick = now_ticks;
         return false;
+    }
+
+    fn containUserException(
+        self: *Scheduler,
+        runtime: *task_runtime.Runtime,
+        task_id: u64,
+        now_ticks: u64,
+    ) void {
+        const exception = self.executor.lastUserException() orelse
+            native_util.impossibleByInvariant("faulted userspace dispatch has no exception record");
+        runtime.recordCrashReport(
+            task_id,
+            USER_EXCEPTION_CRASH_SERVICE_ID,
+            now_ticks,
+            exception.vector,
+            USER_EXCEPTION_REDACTION_POLICY_VERSION,
+            exception.reasonFingerprint(),
+            true,
+        ) catch |err| native_util.impossibleByInvariantError("userspace exception crash report was rejected", err);
+        const terminated = runtime.terminateTask(task_id, now_ticks) catch |err|
+            native_util.impossibleByInvariantError("faulted userspace task termination was rejected", err);
+        if (!terminated) native_util.impossibleByInvariant("faulted userspace task was already terminated");
+        if (self.slots.slotIndexOf(task_id)) |slot_index| {
+            if (!self.unregisterSlotIndex(slot_index)) {
+                native_util.impossibleByInvariant("faulted userspace task disappeared from the scheduler");
+            }
+        }
     }
 
     fn enqueueReadyIndex(
@@ -1425,7 +1460,10 @@ fn deadlineAfterDispatch(class: accelerator_scheduler.ResourceClass, now_ticks: 
 }
 
 fn executionRemainsReady(outcome: userspace_executor.ExecutionOutcome) bool {
-    return outcome != .wait_for_event;
+    return switch (outcome) {
+        .unavailable, .yielded => true,
+        .wait_for_event, .faulted => false,
+    };
 }
 
 fn taskUiPresentationEligible(
@@ -1800,6 +1838,7 @@ test "userspace scheduler parks only explicit event-wait yields" {
     try std.testing.expect(executionRemainsReady(.unavailable));
     try std.testing.expect(executionRemainsReady(.yielded));
     try std.testing.expect(!executionRemainsReady(.wait_for_event));
+    try std.testing.expect(!executionRemainsReady(.faulted));
 }
 
 test "userspace scheduler dispatches resource ready queues by priority" {

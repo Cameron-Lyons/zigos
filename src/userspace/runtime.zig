@@ -127,6 +127,7 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
             ui_revision: u64,
         ) callconv(.c) u32;
         extern fn zigos_probe_nx(target: usize) callconv(.c) void;
+        extern fn zigos_probe_gp() callconv(.c) void;
 
         fn call(request_addr: usize, response_addr: usize, response_len: usize) struct {
             status: abi.SyscallStatus,
@@ -144,6 +145,8 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
     }
 else
     struct {
+        fn zigos_probe_gp() void {}
+
         fn call(_: usize, _: usize, _: usize) struct {
             status: abi.SyscallStatus,
             bytes_written: u32,
@@ -168,6 +171,7 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
 pub fn zigos_userspace_contract_main(
     comptime run_mmu_isolation_probe: bool,
     comptime run_nx_isolation_probe: bool,
+    comptime run_gp_isolation_probe: bool,
     comptime bundle_id: []const u8,
     comptime contract_flags: u32,
 ) noreturn {
@@ -193,6 +197,9 @@ pub fn zigos_userspace_contract_main(
     }
     if (comptime run_mmu_isolation_probe) {
         runMmuIsolationProbe(detail);
+    }
+    if (comptime run_gp_isolation_probe) {
+        runGeneralProtectionIsolationProbe();
     }
 
     runSteadyState(
@@ -387,6 +394,11 @@ fn runMmuIsolationProbe(detail: mailbox.Detail) noreturn {
 fn runNxIsolationProbe() void {
     if (builtin.target.os.tag != .freestanding) return;
     freestanding_syscall.zigos_probe_nx(@intFromPtr(&zigos_userspace_bootstrap));
+}
+
+fn runGeneralProtectionIsolationProbe() void {
+    if (builtin.target.os.tag != .freestanding) return;
+    freestanding_syscall.zigos_probe_gp();
 }
 
 fn invalidSyscallPointerStatus() abi.SyscallStatus {
