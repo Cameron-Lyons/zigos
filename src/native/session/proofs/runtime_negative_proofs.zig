@@ -42,6 +42,8 @@ else
 
 const MMU_PROOF_BUNDLE_ID = "zigos.proof.mmu-isolation";
 const GP_PROOF_BUNDLE_ID = "zigos.system.termination-probe";
+const USER_PAGE_FAULT_VECTOR: u8 = 14;
+const PAGE_FAULT_USER_MODE_BIT: u32 = 1 << 2;
 
 var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
 var reboot_proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
@@ -131,7 +133,7 @@ pub fn runFreestandingAndPrint(
     var attempt: usize = 0;
     while (attempt < 8) : (attempt += 1) {
         const outcome = scheduler.executeTask(task_id, attempt);
-        const current = runtime.find(task_id) orelse return false;
+        const current = runtime.findConst(task_id) orelse return false;
 
         if (!saw_syscall_pointer_denial and
             scheduler.executor.observedUserCounterStagePulse(
@@ -153,14 +155,17 @@ pub fn runFreestandingAndPrint(
             saw_user_nx_fault = true;
         }
 
-        if (scheduler.executor.consumeUserPageFault(
-            task_id,
-            current.address_space_id,
-            userspace_bootstrap_mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR,
-        )) {
+        if (outcome == .faulted) {
+            const exception = scheduler.executor.lastUserException() orelse return false;
+            if (exception.vector != USER_PAGE_FAULT_VECTOR or
+                (exception.error_code & PAGE_FAULT_USER_MODE_BIT) == 0)
+            {
+                return false;
+            }
+            if (exception.fault_address != userspace_bootstrap_mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR) return false;
+            if (current.state != .terminated) return false;
             if (!saw_syscall_pointer_denial or !saw_user_nx_fault) return false;
             common.printBootMarker(boot_markers.runtime_proof_mmu_user_fault);
-            if (!(runtime.terminateTask(task_id, task_runtime.MAX_TASKS + 10) catch return false)) return false;
             if (scheduler.executor.materializedCount() != baseline_mappings) return false;
             if (paging.frameStats().allocated != baseline_frames) return false;
             common.printBootMarker(boot_markers.runtime_proof_address_space_reclamation);

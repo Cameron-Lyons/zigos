@@ -59,11 +59,13 @@ pub const UserException = struct {
     vector: u8,
     error_code: u32,
     instruction_pointer: u64,
+    fault_address: u64 = 0,
 
     pub fn reasonFingerprint(self: UserException) u64 {
-        return self.instruction_pointer ^
-            (@as(u64, self.error_code) << 32) ^
-            @as(u64, self.vector);
+        var fingerprint = native_util.fnv1a64AppendByte(native_util.FNV1A_64_OFFSET_BASIS, self.vector);
+        fingerprint = native_util.fnv1a64AppendU32LittleEndian(fingerprint, self.error_code);
+        fingerprint = native_util.fnv1a64AppendU64LittleEndian(fingerprint, self.instruction_pointer);
+        return native_util.fnv1a64AppendU64LittleEndian(fingerprint, self.fault_address);
     }
 };
 
@@ -1359,6 +1361,13 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
         mapping.resume_instruction_pointer = @intCast(frame.eip);
         mapping.resume_stack_pointer = @intCast(frame.useresp);
         captureUserContext64(mapping, frame);
+    } else {
+        executor.last_user_exception = .{
+            .vector = PAGE_FAULT_VECTOR,
+            .error_code = error_code,
+            .instruction_pointer = @intCast(frame.eip),
+            .fault_address = faulting_address,
+        };
     }
 
     executor.handoff_completed = true;
@@ -2058,5 +2067,12 @@ test "userspace exception records bind vector error and instruction context" {
         .error_code = 0,
         .instruction_pointer = 0x4000_3001,
     }).reasonFingerprint());
+    try std.testing.expect(baseline.reasonFingerprint() != (UserException{
+        .vector = PAGE_FAULT_VECTOR,
+        .error_code = 0x4,
+        .instruction_pointer = 0x4000_3000,
+        .fault_address = 0x7000_0000,
+    }).reasonFingerprint());
+    try std.testing.expectEqual(@as(u64, 0), baseline.fault_address);
     try std.testing.expect(ExecutionOutcome.faulted.handedOff());
 }
