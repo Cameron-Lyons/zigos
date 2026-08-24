@@ -415,12 +415,8 @@ pub const Service = struct {
             if (self.active_handle_count == 0) native_util.impossibleByInvariant("secret vault active handle count covers expired replacement");
             self.active_handle_count -= 1;
         }
-        if (!self.handles.removeIndex(retired_slot_index)) {
-            native_util.impossibleByInvariant("secret vault replacement handle has a live slot");
-        }
-        const handle_id = self.handles.reserveHandleAt(retired_slot_index) orelse {
-            native_util.impossibleByInvariant("secret vault replacement reuses its retired handle slot");
-        };
+        const handle_id = self.handles.replaceHandle(.{ .value = retired.id }) orelse
+            native_util.impossibleByInvariant("secret vault replacement keeps its retired handle live");
         self.next_reusable_handle = @intCast((retired_slot_index + 1) % MAX_HANDLES);
         return handle_id;
     }

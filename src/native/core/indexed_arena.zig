@@ -911,6 +911,20 @@ pub fn GenerationalArena(
             return self.removeIndex(slot_index);
         }
 
+        pub fn replaceHandle(self: *Self, handle: Handle) ?Handle {
+            const slot_index = handle.slotIndex();
+            if (!self.handleMatches(slot_index, handle)) return null;
+            return self.replaceIndex(slot_index);
+        }
+
+        pub fn replaceIndex(self: *Self, slot_index: usize) ?Handle {
+            if (slot_index >= capacity or !self.slots[slot_index].in_use) return null;
+            self.slots[slot_index] = Slot{};
+            self.slots[slot_index].in_use = true;
+            self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
+        }
+
         pub fn removeIndex(self: *Self, slot_index: usize) bool {
             if (slot_index >= capacity or !self.slots[slot_index].in_use) return false;
             self.slots[slot_index] = Slot{};
@@ -1714,10 +1728,32 @@ test "generational arena generations wrap without zero" {
 
     const last_generation_handle = arena.reserveHandle().?;
     try std.testing.expectEqual(std.math.maxInt(u32), last_generation_handle.generation());
-    try std.testing.expect(arena.removeHandle(last_generation_handle));
-    const wrapped_handle = arena.reserveHandle().?;
+    const wrapped_handle = arena.replaceHandle(last_generation_handle).?;
     try std.testing.expectEqual(@as(u32, 1), wrapped_handle.generation());
     try std.testing.expect(arena.getByHandle(last_generation_handle) == null);
+    try std.testing.expectEqual(@as(usize, 1), arena.countInUse());
+}
+
+test "generational arena replaces live handles in place" {
+    const Arena = GenerationalArena("TestGenerationalHandle", TestSlot, 3);
+    var arena = Arena.init();
+
+    const original = arena.reserveHandle().?;
+    arena.getByHandle(original).?.record = .{ .id = 41, .owner = 7, .label = "original" };
+    const second = arena.reserveHandle().?;
+    const free_head_before = arena.free_head;
+    const claimed_before = arena.next_unclaimed_index;
+
+    const replacement = arena.replaceHandle(original).?;
+    try std.testing.expectEqual(original.slotIndex(), replacement.slotIndex());
+    try std.testing.expect(!original.eql(replacement));
+    try std.testing.expect(arena.getByHandle(original) == null);
+    try std.testing.expectEqualStrings("", arena.getByHandle(replacement).?.record.label);
+    try std.testing.expect(arena.getByHandle(second) != null);
+    try std.testing.expectEqual(@as(usize, 2), arena.countInUse());
+    try std.testing.expectEqual(free_head_before, arena.free_head);
+    try std.testing.expectEqual(claimed_before, arena.next_unclaimed_index);
+    try std.testing.expect(arena.replaceHandle(original) == null);
 }
 
 test "paged indexed arena uses slab pages and invalidates stale handles" {
