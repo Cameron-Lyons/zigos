@@ -28,6 +28,7 @@ pub const SDK_FIRST_APP_SURFACE_ID: u64 = 61_000;
 pub const MAX_PERMISSION_REVIEW_TEXT: usize = permissions.MAX_REVIEW_TEXT_BYTES;
 pub const COMPACT_SIMULATOR_RESULT_METADATA = true;
 pub const PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES: usize = 4_744;
+pub const LAUNCH_RESULT_SIZE_CEILING_BYTES: usize = 16;
 pub const NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES: usize = 56;
 
 comptime {
@@ -37,7 +38,10 @@ comptime {
         idl.MAX_RECORDS > std.math.maxInt(u8) or
         idl.MAX_DECLARATIONS * 3 > std.math.maxInt(u8) or
         manifest_linter.MAX_ISSUES > std.math.maxInt(u8) or
-        ui.MAX_A11Y_ISSUES > std.math.maxInt(u8))
+        ui.MAX_A11Y_ISSUES > std.math.maxInt(u8) or
+        package_service.MAX_COMPONENTS_PER_BUNDLE > std.math.maxInt(u8) or
+        package_service.MAX_ASSETS_PER_BUNDLE > std.math.maxInt(u8) or
+        package_service.MAX_PERMISSIONS_PER_BUNDLE > std.math.maxInt(u8))
     {
         @compileError("SDK simulator results exceed compact count metadata capacity");
     }
@@ -73,9 +77,9 @@ pub const PermissionReviewResult = struct {
 
 pub const LaunchResult = struct {
     task_id: u64,
-    component_count: usize,
-    asset_count: usize,
-    permission_count: usize,
+    component_count: u8,
+    asset_count: u8,
+    permission_count: u8,
     signed_provenance: bool,
     background_allowed: bool,
     local_only: bool,
@@ -111,6 +115,7 @@ pub const NativeAppHarnessResult = struct {
 
 comptime {
     if (@sizeOf(PermissionReviewResult) > PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES or
+        @sizeOf(LaunchResult) > LAUNCH_RESULT_SIZE_CEILING_BYTES or
         @sizeOf(NativeAppHarnessResult) > NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES)
     {
         @compileError("SDK simulator result exceeds its compact size ceiling");
@@ -348,9 +353,9 @@ pub const Simulator = struct {
         );
         return .{
             .task_id = task.id,
-            .component_count = launch_plan.components.len,
-            .asset_count = launch_plan.assets.len,
-            .permission_count = bundle.requested_permissions.len,
+            .component_count = @intCast(launch_plan.components.len),
+            .asset_count = @intCast(launch_plan.assets.len),
+            .permission_count = @intCast(bundle.requested_permissions.len),
             .signed_provenance = task.launch.signed,
             .background_allowed = task.background_allowed,
             .local_only = task.local_only,
@@ -528,6 +533,9 @@ test "SDK simulator keeps bounded result metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(PermissionReviewResult, "request_count"));
     try std.testing.expectEqual(u8, @FieldType(PermissionReviewResult, "grant_count"));
     try std.testing.expectEqual(u16, @FieldType(PermissionReviewResult, "review_len"));
+    try std.testing.expectEqual(u8, @FieldType(LaunchResult, "component_count"));
+    try std.testing.expectEqual(u8, @FieldType(LaunchResult, "asset_count"));
+    try std.testing.expectEqual(u8, @FieldType(LaunchResult, "permission_count"));
     try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "interface_count"));
     try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "operation_count"));
     try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "record_count"));
@@ -536,6 +544,7 @@ test "SDK simulator keeps bounded result metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "permission_grant_count"));
     try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "accessibility_issue_count"));
     try std.testing.expect(@sizeOf(PermissionReviewResult) <= PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(LaunchResult) <= LAUNCH_RESULT_SIZE_CEILING_BYTES);
     try std.testing.expect(@sizeOf(NativeAppHarnessResult) <= NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES);
 }
 
@@ -570,8 +579,8 @@ test "SDK simulator installs updates rolls back launches and debugs native first
 
         const launched = try sim.launchNativeApp(package.bundle.bundle_id);
         launched_task_ids[index] = launched.task_id;
-        try std.testing.expectEqual(package.bundle.components.len, launched.component_count);
-        try std.testing.expectEqual(package.bundle.assets.len, launched.asset_count);
+        try std.testing.expectEqual(@as(u8, @intCast(package.bundle.components.len)), launched.component_count);
+        try std.testing.expectEqual(@as(u8, @intCast(package.bundle.assets.len)), launched.asset_count);
         try std.testing.expect(launched.signed_provenance);
         try std.testing.expect(launched.background_allowed);
         try std.testing.expect(launched.local_only);
