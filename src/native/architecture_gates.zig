@@ -470,6 +470,9 @@ pub const indexed_hot_path_tables = .{
     },
     .secure_pasteboard = .{
         .uses_bounded_grant_scan = secure_pasteboard.BOUNDED_GRANT_SCAN,
+        .uses_direct_grant_lookup = secure_pasteboard.DIRECT_GRANT_LOOKUP and
+            @hasDecl(secure_pasteboard, "TokenId") and
+            !@hasField(secure_pasteboard.Service, "next_token_id"),
         .reclaims_terminal_grants = secure_pasteboard.RECLAIMS_TERMINAL_GRANTS,
         .stores_compact_grant_lengths = secure_pasteboard.COMPACT_GRANT_LENGTHS,
         .keeps_fixed_state_within_ceiling = @sizeOf(secure_pasteboard.Service) <= secure_pasteboard.SERVICE_SIZE_CEILING_BYTES,
