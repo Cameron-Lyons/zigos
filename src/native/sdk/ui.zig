@@ -5,6 +5,19 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_RENDER_BYTES: usize = 4096;
 pub const MAX_A11Y_NODES: usize = 128;
 pub const MAX_A11Y_ISSUES: usize = 32;
+pub const COMPACT_REVIEW_UI_METADATA = true;
+pub const NODE_SIZE_CEILING_BYTES: usize = 128;
+pub const ACCESSIBILITY_REPORT_SIZE_CEILING_BYTES: usize = 776;
+const AUDIT_STATE_SIZE_CEILING_BYTES: usize = 1_296;
+
+comptime {
+    if (MAX_CHILDREN > std.math.maxInt(u8) or
+        MAX_A11Y_NODES > std.math.maxInt(u8) or
+        MAX_A11Y_ISSUES > std.math.maxInt(u8))
+    {
+        @compileError("SDK review UI state exceeds compact count metadata capacity");
+    }
+}
 
 pub const Role = enum(u8) {
     window,
@@ -45,14 +58,14 @@ pub const Node = struct {
     focus_order: u16 = 0,
     semantic_level: u8 = 0,
     live_region: bool = false,
+    child_count: u8 = 0,
     hint: []const u8 = "",
-    child_count: usize = 0,
     children: [MAX_CHILDREN]*const Node = undefined,
 
     pub fn withChildren(self: Node, children: []const *const Node) Node {
         var copy = self;
-        copy.child_count = @min(children.len, copy.children.len);
-        for (children[0..copy.child_count], 0..) |child, index| {
+        copy.child_count = @intCast(@min(children.len, copy.children.len));
+        for (children[0..@as(usize, copy.child_count)], 0..) |child, index| {
             copy.children[index] = child;
         }
         return copy;
@@ -75,8 +88,8 @@ pub const AccessibilityIssue = struct {
 };
 
 pub const AccessibilityReport = struct {
-    node_count: usize = 0,
-    issue_count: usize = 0,
+    node_count: u8 = 0,
+    issue_count: u8 = 0,
     issues: [MAX_A11Y_ISSUES]AccessibilityIssue = undefined,
 
     pub fn hasErrors(self: *const AccessibilityReport) bool {
@@ -85,7 +98,7 @@ pub const AccessibilityReport = struct {
 
     pub fn count(self: *const AccessibilityReport, code: AccessibilityIssueCode) usize {
         var total: usize = 0;
-        for (self.issues[0..self.issue_count]) |issue| {
+        for (self.issues[0..@as(usize, self.issue_count)]) |issue| {
             if (issue.code == code) total += 1;
         }
         return total;
@@ -174,7 +187,7 @@ fn renderNode(node: *const Node, depth: usize, out: []u8, cursor: *usize) error{
         "id={d} role={s} intent={s} enabled={s} focusable={s} checked={s} level={d} label=\"{s}\" value=\"{s}\" hint=\"{s}\"\n",
         .{ node.id, @tagName(node.role), @tagName(node.intent), yesNo(node.enabled), yesNo(node.focusable), yesNo(node.checked), node.semantic_level, node.label, node.value, node.hint },
     );
-    for (node.children[0..node.child_count]) |child| {
+    for (node.children[0..@as(usize, node.child_count)]) |child| {
         try renderNode(child, depth + 1, out, cursor);
     }
 }
@@ -187,9 +200,18 @@ pub fn audit(root: *const Node) AccessibilityReport {
 
 const AuditState = struct {
     report: AccessibilityReport = .{},
-    seen_count: usize = 0,
+    seen_count: u8 = 0,
     seen_ids: [MAX_A11Y_NODES]u32 = [_]u32{0} ** MAX_A11Y_NODES,
 };
+
+comptime {
+    if (@sizeOf(Node) > NODE_SIZE_CEILING_BYTES or
+        @sizeOf(AccessibilityReport) > ACCESSIBILITY_REPORT_SIZE_CEILING_BYTES or
+        @sizeOf(AuditState) > AUDIT_STATE_SIZE_CEILING_BYTES)
+    {
+        @compileError("SDK review UI state exceeds its compact size ceiling");
+    }
+}
 
 fn auditNode(node: *const Node, state: *AuditState) void {
     if (state.seen_count >= state.seen_ids.len) {
@@ -217,13 +239,13 @@ fn auditNode(node: *const Node, state: *AuditState) void {
         state.report.add(node.id, .heading_level_missing, "headings require a semantic level");
     }
 
-    for (node.children[0..node.child_count]) |child| {
+    for (node.children[0..@as(usize, node.child_count)]) |child| {
         auditNode(child, state);
     }
 }
 
 fn seenId(state: *const AuditState, id: u32) bool {
-    for (state.seen_ids[0..state.seen_count]) |seen| {
+    for (state.seen_ids[0..@as(usize, state.seen_count)]) |seen| {
         if (seen == id) return true;
     }
     return false;
@@ -265,6 +287,16 @@ fn appendFmt(out: []u8, cursor: *usize, comptime fmt: []const u8, args: anytype)
 
 fn yesNo(value: bool) []const u8 {
     return if (value) "yes" else "no";
+}
+
+test "UI review and accessibility records keep bounded metadata compact" {
+    try std.testing.expectEqual(u8, @FieldType(Node, "child_count"));
+    try std.testing.expectEqual(u8, @FieldType(AccessibilityReport, "node_count"));
+    try std.testing.expectEqual(u8, @FieldType(AccessibilityReport, "issue_count"));
+    try std.testing.expectEqual(u8, @FieldType(AuditState, "seen_count"));
+    try std.testing.expect(@sizeOf(Node) <= NODE_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(AccessibilityReport) <= ACCESSIBILITY_REPORT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(AuditState) <= AUDIT_STATE_SIZE_CEILING_BYTES);
 }
 
 test "UI primitives render a stable native tree for simulator snapshots" {

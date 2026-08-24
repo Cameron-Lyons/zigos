@@ -2,6 +2,9 @@ const indexed_arena = @import("core/indexed_arena.zig");
 const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
 const sdk_idl = @import("sdk/idl.zig");
+const sdk_permissions = @import("sdk/permissions.zig");
+const sdk_simulator = @import("sdk/simulator.zig");
+const sdk_ui = @import("sdk/ui.zig");
 const service_registry = @import("services/service_registry.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
 const userspace_scheduler = @import("task/userspace_scheduler.zig");
@@ -156,6 +159,36 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(sdk_idl.Interface) <= sdk_idl.INTERFACE_SIZE_CEILING_BYTES and
             @sizeOf(sdk_idl.Document) <= sdk_idl.DOCUMENT_SIZE_CEILING_BYTES and
             @sizeOf(sdk_idl.GeneratedSource) <= sdk_idl.GENERATED_SOURCE_SIZE_CEILING_BYTES,
+    },
+    .sdk_review = .{
+        .stores_compact_ui_metadata = sdk_ui.COMPACT_REVIEW_UI_METADATA and
+            @FieldType(sdk_ui.Node, "child_count") == u8 and
+            @FieldType(sdk_ui.AccessibilityReport, "node_count") == u8 and
+            @FieldType(sdk_ui.AccessibilityReport, "issue_count") == u8,
+        .stores_compact_permission_metadata = sdk_permissions.COMPACT_PERMISSION_REVIEW_METADATA and
+            @FieldType(sdk_permissions.ReviewPlan, "grant_count") == u8 and
+            @FieldType(sdk_permissions.ReviewPlan, "node_count") == u8 and
+            @FieldType(sdk_permissions.HarnessResult, "required_count") == u8 and
+            @FieldType(sdk_permissions.HarnessResult, "optional_count") == u8 and
+            @FieldType(sdk_permissions.HarnessResult, "denied_required_count") == u8 and
+            @FieldType(sdk_permissions.HarnessResult, "denied_optional_count") == u8,
+        .stores_compact_simulator_results = sdk_simulator.COMPACT_SIMULATOR_RESULT_METADATA and
+            @FieldType(sdk_simulator.PermissionReviewResult, "request_count") == u8 and
+            @FieldType(sdk_simulator.PermissionReviewResult, "grant_count") == u8 and
+            @FieldType(sdk_simulator.PermissionReviewResult, "review_len") == u16 and
+            @FieldType(sdk_simulator.NativeAppHarnessResult, "interface_count") == u8 and
+            @FieldType(sdk_simulator.NativeAppHarnessResult, "operation_count") == u8 and
+            @FieldType(sdk_simulator.NativeAppHarnessResult, "record_count") == u8 and
+            @FieldType(sdk_simulator.NativeAppHarnessResult, "native_declaration_count") == u8 and
+            @FieldType(sdk_simulator.NativeAppHarnessResult, "lint_issue_count") == u8 and
+            @FieldType(sdk_simulator.NativeAppHarnessResult, "permission_grant_count") == u8 and
+            @FieldType(sdk_simulator.NativeAppHarnessResult, "accessibility_issue_count") == u8,
+        .keeps_fixed_state_within_ceilings = @sizeOf(sdk_ui.Node) <= sdk_ui.NODE_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_ui.AccessibilityReport) <= sdk_ui.ACCESSIBILITY_REPORT_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_permissions.ReviewPlan) <= sdk_permissions.REVIEW_PLAN_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_permissions.HarnessResult) <= sdk_permissions.HARNESS_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_simulator.PermissionReviewResult) <= sdk_simulator.PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_simulator.NativeAppHarnessResult) <= sdk_simulator.NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES,
     },
     .principal_keyring = .{
         .uses_key_arena = @hasDecl(@FieldType(principal.Keyring, "slots"), "reserveIndex"),
