@@ -12,7 +12,10 @@ pub const MAX_TARGET_GENERATIONS: usize = 128;
 pub const MAX_GRANT_PLAN_ENTRIES: usize = 16;
 pub const CapabilitySlotIndex = indexed_arena.ReusableIndex(MAX_CAPABILITIES);
 pub const COMPACT_GRANT_METADATA = true;
+pub const TARGET_GENERATION_OWNS_CAPABILITY_CHAINS = true;
+pub const CACHES_RECENT_TARGET_GENERATION = true;
 pub const GRANT_RESERVATION_SIZE_CEILING_BYTES: usize = 312;
+pub const CAPABILITY_TABLE_SIZE_CEILING_BYTES: usize = 37_040;
 pub const CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY: u8 = 0;
 pub const CAPABILITY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 
@@ -132,22 +135,6 @@ pub const RetiredAuthority = struct {
     scoped_task_id: ?u64,
 };
 
-const CapabilitySlot = struct {
-    in_use: bool = false,
-    capability: Capability = zeroCapability(),
-    target_generation_index: u8 = 0,
-};
-
-const TargetGeneration = struct {
-    in_use: bool = false,
-    target: CapabilityTarget = .{ .kind = .task, .id = 0 },
-    generation: u32 = 1,
-};
-
-fn targetGenerationKey(slot: *const TargetGeneration) u64 {
-    return targetKey(slot.target);
-}
-
 pub fn GrantReservationFor(comptime max_capabilities: usize) type {
     const SlotIndex = indexed_arena.ReusableIndex(max_capabilities);
     return struct {
@@ -169,6 +156,12 @@ pub const GrantReservation = GrantReservationFor(MAX_CAPABILITIES);
 
 pub const CapabilityTable = CapabilityTableWith(.{});
 
+comptime {
+    if (@sizeOf(CapabilityTable) > CAPABILITY_TABLE_SIZE_CEILING_BYTES) {
+        @compileError("production capability table exceeded its fixed-state size ceiling");
+    }
+}
+
 pub fn CapabilityTableWith(comptime config: TableConfig) type {
     config.validate();
     return struct {
@@ -176,12 +169,32 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         const MAX_TABLE_CAPABILITIES = config.max_capabilities;
         const TABLE_INDEX_CAPACITY = config.capability_index_capacity;
         const MAX_TABLE_TARGET_GENERATIONS = config.max_target_generations;
+        const TableCapabilitySlotIndex = indexed_arena.ReusableIndex(MAX_TABLE_CAPABILITIES);
+        const table_capability_no_index = indexed_arena.reusableNoIndex(MAX_TABLE_CAPABILITIES);
+        const CapabilitySlot = struct {
+            in_use: bool = false,
+            capability: Capability = zeroCapability(),
+            target_generation_index: u8 = 0,
+            target_previous: TableCapabilitySlotIndex = table_capability_no_index,
+            target_next: TableCapabilitySlotIndex = table_capability_no_index,
+        };
+        const TargetGeneration = struct {
+            in_use: bool = false,
+            target: CapabilityTarget = .{ .kind = .task, .id = 0 },
+            generation: u32 = 1,
+            capability_head: TableCapabilitySlotIndex = table_capability_no_index,
+            capability_tail: TableCapabilitySlotIndex = table_capability_no_index,
+            capability_count: TableCapabilitySlotIndex = 0,
+        };
+        const TargetGenerationKey = struct {
+            fn key(slot: *const TargetGeneration) u64 {
+                return targetKey(slot.target);
+            }
+        };
         const CapabilityArena = indexed_arena.GenerationalArena("CapabilityId", CapabilitySlot, MAX_TABLE_CAPABILITIES);
         const CapabilityHandle = CapabilityArena.Handle;
-        const TargetGenerationArena = indexed_arena.IndexedArenaWithKey(u64, TargetGeneration, MAX_TABLE_TARGET_GENERATIONS, TABLE_INDEX_CAPACITY, targetGenerationKey);
+        const TargetGenerationArena = indexed_arena.IndexedArenaWithKey(u64, TargetGeneration, MAX_TABLE_TARGET_GENERATIONS, TABLE_INDEX_CAPACITY, TargetGenerationKey.key);
         const HolderIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
-        const TargetIndex = indexed_arena.MultimapIndex(MAX_TABLE_CAPABILITIES, MAX_TABLE_CAPABILITIES, TABLE_INDEX_CAPACITY);
-        const TableCapabilitySlotIndex = indexed_arena.ReusableIndex(MAX_TABLE_CAPABILITIES);
         const TableGrantReservation = GrantReservationFor(MAX_TABLE_CAPABILITIES);
         const InsertedCapabilitySlot = struct {
             slot_index: usize,
@@ -196,8 +209,9 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         slots: CapabilityArena = CapabilityArena.init(),
         holder_index: HolderIndex = HolderIndex.init(),
-        target_index: TargetIndex = TargetIndex.init(),
         target_generations: TargetGenerationArena = TargetGenerationArena.init(),
+        cached_target_key: u64 = 0,
+        cached_target_generation_index: u8 = 0,
         mutation_generation: u64 = 1,
 
         pub fn init() Self {
@@ -212,8 +226,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             const compact_no_index: CompactIndex = @intCast(MAX_TABLE_CAPABILITIES);
             for (&self.holder_index.links) |*link| link.bucket = compact_no_index;
             self.holder_index.free_bucket_head = compact_no_index;
-            for (&self.target_index.links) |*link| link.bucket = compact_no_index;
-            self.target_index.free_bucket_head = compact_no_index;
 
             self.target_generations.free_head = indexed_arena.reusableNoIndex(MAX_TABLE_TARGET_GENERATIONS);
             self.mutation_generation = 1;
@@ -263,9 +275,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         pub fn queryByTarget(self: *const Self, target: CapabilityTarget, output: []Capability) []Capability {
             var count: usize = 0;
-            var slot_index = self.target_index.head(targetKey(target));
-            if (slot_index == indexed_arena.no_index) self.debugAssertTargetIndexMissAbsent(target);
-            while (slot_index != indexed_arena.no_index) : (slot_index = self.target_index.next(slot_index)) {
+            const target_generation_index = self.findTargetGenerationIndex(target) orelse return output[0..0];
+            var compact_slot_index = self.targetGenerationAt(target_generation_index).capability_head;
+            while (compact_slot_index != table_capability_no_index) {
+                const slot_index: usize = @intCast(compact_slot_index);
                 if (slot_index >= self.slots.slots.len) native_util.impossibleByInvariant("target index points outside capability slots");
                 const slot = &self.slots.slots[slot_index];
                 if (!slot.in_use) native_util.impossibleByInvariant("target index points at a free capability slot");
@@ -273,6 +286,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 if (count >= output.len) break;
                 output[count] = slot.capability;
                 count += 1;
+                compact_slot_index = slot.target_next;
             }
             return output[0..count];
         }
@@ -395,10 +409,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             retired_output: []RetiredAuthority,
         ) usize {
             var retired_count: usize = 0;
-            const target_key = targetKey(target);
+            const target_generation_index = self.findTargetGenerationIndex(target) orelse return 0;
             while (true) {
-                const slot_index = self.target_index.head(target_key);
-                if (slot_index == indexed_arena.no_index) break;
+                const compact_slot_index = self.targetGenerationAt(target_generation_index).capability_head;
+                if (compact_slot_index == table_capability_no_index) break;
+                const slot_index: usize = @intCast(compact_slot_index);
                 if (slot_index >= self.slots.slots.len) {
                     native_util.impossibleByInvariant("capability target index points outside capability slots");
                 }
@@ -456,6 +471,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .in_use = true,
                 .capability = capability,
                 .target_generation_index = target_generation_index,
+                .target_previous = table_capability_no_index,
+                .target_next = table_capability_no_index,
             };
             return .{
                 .slot_index = reserved_handle.slotIndex(),
@@ -488,13 +505,32 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn ensureTargetGenerationIndex(self: *Self, target: CapabilityTarget) Error!u8 {
-            if (self.findTargetGenerationIndex(target)) |index| return index;
+            const key = targetKey(target);
+            if (self.cached_target_key == key) {
+                const index = self.cached_target_generation_index;
+                const entry = self.targetGenerationAt(index);
+                if (!entry.in_use or !entry.target.eql(target)) {
+                    native_util.impossibleByInvariant("cached target generation matches its target");
+                }
+                return index;
+            }
+            if (self.findTargetGenerationIndex(target)) |index| {
+                self.cacheTargetGeneration(key, index);
+                return index;
+            }
 
-            const index = self.target_generations.insertIndex(targetKey(target), .{
+            const index = self.target_generations.insertIndex(key, .{
                 .target = target,
                 .generation = 1,
             }) orelse return error.TargetTableFull;
-            return @intCast(index);
+            const compact_index: u8 = @intCast(index);
+            self.cacheTargetGeneration(key, compact_index);
+            return compact_index;
+        }
+
+        fn cacheTargetGeneration(self: *Self, key: u64, index: u8) void {
+            self.cached_target_key = key;
+            self.cached_target_generation_index = index;
         }
 
         fn targetGenerationAt(self: *const Self, target_generation_index: u8) *const TargetGeneration {
@@ -643,15 +679,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             }
         }
 
-        fn debugAssertTargetIndexMissAbsent(self: *const Self, target: CapabilityTarget) void {
-            if (!debugIndexChecksEnabledForTable()) return;
-            for (self.slots.slots) |slot| {
-                if (slot.in_use and slot.capability.target.eql(target)) {
-                    native_util.impossibleByInvariant("target index missed a live capability");
-                }
-            }
-        }
-
         fn discard(self: *Self, capability_id: u64) void {
             const slot_index = self.findSlotIndex(capability_id) orelse return;
             self.removeSlot(slot_index);
@@ -669,7 +696,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             if (slot_index >= self.slots.slots.len or !self.slots.slots[slot_index].in_use) return;
             const removed = self.slots.slots[slot_index].capability;
             self.unlinkHolder(slot_index, holderKey(removed.holder));
-            self.unlinkTarget(slot_index, targetKey(removed.target));
+            self.unlinkTarget(slot_index);
             if (self.slots.removeIndex(slot_index)) {
                 self.advanceMutationGeneration();
             }
@@ -685,19 +712,85 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 native_util.impossibleByInvariant("capability holder index capacity covers capability slots");
             }
 
-            const target_key = targetKey(cap.target);
-            if (target_key == 0) native_util.impossibleByInvariant("capability table target indexes never use the reserved zero key");
-            if (!self.target_index.append(target_key, slot_index)) {
-                native_util.impossibleByInvariant("capability target index capacity covers capability slots");
-            }
+            self.linkTarget(slot_index);
         }
 
         fn unlinkHolder(self: *Self, slot_index: usize, key: u64) void {
             _ = self.holder_index.remove(key, slot_index);
         }
 
-        fn unlinkTarget(self: *Self, slot_index: usize, key: u64) void {
-            _ = self.target_index.remove(key, slot_index);
+        fn linkTarget(self: *Self, slot_index: usize) void {
+            if (slot_index >= self.slots.slots.len) native_util.impossibleByInvariant("capability target link starts inside capability slots");
+            const slot = &self.slots.slots[slot_index];
+            const target_generation = self.targetGenerationAtMut(slot.target_generation_index);
+            if (!target_generation.target.eql(slot.capability.target)) {
+                native_util.impossibleByInvariant("capability target generation matches its target");
+            }
+            if (slot.target_previous != table_capability_no_index or slot.target_next != table_capability_no_index) {
+                native_util.impossibleByInvariant("new capability target link starts detached");
+            }
+
+            const compact_slot_index: TableCapabilitySlotIndex = @intCast(slot_index);
+            slot.target_previous = target_generation.capability_tail;
+            if (target_generation.capability_tail == table_capability_no_index) {
+                if (target_generation.capability_head != table_capability_no_index or target_generation.capability_count != 0) {
+                    native_util.impossibleByInvariant("empty target generation has no capability links");
+                }
+                target_generation.capability_head = compact_slot_index;
+            } else {
+                const tail_index: usize = @intCast(target_generation.capability_tail);
+                if (tail_index >= self.slots.slots.len) native_util.impossibleByInvariant("capability target tail points inside capability slots");
+                const tail = &self.slots.slots[tail_index];
+                if (!tail.in_use or tail.target_generation_index != slot.target_generation_index or tail.target_next != table_capability_no_index) {
+                    native_util.impossibleByInvariant("capability target tail belongs to its generation");
+                }
+                tail.target_next = compact_slot_index;
+            }
+            target_generation.capability_tail = compact_slot_index;
+            target_generation.capability_count += 1;
+        }
+
+        fn unlinkTarget(self: *Self, slot_index: usize) void {
+            if (slot_index >= self.slots.slots.len) native_util.impossibleByInvariant("capability target unlink starts inside capability slots");
+            const slot = &self.slots.slots[slot_index];
+            const target_generation = self.targetGenerationAtMut(slot.target_generation_index);
+            const compact_slot_index: TableCapabilitySlotIndex = @intCast(slot_index);
+            if (target_generation.capability_count == 0) native_util.impossibleByInvariant("live capability target generation has links");
+
+            if (slot.target_previous == table_capability_no_index) {
+                if (target_generation.capability_head != compact_slot_index) native_util.impossibleByInvariant("capability target head belongs to its generation");
+                target_generation.capability_head = slot.target_next;
+            } else {
+                const previous_index: usize = @intCast(slot.target_previous);
+                if (previous_index >= self.slots.slots.len) native_util.impossibleByInvariant("capability target predecessor points inside capability slots");
+                const previous = &self.slots.slots[previous_index];
+                if (!previous.in_use or previous.target_generation_index != slot.target_generation_index or previous.target_next != compact_slot_index) {
+                    native_util.impossibleByInvariant("capability target predecessor points at its successor");
+                }
+                previous.target_next = slot.target_next;
+            }
+
+            if (slot.target_next == table_capability_no_index) {
+                if (target_generation.capability_tail != compact_slot_index) native_util.impossibleByInvariant("capability target tail belongs to its generation");
+                target_generation.capability_tail = slot.target_previous;
+            } else {
+                const next_index: usize = @intCast(slot.target_next);
+                if (next_index >= self.slots.slots.len) native_util.impossibleByInvariant("capability target successor points inside capability slots");
+                const next = &self.slots.slots[next_index];
+                if (!next.in_use or next.target_generation_index != slot.target_generation_index or next.target_previous != compact_slot_index) {
+                    native_util.impossibleByInvariant("capability target successor points at its predecessor");
+                }
+                next.target_previous = slot.target_previous;
+            }
+
+            slot.target_previous = table_capability_no_index;
+            slot.target_next = table_capability_no_index;
+            target_generation.capability_count -= 1;
+            if (target_generation.capability_count == 0 and
+                (target_generation.capability_head != table_capability_no_index or target_generation.capability_tail != table_capability_no_index))
+            {
+                native_util.impossibleByInvariant("empty target generation has no capability links");
+            }
         }
 
         fn debugIndexChecksEnabledForTable() bool {
@@ -1450,6 +1543,58 @@ test "derived capability views are copied before revoked slots are reused" {
     });
     try std.testing.expect(table.query(third.id) != null);
     try std.testing.expectEqual(@as(usize, 3), table.slots.countInUse());
+}
+
+test "target generation chains preserve middle removal and free-slot reuse" {
+    const SmallTable = CapabilityTableWith(.{
+        .max_capabilities = 4,
+        .capability_index_capacity = 8,
+        .max_target_generations = 2,
+    });
+    var table = SmallTable.init();
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 1 };
+    const target = CapabilityTarget{ .kind = .service, .id = 77 };
+    const request = MintRequest{
+        .holder = holder,
+        .issuer = holder,
+        .target = target,
+        .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    };
+
+    const first = try table.mintBootRoot(request);
+    const middle = try table.mintBootRoot(request);
+    const last = try table.mintBootRoot(request);
+    const middle_slot_index = table.findSlotIndex(middle.id).?;
+    var matches: [4]Capability = undefined;
+    var found = table.queryByTarget(target, &matches);
+    try std.testing.expectEqual(@as(usize, 3), found.len);
+    try std.testing.expectEqual(first.id, found[0].id);
+    try std.testing.expectEqual(middle.id, found[1].id);
+    try std.testing.expectEqual(last.id, found[2].id);
+
+    try table.revokeGrant(middle.id);
+    found = table.queryByTarget(target, &matches);
+    try std.testing.expectEqual(@as(usize, 2), found.len);
+    try std.testing.expectEqual(first.id, found[0].id);
+    try std.testing.expectEqual(last.id, found[1].id);
+
+    const replacement = try table.mintBootRoot(request);
+    try std.testing.expectEqual(middle_slot_index, table.findSlotIndex(replacement.id).?);
+    found = table.queryByTarget(target, &matches);
+    try std.testing.expectEqual(@as(usize, 3), found.len);
+    try std.testing.expectEqual(first.id, found[0].id);
+    try std.testing.expectEqual(last.id, found[1].id);
+    try std.testing.expectEqual(replacement.id, found[2].id);
+
+    try table.revokeGrant(first.id);
+    try table.revokeGrant(replacement.id);
+    found = table.queryByTarget(target, &matches);
+    try std.testing.expectEqual(@as(usize, 1), found.len);
+    try std.testing.expectEqual(last.id, found[0].id);
+    try std.testing.expectEqual(@as(usize, 1), table.retireTargetAuthority(target));
+    try std.testing.expectEqual(@as(usize, 0), table.queryByTarget(target, &matches).len);
 }
 
 test "grant plan reserves target generation slots in the arena" {

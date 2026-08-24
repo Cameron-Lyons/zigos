@@ -254,7 +254,12 @@ pub const indexed_hot_path_tables = .{
         .uses_target_generation_arena = @hasDecl(@FieldType(capability.CapabilityTable, "target_generations"), "reserveIndex"),
         .supports_direct_capability_slot_insertion = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandleAt"),
         .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),
-        .uses_target_multimap = @hasField(capability.CapabilityTable, "target_index"),
+        .uses_target_generation_capability_chains = capability.TARGET_GENERATION_OWNS_CAPABILITY_CHAINS and
+            !@hasField(capability.CapabilityTable, "target_index"),
+        .caches_recent_target_generation = capability.CACHES_RECENT_TARGET_GENERATION and
+            @hasField(capability.CapabilityTable, "cached_target_key") and
+            @hasField(capability.CapabilityTable, "cached_target_generation_index"),
+        .keeps_fixed_state_within_ceiling = @sizeOf(capability.CapabilityTable) <= capability.CAPABILITY_TABLE_SIZE_CEILING_BYTES,
         .tracks_mutation_generation = @hasField(capability.CapabilityTable, "mutation_generation"),
         .retires_task_bound_and_targeting_authority = @hasDecl(capability.CapabilityTable, "retireTaskAuthority"),
         .retires_dead_target_authority = @hasDecl(capability.CapabilityTable, "retireTargetAuthority"),
