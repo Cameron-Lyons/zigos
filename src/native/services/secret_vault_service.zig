@@ -10,7 +10,14 @@ const secure_secret_store = @import("../platform/secure_secret_store.zig");
 pub const MAX_HANDLES: usize = secure_secret_store.MAX_HANDLES;
 pub const BOUNDED_HANDLE_SCAN = true;
 pub const RECLAIMS_TERMINAL_HANDLES = true;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 10_280;
+pub const COMPACT_ACTIVE_HANDLE_COUNT_METADATA = true;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 9_352;
+
+comptime {
+    if (MAX_HANDLES > std.math.maxInt(u8)) {
+        @compileError("secret vault active handle count cannot represent the handle capacity");
+    }
+}
 
 pub const Error = secure_secret_store.Error || event_ledger.Error || error{
     HandleExpired,
@@ -107,7 +114,7 @@ pub const Service = struct {
     next_handle_id: u64 = 1,
     generation: u32 = 1,
     handles: HandleArena = HandleArena.init(),
-    active_handle_count: usize = 0,
+    active_handle_count: u8 = 0,
     next_reusable_handle: u8 = 0,
 
     comptime {
@@ -565,6 +572,12 @@ fn testHardwareProvider() secure_secret_store.HardwareSealProvider {
         .available = true,
         .sealFn = testHardwareSeal,
     };
+}
+
+test "secret vault stores active handle count in capacity-sized metadata" {
+    try std.testing.expect(COMPACT_ACTIVE_HANDLE_COUNT_METADATA);
+    try std.testing.expect(@FieldType(Service, "active_handle_count") == u8);
+    try std.testing.expect(@sizeOf(Service) <= SERVICE_SIZE_CEILING_BYTES);
 }
 
 test "secret vault brokers sealed leased handles raw export policy rotation and revocation" {
