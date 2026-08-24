@@ -12,6 +12,8 @@ const sync_service = @import("../sync/sync_service.zig");
 const workspace = @import("../storage/workspace.zig");
 
 pub const MAX_BREAK_GLASS_REASON_BYTES: usize = 160;
+pub const DERIVES_ACTION_COUNT_FROM_SLICE = true;
+pub const ENTRY_SESSION_SIZE_CEILING_BYTES: usize = 48;
 
 pub const RecoveryReport = struct {
     recovery_boot_entered: bool = false,
@@ -46,12 +48,21 @@ pub const EntryRequest = struct {
 
 pub const EntrySession = struct {
     owner: principal.PrincipalId,
-    action_count: usize,
     actions: []const RecoveryAction,
     profile: BootProfile = .recovery,
     entered_from_boot_profile: bool = false,
     normal_session_authority: bool = false,
     entry_tick: u64 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > ENTRY_SESSION_SIZE_CEILING_BYTES) {
+            @compileError("recovery entry session exceeds its compact size ceiling");
+        }
+    }
+
+    pub fn actionCount(self: *const EntrySession) usize {
+        return self.actions.len;
+    }
 
     pub fn permits(self: *const EntrySession, action: RecoveryAction) bool {
         for (self.actions) |allowed| {
@@ -125,7 +136,6 @@ pub const Environment = struct {
         try validateUniqueRecoveryActions(request.actions);
         return .{
             .owner = self.owner,
-            .action_count = request.actions.len,
             .actions = request.actions,
             .profile = request.profile,
         };
@@ -375,6 +385,13 @@ fn validateUniqueRecoveryActions(actions: []const RecoveryAction) EntryError!voi
     }
 }
 
+test "recovery entry sessions derive action count from their authoritative slice" {
+    try std.testing.expect(DERIVES_ACTION_COUNT_FROM_SLICE);
+    try std.testing.expect(!@hasField(EntrySession, "action_count"));
+    try std.testing.expect(@hasDecl(EntrySession, "actionCount"));
+    try std.testing.expect(@sizeOf(EntrySession) <= ENTRY_SESSION_SIZE_CEILING_BYTES);
+}
+
 test "recovery environment verifies reinstalls restores repairs and rotates" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
@@ -543,7 +560,7 @@ test "recovery environment requires boot-profile recovery session gates and refu
         .requester = storage_owner,
         .actions = &.{ .restore_workspace_snapshot, .repair_sync_metadata },
     });
-    try std.testing.expectEqual(@as(usize, 2), entry.action_count);
+    try std.testing.expectEqual(@as(usize, 2), entry.actionCount());
     try std.testing.expect(entry.permits(.restore_workspace_snapshot));
     try std.testing.expect(!entry.permits(.rotate_device_keys));
     try std.testing.expectError(error.RecoveryBootProfileRequired, recovery.restoreWorkspaceSnapshot(&entry, &storage, workspace_record.id, 999, 20));
@@ -637,7 +654,7 @@ test "recovery environment audits break-glass recovery authorization" {
         .reason = "disk repair",
         .actions = &.{ .restore_workspace_snapshot, .repair_sync_metadata },
     }, 34);
-    try std.testing.expectEqual(@as(usize, 2), session.entry.action_count);
+    try std.testing.expectEqual(@as(usize, 2), session.entry.actionCount());
     try std.testing.expect(session.entry.entered_from_boot_profile);
     try std.testing.expect(!session.entry.normal_session_authority);
     try std.testing.expect(session.audited_break_glass);
