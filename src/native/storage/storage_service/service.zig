@@ -234,15 +234,6 @@ pub const StorageCore = struct {
         return recovered;
     }
 
-    pub fn exportSnapshot(
-        self: *Service,
-        workspace_id: anytype,
-        snapshot_id: anytype,
-        identity: signing.SignerIdentity,
-    ) workspace.Error!workspace.ExportPackage {
-        return self.workspaces.exportSnapshot(workspaceId(workspace_id), snapshotId(snapshot_id), identity);
-    }
-
     pub fn exportSnapshotInto(
         self: *Service,
         workspace_id: anytype,
@@ -251,18 +242,6 @@ pub const StorageCore = struct {
         out: *workspace.ExportPackage,
     ) workspace.Error!void {
         return self.workspaces.exportSnapshotInto(workspaceId(workspace_id), snapshotId(snapshot_id), identity, out);
-    }
-
-    pub fn importWorkspace(
-        self: *Service,
-        owner: principal.PrincipalId,
-        label: []const u8,
-        package: workspace.ExportPackage,
-        tick: u64,
-    ) workspace.Error!*workspace.WorkspaceRecord {
-        const record = try self.workspaces.importWorkspace(owner, label, package, tick);
-        self.noteMutation(true);
-        return record;
     }
 
     pub fn importWorkspaceFromPackage(
@@ -600,17 +579,6 @@ pub const StoragePort = struct {
         const key = workspaceId(workspace_id);
         _ = try self.requireStorageAuthority(authority, key, .write);
         return self.core.recoverDeleted(key, path, authority.now_ticks);
-    }
-
-    pub fn importWorkspace(
-        self: *StoragePort,
-        authority: AuthorityContext,
-        owner: principal.PrincipalId,
-        label: []const u8,
-        package: workspace.ExportPackage,
-    ) (AuthorityError || workspace.Error)!*workspace.WorkspaceRecord {
-        _ = try self.requireStorageAuthority(authority, null, .write);
-        return self.core.importWorkspace(owner, label, package, authority.now_ticks);
     }
 
     pub fn importWorkspaceFromPackage(

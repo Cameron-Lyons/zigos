@@ -925,6 +925,10 @@ pub const indexed_hot_path_tables = .{
             @FieldType(workspace.ExportPackage, "entry_count") == u8 and
             @FieldType(workspace.ExportPackage, "signature_format_len") == u8 and
             @FieldType(workspace.ExportPackage, "signature_signer_len") == u8,
+        .uses_borrowed_export_package_apis = @hasDecl(workspace.Directory, "exportSnapshotInto") and
+            @hasDecl(workspace.Directory, "importWorkspaceFromPackage") and
+            !@hasDecl(workspace.Directory, "exportSnapshot") and
+            !@hasDecl(workspace.Directory, "importWorkspace"),
         .keeps_snapshot_export_state_within_ceilings = @sizeOf(workspace.SnapshotRecord) <= workspace.SNAPSHOT_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(workspace.ExportPackage) <= workspace.EXPORT_PACKAGE_SIZE_CEILING_BYTES,
         .stores_compact_workspace_label_metadata = workspace.COMPACT_WORKSPACE_LABEL_METADATA and
