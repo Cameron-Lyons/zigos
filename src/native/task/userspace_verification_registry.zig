@@ -41,6 +41,7 @@ pub const verification_only_boot_image_specs = [_]ImageSpec{
         .entry = "app.termination.probe",
         .role_tag = 0xA105,
         .heartbeat_increment = 5,
+        .contract_flags = production_registry.FLAG_GP_PROOF_PROBE,
     }),
     production_registry.standaloneImageSpec(.{
         .bundle_id = "zigos.system.service-client",
@@ -144,4 +145,10 @@ test "verification registry keeps the freestanding MMU isolation proof" {
     try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.component_class);
     try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", proof.artifact_name);
     try std.testing.expectEqualStrings("zigos.proof.mmu-isolation", proof.entry);
+}
+
+test "verification registry keeps the ring-three exception containment proof" {
+    const proof = findVerification("zigos.system.termination-probe") orelse return error.MissingTerminationProof;
+    try std.testing.expect((proof.contract_flags & production_registry.FLAG_GP_PROOF_PROBE) != 0);
+    try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.component_class);
 }

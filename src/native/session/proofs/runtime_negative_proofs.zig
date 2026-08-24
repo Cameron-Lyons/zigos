@@ -41,6 +41,7 @@ else
     };
 
 const MMU_PROOF_BUNDLE_ID = "zigos.proof.mmu-isolation";
+const GP_PROOF_BUNDLE_ID = "zigos.system.termination-probe";
 
 var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
 var reboot_proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
@@ -163,6 +164,8 @@ pub fn runFreestandingAndPrint(
             if (scheduler.executor.materializedCount() != baseline_mappings) return false;
             if (paging.frameStats().allocated != baseline_frames) return false;
             common.printBootMarker(boot_markers.runtime_proof_address_space_reclamation);
+            if (!userGeneralProtectionFaultIsContained(catalog, runtime, scheduler)) return false;
+            common.printBootMarker(boot_markers.runtime_proof_user_gp_contained);
             return true;
         }
 
@@ -170,6 +173,37 @@ pub fn runFreestandingAndPrint(
     }
 
     return false;
+}
+
+fn userGeneralProtectionFaultIsContained(
+    catalog: *userspace_loader.Catalog,
+    runtime: *task_runtime.Runtime,
+    scheduler: *userspace_scheduler.Scheduler,
+) bool {
+    const baseline_frames = paging.frameStats().allocated;
+    const baseline_mappings = scheduler.executor.materializedCount();
+    const launched = catalog.launchDirect(runtime, GP_PROOF_BUNDLE_ID, .{
+        .owner = app(61),
+        .budget = budget(),
+        .local_only = true,
+    }) catch return false;
+
+    var attempt: usize = 0;
+    while (attempt < 3) : (attempt += 1) {
+        const outcome = scheduler.executeTask(launched.id, task_runtime.MAX_TASKS + 20 + attempt);
+        if (outcome == .faulted) break;
+        if (!outcome.handedOff()) return false;
+    } else return false;
+
+    const exception = scheduler.executor.lastUserException() orelse return false;
+    if (exception.vector != 13 or exception.error_code != 0) return false;
+    const terminated = runtime.findConst(launched.id) orelse return false;
+    if (terminated.state != .terminated) return false;
+    const provenance = terminated.latestProvenanceEvent() orelse return false;
+    if (provenance.kind != .crash_report) return false;
+    if (scheduler.executor.materializedCount() != baseline_mappings) return false;
+    if (paging.frameStats().allocated != baseline_frames) return false;
+    return true;
 }
 
 pub fn processIsolationBlocksForeignSharedMemory() bool {

@@ -1077,7 +1077,7 @@ pub const Runtime = struct {
 
         self.removeInitialComponentLabelIndex(slot_index, task);
         self.setTaskState(task, .terminated);
-        resetTaskCold(taskCold(task));
+        clearTerminatedTaskResources(task);
         task.execution_component_count = 0;
         task.capability_count = 0;
         task.appendAudit(.{
@@ -1201,6 +1201,13 @@ fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
 
     cold.provenance_trail[task.provenance_start] = TaskProvenanceRecord.from(event);
     task.provenance_start = @intCast((task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS);
+}
+
+fn clearTerminatedTaskResources(task: *TaskRecord) void {
+    const cold = taskCold(task);
+    cold.execution_components = std.mem.zeroes(@TypeOf(cold.execution_components));
+    cold.capability_ids = [_]u64{0} ** MAX_TASK_CAPABILITIES;
+    cold.capability_generation = 1;
 }
 
 fn createTaskIdTestTask(runtime: *Runtime, owner_serial: u64) Error!*TaskRecord {
@@ -1615,6 +1622,10 @@ test "task runtime records redacted crash report provenance" {
     try std.testing.expectEqual(@as(u64, 704), latest.service_id);
     try std.testing.expect(std.mem.indexOf(u8, latest.detailSlice(), "redacted=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, latest.detailSlice(), "reason_fingerprint=0xfeed") != null);
+
+    try std.testing.expect(try runtime.terminateTask(task.id, 78));
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.crash_report, task.latestProvenanceEvent().?.kind);
+    try std.testing.expectEqual(model.AuditEventKind.terminated, task.latestAuditEvent().?.kind);
 }
 
 test "restoring a snapshot rebuilds authoritative indexes" {

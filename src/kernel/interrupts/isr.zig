@@ -174,11 +174,8 @@ pub export fn isrHandler(regs: *Registers) void {
         return;
     }
 
-    console.print("Received interrupt: ");
     if (vector < EXCEPTION_VECTOR_COUNT) {
-        console.print(exception_messages[vector]);
-        console.print("\n");
-        haltWithExceptionContext(regs, vector);
+        haltUnhandledException(regs);
     }
 }
 pub const InterruptFrame = Registers;
@@ -254,7 +251,15 @@ fn interruptVector(regs: *const Registers) usize {
     return vector;
 }
 
-fn haltWithExceptionContext(regs: *const Registers, vector: usize) noreturn {
+pub fn haltUnhandledException(regs: *const Registers) noreturn {
+    const vector = interruptVector(regs);
+    console.print("Received interrupt: ");
+    if (vector < EXCEPTION_VECTOR_COUNT) {
+        console.print(exception_messages[vector]);
+    } else {
+        console.print("Unknown Interrupt");
+    }
+    console.print("\n");
     console.print("Exception context: vector=0x");
     numfmt.printHex(vector);
     console.print(" error=0x");

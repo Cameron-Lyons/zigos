@@ -26,4 +26,11 @@ zigos_probe_nx:
     popq %r15
     ret
 
+.section .text.zigos_probe_gp,"ax",@progbits
+.globl zigos_probe_gp
+.type zigos_probe_gp, @function
+zigos_probe_gp:
+    hlt
+    ret
+
 .section .note.GNU-stack,"",@progbits

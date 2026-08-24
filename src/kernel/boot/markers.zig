@@ -79,6 +79,7 @@ pub const runtime_proof_syscall_pointer_isolation = "ZIGOS:RUNTIME_PROOF:SYSCALL
 pub const runtime_proof_mmu_user_fault = "ZIGOS:RUNTIME_PROOF:MMU_USER_FAULT:PASS";
 pub const runtime_proof_user_nx_fault = "ZIGOS:RUNTIME_PROOF:USER_NX_FAULT:PASS";
 pub const runtime_proof_address_space_reclamation = "ZIGOS:RUNTIME_PROOF:ADDRESS_SPACE_RECLAMATION:PASS";
+pub const runtime_proof_user_gp_contained = "ZIGOS:RUNTIME_PROOF:USER_GP_CONTAINED:PASS";
 pub const runtime_proof_syscall_subject_spoof = "ZIGOS:RUNTIME_PROOF:SYSCALL_SUBJECT_SPOOF:PASS";
 pub const runtime_proof_raw_network_bypass = "ZIGOS:RUNTIME_PROOF:RAW_NETWORK_BYPASS:PASS";
 pub const runtime_proof_driver_authority_escape = "ZIGOS:RUNTIME_PROOF:DRIVER_AUTHORITY_ESCAPE:PASS";
