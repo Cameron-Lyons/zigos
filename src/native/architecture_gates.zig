@@ -184,6 +184,9 @@ pub const indexed_hot_path_tables = .{
             @FieldType(sdk_permissions.HarnessResult, "optional_count") == u8 and
             @FieldType(sdk_permissions.HarnessResult, "denied_required_count") == u8 and
             @FieldType(sdk_permissions.HarnessResult, "denied_optional_count") == u8,
+        .derives_permission_harness_command_count = sdk_permissions.DERIVES_HARNESS_COMMAND_COUNT and
+            !@hasField(sdk_permissions.Harness, "command_count") and
+            @hasDecl(sdk_permissions.Harness, "commandCount"),
         .stores_compact_simulator_results = sdk_simulator.COMPACT_SIMULATOR_RESULT_METADATA and
             @FieldType(sdk_simulator.PermissionReviewResult, "request_count") == u8 and
             @FieldType(sdk_simulator.PermissionReviewResult, "grant_count") == u8 and
@@ -202,6 +205,7 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(sdk_ui.AccessibilityReport) <= sdk_ui.ACCESSIBILITY_REPORT_SIZE_CEILING_BYTES and
             @sizeOf(sdk_permissions.ReviewPlan) <= sdk_permissions.REVIEW_PLAN_SIZE_CEILING_BYTES and
             @sizeOf(sdk_permissions.HarnessResult) <= sdk_permissions.HARNESS_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_permissions.Harness) <= sdk_permissions.HARNESS_SIZE_CEILING_BYTES and
             @sizeOf(sdk_simulator.PermissionReviewResult) <= sdk_simulator.PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES and
             @sizeOf(sdk_simulator.LaunchResult) <= sdk_simulator.LAUNCH_RESULT_SIZE_CEILING_BYTES and
             @sizeOf(sdk_simulator.NativeAppHarnessResult) <= sdk_simulator.NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES,
