@@ -103,6 +103,7 @@ ISR_NOERRCODE 67
 ISR_NOERRCODE 255
 
 isr_common_stub:
+    clac
     SAVE_REGISTERS
     movq %rsp, %r12
     movq %r12, %rdi

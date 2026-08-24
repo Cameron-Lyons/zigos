@@ -133,6 +133,7 @@ pub const CR4_OSXMMEXCPT: usize = 1 << 10;
 pub const CR4_UMIP: usize = 1 << 11;
 pub const CR4_PCIDE: usize = 1 << 17;
 pub const CR4_SMEP: usize = 1 << 20;
+pub const CR4_SMAP: usize = 1 << 21;
 
 pub const CR3_PCID_MASK: usize = 0x0FFF;
 pub const CR3_ADDRESS_MASK: usize = 0x000F_FFFF_FFFF_F000;
@@ -144,6 +145,8 @@ const InvpcidDescriptor = extern struct {
 };
 
 extern fn x86_invalidate_pcid(descriptor: *const InvpcidDescriptor) callconv(.c) void;
+extern fn x86_allow_supervisor_user_memory() callconv(.c) void;
+extern fn x86_forbid_supervisor_user_memory() callconv(.c) void;
 
 pub const EFER_MSR: u32 = 0xC000_0080;
 pub const EFER_SCE: u64 = 1 << 0;
@@ -236,6 +239,18 @@ pub inline fn processContextIdentifiersEnabled() bool {
 
 pub inline fn globalPagesEnabled() bool {
     return (readCr4() & CR4_PGE) != 0;
+}
+
+pub inline fn supervisorAccessPreventionEnabled() bool {
+    return (readCr4() & CR4_SMAP) != 0;
+}
+
+pub inline fn allowSupervisorUserMemory() void {
+    x86_allow_supervisor_user_memory();
+}
+
+pub inline fn forbidSupervisorUserMemory() void {
+    x86_forbid_supervisor_user_memory();
 }
 
 pub fn enableSse() void {

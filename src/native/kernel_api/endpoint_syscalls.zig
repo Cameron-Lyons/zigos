@@ -44,7 +44,8 @@ pub fn dispatchEndpointSend(
     _ = response_len;
     _ = response_addr;
     var request = dispatch.readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    request.payload = dispatch.borrowImmediateUserSlice(memory, request.payload, endpoint.MAX_MESSAGE_BYTES) orelse return dispatch.invalidRequest();
+    var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer) orelse return dispatch.invalidRequest();
     component_port.invokeGenerated(.endpoint_send, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.success();
 }
@@ -80,10 +81,24 @@ pub fn dispatchEndpointRecv(
     {
         return .{ .status = .invalid_response_buffer };
     }
-    const received = component_port.invokeGenerated(.endpoint_recv, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    var attached_capability = @import("std").mem.zeroes(abi.CapabilityDescriptor);
+    var kernel_request = request;
+    kernel_request.payload_out = payload_buffer[0..request.payload_out.len];
+    kernel_request.attached_capability_out = &attached_capability;
+    const received = component_port.invokeGenerated(.endpoint_recv, port, kernel_request, now_ticks) catch |err| return dispatch.mapError(err);
 
     var response = @import("std").mem.zeroes(abi.EndpointRecvResponse);
     if (received) |message| {
+        const payload_len: usize = message.message.payload_len;
+        if (!dispatch.copyToUser(memory, request.payload_out, payload_buffer[0..payload_len])) {
+            return .{ .status = .invalid_response_buffer };
+        }
+        if (message.attached_capability != null and
+            !dispatch.writeUserValue(memory, @intFromPtr(request.attached_capability_out), attached_capability))
+        {
+            return .{ .status = .invalid_response_buffer };
+        }
         response.present = 1;
         response.has_attached_capability = @intFromBool(message.attached_capability != null);
         response.message = message.message;

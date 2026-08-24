@@ -74,9 +74,11 @@ pub fn enableModernFeatures(features: baseline.Features, process_context_mode: P
     var cr4 = x86.readCr4();
     cr4 |= x86.CR4_PGE;
     cr4 |= x86.CR4_SMEP;
+    cr4 |= x86.CR4_SMAP;
     cr4 |= x86.CR4_UMIP;
     x86.writeCr4(cr4);
     if (!x86.globalPagesEnabled()) unreachable;
+    if (!x86.supervisorAccessPreventionEnabled()) unreachable;
     if (process_context_mode == .hardware_pcid) {
         if (!features.pcid or !features.invpcid) unreachable;
         x86.enableProcessContextIdentifiers();
