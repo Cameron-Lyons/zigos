@@ -1,6 +1,7 @@
 const indexed_arena = @import("core/indexed_arena.zig");
 const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
+const sdk_idl = @import("sdk/idl.zig");
 const service_registry = @import("services/service_registry.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
 const userspace_scheduler = @import("task/userspace_scheduler.zig");
@@ -118,6 +119,42 @@ pub const indexed_hot_path_tables = .{
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
         .binds_services_by_interface_id = @hasDecl(component_abi_schema, "interfaceIdForService"),
+    },
+    .sdk_idl = .{
+        .stores_compact_bounded_metadata = sdk_idl.COMPACT_IDL_METADATA and
+            @FieldType(sdk_idl.TypeRef, "name_len") == u8 and
+            @FieldType(sdk_idl.Field, "name_len") == u8 and
+            @FieldType(sdk_idl.Record, "name_len") == u8 and
+            @FieldType(sdk_idl.Record, "field_start") == u8 and
+            @FieldType(sdk_idl.Record, "field_count") == u8 and
+            @FieldType(sdk_idl.PermissionDecl, "resource_len") == u8 and
+            @FieldType(sdk_idl.ObjectDecl, "name_len") == u8 and
+            @FieldType(sdk_idl.ObjectDecl, "path_len") == u8 and
+            @FieldType(sdk_idl.SyncDecl, "prefix_len") == u8 and
+            @FieldType(sdk_idl.Operation, "name_len") == u8 and
+            @FieldType(sdk_idl.Operation, "request_type_len") == u8 and
+            @FieldType(sdk_idl.Operation, "response_type_len") == u8 and
+            @FieldType(sdk_idl.Interface, "name_len") == u8 and
+            @FieldType(sdk_idl.Interface, "operation_start") == u8 and
+            @FieldType(sdk_idl.Interface, "operation_count") == u8 and
+            @FieldType(sdk_idl.Document, "interface_count") == u8 and
+            @FieldType(sdk_idl.Document, "operation_count") == u8 and
+            @FieldType(sdk_idl.Document, "record_count") == u8 and
+            @FieldType(sdk_idl.Document, "field_count") == u8 and
+            @FieldType(sdk_idl.Document, "permission_count") == u8 and
+            @FieldType(sdk_idl.Document, "object_count") == u8 and
+            @FieldType(sdk_idl.Document, "sync_count") == u8 and
+            @FieldType(sdk_idl.GeneratedSource, "len") == u16,
+        .keeps_fixed_state_within_ceilings = @sizeOf(sdk_idl.TypeRef) <= sdk_idl.TYPE_REF_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.Field) <= sdk_idl.FIELD_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.Record) <= sdk_idl.RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.PermissionDecl) <= sdk_idl.PERMISSION_DECL_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.ObjectDecl) <= sdk_idl.OBJECT_DECL_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.SyncDecl) <= sdk_idl.SYNC_DECL_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.Operation) <= sdk_idl.OPERATION_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.Interface) <= sdk_idl.INTERFACE_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.Document) <= sdk_idl.DOCUMENT_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_idl.GeneratedSource) <= sdk_idl.GENERATED_SOURCE_SIZE_CEILING_BYTES,
     },
     .principal_keyring = .{
         .uses_key_arena = @hasDecl(@FieldType(principal.Keyring, "slots"), "reserveIndex"),

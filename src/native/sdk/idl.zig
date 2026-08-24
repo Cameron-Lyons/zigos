@@ -10,6 +10,33 @@ pub const MAX_DECLARATIONS: usize = 32;
 pub const MAX_NAME_BYTES: usize = 64;
 pub const MAX_RESOURCE_BYTES: usize = 96;
 pub const MAX_GENERATED_BYTES: usize = 32768;
+pub const COMPACT_IDL_METADATA = true;
+pub const TYPE_REF_SIZE_CEILING_BYTES: usize = 66;
+pub const FIELD_SIZE_CEILING_BYTES: usize = 132;
+pub const RECORD_SIZE_CEILING_BYTES: usize = 67;
+pub const PERMISSION_DECL_SIZE_CEILING_BYTES: usize = 100;
+pub const OBJECT_DECL_SIZE_CEILING_BYTES: usize = 166;
+pub const SYNC_DECL_SIZE_CEILING_BYTES: usize = 100;
+pub const OPERATION_SIZE_CEILING_BYTES: usize = 204;
+pub const INTERFACE_SIZE_CEILING_BYTES: usize = 72;
+pub const DOCUMENT_SIZE_CEILING_BYTES: usize = 33_104;
+pub const GENERATED_SOURCE_SIZE_CEILING_BYTES: usize = 32_770;
+
+comptime {
+    if (MAX_INTERFACES > std.math.maxInt(u8) or
+        MAX_OPERATIONS > std.math.maxInt(u8) or
+        MAX_RECORDS > std.math.maxInt(u8) or
+        MAX_FIELDS > std.math.maxInt(u8) or
+        MAX_DECLARATIONS > std.math.maxInt(u8) or
+        MAX_NAME_BYTES > std.math.maxInt(u8) or
+        MAX_RESOURCE_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("IDL tables or text exceed compact byte metadata capacity");
+    }
+    if (MAX_GENERATED_BYTES > std.math.maxInt(u16)) {
+        @compileError("generated IDL output exceeds compact length metadata capacity");
+    }
+}
 
 pub const Error = error{
     EmptyInput,
@@ -88,33 +115,33 @@ pub const Cardinality = enum(u8) {
 
 pub const TypeRef = struct {
     kind: TypeKind = .void,
-    name_len: usize = 0,
+    name_len: u8 = 0,
     name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
 
     pub fn nameSlice(self: *const TypeRef) []const u8 {
-        return self.name[0..self.name_len];
+        return self.name[0..@as(usize, self.name_len)];
     }
 };
 
 pub const Field = struct {
-    name_len: usize = 0,
+    name_len: u8 = 0,
     name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
     type_ref: TypeRef = .{},
     cardinality: Cardinality = .required,
 
     pub fn nameSlice(self: *const Field) []const u8 {
-        return self.name[0..self.name_len];
+        return self.name[0..@as(usize, self.name_len)];
     }
 };
 
 pub const Record = struct {
-    name_len: usize = 0,
+    name_len: u8 = 0,
     name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
-    field_start: usize = 0,
-    field_count: usize = 0,
+    field_start: u8 = 0,
+    field_count: u8 = 0,
 
     pub fn nameSlice(self: *const Record) []const u8 {
-        return self.name[0..self.name_len];
+        return self.name[0..@as(usize, self.name_len)];
     }
 };
 
@@ -137,67 +164,67 @@ pub const SyncSemantic = enum(u8) {
 
 pub const PermissionDecl = struct {
     kind: manifest.PermissionKind = .object_access,
-    resource_len: usize = 0,
+    resource_len: u8 = 0,
     resource: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
     required: bool = true,
     local_only: bool = true,
 
     pub fn resourceSlice(self: *const PermissionDecl) []const u8 {
-        return self.resource[0..self.resource_len];
+        return self.resource[0..@as(usize, self.resource_len)];
     }
 };
 
 pub const ObjectDecl = struct {
-    name_len: usize = 0,
+    name_len: u8 = 0,
     name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
     kind: ObjectKind = .document,
-    path_len: usize = 0,
+    path_len: u8 = 0,
     path: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
     signed: bool = true,
     versioned: bool = true,
     sync: bool = true,
 
     pub fn nameSlice(self: *const ObjectDecl) []const u8 {
-        return self.name[0..self.name_len];
+        return self.name[0..@as(usize, self.name_len)];
     }
 
     pub fn pathSlice(self: *const ObjectDecl) []const u8 {
-        return self.path[0..self.path_len];
+        return self.path[0..@as(usize, self.path_len)];
     }
 };
 
 pub const SyncDecl = struct {
-    prefix_len: usize = 0,
+    prefix_len: u8 = 0,
     prefix: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
     semantic: SyncSemantic = .mergeable_crdt,
     local_first: bool = true,
     e2ee: bool = true,
 
     pub fn prefixSlice(self: *const SyncDecl) []const u8 {
-        return self.prefix[0..self.prefix_len];
+        return self.prefix[0..@as(usize, self.prefix_len)];
     }
 };
 
 pub const Operation = struct {
-    name_len: usize = 0,
+    name_len: u8 = 0,
     name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
     request_size: u32 = 0,
     response_size: u32 = 0,
-    request_type_len: usize = 0,
+    request_type_len: u8 = 0,
     request_type: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
-    response_type_len: usize = 0,
+    response_type_len: u8 = 0,
     response_type: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
 
     pub fn nameSlice(self: *const Operation) []const u8 {
-        return self.name[0..self.name_len];
+        return self.name[0..@as(usize, self.name_len)];
     }
 
     pub fn requestTypeSlice(self: *const Operation) []const u8 {
-        return self.request_type[0..self.request_type_len];
+        return self.request_type[0..@as(usize, self.request_type_len)];
     }
 
     pub fn responseTypeSlice(self: *const Operation) []const u8 {
-        return self.response_type[0..self.response_type_len];
+        return self.response_type[0..@as(usize, self.response_type_len)];
     }
 
     pub fn isTyped(self: *const Operation) bool {
@@ -206,15 +233,15 @@ pub const Operation = struct {
 };
 
 pub const Interface = struct {
-    name_len: usize = 0,
+    name_len: u8 = 0,
     name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
     version_major: u16 = 1,
     version_minor: u16 = 0,
-    operation_start: usize = 0,
-    operation_count: usize = 0,
+    operation_start: u8 = 0,
+    operation_count: u8 = 0,
 
     pub fn nameSlice(self: *const Interface) []const u8 {
-        return self.name[0..self.name_len];
+        return self.name[0..@as(usize, self.name_len)];
     }
 
     pub fn manifestDecl(self: *const Interface) manifest.InterfaceDecl {
@@ -227,13 +254,13 @@ pub const Interface = struct {
 };
 
 pub const Document = struct {
-    interface_count: usize = 0,
-    operation_count: usize = 0,
-    record_count: usize = 0,
-    field_count: usize = 0,
-    permission_count: usize = 0,
-    object_count: usize = 0,
-    sync_count: usize = 0,
+    interface_count: u8 = 0,
+    operation_count: u8 = 0,
+    record_count: u8 = 0,
+    field_count: u8 = 0,
+    permission_count: u8 = 0,
+    object_count: u8 = 0,
+    sync_count: u8 = 0,
     interfaces: [MAX_INTERFACES]Interface = [_]Interface{.{}} ** MAX_INTERFACES,
     operations: [MAX_OPERATIONS]Operation = [_]Operation{.{}} ** MAX_OPERATIONS,
     records: [MAX_RECORDS]Record = [_]Record{.{}} ** MAX_RECORDS,
@@ -247,11 +274,15 @@ pub const Document = struct {
     }
 
     pub fn operationsFor(self: *const Document, interface: *const Interface) []const Operation {
-        return self.operations[interface.operation_start .. interface.operation_start + interface.operation_count];
+        const start: usize = @intCast(interface.operation_start);
+        const count: usize = @intCast(interface.operation_count);
+        return self.operations[start .. start + count];
     }
 
     pub fn fieldsFor(self: *const Document, record: *const Record) []const Field {
-        return self.fields[record.field_start .. record.field_start + record.field_count];
+        const start: usize = @intCast(record.field_start);
+        const count: usize = @intCast(record.field_count);
+        return self.fields[start .. start + count];
     }
 
     pub fn findInterface(self: *const Document, name: []const u8) ?*const Interface {
@@ -281,18 +312,34 @@ pub const Document = struct {
     }
 
     pub fn nativeDeclarationCount(self: *const Document) usize {
-        return self.permission_count + self.object_count + self.sync_count;
+        return @as(usize, self.permission_count) + @as(usize, self.object_count) + @as(usize, self.sync_count);
     }
 };
 
 pub const GeneratedSource = struct {
-    len: usize = 0,
+    len: u16 = 0,
     buffer: [MAX_GENERATED_BYTES]u8 = [_]u8{0} ** MAX_GENERATED_BYTES,
 
     pub fn slice(self: *const GeneratedSource) []const u8 {
-        return self.buffer[0..self.len];
+        return self.buffer[0..@as(usize, self.len)];
     }
 };
+
+comptime {
+    if (@sizeOf(TypeRef) > TYPE_REF_SIZE_CEILING_BYTES or
+        @sizeOf(Field) > FIELD_SIZE_CEILING_BYTES or
+        @sizeOf(Record) > RECORD_SIZE_CEILING_BYTES or
+        @sizeOf(PermissionDecl) > PERMISSION_DECL_SIZE_CEILING_BYTES or
+        @sizeOf(ObjectDecl) > OBJECT_DECL_SIZE_CEILING_BYTES or
+        @sizeOf(SyncDecl) > SYNC_DECL_SIZE_CEILING_BYTES or
+        @sizeOf(Operation) > OPERATION_SIZE_CEILING_BYTES or
+        @sizeOf(Interface) > INTERFACE_SIZE_CEILING_BYTES or
+        @sizeOf(Document) > DOCUMENT_SIZE_CEILING_BYTES or
+        @sizeOf(GeneratedSource) > GENERATED_SOURCE_SIZE_CEILING_BYTES)
+    {
+        @compileError("IDL state exceeds its compact layout ceiling");
+    }
+}
 
 pub fn parse(source: []const u8) Error!Document {
     if (std.mem.trim(u8, source, " \t\r\n").len == 0) return error.EmptyInput;
@@ -448,7 +495,7 @@ pub fn generateZigBindings(document: *const Document, output: []u8) Error![]cons
 pub fn generate(document: *const Document) Error!GeneratedSource {
     var generated = GeneratedSource{};
     const slice = try generateZigBindings(document, &generated.buffer);
-    generated.len = slice.len;
+    generated.len = @intCast(slice.len);
     return generated;
 }
 
@@ -457,14 +504,14 @@ fn addInterface(doc: *Document, name: []const u8, version_text: []const u8) Erro
     if (doc.findInterface(name) != null) return error.DuplicateInterface;
 
     const version = try parseVersion(version_text);
-    const index = doc.interface_count;
+    const index: usize = @intCast(doc.interface_count);
     var interface = Interface{
         .version_major = version.major,
         .version_minor = version.minor,
         .operation_start = doc.operation_count,
         .operation_count = 0,
     };
-    interface.name_len = native_util.copyTextExact(&interface.name, name) catch return error.InterfaceNameTooLong;
+    interface.name_len = @intCast(native_util.copyTextExact(&interface.name, name) catch return error.InterfaceNameTooLong);
     doc.interfaces[index] = interface;
     doc.interface_count += 1;
     return index;
@@ -484,12 +531,12 @@ fn addOperation(
         if (std.mem.eql(u8, operation.nameSlice(), name)) return error.DuplicateOperation;
     }
 
-    const index = doc.operation_count;
+    const index: usize = @intCast(doc.operation_count);
     var operation = Operation{
         .request_size = request_size,
         .response_size = response_size,
     };
-    operation.name_len = native_util.copyTextExact(&operation.name, name) catch return error.OperationNameTooLong;
+    operation.name_len = @intCast(native_util.copyTextExact(&operation.name, name) catch return error.OperationNameTooLong);
     doc.operations[index] = operation;
     doc.operation_count += 1;
     doc.interfaces[interface_index].operation_count += 1;
@@ -509,11 +556,11 @@ fn addTypedOperation(
         if (std.mem.eql(u8, operation.nameSlice(), name)) return error.DuplicateOperation;
     }
 
-    const index = doc.operation_count;
+    const index: usize = @intCast(doc.operation_count);
     var operation = Operation{};
-    operation.name_len = native_util.copyTextExact(&operation.name, name) catch return error.OperationNameTooLong;
-    operation.request_type_len = native_util.copyTextExact(&operation.request_type, request_type) catch return error.FieldTypeTooLong;
-    operation.response_type_len = native_util.copyTextExact(&operation.response_type, response_type) catch return error.FieldTypeTooLong;
+    operation.name_len = @intCast(native_util.copyTextExact(&operation.name, name) catch return error.OperationNameTooLong);
+    operation.request_type_len = @intCast(native_util.copyTextExact(&operation.request_type, request_type) catch return error.FieldTypeTooLong);
+    operation.response_type_len = @intCast(native_util.copyTextExact(&operation.response_type, response_type) catch return error.FieldTypeTooLong);
     doc.operations[index] = operation;
     doc.operation_count += 1;
     doc.interfaces[interface_index].operation_count += 1;
@@ -523,12 +570,12 @@ fn addRecord(doc: *Document, name: []const u8) Error!usize {
     if (doc.record_count >= doc.records.len) return error.RecordTableFull;
     if (doc.findRecord(name) != null) return error.DuplicateRecord;
 
-    const index = doc.record_count;
+    const index: usize = @intCast(doc.record_count);
     var record = Record{
         .field_start = doc.field_count,
         .field_count = 0,
     };
-    record.name_len = native_util.copyTextExact(&record.name, name) catch return error.RecordNameTooLong;
+    record.name_len = @intCast(native_util.copyTextExact(&record.name, name) catch return error.RecordNameTooLong);
     doc.records[index] = record;
     doc.record_count += 1;
     return index;
@@ -548,12 +595,12 @@ fn addField(
         if (std.mem.eql(u8, field.nameSlice(), name)) return error.DuplicateField;
     }
 
-    const index = doc.field_count;
+    const index: usize = @intCast(doc.field_count);
     var field = Field{
         .type_ref = type_ref,
         .cardinality = cardinality,
     };
-    field.name_len = native_util.copyTextExact(&field.name, name) catch return error.FieldNameTooLong;
+    field.name_len = @intCast(native_util.copyTextExact(&field.name, name) catch return error.FieldNameTooLong);
     doc.fields[index] = field;
     doc.field_count += 1;
     doc.records[record_index].field_count += 1;
@@ -567,7 +614,7 @@ fn addPermission(
 ) Error!void {
     if (doc.permission_count >= doc.permissions.len) return error.PermissionTableFull;
     var decl = PermissionDecl{ .kind = kind };
-    decl.resource_len = native_util.copyTextExact(&decl.resource, resource) catch return error.PermissionResourceTooLong;
+    decl.resource_len = @intCast(native_util.copyTextExact(&decl.resource, resource) catch return error.PermissionResourceTooLong);
     applyPermissionFlags(&decl, flags);
     doc.permissions[doc.permission_count] = decl;
     doc.permission_count += 1;
@@ -582,8 +629,8 @@ fn addObject(
 ) Error!void {
     if (doc.object_count >= doc.objects.len) return error.ObjectTableFull;
     var decl = ObjectDecl{ .kind = kind };
-    decl.name_len = native_util.copyTextExact(&decl.name, name) catch return error.RecordNameTooLong;
-    decl.path_len = native_util.copyTextExact(&decl.path, path) catch return error.ObjectPathTooLong;
+    decl.name_len = @intCast(native_util.copyTextExact(&decl.name, name) catch return error.RecordNameTooLong);
+    decl.path_len = @intCast(native_util.copyTextExact(&decl.path, path) catch return error.ObjectPathTooLong);
     var tokens = std.mem.tokenizeAny(u8, flags, " \t");
     while (tokens.next()) |flag| {
         if (std.mem.eql(u8, flag, "unsigned")) decl.signed = false;
@@ -602,7 +649,7 @@ fn addSync(
 ) Error!void {
     if (doc.sync_count >= doc.syncs.len) return error.SyncTableFull;
     var decl = SyncDecl{ .semantic = semantic };
-    decl.prefix_len = native_util.copyTextExact(&decl.prefix, prefix) catch return error.SyncPrefixTooLong;
+    decl.prefix_len = @intCast(native_util.copyTextExact(&decl.prefix, prefix) catch return error.SyncPrefixTooLong);
     var tokens = std.mem.tokenizeAny(u8, flags, " \t");
     while (tokens.next()) |flag| {
         if (std.mem.eql(u8, flag, "remote_ok")) decl.local_first = false;
@@ -672,7 +719,7 @@ const Version = struct {
 
 fn parseTypeRef(type_name: []const u8) Error!TypeRef {
     var ref = TypeRef{ .kind = builtinTypeKind(type_name) orelse .record };
-    ref.name_len = native_util.copyTextExact(&ref.name, type_name) catch return error.FieldTypeTooLong;
+    ref.name_len = @intCast(native_util.copyTextExact(&ref.name, type_name) catch return error.FieldTypeTooLong);
     return ref;
 }
 
@@ -842,12 +889,12 @@ test "IDL parser produces manifest interfaces and codegen bindings" {
         \\object document document workspace://documents signed versioned sync
         \\sync documents/ mergeable_crdt local_first
     );
-    try std.testing.expectEqual(@as(usize, 1), doc.interface_count);
-    try std.testing.expectEqual(@as(usize, 2), doc.operation_count);
-    try std.testing.expectEqual(@as(usize, 3), doc.record_count);
-    try std.testing.expectEqual(@as(usize, 1), doc.permission_count);
-    try std.testing.expectEqual(@as(usize, 1), doc.object_count);
-    try std.testing.expectEqual(@as(usize, 1), doc.sync_count);
+    try std.testing.expectEqual(@as(u8, 1), doc.interface_count);
+    try std.testing.expectEqual(@as(u8, 2), doc.operation_count);
+    try std.testing.expectEqual(@as(u8, 3), doc.record_count);
+    try std.testing.expectEqual(@as(u8, 1), doc.permission_count);
+    try std.testing.expectEqual(@as(u8, 1), doc.object_count);
+    try std.testing.expectEqual(@as(u8, 1), doc.sync_count);
     try std.testing.expect(doc.allOperationsTyped());
     try std.testing.expectEqualStrings("writer.edit", doc.interfaceAt(0).nameSlice());
     try std.testing.expectEqual(@as(u16, 1), doc.interfaceAt(0).manifestDecl().version_major);
@@ -859,6 +906,26 @@ test "IDL parser produces manifest interfaces and codegen bindings" {
     try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "pub const writer_edit") != null);
     try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "pub const save") != null);
     try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "request_type = \"SaveRequest\"") != null);
+}
+
+test "IDL records keep bounded metadata compact" {
+    try std.testing.expectEqual(u8, @FieldType(TypeRef, "name_len"));
+    try std.testing.expectEqual(u8, @FieldType(Record, "field_start"));
+    try std.testing.expectEqual(u8, @FieldType(Record, "field_count"));
+    try std.testing.expectEqual(u8, @FieldType(Operation, "request_type_len"));
+    try std.testing.expectEqual(u8, @FieldType(Interface, "operation_start"));
+    try std.testing.expectEqual(u8, @FieldType(Document, "field_count"));
+    try std.testing.expectEqual(u16, @FieldType(GeneratedSource, "len"));
+    try std.testing.expect(@sizeOf(TypeRef) <= TYPE_REF_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Field) <= FIELD_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Record) <= RECORD_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(PermissionDecl) <= PERMISSION_DECL_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(ObjectDecl) <= OBJECT_DECL_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(SyncDecl) <= SYNC_DECL_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Operation) <= OPERATION_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Interface) <= INTERFACE_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Document) <= DOCUMENT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(GeneratedSource) <= GENERATED_SOURCE_SIZE_CEILING_BYTES);
 }
 
 test "IDL parser rejects ambiguous developer contracts" {
