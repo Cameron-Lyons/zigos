@@ -36,6 +36,7 @@ pub const DEFAULT_SYNTHETIC_ENTRY_POINT = model.DEFAULT_SYNTHETIC_ENTRY_POINT;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES = model.DEFAULT_SYNTHETIC_IMAGE_BYTES;
 pub const TaskStateCount = u8;
 pub const COMPACT_LIFECYCLE_METADATA = true;
+pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
 pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
 pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_624;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
@@ -302,8 +303,14 @@ pub const Runtime = struct {
     }
 
     fn clearTaskColdRecords(self: *Runtime, count: usize) void {
+        self.clearTaskColdRecordRange(0, count);
+    }
+
+    fn clearTaskColdRecordRange(self: *Runtime, first: usize, end: usize) void {
         const records = self.taskColdRecords() orelse return;
-        for (records[0..@min(count, records.len)]) |*cold| resetTaskCold(cold);
+        const bounded_first = @min(first, records.len);
+        const bounded_end = @min(@max(first, end), records.len);
+        for (records[bounded_first..bounded_end]) |*cold| resetTaskCold(cold);
     }
 
     fn releaseTaskColdRecords(self: *Runtime) void {
@@ -404,14 +411,14 @@ pub const Runtime = struct {
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) error{NoSpaceLeft}!void {
         const task_cold = if (state.task_count == 0) null else try self.ensureTaskColdRecords();
-        const cold_records_to_clear = @max(self.tasks.claimedCount(), state.task_count);
+        const previous_task_claimed_count = self.tasks.claimedCount();
         const restored_address_spaces = if (state.address_space_count == 0) null else try self.ensureAddressSpaceArena();
         const retirements = self.captureAddressSpaceRetirements(.snapshot_restore);
         self.resetForSnapshotRestore();
         if (state.task_count == 0 and heap_backed_task_cold) {
             self.releaseTaskColdRecords();
-        } else {
-            self.clearTaskColdRecords(cold_records_to_clear);
+        } else if (previous_task_claimed_count > state.task_count) {
+            self.clearTaskColdRecordRange(state.task_count, previous_task_claimed_count);
         }
         if (state.address_space_count == 0 and heap_backed_address_spaces) {
             self.releaseAddressSpaceArena();
@@ -424,17 +431,26 @@ pub const Runtime = struct {
 
         var task_index: usize = 0;
         while (task_index < state.task_count) : (task_index += 1) {
-            if (!state.tasks[task_index].in_use) {
+            const snapshot_slot = &state.tasks[task_index];
+            if (!snapshot_slot.in_use) {
                 native_util.impossibleByInvariant("counted task snapshot records are live");
             }
-            const task_id = state.tasks[task_index].task.id;
+            const snapshot_task = &snapshot_slot.task;
+            const previous_task = &self.tasks.slotAtConst(task_index).task;
+            const reuses_cold_backing = task_index < previous_task_claimed_count and
+                previous_task.id != 0 and
+                previous_task.id == snapshot_task.id and
+                previous_task.owner.eql(snapshot_task.owner);
+            const cold_records = task_cold orelse
+                native_util.impossibleByInvariant("restored tasks retain cold runtime state");
+            if (!reuses_cold_backing) resetTaskCold(&cold_records[task_index]);
+
+            const task_id = snapshot_task.id;
             const slot_index = self.tasks.reserveIndexAt(task_id, task_index) orelse {
                 native_util.impossibleByInvariant("task snapshot count is bounded by task arena capacity");
             };
-            self.tasks.slotAt(slot_index).task = state.tasks[task_index].task;
-            const cold_records = task_cold orelse
-                native_util.impossibleByInvariant("restored tasks retain cold runtime state");
-            copyTaskColdForTask(&cold_records[task_index], &state.task_cold[task_index], &state.tasks[task_index].task);
+            self.tasks.slotAt(slot_index).task = snapshot_task.*;
+            copyTaskColdForTask(&cold_records[task_index], &state.task_cold[task_index], snapshot_task);
             self.rebuildTaskDerivedIndexesAt(slot_index);
         }
 
@@ -1696,6 +1712,46 @@ test "restoring a snapshot rebuilds authoritative indexes" {
     const pre_rehost_address_space_id = restored.find(task_id).?.address_space_id;
     try std.testing.expect(try restored.rehostTask(task_id, 2));
     try std.testing.expect(restored.findAddressSpaceConst(pre_rehost_address_space_id) == null);
+}
+
+test "snapshot restore reuses live cold backing and clears only retired records" {
+    const source = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(source);
+    source.* = Runtime.init();
+    const restored = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(restored);
+    restored.* = Runtime.init();
+    const snapshot = try std.testing.allocator.create(Snapshot);
+    defer std.testing.allocator.destroy(snapshot);
+    snapshot.* = Runtime.initSnapshot();
+
+    const source_task = try createTaskIdTestTask(source, 8_001);
+    _ = try createTaskIdTestTask(source, 8_010);
+    source.writeSnapshot(snapshot);
+
+    _ = try createTaskIdTestTask(restored, 8_001);
+    _ = try createTaskIdTestTask(restored, 8_003);
+    _ = try createTaskIdTestTask(restored, 8_004);
+    const cold_records = restored.taskColdRecords().?;
+    cold_records[0].capability_ids[MAX_TASK_CAPABILITIES - 1] = 0xCAFE;
+    cold_records[1].capability_ids[MAX_TASK_CAPABILITIES - 1] = 0xBEEF;
+    cold_records[1].capability_generation = 99;
+    cold_records[2].capability_ids[MAX_TASK_CAPABILITIES - 1] = 0xFACE;
+    cold_records[2].capability_generation = 100;
+
+    try restored.restoreFromSnapshot(snapshot);
+
+    const restored_cold = restored.taskColdRecords().?;
+    try std.testing.expectEqual(@as(u64, 0xCAFE), restored_cold[0].capability_ids[MAX_TASK_CAPABILITIES - 1]);
+    try std.testing.expectEqual(@as(u64, 0), restored_cold[1].capability_ids[MAX_TASK_CAPABILITIES - 1]);
+    try std.testing.expectEqual(@as(u64, 1), restored_cold[1].capability_generation);
+    try std.testing.expectEqual(@as(u64, 0), restored_cold[2].capability_ids[MAX_TASK_CAPABILITIES - 1]);
+    try std.testing.expectEqual(@as(u64, 1), restored_cold[2].capability_generation);
+
+    const live = restored.find(source_task.id).?;
+    try std.testing.expectEqual(@as(usize, 0), live.capabilityIds().len);
+    try restored.grantCapability(live.id, 0x1234);
+    try std.testing.expectEqualSlices(u64, &.{0x1234}, live.capabilityIds());
 }
 
 test "snapshot restore preserves compact task denial provenance" {

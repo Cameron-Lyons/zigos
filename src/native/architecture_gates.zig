@@ -352,6 +352,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_task_capability_generation = @hasDecl(task_runtime.TaskRecord, "capabilityGeneration"),
         .removes_retired_capability_attachments = @hasDecl(task_runtime.Runtime, "revokeCapabilityEverywhere"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
+        .reuses_live_snapshot_cold_backing = task_runtime.SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING,
     },
     .debug_contract = .{
         .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and

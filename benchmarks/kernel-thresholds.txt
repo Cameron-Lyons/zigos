@@ -6,7 +6,7 @@ permission.review.render_grants 1700
 network_policy.authorize_connection 160
 background_dispatch.allowed_sync 720
 service_supervisor.ready_lookup 32
-task_runtime.checkpoint.write_restore 21000
+task_runtime.checkpoint.write_restore 14000
 task_runtime.checkpoint.write_low_occupancy 1600
 paging.address_space_roundtrip 40000
 syscall.fast_entry_roundtrip 1200
