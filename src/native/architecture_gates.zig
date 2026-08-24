@@ -251,6 +251,7 @@ pub const indexed_hot_path_tables = .{
         .keeps_grant_reservation_within_ceiling = @sizeOf(capability.GrantReservation) <= capability.GRANT_RESERVATION_SIZE_CEILING_BYTES,
         .avoids_capability_primary_index_lookups = capability.CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY == 0,
         .avoids_capability_id_collision_probes = capability.CAPABILITY_ID_COLLISION_PROBES_PER_INSERT == 0,
+        .uses_direct_right_masks = capability.DIRECT_RIGHT_MASKS and @hasDecl(capability, "bitsContainRight"),
         .uses_target_generation_arena = @hasDecl(@FieldType(capability.CapabilityTable, "target_generations"), "reserveIndex"),
         .supports_direct_capability_slot_insertion = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandleAt"),
         .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),

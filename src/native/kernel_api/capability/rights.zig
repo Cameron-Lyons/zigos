@@ -57,7 +57,17 @@ pub const CapabilityRight = enum(u8) {
     notification_post,
     process_control,
     surface_present,
+
+    pub inline fn mask(self: CapabilityRight) u64 {
+        return @as(u64, 1) << @intCast(@intFromEnum(self));
+    }
 };
+
+pub const DIRECT_RIGHT_MASKS = true;
+
+pub inline fn bitsContainRight(bits: u64, right: CapabilityRight) bool {
+    return bits & right.mask() != 0;
+}
 
 const RightsBits = packed struct(u64) {
     task_create: bool = false,
@@ -232,10 +242,7 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
     }
 
     pub fn has(self: CapabilityRights, right: CapabilityRight) bool {
-        const bits = self.toRightsBits();
-        return switch (right) {
-            inline else => |field| @field(bits, @tagName(field)),
-        };
+        return bitsContainRight(self.toBits(), right);
     }
 
     pub fn single(right: CapabilityRight) CapabilityRights {
@@ -289,3 +296,12 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
         return out;
     }
 };
+
+test "direct right masks match every packed capability bit" {
+    inline for (std.meta.tags(CapabilityRight)) |right| {
+        const single = CapabilityRights.single(right).toBits();
+        try std.testing.expectEqual(right.mask(), single);
+        try std.testing.expect(bitsContainRight(single, right));
+        try std.testing.expect(!bitsContainRight(0, right));
+    }
+}

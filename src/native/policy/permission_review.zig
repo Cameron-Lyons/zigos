@@ -1,5 +1,4 @@
 const std = @import("std");
-const capability = @import("../kernel_api/capability.zig");
 const humane_permissions = @import("humane_permissions.zig");
 const manifest = @import("manifest.zig");
 const manifest_fixtures = @import("manifest_fixtures.zig");
@@ -8,10 +7,6 @@ const policy_mediation = @import("policy_mediation.zig");
 const units = @import("../core/units.zig");
 
 const yesNo = native_util.yesNo;
-const RIGHTS_SUMMARY_BUFFER_BYTES: usize = 160;
-const SCOPE_SUMMARY_BUFFER_BYTES: usize = 320;
-const EGRESS_INTENT_BUFFER_BYTES: usize = 180;
-const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
 const REVIEW_RENDER_BUFFER_BYTES: usize = units.kibibytes(2);
 const REVIEW_REQUEST_BUFFER_BYTES: usize = 512;
 
@@ -227,18 +222,14 @@ fn appendRequest(
     try appendText(buffer, used, request.resource);
     try appendText(buffer, used, "\n");
 
-    var rights_buffer: [RIGHTS_SUMMARY_BUFFER_BYTES]u8 = undefined;
-    try appendText(buffer, used, "    rights: ");
-    try appendText(buffer, used, rightsSummary(request.rights, &rights_buffer));
-    try appendText(buffer, used, "\n");
-    var scope_buffer: [SCOPE_SUMMARY_BUFFER_BYTES]u8 = undefined;
-    const scope_summary = humane_permissions.renderRequestScopeToBuffer(&scope_buffer, request) catch "Scope: unavailable";
     try appendText(buffer, used, "    ");
-    try appendText(buffer, used, scope_summary);
+    const scope_summary = try humane_permissions.renderRequestScopeToBuffer(buffer[used.*..], request);
+    used.* += scope_summary.len;
     try appendText(buffer, used, "\n");
     if (request.kind == .network_egress and request.egress_intent.declared()) {
-        var intent_buffer: [EGRESS_INTENT_BUFFER_BYTES]u8 = undefined;
-        try appendFmt(buffer, used, "    data egress intent: {s}\n", .{dataEgressIntentSummary(request.egress_intent, &intent_buffer)});
+        try appendText(buffer, used, "    data egress intent: ");
+        try appendDataEgressIntentSummary(buffer, used, request.egress_intent);
+        try appendText(buffer, used, "\n");
     }
     try appendText(buffer, used, "    required: ");
     try appendText(buffer, used, yesNo(request.required));
@@ -270,14 +261,13 @@ fn appendRequest(
         if (!decision.allow) {
             try appendText(buffer, used, "    decision: deny\n");
         } else if (decision.lease_ticks) |lease_ticks| {
-            var expiry_buffer: [LEASE_SUMMARY_BUFFER_BYTES]u8 = undefined;
-            const expiry = humane_permissions.requestedLeaseLabel(&expiry_buffer, lease_ticks) catch "custom lease";
             try appendText(buffer, used, "    decision: allow local_only=");
             try appendText(buffer, used, yesNo(decision.local_only));
             try appendText(buffer, used, " lease=");
             try appendUnsigned(buffer, used, lease_ticks);
             try appendText(buffer, used, " ticks\n    decision lease summary: ");
-            try appendText(buffer, used, expiry);
+            const expiry = try humane_permissions.requestedLeaseLabel(buffer[used.*..], lease_ticks);
+            used.* += expiry.len;
             try appendText(buffer, used, "\n");
         } else {
             try appendFmt(buffer, used, "    decision: allow local_only={s}\n", .{yesNo(decision.local_only)});
@@ -311,24 +301,23 @@ fn appendCompactReceipt(
     }
     try appendText(buffer, used, " data_leaves=");
     if (request.kind == .network_egress) {
-        var intent_buffer: [EGRESS_INTENT_BUFFER_BYTES]u8 = undefined;
-        try appendText(buffer, used, dataEgressIntentSummary(request.egress_intent, &intent_buffer));
+        try appendDataEgressIntentSummary(buffer, used, request.egress_intent);
     } else {
         try appendText(buffer, used, "none");
     }
     try appendText(buffer, used, " revoke=Permission Review\n");
 }
 
-fn dataEgressIntentSummary(intent: manifest.DataEgressIntent, buffer: *[EGRESS_INTENT_BUFFER_BYTES]u8) []const u8 {
-    return switch (intent.kind) {
-        .unspecified => "unspecified data egress",
-        .sync_object => std.fmt.bufPrint(buffer, "sync object {s} with {s}", .{
+fn appendDataEgressIntentSummary(buffer: []u8, used: *usize, intent: manifest.DataEgressIntent) !void {
+    switch (intent.kind) {
+        .unspecified => try appendText(buffer, used, "unspecified data egress"),
+        .sync_object => try appendFmt(buffer, used, "sync object {s} with {s}", .{
             intent.object,
             intent.principal,
-        }) catch "sync object",
-        .call_service => std.fmt.bufPrint(buffer, "call service {s}", .{intent.service}) catch "call service",
-        .publish_event => std.fmt.bufPrint(buffer, "publish event {s}", .{intent.event_type}) catch "publish event",
-    };
+        }),
+        .call_service => try appendFmt(buffer, used, "call service {s}", .{intent.service}),
+        .publish_event => try appendFmt(buffer, used, "publish event {s}", .{intent.event_type}),
+    }
 }
 
 fn backgroundTriggerLabel(trigger: manifest.BackgroundTrigger) []const u8 {
@@ -363,38 +352,6 @@ fn backgroundVisibilityLabel(visibility: manifest.BackgroundVisibility) []const 
         .user_visible => "user-visible",
         .audit_only => "audit-only",
     };
-}
-
-fn rightsSummary(rights: capability.CapabilityRights, buffer: *[RIGHTS_SUMMARY_BUFFER_BYTES]u8) []const u8 {
-    var used: usize = 0;
-    var first = true;
-
-    appendRight(buffer, &used, &first, rights.has(.object_read), "object_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.object_write), "object_write") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.device_use), "device_use") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.clipboard_read), "clipboard_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.clipboard_write), "clipboard_write") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.sensor_read), "sensor_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.background_run), "background_run") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.network_local), "network_local") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.network_remote), "network_remote") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.ipc_peer), "ipc_peer") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.location_read), "location_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.contacts_read), "contacts_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.screen_capture), "screen_capture") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.has(.notification_post), "notification_post") catch return "rights_error";
-
-    if (first) {
-        return "none";
-    }
-    return buffer[0..used];
-}
-
-fn appendRight(buffer: *[RIGHTS_SUMMARY_BUFFER_BYTES]u8, used: *usize, first: *bool, enabled: bool, label: []const u8) !void {
-    if (!enabled) return;
-    if (!first.*) try appendText(buffer, used, ", ");
-    try appendText(buffer, used, label);
-    first.* = false;
 }
 
 fn appendText(buffer: []u8, used: *usize, text: []const u8) !void {
@@ -481,14 +438,12 @@ test "renderToBuffer preserves the exact permission review text" {
     const expected =
         \\Permission review for Notes [app.notes] task=3
         \\  [1/2] Object access: workspace:notes
-        \\    rights: object_read, object_write
         \\    Scope: this object on this device; rights: read, write; lease: until revoked; data leaves: none; revoke: remove this app from the object's share sheet
         \\    required: yes local_only: yes
         \\    decision: allow local_only=yes lease=400 ticks
         \\    decision lease summary: up to 400 ticks
         \\    receipt: granted=Object access duration=400 ticks data_leaves=none revoke=Permission Review
         \\  [2/2] Clipboard: clipboard
-        \\    rights: clipboard_read
         \\    Scope: clipboard for this task; rights: read clipboard; lease: until revoked; data leaves: none; revoke: turn off clipboard access in Permission Review
         \\    required: no local_only: no
         \\    decision: deny
@@ -698,8 +653,8 @@ test "renderToBuffer labels expanded location contacts screen capture and notifi
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Contacts") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Screen capture") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Notification posting") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "location_read") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "contacts_read") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "screen_capture") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "notification_post") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "rights: read location") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "rights: read;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "rights: capture screen") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "rights: post notifications") != null);
 }
