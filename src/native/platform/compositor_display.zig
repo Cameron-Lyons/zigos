@@ -461,14 +461,15 @@ test "compositor display framebuffer renders windows switching recovery and perm
     try expectDisplayContains(&display, "surface_state model=notes revision=2");
     try expectDisplayContains(&display, "hello world");
 
-    const snapshot = session.snapshot();
+    var snapshot: compositor_session.SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
     _ = try session.switchView(workspace_window.id);
     try display.renderSession(&session);
     try expectDisplayContains(&display, "active_type=workspace_view");
     try expectDisplayContains(&display, "active_window=2");
 
     session.reset();
-    try session.restore(snapshot);
+    try session.restoreFromSnapshot(&snapshot);
     try display.renderSession(&session);
     try expectDisplayContains(&display, "type=document_view");
     try expectDisplayContains(&display, "type=workspace_view");

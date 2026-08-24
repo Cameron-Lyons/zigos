@@ -224,8 +224,9 @@ pub const TrustBoot = struct {
         ) catch return false;
         const network_probe = self.seedProductionHealthNetworkProbe(&sync_instance, workspace_id, 81) catch return false;
         const compositor_task = self.runtime.find(graph.service_bindings.bindingFor(.compositor_ui_session).task_id) orelse return false;
-        const compositor_snapshot = self.compositor.snapshot();
-        defer self.compositor.restore(compositor_snapshot) catch |err|
+        var compositor_snapshot: compositor_session.SessionSnapshot = undefined;
+        self.compositor.snapshotInto(&compositor_snapshot);
+        defer self.compositor.restoreFromSnapshot(&compositor_snapshot) catch |err|
             native_util.impossibleByInvariantError("activation health restores its retained compositor snapshot", err);
         _ = self.compositor.openTaskView(compositor_task, "Post-Activation Health") catch return false;
 

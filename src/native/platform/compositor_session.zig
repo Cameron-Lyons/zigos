@@ -843,9 +843,8 @@ pub const Session = struct {
         return window;
     }
 
-    pub fn snapshot(self: *const Session) SessionSnapshot {
-        var stored: SessionSnapshot = undefined;
-        stored = .{
+    pub fn snapshotInto(self: *const Session, stored: *SessionSnapshot) void {
+        stored.* = .{
             .next_window_id = self.next_window_id,
             .active_window_id = self.active_window_id,
             .windows = self.windows,
@@ -874,10 +873,9 @@ pub const Session = struct {
         } else if (self.item_count != 0) {
             native_util.impossibleByInvariant("non-empty compositor review state retains backing");
         }
-        return stored;
     }
 
-    pub fn restore(self: *Session, stored: SessionSnapshot) Error!void {
+    pub fn restoreFromSnapshot(self: *Session, stored: *const SessionSnapshot) Error!void {
         const retained_review_items = self.reviewItemsPtr() != null;
         const review_items = if (stored.item_count == 0) null else try self.ensureReviewItems();
         errdefer if (!retained_review_items and review_items != null) self.releaseReviewItems();
@@ -1307,7 +1305,7 @@ pub const Service = struct {
             .recover_state => {
                 const store = self.checkpoint_store orelse return error.RecoveryStateMissing;
                 if (!store.valid) return error.RecoveryStateMissing;
-                try self.session.restore(store.snapshot);
+                try self.session.restoreFromSnapshot(&store.snapshot);
                 response.recovered = true;
             },
             .close_task_windows => {
@@ -1318,7 +1316,7 @@ pub const Service = struct {
 
     fn checkpoint(self: *Service) void {
         const store = self.checkpoint_store orelse return;
-        store.snapshot = self.session.snapshot();
+        self.session.snapshotInto(&store.snapshot);
         store.valid = true;
     }
 };
@@ -1995,9 +1993,10 @@ test "compositor task window index survives restore and closes only matching tas
     try std.testing.expect(session.taskOwnsVisibleWindow(78));
     try std.testing.expect(!session.taskOwnsVisibleWindow(79));
 
-    const snapshot = session.snapshot();
+    var snapshot: SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
     var restored = Session.init();
-    try restored.restore(snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expect(restored.taskOwnsVisibleWindow(first_task.id));
     try std.testing.expect(restored.taskOwnsVisibleWindow(77));
 
@@ -2059,9 +2058,10 @@ test "compositor window order indexes saturated switching removal and restore" {
     try std.testing.expectEqual(@as(usize, MAX_WINDOWS - 1), wrapped_last.visible_index);
     try std.testing.expectEqual(window_ids[MAX_WINDOWS - 1], wrapped_last.window.id);
 
-    const snapshot = session.snapshot();
+    var snapshot: SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
     var restored = Session.init();
-    try restored.restore(snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(?usize, MAX_WINDOWS - 1), restored.activeWindowOrderIndex());
     for (window_ids, 0..) |window_id, order_index| {
         try std.testing.expectEqual(window_id, restored.windowAtOrder(order_index).?.id);
@@ -2366,9 +2366,10 @@ test "compositor session opens document workspace and full-screen task views" {
     const fullscreen = try session.openTaskView(app_task, "Edit Media Project");
     try std.testing.expectEqual(@as(usize, 3), session.visibleWindowCount());
 
-    const snapshot = session.snapshot();
+    var snapshot: SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
     var restored = Session.init();
-    try restored.restore(snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(usize, 3), restored.window_count);
     try std.testing.expectEqual(@as(usize, 3), restored.visibleWindowCount());
 
@@ -2414,9 +2415,10 @@ test "compositor window ids stop at exhaustion" {
     try std.testing.expectEqual(ServiceStatus.id_exhausted, statusForError(error.WindowIdExhausted));
     try std.testing.expectEqual(ServiceStatus.resource_exhausted, statusForError(error.OutOfMemory));
 
-    const snapshot = session.snapshot();
+    var snapshot: SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
     var restored = Session.init();
-    try restored.restore(snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 0), restored.next_window_id);
     try std.testing.expectError(error.WindowIdExhausted, restored.openTaskView(app_task, "Final Task"));
 }
@@ -2460,9 +2462,10 @@ test "compositor session owns bounded monotonic surface presentations" {
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(@as(u64, 2), session.surfacePresentation(71).?.presentation_count);
 
-    const snapshot = session.snapshot();
+    var snapshot: SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
     var restored = Session.init();
-    try restored.restore(snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqualStrings("draft!", restored.surfacePresentation(71).?.textSlice());
     try std.testing.expectEqual(@as(?usize, surface_slot_index), restored.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), restored.active_surface_head);
@@ -2517,8 +2520,9 @@ test "compositor surface pruning caches unchanged task lifecycle generations" {
     try std.testing.expect(try runtime.resumeTask(app_task_id, 111));
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(runtime.find(app_task_id).?, &presentation));
     try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
-    const snapshot = session.snapshot();
-    try session.restore(snapshot);
+    var snapshot: SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
+    try session.restoreFromSnapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 0), session.last_surface_prune_generation);
     try std.testing.expectEqual(@as(usize, 0), session.pruneSurfacePresentations(&runtime));
 
@@ -2576,9 +2580,10 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
     try std.testing.expectEqual(@as(u16, @intCast(removed_slot_index)), session.active_surface_tail);
     try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES), session.presentedSurfaceCount());
 
-    const snapshot = session.snapshot();
+    var snapshot: SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
     var restored = Session.init();
-    try restored.restore(snapshot);
+    try restored.restoreFromSnapshot(&snapshot);
     try std.testing.expect(try runtime.terminateTask(task_ids[1], 101));
     try std.testing.expect(try runtime.terminateTask(task_ids[MAX_PRESENTED_SURFACES - 2], 102));
     try std.testing.expectEqual(@as(usize, 2), restored.pruneSurfacePresentations(&runtime));
