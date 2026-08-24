@@ -389,7 +389,7 @@ const package_v1_components = [_]manifest.ExecutionComponentDecl{
 
 const package_v2_components = [_]manifest.ExecutionComponentDecl{
     .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
-    .{ .id = "notes-sync", .entry = "zigos.notes.sync", .abi = .native_sandbox },
+    .{ .id = "notes-sync", .entry = "zigos.notes.sync" },
 };
 
 const package_interfaces = [_]manifest.InterfaceDecl{

@@ -743,7 +743,7 @@
         },
         {
           "file": "src/native/policy/manifest.zig",
-          "name": "example app packaging requires typed components"
+          "name": "application packages use the single typed component model"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
@@ -2070,7 +2070,7 @@
       "negative_tests": [
         {
           "file": "src/native/policy/manifest.zig",
-          "name": "example app packaging requires typed components"
+          "name": "compatibility namespaces are rejected by native-only manifest validation"
         },
         {
           "file": "src/native/services/service_registry.zig",

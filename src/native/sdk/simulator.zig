@@ -495,10 +495,7 @@ fn appImageId(bundle: manifest.BundleManifest) u64 {
 
 fn componentSpec(component: package_service.StoredComponent) task_runtime.ExecutionComponentSpec {
     return .{
-        .substrate = switch (component.abi) {
-            .typed_component_v1 => .typed_component_abi,
-            .native_sandbox => .early_elf_runner,
-        },
+        .substrate = .typed_component_abi,
         .label = component.idSlice(),
         .entry = component.entrySlice(),
     };

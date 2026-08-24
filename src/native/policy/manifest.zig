@@ -223,15 +223,9 @@ pub const AiMetadata = struct {
     audit_prompt_use: bool = false,
 };
 
-pub const ComponentAbi = enum(u8) {
-    typed_component_v1,
-    native_sandbox,
-};
-
 pub const ExecutionComponentDecl = struct {
     id: []const u8,
     entry: []const u8,
-    abi: ComponentAbi = .typed_component_v1,
 };
 
 pub const AssetDecl = struct {
@@ -404,7 +398,6 @@ pub const ValidationError = error{
     TooManyComponents,
     ComponentIdEmpty,
     ComponentEntryEmpty,
-    UntypedApplicationComponent,
     ComponentIdTooLong,
     ComponentEntryTooLong,
     DuplicateComponentId,
@@ -762,9 +755,6 @@ pub fn validateApplicationPackaging(bundle: BundleManifest) ValidationError!void
         return error.MissingInterfaceDefinition;
     }
     if (bundle.assets.len == 0) return error.MissingAsset;
-    for (bundle.components) |component| {
-        if (component.abi != .typed_component_v1) return error.UntypedApplicationComponent;
-    }
 }
 
 pub fn hasPermission(bundle: BundleManifest, kind: PermissionKind) bool {
@@ -1690,17 +1680,18 @@ test "compatibility namespaces are rejected by native-only manifest validation" 
     }));
 }
 
-test "example app packaging requires typed components" {
+test "application packages use the single typed component model" {
+    try std.testing.expect(!@hasField(ExecutionComponentDecl, "abi"));
     const bundle = BundleManifest{
-        .bundle_id = "app.untyped",
-        .display_name = "Untyped",
+        .bundle_id = "app.typed",
+        .display_name = "Typed",
         .publisher = "zigos.dev",
-        .provided_interfaces = &.{.{ .name = "zigos.untyped.example" }},
-        .components = &.{.{ .id = "untyped-main", .entry = "app.untyped.main", .abi = .native_sandbox }},
-        .assets = &.{.{ .path = "assets/untyped/icon.svg", .content_type = "image/svg+xml" }},
+        .provided_interfaces = &.{.{ .name = "zigos.typed.example" }},
+        .components = &.{.{ .id = "typed-main", .entry = "app.typed.main" }},
+        .assets = &.{.{ .path = "assets/typed/icon.svg", .content_type = "image/svg+xml" }},
     };
 
-    try std.testing.expectError(error.UntypedApplicationComponent, validateApplicationPackaging(bundle));
+    try validateApplicationPackaging(bundle);
 }
 
 test "validate rejects background execution permissions without task metadata" {

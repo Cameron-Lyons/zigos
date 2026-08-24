@@ -78,7 +78,6 @@ pub fn digestBundle(bundle: manifest.BundleManifest) Digest {
         crypto_hash.updateInt(&hasher, "component-index", index);
         crypto_hash.updateBytes(&hasher, "component-id", component.id);
         crypto_hash.updateBytes(&hasher, "component-entry", component.entry);
-        crypto_hash.updateEnum(&hasher, "component-abi", component.abi);
     }
     for (bundle.assets, 0..) |asset, index| {
         crypto_hash.updateInt(&hasher, "asset-index", index);

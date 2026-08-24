@@ -86,16 +86,12 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
         .data_schema_version = 1,
     }, install_policy));
 
-    const untyped_components = [_]manifest.ExecutionComponentDecl{
-        .{ .id = "writer-bridge", .entry = "app.writer.bridge", .abi = .native_sandbox },
-    };
-    var untyped_bundle = bundle;
-    untyped_bundle.bundle_id = "app.writer.bridge";
-    untyped_bundle.display_name = "Writer Bridge";
-    untyped_bundle.components = &untyped_components;
-    untyped_bundle.signature = try userspace_manifest_signing.signBundle(untyped_bundle);
-    try std.testing.expectError(error.UntypedApplicationComponent, package_port.install(package_authority, .{
-        .bundle = untyped_bundle,
+    var compatibility_bundle = bundle;
+    compatibility_bundle.bundle_id = "compat.writer.bridge";
+    compatibility_bundle.display_name = "Compatibility Writer Bridge";
+    compatibility_bundle.signature = try userspace_manifest_signing.signBundle(compatibility_bundle);
+    try std.testing.expectError(error.CompatibilityNamespaceUnsupported, package_port.install(package_authority, .{
+        .bundle = compatibility_bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
     }, install_policy));

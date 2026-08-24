@@ -15,7 +15,7 @@ storage.file_bridge.resolve_view 144
 storage.workspace.commit_overlay 12000
 storage.volume.replay_segmented_log 1020000
 storage.volume.compact_checkpoint 1100000
-package_revision.rollforward_rollback 4600
+package_revision.rollforward_rollback 3600
 indexing_service.query_ranked 420
 media_print.submit_complete 4800
 event_ledger.export_redacted 14200
