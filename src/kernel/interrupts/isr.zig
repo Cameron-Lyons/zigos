@@ -3,6 +3,8 @@ const interrupt_context = @import("context.zig");
 const gdt = @import("gdt64.zig");
 const idt = @import("idt64.zig");
 const io = @import("../utils/io.zig");
+const console = @import("../utils/console.zig");
+const numfmt = @import("../utils/numfmt.zig");
 const timer = @import("../timer/timer.zig");
 const intel_i225_hw = @import("../drivers/intel_i225_hw.zig");
 const nvme_hw = @import("../drivers/nvme_hw.zig");
@@ -14,6 +16,8 @@ const IDT_INTERRUPT_GATE: u8 = 0x8E;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
 const DOUBLE_FAULT_VECTOR: u8 = 8;
 const PAGE_FAULT_VECTOR: u32 = 14;
+const REQUESTED_PRIVILEGE_LEVEL_MASK: usize = 0x3;
+const USER_PRIVILEGE_LEVEL: usize = 0x3;
 
 const PIC_MASTER_DATA_PORT: u16 = 0x21;
 const PIC_SLAVE_DATA_PORT: u16 = 0xA1;
@@ -170,15 +174,11 @@ pub export fn isrHandler(regs: *Registers) void {
         return;
     }
 
-    const console = @import("../utils/console.zig");
     console.print("Received interrupt: ");
     if (vector < EXCEPTION_VECTOR_COUNT) {
         console.print(exception_messages[vector]);
         console.print("\n");
-        console.print("System Halted!\n");
-        while (true) {
-            asm volatile ("hlt");
-        }
+        haltWithExceptionContext(regs, vector);
     }
 }
 pub const InterruptFrame = Registers;
@@ -254,6 +254,33 @@ fn interruptVector(regs: *const Registers) usize {
     return vector;
 }
 
+fn haltWithExceptionContext(regs: *const Registers, vector: usize) noreturn {
+    console.print("Exception context: vector=0x");
+    numfmt.printHex(vector);
+    console.print(" error=0x");
+    numfmt.printHex(regs.err_code);
+    console.print(" rip=0x");
+    numfmt.printHex(regs.eip);
+    console.print(" cs=0x");
+    numfmt.printHex(regs.cs);
+    console.print(" rflags=0x");
+    numfmt.printHex(regs.eflags);
+    if (frameOriginatesFromUserspace(regs.cs)) {
+        console.print(" rsp=0x");
+        numfmt.printHex(regs.useresp);
+        console.print(" ss=0x");
+        numfmt.printHex(regs.ss);
+    }
+    console.print("\nSystem Halted!\n");
+    while (true) {
+        asm volatile ("hlt");
+    }
+}
+
+fn frameOriginatesFromUserspace(code_selector: usize) bool {
+    return code_selector & REQUESTED_PRIVILEGE_LEVEL_MASK == USER_PRIVILEGE_LEVEL;
+}
+
 fn setKernelGate(vector: u8, handler: GateHandler) void {
     idt.setGate(vector, handler, gdt.KERNEL_CODE_SEG, IDT_INTERRUPT_GATE);
 }
@@ -269,5 +296,10 @@ comptime {
     }
     if (@sizeOf(Registers) != 192) {
         @compileError("x86-64 interrupt frame size diverged from interrupt64.S");
+    }
+    if (frameOriginatesFromUserspace(gdt.KERNEL_CODE_SEG) or
+        !frameOriginatesFromUserspace(gdt.USER_CODE_SEG | USER_PRIVILEGE_LEVEL))
+    {
+        @compileError("x86-64 interrupt privilege-origin decoding diverged from the GDT selectors");
     }
 }
