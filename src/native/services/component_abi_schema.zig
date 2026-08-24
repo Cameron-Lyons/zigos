@@ -405,20 +405,34 @@ pub const OperationDecl = struct {
 };
 
 pub const MAX_OPERATIONS_PER_INTERFACE: usize = maxOperationsPerInterface();
+pub const COMPACT_INTERFACE_CONTRACT_METADATA = true;
+pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES: usize = 392;
+
+comptime {
+    if (MAX_OPERATIONS_PER_INTERFACE > std.math.maxInt(u8)) {
+        @compileError("component ABI operation capacity exceeds its compact count field");
+    }
+}
 
 pub const InterfaceContract = struct {
     interface_id: InterfaceId,
     interface: manifest.InterfaceDecl,
     contract_hash: u64,
     coverage_requirement_id: []const u8,
-    operation_count: usize,
+    operation_count: u8,
     operations: [MAX_OPERATIONS_PER_INTERFACE]OperationDecl,
 
     pub fn operation(self: *const InterfaceContract, operation_id: OperationId) ?OperationDecl {
-        for (self.operations[0..self.operation_count]) |decl| {
+        for (self.operations[0..@as(usize, self.operation_count)]) |decl| {
             if (decl.id == operation_id) return decl;
         }
         return null;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > INTERFACE_CONTRACT_SIZE_CEILING_BYTES) {
+            @compileError("component ABI interface contract exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -647,7 +661,7 @@ fn buildContract(comptime spec: InterfaceSpec) InterfaceContract {
     inline for (operation_specs) |operation_spec| {
         _ = interfaceSpec(operation_spec.interface);
         if (operation_spec.interface == spec.key) {
-            result.operations[result.operation_count] = operationDecl(operation_spec);
+            result.operations[@as(usize, result.operation_count)] = operationDecl(operation_spec);
             result.operation_count += 1;
         }
     }
@@ -736,6 +750,9 @@ fn buildCoverageReferences() [interface_specs.len + service_binding_specs.len + 
 }
 
 test "component ABI schema emits manifest interfaces and service catalog bindings" {
+    try std.testing.expect(COMPACT_INTERFACE_CONTRACT_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(InterfaceContract, "operation_count"));
+    try std.testing.expect(@sizeOf(InterfaceContract) <= INTERFACE_CONTRACT_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(interface_specs.len, manifest_interfaces.len);
     try std.testing.expectEqual(service_binding_specs.len, service_catalog_bindings.len);
     try std.testing.expectEqualStrings("zigos.service.registry", interfaceDecl(.service_registry).name);

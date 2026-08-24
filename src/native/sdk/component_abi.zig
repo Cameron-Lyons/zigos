@@ -15,6 +15,8 @@ pub const PackageInstallRequest = typed_component_abi.PackageInstallRequest;
 pub const PackageInstallResponse = typed_component_abi.PackageInstallResponse;
 pub const PackageUpdateRequest = typed_component_abi.PackageUpdateRequest;
 pub const PackageUpdateResponse = typed_component_abi.PackageUpdateResponse;
+pub const COMPACT_COMPONENT_BINDING_METADATA = true;
+pub const BINDING_SIZE_CEILING_BYTES: usize = 40;
 pub const Error = typed_component_abi.Error || idl.Error || error{
     InterfaceNotDeclared,
     OperationNotInInterface,
@@ -24,12 +26,18 @@ pub const Binding = struct {
     interface_id: InterfaceId,
     interface: manifest.InterfaceDecl,
     contract_hash: u64,
-    operation_count: usize,
+    operation_count: u8,
 
     pub fn matches(self: Binding, decl: manifest.InterfaceDecl) bool {
         return std.mem.eql(u8, self.interface.name, decl.name) and
             self.interface.version_major == decl.version_major and
             self.interface.version_minor == decl.version_minor;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > BINDING_SIZE_CEILING_BYTES) {
+            @compileError("SDK component binding exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -88,6 +96,9 @@ pub fn validateHeader(
 
 test "SDK component ABI exposes typed bindings and validates real wire headers" {
     const bind = binding(.package_install);
+    try std.testing.expect(COMPACT_COMPONENT_BINDING_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(Binding, "operation_count"));
+    try std.testing.expect(@sizeOf(Binding) <= BINDING_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(InterfaceId.package_install, bind.interface_id);
     try std.testing.expect(bind.contract_hash != 0);
     try std.testing.expect(bind.operation_count >= 3);
