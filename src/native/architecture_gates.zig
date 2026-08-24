@@ -387,6 +387,8 @@ pub const indexed_hot_path_tables = .{
         .bounds_secret_lookup_comparisons = secure_secret_store.SECRET_LOOKUP_COMPARISON_BOUND == 5,
         .drops_secret_arena = @FieldType(secure_secret_store.Store, "secrets") == [secure_secret_store.MAX_SECRETS]secure_secret_store.SecretRecord,
         .uses_handle_arena = @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "reserve"),
+        .uses_direct_generational_handles = secure_secret_store.DIRECT_HANDLE_LOOKUP and
+            @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "getByHandle"),
         .supports_handle_replacement = @hasDecl(secure_secret_store.Store, "replaceHandle"),
         .keeps_fixed_state_within_ceiling = @sizeOf(secure_secret_store.Store) <= secure_secret_store.STORE_SIZE_CEILING_BYTES,
     },
@@ -415,6 +417,8 @@ pub const indexed_hot_path_tables = .{
 
     .secret_vault_service = .{
         .uses_handle_arena = @hasDecl(@FieldType(secret_vault_service.Service, "handles"), "reserve"),
+        .uses_direct_generational_handles = secret_vault_service.DIRECT_HANDLE_LOOKUP and
+            @hasDecl(@FieldType(secret_vault_service.Service, "handles"), "getByHandle"),
         .uses_bounded_handle_scan = secret_vault_service.BOUNDED_HANDLE_SCAN,
         .reclaims_terminal_handles = secret_vault_service.RECLAIMS_TERMINAL_HANDLES,
         .drops_secondary_handle_indexes = !@hasField(secret_vault_service.Service, "secret_handle_index") and
