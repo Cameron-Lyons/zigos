@@ -33,12 +33,18 @@ pub const CompiledPackage = struct {
     }
 };
 
-pub fn compile(package: example_apps.ExamplePackage) Error!CompiledPackage {
+pub fn compileInto(package: example_apps.ExamplePackage, compiled: *CompiledPackage) Error!void {
     if (package.idl_source.len == 0) return error.PackageMissingIdl;
     try manifest.validate(package.bundle);
     try manifest.validateApplicationPackaging(package.bundle);
 
-    const document = try idl.parse(package.idl_source);
+    compiled.* = .{
+        .package = package,
+        .document = .{},
+        .generated = .{},
+    };
+    const document = &compiled.document;
+    try idl.parseInto(package.idl_source, document);
     if (!document.allOperationsTyped()) return error.UntypedOperation;
     if (document.nativeDeclarationCount() == 0) return error.IdlNativeDeclarationsMissing;
     for (document.interfaces[0..document.interface_count]) |*interface| {
@@ -47,11 +53,7 @@ pub fn compile(package: example_apps.ExamplePackage) Error!CompiledPackage {
         }
     }
 
-    return .{
-        .package = package,
-        .document = document,
-        .generated = try idl.generate(&document),
-    };
+    try idl.generateInto(document, &compiled.generated);
 }
 
 pub fn signedBundle(
@@ -71,7 +73,8 @@ pub const bundleDeclaresInterface = manifest.bundleDeclaresInterface;
 
 test "app platform compiles IDL validates manifest declarations and signs packages" {
     const package = example_apps.firstPartyWriter();
-    const compiled = try compile(package);
+    var compiled: CompiledPackage = undefined;
+    try compileInto(package, &compiled);
     try std.testing.expectEqual(@as(usize, 1), compiled.interfaceCount());
     try std.testing.expect(compiled.operationCount() >= 4);
     try std.testing.expect(compiled.requiredPermissionCount() >= 1);

@@ -341,10 +341,11 @@ comptime {
     }
 }
 
-pub fn parse(source: []const u8) Error!Document {
+pub fn parseInto(source: []const u8, document: *Document) Error!void {
+    document.* = .{};
     if (std.mem.trim(u8, source, " \t\r\n").len == 0) return error.EmptyInput;
 
-    var doc = Document{};
+    const doc = document;
     var current_interface_index: ?usize = null;
     var current_record_index: ?usize = null;
     var lines = std.mem.splitScalar(u8, source, '\n');
@@ -357,52 +358,51 @@ pub fn parse(source: []const u8) Error!Document {
         if (std.mem.eql(u8, directive, "interface")) {
             const name = tokens.next() orelse return error.MissingInterfaceName;
             const version_text = tokens.next() orelse return error.MissingVersion;
-            current_interface_index = try addInterface(&doc, name, version_text);
+            current_interface_index = try addInterface(doc, name, version_text);
             current_record_index = null;
         } else if (std.mem.eql(u8, directive, "record")) {
             const name = tokens.next() orelse return error.MissingRecordName;
-            current_record_index = try addRecord(&doc, name);
+            current_record_index = try addRecord(doc, name);
         } else if (std.mem.eql(u8, directive, "field")) {
             const record_index = current_record_index orelse return error.FieldBeforeRecord;
             const name = tokens.next() orelse return error.MissingFieldName;
             const type_name = tokens.next() orelse return error.MissingFieldType;
             const cardinality = if (tokens.next()) |token| try parseCardinality(token) else Cardinality.required;
-            try addField(&doc, record_index, name, try parseTypeRef(type_name), cardinality);
+            try addField(doc, record_index, name, try parseTypeRef(type_name), cardinality);
         } else if (std.mem.eql(u8, directive, "operation") or std.mem.eql(u8, directive, "op")) {
             const interface_index = current_interface_index orelse return error.OperationBeforeInterface;
             const name = tokens.next() orelse return error.MissingOperationName;
             const request_token = tokens.next() orelse return error.MissingOperationRequestType;
             if (parseMaybeU32(request_token)) |request_size| {
                 const response_size = try parseU32(tokens.next() orelse return error.MissingResponseSize);
-                try addOperation(&doc, interface_index, name, request_size, response_size);
+                try addOperation(doc, interface_index, name, request_size, response_size);
             } else {
                 const arrow = tokens.next() orelse return error.MissingOperationArrow;
                 if (!std.mem.eql(u8, arrow, "->")) return error.MissingOperationArrow;
                 const response_type = tokens.next() orelse return error.MissingOperationResponseType;
-                try addTypedOperation(&doc, interface_index, name, request_token, response_type);
+                try addTypedOperation(doc, interface_index, name, request_token, response_type);
             }
         } else if (std.mem.eql(u8, directive, "permission")) {
             const kind = try parsePermissionKind(tokens.next() orelse return error.MissingPermissionKind);
             const resource = tokens.next() orelse return error.MissingPermissionResource;
-            try addPermission(&doc, kind, resource, tokens.rest());
+            try addPermission(doc, kind, resource, tokens.rest());
         } else if (std.mem.eql(u8, directive, "object")) {
             const name = tokens.next() orelse return error.MissingObjectName;
             const kind = try parseObjectKind(tokens.next() orelse return error.MissingObjectType);
             const path = tokens.next() orelse return error.MissingObjectPath;
-            try addObject(&doc, name, kind, path, tokens.rest());
+            try addObject(doc, name, kind, path, tokens.rest());
         } else if (std.mem.eql(u8, directive, "sync")) {
             const prefix = tokens.next() orelse return error.MissingSyncPrefix;
             const semantic = try parseSyncSemantic(tokens.next() orelse return error.MissingSyncSemantic);
-            try addSync(&doc, prefix, semantic, tokens.rest());
+            try addSync(doc, prefix, semantic, tokens.rest());
         } else {
             return error.UnknownDirective;
         }
     }
 
     if (doc.interface_count == 0) return error.EmptyInput;
-    try validateTypeReferences(&doc);
-    populateTypedOperationSizes(&doc);
-    return doc;
+    try validateTypeReferences(doc);
+    populateTypedOperationSizes(doc);
 }
 
 pub fn generateZigBindings(document: *const Document, output: []u8) Error![]const u8 {
@@ -492,11 +492,10 @@ pub fn generateZigBindings(document: *const Document, output: []u8) Error![]cons
     return output[0..cursor];
 }
 
-pub fn generate(document: *const Document) Error!GeneratedSource {
-    var generated = GeneratedSource{};
+pub fn generateInto(document: *const Document, generated: *GeneratedSource) Error!void {
+    generated.* = .{};
     const slice = try generateZigBindings(document, &generated.buffer);
     generated.len = @intCast(slice.len);
-    return generated;
 }
 
 fn addInterface(doc: *Document, name: []const u8, version_text: []const u8) Error!usize {
@@ -872,7 +871,7 @@ fn isDigit(byte: u8) bool {
 }
 
 test "IDL parser produces manifest interfaces and codegen bindings" {
-    const doc = try parse(
+    const source =
         \\interface writer.edit 1.2
         \\record OpenRequest
         \\field object object_id
@@ -888,7 +887,9 @@ test "IDL parser produces manifest interfaces and codegen bindings" {
         \\permission object_access workspace://documents local_only
         \\object document document workspace://documents signed versioned sync
         \\sync documents/ mergeable_crdt local_first
-    );
+    ;
+    var doc: Document = undefined;
+    try parseInto(source, &doc);
     try std.testing.expectEqual(@as(u8, 1), doc.interface_count);
     try std.testing.expectEqual(@as(u8, 2), doc.operation_count);
     try std.testing.expectEqual(@as(u8, 3), doc.record_count);
@@ -901,7 +902,8 @@ test "IDL parser produces manifest interfaces and codegen bindings" {
     try std.testing.expectEqualStrings("SaveRequest", doc.operations[1].requestTypeSlice());
     try std.testing.expect(doc.operations[1].request_size > 0);
 
-    const generated = try generate(&doc);
+    var generated: GeneratedSource = undefined;
+    try generateInto(&doc, &generated);
     try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "pub const OpenRequest") != null);
     try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "pub const writer_edit") != null);
     try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "pub const save") != null);
@@ -929,18 +931,22 @@ test "IDL records keep bounded metadata compact" {
 }
 
 test "IDL parser rejects ambiguous developer contracts" {
-    try std.testing.expectError(error.OperationBeforeInterface, parse("operation save 1 1"));
-    try std.testing.expectError(error.DuplicateInterface, parse(
+    var doc: Document = undefined;
+    try std.testing.expectError(error.OperationBeforeInterface, parseInto("operation save 1 1", &doc));
+    const duplicate_interface =
         \\interface writer.edit 1.0
         \\interface writer.edit 1.0
-    ));
-    try std.testing.expectError(error.DuplicateOperation, parse(
+    ;
+    try std.testing.expectError(error.DuplicateInterface, parseInto(duplicate_interface, &doc));
+    const duplicate_operation =
         \\interface writer.edit 1.0
         \\operation save 1 1
         \\operation save 2 2
-    ));
-    try std.testing.expectError(error.UnresolvedRecordType, parse(
+    ;
+    try std.testing.expectError(error.DuplicateOperation, parseInto(duplicate_operation, &doc));
+    const unresolved_record_type =
         \\interface writer.edit 1.0
         \\operation save MissingRequest -> MissingResponse
-    ));
+    ;
+    try std.testing.expectError(error.UnresolvedRecordType, parseInto(unresolved_record_type, &doc));
 }

@@ -150,7 +150,8 @@ pub fn lintWithIdl(bundle: manifest.BundleManifest, idl_source: []const u8) Repo
         return report;
     }
 
-    const document = idl.parse(idl_source) catch |err| {
+    var document: idl.Document = undefined;
+    idl.parseInto(idl_source, &document) catch |err| {
         report.add(.err, .idl_parse, @errorName(err));
         return report;
     };

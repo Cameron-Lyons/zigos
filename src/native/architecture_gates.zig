@@ -3,6 +3,7 @@ const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
 const signing = @import("core/signing.zig");
 const sdk_idl = @import("sdk/idl.zig");
+const sdk_app_platform = @import("sdk/app_platform.zig");
 const sdk_component_abi = @import("sdk/component_abi.zig");
 const sdk_object_store = @import("sdk/object_store_api.zig");
 const sdk_permissions = @import("sdk/permissions.zig");
@@ -138,6 +139,14 @@ pub const indexed_hot_path_tables = .{
         .keeps_bindings_within_ceiling = @sizeOf(sdk_component_abi.Binding) <= sdk_component_abi.BINDING_SIZE_CEILING_BYTES,
     },
     .sdk_idl = .{
+        .uses_borrowed_large_output_apis = @hasDecl(sdk_idl, "parseInto") and
+            @hasDecl(sdk_idl, "generateInto") and
+            !@hasDecl(sdk_idl, "parse") and
+            !@hasDecl(sdk_idl, "generate") and
+            @hasDecl(sdk_app_platform, "compileInto") and
+            !@hasDecl(sdk_app_platform, "compile") and
+            @hasDecl(sdk_simulator.Simulator, "parseAndGenerateInto") and
+            !@hasDecl(sdk_simulator.Simulator, "parseAndGenerate"),
         .stores_compact_bounded_metadata = sdk_idl.COMPACT_IDL_METADATA and
             @FieldType(sdk_idl.TypeRef, "name_len") == u8 and
             @FieldType(sdk_idl.Field, "name_len") == u8 and

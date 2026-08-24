@@ -175,16 +175,17 @@ pub const Simulator = struct {
         self.bootstrapped = true;
     }
 
-    pub fn parseAndGenerate(self: *Simulator, source: []const u8) !idl.GeneratedSource {
-        const document = try idl.parse(source);
+    pub fn parseAndGenerateInto(self: *Simulator, source: []const u8, generated: *idl.GeneratedSource) !void {
+        var document: idl.Document = undefined;
+        try idl.parseInto(source, &document);
         try self.debug.record(.idl_parsed, self.advanceClock(), "idl", "parsed", true);
-        const generated = try idl.generate(&document);
+        try idl.generateInto(&document, generated);
         try self.debug.record(.codegen_emitted, self.advanceClock(), "idl", "zig-bindings", true);
-        return generated;
     }
 
     pub fn runNativeAppHarness(self: *Simulator, package: example_apps.ExamplePackage) !NativeAppHarnessResult {
-        const compiled = try app_platform.compile(package);
+        var compiled: app_platform.CompiledPackage = undefined;
+        try app_platform.compileInto(package, &compiled);
         const lint = manifest_linter.lintWithIdl(package.bundle, package.idl_source);
         if (lint.hasErrors()) return error.ManifestLintFailed;
 
@@ -556,10 +557,12 @@ test "SDK simulator installs updates rolls back launches and debugs native first
     var launched_task_ids = [_]u64{0} ** suite.len;
 
     for (suite, 0..) |package, index| {
-        const compiled = try app_platform.compile(package);
+        var compiled: app_platform.CompiledPackage = undefined;
+        try app_platform.compileInto(package, &compiled);
         try std.testing.expect(compiled.operationCount() >= 4);
 
-        const generated = try sim.parseAndGenerate(package.idl_source);
+        var generated: idl.GeneratedSource = undefined;
+        try sim.parseAndGenerateInto(package.idl_source, &generated);
         try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "OperationDescriptor") != null);
 
         const review = try sim.reviewPermissions(.{
