@@ -40,6 +40,11 @@ pub const MAX_MODEL_FAMILY_BYTES = model.MAX_MODEL_FAMILY_BYTES;
 pub const MAX_SIGNATURE_FORMAT_BYTES = model.MAX_SIGNATURE_FORMAT_BYTES;
 pub const MAX_SIGNATURE_SIGNER_BYTES = model.MAX_SIGNATURE_SIGNER_BYTES;
 pub const MAX_INSTALL_SOURCE_BYTES = model.MAX_INSTALL_SOURCE_BYTES;
+pub const COMPACT_PACKAGE_RESULT_METADATA = model.COMPACT_PACKAGE_RESULT_METADATA;
+pub const REMOVE_RESULT_SIZE_CEILING_BYTES = model.REMOVE_RESULT_SIZE_CEILING_BYTES;
+pub const OFFBOARD_RESULT_SIZE_CEILING_BYTES = model.OFFBOARD_RESULT_SIZE_CEILING_BYTES;
+pub const PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES = model.PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES;
+pub const LAUNCH_PLAN_SIZE_CEILING_BYTES = model.LAUNCH_PLAN_SIZE_CEILING_BYTES;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
 pub const RemoveResult = model.RemoveResult;
@@ -1171,7 +1176,7 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqual(@as(u32, 2), launch_plan.provenance.data_schema_version);
     try std.testing.expect(launch_plan.provenance.signed);
     try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519, launch_plan.provenance.signature_format);
-    try std.testing.expectEqual(@as(usize, signing.PUBLIC_KEY_BYTES), launch_plan.provenance.signature_public_key_len);
+    try std.testing.expectEqual(@as(u8, signing.PUBLIC_KEY_BYTES), launch_plan.provenance.signature_public_key_len);
 
     _ = try service.rollback(rollbackRequestForActive(service.find("app.notes").?));
     const rolled_back = service.find("app.notes").?;
@@ -1189,7 +1194,7 @@ test "package service enforces signed manifests policy gated sources updates rol
 
     const removed = try service.remove(removeRequestForActive(service.find("app.notes").?));
     try std.testing.expect(removed.removed_existing);
-    try std.testing.expectEqual(@as(usize, 2), removed.removed_revision_count);
+    try std.testing.expectEqual(@as(u8, 2), removed.removed_revision_count);
     try std.testing.expect(service.find("app.notes") == null);
     try std.testing.expectError(error.BundleNotFound, service.buildLaunchPlan("app.notes"));
     try std.testing.expectError(error.BundleNotFound, service.remove(.{

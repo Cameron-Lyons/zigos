@@ -1016,7 +1016,7 @@ pub const HumaneShell = struct {
         }
         _ = try self.ux.removeApp(self.config.user, self.config.bundle_id);
         self.state.package_removed = true;
-        self.state.package_removed_revision_count = saturatingU16(removed.removed_revision_count);
+        self.state.package_removed_revision_count = saturatingU16(@as(usize, removed.removed_revision_count));
         self.state.task_id = 0;
         self.state.workspace_opened = false;
         self.state.document_opened = false;

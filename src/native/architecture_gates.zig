@@ -464,6 +464,14 @@ pub const indexed_hot_path_tables = .{
         .uses_revision_permission_text_pool = @hasField(package_service.BundleRevision, "permission_text"),
         .uses_compact_permission_text_refs = @sizeOf(@FieldType(package_service.StoredPermission, "resource")) == 4 and
             @sizeOf(package_service.StoredPermission) < package_service.MAX_PERMISSION_RESOURCE_BYTES,
+        .uses_compact_result_metadata = package_service.COMPACT_PACKAGE_RESULT_METADATA and
+            @FieldType(package_service.RemoveResult, "removed_revision_count") == u8 and
+            @FieldType(package_service.OffboardResult, "removed_revision_count") == u8 and
+            @FieldType(package_service.PackageLaunchProvenance, "signature_public_key_len") == u8,
+        .keeps_results_within_ceilings = @sizeOf(package_service.RemoveResult) <= package_service.REMOVE_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(package_service.OffboardResult) <= package_service.OFFBOARD_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(package_service.PackageLaunchProvenance) <= package_service.PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES and
+            @sizeOf(package_service.LaunchPlan) <= package_service.LAUNCH_PLAN_SIZE_CEILING_BYTES,
     },
     .public_store = .{
         .uses_bounded_release_scan = public_store.BOUNDED_RELEASE_SCAN and
