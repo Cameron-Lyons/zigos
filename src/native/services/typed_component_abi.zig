@@ -17,6 +17,8 @@ pub const ServiceCatalogBinding = schema.ServiceCatalogBinding;
 pub const CoverageReference = schema.CoverageReference;
 pub const CoverageReferenceKind = schema.CoverageReferenceKind;
 pub const MAX_OPERATIONS_PER_INTERFACE = schema.MAX_OPERATIONS_PER_INTERFACE;
+pub const COMPACT_INTERFACE_CONTRACT_METADATA = schema.COMPACT_INTERFACE_CONTRACT_METADATA;
+pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES = schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES;
 
 pub const ServiceRegisterRequest = schema.requestType(.service_register);
 pub const ServiceConnectionRequest = schema.requestType(.service_connect);

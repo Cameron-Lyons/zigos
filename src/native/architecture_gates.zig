@@ -3,6 +3,7 @@ const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
 const signing = @import("core/signing.zig");
 const sdk_idl = @import("sdk/idl.zig");
+const sdk_component_abi = @import("sdk/component_abi.zig");
 const sdk_object_store = @import("sdk/object_store_api.zig");
 const sdk_permissions = @import("sdk/permissions.zig");
 const sdk_simulator = @import("sdk/simulator.zig");
@@ -125,6 +126,14 @@ pub const indexed_hot_path_tables = .{
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
         .binds_services_by_interface_id = @hasDecl(component_abi_schema, "interfaceIdForService"),
+        .stores_compact_contract_metadata = component_abi_schema.COMPACT_INTERFACE_CONTRACT_METADATA and
+            @FieldType(component_abi_schema.InterfaceContract, "operation_count") == u8,
+        .keeps_contracts_within_ceiling = @sizeOf(component_abi_schema.InterfaceContract) <= component_abi_schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES,
+    },
+    .sdk_component_abi = .{
+        .stores_compact_binding_metadata = sdk_component_abi.COMPACT_COMPONENT_BINDING_METADATA and
+            @FieldType(sdk_component_abi.Binding, "operation_count") == u8,
+        .keeps_bindings_within_ceiling = @sizeOf(sdk_component_abi.Binding) <= sdk_component_abi.BINDING_SIZE_CEILING_BYTES,
     },
     .sdk_idl = .{
         .stores_compact_bounded_metadata = sdk_idl.COMPACT_IDL_METADATA and
