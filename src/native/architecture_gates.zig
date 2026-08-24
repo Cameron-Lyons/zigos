@@ -433,6 +433,9 @@ pub const indexed_hot_path_tables = .{
     },
     .media_print_service = .{
         .uses_bounded_job_scan = media_print_service.BOUNDED_JOB_SCAN,
+        .uses_direct_generational_job_lookup = media_print_service.DIRECT_JOB_LOOKUP and
+            @hasDecl(media_print_service, "JobId") and
+            !@hasField(media_print_service.Service, "next_job_id"),
         .uses_compact_completion_queue = media_print_service.COMPACT_COMPLETION_QUEUE,
         .stores_compact_job_text_metadata = media_print_service.COMPACT_JOB_TEXT_METADATA and
             @FieldType(media_print_service.JobRecord, "label_len") == u8 and
