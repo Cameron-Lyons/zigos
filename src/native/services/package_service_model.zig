@@ -32,6 +32,11 @@ pub const MAX_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_SIGNATURE_SIGNER_BYTES: usize = 64;
 pub const MAX_INSTALL_SOURCE_BYTES: usize = 96;
 pub const MAX_REVISIONS_PER_BUNDLE: usize = 2;
+pub const COMPACT_PACKAGE_RESULT_METADATA = true;
+pub const REMOVE_RESULT_SIZE_CEILING_BYTES: usize = 2;
+pub const OFFBOARD_RESULT_SIZE_CEILING_BYTES: usize = 48;
+pub const PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES: usize = 216;
+pub const LAUNCH_PLAN_SIZE_CEILING_BYTES: usize = 248;
 
 comptime {
     const byte_capacities = [_]usize{
@@ -103,14 +108,26 @@ pub const InstallResult = struct {
 
 pub const RemoveResult = struct {
     removed_existing: bool,
-    removed_revision_count: usize,
+    removed_revision_count: u8,
+
+    comptime {
+        if (@sizeOf(@This()) > REMOVE_RESULT_SIZE_CEILING_BYTES) {
+            @compileError("package remove result exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const OffboardResult = struct {
     removed_existing: bool,
-    removed_revision_count: usize,
+    removed_revision_count: u8,
     deletion_receipt_id: u64,
     removed_bundle_digest: crypto_hash.Digest,
+
+    comptime {
+        if (@sizeOf(@This()) > OFFBOARD_RESULT_SIZE_CEILING_BYTES) {
+            @compileError("package offboard result exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const StoredComponent = struct {
@@ -148,6 +165,12 @@ pub const LaunchPlan = struct {
     components: []const StoredComponent,
     assets: []const StoredAsset,
     provenance: PackageLaunchProvenance = .{},
+
+    comptime {
+        if (@sizeOf(@This()) > LAUNCH_PLAN_SIZE_CEILING_BYTES) {
+            @compileError("package launch plan exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const PackageLaunchProvenance = struct {
@@ -162,9 +185,15 @@ pub const PackageLaunchProvenance = struct {
     permission_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     signature_format: []const u8 = "",
     signature_signer: []const u8 = "",
-    signature_public_key_len: usize = 0,
+    signature_public_key_len: u8 = 0,
     signed: bool = false,
     release_transparency: ReleaseTransparencyEvidence = .{},
+
+    comptime {
+        if (@sizeOf(@This()) > PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES) {
+            @compileError("package launch provenance exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const StoredInterface = struct {
@@ -569,6 +598,17 @@ test "package catalog uses capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 180), @sizeOf(StoredSignature));
     try std.testing.expectEqual(@as(usize, 10_408), @sizeOf(BundleRevision));
     try std.testing.expectEqual(@as(usize, 20_904), @sizeOf(BundleSlot));
+}
+
+test "package results use compact bounded metadata" {
+    try std.testing.expect(COMPACT_PACKAGE_RESULT_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(RemoveResult, "removed_revision_count"));
+    try std.testing.expectEqual(u8, @FieldType(OffboardResult, "removed_revision_count"));
+    try std.testing.expectEqual(u8, @FieldType(PackageLaunchProvenance, "signature_public_key_len"));
+    try std.testing.expect(@sizeOf(RemoveResult) <= REMOVE_RESULT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(OffboardResult) <= OFFBOARD_RESULT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(PackageLaunchProvenance) <= PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(LaunchPlan) <= LAUNCH_PLAN_SIZE_CEILING_BYTES);
 }
 
 pub fn zeroBundle() InstalledBundle {
