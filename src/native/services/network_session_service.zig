@@ -1,6 +1,7 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const network_policy = @import("../sync/network_policy.zig");
@@ -9,7 +10,7 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_SESSIONS: usize = 32;
 pub const MAX_DESTINATION_BYTES: usize = 96;
-pub const BOUNDED_SESSION_SCAN = true;
+pub const DIRECT_SESSION_LOOKUP = true;
 pub const RECLAIMS_TERMINAL_SESSIONS = true;
 pub const COMPACT_DESTINATION_LENGTH = true;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 5_920;
@@ -90,15 +91,15 @@ pub const Error = network_policy.Error || event_ledger.Error || error{
     SessionCompleted,
     SessionBindingMismatch,
     SessionExpired,
-    SessionIdExhausted,
     SessionNotFound,
     SessionRevoked,
     SessionTableFull,
     SourceMismatch,
 };
 
+const SessionHandle = indexed_arena.GenerationalHandle("NetworkSession");
+
 pub const Service = struct {
-    next_session_id: u64 = 1,
     sessions: [MAX_SESSIONS]SessionRecord = [_]SessionRecord{zeroSession()} ** MAX_SESSIONS,
     session_count: u8 = 0,
     next_reusable_session: u8 = 0,
@@ -175,8 +176,7 @@ pub const Service = struct {
         }
 
         const session_index = self.availableSessionIndex(request.now_ticks) orelse return error.SessionTableFull;
-        const session_id = self.next_session_id;
-        if (session_id == 0) return error.SessionIdExhausted;
+        const session_id = self.nextSessionId(session_index);
         var record = zeroSession();
         record.id = session_id;
         record.subject = request.subject;
@@ -209,7 +209,6 @@ pub const Service = struct {
         if (self.sessions[session_index].id == 0) self.session_count += 1;
         self.sessions[session_index] = record;
         self.next_reusable_session = @intCast((session_index + 1) % MAX_SESSIONS);
-        self.next_session_id +%= 1;
         return &self.sessions[session_index];
     }
 
@@ -333,9 +332,9 @@ pub const Service = struct {
     }
 
     pub fn find(self: *const Service, session_id: u64) ?*const SessionRecord {
-        if (session_id == 0) return null;
-        for (&self.sessions) |*session| if (session.id == session_id) return session;
-        return null;
+        const slot_index = sessionSlotIndex(session_id) orelse return null;
+        const session = &self.sessions[slot_index];
+        return if (session.id == session_id) session else null;
     }
 
     fn sessionForRequest(
@@ -380,9 +379,16 @@ pub const Service = struct {
     }
 
     fn findMutable(self: *Service, session_id: u64) ?*SessionRecord {
-        if (session_id == 0) return null;
-        for (&self.sessions) |*session| if (session.id == session_id) return session;
-        return null;
+        const slot_index = sessionSlotIndex(session_id) orelse return null;
+        const session = &self.sessions[slot_index];
+        return if (session.id == session_id) session else null;
+    }
+
+    fn nextSessionId(self: *const Service, session_index: usize) u64 {
+        const current_generation = (SessionHandle{ .value = self.sessions[session_index].id }).generation();
+        const incremented = current_generation +% 1;
+        const generation = if (incremented == 0) 1 else incremented;
+        return SessionHandle.fromParts(session_index, generation).value;
     }
 
     fn availableSessionIndex(self: *const Service, now_ticks: u64) ?usize {
@@ -397,6 +403,13 @@ pub const Service = struct {
         return null;
     }
 };
+
+fn sessionSlotIndex(session_id: u64) ?usize {
+    const handle = SessionHandle{ .value = session_id };
+    if (handle.isZero()) return null;
+    const slot_index = handle.slotIndex();
+    return if (slot_index < MAX_SESSIONS) slot_index else null;
+}
 
 fn sessionReusableAt(session: *const SessionRecord, now_ticks: u64) bool {
     return session.state != .active or now_ticks >= session.expires_at_ticks;
@@ -487,7 +500,7 @@ fn recordNetworkSession(
     }
 }
 
-test "network session open validates destinations and stops at id exhaustion" {
+test "network session open validates destinations and uses direct generational handles" {
     const signing = @import("../core/signing.zig");
 
     var network_policies = network_policy.Directory.init();
@@ -549,9 +562,7 @@ test "network session open validates destinations and stops at id exhaustion" {
     ));
     try std.testing.expectEqual(@as(usize, 0), service.sessionCount());
     try std.testing.expect(service.find(1) == null);
-    try std.testing.expectEqual(@as(u64, 1), service.next_session_id);
 
-    service.next_session_id = std.math.maxInt(u64);
     const valid_request = OpenRequest{
         .subject = app,
         .task_id = 9902,
@@ -572,21 +583,12 @@ test "network session open validates destinations and stops at id exhaustion" {
         valid_request,
         null,
     );
-    try std.testing.expectEqual(std.math.maxInt(u64), session.id);
+    const session_handle = SessionHandle{ .value = session.id };
+    try std.testing.expectEqual(@as(usize, 0), session_handle.slotIndex());
+    try std.testing.expectEqual(@as(u32, 1), session_handle.generation());
     try std.testing.expectEqualStrings("updates.example", session.destinationSlice());
-    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
     try std.testing.expectEqual(@as(usize, 1), service.sessionCount());
-    try std.testing.expectError(error.SessionIdExhausted, service.open(
-        &network_policies,
-        &capabilities,
-        &policies,
-        subjects,
-        valid_request,
-        null,
-    ));
-    try std.testing.expectEqual(@as(u64, 0), service.next_session_id);
-    try std.testing.expectEqual(@as(usize, 1), service.sessionCount());
-    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
+    try std.testing.expectEqual(session.id, service.find(session.id).?.id);
 }
 
 test "network session service opens leased attested sessions and audits revocation" {
@@ -711,7 +713,8 @@ test "network session service opens leased attested sessions and audits revocati
         },
         &ledger,
     );
-    try std.testing.expectEqual(@as(u64, 1), session.id);
+    try std.testing.expectEqual(@as(usize, 0), (SessionHandle{ .value = session.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 1), (SessionHandle{ .value = session.id }).generation());
     try std.testing.expect(session.attested);
     try std.testing.expectEqualStrings("relay.zigos.dev", session.destinationSlice());
 
