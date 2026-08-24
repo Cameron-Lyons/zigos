@@ -8,8 +8,11 @@ const signing = @import("../core/signing.zig");
 
 pub const MAX_DELEGATIONS: usize = 16;
 pub const COMPACT_ACTIVE_DELEGATION_METADATA = true;
+pub const BOUNDED_DELEGATION_SCAN = true;
+pub const DIRECT_DELEGATION_LOOKUP = true;
+pub const RECLAIMS_REVOKED_DELEGATIONS = true;
 pub const ACTIVE_GENERATION_BUCKET_SIZE_CEILING_BYTES: usize = 8;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_056;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 2_616;
 const NO_ACTIVE_GENERATION: u32 = std.math.maxInt(u32);
 
 comptime {
@@ -22,7 +25,6 @@ pub const Error = event_ledger.Error || error{
     ActionBudgetExceeded,
     ContextBudgetExceeded,
     DelegationBindingMismatch,
-    DelegationIdExhausted,
     DelegationNotFound,
     DelegationRevoked,
     DelegationTableFull,
@@ -31,6 +33,8 @@ pub const Error = event_ledger.Error || error{
     RemoteCallBudgetExceeded,
     SessionMismatch,
 };
+
+pub const DelegationId = indexed_arena.GenerationalHandle("AgentDelegation");
 
 pub const AuthorizeRequest = struct {
     subject: principal.PrincipalId,
@@ -90,11 +94,7 @@ const Slot = struct {
     delegation: Delegation = .{},
 };
 
-fn slotDelegationKey(slot: *const Slot) u64 {
-    return slot.delegation.id;
-}
-
-const DelegationArena = indexed_arena.IndexedArenaWithKey(u64, Slot, MAX_DELEGATIONS, MAX_DELEGATIONS * 2, slotDelegationKey);
+const DelegationArena = indexed_arena.GenerationalArena("AgentDelegation", Slot, MAX_DELEGATIONS);
 const DelegationGenerationIndex = indexed_arena.MultimapIndex(MAX_DELEGATIONS, MAX_DELEGATIONS, MAX_DELEGATIONS * 2);
 
 const ActiveGenerationBucket = struct {
@@ -122,9 +122,9 @@ const ActiveGenerationBucketArena = indexed_arena.IndexedArenaWithKey(
 );
 
 pub const Service = struct {
-    next_delegation_id: u64 = 1,
     minimum_generation: u32 = 1,
     slots: DelegationArena = DelegationArena.init(),
+    next_reusable_slot: u8 = 0,
     active_delegation_count: u8 = 0,
     lowest_active_generation: u32 = NO_ACTIVE_GENERATION,
     delegation_generation_index: DelegationGenerationIndex = DelegationGenerationIndex.init(),
@@ -169,9 +169,10 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        if (self.slots.countInUse() >= MAX_DELEGATIONS) return error.DelegationTableFull;
-        const delegation_id = self.next_delegation_id;
-        if (delegation_id == 0) return error.DelegationIdExhausted;
+        const slot_index = self.availableDelegationIndex() orelse return error.DelegationTableFull;
+        try recordSessionBoundary(ledger, request, true, false);
+        try recordAllowedDelegation(ledger, request);
+        const delegation_id = self.claimDelegationId(slot_index).value;
         const delegation = Delegation{
             .id = delegation_id,
             .subject = request.subject,
@@ -185,14 +186,10 @@ pub const Service = struct {
             .user_confirmed = request.user_confirmed,
             .audit_enabled = request.audit_enabled,
         };
-        const slot_index = self.slots.reserveIndex(delegation_id) orelse return error.DelegationTableFull;
-        errdefer _ = self.slots.removeIndex(slot_index);
-        try recordSessionBoundary(ledger, request, true, false);
-        try recordAllowedDelegation(ledger, request);
         const slot = &self.slots.slots[slot_index];
         slot.delegation = delegation;
         self.accountActiveDelegation(slot_index, &slot.delegation);
-        self.next_delegation_id +%= 1;
+        self.next_reusable_slot = @intCast((slot_index + 1) % MAX_DELEGATIONS);
         return &slot.delegation;
     }
 
@@ -279,12 +276,33 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, delegation_id: u64) ?*Delegation {
-        const slot = self.slots.get(delegation_id) orelse return null;
+        const slot = self.slots.getByHandle(.{ .value = delegation_id }) orelse return null;
         return &slot.delegation;
     }
 
     pub fn activeCount(self: *const Service) usize {
         return @intCast(self.active_delegation_count);
+    }
+
+    fn availableDelegationIndex(self: *const Service) ?usize {
+        for (0..MAX_DELEGATIONS) |offset| {
+            const slot_index = (@as(usize, self.next_reusable_slot) + offset) % MAX_DELEGATIONS;
+            if (!self.slots.slots[slot_index].in_use) return slot_index;
+        }
+        for (0..MAX_DELEGATIONS) |offset| {
+            const slot_index = (@as(usize, self.next_reusable_slot) + offset) % MAX_DELEGATIONS;
+            if (self.slots.slots[slot_index].delegation.revoked) return slot_index;
+        }
+        return null;
+    }
+
+    fn claimDelegationId(self: *Service, slot_index: usize) DelegationId {
+        if (self.slots.slots[slot_index].in_use) {
+            return self.slots.replaceIndex(slot_index) orelse
+                native_util.impossibleByInvariant("revoked delegation slot remains replaceable");
+        }
+        return self.slots.reserveHandleAt(slot_index) orelse
+            native_util.impossibleByInvariant("available delegation slot remains reservable");
     }
 
     fn accountActiveDelegation(self: *Service, slot_index: usize, delegation: *const Delegation) void {
@@ -896,7 +914,7 @@ test "agent delegation service audits denied actions and enforces cumulative con
     try std.testing.expect(std.mem.indexOf(u8, redacted, "private wrong session") == null);
 }
 
-test "agent delegation service ids stop at exhaustion" {
+test "agent delegation service reclaims revoked generational slots" {
     var policies = policy_object.Directory.init();
     _ = try policies.create(.{
         .scope = .organization,
@@ -921,47 +939,10 @@ test "agent delegation service ids stop at exhaustion" {
     const subjects = policy_object.SubjectSet{ .organization_id = 2037 };
     const subject = principal.PrincipalId{ .kind = .app, .serial = 3037 };
     var service = Service.init();
-    service.next_delegation_id = std.math.maxInt(u64);
 
-    const max_delegation = try service.authorize(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7000,
-        .session_id = 8000,
-        .autonomous_actions = 1,
-        .remote_calls = 1,
-        .user_confirmed = true,
-        .audit_enabled = true,
-        .local_context_only = true,
-        .context_bytes = 128,
-        .delegation_generation = 1,
-        .user_visible_plan = true,
-        .now_tick = 40,
-        .detail = "private max id agent session",
-    }, null);
-    try std.testing.expectEqual(std.math.maxInt(u64), max_delegation.id);
-    try std.testing.expectEqual(@as(u64, 0), service.next_delegation_id);
-    try std.testing.expect(service.find(0) == null);
-
-    try std.testing.expectError(error.DelegationIdExhausted, service.authorize(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7001,
-        .session_id = 8001,
-        .autonomous_actions = 1,
-        .remote_calls = 1,
-        .user_confirmed = true,
-        .audit_enabled = true,
-        .local_context_only = true,
-        .context_bytes = 128,
-        .delegation_generation = 1,
-        .user_visible_plan = true,
-        .now_tick = 41,
-        .detail = "private exhausted id agent session",
-    }, null));
-    try std.testing.expectEqual(@as(usize, 1), service.activeCount());
-
-    var full_service = Service.init();
+    var first_delegation_id: u64 = 0;
     for (0..MAX_DELEGATIONS) |index| {
-        _ = try full_service.authorize(&policies, subjects, .{
+        const delegation = try service.authorize(&policies, subjects, .{
             .subject = subject,
             .task_id = @intCast(7100 + index),
             .session_id = @intCast(8100 + index),
@@ -976,14 +957,19 @@ test "agent delegation service ids stop at exhaustion" {
             .now_tick = @intCast(50 + index),
             .detail = "private full table agent session",
         }, null);
+        const delegation_id = DelegationId{ .value = delegation.id };
+        try std.testing.expectEqual(index, delegation_id.slotIndex());
+        try std.testing.expectEqual(@as(u32, 1), delegation_id.generation());
+        if (index == 0) first_delegation_id = delegation.id;
     }
-    try std.testing.expectEqual(MAX_DELEGATIONS, full_service.activeCount());
+    try std.testing.expectEqual(MAX_DELEGATIONS, service.activeCount());
     try std.testing.expectEqual(
         @as(u8, MAX_DELEGATIONS),
-        full_service.active_generation_buckets.get(generationKey(1)).?.active_count,
+        service.active_generation_buckets.get(generationKey(1)).?.active_count,
     );
-    const next_before_full = full_service.next_delegation_id;
-    try std.testing.expectError(error.DelegationTableFull, full_service.authorize(&policies, subjects, .{
+    try std.testing.expect(service.find(0) == null);
+    try std.testing.expect(service.find(DelegationId.fromParts(MAX_DELEGATIONS, 1).value) == null);
+    try std.testing.expectError(error.DelegationTableFull, service.authorize(&policies, subjects, .{
         .subject = subject,
         .task_id = 7200,
         .session_id = 8200,
@@ -998,5 +984,68 @@ test "agent delegation service ids stop at exhaustion" {
         .now_tick = 70,
         .detail = "private rejected full table agent session",
     }, null));
-    try std.testing.expectEqual(next_before_full, full_service.next_delegation_id);
+
+    try std.testing.expectEqual(MAX_DELEGATIONS, try service.killSwitch(2, null, subject, 71, "private full table kill switch"));
+    try std.testing.expectEqual(@as(usize, 0), service.activeCount());
+    try std.testing.expectError(error.DelegationRevoked, service.recordAction(.{
+        .subject = subject,
+        .task_id = 7100,
+        .delegation_id = first_delegation_id,
+        .session_id = 8100,
+        .expected_generation = 1,
+    }, null));
+
+    const replacement = try service.authorize(&policies, subjects, .{
+        .subject = subject,
+        .task_id = 7201,
+        .session_id = 8201,
+        .autonomous_actions = 1,
+        .remote_calls = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 128,
+        .delegation_generation = 2,
+        .user_visible_plan = true,
+        .now_tick = 72,
+        .detail = "private replacement agent session",
+    }, null);
+    try std.testing.expectEqual(@as(usize, 0), (DelegationId{ .value = replacement.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 2), (DelegationId{ .value = replacement.id }).generation());
+    try std.testing.expect(service.find(first_delegation_id) == null);
+    try std.testing.expectError(error.DelegationNotFound, service.recordAction(.{
+        .subject = subject,
+        .task_id = 7100,
+        .delegation_id = first_delegation_id,
+        .session_id = 8100,
+        .expected_generation = 1,
+    }, null));
+    try std.testing.expectEqual(MAX_DELEGATIONS, service.slots.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.activeCount());
+
+    try std.testing.expectEqual(@as(usize, 1), try service.killSwitch(3, null, subject, 73, "private replacement kill switch"));
+    const wrapped_from = DelegationId.fromParts(0, std.math.maxInt(u32)).value;
+    service.slots.slot_generations[0] = std.math.maxInt(u32);
+    service.slots.slots[0].delegation.id = wrapped_from;
+    service.next_reusable_slot = 0;
+    try std.testing.expect(service.find(wrapped_from) != null);
+
+    const wrapped = try service.authorize(&policies, subjects, .{
+        .subject = subject,
+        .task_id = 7202,
+        .session_id = 8202,
+        .autonomous_actions = 1,
+        .remote_calls = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .local_context_only = true,
+        .context_bytes = 128,
+        .delegation_generation = 3,
+        .user_visible_plan = true,
+        .now_tick = 74,
+        .detail = "private wrapped agent session",
+    }, null);
+    try std.testing.expectEqual(@as(usize, 0), (DelegationId{ .value = wrapped.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 1), (DelegationId{ .value = wrapped.id }).generation());
+    try std.testing.expect(service.find(wrapped_from) == null);
 }

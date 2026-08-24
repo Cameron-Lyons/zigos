@@ -485,7 +485,15 @@ pub const indexed_hot_path_tables = .{
         .tracks_privacy_indicators = @hasField(sensitive_capture_service.Service, "privacy_indicator_counts"),
     },
     .agent_delegation_service = .{
-        .uses_delegation_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "slots"), "reserve"),
+        .uses_delegation_arena = @hasDecl(@FieldType(agent_delegation_service.Service, "slots"), "reserveHandle"),
+        .uses_direct_generational_delegation_lookup = agent_delegation_service.DIRECT_DELEGATION_LOOKUP and
+            @hasDecl(agent_delegation_service, "DelegationId") and
+            @hasDecl(@FieldType(agent_delegation_service.Service, "slots"), "getByHandle") and
+            !@hasField(agent_delegation_service.Service, "next_delegation_id"),
+        .uses_bounded_fair_delegation_scan = agent_delegation_service.BOUNDED_DELEGATION_SCAN and
+            @hasField(agent_delegation_service.Service, "next_reusable_slot"),
+        .reclaims_revoked_delegations = agent_delegation_service.RECLAIMS_REVOKED_DELEGATIONS and
+            @hasDecl(@FieldType(agent_delegation_service.Service, "slots"), "replaceIndex"),
         .stores_compact_active_delegation_metadata = agent_delegation_service.COMPACT_ACTIVE_DELEGATION_METADATA and
             @FieldType(agent_delegation_service.Service, "active_delegation_count") == u8,
         .keeps_fixed_state_within_ceiling = @sizeOf(agent_delegation_service.Service) <= agent_delegation_service.SERVICE_SIZE_CEILING_BYTES,
