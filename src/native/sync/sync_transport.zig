@@ -50,15 +50,23 @@ pub const MAX_CAPTURED_PACKETS: usize = 16;
 pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
 pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 3;
 pub const COMPACT_CAPTURE_METADATA = true;
+pub const COMPACT_NATIVE_RESULT_METADATA = true;
+pub const NativePayloadLength = u8;
+pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
 pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_880;
 pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_104;
+pub const NATIVE_DELIVERY_SIZE_CEILING_BYTES: usize = 520;
+pub const OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES: usize = 288;
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PacketTooLarge);
 const NativeFrameReader = binary_cursor.Reader(Error, error.NativeTransportMalformedFrame);
 
 comptime {
-    if (network_driver_task.MAX_NATIVE_FRAME_BYTES > std.math.maxInt(u16)) {
-        @compileError("native captured frame length no longer fits compact metadata");
+    if (network_driver_task.MAX_NATIVE_FRAME_BYTES > std.math.maxInt(u16) or
+        MAX_NATIVE_PAYLOAD_BYTES > std.math.maxInt(NativePayloadLength) or
+        MAX_PACKET_BYTES > std.math.maxInt(ObjectSharePayloadLength))
+    {
+        @compileError("native transport capacity no longer fits compact metadata");
     }
 }
 
@@ -242,7 +250,13 @@ pub const NativeDelivery = struct {
     relay_fallback: bool,
     congested: bool,
     sequence: u64,
-    payload_len: usize,
+    payload_len: NativePayloadLength,
+
+    comptime {
+        if (@sizeOf(@This()) > NATIVE_DELIVERY_SIZE_CEILING_BYTES) {
+            @compileError("native delivery exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const ObjectShareEnvelope = struct {
@@ -250,11 +264,17 @@ pub const ObjectShareEnvelope = struct {
     object_id: u64,
     version_id: u64,
     encrypted: bool,
-    payload_len: usize,
+    payload_len: ObjectSharePayloadLength,
     payload: [MAX_PACKET_BYTES]u8 = [_]u8{0} ** MAX_PACKET_BYTES,
 
     pub fn payloadSlice(self: *const ObjectShareEnvelope) []const u8 {
-        return self.payload[0..self.payload_len];
+        return self.payload[0..@as(usize, self.payload_len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES) {
+            @compileError("object-share envelope exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -498,7 +518,7 @@ pub const NativeTransportService = struct {
             .relay_fallback = false,
             .congested = false,
             .sequence = sequence,
-            .payload_len = plaintext.len,
+            .payload_len = @intCast(plaintext.len),
         };
     }
 
@@ -533,7 +553,7 @@ pub const NativeTransportService = struct {
                     .relay_fallback = true,
                     .congested = err == error.NativeTransportCongested,
                     .sequence = sequence,
-                    .payload_len = plaintext.len,
+                    .payload_len = @intCast(plaintext.len),
                 };
             },
             else => return err,
@@ -571,7 +591,7 @@ pub const NativeTransportService = struct {
             .object_id = object_id,
             .version_id = version_id,
             .encrypted = packet.encrypted,
-            .payload_len = packet.ciphertext_len,
+            .payload_len = @intCast(packet.ciphertext_len),
         };
         @memcpy(envelope.payload[0..packet.ciphertext_len], packet.ciphertextSlice());
         return envelope;
@@ -1653,4 +1673,12 @@ test "compact capture metadata preserves maximum native frames" {
     const captured = capture.lastPtr().?;
     try std.testing.expectEqual(@as(u16, network_driver_task.MAX_NATIVE_FRAME_BYTES), captured.len);
     try std.testing.expectEqualSlices(u8, &frame, captured.slice());
+}
+
+test "compact native result metadata preserves bounded payload capacities" {
+    try std.testing.expect(COMPACT_NATIVE_RESULT_METADATA);
+    try std.testing.expectEqual(NativePayloadLength, @FieldType(NativeDelivery, "payload_len"));
+    try std.testing.expectEqual(ObjectSharePayloadLength, @FieldType(ObjectShareEnvelope, "payload_len"));
+    try std.testing.expectEqual(@as(usize, 520), @sizeOf(NativeDelivery));
+    try std.testing.expectEqual(@as(usize, 288), @sizeOf(ObjectShareEnvelope));
 }

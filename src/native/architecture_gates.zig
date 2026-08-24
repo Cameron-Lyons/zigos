@@ -757,9 +757,14 @@ pub const indexed_hot_path_tables = .{
     .sync_transport = .{
         .stores_compact_capture_metadata = sync_transport.COMPACT_CAPTURE_METADATA and
             @FieldType(sync_transport.CapturedPacket, "len") == u16,
+        .stores_compact_native_result_metadata = sync_transport.COMPACT_NATIVE_RESULT_METADATA and
+            @FieldType(sync_transport.NativeDelivery, "payload_len") == sync_transport.NativePayloadLength and
+            @FieldType(sync_transport.ObjectShareEnvelope, "payload_len") == sync_transport.ObjectSharePayloadLength,
         .keeps_capture_state_within_ceilings = @sizeOf(sync_transport.CapturedPacket) <= sync_transport.CAPTURED_PACKET_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport.PacketCapture) <= sync_transport.PACKET_CAPTURE_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport.NativeTransportService) <= sync_transport.NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES,
+        .keeps_native_results_within_ceilings = @sizeOf(sync_transport.NativeDelivery) <= sync_transport.NATIVE_DELIVERY_SIZE_CEILING_BYTES and
+            @sizeOf(sync_transport.ObjectShareEnvelope) <= sync_transport.OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES,
         .uses_packet_capture_arena = @hasDecl(@FieldType(sync_transport.PacketCapture, "packets"), "reserveIndex"),
         .tracks_last_packet_id = @hasField(sync_transport.PacketCapture, "last_packet_id"),
     },
