@@ -835,6 +835,7 @@ fn validateNuc11tnki5KernelProofSources(
     const cpu_baseline_path = "src/arch/cpu_baseline.zig";
     const x86_path = "src/arch/x86.zig";
     const invpcid_path = "src/arch/x86/invpcid.S";
+    const user_access_path = "src/arch/x86/user_access.S";
     const cpu_features_path = "src/arch/cpu_features.zig";
     const boot_entry_path = "src/kernel/boot/entry.zig";
     const paging_path = "src/kernel/memory/paging64.zig";
@@ -977,6 +978,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "x86 process-context invalidation assembly is missing: {s}", .{invpcid_path});
         return;
     }
+    if (!common.pathExists(io, user_access_path)) {
+        try common.addError(errors, allocator, "x86 supervisor user-memory access assembly is missing: {s}", .{user_access_path});
+        return;
+    }
     if (!common.pathExists(io, cpu_features_path)) {
         try common.addError(errors, allocator, "modern CPU feature enablement source is missing: {s}", .{cpu_features_path});
         return;
@@ -1079,6 +1084,7 @@ fn validateNuc11tnki5KernelProofSources(
     const cpu_baseline_source = try common.readFileAlloc(allocator, io, cpu_baseline_path, common.source_file_max_bytes);
     const x86_source = try common.readFileAlloc(allocator, io, x86_path, common.source_file_max_bytes);
     const invpcid_source = try common.readFileAlloc(allocator, io, invpcid_path, common.source_file_max_bytes);
+    const user_access_source = try common.readFileAlloc(allocator, io, user_access_path, common.source_file_max_bytes);
     const cpu_features_source = try common.readFileAlloc(allocator, io, cpu_features_path, common.source_file_max_bytes);
     const boot_entry_source = try common.readFileAlloc(allocator, io, boot_entry_path, common.source_file_max_bytes);
     const paging_source = try common.readFileAlloc(allocator, io, paging_path, common.source_file_max_bytes);
@@ -1461,6 +1467,9 @@ fn validateNuc11tnki5KernelProofSources(
         "invpcid",
         "pge",
         "syscall",
+        "smep",
+        "smap",
+        "umip",
     };
     for (required_modern_cpu_baseline_snippets) |snippet| {
         if (std.mem.indexOf(u8, cpu_baseline_source, snippet) == null) {
@@ -1477,6 +1486,12 @@ fn validateNuc11tnki5KernelProofSources(
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
         "globalPagesEnabled",
+        "CR4_SMEP",
+        "CR4_SMAP",
+        "CR4_UMIP",
+        "supervisorAccessPreventionEnabled",
+        "allowSupervisorUserMemory",
+        "forbidSupervisorUserMemory",
         "EFER_SCE",
         "IA32_STAR_MSR",
         "IA32_LSTAR_MSR",
@@ -1499,6 +1514,23 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "x86 process-context invalidation must retain snippet: {s}", .{snippet});
         }
     }
+    const required_user_access_assembly_snippets = [_][]const u8{
+        "x86_allow_supervisor_user_memory",
+        "stac",
+        "x86_forbid_supervisor_user_memory",
+        "clac",
+    };
+    for (required_user_access_assembly_snippets) |snippet| {
+        if (std.mem.indexOf(u8, user_access_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86 SMAP user-memory access support must retain snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, kernel_build_source, "src/arch/x86/user_access.S") == null) {
+        try common.addError(errors, allocator, "kernel build must include the x86 SMAP user-memory access assembly", .{});
+    }
+    if (std.mem.indexOf(u8, interrupt_stubs_source, "isr_common_stub:\n    clac") == null) {
+        try common.addError(errors, allocator, "x86 interrupt entry must clear AC before entering kernel handlers", .{});
+    }
     const required_cpu_feature_pcid_snippets = [_][]const u8{
         "enableModernFeatures",
         "ProcessContextMode",
@@ -1506,6 +1538,10 @@ fn validateNuc11tnki5KernelProofSources(
         "software_flush",
         "CR4_PGE",
         "globalPagesEnabled",
+        "CR4_SMEP",
+        "CR4_SMAP",
+        "CR4_UMIP",
+        "supervisorAccessPreventionEnabled",
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
     };
@@ -1524,6 +1560,9 @@ fn validateNuc11tnki5KernelProofSources(
         "cpu_pcid_software_fallback",
         "cpu_pcid_ready",
         "cpu_pge_enabled",
+        "cpu_smep_enabled",
+        "cpu_smap_enabled",
+        "cpu_umip_enabled",
         "cpu_syscall_enabled",
     };
     for (required_boot_process_context_snippets) |snippet| {
@@ -3231,24 +3270,27 @@ fn validateUserspaceDriverDataPathTrack(
             try common.addError(errors, allocator, "Compact endpoint receive ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
     }
-    const direct_endpoint_send_snippets = [_]struct {
+    const protected_endpoint_send_snippets = [_]struct {
         path: []const u8,
         source: []const u8,
         snippet: []const u8,
     }{
-        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "pub fn borrowImmediateUserSlice(" },
-        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "immediate user slice borrow preserves identity and enforces bounds" },
-        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "request.payload = dispatch.borrowImmediateUserSlice(memory, request.payload, endpoint.MAX_MESSAGE_BYTES)" },
+        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "pub fn copyUserSlice(" },
+        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user slice copies enforce source and destination bounds" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer)" },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGenerated(.endpoint_send, port, request, now_ticks)" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "invalid_payload_ptr[0..1]" },
     };
-    for (direct_endpoint_send_snippets) |required| {
+    for (protected_endpoint_send_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
-            try common.addError(errors, allocator, "Direct endpoint send path must retain snippet in {s}: {s}", .{ required.path, required.snippet });
+            try common.addError(errors, allocator, "SMAP-safe endpoint send path must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
     }
-    if (std.mem.indexOf(u8, endpoint_syscalls_source, "var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8") != null) {
-        try common.addError(errors, allocator, "Endpoint send must not reintroduce the redundant kernel staging buffer", .{});
+    if (std.mem.indexOf(u8, syscall_dispatch_source, "borrowImmediateUserSlice") != null or
+        std.mem.indexOf(u8, endpoint_syscalls_source, "borrowImmediateUserSlice") != null)
+    {
+        try common.addError(errors, allocator, "Endpoint send must not retain a borrowed userspace payload beyond its scoped SMAP access window", .{});
     }
     const surface_presentation_abi_snippets = [_]struct {
         path: []const u8,

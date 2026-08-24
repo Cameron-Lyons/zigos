@@ -24,6 +24,9 @@ else
         pub fn readCr2() usize {
             return 0;
         }
+
+        pub fn allowSupervisorUserMemory() void {}
+        pub fn forbidSupervisorUserMemory() void {}
     };
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -610,6 +613,8 @@ pub const Executor = struct {
 
         freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
         defer freestanding.paging.switchToKernelAddressSpace();
+        x86.allowSupervisorUserMemory();
+        defer x86.forbidSupervisorUserMemory();
         const mailbox_ptr: *const userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
         if (mailbox_ptr.version != userspace_bootstrap_mailbox.VERSION) return null;
         return mailbox_ptr.*;
@@ -1082,6 +1087,8 @@ fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?Bootstrap
 
 fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
     const update = prepared orelse return;
+    x86.allowSupervisorUserMemory();
+    defer x86.forbidSupervisorUserMemory();
     const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(update.address);
     if (!update.preserve_runtime_state) {
         mailbox_ptr.* = .{

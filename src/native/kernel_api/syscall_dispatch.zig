@@ -6,6 +6,14 @@ const component_port = @import("component_port.zig");
 const debug_contract = @import("../security/debug_contract.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
+const x86 = if (builtin.target.os.tag == .freestanding)
+    @import("../../arch/x86.zig")
+else
+    struct {
+        pub fn allowSupervisorUserMemory() void {}
+        pub fn forbidSupervisorUserMemory() void {}
+    };
+
 const USER_POINTER_FLOOR: usize = 0x10000;
 const USER_POINTER_CEILING_32: usize = 0xC0000000;
 
@@ -43,6 +51,8 @@ pub fn readRequest(comptime T: type, memory: UserMemoryContext, request_addr: us
 pub fn readUserValue(comptime T: type, memory: UserMemoryContext, addr: usize) ?T {
     if (!validateUserRange(memory, addr, @sizeOf(T), @alignOf(T), .read)) return null;
     const ptr: *const T = @ptrFromInt(addr);
+    x86.allowSupervisorUserMemory();
+    defer x86.forbidSupervisorUserMemory();
     return ptr.*;
 }
 
@@ -50,17 +60,30 @@ pub fn copyUserSlice(memory: UserMemoryContext, slice: []const u8, dest: []u8) ?
     if (slice.len > dest.len) return null;
     if (slice.len == 0) return dest[0..0];
     if (!validateUserRange(memory, @intFromPtr(slice.ptr), slice.len, 1, .read)) return null;
+    x86.allowSupervisorUserMemory();
+    defer x86.forbidSupervisorUserMemory();
     @memcpy(dest[0..slice.len], slice);
     return dest[0..slice.len];
 }
 
-/// The returned borrow is valid only for a synchronous consumer that copies the
-/// bytes before returning to userspace.
-pub fn borrowImmediateUserSlice(memory: UserMemoryContext, slice: []const u8, max_len: usize) ?[]const u8 {
-    if (slice.len > max_len) return null;
-    if (slice.len == 0) return &[_]u8{};
-    if (!validateUserRange(memory, @intFromPtr(slice.ptr), slice.len, 1, .read)) return null;
-    return slice;
+pub fn copyToUser(memory: UserMemoryContext, destination: []u8, source: []const u8) bool {
+    if (source.len > destination.len) return false;
+    if (source.len == 0) return true;
+    if (!validateUserRange(memory, @intFromPtr(destination.ptr), source.len, 1, .write)) return false;
+    x86.allowSupervisorUserMemory();
+    defer x86.forbidSupervisorUserMemory();
+    @memcpy(destination[0..source.len], source);
+    return true;
+}
+
+pub fn writeUserValue(memory: UserMemoryContext, destination: usize, value: anytype) bool {
+    const T = @TypeOf(value);
+    if (!validateUserRange(memory, destination, @sizeOf(T), @alignOf(T), .write)) return false;
+    const ptr: *T = @ptrFromInt(destination);
+    x86.allowSupervisorUserMemory();
+    defer x86.forbidSupervisorUserMemory();
+    ptr.* = value;
+    return true;
 }
 
 pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, alignment: usize, access: UserMemoryAccess) bool {
@@ -117,6 +140,8 @@ pub fn writeResponse(memory: UserMemoryContext, response_addr: usize, response_l
     if (buffer.len < bytes.len) return .{
         .status = .buffer_too_small,
     };
+    x86.allowSupervisorUserMemory();
+    defer x86.forbidSupervisorUserMemory();
     @memcpy(buffer[0..bytes.len], bytes);
     return .{
         .status = .success,
@@ -363,15 +388,20 @@ fn regionAllows(access: task_runtime.SegmentAccess, requested: UserMemoryAccess)
     };
 }
 
-test "immediate user slice borrow preserves identity and enforces bounds" {
+test "user slice copies enforce source and destination bounds" {
     const memory = UserMemoryContext{ .address_space = null };
     const payload = "endpoint-payload";
-    const borrowed = borrowImmediateUserSlice(memory, payload, payload.len).?;
+    var copied_buffer: [32]u8 = undefined;
+    const copied = copyUserSlice(memory, payload, &copied_buffer).?;
 
-    try std.testing.expectEqual(@intFromPtr(payload.ptr), @intFromPtr(borrowed.ptr));
-    try std.testing.expectEqualStrings(payload, borrowed);
-    try std.testing.expect(borrowImmediateUserSlice(memory, payload, payload.len - 1) == null);
+    try std.testing.expectEqualStrings(payload, copied);
+    try std.testing.expect(copyUserSlice(memory, payload, copied_buffer[0 .. payload.len - 1]) == null);
+
+    var destination: [32]u8 = undefined;
+    try std.testing.expect(copyToUser(memory, &destination, payload));
+    try std.testing.expectEqualStrings(payload, destination[0..payload.len]);
+    try std.testing.expect(!copyToUser(memory, destination[0 .. payload.len - 1], payload));
 
     const invalid_ptr: [*]const u8 = @ptrFromInt(0x1000);
-    try std.testing.expect(borrowImmediateUserSlice(memory, invalid_ptr[0..1], 1) == null);
+    try std.testing.expect(copyUserSlice(memory, invalid_ptr[0..1], &copied_buffer) == null);
 }

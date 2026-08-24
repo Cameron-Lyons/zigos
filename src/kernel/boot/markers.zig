@@ -11,6 +11,7 @@ pub const cpu_baseline_ready = "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY";
 pub const cpu_baseline_rejected = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";
 pub const cpu_nx_enabled = "ZIGOS:CPU:NX:ENABLED";
 pub const cpu_smep_enabled = "ZIGOS:CPU:SMEP:ENABLED";
+pub const cpu_smap_enabled = "ZIGOS:CPU:SMAP:ENABLED";
 pub const cpu_umip_enabled = "ZIGOS:CPU:UMIP:ENABLED";
 pub const cpu_pge_enabled = "ZIGOS:CPU:PGE:ENABLED";
 pub const cpu_syscall_enabled = "ZIGOS:CPU:SYSCALL:ENABLED";

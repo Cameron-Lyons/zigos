@@ -71,6 +71,7 @@ pub fn kernelMain() void {
     );
     common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);
+    common.printBootMarker(boot_markers.cpu_smap_enabled);
     common.printBootMarker(boot_markers.cpu_umip_enabled);
     common.printBootMarker(boot_markers.cpu_pge_enabled);
     if (hardware_process_contexts) {
