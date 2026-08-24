@@ -11,8 +11,9 @@ pub const MAX_VALUE_BYTES: usize = 96;
 pub const BOUNDED_SECRET_LOOKUP = true;
 pub const DENSE_SECRET_TABLE = true;
 pub const COMPACT_SECRET_METADATA = true;
+pub const DIRECT_HANDLE_LOOKUP = true;
 pub const SECRET_LOOKUP_COMPARISON_BOUND: usize = 5;
-pub const STORE_SIZE_CEILING_BYTES: usize = 6_120;
+pub const STORE_SIZE_CEILING_BYTES: usize = 5_320;
 
 pub const SecretRecord = struct {
     id: u64,
@@ -58,7 +59,6 @@ pub const HardwareSealProvider = struct {
 };
 
 pub const Error = error{
-    HandleIdExhausted,
     HandleHolderMismatch,
     HandleNotFound,
     HandleTableFull,
@@ -83,11 +83,11 @@ const HandleSlot = struct {
     },
 };
 
-const HandleArena = indexed_arena.IndexedArenaWithKey(u64, HandleSlot, MAX_HANDLES, MAX_HANDLES * 2, secretHandleSlotId);
+pub const HandleId = indexed_arena.GenerationalHandle("SecureSecretStoreHandle");
+const HandleArena = indexed_arena.GenerationalArena("SecureSecretStoreHandle", HandleSlot, MAX_HANDLES);
 
 pub const Store = struct {
     next_secret_id: u64 = 1,
-    next_handle_id: u64 = 1,
     hardware_provider: HardwareSealProvider = .{},
     secrets: [MAX_SECRETS]SecretRecord = [_]SecretRecord{zeroSecret()} ** MAX_SECRETS,
     secret_count: u8 = 0,
@@ -180,7 +180,9 @@ pub const Store = struct {
         allow_raw_export: bool,
     ) Error!SecretHandle {
         const secret = self.findSecret(secret_id) orelse return error.SecretNotFound;
-        const retired_slot_index = self.handles.slotIndexOf(retired_handle_id) orelse return error.HandleNotFound;
+        const retired_handle = HandleId{ .value = retired_handle_id };
+        if (self.handles.getConstByHandle(retired_handle) == null) return error.HandleNotFound;
+        const retired_slot_index = retired_handle.slotIndex();
         return self.installHandle(retired_slot_index, secret, holder, task_id, allow_raw_export);
     }
 
@@ -192,33 +194,29 @@ pub const Store = struct {
         task_id: u64,
         allow_raw_export: bool,
     ) Error!SecretHandle {
-        const handle_id = self.next_handle_id;
-        if (handle_id == 0) return error.HandleIdExhausted;
-        if (self.handles.getConst(handle_id) != null) return error.HandleIdExhausted;
+        const handle_id = if (retired_slot_index) |slot_index| blk: {
+            if (!self.handles.removeIndex(slot_index)) {
+                native_util.impossibleByInvariant("secure store replacement handle has a live slot");
+            }
+            break :blk self.handles.reserveHandleAt(slot_index) orelse
+                native_util.impossibleByInvariant("secure store replacement reuses its retired handle slot");
+        } else self.handles.reserveHandle() orelse return error.HandleTableFull;
         const handle = SecretHandle{
-            .id = handle_id,
+            .id = handle_id.value,
             .secret_id = secret.id,
             .holder = holder,
             .task_id = task_id,
             .hardware_backed = secret.hardware_backed,
             .export_allowed = allow_raw_export and secret.exportable,
         };
-        if (retired_slot_index) |slot_index| {
-            if (!self.handles.removeIndex(slot_index)) {
-                native_util.impossibleByInvariant("secure store replacement handle has a live slot");
-            }
-            if (self.handles.insertIndexAt(handle_id, slot_index, .{ .handle = handle }) == null) {
-                native_util.impossibleByInvariant("secure store replacement reuses its retired handle slot");
-            }
-        } else {
-            _ = self.handles.insertIndex(handle_id, .{ .handle = handle }) orelse return error.HandleIdExhausted;
-        }
-        self.next_handle_id +%= 1;
+        const slot = self.handles.getByHandle(handle_id) orelse
+            native_util.impossibleByInvariant("secure store reserved handle resolves directly");
+        slot.handle = handle;
         return handle;
     }
 
     pub fn describeHandle(self: *const Store, handle_id: u64) ?SecretHandle {
-        const slot = self.handles.getConst(handle_id) orelse return null;
+        const slot = self.handles.getConstByHandle(.{ .value = handle_id }) orelse return null;
         return slot.handle;
     }
 
@@ -265,10 +263,6 @@ pub const Store = struct {
         return null;
     }
 };
-
-fn secretHandleSlotId(slot: *const HandleSlot) u64 {
-    return slot.handle.id;
-}
 
 fn zeroSecret() SecretRecord {
     return .{
@@ -378,7 +372,7 @@ test "secure secret store reports missing handles and oversized secrets" {
     }));
 }
 
-test "secure secret store stops secret and handle allocation at id exhaustion" {
+test "secure secret store stops secret allocation at id exhaustion and bounds handle capacity" {
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 4 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 46 };
@@ -390,14 +384,6 @@ test "secure secret store stops secret and handle allocation at id exhaustion" {
     try std.testing.expect(store.describeSecret(0) == null);
     try std.testing.expectError(error.SecretIdExhausted, store.importSecret(owner, "exhausted-secret", "private exhausted secret", false, true));
     try std.testing.expectEqual(@as(usize, 1), store.countSecrets());
-
-    store.next_handle_id = std.math.maxInt(u64);
-    const max_handle = try store.lendHandle(max_secret.id, holder, 92, true);
-    try std.testing.expectEqual(std.math.maxInt(u64), max_handle.id);
-    try std.testing.expectEqual(@as(u64, 0), store.next_handle_id);
-    try std.testing.expect(store.describeHandle(0) == null);
-    try std.testing.expectError(error.HandleIdExhausted, store.lendHandle(max_secret.id, holder, 93, true));
-    try std.testing.expectEqual(@as(usize, 1), store.handles.countInUse());
 
     var full_secrets = Store.init();
     var label_buffer: [MAX_LABEL_BYTES]u8 = undefined;
@@ -419,18 +405,18 @@ test "secure secret store stops secret and handle allocation at id exhaustion" {
     var full_handles = Store.init();
     const full_handle_secret = try full_handles.importSecret(owner, "full-handle", "private full handle", false, true);
     for (0..MAX_HANDLES) |index| {
-        _ = try full_handles.lendHandle(full_handle_secret.id, holder, @intCast(100 + index), true);
+        const handle = try full_handles.lendHandle(full_handle_secret.id, holder, @intCast(100 + index), true);
+        try std.testing.expectEqual(index, (HandleId{ .value = handle.id }).slotIndex());
+        try std.testing.expectEqual(@as(u32, 1), (HandleId{ .value = handle.id }).generation());
     }
-    const handle_next_before = full_handles.next_handle_id;
     try std.testing.expectError(error.HandleTableFull, full_handles.lendHandle(full_handle_secret.id, holder, 94, true));
-    try std.testing.expectEqual(handle_next_before, full_handles.next_handle_id);
-    try std.testing.expect(full_handles.describeHandle(handle_next_before) == null);
+    try std.testing.expect(full_handles.describeHandle(0) == null);
+    try std.testing.expect(full_handles.describeHandle(HandleId.fromParts(MAX_HANDLES, 1).value) == null);
 }
 
-test "secure secret store direct insertion rejects staged id collisions" {
+test "secure secret store direct insertion rejects staged secret id collisions" {
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 5 };
-    const holder = principal.PrincipalId{ .kind = .app, .serial = 47 };
 
     const original_secret = try store.importSecret(owner, "original", "original material", false, true);
     store.next_secret_id = original_secret.id;
@@ -438,38 +424,33 @@ test "secure secret store direct insertion rejects staged id collisions" {
     try std.testing.expectEqual(@as(usize, 1), store.countSecrets());
     try std.testing.expectEqualStrings("original material", store.describeSecret(original_secret.id).?.value[0..original_secret.value_len]);
 
-    const original_handle = try store.lendHandle(original_secret.id, holder, 93, true);
-    store.next_handle_id = original_handle.id;
-    try std.testing.expectError(error.HandleIdExhausted, store.lendHandle(original_secret.id, holder, 94, true));
-    try std.testing.expectEqual(@as(usize, 1), store.handles.countInUse());
-    try std.testing.expectEqual(@as(u64, 93), store.describeHandle(original_handle.id).?.task_id);
 }
 
-test "secure secret store replaces one handle transactionally" {
+test "secure secret store replaces one handle with a direct generation" {
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 6 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 48 };
     const secret = try store.importSecret(owner, "replaceable", "replaceable material", false, true);
+    store.handles.slot_generations[0] = std.math.maxInt(u32);
     const retired = try store.lendHandle(secret.id, holder, 95, true);
+    const retired_id = HandleId{ .value = retired.id };
+    try std.testing.expectEqual(@as(usize, 0), retired_id.slotIndex());
+    try std.testing.expectEqual(std.math.maxInt(u32), retired_id.generation());
 
-    const next_before_missing = store.next_handle_id;
     try std.testing.expectError(error.HandleNotFound, store.replaceHandle(999, secret.id, holder, 96, true));
-    try std.testing.expectEqual(next_before_missing, store.next_handle_id);
     try std.testing.expect(store.describeHandle(retired.id) != null);
-
-    store.next_handle_id = retired.id;
-    try std.testing.expectError(error.HandleIdExhausted, store.replaceHandle(retired.id, secret.id, holder, 96, true));
-    try std.testing.expect(store.describeHandle(retired.id) != null);
-    store.next_handle_id = next_before_missing;
 
     const replacement = try store.replaceHandle(retired.id, secret.id, holder, 96, true);
-    try std.testing.expect(replacement.id != retired.id);
+    const replacement_id = HandleId{ .value = replacement.id };
+    try std.testing.expectEqual(retired_id.slotIndex(), replacement_id.slotIndex());
+    try std.testing.expectEqual(@as(u32, 1), replacement_id.generation());
+    try std.testing.expect(!retired_id.eql(replacement_id));
     try std.testing.expect(store.describeHandle(retired.id) == null);
     try std.testing.expectEqual(@as(u64, 96), store.describeHandle(replacement.id).?.task_id);
     try std.testing.expectEqual(@as(usize, 1), store.handles.countInUse());
 }
 
-test "secure secret store keeps secrets dense and handles indexed through full tables" {
+test "secure secret store keeps secrets dense and handles direct through full tables" {
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 4 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 46 };
