@@ -141,8 +141,9 @@ pub fn proveBootedCompositorServicePath(
 
     var tick: u64 = 124;
     {
-        const shell_snapshot = session.snapshot();
-        defer session.restore(shell_snapshot) catch |err|
+        var shell_snapshot: compositor_session.SessionSnapshot = undefined;
+        session.snapshotInto(&shell_snapshot);
+        defer session.restoreFromSnapshot(&shell_snapshot) catch |err|
             native_util.impossibleByInvariantError("compositor proof restores its retained shell snapshot", err);
         try proveBootedRenderedTaskShell(
             kernel_port,
@@ -159,8 +160,9 @@ pub fn proveBootedCompositorServicePath(
     }
 
     {
-        const permission_snapshot = session.snapshot();
-        defer session.restore(permission_snapshot) catch |err|
+        var permission_snapshot: compositor_session.SessionSnapshot = undefined;
+        session.snapshotInto(&permission_snapshot);
+        defer session.restoreFromSnapshot(&permission_snapshot) catch |err|
             native_util.impossibleByInvariantError("compositor proof restores its retained permission snapshot", err);
         try proveBootedRenderedPermissionReviewSurface(runtime, &service, session, app_task.id, capability_table);
     }

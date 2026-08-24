@@ -661,6 +661,10 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(measured_boot.Recorder) <= measured_boot.RECORDER_SIZE_CEILING_BYTES,
     },
     .compositor_session = .{
+        .uses_borrowed_snapshot_apis = @hasDecl(compositor_session.Session, "snapshotInto") and
+            @hasDecl(compositor_session.Session, "restoreFromSnapshot") and
+            !@hasDecl(compositor_session.Session, "snapshot") and
+            !@hasDecl(compositor_session.Session, "restore"),
         .stores_compact_window_metadata = compositor_session.COMPACT_RECORD_METADATA and
             @FieldType(compositor_session.WindowRecord, "bundle_id_len") == u8 and
             @FieldType(compositor_session.WindowRecord, "display_name_len") == u8 and
