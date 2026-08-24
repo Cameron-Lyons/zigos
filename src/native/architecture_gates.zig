@@ -405,6 +405,8 @@ pub const indexed_hot_path_tables = .{
         .drops_secondary_handle_indexes = !@hasField(secret_vault_service.Service, "secret_handle_index") and
             !@hasField(secret_vault_service.Service, "active_handle_index"),
         .tracks_active_handles = @hasField(secret_vault_service.Service, "active_handle_count"),
+        .stores_compact_active_handle_metadata = secret_vault_service.COMPACT_ACTIVE_HANDLE_COUNT_METADATA and
+            @FieldType(secret_vault_service.Service, "active_handle_count") == u8,
         .uses_fair_terminal_reuse = @hasField(secret_vault_service.Service, "next_reusable_handle"),
         .keeps_fixed_state_within_ceiling = @sizeOf(secret_vault_service.Service) <= secret_vault_service.SERVICE_SIZE_CEILING_BYTES,
     },
