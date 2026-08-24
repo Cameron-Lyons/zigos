@@ -4,11 +4,21 @@ const object_store = @import("../../storage/object_store.zig");
 const workspace = @import("../../storage/workspace.zig");
 
 pub const capacity: usize = workspace.MAX_WORKSPACE_ENTRY_MUTATIONS * 2;
+pub const MutationIndex = u8;
+pub const COMPACT_MUTATION_INDEX_METADATA = true;
+pub const SLOT_SIZE_CEILING_BYTES: usize = 16;
+pub const INDEX_SIZE_CEILING_BYTES: usize = capacity * SLOT_SIZE_CEILING_BYTES;
+
+comptime {
+    if (workspace.MAX_WORKSPACE_ENTRY_MUTATIONS > std.math.maxInt(MutationIndex)) {
+        @compileError("latest mutation indexes cannot represent the workspace mutation capacity");
+    }
+}
 
 const Slot = struct {
     in_use: bool = false,
     path_hash: u64 = 0,
-    mutation_index: usize = 0,
+    mutation_index: MutationIndex = 0,
 };
 
 pub const Index = struct {
@@ -29,12 +39,12 @@ pub const Index = struct {
                 slot.* = .{
                     .in_use = true,
                     .path_hash = path_hash,
-                    .mutation_index = mutation_index,
+                    .mutation_index = @intCast(mutation_index),
                 };
                 return;
             }
             if (slot.path_hash == path_hash and std.mem.eql(u8, changes[slot.mutation_index].entry.pathSlice(), path)) {
-                slot.mutation_index = mutation_index;
+                slot.mutation_index = @intCast(mutation_index);
                 return;
             }
         }
@@ -68,6 +78,12 @@ pub const Index = struct {
     }
 };
 
+comptime {
+    if (@sizeOf(Slot) > SLOT_SIZE_CEILING_BYTES or @sizeOf(Index) > INDEX_SIZE_CEILING_BYTES) {
+        @compileError("latest mutation index exceeds its compact size ceiling");
+    }
+}
+
 pub fn build(changes: []const workspace.EntryMutation) Index {
     var index = Index{};
     for (changes, 0..) |_, mutation_index| {
@@ -78,6 +94,13 @@ pub fn build(changes: []const workspace.EntryMutation) Index {
 
 fn slotStart(path_hash: u64) usize {
     return @intCast(path_hash % capacity);
+}
+
+test "latest mutation index uses capacity-sized slot metadata" {
+    try std.testing.expect(COMPACT_MUTATION_INDEX_METADATA);
+    try std.testing.expectEqual(MutationIndex, @FieldType(Slot, "mutation_index"));
+    try std.testing.expect(@sizeOf(Slot) <= SLOT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Index) <= INDEX_SIZE_CEILING_BYTES);
 }
 
 test "latest mutation index tracks newest mutation per path hash" {
