@@ -785,7 +785,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const last_replicated_generation = self.replicaWorkspaceGeneration(workspace_id, to_device);
             const changes = try store.entryChangesSince(workspace_id, last_replicated_generation);
             const latest_mutation_index = latest_mutations.build(changes);
-            try self.preflightTransactionalEntries(workspace_id, to_device, changes, latest_mutation_index, policy);
+            try self.preflightTransactionalEntries(workspace_id, to_device, changes, &latest_mutation_index, policy);
             for (changes, 0..) |mutation, mutation_index| {
                 const entry = mutation.entry;
                 if (!latest_mutation_index.isLatest(changes, mutation_index)) continue;
@@ -1337,7 +1337,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             workspace_id: u64,
             to_device: principal.PrincipalId,
             changes: []const workspace.EntryMutation,
-            latest_mutation_index: latest_mutations.Index,
+            latest_mutation_index: *const latest_mutations.Index,
             policy: *const WorkspacePolicy,
         ) Error!void {
             for (changes, 0..) |mutation, mutation_index| {

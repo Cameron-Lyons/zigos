@@ -35,6 +35,7 @@ const sync_transport_harness = @import("sync/sync_transport_harness.zig");
 const sync_transport = @import("sync/sync_transport.zig");
 const device_graph = @import("sync/device_graph.zig");
 const sync_service = @import("sync/sync_service.zig");
+const sync_latest_mutations = @import("sync/sync_service/latest_mutations.zig");
 const sync_service_test = @import("sync/sync_service_test.zig");
 const sync_adapters = @import("sync/sync_adapters.zig");
 const sync_state_support = @import("sync/sync_state_support.zig");
@@ -779,6 +780,9 @@ pub const indexed_hot_path_tables = .{
         .rebuilds_loaded_indexes = @hasDecl(device_graph.Graph, "rebuildIndexes"),
     },
     .sync_service = .{
+        .stores_compact_latest_mutation_indexes = sync_latest_mutations.COMPACT_MUTATION_INDEX_METADATA and
+            @sizeOf(sync_latest_mutations.MutationIndex) == 1,
+        .keeps_latest_mutation_index_within_ceiling = @sizeOf(sync_latest_mutations.Index) <= sync_latest_mutations.INDEX_SIZE_CEILING_BYTES,
         .stores_compact_overlay_session_metadata = sync_service.COMPACT_OVERLAY_SESSION_METADATA and
             @FieldType(sync_service.OverlaySession, "service_identity_len") == u8 and
             @FieldType(sync_service.OverlaySession, "relay_domain_len") == u8 and
