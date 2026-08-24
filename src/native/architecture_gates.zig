@@ -284,6 +284,17 @@ pub const indexed_hot_path_tables = .{
         .stores_compact_credential_metadata = os_identity.COMPACT_CREDENTIAL_METADATA and
             @FieldType(os_identity.CredentialRecord, "relying_party_id_len") == u8 and
             @FieldType(os_identity.CredentialRecord, "label_len") == u8,
+        .stores_compact_proof_and_assertion_metadata = os_identity.COMPACT_IDENTITY_PROOF_METADATA and
+            @FieldType(os_identity.LocalUnlockProof, "relying_party_id_len") == u8 and
+            @FieldType(os_identity.LocalUnlockProof, "challenge_len") == u8 and
+            @FieldType(os_identity.Assertion, "relying_party_id_len") == u8 and
+            @FieldType(os_identity.Assertion, "origin_len") == u8 and
+            @FieldType(os_identity.Assertion, "challenge_len") == u8,
+        .keeps_proofs_and_requests_within_ceilings = @sizeOf(os_identity.LocalUnlockProof) <= os_identity.LOCAL_UNLOCK_PROOF_SIZE_CEILING_BYTES and
+            @sizeOf(os_identity.Assertion) <= os_identity.ASSERTION_SIZE_CEILING_BYTES and
+            @sizeOf(os_identity.AssertionRequest) <= os_identity.ASSERTION_REQUEST_SIZE_CEILING_BYTES and
+            @sizeOf(os_identity.RecoveryApproval) <= os_identity.RECOVERY_APPROVAL_SIZE_CEILING_BYTES and
+            @sizeOf(os_identity.RecoveryRequest) <= os_identity.RECOVERY_REQUEST_SIZE_CEILING_BYTES,
         .bounds_credential_lookup_comparisons = os_identity.CREDENTIAL_LOOKUP_COMPARISON_BOUND == 5,
         .drops_credential_arena = @FieldType(os_identity.Store, "credentials") == [os_identity.MAX_CREDENTIALS]os_identity.CredentialRecord,
         .keeps_fixed_state_within_ceiling = @sizeOf(os_identity.Store) <= os_identity.STORE_SIZE_CEILING_BYTES,

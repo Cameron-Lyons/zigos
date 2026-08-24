@@ -15,8 +15,24 @@ pub const MAX_CHALLENGE_BYTES: usize = 64;
 pub const BOUNDED_CREDENTIAL_LOOKUP = true;
 pub const DENSE_CREDENTIAL_TABLE = true;
 pub const COMPACT_CREDENTIAL_METADATA = true;
+pub const COMPACT_IDENTITY_PROOF_METADATA = true;
 pub const CREDENTIAL_LOOKUP_COMPARISON_BOUND: usize = 5;
 pub const STORE_SIZE_CEILING_BYTES: usize = 5_008;
+pub const LOCAL_UNLOCK_PROOF_SIZE_CEILING_BYTES: usize = 304;
+pub const ASSERTION_SIZE_CEILING_BYTES: usize = 416;
+pub const ASSERTION_REQUEST_SIZE_CEILING_BYTES: usize = 440;
+pub const RECOVERY_APPROVAL_SIZE_CEILING_BYTES: usize = 320;
+pub const RECOVERY_REQUEST_SIZE_CEILING_BYTES: usize = 440;
+
+comptime {
+    if (MAX_RP_ID_BYTES > std.math.maxInt(u8) or
+        MAX_LABEL_BYTES > std.math.maxInt(u8) or
+        MAX_ORIGIN_BYTES > std.math.maxInt(u8) or
+        MAX_CHALLENGE_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("OS identity text exceeds compact length metadata capacity");
+    }
+}
 
 pub const CredentialScope = enum(u8) {
     device_bound,
@@ -50,18 +66,18 @@ pub const LocalUnlockProof = struct {
     method: UnlockMethod,
     issued_at_ticks: u64,
     expires_at_ticks: u64,
-    relying_party_id_len: usize,
+    relying_party_id_len: u8,
     relying_party_id: [MAX_RP_ID_BYTES]u8,
-    challenge_len: usize,
+    challenge_len: u8,
     challenge: [MAX_CHALLENGE_BYTES]u8,
     signature: manifest.Signature = .{},
 
     pub fn relyingPartySlice(self: *const LocalUnlockProof) []const u8 {
-        return self.relying_party_id[0..self.relying_party_id_len];
+        return self.relying_party_id[0..@as(usize, self.relying_party_id_len)];
     }
 
     pub fn challengeSlice(self: *const LocalUnlockProof) []const u8 {
-        return self.challenge[0..self.challenge_len];
+        return self.challenge[0..@as(usize, self.challenge_len)];
     }
 };
 
@@ -142,11 +158,11 @@ pub const Assertion = struct {
     device: principal.PrincipalId,
     credential_generation: u32,
     assertion_counter: u64,
-    relying_party_id_len: usize,
+    relying_party_id_len: u8,
     relying_party_id: [MAX_RP_ID_BYTES]u8,
-    origin_len: usize,
+    origin_len: u8,
     origin: [MAX_ORIGIN_BYTES]u8,
-    challenge_len: usize,
+    challenge_len: u8,
     challenge: [MAX_CHALLENGE_BYTES]u8,
     signature: manifest.Signature,
     local_unlock_verified: bool,
@@ -158,17 +174,28 @@ pub const Assertion = struct {
     unlock_age_ticks: u64,
 
     pub fn relyingPartySlice(self: *const Assertion) []const u8 {
-        return self.relying_party_id[0..self.relying_party_id_len];
+        return self.relying_party_id[0..@as(usize, self.relying_party_id_len)];
     }
 
     pub fn originSlice(self: *const Assertion) []const u8 {
-        return self.origin[0..self.origin_len];
+        return self.origin[0..@as(usize, self.origin_len)];
     }
 
     pub fn challengeSlice(self: *const Assertion) []const u8 {
-        return self.challenge[0..self.challenge_len];
+        return self.challenge[0..@as(usize, self.challenge_len)];
     }
 };
+
+comptime {
+    if (@sizeOf(LocalUnlockProof) > LOCAL_UNLOCK_PROOF_SIZE_CEILING_BYTES or
+        @sizeOf(Assertion) > ASSERTION_SIZE_CEILING_BYTES or
+        @sizeOf(AssertionRequest) > ASSERTION_REQUEST_SIZE_CEILING_BYTES or
+        @sizeOf(RecoveryApproval) > RECOVERY_APPROVAL_SIZE_CEILING_BYTES or
+        @sizeOf(RecoveryRequest) > RECOVERY_REQUEST_SIZE_CEILING_BYTES)
+    {
+        @compileError("OS identity proof or request exceeds its size ceiling");
+    }
+}
 
 pub const Error = error{
     ChallengeTooLong,
@@ -200,9 +227,6 @@ pub const Store = struct {
     comptime {
         if (MAX_CREDENTIALS > std.math.maxInt(u8)) {
             @compileError("credential count no longer fits compact storage");
-        }
-        if (MAX_RP_ID_BYTES > std.math.maxInt(u8) or MAX_LABEL_BYTES > std.math.maxInt(u8)) {
-            @compileError("credential text no longer fits compact length metadata");
         }
         if (@sizeOf(@This()) > STORE_SIZE_CEILING_BYTES) {
             @compileError("OS identity store exceeds its fixed-state size ceiling");
@@ -321,9 +345,9 @@ pub const Store = struct {
             .device_trust_generation = device_record.trust_generation,
             .unlock_age_ticks = request.tick - unlock.issued_at_ticks,
         };
-        assertion.relying_party_id_len = native_util.copyTextExact(&assertion.relying_party_id, credential.relyingPartySlice()) catch return error.RelyingPartyTooLong;
-        assertion.origin_len = native_util.copyTextExact(&assertion.origin, request.origin) catch return error.OriginTooLong;
-        assertion.challenge_len = native_util.copyTextExact(&assertion.challenge, request.challenge) catch return error.ChallengeTooLong;
+        assertion.relying_party_id_len = @intCast(native_util.copyTextExact(&assertion.relying_party_id, credential.relyingPartySlice()) catch return error.RelyingPartyTooLong);
+        assertion.origin_len = @intCast(native_util.copyTextExact(&assertion.origin, request.origin) catch return error.OriginTooLong);
+        assertion.challenge_len = @intCast(native_util.copyTextExact(&assertion.challenge, request.challenge) catch return error.ChallengeTooLong);
         return assertion;
     }
 
@@ -427,8 +451,8 @@ pub fn createLocalUnlockProof(
         .challenge = [_]u8{0} ** MAX_CHALLENGE_BYTES,
         .signature = .{},
     };
-    proof.relying_party_id_len = native_util.copyTextExact(&proof.relying_party_id, relying_party_id) catch return error.RelyingPartyTooLong;
-    proof.challenge_len = native_util.copyTextExact(&proof.challenge, challenge) catch return error.ChallengeTooLong;
+    proof.relying_party_id_len = @intCast(native_util.copyTextExact(&proof.relying_party_id, relying_party_id) catch return error.RelyingPartyTooLong);
+    proof.challenge_len = @intCast(native_util.copyTextExact(&proof.challenge, challenge) catch return error.ChallengeTooLong);
     const digest = localUnlockDigest(
         proof.owner,
         proof.device,
@@ -685,6 +709,19 @@ fn testHardwareProvider() secure_secret_store.HardwareSealProvider {
         .available = true,
         .sealFn = testHardwareSeal,
     };
+}
+
+test "os identity keeps proof and assertion metadata compact" {
+    try std.testing.expectEqual(u8, @FieldType(LocalUnlockProof, "relying_party_id_len"));
+    try std.testing.expectEqual(u8, @FieldType(LocalUnlockProof, "challenge_len"));
+    try std.testing.expectEqual(u8, @FieldType(Assertion, "relying_party_id_len"));
+    try std.testing.expectEqual(u8, @FieldType(Assertion, "origin_len"));
+    try std.testing.expectEqual(u8, @FieldType(Assertion, "challenge_len"));
+    try std.testing.expect(@sizeOf(LocalUnlockProof) <= LOCAL_UNLOCK_PROOF_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Assertion) <= ASSERTION_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(AssertionRequest) <= ASSERTION_REQUEST_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(RecoveryApproval) <= RECOVERY_APPROVAL_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(RecoveryRequest) <= RECOVERY_REQUEST_SIZE_CEILING_BYTES);
 }
 
 test "os identity creates passkey credentials and rejects phishing origins" {
