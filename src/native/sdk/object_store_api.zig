@@ -10,6 +10,9 @@ pub const PutResult = object_store.PutResult;
 pub const ObjectQueryResult = object_store.ObjectQueryResult;
 pub const ObjectHistoryEntry = object_store.ObjectHistoryEntry;
 pub const ObjectOperatingModel = object_store.ObjectOperatingModel;
+pub const COMPACT_OBJECT_HANDLE_METADATA = true;
+pub const OBJECT_HANDLE_SIZE_CEILING_BYTES: usize = 136;
+pub const LOADED_OBJECT_SIZE_CEILING_BYTES: usize = 152;
 pub const Error = object_store.Error || error{
     ObjectPayloadUnavailable,
     StaleObjectVersion,
@@ -17,27 +20,47 @@ pub const Error = object_store.Error || error{
     ContentTypeTooLong,
 };
 
+comptime {
+    if (object_store.MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
+        object_store.MAX_CONTENT_TYPE_BYTES > std.math.maxInt(u8))
+    {
+        @compileError("object-store SDK metadata exceeds its compact length fields");
+    }
+}
+
 pub const ObjectHandle = struct {
     object_id: object_store.ids.ObjectId,
     version_id: object_store.ids.VersionId,
     object_type: ObjectType,
-    label_len: usize = 0,
+    label_len: u8 = 0,
     label: [object_store.MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** object_store.MAX_METADATA_LABEL_BYTES,
-    content_type_len: usize = 0,
+    content_type_len: u8 = 0,
     content_type: [object_store.MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** object_store.MAX_CONTENT_TYPE_BYTES,
 
     pub fn labelSlice(self: *const ObjectHandle) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
     }
 
     pub fn contentTypeSlice(self: *const ObjectHandle) []const u8 {
-        return self.content_type[0..self.content_type_len];
+        return self.content_type[0..@min(@as(usize, self.content_type_len), self.content_type.len)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > OBJECT_HANDLE_SIZE_CEILING_BYTES) {
+            @compileError("object-store SDK handle exceeds its compact size ceiling");
+        }
     }
 };
 
 pub const LoadedObject = struct {
     handle: ObjectHandle,
     payload: []const u8,
+
+    comptime {
+        if (@sizeOf(@This()) > LOADED_OBJECT_SIZE_CEILING_BYTES) {
+            @compileError("loaded object exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const Client = struct {
@@ -152,8 +175,8 @@ fn handleFromPut(
         .version_id = result.version_id,
         .object_type = object_type,
     };
-    handle.label_len = copyText(&handle.label, label) catch return error.LabelTooLong;
-    handle.content_type_len = copyText(&handle.content_type, content_type) catch return error.ContentTypeTooLong;
+    handle.label_len = @intCast(copyText(&handle.label, label) catch return error.LabelTooLong);
+    handle.content_type_len = @intCast(copyText(&handle.content_type, content_type) catch return error.ContentTypeTooLong);
     return handle;
 }
 
@@ -163,8 +186,8 @@ fn handleFromVersion(version: *const object_store.VersionRecord) Error!ObjectHan
         .version_id = version.id,
         .object_type = version.object_type,
     };
-    handle.label_len = copyText(&handle.label, version.metadata.labelSlice()) catch return error.LabelTooLong;
-    handle.content_type_len = copyText(&handle.content_type, version.metadata.contentTypeSlice()) catch return error.ContentTypeTooLong;
+    handle.label_len = @intCast(copyText(&handle.label, version.metadata.labelSlice()) catch return error.LabelTooLong);
+    handle.content_type_len = @intCast(copyText(&handle.content_type, version.metadata.contentTypeSlice()) catch return error.ContentTypeTooLong);
     return handle;
 }
 
@@ -172,6 +195,14 @@ fn copyText(dest: []u8, source: []const u8) error{TextTooLong}!usize {
     if (source.len > dest.len) return error.TextTooLong;
     @memcpy(dest[0..source.len], source);
     return source.len;
+}
+
+test "object-store SDK handle uses compact bounded metadata" {
+    try std.testing.expect(COMPACT_OBJECT_HANDLE_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(ObjectHandle, "label_len"));
+    try std.testing.expectEqual(u8, @FieldType(ObjectHandle, "content_type_len"));
+    try std.testing.expect(@sizeOf(ObjectHandle) <= OBJECT_HANDLE_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(LoadedObject) <= LOADED_OBJECT_SIZE_CEILING_BYTES);
 }
 
 test "object-store SDK stores signed versions and queries developer fixtures" {
