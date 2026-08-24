@@ -8,8 +8,10 @@ const ui = @import("ui.zig");
 pub const MAX_REVIEW_NODES: usize = permission_review.MAX_REVIEW_DECISIONS + 4;
 pub const MAX_REVIEW_TEXT_BYTES: usize = ui.MAX_RENDER_BYTES;
 pub const COMPACT_PERMISSION_REVIEW_METADATA = true;
+pub const DERIVES_HARNESS_COMMAND_COUNT = true;
 pub const REVIEW_PLAN_SIZE_CEILING_BYTES: usize = 3_616;
 pub const HARNESS_RESULT_SIZE_CEILING_BYTES: usize = 3_624;
+pub const HARNESS_SIZE_CEILING_BYTES: usize = 400;
 pub const ReviewCommand = permission_review.ReviewCommand;
 pub const ReviewDecision = permission_review.ReviewDecision;
 pub const UserGrant = policy_mediation.UserGrant;
@@ -51,7 +53,6 @@ pub const HarnessResult = struct {
 pub const Harness = struct {
     task_id: u64,
     bundle: *const manifest.BundleManifest,
-    command_count: usize = 0,
     commands: [permission_review.MAX_REVIEW_DECISIONS]ReviewCommand =
         [_]ReviewCommand{.{ .allow = true }} ** permission_review.MAX_REVIEW_DECISIONS,
 
@@ -59,12 +60,15 @@ pub const Harness = struct {
         var harness = Harness{
             .task_id = task_id,
             .bundle = bundle,
-            .command_count = @min(bundle.requested_permissions.len, permission_review.MAX_REVIEW_DECISIONS),
         };
-        for (bundle.requested_permissions[0..harness.command_count], 0..) |request, index| {
+        for (bundle.requested_permissions[0..harness.commandCount()], 0..) |request, index| {
             harness.commands[index] = defaultCommand(request);
         }
         return harness;
+    }
+
+    pub fn commandCount(self: *const Harness) usize {
+        return @min(self.bundle.requested_permissions.len, permission_review.MAX_REVIEW_DECISIONS);
     }
 
     pub fn allow(self: *Harness, kind: manifest.PermissionKind) HarnessError!void {
@@ -76,11 +80,12 @@ pub const Harness = struct {
     }
 
     pub fn run(self: *const Harness) !HarnessResult {
+        const command_count = self.commandCount();
         var result = HarnessResult{
-            .plan = try buildReviewPlan(self.task_id, self.bundle, self.commands[0..self.command_count]),
+            .plan = try buildReviewPlan(self.task_id, self.bundle, self.commands[0..command_count]),
         };
 
-        for (self.bundle.requested_permissions[0..self.command_count], 0..) |request, index| {
+        for (self.bundle.requested_permissions[0..command_count], 0..) |request, index| {
             if (request.required) {
                 result.required_count += 1;
             } else {
@@ -110,7 +115,7 @@ pub const Harness = struct {
     }
 
     fn find(self: *const Harness, kind: manifest.PermissionKind, resource: ?[]const u8) ?usize {
-        for (self.bundle.requested_permissions[0..self.command_count], 0..) |request, index| {
+        for (self.bundle.requested_permissions[0..self.commandCount()], 0..) |request, index| {
             if (request.kind != kind) continue;
             if (resource) |expected| {
                 if (!std.mem.eql(u8, request.resource, expected)) continue;
@@ -123,7 +128,8 @@ pub const Harness = struct {
 
 comptime {
     if (@sizeOf(ReviewPlan) > REVIEW_PLAN_SIZE_CEILING_BYTES or
-        @sizeOf(HarnessResult) > HARNESS_RESULT_SIZE_CEILING_BYTES)
+        @sizeOf(HarnessResult) > HARNESS_RESULT_SIZE_CEILING_BYTES or
+        @sizeOf(Harness) > HARNESS_SIZE_CEILING_BYTES)
     {
         @compileError("SDK permission review state exceeds its compact size ceiling");
     }
@@ -193,6 +199,9 @@ fn defaultCommand(request: manifest.PermissionRequest) ReviewCommand {
 }
 
 test "permission SDK keeps bounded review results compact" {
+    try std.testing.expect(DERIVES_HARNESS_COMMAND_COUNT);
+    try std.testing.expect(!@hasField(Harness, "command_count"));
+    try std.testing.expect(@hasDecl(Harness, "commandCount"));
     try std.testing.expectEqual(u8, @FieldType(ReviewPlan, "grant_count"));
     try std.testing.expectEqual(u8, @FieldType(ReviewPlan, "node_count"));
     try std.testing.expectEqual(u8, @FieldType(HarnessResult, "required_count"));
@@ -201,6 +210,7 @@ test "permission SDK keeps bounded review results compact" {
     try std.testing.expectEqual(u8, @FieldType(HarnessResult, "denied_optional_count"));
     try std.testing.expect(@sizeOf(ReviewPlan) <= REVIEW_PLAN_SIZE_CEILING_BYTES);
     try std.testing.expect(@sizeOf(HarnessResult) <= HARNESS_RESULT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Harness) <= HARNESS_SIZE_CEILING_BYTES);
 }
 
 test "permission SDK builds grants and a native UI review tree" {
@@ -223,6 +233,7 @@ test "permission harness proves required and optional review outcomes" {
     const package = examples.firstPartyStudio();
 
     var optional_harness = Harness.init(88, &package.bundle);
+    try std.testing.expectEqual(@min(package.bundle.requested_permissions.len, permission_review.MAX_REVIEW_DECISIONS), optional_harness.commandCount());
     try optional_harness.deny(.camera);
     const optional_result = try optional_harness.run();
     try std.testing.expect(optional_result.allRequiredGranted());
