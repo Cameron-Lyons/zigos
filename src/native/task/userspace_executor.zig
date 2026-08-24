@@ -163,6 +163,23 @@ pub const DEFAULT_USER_RFLAGS: u64 = USER_RFLAGS_RESERVED | (1 << 9);
 const USERSPACE_TRAP_VECTOR: u8 = 129;
 const GENERAL_PROTECTION_FAULT_VECTOR: u8 = 13;
 const PAGE_FAULT_VECTOR: u8 = 14;
+const CONTAINABLE_USER_EXCEPTION_VECTORS = [_]u8{
+    0,  // Divide error.
+    1,  // Debug exception.
+    3,  // Breakpoint.
+    4,  // Overflow.
+    5,  // Bound-range exceeded.
+    6,  // Invalid opcode.
+    7,  // Device not available.
+    10, // Invalid TSS.
+    11, // Segment not present.
+    12, // Stack-segment fault.
+    GENERAL_PROTECTION_FAULT_VECTOR,
+    16, // x87 floating-point exception.
+    17, // Alignment check.
+    19, // SIMD floating-point exception.
+    21, // Control-protection exception.
+};
 const TRAP_STACK_BYTES: usize = units.kibibytes(48);
 const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
 
@@ -421,7 +438,9 @@ pub const Executor = struct {
         if (self.initialized) return;
         if (!trap_handler_registered) {
             freestanding.isr.registerHandler(USERSPACE_TRAP_VECTOR, userspaceTrapHandler);
-            freestanding.isr.registerHandler(GENERAL_PROTECTION_FAULT_VECTOR, userspaceGeneralProtectionFaultHandler);
+            for (CONTAINABLE_USER_EXCEPTION_VECTORS) |vector| {
+                freestanding.isr.registerHandler(vector, userspaceExceptionHandler);
+            }
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
             trap_handler_registered = true;
         }
@@ -1309,21 +1328,32 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     freestanding.paging.switchToKernelAddressSpace();
 }
 
-fn userspaceGeneralProtectionFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
+fn userspaceExceptionHandler(frame: *freestanding.isr.InterruptFrame) void {
     const executor = registered_executor orelse freestanding.isr.haltUnhandledException(frame);
     if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) {
         freestanding.isr.haltUnhandledException(frame);
     }
     _ = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
+    const vector = std.math.cast(u8, frame.int_no) orelse
+        native_util.impossibleByInvariant("userspace exception vector exceeds the IDT range");
+    if (!isContainableUserExceptionVector(vector)) {
+        freestanding.isr.haltUnhandledException(frame);
+    }
     executor.last_user_exception = .{
-        .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+        .vector = vector,
         .error_code = @intCast(frame.err_code),
         .instruction_pointer = @intCast(frame.eip),
     };
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
     freestanding.paging.switchToKernelAddressSpace();
+}
+
+fn isContainableUserExceptionVector(vector: u8) bool {
+    return for (CONTAINABLE_USER_EXCEPTION_VECTORS) |candidate| {
+        if (vector == candidate) break true;
+    } else false;
 }
 
 fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
@@ -2075,4 +2105,14 @@ test "userspace exception records bind vector error and instruction context" {
     }).reasonFingerprint());
     try std.testing.expectEqual(@as(u64, 0), baseline.fault_address);
     try std.testing.expect(ExecutionOutcome.faulted.handedOff());
+}
+
+test "userspace exception containment excludes system-fatal and dedicated vectors" {
+    try std.testing.expect(isContainableUserExceptionVector(0));
+    try std.testing.expect(isContainableUserExceptionVector(6));
+    try std.testing.expect(isContainableUserExceptionVector(GENERAL_PROTECTION_FAULT_VECTOR));
+    try std.testing.expect(!isContainableUserExceptionVector(2));
+    try std.testing.expect(!isContainableUserExceptionVector(8));
+    try std.testing.expect(!isContainableUserExceptionVector(PAGE_FAULT_VECTOR));
+    try std.testing.expect(!isContainableUserExceptionVector(18));
 }
