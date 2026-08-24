@@ -6,6 +6,8 @@ const copyText = native_util.copyText;
 pub const MAX_NOTIFICATIONS: usize = 32;
 pub const MAX_DETAIL_BYTES: usize = 96;
 pub const BOUNDED_NOTIFICATION_SCAN = true;
+pub const DIRECT_NOTIFICATION_LOOKUP = true;
+pub const ORDERED_NOTIFICATION_IDS = true;
 pub const RECLAIMS_SUPPRESSED_NOTIFICATIONS = true;
 pub const COMPACT_NOTIFICATION_METADATA = true;
 pub const ATTENTION_DECISION_SIZE_CEILING_BYTES: usize = 4;
@@ -128,13 +130,44 @@ pub const Notification = struct {
 };
 
 pub const Error = error{
-    NotificationIdExhausted,
     NotificationTableFull,
     NotificationNotFound,
 };
 
+const NOTIFICATION_SLOT_BITS: u6 = 5;
+const NOTIFICATION_SEQUENCE_BITS: u6 = 59;
+const NOTIFICATION_SEQUENCE_MASK: u64 = std.math.maxInt(u64) >> NOTIFICATION_SLOT_BITS;
+const NOTIFICATION_SEQUENCE_HALF_RANGE: u64 = @as(u64, 1) << (NOTIFICATION_SEQUENCE_BITS - 1);
+
+pub const NotificationId = struct {
+    value: u64 = 0,
+
+    pub fn fromParts(slot_index: usize, sequence_value: u64) NotificationId {
+        if (slot_index >= MAX_NOTIFICATIONS or sequence_value == 0 or sequence_value > NOTIFICATION_SEQUENCE_MASK) return .{};
+        return .{ .value = (sequence_value << NOTIFICATION_SLOT_BITS) | @as(u64, @intCast(slot_index)) };
+    }
+
+    pub fn slotIndex(self: NotificationId) usize {
+        return @intCast(self.value & (MAX_NOTIFICATIONS - 1));
+    }
+
+    pub fn sequence(self: NotificationId) u64 {
+        return self.value >> NOTIFICATION_SLOT_BITS;
+    }
+
+    pub fn isZero(self: NotificationId) bool {
+        return self.value == 0;
+    }
+};
+
+comptime {
+    if (MAX_NOTIFICATIONS != @as(usize, 1) << NOTIFICATION_SLOT_BITS) {
+        @compileError("notification ID slot encoding must exactly cover notification capacity");
+    }
+}
+
 pub const Center = struct {
-    next_notification_id: u64 = 1,
+    next_notification_sequence: u64 = 1,
     notifications: [MAX_NOTIFICATIONS]Notification = [_]Notification{.{}} ** MAX_NOTIFICATIONS,
     permanent_attention_counts: AttentionCounts = .{},
     notification_count: u8 = 0,
@@ -152,11 +185,7 @@ pub const Center = struct {
     }
 
     pub fn post(self: *Center, request: PostRequest) Error!*Notification {
-        const notification_id = self.next_notification_id;
-        if (notification_id == 0) return error.NotificationIdExhausted;
-        if (self.notificationSlotIndex(notification_id) != null) return error.NotificationIdExhausted;
         var notification = Notification{};
-        notification.id = notification_id;
         notification.reason = request.reason;
         notification.urgency = request.urgency;
         notification.source = request.source;
@@ -173,11 +202,12 @@ pub const Center = struct {
             self.applySuppressionPolicy(request);
             break :replacement self.reuseSuppressedNotificationSlotIndex(retired_index);
         };
+        notification.id = NotificationId.fromParts(slot_index, self.next_notification_sequence).value;
         if (slot_index == self.countNotifications()) self.notification_count += 1;
         const slot = &self.notifications[slot_index];
         slot.* = notification;
         self.accountPostedAttention(slot);
-        self.next_notification_id +%= 1;
+        self.next_notification_sequence = nextNotificationSequence(self.next_notification_sequence);
         return slot;
     }
 
@@ -274,7 +304,7 @@ pub const Center = struct {
         var latest: ?*const Notification = null;
         for (self.notifications[0..self.countNotifications()]) |*notification| {
             if (!notification.isActive(now_ticks)) continue;
-            if (latest == null or notification.id > latest.?.id) latest = notification;
+            if (latest == null or notificationPostedAfter(notification.id, latest.?.id)) latest = notification;
         }
         return latest;
     }
@@ -364,11 +394,11 @@ pub const Center = struct {
     }
 
     fn notificationSlotIndex(self: *const Center, notification_id: u64) ?usize {
-        if (notification_id == 0) return null;
-        for (self.notifications[0..self.countNotifications()], 0..) |notification, slot_index| {
-            if (notification.id == notification_id) return slot_index;
-        }
-        return null;
+        const handle = NotificationId{ .value = notification_id };
+        if (handle.isZero()) return null;
+        const slot_index = handle.slotIndex();
+        if (slot_index >= self.countNotifications()) return null;
+        return if (self.notifications[slot_index].id == notification_id) slot_index else null;
     }
 
     fn suppressedNotificationSlot(self: *const Center) ?usize {
@@ -398,6 +428,17 @@ pub const Center = struct {
         return count;
     }
 };
+
+fn nextNotificationSequence(sequence: u64) u64 {
+    return if (sequence >= NOTIFICATION_SEQUENCE_MASK) 1 else sequence + 1;
+}
+
+fn notificationPostedAfter(candidate_id: u64, current_id: u64) bool {
+    const candidate = (NotificationId{ .value = candidate_id }).sequence();
+    const current = (NotificationId{ .value = current_id }).sequence();
+    const distance = (candidate -% current) & NOTIFICATION_SEQUENCE_MASK;
+    return distance != 0 and distance < NOTIFICATION_SEQUENCE_HALF_RANGE;
+}
 
 fn deny(
     reason: AttentionDecisionReason,
@@ -548,40 +589,48 @@ test "notification center commits new slots after suppression scans" {
     try std.testing.expectEqual(@as(usize, 1), center.activeCount(1));
 }
 
-test "notification center stops at id exhaustion and full posts require matching replacement" {
+test "notification center orders direct ids across sequence wrap and full replacements" {
     var center = Center.init();
     const source = principal.PrincipalId{ .kind = .service, .serial = 10 };
 
-    center.next_notification_id = std.math.maxInt(u64);
+    center.next_notification_sequence = NOTIFICATION_SEQUENCE_MASK;
     const max_notification = try center.post(.{
         .source = source,
         .reason = .sync_conflict,
         .urgency = .high,
         .detail = "max id notification",
     });
-    try std.testing.expectEqual(std.math.maxInt(u64), max_notification.id);
-    try std.testing.expectEqual(@as(u64, 0), center.next_notification_id);
+    try std.testing.expectEqual(@as(usize, 0), (NotificationId{ .value = max_notification.id }).slotIndex());
+    try std.testing.expectEqual(NOTIFICATION_SEQUENCE_MASK, (NotificationId{ .value = max_notification.id }).sequence());
+    try std.testing.expectEqual(@as(u64, 1), center.next_notification_sequence);
     try std.testing.expect(center.find(0) == null);
 
-    try std.testing.expectError(error.NotificationIdExhausted, center.post(.{
+    const wrapped_notification = try center.post(.{
         .source = source,
-        .reason = .sync_conflict,
+        .reason = .update_ready,
         .urgency = .high,
-        .detail = "exhausted id notification",
-        .suppression_policy = .replace_same_source_reason,
-    }));
-    try std.testing.expectEqual(@as(usize, 1), center.activeCount(1));
+        .detail = "wrapped id notification",
+    });
+    try std.testing.expectEqual(@as(usize, 1), (NotificationId{ .value = wrapped_notification.id }).slotIndex());
+    try std.testing.expectEqual(@as(u64, 1), (NotificationId{ .value = wrapped_notification.id }).sequence());
+    try std.testing.expectEqual(wrapped_notification.id, center.latestVisible(1).?.id);
+    try std.testing.expectEqual(@as(usize, 2), center.activeCount(1));
     try std.testing.expect(!max_notification.suppressed);
 
     var full_center = Center.init();
+    var first_notification_id: u64 = 0;
     for (0..MAX_NOTIFICATIONS) |index| {
-        _ = try full_center.post(.{
+        const notification = try full_center.post(.{
             .source = source,
             .reason = .policy_notice,
             .urgency = .normal,
             .task_id = @intCast(index + 1),
             .detail = "full table notification",
         });
+        const notification_id = NotificationId{ .value = notification.id };
+        try std.testing.expectEqual(index, notification_id.slotIndex());
+        try std.testing.expectEqual(@as(u64, @intCast(index + 1)), notification_id.sequence());
+        if (index == 0) first_notification_id = notification.id;
     }
     try std.testing.expectEqual(MAX_NOTIFICATIONS, full_center.activeCount(1));
     const replacement = try full_center.post(.{
@@ -592,11 +641,13 @@ test "notification center stops at id exhaustion and full posts require matching
         .detail = "matching replacement at capacity",
         .suppression_policy = .replace_same_source_reason_task,
     });
-    try std.testing.expect(full_center.find(1) == null);
+    try std.testing.expect(full_center.find(first_notification_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), (NotificationId{ .value = replacement.id }).slotIndex());
+    try std.testing.expectEqual(@as(u64, MAX_NOTIFICATIONS + 1), (NotificationId{ .value = replacement.id }).sequence());
     try std.testing.expectEqualStrings("matching replacement at capacity", replacement.detailSlice());
     try std.testing.expectEqual(MAX_NOTIFICATIONS, full_center.activeCount(1));
 
-    const next_before_unmatched = full_center.next_notification_id;
+    const next_before_unmatched = full_center.next_notification_sequence;
     try std.testing.expectError(error.NotificationTableFull, full_center.post(.{
         .source = source,
         .reason = .policy_notice,
@@ -605,7 +656,7 @@ test "notification center stops at id exhaustion and full posts require matching
         .detail = "unmatched replacement without capacity",
         .suppression_policy = .replace_same_source_reason_task,
     }));
-    try std.testing.expectEqual(next_before_unmatched, full_center.next_notification_id);
+    try std.testing.expectEqual(next_before_unmatched, full_center.next_notification_sequence);
     try std.testing.expectEqual(MAX_NOTIFICATIONS, full_center.activeCount(1));
 }
 
@@ -613,19 +664,21 @@ test "notification center reclaims suppressed slots when the table is full" {
     var center = Center.init();
     const source = principal.PrincipalId{ .kind = .service, .serial = 11 };
 
+    var notification_ids: [MAX_NOTIFICATIONS]u64 = [_]u64{0} ** MAX_NOTIFICATIONS;
     for (0..MAX_NOTIFICATIONS) |index| {
-        _ = try center.post(.{
+        const notification = try center.post(.{
             .source = source,
             .reason = .policy_notice,
             .urgency = .normal,
             .task_id = @intCast(index + 1),
             .detail = "table filler",
         });
+        notification_ids[index] = notification.id;
     }
-    const first_dismissed_slot = center.notificationSlotIndex(3).?;
-    const second_dismissed_slot = center.notificationSlotIndex(5).?;
-    try std.testing.expect((try center.dismiss(3)).suppressed);
-    try std.testing.expect((try center.dismiss(5)).suppressed);
+    const first_dismissed_slot = center.notificationSlotIndex(notification_ids[2]).?;
+    const second_dismissed_slot = center.notificationSlotIndex(notification_ids[4]).?;
+    try std.testing.expect((try center.dismiss(notification_ids[2])).suppressed);
+    try std.testing.expect((try center.dismiss(notification_ids[4])).suppressed);
     try std.testing.expectEqual(first_dismissed_slot, center.suppressedNotificationSlot().?);
 
     const first_replacement = try center.post(.{
@@ -634,8 +687,8 @@ test "notification center reclaims suppressed slots when the table is full" {
         .urgency = .high,
         .detail = "first reclaimed slot notification",
     });
-    try std.testing.expect(center.find(3) == null);
-    try std.testing.expect(center.find(5) != null);
+    try std.testing.expect(center.find(notification_ids[2]) == null);
+    try std.testing.expect(center.find(notification_ids[4]) != null);
     try std.testing.expectEqual(second_dismissed_slot, center.suppressedNotificationSlot().?);
 
     const second_replacement = try center.post(.{
@@ -645,7 +698,7 @@ test "notification center reclaims suppressed slots when the table is full" {
         .detail = "second reclaimed slot notification",
     });
     try std.testing.expectEqual(MAX_NOTIFICATIONS, center.activeCount(1));
-    try std.testing.expect(center.find(5) == null);
+    try std.testing.expect(center.find(notification_ids[4]) == null);
     try std.testing.expectEqualStrings("first reclaimed slot notification", first_replacement.detailSlice());
     try std.testing.expectEqualStrings("second reclaimed slot notification", second_replacement.detailSlice());
     try std.testing.expectEqual(MAX_NOTIFICATIONS - 2, center.sourceReasonCount(source, .policy_notice));

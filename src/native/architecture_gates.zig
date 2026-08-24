@@ -451,6 +451,10 @@ pub const indexed_hot_path_tables = .{
     },
     .notification_center = .{
         .uses_bounded_notification_scan = notification_center.BOUNDED_NOTIFICATION_SCAN,
+        .uses_direct_ordered_notification_ids = notification_center.DIRECT_NOTIFICATION_LOOKUP and
+            notification_center.ORDERED_NOTIFICATION_IDS and
+            @hasDecl(notification_center, "NotificationId") and
+            !@hasField(notification_center.Center, "next_notification_id"),
         .reclaims_suppressed_notifications = notification_center.RECLAIMS_SUPPRESSED_NOTIFICATIONS,
         .stores_compact_notification_metadata = notification_center.COMPACT_NOTIFICATION_METADATA and
             @FieldType(notification_center.AttentionDecision, "active_visible") == u8 and

@@ -223,7 +223,7 @@ test "attention broker gates posts dismisses notifications and redacts policy de
         .detail = "private passive detail",
         .now_ticks = 10,
     }, &ledger);
-    try std.testing.expectEqual(@as(u64, 1), passive.id);
+    try std.testing.expectEqual(notification_center.NotificationId.fromParts(0, 1).value, passive.id);
     try std.testing.expectEqual(@as(u64, 900), passive.taskId().?);
     try std.testing.expectEqual(@as(u16, 1), service.activeVisible(10));
 

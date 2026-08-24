@@ -338,7 +338,7 @@ test "media print service uses scheduled engines and emits completion notificati
         .visibility = .task,
     }, &scheduler, &notifications, 10);
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, export_job.engine);
-    try std.testing.expectEqual(@as(?u64, 1), export_job.notification_id);
+    try std.testing.expectEqual(@as(?u64, notification_center.NotificationId.fromParts(0, 1).value), export_job.notification_id);
     try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
 
     const print_job = try service.submit(.{
@@ -358,9 +358,9 @@ test "media print service uses scheduled engines and emits completion notificati
     try std.testing.expectEqual(JobState.completed, print_job.state);
     try std.testing.expectEqual(notification_center.Reason.print_complete, notifications.latestVisible(20).?.reason);
     try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
-    const next_notification_id = notifications.next_notification_id;
+    const next_notification_sequence = notifications.next_notification_sequence;
     try std.testing.expectEqual(@as(?u64, completion_id), try service.complete(print_job.id, &scheduler, &notifications, 21));
-    try std.testing.expectEqual(next_notification_id, notifications.next_notification_id);
+    try std.testing.expectEqual(next_notification_sequence, notifications.next_notification_sequence);
     try std.testing.expectEqual(@as(usize, 1), service.completedJobCount());
     _ = try service.complete(export_job.id, &scheduler, &notifications, 21);
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
