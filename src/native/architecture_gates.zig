@@ -29,6 +29,7 @@ const kernel_dmar = @import("../kernel/platform/dmar.zig");
 const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
 const input_driver_task = @import("drivers/input_driver_task.zig");
+const permission_review = @import("policy/permission_review.zig");
 const permission_review_service = @import("policy/permission_review_service.zig");
 const policy_mediation = @import("policy/policy_mediation.zig");
 const xhci = @import("../kernel/drivers/xhci.zig");
@@ -786,6 +787,14 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(permission_review_service.CommandInput) <= permission_review_service.COMMAND_INPUT_SIZE_CEILING_BYTES,
     },
     .permission_review = .{
+        .stores_compact_session_decisions = permission_review.COMPACT_REVIEW_SESSION_DECISIONS and
+            @FieldType(permission_review.ReviewSession, "decision_count") == u8 and
+            @FieldType(permission_review.ReviewSession, "allowed_mask") == u16 and
+            @FieldType(permission_review.ReviewSession, "local_only_mask") == u16 and
+            @FieldType(permission_review.ReviewSession, "lease_present_mask") == u16 and
+            !@hasField(permission_review.ReviewSession, "decisions"),
+        .keeps_session_within_ceiling = @sizeOf(permission_review.ReviewSession) <=
+            permission_review.REVIEW_SESSION_SIZE_CEILING_BYTES,
         .stores_compact_rendered_progress = permission_review_service.COMPACT_REVIEW_PROGRESS_METADATA and
             @FieldType(permission_review_service.RenderedReviewSurface, "active_index") == u8 and
             @FieldType(permission_review_service.RenderedReviewSurface, "decision_count") == u8,

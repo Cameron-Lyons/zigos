@@ -221,7 +221,7 @@ pub fn build(b: *std.Build) void {
         kernels.zigos_native_verification,
         userspace_images,
         "build/zigos-native-spec.log",
-        shared.native_store_smoke_image_path,
+        shared.native_store_spec_image_path,
         .full,
     );
     spec_smoke_cmd.step.dependOn(check_steps.spec_tests);

@@ -11,6 +11,18 @@ const REVIEW_RENDER_BUFFER_BYTES: usize = units.kibibytes(2);
 const REVIEW_REQUEST_BUFFER_BYTES: usize = 512;
 
 pub const MAX_REVIEW_DECISIONS: usize = policy_mediation.MAX_PERMISSION_DECISIONS;
+pub const COMPACT_REVIEW_SESSION_DECISIONS = true;
+pub const REVIEW_SESSION_SIZE_CEILING_BYTES: usize = 152;
+
+const DecisionMask = u16;
+
+comptime {
+    if (MAX_REVIEW_DECISIONS > @bitSizeOf(DecisionMask) or
+        MAX_REVIEW_DECISIONS > std.math.maxInt(u8))
+    {
+        @compileError("permission review session exceeds compact decision metadata capacity");
+    }
+}
 
 pub const ReviewDecision = struct {
     kind: manifest.PermissionKind,
@@ -44,14 +56,31 @@ pub const SessionError = error{
 pub const ReviewSession = struct {
     task_id: u64,
     bundle: *const manifest.BundleManifest,
-    decision_count: usize,
-    decisions: [MAX_REVIEW_DECISIONS]ReviewCommand,
+    lease_ticks: [MAX_REVIEW_DECISIONS]u64,
+    allowed_mask: DecisionMask,
+    local_only_mask: DecisionMask,
+    lease_present_mask: DecisionMask,
+    decision_count: u8,
 
     pub fn decisionAt(self: *const ReviewSession, request_index: usize) ?ReviewCommand {
-        if (request_index >= self.decision_count) return null;
-        return self.decisions[request_index];
+        if (request_index >= @as(usize, self.decision_count)) return null;
+        const mask = decisionMask(request_index);
+        return .{
+            .allow = self.allowed_mask & mask != 0,
+            .local_only = self.local_only_mask & mask != 0,
+            .lease_ticks = if (self.lease_present_mask & mask != 0)
+                self.lease_ticks[request_index]
+            else
+                null,
+        };
     }
 };
+
+comptime {
+    if (@sizeOf(ReviewSession) > REVIEW_SESSION_SIZE_CEILING_BYTES) {
+        @compileError("permission review session exceeds its compact size ceiling");
+    }
+}
 
 pub fn initSession(
     task_id: u64,
@@ -64,8 +93,11 @@ pub fn initSession(
     var session = ReviewSession{
         .task_id = task_id,
         .bundle = bundle,
-        .decision_count = decisions.len,
-        .decisions = undefined,
+        .lease_ticks = undefined,
+        .allowed_mask = 0,
+        .local_only_mask = 0,
+        .lease_present_mask = 0,
+        .decision_count = @intCast(decisions.len),
     };
 
     for (decisions, 0..) |decision, index| {
@@ -73,13 +105,19 @@ pub fn initSession(
         if (decision.kind != request.kind or !std.mem.eql(u8, decision.resource, request.resource)) {
             return error.DecisionOrderMismatch;
         }
-        session.decisions[index] = .{
-            .allow = decision.allow,
-            .local_only = decision.local_only,
-            .lease_ticks = decision.lease_ticks,
-        };
+        const mask = decisionMask(index);
+        if (decision.allow) session.allowed_mask |= mask;
+        if (decision.local_only) session.local_only_mask |= mask;
+        if (decision.lease_ticks) |lease_ticks| {
+            session.lease_present_mask |= mask;
+            session.lease_ticks[index] = lease_ticks;
+        }
     }
     return session;
+}
+
+fn decisionMask(index: usize) DecisionMask {
+    return @as(DecisionMask, 1) << @intCast(index);
 }
 
 pub fn renderToBuffer(
@@ -369,6 +407,57 @@ fn appendUnsigned(buffer: []u8, used: *usize, value: u64) !void {
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) !void {
     const rendered = try std.fmt.bufPrint(buffer[used.*..], fmt, args);
     used.* += rendered.len;
+}
+
+test "review sessions store decisions in compact masks" {
+    try std.testing.expect(COMPACT_REVIEW_SESSION_DECISIONS);
+    try std.testing.expectEqual(u8, @FieldType(ReviewSession, "decision_count"));
+    try std.testing.expectEqual(u16, @FieldType(ReviewSession, "allowed_mask"));
+    try std.testing.expectEqual(u16, @FieldType(ReviewSession, "local_only_mask"));
+    try std.testing.expectEqual(u16, @FieldType(ReviewSession, "lease_present_mask"));
+    try std.testing.expect(!@hasField(ReviewSession, "decisions"));
+    try std.testing.expect(@sizeOf(ReviewSession) <= REVIEW_SESSION_SIZE_CEILING_BYTES);
+
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object = .{ .object_read = true } },
+        },
+        .{
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .rights = .{ .workspace = .{ .clipboard_read = true } },
+            .required = false,
+        },
+    };
+    const bundle = manifest_fixtures.basicNotesBundle(&permissions);
+    const decisions = [_]ReviewDecision{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .allow = true,
+            .local_only = true,
+            .lease_ticks = 40,
+        },
+        .{
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .allow = false,
+        },
+    };
+    const session = try initSession(1, &bundle, &decisions);
+
+    try std.testing.expectEqual(@as(u8, 2), session.decision_count);
+    const first = session.decisionAt(0).?;
+    try std.testing.expect(first.allow);
+    try std.testing.expect(first.local_only);
+    try std.testing.expectEqual(@as(?u64, 40), first.lease_ticks);
+    const second = session.decisionAt(1).?;
+    try std.testing.expect(!second.allow);
+    try std.testing.expect(!second.local_only);
+    try std.testing.expectEqual(@as(?u64, null), second.lease_ticks);
+    try std.testing.expectEqual(@as(?ReviewCommand, null), session.decisionAt(2));
 }
 
 test "decisionsToGrants clamps lease duration to the manifest request" {
