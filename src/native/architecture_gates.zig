@@ -505,6 +505,9 @@ pub const indexed_hot_path_tables = .{
     },
     .object_resilience_service = .{
         .uses_bounded_snapshot_scan = object_resilience_service.BOUNDED_SNAPSHOT_SCAN,
+        .uses_direct_generational_snapshot_lookup = object_resilience_service.DIRECT_SNAPSHOT_LOOKUP and
+            @hasDecl(object_resilience_service, "SnapshotId") and
+            !@hasField(object_resilience_service.Service, "next_snapshot_id"),
         .reclaims_revoked_snapshots = object_resilience_service.RECLAIMS_REVOKED_SNAPSHOTS,
         .keeps_fixed_state_within_ceiling = @sizeOf(object_resilience_service.Service) <= object_resilience_service.SERVICE_SIZE_CEILING_BYTES,
     },

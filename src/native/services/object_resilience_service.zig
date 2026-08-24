@@ -1,5 +1,6 @@
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
@@ -7,19 +8,21 @@ const signing = @import("../core/signing.zig");
 
 pub const MAX_SNAPSHOTS: usize = 16;
 pub const BOUNDED_SNAPSHOT_SCAN = true;
+pub const DIRECT_SNAPSHOT_LOOKUP = true;
 pub const RECLAIMS_REVOKED_SNAPSHOTS = true;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 1_184;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 1_160;
 
 pub const Error = event_ledger.Error || error{
     DeviceTrustMismatch,
     PolicyDenied,
     SourceTaskMismatch,
-    SnapshotIdExhausted,
     SnapshotNotFound,
     SnapshotSubjectMismatch,
     SnapshotRevoked,
     SnapshotTableFull,
 };
+
+pub const SnapshotId = indexed_arena.GenerationalHandle("ObjectResilienceSnapshot");
 
 pub const PrepareBackupRequest = struct {
     subject: principal.PrincipalId,
@@ -71,7 +74,6 @@ pub const Snapshot = struct {
 };
 
 pub const Service = struct {
-    next_snapshot_id: u64 = 1,
     snapshots: [MAX_SNAPSHOTS]Snapshot = [_]Snapshot{.{}} ** MAX_SNAPSHOTS,
     snapshot_count: u8 = 0,
     next_reusable_snapshot: u8 = 0,
@@ -105,15 +107,11 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const snapshot_id = self.next_snapshot_id;
-        if (snapshot_id == 0) {
-            try recordBackup(ledger, request, 0, false);
-            return error.SnapshotIdExhausted;
-        }
         const snapshot_index = self.availableSnapshotIndex() orelse {
             try recordBackup(ledger, request, 0, false);
             return error.SnapshotTableFull;
         };
+        const snapshot_id = self.nextSnapshotId(snapshot_index);
         const snapshot = Snapshot{
             .id = snapshot_id,
             .subject = request.subject,
@@ -131,7 +129,6 @@ pub const Service = struct {
         if (self.snapshots[snapshot_index].id == 0) self.snapshot_count += 1;
         self.snapshots[snapshot_index] = snapshot;
         self.next_reusable_snapshot = @intCast((snapshot_index + 1) % MAX_SNAPSHOTS);
-        self.next_snapshot_id +%= 1;
         return &self.snapshots[snapshot_index];
     }
 
@@ -196,11 +193,12 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, snapshot_id: u64) ?*Snapshot {
-        if (snapshot_id == 0) return null;
-        for (&self.snapshots) |*snapshot| {
-            if (snapshot.id == snapshot_id) return snapshot;
-        }
-        return null;
+        const handle = SnapshotId{ .value = snapshot_id };
+        if (handle.isZero()) return null;
+        const snapshot_index = handle.slotIndex();
+        if (snapshot_index >= MAX_SNAPSHOTS) return null;
+        const snapshot = &self.snapshots[snapshot_index];
+        return if (snapshot.id == snapshot_id) snapshot else null;
     }
 
     pub fn snapshotCount(self: *const Service) usize {
@@ -217,6 +215,13 @@ pub const Service = struct {
             if (self.snapshots[snapshot_index].revoked) return snapshot_index;
         }
         return null;
+    }
+
+    fn nextSnapshotId(self: *const Service, snapshot_index: usize) u64 {
+        const current_generation = (SnapshotId{ .value = self.snapshots[snapshot_index].id }).generation();
+        const incremented = current_generation +% 1;
+        const generation = if (incremented == 0) 1 else incremented;
+        return SnapshotId.fromParts(snapshot_index, generation).value;
     }
 };
 
@@ -320,6 +325,8 @@ test "object resilience binds restore and revoke to snapshot subject and source 
         .now_ticks = 10,
         .detail = "private object backup contents",
     }, &ledger);
+    try std.testing.expectEqual(@as(usize, 0), (SnapshotId{ .value = snapshot.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 1), (SnapshotId{ .value = snapshot.id }).generation());
 
     try std.testing.expectError(error.SnapshotSubjectMismatch, service.restore(&directory, subjects, .{
         .subject = intruder,
@@ -431,7 +438,6 @@ test "object resilience binds restore and revoke to snapshot subject and source 
             .now_ticks = 200 + index,
         }, null);
     }
-    const next_snapshot_id_before_full = full_service.next_snapshot_id;
     try std.testing.expectError(error.SnapshotTableFull, full_service.prepareBackup(&directory, subjects, .{
         .subject = owner,
         .task_id = 5_000,
@@ -444,7 +450,6 @@ test "object resilience binds restore and revoke to snapshot subject and source 
         .recovery_key_present = true,
         .now_ticks = 300,
     }, null));
-    try std.testing.expectEqual(next_snapshot_id_before_full, full_service.next_snapshot_id);
     try std.testing.expectEqual(MAX_SNAPSHOTS, full_service.snapshotCount());
 
     const summary = ledger.userVisibleDiagnosticSummary();
@@ -459,7 +464,7 @@ test "object resilience binds restore and revoke to snapshot subject and source 
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=object_resilience") != null);
 }
 
-test "object resilience snapshot ids stop at exhaustion" {
+test "object resilience rejects stale generational snapshot ids after reuse" {
     var directory = policy_object.Directory.init();
     _ = try directory.create(.{
         .scope = .organization,
@@ -480,39 +485,86 @@ test "object resilience snapshot ids stop at exhaustion" {
     const subjects = policy_object.SubjectSet{ .organization_id = 740 };
     const owner = principal.PrincipalId{ .kind = .app, .serial = 741 };
     var service = Service.init();
-    service.next_snapshot_id = std.math.maxInt(u64);
 
-    const first = try service.prepareBackup(&directory, subjects, .{
-        .subject = owner,
-        .task_id = 900,
-        .workspace_id = 11,
-        .object_id = 22,
-        .restore_device_id = 333,
-        .bytes = 4096,
-        .sensitivity = .private_user_data,
-        .encrypted = true,
-        .recovery_key_present = true,
-        .now_ticks = 10,
-        .detail = "private object backup contents",
-    }, null);
-    try std.testing.expectEqual(std.math.maxInt(u64), first.id);
-    try std.testing.expectEqual(@as(u64, 0), service.next_snapshot_id);
+    var first_snapshot_id: u64 = 0;
+    for (0..MAX_SNAPSHOTS) |index| {
+        const snapshot = try service.prepareBackup(&directory, subjects, .{
+            .subject = owner,
+            .task_id = 900 + index,
+            .workspace_id = 11,
+            .object_id = 22 + index,
+            .restore_device_id = 333,
+            .bytes = 4096,
+            .sensitivity = .private_user_data,
+            .encrypted = true,
+            .recovery_key_present = true,
+            .now_ticks = 10 + index,
+            .detail = "private object backup contents",
+        }, null);
+        const snapshot_id = SnapshotId{ .value = snapshot.id };
+        try std.testing.expectEqual(index, snapshot_id.slotIndex());
+        try std.testing.expectEqual(@as(u32, 1), snapshot_id.generation());
+        if (index == 0) first_snapshot_id = snapshot.id;
+    }
+    try std.testing.expectEqual(MAX_SNAPSHOTS, service.snapshotCount());
     try std.testing.expect(service.find(0) == null);
+    try std.testing.expect(service.find(SnapshotId.fromParts(MAX_SNAPSHOTS, 1).value) == null);
 
-    try std.testing.expectError(error.SnapshotIdExhausted, service.prepareBackup(&directory, subjects, .{
+    try std.testing.expectError(error.SnapshotTableFull, service.prepareBackup(&directory, subjects, .{
         .subject = owner,
-        .task_id = 901,
+        .task_id = 1_000,
         .workspace_id = 11,
-        .object_id = 23,
+        .object_id = 100,
         .restore_device_id = 333,
         .bytes = 4096,
         .sensitivity = .private_user_data,
         .encrypted = true,
         .recovery_key_present = true,
-        .now_ticks = 11,
+        .now_ticks = 30,
         .detail = "private object backup contents",
     }, null));
-    try std.testing.expectEqual(@as(u64, 0), service.next_snapshot_id);
-    try std.testing.expectEqual(@as(usize, 1), service.snapshotCount());
-    try std.testing.expectEqual(std.math.maxInt(u64), service.find(std.math.maxInt(u64)).?.id);
+
+    try service.revoke(.{
+        .subject = owner,
+        .task_id = 900,
+        .snapshot_id = first_snapshot_id,
+        .now_ticks = 31,
+    }, null);
+    const replacement = try service.prepareBackup(&directory, subjects, .{
+        .subject = owner,
+        .task_id = 1_001,
+        .workspace_id = 11,
+        .object_id = 101,
+        .restore_device_id = 333,
+        .bytes = 4096,
+        .sensitivity = .private_user_data,
+        .encrypted = true,
+        .recovery_key_present = true,
+        .now_ticks = 32,
+        .detail = "private replacement object backup",
+    }, null);
+    try std.testing.expectEqual(@as(usize, 0), (SnapshotId{ .value = replacement.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 2), (SnapshotId{ .value = replacement.id }).generation());
+    try std.testing.expect(service.find(first_snapshot_id) == null);
+
+    const wrapped_from = SnapshotId.fromParts(0, std.math.maxInt(u32)).value;
+    replacement.id = wrapped_from;
+    replacement.revoked = true;
+    service.next_reusable_snapshot = 0;
+    const wrapped = try service.prepareBackup(&directory, subjects, .{
+        .subject = owner,
+        .task_id = 1_002,
+        .workspace_id = 11,
+        .object_id = 102,
+        .restore_device_id = 333,
+        .bytes = 4096,
+        .sensitivity = .private_user_data,
+        .encrypted = true,
+        .recovery_key_present = true,
+        .now_ticks = 33,
+        .detail = "private wrapped object backup",
+    }, null);
+    try std.testing.expectEqual(@as(usize, 0), (SnapshotId{ .value = wrapped.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 1), (SnapshotId{ .value = wrapped.id }).generation());
+    try std.testing.expect(service.find(wrapped_from) == null);
 }
