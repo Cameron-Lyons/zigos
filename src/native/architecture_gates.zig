@@ -19,6 +19,7 @@ const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
 const indexing_service = @import("services/indexing_service.zig");
 const event_ledger = @import("platform/event_ledger.zig");
+const recovery_environment = @import("platform/recovery_environment.zig");
 const attestation_service = @import("platform/attestation_service.zig");
 const immutable_base = @import("platform/immutable_base.zig");
 const measured_boot = @import("platform/measured_boot.zig");
@@ -592,6 +593,12 @@ pub const indexed_hot_path_tables = .{
         .indexes_task = @hasField(event_ledger.EventBacking, "task_index"),
         .visits_indexes = @hasDecl(event_ledger.Ledger, "queryEvents"),
         .removes_evicted_indexes = @hasDecl(event_ledger.Ledger, "removeEventIndexes"),
+    },
+    .recovery_environment = .{
+        .derives_action_count_from_slice = recovery_environment.DERIVES_ACTION_COUNT_FROM_SLICE and
+            !@hasField(recovery_environment.EntrySession, "action_count") and
+            @hasDecl(recovery_environment.EntrySession, "actionCount"),
+        .keeps_entry_session_within_ceiling = @sizeOf(recovery_environment.EntrySession) <= recovery_environment.ENTRY_SESSION_SIZE_CEILING_BYTES,
     },
     .attestation_service = .{
         .stores_compact_bounded_metadata = attestation_service.COMPACT_ATTESTATION_METADATA and
