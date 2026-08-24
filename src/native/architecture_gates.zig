@@ -178,6 +178,9 @@ pub const indexed_hot_path_tables = .{
             @FieldType(sdk_simulator.PermissionReviewResult, "request_count") == u8 and
             @FieldType(sdk_simulator.PermissionReviewResult, "grant_count") == u8 and
             @FieldType(sdk_simulator.PermissionReviewResult, "review_len") == u16 and
+            @FieldType(sdk_simulator.LaunchResult, "component_count") == u8 and
+            @FieldType(sdk_simulator.LaunchResult, "asset_count") == u8 and
+            @FieldType(sdk_simulator.LaunchResult, "permission_count") == u8 and
             @FieldType(sdk_simulator.NativeAppHarnessResult, "interface_count") == u8 and
             @FieldType(sdk_simulator.NativeAppHarnessResult, "operation_count") == u8 and
             @FieldType(sdk_simulator.NativeAppHarnessResult, "record_count") == u8 and
@@ -190,6 +193,7 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(sdk_permissions.ReviewPlan) <= sdk_permissions.REVIEW_PLAN_SIZE_CEILING_BYTES and
             @sizeOf(sdk_permissions.HarnessResult) <= sdk_permissions.HARNESS_RESULT_SIZE_CEILING_BYTES and
             @sizeOf(sdk_simulator.PermissionReviewResult) <= sdk_simulator.PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(sdk_simulator.LaunchResult) <= sdk_simulator.LAUNCH_RESULT_SIZE_CEILING_BYTES and
             @sizeOf(sdk_simulator.NativeAppHarnessResult) <= sdk_simulator.NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES,
     },
     .sdk_object_store = .{
