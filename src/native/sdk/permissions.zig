@@ -7,30 +7,41 @@ const ui = @import("ui.zig");
 
 pub const MAX_REVIEW_NODES: usize = permission_review.MAX_REVIEW_DECISIONS + 4;
 pub const MAX_REVIEW_TEXT_BYTES: usize = ui.MAX_RENDER_BYTES;
+pub const COMPACT_PERMISSION_REVIEW_METADATA = true;
+pub const REVIEW_PLAN_SIZE_CEILING_BYTES: usize = 3_616;
+pub const HARNESS_RESULT_SIZE_CEILING_BYTES: usize = 3_624;
 pub const ReviewCommand = permission_review.ReviewCommand;
 pub const ReviewDecision = permission_review.ReviewDecision;
 pub const UserGrant = policy_mediation.UserGrant;
 pub const HarnessError = error{PermissionNotRequested};
 
+comptime {
+    if (permission_review.MAX_REVIEW_DECISIONS > std.math.maxInt(u8) or
+        MAX_REVIEW_NODES > std.math.maxInt(u8))
+    {
+        @compileError("SDK permission review state exceeds compact count metadata capacity");
+    }
+}
+
 pub const ReviewPlan = struct {
     session: permission_review.ReviewSession,
-    grant_count: usize = 0,
+    grant_count: u8 = 0,
+    node_count: u8 = 0,
     grants: [permission_review.MAX_REVIEW_DECISIONS]UserGrant =
         [_]UserGrant{.{ .kind = .object_access }} ** permission_review.MAX_REVIEW_DECISIONS,
-    node_count: usize = 0,
     nodes: [MAX_REVIEW_NODES]ui.Node = undefined,
 
     pub fn grantSlice(self: *const ReviewPlan) []const UserGrant {
-        return self.grants[0..self.grant_count];
+        return self.grants[0..@as(usize, self.grant_count)];
     }
 };
 
 pub const HarnessResult = struct {
     plan: ReviewPlan,
-    required_count: usize = 0,
-    optional_count: usize = 0,
-    denied_required_count: usize = 0,
-    denied_optional_count: usize = 0,
+    required_count: u8 = 0,
+    optional_count: u8 = 0,
+    denied_required_count: u8 = 0,
+    denied_optional_count: u8 = 0,
 
     pub fn allRequiredGranted(self: *const HarnessResult) bool {
         return self.denied_required_count == 0;
@@ -110,6 +121,14 @@ pub const Harness = struct {
     }
 };
 
+comptime {
+    if (@sizeOf(ReviewPlan) > REVIEW_PLAN_SIZE_CEILING_BYTES or
+        @sizeOf(HarnessResult) > HARNESS_RESULT_SIZE_CEILING_BYTES)
+    {
+        @compileError("SDK permission review state exceeds its compact size ceiling");
+    }
+}
+
 pub fn buildReviewPlan(
     task_id: u64,
     bundle: *const manifest.BundleManifest,
@@ -132,7 +151,7 @@ pub fn buildReviewPlan(
         .session = try permission_review.initSession(task_id, bundle, decisions[0..decision_count]),
     };
     const grants = permission_review.decisionsToGrants(&plan.session, 1, &plan.grants);
-    plan.grant_count = grants.len;
+    plan.grant_count = @intCast(grants.len);
     buildReviewUi(bundle, &plan);
     return plan;
 }
@@ -146,10 +165,10 @@ pub fn renderReviewText(
 
 pub fn renderReviewUi(plan: *const ReviewPlan, out: []u8) ![]const u8 {
     var child_refs: [MAX_REVIEW_NODES]*const ui.Node = undefined;
-    for (plan.nodes[0..plan.node_count], 0..) |*node, index| {
+    for (plan.nodes[0..@as(usize, plan.node_count)], 0..) |*node, index| {
         child_refs[index] = node;
     }
-    const root = ui.window(100, "Permission Review", child_refs[0..plan.node_count]);
+    const root = ui.window(100, "Permission Review", child_refs[0..@as(usize, plan.node_count)]);
     return ui.render(&root, out);
 }
 
@@ -171,6 +190,17 @@ fn defaultCommand(request: manifest.PermissionRequest) ReviewCommand {
         .local_only = request.local_only,
         .lease_ticks = if (request.max_lease_ticks == 0) null else request.max_lease_ticks,
     };
+}
+
+test "permission SDK keeps bounded review results compact" {
+    try std.testing.expectEqual(u8, @FieldType(ReviewPlan, "grant_count"));
+    try std.testing.expectEqual(u8, @FieldType(ReviewPlan, "node_count"));
+    try std.testing.expectEqual(u8, @FieldType(HarnessResult, "required_count"));
+    try std.testing.expectEqual(u8, @FieldType(HarnessResult, "optional_count"));
+    try std.testing.expectEqual(u8, @FieldType(HarnessResult, "denied_required_count"));
+    try std.testing.expectEqual(u8, @FieldType(HarnessResult, "denied_optional_count"));
+    try std.testing.expect(@sizeOf(ReviewPlan) <= REVIEW_PLAN_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(HarnessResult) <= HARNESS_RESULT_SIZE_CEILING_BYTES);
 }
 
 test "permission SDK builds grants and a native UI review tree" {
@@ -197,11 +227,11 @@ test "permission harness proves required and optional review outcomes" {
     const optional_result = try optional_harness.run();
     try std.testing.expect(optional_result.allRequiredGranted());
     try std.testing.expect(optional_result.denied_optional_count >= 1);
-    try std.testing.expect(optional_result.plan.grantSlice().len + optional_result.denied_optional_count >= manifest.requiredPermissionCount(package.bundle));
+    try std.testing.expect(optional_result.plan.grantSlice().len + @as(usize, optional_result.denied_optional_count) >= manifest.requiredPermissionCount(package.bundle));
 
     var required_harness = Harness.init(89, &package.bundle);
     try required_harness.deny(.object_access);
     const required_result = try required_harness.run();
     try std.testing.expect(!required_result.allRequiredGranted());
-    try std.testing.expectEqual(@as(usize, 1), required_result.denied_required_count);
+    try std.testing.expectEqual(@as(u8, 1), required_result.denied_required_count);
 }

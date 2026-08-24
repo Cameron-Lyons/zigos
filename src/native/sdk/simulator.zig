@@ -26,6 +26,25 @@ pub const SDK_POLICY_AUTHORITY = principal.PrincipalId{ .kind = .policy_authorit
 pub const SDK_PACKAGE_OWNER = principal.PrincipalId{ .kind = .service, .serial = 60_005 };
 pub const SDK_FIRST_APP_SURFACE_ID: u64 = 61_000;
 pub const MAX_PERMISSION_REVIEW_TEXT: usize = permissions.MAX_REVIEW_TEXT_BYTES;
+pub const COMPACT_SIMULATOR_RESULT_METADATA = true;
+pub const PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES: usize = 4_744;
+pub const NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES: usize = 56;
+
+comptime {
+    if (permission_review.MAX_REVIEW_DECISIONS > std.math.maxInt(u8) or
+        idl.MAX_INTERFACES > std.math.maxInt(u8) or
+        idl.MAX_OPERATIONS > std.math.maxInt(u8) or
+        idl.MAX_RECORDS > std.math.maxInt(u8) or
+        idl.MAX_DECLARATIONS * 3 > std.math.maxInt(u8) or
+        manifest_linter.MAX_ISSUES > std.math.maxInt(u8) or
+        ui.MAX_A11Y_ISSUES > std.math.maxInt(u8))
+    {
+        @compileError("SDK simulator results exceed compact count metadata capacity");
+    }
+    if (MAX_PERMISSION_REVIEW_TEXT > std.math.maxInt(u16)) {
+        @compileError("SDK permission review text exceeds compact length metadata capacity");
+    }
+}
 
 pub const DevPackage = struct {
     bundle: manifest.BundleManifest,
@@ -36,19 +55,19 @@ pub const DevPackage = struct {
 };
 
 pub const PermissionReviewResult = struct {
-    request_count: usize = 0,
-    grant_count: usize = 0,
-    review_len: usize = 0,
+    request_count: u8 = 0,
+    grant_count: u8 = 0,
+    review_len: u16 = 0,
     review_text: [MAX_PERMISSION_REVIEW_TEXT]u8 = [_]u8{0} ** MAX_PERMISSION_REVIEW_TEXT,
     grants: [permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant =
         [_]policy_mediation.UserGrant{.{ .kind = .object_access }} ** permission_review.MAX_REVIEW_DECISIONS,
 
     pub fn textSlice(self: *const PermissionReviewResult) []const u8 {
-        return self.review_text[0..self.review_len];
+        return self.review_text[0..@as(usize, self.review_len)];
     }
 
     pub fn grantSlice(self: *const PermissionReviewResult) []const policy_mediation.UserGrant {
-        return self.grants[0..self.grant_count];
+        return self.grants[0..@as(usize, self.grant_count)];
     }
 };
 
@@ -64,17 +83,17 @@ pub const LaunchResult = struct {
 };
 
 pub const NativeAppHarnessResult = struct {
-    interface_count: usize = 0,
-    operation_count: usize = 0,
-    record_count: usize = 0,
-    native_declaration_count: usize = 0,
-    lint_issue_count: usize = 0,
-    permission_grant_count: usize = 0,
+    interface_count: u8 = 0,
+    operation_count: u8 = 0,
+    record_count: u8 = 0,
+    native_declaration_count: u8 = 0,
+    lint_issue_count: u8 = 0,
+    permission_grant_count: u8 = 0,
     task_id: u64 = 0,
     object_id: u64 = 0,
     version_id: u64 = 0,
     synced_version: ?u64 = null,
-    accessibility_issue_count: usize = 0,
+    accessibility_issue_count: u8 = 0,
     signed_provenance: bool = false,
     local_first: bool = false,
 
@@ -89,6 +108,14 @@ pub const NativeAppHarnessResult = struct {
             self.accessibility_issue_count == 0;
     }
 };
+
+comptime {
+    if (@sizeOf(PermissionReviewResult) > PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES or
+        @sizeOf(NativeAppHarnessResult) > NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES)
+    {
+        @compileError("SDK simulator result exceeds its compact size ceiling");
+    }
+}
 
 fn signSdkReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
     return signing.signWithDefaultRegistry(
@@ -185,12 +212,12 @@ pub const Simulator = struct {
         const accessibility = ui.audit(&root);
 
         return .{
-            .interface_count = compiled.interfaceCount(),
-            .operation_count = compiled.operationCount(),
+            .interface_count = @intCast(compiled.interfaceCount()),
+            .operation_count = @intCast(compiled.operationCount()),
             .record_count = compiled.document.record_count,
-            .native_declaration_count = compiled.document.nativeDeclarationCount(),
-            .lint_issue_count = lint.issue_count,
-            .permission_grant_count = permission_result.plan.grantSlice().len,
+            .native_declaration_count = @intCast(compiled.document.nativeDeclarationCount()),
+            .lint_issue_count = @intCast(lint.issue_count),
+            .permission_grant_count = @intCast(permission_result.plan.grantSlice().len),
             .task_id = launched.task_id,
             .object_id = updated.object_id.raw(),
             .version_id = updated.version_id.raw(),
@@ -252,19 +279,19 @@ pub const Simulator = struct {
             decisions[0..decision_count],
         );
         var result = PermissionReviewResult{
-            .request_count = package.bundle.requested_permissions.len,
+            .request_count = @intCast(package.bundle.requested_permissions.len),
         };
         const rendered = try permission_review.renderToBuffer(
             &result.review_text,
             &session,
         );
-        result.review_len = rendered.len;
+        result.review_len = @intCast(rendered.len);
         const grants = permission_review.decisionsToGrants(
             &session,
             self.now_ticks,
             &result.grants,
         );
-        result.grant_count = grants.len;
+        result.grant_count = @intCast(grants.len);
         try self.debug.record(
             .permission_review_rendered,
             self.advanceClock(),
@@ -497,6 +524,21 @@ fn bundleIsLocalOnly(bundle: manifest.BundleManifest) bool {
     return true;
 }
 
+test "SDK simulator keeps bounded result metadata compact" {
+    try std.testing.expectEqual(u8, @FieldType(PermissionReviewResult, "request_count"));
+    try std.testing.expectEqual(u8, @FieldType(PermissionReviewResult, "grant_count"));
+    try std.testing.expectEqual(u16, @FieldType(PermissionReviewResult, "review_len"));
+    try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "interface_count"));
+    try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "operation_count"));
+    try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "record_count"));
+    try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "native_declaration_count"));
+    try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "lint_issue_count"));
+    try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "permission_grant_count"));
+    try std.testing.expectEqual(u8, @FieldType(NativeAppHarnessResult, "accessibility_issue_count"));
+    try std.testing.expect(@sizeOf(PermissionReviewResult) <= PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(NativeAppHarnessResult) <= NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES);
+}
+
 test "SDK simulator installs updates rolls back launches and debugs native first party apps" {
     const examples = @import("example_apps.zig");
 
@@ -515,7 +557,7 @@ test "SDK simulator installs updates rolls back launches and debugs native first
             .bundle = package.bundle,
             .signer = package.signer,
         }, &.{});
-        try std.testing.expectEqual(package.bundle.requested_permissions.len, review.request_count);
+        try std.testing.expectEqual(@as(u8, @intCast(package.bundle.requested_permissions.len)), review.request_count);
         try std.testing.expect(review.grant_count >= manifest.requiredPermissionCount(package.bundle));
         try std.testing.expect(std.mem.indexOf(u8, review.textSlice(), package.bundle.display_name) != null);
 
