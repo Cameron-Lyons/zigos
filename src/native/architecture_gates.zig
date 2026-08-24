@@ -924,6 +924,11 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(workspace.ExportPackage) <= workspace.EXPORT_PACKAGE_SIZE_CEILING_BYTES,
         .stores_compact_workspace_label_metadata = workspace.COMPACT_WORKSPACE_LABEL_METADATA and
             @FieldType(workspace.WorkspaceRecord, "label_len") == u8,
+        .stores_compact_workspace_table_metadata = workspace.COMPACT_WORKSPACE_TABLE_METADATA and
+            @FieldType(workspace.WorkspaceTableCounts, "entry_count") == workspace.WorkspaceEntryCount and
+            @FieldType(workspace.WorkspaceTableCounts, "entry_mutation_count") == workspace.WorkspaceMutationCount and
+            @FieldType(workspace.WorkspaceTableCounts, "share_grant_count") == workspace.WorkspaceShareGrantCount and
+            @FieldType(workspace.WorkspaceTableCounts, "deleted_count") == workspace.RecoverableDeleteCount,
         .keeps_workspace_state_within_ceilings = @sizeOf(workspace.WorkspaceRecord) <= workspace.WORKSPACE_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(workspace.Directory) <= workspace.DIRECTORY_SIZE_CEILING_BYTES,
         .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),

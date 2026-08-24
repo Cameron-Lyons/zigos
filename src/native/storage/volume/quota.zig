@@ -39,7 +39,7 @@ pub fn productCapacityUsage(store: *const object_store.Store, workspaces: *const
 
     for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
-        usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.workspace.path_index.entry_count);
+        usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.workspace.counts.entry_count);
     }
     for (&workspaces.snapshots.slots) |*slot| {
         if (!persistableSnapshotSlot(slot)) continue;
@@ -103,10 +103,10 @@ pub fn snapshotCount(workspaces: *const workspace.Directory) usize {
 pub fn persistableWorkspaceSlot(slot: anytype) bool {
     if (!slot.in_use) return false;
     return slot.workspace.label_len <= slot.workspace.label.len and
-        slot.workspace.path_index.entry_count <= workspace.MAX_WORKSPACE_ENTRIES and
-        slot.workspace.mutation_log.entry_mutation_count <= workspace.MAX_WORKSPACE_ENTRY_MUTATIONS and
-        slot.workspace.share_table.share_grant_count <= workspace.MAX_SHARE_GRANTS and
-        slot.workspace.recoverable_deletes.deleted_count <= workspace.MAX_RECOVERABLE_DELETES;
+        slot.workspace.counts.entry_count <= workspace.MAX_WORKSPACE_ENTRIES and
+        slot.workspace.counts.entry_mutation_count <= workspace.MAX_WORKSPACE_ENTRY_MUTATIONS and
+        slot.workspace.counts.share_grant_count <= workspace.MAX_SHARE_GRANTS and
+        slot.workspace.counts.deleted_count <= workspace.MAX_RECOVERABLE_DELETES;
 }
 
 pub fn persistableSnapshotSlot(slot: anytype) bool {

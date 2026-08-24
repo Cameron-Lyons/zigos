@@ -17,21 +17,21 @@ pub fn rootAddress(entries: anytype) RootAddress {
     return crypto_hash.finalize(&hasher);
 }
 
-pub fn rebuildPathMerkle(index: anytype) void {
-    for (0..index.entry_count) |entry_index| updatePathLeaf(index, entry_index);
+pub fn rebuildPathMerkle(index: anytype, entry_count: usize) void {
+    for (0..entry_count) |entry_index| updatePathLeaf(index, entry_index);
 
-    for (index.leaf_hashes[index.entry_count..]) |*leaf_hash| {
+    for (index.leaf_hashes[entry_count..]) |*leaf_hash| {
         leaf_hash.* = zeroRootAddress();
     }
-    refreshPathRoot(index);
+    refreshPathRoot(index, entry_count);
 }
 
 pub fn updatePathLeaf(index: anytype, entry_index: usize) void {
     index.leaf_hashes[entry_index] = entryLeafAddress(index.entries[entry_index]);
 }
 
-pub fn refreshPathRoot(index: anytype) void {
-    index.root_address = rootFromLeaves(index.leaf_hashes[0..index.entry_count]);
+pub fn refreshPathRoot(index: anytype, entry_count: usize) void {
+    index.root_address = rootFromLeaves(index.leaf_hashes[0..entry_count]);
 }
 
 fn rootFromLeaves(leaf_hashes: []const RootAddress) RootAddress {
