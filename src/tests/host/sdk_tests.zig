@@ -9,7 +9,8 @@ test "SDK host tests import native developer platform modules" {
 test "native SDK provides the full app developer loop" {
     const package = native_app_sdk.example_apps.firstPartyWriter();
 
-    const compiled = try native_app_sdk.app_platform.compile(package);
+    var compiled: native_app_sdk.app_platform.CompiledPackage = undefined;
+    try native_app_sdk.app_platform.compileInto(package, &compiled);
     try std.testing.expect(compiled.interfaceCount() >= 1);
     try std.testing.expect(compiled.operationCount() >= 4);
     try std.testing.expect(compiled.document.allOperationsTyped());

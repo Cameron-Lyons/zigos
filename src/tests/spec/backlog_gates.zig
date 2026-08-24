@@ -277,9 +277,11 @@ pub fn componentAbiDepthGate() !void {
     var sim = native_app_sdk.simulator.Simulator.init();
     const suite = native_app_sdk.example_apps.firstPartySuite();
     for (suite) |package| {
-        const compiled = try native_app_sdk.app_platform.compile(package);
+        var compiled: native_app_sdk.app_platform.CompiledPackage = undefined;
+        try native_app_sdk.app_platform.compileInto(package, &compiled);
         try std.testing.expect(compiled.operationCount() >= 4);
-        const generated = try sim.parseAndGenerate(package.idl_source);
+        var generated: native_app_sdk.idl.GeneratedSource = undefined;
+        try sim.parseAndGenerateInto(package.idl_source, &generated);
         try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "OperationDescriptor") != null);
         const review = try sim.reviewPermissions(.{
             .bundle = package.bundle,
