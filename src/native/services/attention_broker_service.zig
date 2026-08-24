@@ -143,8 +143,8 @@ pub const Service = struct {
     fn activeCounts(self: *const Service, now_ticks: u64) ActiveCounts {
         const counts = self.center.activeAttentionCounts(now_ticks);
         return .{
-            .visible = boundedU16(counts.active_visible),
-            .interruptions = boundedU16(counts.active_interruptions),
+            .visible = counts.active_visible,
+            .interruptions = counts.active_interruptions,
         };
     }
 };
@@ -180,10 +180,6 @@ fn recordNotification(
     tick: u64,
 ) event_ledger.Error!void {
     if (ledger) |active| try active.recordNotification(notification, tick);
-}
-
-fn boundedU16(value: usize) u16 {
-    return @intCast(@min(value, @as(usize, std.math.maxInt(u16))));
 }
 
 test "attention broker gates posts dismisses notifications and redacts policy details" {

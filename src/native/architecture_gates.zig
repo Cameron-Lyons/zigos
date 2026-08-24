@@ -426,7 +426,11 @@ pub const indexed_hot_path_tables = .{
     .notification_center = .{
         .uses_bounded_notification_scan = notification_center.BOUNDED_NOTIFICATION_SCAN,
         .reclaims_suppressed_notifications = notification_center.RECLAIMS_SUPPRESSED_NOTIFICATIONS,
-        .stores_compact_notification_metadata = notification_center.COMPACT_NOTIFICATION_METADATA,
+        .stores_compact_notification_metadata = notification_center.COMPACT_NOTIFICATION_METADATA and
+            @FieldType(notification_center.AttentionDecision, "active_visible") == u8 and
+            @FieldType(notification_center.AttentionDecision, "active_interruptions") == u8 and
+            @FieldType(notification_center.AttentionCounts, "active_visible") == u8 and
+            @FieldType(notification_center.AttentionCounts, "active_interruptions") == u8,
         .uses_fixed_notification_table = @FieldType(notification_center.Center, "notifications") == [notification_center.MAX_NOTIFICATIONS]notification_center.Notification,
         .drops_secondary_notification_indexes = !@hasField(notification_center.Center, "source_reason_index") and
             !@hasField(notification_center.Center, "expiring_attention_index") and
@@ -436,7 +440,10 @@ pub const indexed_hot_path_tables = .{
             !@hasField(notification_center.Center, "visible_prev_by_slot") and
             !@hasField(notification_center.Center, "visible_next_by_slot"),
         .tracks_visible_notification_count = @hasField(notification_center.Center, "visible_notification_count"),
-        .keeps_fixed_state_within_ceiling = @sizeOf(notification_center.Center) <= notification_center.CENTER_SIZE_CEILING_BYTES,
+        .keeps_fixed_state_within_ceiling = @sizeOf(notification_center.AttentionDecision) <= notification_center.ATTENTION_DECISION_SIZE_CEILING_BYTES and
+            @sizeOf(notification_center.AttentionCounts) <= notification_center.ATTENTION_COUNTS_SIZE_CEILING_BYTES and
+            @sizeOf(notification_center.AttentionPostResult) <= notification_center.ATTENTION_POST_RESULT_SIZE_CEILING_BYTES and
+            @sizeOf(notification_center.Center) <= notification_center.CENTER_SIZE_CEILING_BYTES,
     },
     .secure_pasteboard = .{
         .uses_bounded_grant_scan = secure_pasteboard.BOUNDED_GRANT_SCAN,

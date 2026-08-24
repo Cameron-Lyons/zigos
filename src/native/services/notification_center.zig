@@ -8,7 +8,16 @@ pub const MAX_DETAIL_BYTES: usize = 96;
 pub const BOUNDED_NOTIFICATION_SCAN = true;
 pub const RECLAIMS_SUPPRESSED_NOTIFICATIONS = true;
 pub const COMPACT_NOTIFICATION_METADATA = true;
-pub const CENTER_SIZE_CEILING_BYTES: usize = 4_640;
+pub const ATTENTION_DECISION_SIZE_CEILING_BYTES: usize = 4;
+pub const ATTENTION_COUNTS_SIZE_CEILING_BYTES: usize = 2;
+pub const ATTENTION_POST_RESULT_SIZE_CEILING_BYTES: usize = 16;
+pub const CENTER_SIZE_CEILING_BYTES: usize = 4_624;
+
+comptime {
+    if (MAX_NOTIFICATIONS > std.math.maxInt(u8)) {
+        @compileError("notification capacity exceeds compact attention counts");
+    }
+}
 
 pub const Reason = enum(u8) {
     permission_request,
@@ -51,20 +60,37 @@ pub const AttentionPolicy = struct {
 pub const AttentionDecision = struct {
     allowed: bool,
     reason: AttentionDecisionReason = .allowed,
-    active_visible: usize = 0,
-    active_interruptions: usize = 0,
+    active_visible: u8 = 0,
+    active_interruptions: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > ATTENTION_DECISION_SIZE_CEILING_BYTES) {
+            @compileError("notification attention decision exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const AttentionCounts = struct {
-    active_visible: usize = 0,
-    active_interruptions: usize = 0,
+    active_visible: u8 = 0,
+    active_interruptions: u8 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) > ATTENTION_COUNTS_SIZE_CEILING_BYTES) {
+            @compileError("notification attention counts exceed their compact size ceiling");
+        }
+    }
 };
 
 pub const AttentionPostResult = struct {
     decision: AttentionDecision,
     notification: ?*Notification = null,
-};
 
+    comptime {
+        if (@sizeOf(@This()) > ATTENTION_POST_RESULT_SIZE_CEILING_BYTES) {
+            @compileError("notification attention post result exceeds its compact size ceiling");
+        }
+    }
+};
 pub const PostRequest = struct {
     source: principal.PrincipalId,
     reason: Reason,
@@ -188,12 +214,12 @@ pub const Center = struct {
         {
             return deny(.quiet_mode, counts);
         }
-        if (policy.max_visible_notifications != 0 and counts.active_visible >= policy.max_visible_notifications) {
+        if (policy.max_visible_notifications != 0 and @as(usize, counts.active_visible) >= policy.max_visible_notifications) {
             return deny(.visible_budget_exhausted, counts);
         }
         if (isInterruptive(request.urgency) and
             policy.max_interruptions_per_window != 0 and
-            counts.active_interruptions >= policy.max_interruptions_per_window)
+            @as(u16, counts.active_interruptions) >= policy.max_interruptions_per_window)
         {
             return deny(.interruption_budget_exhausted, counts);
         }
@@ -393,6 +419,15 @@ pub fn isInterruptive(urgency: Urgency) bool {
 }
 
 test "notification center keeps structured objects task links expiry and suppression" {
+    try std.testing.expect(COMPACT_NOTIFICATION_METADATA);
+    try std.testing.expectEqual(u8, @FieldType(AttentionDecision, "active_visible"));
+    try std.testing.expectEqual(u8, @FieldType(AttentionDecision, "active_interruptions"));
+    try std.testing.expectEqual(u8, @FieldType(AttentionCounts, "active_visible"));
+    try std.testing.expectEqual(u8, @FieldType(AttentionCounts, "active_interruptions"));
+    try std.testing.expect(@sizeOf(AttentionDecision) <= ATTENTION_DECISION_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(AttentionCounts) <= ATTENTION_COUNTS_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(AttentionPostResult) <= ATTENTION_POST_RESULT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(Center) <= CENTER_SIZE_CEILING_BYTES);
     var center = Center.init();
     const sync_source = principal.PrincipalId{ .kind = .service, .serial = 7 };
     const update_source = principal.PrincipalId{ .kind = .service, .serial = 8 };
@@ -690,16 +725,16 @@ test "notification center counts permanent attention separately from expiring no
         .expires_at_ticks = 10,
     });
 
-    try std.testing.expectEqual(@as(usize, 2), center.permanent_attention_counts.active_visible);
-    try std.testing.expectEqual(@as(usize, 1), center.permanent_attention_counts.active_interruptions);
+    try std.testing.expectEqual(@as(u8, 2), center.permanent_attention_counts.active_visible);
+    try std.testing.expectEqual(@as(u8, 1), center.permanent_attention_counts.active_interruptions);
     try std.testing.expectEqual(@as(usize, 3), center.activeCount(5));
     try std.testing.expectEqual(@as(usize, 2), center.activeInterruptionCount(5));
     try std.testing.expectEqual(@as(usize, 2), center.activeCount(10));
     try std.testing.expectEqual(@as(usize, 1), center.activeInterruptionCount(10));
 
     _ = try center.dismiss(permanent_interrupt.id);
-    try std.testing.expectEqual(@as(usize, 1), center.permanent_attention_counts.active_visible);
-    try std.testing.expectEqual(@as(usize, 0), center.permanent_attention_counts.active_interruptions);
+    try std.testing.expectEqual(@as(u8, 1), center.permanent_attention_counts.active_visible);
+    try std.testing.expectEqual(@as(u8, 0), center.permanent_attention_counts.active_interruptions);
     try std.testing.expectEqual(@as(usize, 2), center.activeCount(5));
     try std.testing.expectEqual(@as(usize, 1), center.activeInterruptionCount(5));
     try std.testing.expectEqual(@as(usize, 1), center.activeCount(10));
