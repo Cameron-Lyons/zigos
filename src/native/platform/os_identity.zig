@@ -12,12 +12,11 @@ pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_RP_ID_BYTES: usize = 64;
 pub const MAX_ORIGIN_BYTES: usize = 96;
 pub const MAX_CHALLENGE_BYTES: usize = 64;
-pub const BOUNDED_CREDENTIAL_LOOKUP = true;
+pub const DIRECT_CREDENTIAL_LOOKUP = true;
 pub const DENSE_CREDENTIAL_TABLE = true;
 pub const COMPACT_CREDENTIAL_METADATA = true;
 pub const COMPACT_IDENTITY_PROOF_METADATA = true;
-pub const CREDENTIAL_LOOKUP_COMPARISON_BOUND: usize = 5;
-pub const STORE_SIZE_CEILING_BYTES: usize = 5_008;
+pub const STORE_SIZE_CEILING_BYTES: usize = 5_000;
 pub const LOCAL_UNLOCK_PROOF_SIZE_CEILING_BYTES: usize = 304;
 pub const ASSERTION_SIZE_CEILING_BYTES: usize = 416;
 pub const ASSERTION_REQUEST_SIZE_CEILING_BYTES: usize = 440;
@@ -201,7 +200,6 @@ pub const Error = error{
     ChallengeTooLong,
     CredentialNotFound,
     CredentialRevoked,
-    CredentialIdExhausted,
     CredentialTableFull,
     DeviceBoundCredentialWrongDevice,
     DeviceBoundRecoveryDenied,
@@ -220,7 +218,6 @@ pub const Error = error{
 } || secure_secret_store.Error || device_graph.Error;
 
 pub const Store = struct {
-    next_credential_id: u64 = 1,
     credentials: [MAX_CREDENTIALS]CredentialRecord = [_]CredentialRecord{zeroCredential()} ** MAX_CREDENTIALS,
     credential_count: u8 = 0,
 
@@ -249,10 +246,8 @@ pub const Store = struct {
         const credential_public_key = signing.publicKey(request.credential_identity) catch return error.InvalidCredentialSignature;
 
         if (self.countCredentials() >= MAX_CREDENTIALS) return error.CredentialTableFull;
-        const credential_id = self.next_credential_id;
-        if (credential_id == 0) return error.CredentialIdExhausted;
-        if (self.findCredentialConst(credential_id) != null) return error.CredentialIdExhausted;
         const slot_index = self.countCredentials();
+        const credential_id: u64 = @intCast(slot_index + 1);
 
         var credential = zeroCredential();
         credential.id = credential_id;
@@ -289,7 +284,6 @@ pub const Store = struct {
         const slot = &self.credentials[slot_index];
         slot.* = credential;
         self.credential_count += 1;
-        self.next_credential_id +%= 1;
         return slot;
     }
 
@@ -411,20 +405,9 @@ pub const Store = struct {
     }
 
     fn credentialSlotIndex(self: *const Store, credential_id: u64) ?usize {
-        var low: usize = 0;
-        var high = self.countCredentials();
-        while (low < high) {
-            const middle = low + (high - low) / 2;
-            const candidate_id = self.credentials[middle].id;
-            if (credential_id < candidate_id) {
-                high = middle;
-            } else if (credential_id > candidate_id) {
-                low = middle + 1;
-            } else {
-                return middle;
-            }
-        }
-        return null;
+        if (credential_id == 0 or credential_id > self.countCredentials()) return null;
+        const slot_index: usize = @intCast(credential_id - 1);
+        return if (self.credentials[slot_index].id == credential_id) slot_index else null;
     }
 };
 
@@ -847,9 +830,8 @@ test "os identity registration rejects overlong text without consuming credentia
         .credential_identity = credential_identity,
         .tick = 3,
     }));
-    try std.testing.expectEqual(@as(u64, 1), identities.next_credential_id);
     try std.testing.expect(identities.findCredential(1) == null);
-    try std.testing.expectEqual(@as(u64, 1), secrets.next_secret_id);
+    try std.testing.expect(secrets.describeSecret(1) == null);
 
     const credential = try identities.registerCredential(&graph, &secrets, .{
         .owner = user,
@@ -861,15 +843,13 @@ test "os identity registration rejects overlong text without consuming credentia
         .tick = 4,
     });
     try std.testing.expectEqual(@as(u64, 1), credential.id);
-    try std.testing.expectEqual(@as(u64, 2), identities.next_credential_id);
-    try std.testing.expectEqual(@as(u64, 2), secrets.next_secret_id);
+    try std.testing.expectEqual(@as(u64, 1), credential.secret_id);
+    try std.testing.expect(identities.findCredential(2) == null);
+    try std.testing.expect(secrets.describeSecret(2) == null);
 }
 
-test "os identity credential ids stop before consuming secrets at exhaustion" {
+test "os identity full credential table does not consume secrets" {
     var graph = device_graph.Graph.init();
-    var secrets = secure_secret_store.Store.init();
-    secrets.attachHardwareProvider(testHardwareProvider());
-    var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 771 };
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 781 };
     const user_identity = signing.SignerIdentity{
@@ -888,33 +868,6 @@ test "os identity credential ids stop before consuming secrets at exhaustion" {
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
     _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
 
-    identities.next_credential_id = std.math.maxInt(u64);
-    const max_credential = try identities.registerCredential(&graph, &secrets, .{
-        .owner = user,
-        .device = laptop,
-        .relying_party_id = "wrap.example",
-        .label = "wrap-passkey-max",
-        .scope = .synced,
-        .credential_identity = credential_identity,
-        .tick = 2,
-    });
-    try std.testing.expectEqual(std.math.maxInt(u64), max_credential.id);
-    try std.testing.expectEqual(@as(u64, 0), identities.next_credential_id);
-    try std.testing.expect(identities.findCredential(0) == null);
-
-    const secret_next_before_exhaustion = secrets.next_secret_id;
-    try std.testing.expectError(error.CredentialIdExhausted, identities.registerCredential(&graph, &secrets, .{
-        .owner = user,
-        .device = laptop,
-        .relying_party_id = "wrap.example",
-        .label = "exhausted-passkey",
-        .scope = .synced,
-        .credential_identity = credential_identity,
-        .tick = 3,
-    }));
-    try std.testing.expectEqual(secret_next_before_exhaustion, secrets.next_secret_id);
-    try std.testing.expectEqual(@as(usize, 1), identities.countCredentials());
-
     var full_identities = Store.init();
     var full_secrets = secure_secret_store.Store.init();
     for (0..MAX_CREDENTIALS) |index| {
@@ -923,8 +876,9 @@ test "os identity credential ids stop before consuming secrets at exhaustion" {
         full_identities.credentials[index].id = credential_id;
     }
     full_identities.credential_count = @intCast(MAX_CREDENTIALS);
-    const credential_next_before = full_identities.next_credential_id;
-    const secret_next_before = full_secrets.next_secret_id;
+    try std.testing.expect(full_identities.findCredential(0) == null);
+    try std.testing.expect(full_identities.findCredential(MAX_CREDENTIALS + 1) == null);
+    try std.testing.expect(full_secrets.describeSecret(1) == null);
     try std.testing.expectError(error.CredentialTableFull, full_identities.registerCredential(&graph, &full_secrets, .{
         .owner = user,
         .device = laptop,
@@ -934,8 +888,8 @@ test "os identity credential ids stop before consuming secrets at exhaustion" {
         .credential_identity = credential_identity,
         .tick = 5,
     }));
-    try std.testing.expectEqual(credential_next_before, full_identities.next_credential_id);
-    try std.testing.expectEqual(secret_next_before, full_secrets.next_secret_id);
+    try std.testing.expectEqual(MAX_CREDENTIALS, full_identities.countCredentials());
+    try std.testing.expect(full_secrets.describeSecret(1) == null);
 }
 
 test "os identity recovers synced credentials through trusted device graph" {

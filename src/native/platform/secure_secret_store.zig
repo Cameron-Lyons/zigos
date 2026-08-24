@@ -8,12 +8,11 @@ pub const MAX_SECRETS: usize = 16;
 pub const MAX_HANDLES: usize = 32;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_VALUE_BYTES: usize = 96;
-pub const BOUNDED_SECRET_LOOKUP = true;
+pub const DIRECT_SECRET_LOOKUP = true;
 pub const DENSE_SECRET_TABLE = true;
 pub const COMPACT_SECRET_METADATA = true;
 pub const DIRECT_HANDLE_LOOKUP = true;
-pub const SECRET_LOOKUP_COMPARISON_BOUND: usize = 5;
-pub const STORE_SIZE_CEILING_BYTES: usize = 5_320;
+pub const STORE_SIZE_CEILING_BYTES: usize = 5_312;
 
 pub const SecretRecord = struct {
     id: u64,
@@ -65,7 +64,6 @@ pub const Error = error{
     HardwareProviderUnavailable,
     LabelTooLong,
     RawExportDenied,
-    SecretIdExhausted,
     SecretNotFound,
     SecretTableFull,
     SecretTooLarge,
@@ -87,7 +85,6 @@ pub const HandleId = indexed_arena.GenerationalHandle("SecureSecretStoreHandle")
 const HandleArena = indexed_arena.GenerationalArena("SecureSecretStoreHandle", HandleSlot, MAX_HANDLES);
 
 pub const Store = struct {
-    next_secret_id: u64 = 1,
     hardware_provider: HardwareSealProvider = .{},
     secrets: [MAX_SECRETS]SecretRecord = [_]SecretRecord{zeroSecret()} ** MAX_SECRETS,
     secret_count: u8 = 0,
@@ -124,9 +121,8 @@ pub const Store = struct {
         if (raw.len > MAX_VALUE_BYTES) return error.SecretTooLarge;
         if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
         if (self.countSecrets() >= MAX_SECRETS) return error.SecretTableFull;
-        const secret_id = self.next_secret_id;
-        if (secret_id == 0) return error.SecretIdExhausted;
-        if (self.findSecretConst(secret_id) != null) return error.SecretIdExhausted;
+        const slot_index = self.countSecrets();
+        const secret_id: u64 = @intCast(slot_index + 1);
         const hardware_sealed_digest = if (hardware_backed)
             self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable
         else
@@ -151,11 +147,9 @@ pub const Store = struct {
             secret.value_len = @intCast(native_util.copyTextExact(&secret.value, raw) catch return error.SecretTooLarge);
         }
 
-        const slot_index = self.countSecrets();
         const slot = &self.secrets[slot_index];
         slot.* = secret;
         self.secret_count += 1;
-        self.next_secret_id +%= 1;
         return slot;
     }
 
@@ -244,20 +238,9 @@ pub const Store = struct {
     }
 
     fn secretSlotIndex(self: *const Store, secret_id: u64) ?usize {
-        var low: usize = 0;
-        var high = self.countSecrets();
-        while (low < high) {
-            const middle = low + (high - low) / 2;
-            const candidate_id = self.secrets[middle].id;
-            if (secret_id < candidate_id) {
-                high = middle;
-            } else if (secret_id > candidate_id) {
-                low = middle + 1;
-            } else {
-                return middle;
-            }
-        }
-        return null;
+        if (secret_id == 0 or secret_id > self.countSecrets()) return null;
+        const slot_index: usize = @intCast(secret_id - 1);
+        return if (self.secrets[slot_index].id == secret_id) slot_index else null;
     }
 };
 
@@ -369,26 +352,19 @@ test "secure secret store reports missing handles and oversized secrets" {
     }));
 }
 
-test "secure secret store stops secret allocation at id exhaustion and bounds handle capacity" {
-    var store = Store.init();
+test "secure secret store uses direct dense ids and bounds handle capacity" {
     const owner = principal.PrincipalId{ .kind = .user, .serial = 4 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 46 };
-
-    store.next_secret_id = std.math.maxInt(u64);
-    const max_secret = try store.importSecret(owner, "max-secret", "private max secret", false, true);
-    try std.testing.expectEqual(std.math.maxInt(u64), max_secret.id);
-    try std.testing.expectEqual(@as(u64, 0), store.next_secret_id);
-    try std.testing.expect(store.describeSecret(0) == null);
-    try std.testing.expectError(error.SecretIdExhausted, store.importSecret(owner, "exhausted-secret", "private exhausted secret", false, true));
-    try std.testing.expectEqual(@as(usize, 1), store.countSecrets());
 
     var full_secrets = Store.init();
     var label_buffer: [MAX_LABEL_BYTES]u8 = undefined;
     for (0..MAX_SECRETS) |index| {
         const label = try std.fmt.bufPrint(&label_buffer, "full-secret-{d}", .{index});
-        _ = try full_secrets.importSecret(owner, label, "private full secret", false, true);
+        const secret = try full_secrets.importSecret(owner, label, "private full secret", false, true);
+        try std.testing.expectEqual(@as(u64, @intCast(index + 1)), secret.id);
     }
-    const secret_next_before = full_secrets.next_secret_id;
+    try std.testing.expect(full_secrets.describeSecret(0) == null);
+    try std.testing.expect(full_secrets.describeSecret(MAX_SECRETS + 1) == null);
     try std.testing.expectError(error.SecretTableFull, full_secrets.importSecret(
         owner,
         "full-secret",
@@ -396,8 +372,7 @@ test "secure secret store stops secret allocation at id exhaustion and bounds ha
         true,
         false,
     ));
-    try std.testing.expectEqual(secret_next_before, full_secrets.next_secret_id);
-    try std.testing.expect(full_secrets.describeSecret(secret_next_before) == null);
+    try std.testing.expectEqual(MAX_SECRETS, full_secrets.countSecrets());
 
     var full_handles = Store.init();
     const full_handle_secret = try full_handles.importSecret(owner, "full-handle", "private full handle", false, true);
@@ -409,18 +384,6 @@ test "secure secret store stops secret allocation at id exhaustion and bounds ha
     try std.testing.expectError(error.HandleTableFull, full_handles.lendHandle(full_handle_secret.id, holder, 94, true));
     try std.testing.expect(full_handles.describeHandle(0) == null);
     try std.testing.expect(full_handles.describeHandle(HandleId.fromParts(MAX_HANDLES, 1).value) == null);
-}
-
-test "secure secret store direct insertion rejects staged secret id collisions" {
-    var store = Store.init();
-    const owner = principal.PrincipalId{ .kind = .user, .serial = 5 };
-
-    const original_secret = try store.importSecret(owner, "original", "original material", false, true);
-    store.next_secret_id = original_secret.id;
-    try std.testing.expectError(error.SecretIdExhausted, store.importSecret(owner, "replacement", "replacement material", false, true));
-    try std.testing.expectEqual(@as(usize, 1), store.countSecrets());
-    try std.testing.expectEqualStrings("original material", store.describeSecret(original_secret.id).?.value[0..original_secret.value_len]);
-
 }
 
 test "secure secret store replaces one handle with a direct generation" {

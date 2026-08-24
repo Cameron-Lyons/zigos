@@ -378,13 +378,13 @@ pub const indexed_hot_path_tables = .{
         .keeps_fixed_state_within_ceiling = @sizeOf(indexing_service.Service) <= indexing_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .secure_secret_store = .{
-        .uses_bounded_secret_lookup = secure_secret_store.BOUNDED_SECRET_LOOKUP,
+        .uses_direct_secret_lookup = secure_secret_store.DIRECT_SECRET_LOOKUP and
+            !@hasField(secure_secret_store.Store, "next_secret_id"),
         .uses_dense_secret_table = secure_secret_store.DENSE_SECRET_TABLE and
             @FieldType(secure_secret_store.Store, "secrets") == [secure_secret_store.MAX_SECRETS]secure_secret_store.SecretRecord,
         .stores_compact_secret_metadata = secure_secret_store.COMPACT_SECRET_METADATA and
             @FieldType(secure_secret_store.SecretRecord, "label_len") == u8 and
             @FieldType(secure_secret_store.SecretRecord, "value_len") == u8,
-        .bounds_secret_lookup_comparisons = secure_secret_store.SECRET_LOOKUP_COMPARISON_BOUND == 5,
         .drops_secret_arena = @FieldType(secure_secret_store.Store, "secrets") == [secure_secret_store.MAX_SECRETS]secure_secret_store.SecretRecord,
         .uses_handle_arena = @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "reserve"),
         .uses_direct_generational_handles = secure_secret_store.DIRECT_HANDLE_LOOKUP and
@@ -394,7 +394,8 @@ pub const indexed_hot_path_tables = .{
         .keeps_fixed_state_within_ceiling = @sizeOf(secure_secret_store.Store) <= secure_secret_store.STORE_SIZE_CEILING_BYTES,
     },
     .os_identity = .{
-        .uses_bounded_credential_lookup = os_identity.BOUNDED_CREDENTIAL_LOOKUP,
+        .uses_direct_credential_lookup = os_identity.DIRECT_CREDENTIAL_LOOKUP and
+            !@hasField(os_identity.Store, "next_credential_id"),
         .uses_dense_credential_table = os_identity.DENSE_CREDENTIAL_TABLE and
             @FieldType(os_identity.Store, "credentials") == [os_identity.MAX_CREDENTIALS]os_identity.CredentialRecord,
         .stores_compact_credential_metadata = os_identity.COMPACT_CREDENTIAL_METADATA and
@@ -411,7 +412,6 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(os_identity.AssertionRequest) <= os_identity.ASSERTION_REQUEST_SIZE_CEILING_BYTES and
             @sizeOf(os_identity.RecoveryApproval) <= os_identity.RECOVERY_APPROVAL_SIZE_CEILING_BYTES and
             @sizeOf(os_identity.RecoveryRequest) <= os_identity.RECOVERY_REQUEST_SIZE_CEILING_BYTES,
-        .bounds_credential_lookup_comparisons = os_identity.CREDENTIAL_LOOKUP_COMPARISON_BOUND == 5,
         .drops_credential_arena = @FieldType(os_identity.Store, "credentials") == [os_identity.MAX_CREDENTIALS]os_identity.CredentialRecord,
         .keeps_fixed_state_within_ceiling = @sizeOf(os_identity.Store) <= os_identity.STORE_SIZE_CEILING_BYTES,
     },
