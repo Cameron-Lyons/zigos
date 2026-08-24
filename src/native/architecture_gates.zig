@@ -1,6 +1,7 @@
 const indexed_arena = @import("core/indexed_arena.zig");
 const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
+const signing = @import("core/signing.zig");
 const sdk_idl = @import("sdk/idl.zig");
 const sdk_object_store = @import("sdk/object_store_api.zig");
 const sdk_permissions = @import("sdk/permissions.zig");
@@ -197,6 +198,11 @@ pub const indexed_hot_path_tables = .{
             @FieldType(sdk_object_store.ObjectHandle, "content_type_len") == u8,
         .keeps_handles_within_ceilings = @sizeOf(sdk_object_store.ObjectHandle) <= sdk_object_store.OBJECT_HANDLE_SIZE_CEILING_BYTES and
             @sizeOf(sdk_object_store.LoadedObject) <= sdk_object_store.LOADED_OBJECT_SIZE_CEILING_BYTES,
+    },
+    .release_signing = .{
+        .stores_compact_verifier_metadata = signing.COMPACT_RELEASE_VERIFIER_METADATA and
+            @FieldType(signing.ReleaseVerifierMetadata, "public_key_len") == u16,
+        .keeps_verifier_metadata_within_ceiling = @sizeOf(signing.ReleaseVerifierMetadata) <= signing.RELEASE_VERIFIER_METADATA_SIZE_CEILING_BYTES,
     },
     .principal_keyring = .{
         .uses_key_arena = @hasDecl(@FieldType(principal.Keyring, "slots"), "reserveIndex"),

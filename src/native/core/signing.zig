@@ -16,6 +16,14 @@ pub const ED25519_SIGNATURE_BYTES = manifest.ED25519_SIGNATURE_BYTES;
 pub const ML_DSA65_PUBLIC_KEY_BYTES = manifest.ML_DSA65_PUBLIC_KEY_BYTES;
 pub const ML_DSA65_SIGNATURE_BYTES = manifest.ML_DSA65_SIGNATURE_BYTES;
 pub const MAX_SIGNATURE_PROVIDERS: usize = 6;
+pub const COMPACT_RELEASE_VERIFIER_METADATA = true;
+pub const RELEASE_VERIFIER_METADATA_SIZE_CEILING_BYTES: usize = 2_056;
+
+comptime {
+    if (ML_DSA65_PUBLIC_KEY_BYTES > std.math.maxInt(u16)) {
+        @compileError("release verifier public key exceeds its compact length field");
+    }
+}
 
 pub const SignatureProfile = enum {
     ed25519,
@@ -161,7 +169,7 @@ pub const ReleaseVerifierMetadata = struct {
     label: []const u8,
     profile: SignatureProfile,
     signature_format: []const u8,
-    public_key_len: usize,
+    public_key_len: u16,
     public_key: [ML_DSA65_PUBLIC_KEY_BYTES]u8,
     generation: u32,
     provider_boundary: SignatureProviderBoundary,
@@ -179,7 +187,7 @@ pub const ReleaseVerifierMetadata = struct {
     validation_certificate: []const u8 = "",
 
     pub fn publicKeySlice(self: *const ReleaseVerifierMetadata) []const u8 {
-        return self.public_key[0..self.public_key_len];
+        return self.public_key[0..@min(@as(usize, self.public_key_len), self.public_key.len)];
     }
 
     pub fn fromEd25519Provider(
@@ -311,6 +319,12 @@ pub const ReleaseVerifierMetadata = struct {
             std.mem.eql(u8, self.validation_certificate, expected.validation_certificate);
     }
 
+    comptime {
+        if (@sizeOf(@This()) > RELEASE_VERIFIER_METADATA_SIZE_CEILING_BYTES) {
+            @compileError("release verifier metadata exceeds its compact size ceiling");
+        }
+    }
+
     fn metadataFromDescriptor(
         descriptor: SignatureProviderDescriptor,
         key_id: []const u8,
@@ -318,13 +332,14 @@ pub const ReleaseVerifierMetadata = struct {
         public_key: []const u8,
         generation: u32,
     ) ReleaseVerifierMetadata {
+        std.debug.assert(public_key.len <= ML_DSA65_PUBLIC_KEY_BYTES);
         var metadata = ReleaseVerifierMetadata{
             .provider_name = descriptor.name,
             .key_id = key_id,
             .label = label,
             .profile = descriptor.profile,
             .signature_format = descriptor.format(),
-            .public_key_len = public_key.len,
+            .public_key_len = @intCast(public_key.len),
             .public_key = [_]u8{0} ** ML_DSA65_PUBLIC_KEY_BYTES,
             .generation = generation,
             .provider_boundary = descriptor.provider_boundary,
@@ -754,6 +769,12 @@ test "ed25519 signing produces verifiable native signatures" {
         .seed = seedFromByte(0x12),
     };
     try std.testing.expect(!verifyTrusted(signature, "storage-state", wrong_identity));
+}
+
+test "release verifier uses compact bounded public-key metadata" {
+    try std.testing.expect(COMPACT_RELEASE_VERIFIER_METADATA);
+    try std.testing.expectEqual(u16, @FieldType(ReleaseVerifierMetadata, "public_key_len"));
+    try std.testing.expect(@sizeOf(ReleaseVerifierMetadata) <= RELEASE_VERIFIER_METADATA_SIZE_CEILING_BYTES);
 }
 
 test "signature providers expose release eligibility and reject mismatched profiles" {
