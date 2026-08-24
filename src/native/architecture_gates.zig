@@ -492,7 +492,7 @@ pub const indexed_hot_path_tables = .{
         .keeps_fixed_state_within_ceiling = @sizeOf(object_resilience_service.Service) <= object_resilience_service.SERVICE_SIZE_CEILING_BYTES,
     },
     .personal_context_service = .{
-        .uses_bounded_lease_scan = personal_context_service.BOUNDED_LEASE_SCAN,
+        .uses_direct_lease_lookup = personal_context_service.DIRECT_LEASE_LOOKUP,
         .reclaims_terminal_leases = personal_context_service.RECLAIMS_TERMINAL_LEASES,
         .keeps_fixed_state_within_ceiling = @sizeOf(personal_context_service.Service) <= personal_context_service.SERVICE_SIZE_CEILING_BYTES,
     },
