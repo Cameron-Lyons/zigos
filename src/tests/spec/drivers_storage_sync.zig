@@ -487,8 +487,9 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expectEqual(draft_v2.version_id, report_object.snapshot_state.latest_snapshot_version_id);
     try std.testing.expectEqual(draft_v2.version_id, report_object.sync_state.last_synced_version_id);
 
-    const exported = try storage.exportSnapshot(workspace_record.id, baseline.id, storage_signer);
-    const imported = try storage.importWorkspace(spec_support.user(3), "report-import", exported, 7);
+    var exported = workspace.emptyExportPackage();
+    try storage.exportSnapshotInto(workspace_record.id, baseline.id, storage_signer, &exported);
+    const imported = try storage.importWorkspaceFromPackage(spec_support.user(3), "report-import", &exported, 7);
     const imported_entry = try storage.resolve(imported.id, "documents/report.md");
     try std.testing.expectEqual(draft_v1.version_id, imported_entry.version_id);
 

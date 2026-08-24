@@ -85,9 +85,10 @@ test "workspace transactions, snapshot restore, delete recovery, and signed expo
     try std.testing.expect(try directory.recoverDeleted(workspace.id, "documents/notes.md", 24));
     try std.testing.expectEqual(first.version_id, (try directory.resolve(workspace.id, "documents/notes.md")).version_id);
 
-    const package = try directory.exportSnapshot(workspace.id, baseline.id, export_identity);
+    var package = workspace_model.emptyExportPackage();
+    try directory.exportSnapshotInto(workspace.id, baseline.id, export_identity, &package);
     try std.testing.expect(std.mem.eql(u8, &baseline.root_address, &package.root_address));
-    const imported = try directory.importWorkspace(.{ .kind = .service, .serial = 9 }, "imported-notes", package, 25);
+    const imported = try directory.importWorkspaceFromPackage(.{ .kind = .service, .serial = 9 }, "imported-notes", &package, 25);
     try std.testing.expectEqualStrings("imported-notes", imported.labelSlice());
     try std.testing.expectEqual(first.version_id, (try directory.resolve(imported.id, "documents/notes.md")).version_id);
 }
@@ -157,7 +158,8 @@ test "workspace can restore the original workspace from a signed export package"
     _ = try directory.commit(workspace.id, 32);
 
     const snapshot = try directory.snapshot(workspace.id, "baseline", signer);
-    const package = try directory.exportSnapshot(workspace.id, snapshot.id, export_signer);
+    var package = workspace_model.emptyExportPackage();
+    try directory.exportSnapshotInto(workspace.id, snapshot.id, export_signer, &package);
 
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "documents/notes.md", second.object_id, second.version_id, .document);
@@ -429,9 +431,10 @@ test "workspace snapshot signing rejects stale cached roots and preserves canoni
         .label = "zigos-export-key",
         .seed = signing.seedFromByte(0x6a),
     };
-    const package = try directory.exportSnapshot(workspace.id, snapshot_record.id, export_signer);
+    var package = workspace_model.emptyExportPackage();
+    try directory.exportSnapshotInto(workspace.id, snapshot_record.id, export_signer, &package);
     try std.testing.expectEqual(canonical_root, package.root_address);
-    const imported = try directory.importWorkspace(.{ .kind = .service, .serial = 12 }, "root-import", package, 52);
+    const imported = try directory.importWorkspaceFromPackage(.{ .kind = .service, .serial = 12 }, "root-import", &package, 52);
     const imported_entries = try directory.entries(imported.id);
     try std.testing.expectEqual(workspaceRootAddress(imported_entries), imported.rootAddress());
     try std.testing.expectEqual(canonical_root, imported.rootAddress());
@@ -463,7 +466,7 @@ test "workspace snapshots and exports must stay signed" {
         .entry_count = 0,
         .entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
     };
-    try std.testing.expectError(error.UnsignedExport, directory.importWorkspace(.{ .kind = .service, .serial = 10 }, "import", package, 0));
+    try std.testing.expectError(error.UnsignedExport, directory.importWorkspaceFromPackage(.{ .kind = .service, .serial = 10 }, "import", &package, 0));
 }
 
 test "export packages keep self-contained signature state across copies" {
@@ -494,12 +497,13 @@ test "export packages keep self-contained signature state across copies" {
     _ = try directory.commit(workspace.id, 36);
 
     const snapshot = try directory.snapshot(workspace.id, "baseline", signer);
-    var package = try directory.exportSnapshot(workspace.id, snapshot.id, export_signer);
+    var package = workspace_model.emptyExportPackage();
+    try directory.exportSnapshotInto(workspace.id, snapshot.id, export_signer, &package);
     const copied = package;
     package = copied;
 
     try std.testing.expect(package.signerSlice().len != 0);
-    const imported = try directory.importWorkspace(.{ .kind = .service, .serial = 11 }, "archive-import", package, 37);
+    const imported = try directory.importWorkspaceFromPackage(.{ .kind = .service, .serial = 11 }, "archive-import", &package, 37);
     try std.testing.expectEqual(first.version_id, (try directory.resolve(imported.id, "documents/notes.md")).version_id);
 }
 

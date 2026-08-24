@@ -955,17 +955,6 @@ pub const Directory = struct {
         return false;
     }
 
-    pub fn exportSnapshot(
-        self: *Directory,
-        workspace_id: ids.WorkspaceId,
-        snapshot_id: ids.SnapshotId,
-        identity: signing.SignerIdentity,
-    ) Error!ExportPackage {
-        var package = zeroExportPackage();
-        try self.exportSnapshotInto(workspace_id, snapshot_id, identity, &package);
-        return package;
-    }
-
     pub fn exportSnapshotInto(
         self: *Directory,
         workspace_id: ids.WorkspaceId,
@@ -996,16 +985,6 @@ pub const Directory = struct {
         out.label_len = @intCast(native_util.copyTextExact(&out.label, snapshot_record.labelSlice()) catch return error.LabelTooLong);
         copyEntries(out.entries[0..snapshot_entries.len], snapshot_entries);
         signExportPackage(out, identity) catch return error.InvalidSignature;
-    }
-
-    pub fn importWorkspace(
-        self: *Directory,
-        owner: principal.PrincipalId,
-        label: []const u8,
-        package: ExportPackage,
-        tick: u64,
-    ) Error!*WorkspaceRecord {
-        return self.importWorkspaceFromPackage(owner, label, &package, tick);
     }
 
     pub fn importWorkspaceFromPackage(
