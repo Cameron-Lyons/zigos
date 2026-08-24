@@ -182,25 +182,22 @@ pub const Store = struct {
         const secret = self.findSecret(secret_id) orelse return error.SecretNotFound;
         const retired_handle = HandleId{ .value = retired_handle_id };
         if (self.handles.getConstByHandle(retired_handle) == null) return error.HandleNotFound;
-        const retired_slot_index = retired_handle.slotIndex();
-        return self.installHandle(retired_slot_index, secret, holder, task_id, allow_raw_export);
+        return self.installHandle(retired_handle, secret, holder, task_id, allow_raw_export);
     }
 
     fn installHandle(
         self: *Store,
-        retired_slot_index: ?usize,
+        retired_handle: ?HandleId,
         secret: *const SecretRecord,
         holder: principal.PrincipalId,
         task_id: u64,
         allow_raw_export: bool,
     ) Error!SecretHandle {
-        const handle_id = if (retired_slot_index) |slot_index| blk: {
-            if (!self.handles.removeIndex(slot_index)) {
-                native_util.impossibleByInvariant("secure store replacement handle has a live slot");
-            }
-            break :blk self.handles.reserveHandleAt(slot_index) orelse
-                native_util.impossibleByInvariant("secure store replacement reuses its retired handle slot");
-        } else self.handles.reserveHandle() orelse return error.HandleTableFull;
+        const handle_id = if (retired_handle) |retired|
+            self.handles.replaceHandle(retired) orelse
+                native_util.impossibleByInvariant("secure store replacement keeps its retired handle live")
+        else
+            self.handles.reserveHandle() orelse return error.HandleTableFull;
         const handle = SecretHandle{
             .id = handle_id.value,
             .secret_id = secret.id,
