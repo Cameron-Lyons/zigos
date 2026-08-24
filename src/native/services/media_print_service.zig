@@ -1,5 +1,6 @@
 const std = @import("std");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const notification_center = @import("notification_center.zig");
 const principal = @import("../core/principal.zig");
@@ -8,10 +9,11 @@ const units = @import("../core/units.zig");
 pub const MAX_JOBS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
 pub const BOUNDED_JOB_SCAN = true;
+pub const DIRECT_JOB_LOOKUP = true;
 pub const COMPACT_COMPLETION_QUEUE = true;
 pub const COMPACT_JOB_TEXT_METADATA = true;
 pub const JOB_RECORD_SIZE_CEILING_BYTES: usize = 208;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_360;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_352;
 
 comptime {
     if (MAX_JOBS > std.math.maxInt(u8) or MAX_LABEL_BYTES > std.math.maxInt(u8)) {
@@ -74,7 +76,6 @@ pub const JobRecord = struct {
 };
 
 pub const Error = error{
-    JobIdExhausted,
     JobNotFound,
     JobTableFull,
     LabelTooLong,
@@ -82,8 +83,9 @@ pub const Error = error{
     PrinterRequiresLocalOnly,
 } || accelerator_scheduler.Error || notification_center.Error;
 
+pub const JobId = indexed_arena.GenerationalHandle("MediaPrintJob");
+
 pub const Service = struct {
-    next_job_id: u64 = 1,
     jobs: [MAX_JOBS]JobRecord = [_]JobRecord{zeroJob()} ** MAX_JOBS,
     completed_job_slots: [MAX_JOBS]u8 = [_]u8{0} ** MAX_JOBS,
     job_count: u8 = 0,
@@ -112,9 +114,8 @@ pub const Service = struct {
         if (request.label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
         if (request.printer_identity.len > MAX_LABEL_BYTES) return error.PrinterIdentityTooLong;
 
-        const job_id = self.next_job_id;
-        if (job_id == 0) return error.JobIdExhausted;
         const slot_index = self.availableJobSlot() orelse return error.JobTableFull;
+        const job_id = self.nextJobId(slot_index);
         var job = zeroJob();
         job.id = job_id;
         job.kind = request.kind;
@@ -156,7 +157,6 @@ pub const Service = struct {
             self.job_count += 1;
         }
         job_slot.* = job;
-        self.next_job_id +%= 1;
         return job_slot;
     }
 
@@ -254,11 +254,11 @@ pub const Service = struct {
     }
 
     fn findJobSlotIndex(self: *const Service, job_id: u64) ?usize {
-        if (job_id == 0) return null;
-        for (&self.jobs, 0..) |*job, slot_index| {
-            if (job.id == job_id) return slot_index;
-        }
-        return null;
+        const handle = JobId{ .value = job_id };
+        if (handle.isZero()) return null;
+        const slot_index = handle.slotIndex();
+        if (slot_index >= MAX_JOBS) return null;
+        return if (self.jobs[slot_index].id == job_id) slot_index else null;
     }
 
     fn oldestCompletedJobSlotIndex(self: *const Service) ?usize {
@@ -272,6 +272,13 @@ pub const Service = struct {
         if (job.id == 0) native_util.impossibleByInvariant("completed media and print queue points at a free slot");
         if (job.state != .completed) native_util.impossibleByInvariant("completed media and print queue points at an unfinished job");
         return job;
+    }
+
+    fn nextJobId(self: *const Service, slot_index: usize) u64 {
+        const current_generation = (JobId{ .value = self.jobs[slot_index].id }).generation();
+        const incremented = current_generation +% 1;
+        const generation = if (incremented == 0) 1 else incremented;
+        return JobId.fromParts(slot_index, generation).value;
     }
 };
 
@@ -313,7 +320,7 @@ test "media and print job metadata stays compact" {
     try std.testing.expectEqual(u8, @FieldType(JobRecord, "label_len"));
     try std.testing.expectEqual(u8, @FieldType(JobRecord, "printer_identity_len"));
     try std.testing.expectEqual(@as(usize, 208), @sizeOf(JobRecord));
-    try std.testing.expectEqual(@as(usize, 3_360), @sizeOf(Service));
+    try std.testing.expectEqual(@as(usize, 3_352), @sizeOf(Service));
 }
 
 test "media print service uses scheduled engines and emits completion notifications" {
@@ -403,7 +410,7 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
         .label = "background render",
         .visibility = .hidden,
     }, &scheduler, &notifications, 8);
-    try std.testing.expectEqual(@as(u64, 1), hidden.id);
+    try std.testing.expectEqual(JobId.fromParts(0, 1).value, hidden.id);
     try std.testing.expectEqual(@as(?u64, null), hidden.notification_id);
     try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 9));
     try std.testing.expectEqual(@as(usize, 1), service.completedJobCount());
@@ -413,59 +420,38 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
     try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
-test "media print service job ids stop at exhaustion and full tables do not consume ids" {
+test "media print service uses direct generational ids through bounded capacity" {
     var scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 14 };
 
-    service.next_job_id = std.math.maxInt(u64);
-    const max_job = try service.submit(.{
-        .kind = .print_document,
-        .task_id = 90,
-        .workspace_id = 7,
-        .source_principal = source,
-        .label = "max id print",
-        .visibility = .hidden,
-    }, &scheduler, &notifications, 10);
-    try std.testing.expectEqual(std.math.maxInt(u64), max_job.id);
-    try std.testing.expectEqual(@as(u64, 0), service.next_job_id);
-    try std.testing.expect(service.find(0) == null);
-
-    try std.testing.expectError(error.JobIdExhausted, service.submit(.{
-        .kind = .print_document,
-        .task_id = 91,
-        .workspace_id = 7,
-        .source_principal = source,
-        .label = "exhausted id print",
-        .visibility = .hidden,
-    }, &scheduler, &notifications, 11));
-    try std.testing.expectEqual(@as(usize, 1), service.jobCount());
-    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
-
-    var full_scheduler = accelerator_scheduler.Controller.init();
-    var full_notifications = notification_center.Center.init();
-    var full_service = Service.init();
     for (0..MAX_JOBS) |index| {
-        _ = try full_service.submit(.{
+        const job = try service.submit(.{
             .kind = .print_document,
             .task_id = @intCast(100 + index),
             .workspace_id = 8,
             .source_principal = source,
             .label = "full table print",
             .visibility = .hidden,
-        }, &full_scheduler, &full_notifications, 20);
+        }, &scheduler, &notifications, 20);
+        const job_id = JobId{ .value = job.id };
+        try std.testing.expectEqual(index, job_id.slotIndex());
+        try std.testing.expectEqual(@as(u32, 1), job_id.generation());
     }
-    const next_before_full = full_service.next_job_id;
-    try std.testing.expectError(error.JobTableFull, full_service.submit(.{
+    try std.testing.expectEqual(MAX_JOBS, service.jobCount());
+    try std.testing.expectEqual(@as(u16, MAX_JOBS), scheduler.activeClaimCount());
+    try std.testing.expect(service.find(0) == null);
+    try std.testing.expect(service.find(JobId.fromParts(MAX_JOBS, 1).value) == null);
+    try std.testing.expectError(error.JobTableFull, service.submit(.{
         .kind = .print_document,
         .task_id = 200,
         .workspace_id = 8,
         .source_principal = source,
         .label = "rejected full table print",
         .visibility = .hidden,
-    }, &full_scheduler, &full_notifications, 21));
-    try std.testing.expectEqual(next_before_full, full_service.next_job_id);
+    }, &scheduler, &notifications, 21));
+    try std.testing.expectEqual(@as(u16, MAX_JOBS), scheduler.activeClaimCount());
 }
 
 test "media print service retains recent completions and recycles the oldest completed job" {
@@ -512,7 +498,8 @@ test "media print service retains recent completions and recycles the oldest com
         .local_only = true,
         .visibility = .hidden,
     }, &scheduler, &notifications, 99);
-    try std.testing.expectEqual(@as(u64, MAX_JOBS + 1), replacement.id);
+    try std.testing.expectEqual(@as(usize, 2), (JobId{ .value = replacement.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 2), (JobId{ .value = replacement.id }).generation());
     try std.testing.expect(service.find(job_ids[2]) == null);
     try std.testing.expect(service.find(job_ids[0]) != null);
     try std.testing.expect(service.find(job_ids[1]) != null);
@@ -535,7 +522,8 @@ test "media print service retains recent completions and recycles the oldest com
         .local_only = true,
         .visibility = .hidden,
     }, &scheduler, &notifications, 101);
-    try std.testing.expectEqual(@as(u64, MAX_JOBS + 2), wrapped_replacement.id);
+    try std.testing.expectEqual(@as(usize, 0), (JobId{ .value = wrapped_replacement.id }).slotIndex());
+    try std.testing.expectEqual(@as(u32, 2), (JobId{ .value = wrapped_replacement.id }).generation());
     try std.testing.expect(service.find(job_ids[0]) == null);
     try std.testing.expectEqual(job_ids[3], service.oldestCompletedJobId().?);
     try std.testing.expectEqual(@as(usize, MAX_JOBS - 1), service.completedJobCount());
