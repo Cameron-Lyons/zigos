@@ -284,7 +284,7 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(WireHeader));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(ServiceRegisterRequest));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceConnectionRequest));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(ServiceConnectionResponse));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ServiceConnectionResponse));
     try std.testing.expectEqual(@sizeOf(NetworkOpenSessionRequest), @sizeOf(Request(.network_open_session)));
     try std.testing.expectEqual(@sizeOf(NetworkRecordTransferRequest), @sizeOf(Request(.network_record_transfer)));
     try std.testing.expect(@hasField(NetworkRecordTransferRequest, "expected_policy_id"));
