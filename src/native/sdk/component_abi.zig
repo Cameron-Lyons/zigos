@@ -65,11 +65,9 @@ pub fn header(
     correlation_id: u64,
     subject_task_id: u64,
 ) Error!WireHeader {
-    const op = try operation(key, operation_id);
+    _ = try operation(key, operation_id);
     return .{
         .operation = @intFromEnum(operation_id),
-        .request_len = op.request_size,
-        .response_len = op.response_size,
         .correlation_id = correlation_id,
         .subject_task_id = subject_task_id,
     };

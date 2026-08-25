@@ -150,14 +150,16 @@ pub const indexed_hot_path_tables = .{
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
         .binds_services_by_interface_id = @hasDecl(component_abi_schema, "interfaceIdForService"),
-        .uses_exact_interface_id_only_service_wires = component_abi_wire.VERSION == 3 and
-            @sizeOf(component_abi_wire.WireHeader) == 32 and
-            @sizeOf(component_abi_wire.ServiceRegisterRequestWire) == 64 and
-            @sizeOf(component_abi_wire.ServiceConnectionRequestWire) == 40 and
+        .uses_exact_interface_id_only_service_wires = component_abi_wire.VERSION == 4 and
+            @sizeOf(component_abi_wire.WireHeader) == 24 and
+            @sizeOf(component_abi_wire.ServiceRegisterRequestWire) == 56 and
+            @sizeOf(component_abi_wire.ServiceConnectionRequestWire) == 32 and
             @sizeOf(abi.ServiceConnectionDescriptor) == 24 and
             !@hasField(component_abi_wire.WireHeader, "interface_major") and
             !@hasField(component_abi_wire.WireHeader, "interface_minor") and
             !@hasField(component_abi_wire.WireHeader, "flags") and
+            !@hasField(component_abi_wire.WireHeader, "request_len") and
+            !@hasField(component_abi_wire.WireHeader, "response_len") and
             !@hasField(component_abi_wire.ServiceRegisterRequestWire, "interface_name_len") and
             !@hasField(component_abi_wire.ServiceRegisterRequestWire, "version_major") and
             !@hasField(component_abi_wire.ServiceRegisterRequestWire, "version_minor") and

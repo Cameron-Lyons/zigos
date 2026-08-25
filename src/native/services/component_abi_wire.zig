@@ -1,14 +1,12 @@
 const crypto_hash = @import("../core/crypto_hash.zig");
 
 pub const MAGIC: u32 = 0x54434142;
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 pub const WireHeader = extern struct {
     correlation_id: u64,
     subject_task_id: u64,
     magic: u32 = MAGIC,
-    request_len: u32,
-    response_len: u32,
     abi_version: u16 = VERSION,
     operation: u16,
 };
