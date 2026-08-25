@@ -137,6 +137,7 @@ const StorageVolumeContext = struct {
     seed_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
 
     pristine_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
+    object_payload: [object_store.MAX_CHUNK_BYTES + 64]u8 = undefined,
     store: object_store.Store = object_store.Store.init(),
     workspaces: workspace.Directory = workspace.Directory.init(),
     prepared: bool = false,
@@ -811,6 +812,20 @@ fn prepareStorageVolumeFixture() void {
     if (storage_volume_context.prepared) return;
 
     const owner = app(0xBEE0);
+    @memset(&storage_volume_context.object_payload, 0x5a);
+    const stored = storage_volume_context.store.putVersion(.{
+        .preferred_object_id = ids.object(0xBEE0),
+        .object_type = .document,
+        .payload = &storage_volume_context.object_payload,
+        .metadata = object_store.signMetadata(
+            signer("volume-bench", 0x5a),
+            "volume-bench",
+            "text/markdown",
+            .document,
+            &storage_volume_context.object_payload,
+            800,
+        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const record = storage_volume_context.workspaces.create(.{
         .owner = owner,
         .label = "volume-bench",
@@ -822,8 +837,8 @@ fn prepareStorageVolumeFixture() void {
         storage_volume_context.workspaces.stagePut(
             workspace_id,
             "benchmarks/storage-volume.md",
-            ids.object(0xBEE0),
-            ids.version(900 + @as(u64, @intCast(index))),
+            stored.object_id,
+            stored.version_id,
             .document,
         ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
         _ = storage_volume_context.workspaces.commit(workspace_id, 800 + @as(u64, @intCast(index))) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
@@ -1451,7 +1466,11 @@ fn benchmarkStorageVolumeReplaySegmentedLog(iteration: u32) u64 {
         &storage_volume_context.workspaces,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const record = storage_volume_context.workspaces.findOwned(app(0xBEE0), "volume-bench") orelse unreachable;
-    return generation + record.generation + record.entryCount();
+    const stored_object = storage_volume_context.store.object(ids.object(0xBEE0)) orelse unreachable;
+    return generation + record.generation + record.entryCount() +
+        storage_volume_context.store.objectCount() + storage_volume_context.store.versionCount() +
+        storage_volume_context.store.blobCount() + storage_volume_context.store.chunkCount() +
+        storage_volume_context.store.maxBlobPayloadBytes() + stored_object.latest_version_id.raw();
 }
 
 fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
@@ -1462,12 +1481,13 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
         &storage_volume_context.workspaces,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const record = storage_volume_context.workspaces.findOwned(app(0xBEE0), "volume-bench") orelse unreachable;
+    const stored_object = storage_volume_context.store.object(ids.object(0xBEE0)) orelse unreachable;
     storage_volume_context.workspaces.beginTransaction(record.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     storage_volume_context.workspaces.stagePut(
         record.id,
         "benchmarks/storage-volume.md",
-        ids.object(0xBEE0),
-        ids.version(10_000 + @as(u64, iteration)),
+        stored_object.id,
+        stored_object.latest_version_id,
         .document,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = storage_volume_context.workspaces.commit(record.id, 10_000 + @as(u64, iteration)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
@@ -1479,7 +1499,10 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
         &storage_volume_context.workspaces,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const after_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return result.generation + after_compacted - before_compacted + record.generation;
+    return result.generation + after_compacted - before_compacted + record.generation +
+        storage_volume_context.store.objectCount() + storage_volume_context.store.versionCount() +
+        storage_volume_context.store.blobCount() + storage_volume_context.store.chunkCount() +
+        storage_volume_context.store.maxBlobPayloadBytes();
 }
 
 fn benchmarkPackageRevision(iteration: u32) u64 {
