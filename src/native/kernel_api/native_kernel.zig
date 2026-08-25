@@ -84,6 +84,7 @@ pub const SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
 pub const SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const SCOPED_MINT_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const CAPABILITY_PASS_QUERY_RELOOKUPS: usize = 0;
+pub const TASK_CREATE_AUDIT_INDEX_RELOOKUPS: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -172,7 +173,7 @@ pub const Kernel = struct {
         try validateTaskCreateRequest(request);
 
         const task = try self.runtime.createTask(request);
-        try self.runtime.audit(task.id, .{
+        task.appendAudit(.{
             .kind = .created,
             .tick = now_ticks,
         });
