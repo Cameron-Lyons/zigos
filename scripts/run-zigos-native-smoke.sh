@@ -142,6 +142,52 @@ assert_reboot_markers() {
   assert_marker_group "$log_path" cold_reboot
 }
 
+assert_stack_headroom() {
+  local log_path="$1"
+  local marker="$2"
+  local metrics
+  local used_bytes
+  local capacity_bytes
+
+  if ! metrics="$(awk -v marker="$marker" '
+    index($0, marker) {
+      used = ""
+      capacity = ""
+      for (field = 1; field <= NF; field += 1) {
+        if ($field ~ /^used_bytes=/) {
+          split($field, parts, "=")
+          used = parts[2]
+        } else if ($field ~ /^capacity_bytes=/) {
+          split($field, parts, "=")
+          capacity = parts[2]
+        }
+      }
+    }
+    END {
+      if (used == "" || capacity == "") exit 1
+      print used, capacity
+    }
+  ' "$log_path")"; then
+    echo "Zigos native smoke test failed: missing stack watermark '$marker' in $log_path" >&2
+    cat "$log_path" >&2
+    exit 1
+  fi
+
+  read -r used_bytes capacity_bytes <<<"$metrics"
+  if [ "$used_bytes" -gt "$capacity_bytes" ] ||
+     [ $((used_bytes * 4)) -gt $((capacity_bytes * 3)) ]; then
+    echo "Zigos native smoke test failed: stack watermark '$marker' has less than 25% headroom in $log_path" >&2
+    cat "$log_path" >&2
+    exit 1
+  fi
+}
+
+assert_stack_headroom_markers() {
+  local log_path="$1"
+  assert_stack_headroom "$log_path" "ZIGOS:PLATFORM:BOOT_STACK:PEAK"
+  assert_stack_headroom "$log_path" "ZIGOS:PLATFORM:TRAP_STACK:PEAK"
+}
+
 assert_ab_rollback_markers() {
   local log_path="$1"
   assert_marker_group "$log_path" ab_rollback
@@ -315,10 +361,12 @@ run_negative_boot() {
 case "$MODE" in
   production)
     run_boot "$BOOT1_LOG" reset
+    assert_stack_headroom_markers "$BOOT1_LOG"
     assert_production_boot_markers "$BOOT1_LOG"
     assert_marker_group "$BOOT1_LOG" production_first_boot
 
     run_boot "$BOOT2_LOG" preserve
+    assert_stack_headroom_markers "$BOOT2_LOG"
     assert_production_boot_markers "$BOOT2_LOG"
     assert_marker_group "$BOOT2_LOG" production_reboot
 
@@ -336,6 +384,7 @@ case "$MODE" in
     ;;
   full)
     run_boot "$BOOT1_LOG" reset
+    assert_stack_headroom_markers "$BOOT1_LOG"
     assert_boot_markers "$BOOT1_LOG"
     assert_first_boot_markers "$BOOT1_LOG"
     assert_ab_rollback_markers "$BOOT1_LOG"
@@ -343,6 +392,7 @@ case "$MODE" in
     assert_driver_restart_without_reboot "$BOOT1_LOG"
 
     run_boot "$BOOT2_LOG" preserve
+    assert_stack_headroom_markers "$BOOT2_LOG"
     assert_boot_markers "$BOOT2_LOG"
     assert_reboot_markers "$BOOT2_LOG"
     assert_ab_rollback_markers "$BOOT2_LOG"
