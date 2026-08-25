@@ -414,6 +414,7 @@ pub const indexed_hot_path_tables = .{
         .centralizes_subject_task_validation = component_port.SUBJECT_TASK_PRECHECKS_PER_CALL == 0 and
             native_kernel.SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL == 0,
         .reuses_owner_tasks_for_auto_grants = native_kernel.SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS == 0,
+        .reuses_scoped_mint_tasks = native_kernel.SCOPED_MINT_TASK_INDEX_RELOOKUPS == 0,
         .derives_kernel_operations_from_typed_methods = native_kernel.TYPED_METHOD_DERIVES_KERNEL_OPERATION and
             !@hasField(native_kernel.KernelCallContext, "operation") and
             @sizeOf(native_kernel.KernelCallContext) <= native_kernel.KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES,

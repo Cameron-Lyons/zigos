@@ -82,6 +82,7 @@ pub const GRANT_ATTACHMENT_TASK_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
 pub const RESOLVED_TASK_REVOCATION_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
 pub const SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
 pub const SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS: usize = 0;
+pub const SCOPED_MINT_TASK_INDEX_RELOOKUPS: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -346,10 +347,11 @@ pub const Kernel = struct {
         _ = try self.authorizeOperation(.capability_mint, context, now_ticks, .{
             .request_task_id = request.scope.task_id,
         });
-        if (request.scope.task_id) |task_id| {
+        const target_task = if (request.scope.task_id) |task_id| blk: {
             const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
             if (!task.owner.eql(request.holder)) return error.PermissionDenied;
-        }
+            break :blk task;
+        } else null;
 
         var plan = capability.GrantPlan{};
         if (request.scope.task_id) |task_id| {
@@ -358,7 +360,7 @@ pub const Kernel = struct {
             try plan.addMint(0, request);
         }
         var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
-        const minted = (try self.applyGrantPlan(&plan, &minted_buffer, null))[0];
+        const minted = (try self.applyGrantPlan(&plan, &minted_buffer, target_task))[0];
         return capabilityDescriptor(&minted);
     }
 
