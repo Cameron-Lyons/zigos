@@ -29,6 +29,14 @@ pub const CheckpointStore = struct {
     checkpoint_retry_count: u64 = 0,
     checkpoint_volume: CheckpointVolume = if (shares_root_volume) {} else storage_volume.Volume.init(),
 
+    pub fn initializeAllocated(self: *CheckpointStore) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.store.initializeZeroed();
+        self.workspaces.reset();
+        self.last_checkpoint_error = null;
+        if (comptime !shares_root_volume) self.checkpoint_volume = storage_volume.Volume.init();
+    }
+
     fn volumePtr(self: *CheckpointStore) *storage_volume.Volume {
         if (comptime shares_root_volume) {
             return storage_volume.defaultVolume();

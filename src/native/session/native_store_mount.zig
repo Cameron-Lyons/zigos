@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
+const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
@@ -95,8 +96,7 @@ pub const NativeStoreMount = struct {
         if (comptime heap_backed_checkpoint_store) {
             const allocation = kernel_memory.kmalloc(@sizeOf(storage_service_mod.CheckpointStore)) orelse return error.NoSpaceLeft;
             const checkpoint_store: *storage_service_mod.CheckpointStore = @ptrCast(@alignCast(allocation));
-            @memset(std.mem.asBytes(checkpoint_store), 0);
-            checkpoint_store.resetPreparedState();
+            checkpoint_store.initializeAllocated();
             self.storage_checkpoint_store = checkpoint_store;
             return checkpoint_store;
         }
@@ -180,6 +180,19 @@ test "native store initializes reuses and resets its export package buffer" {
     const reset = try mount.exportPackagePtr();
     try std.testing.expect(first == reset);
     try std.testing.expectEqual(@as(usize, 0), reset.entry_count);
+}
+
+test "allocated checkpoint stores receive canonical arena sentinels" {
+    const checkpoint_store = try std.testing.allocator.create(storage_service_mod.CheckpointStore);
+    defer std.testing.allocator.destroy(checkpoint_store);
+    @memset(std.mem.asBytes(checkpoint_store), 0xa5);
+
+    checkpoint_store.initializeAllocated();
+
+    try std.testing.expectEqual(@as(usize, 0), checkpoint_store.store.objectCount());
+    try std.testing.expectEqual(@as(usize, 0), checkpoint_store.store.versionCount());
+    try std.testing.expectEqual(@as(usize, 0), checkpoint_store.workspaces.workspaceCount());
+    try std.testing.expectEqual(@as(usize, 0), checkpoint_store.store.objects.reserveIndex(ids.object(1)).?);
 }
 
 test "native store initializes reuses and resets its sync resident state" {
