@@ -19,6 +19,7 @@ const userspace_scheduler = @import("task/userspace_scheduler.zig");
 const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
 const task_runtime = @import("task/task_runtime.zig");
+const process_isolation = @import("task/process_isolation.zig");
 const syscall_dispatch = @import("kernel_api/syscall_dispatch.zig");
 const component_port = @import("kernel_api/component_port.zig");
 const native_kernel = @import("kernel_api/native_kernel.zig");
@@ -403,6 +404,8 @@ pub const indexed_hot_path_tables = .{
         .reuses_resolved_termination_tasks = task_runtime.TERMINATION_TASK_INDEX_RELOOKUPS == 0 and
             @hasDecl(task_runtime.Runtime, "taskHandle"),
         .records_resolved_task_audits = task_runtime.RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS == 0,
+        .resolves_process_isolation_tasks_once = process_isolation.TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK == 1 and
+            process_isolation.AUDIT_TASK_INDEX_RELOOKUPS == 0,
         .bounds_task_capability_scans = task_runtime.TASK_CAPABILITY_SCAN_BOUND == task_runtime.MAX_TASK_CAPABILITIES,
         .avoids_task_capability_primary_index_lookups = task_runtime.TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
         .tracks_task_capability_generation = @hasDecl(task_runtime.TaskRecord, "capabilityGeneration"),
