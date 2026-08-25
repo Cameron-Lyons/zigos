@@ -374,6 +374,7 @@ pub const indexed_hot_path_tables = .{
         .uses_generational_task_handles_for_dispatch = @hasDecl(task_runtime.Runtime, "findByHandle") and
             userspace_scheduler.SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH == 0,
         .reuses_accelerator_wait_slots = userspace_scheduler.ACCELERATOR_WAIT_TASK_INDEX_RELOOKUPS == 0,
+        .derives_accelerator_wait_dispatch_request_once = userspace_scheduler.ACCELERATOR_WAIT_DISPATCH_REQUEST_DERIVATIONS == 1,
         .reuses_task_slots_during_unregister = userspace_scheduler.TASK_UNREGISTER_SLOT_RELOOKUPS == 0,
         .resolves_accelerator_rank_tasks_once = userspace_scheduler.ACCELERATOR_RANK_TASK_INDEX_LOOKUPS_PER_CANDIDATE == 1 and
             userspace_scheduler.ACCELERATOR_RANK_BACKING_RELOOKUPS_PER_COMPARISON == 0,

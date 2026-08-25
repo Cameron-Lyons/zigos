@@ -58,6 +58,7 @@ pub const ACCELERATOR_RANK_BACKING_RELOOKUPS_PER_COMPARISON: u8 = 0;
 pub const ACCELERATOR_INSERT_BACKING_RELOOKUPS: u8 = 0;
 pub const ACCELERATOR_REMOVE_BACKING_RELOOKUPS: u8 = 0;
 pub const ACCELERATOR_ENQUEUE_BACKING_RELOOKUPS: u8 = 0;
+pub const ACCELERATOR_WAIT_DISPATCH_REQUEST_DERIVATIONS: u8 = 1;
 
 comptime {
     if (task_runtime.MAX_TASKS > std.math.maxInt(QueueSlotIndex) or
@@ -650,7 +651,8 @@ pub const Scheduler = struct {
                 continue;
             }
 
-            const decision = self.planTaskDispatch(slot, task);
+            const dispatch_request = self.dispatchRequestFor(slot, task);
+            const decision = self.planTaskDispatch(dispatch_request);
             slot.last_dispatch_engine = decision.engine;
             slot.last_dispatch_reason = decision.reason;
             slot.last_dispatch_degraded = decision.degraded;
@@ -662,8 +664,15 @@ pub const Scheduler = struct {
                 return false;
             }
             if (self.dispatchRequiresUnavailableAccelerator(slot, decision)) {
-                self.accountDispatchDenied(slot, decision.reason, requestedAcceleratorEngine(self.dispatchRequestFor(slot, task)));
-                self.queuePendingAcceleratorWake(index, slot, task, now_ticks);
+                const requested_engine = requestedAcceleratorEngine(dispatch_request);
+                self.accountDispatchDenied(slot, decision.reason, requested_engine);
+                self.queuePendingAcceleratorWake(
+                    index,
+                    slot,
+                    requested_engine,
+                    dispatch_request.shared_memory_bytes,
+                    now_ticks,
+                );
                 self.last_dispatch_tick = now_ticks;
                 return false;
             }
@@ -914,13 +923,12 @@ pub const Scheduler = struct {
 
     fn planTaskDispatch(
         self: *const Scheduler,
-        slot: *const Slot,
-        task: *const task_runtime.TaskRecord,
+        request: accelerator_scheduler.Request,
     ) accelerator_scheduler.Decision {
         return accelerator_scheduler.planWithState(
             self.resource_state,
             self.engineAvailability(),
-            self.dispatchRequestFor(slot, task),
+            request,
         );
     }
 
@@ -995,12 +1003,11 @@ pub const Scheduler = struct {
         self: *Scheduler,
         slot_index: usize,
         slot: *Slot,
-        task: *const task_runtime.TaskRecord,
+        engine: accelerator_scheduler.Engine,
+        shared_memory_bytes: usize,
         now_ticks: u64,
     ) void {
         if (slot.pending_accelerator_claim_id != 0) return;
-        const request = self.dispatchRequestFor(slot, task);
-        const engine = requestedAcceleratorEngine(request);
         if (engine == .cpu) return;
         _ = self.enqueueAcceleratorClaimForSlot(.{
             .task_id = slot.task_id,
@@ -1008,7 +1015,7 @@ pub const Scheduler = struct {
             .resource_class = slot.resource_class,
             .requested_at_tick = now_ticks,
             .deadline_tick = slot.deadline_tick,
-            .shared_memory_bytes = request.shared_memory_bytes,
+            .shared_memory_bytes = shared_memory_bytes,
         }, slot);
         self.unlinkReadyIndex(slot_index);
     }
