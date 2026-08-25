@@ -11,7 +11,7 @@ pub fn dispatchSharedMemoryCreate(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.SharedMemoryCreateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const created = component_port.invokeGenerated(.shared_memory_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const created = component_port.invokeGeneratedFromValidatedSyscall(.shared_memory_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.SharedMemoryCreateResponse{
         .object = created.object,
         .capability = created.capability,
@@ -39,7 +39,7 @@ pub fn dispatchSharedMemoryUnmap(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.SharedMemoryUnmapRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const unmapped = component_port.invokeGenerated(.shared_memory_unmap, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const unmapped = component_port.invokeGeneratedFromValidatedSyscall(.shared_memory_unmap, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(unmapped));
 }
 

@@ -3297,7 +3297,7 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user slice copies enforce source and destination bounds" },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8" },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer)" },
-        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGenerated(.endpoint_send, port, request, now_ticks)" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks)" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "invalid_payload_ptr[0..1]" },
     };
     for (protected_endpoint_send_snippets) |required| {

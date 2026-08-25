@@ -17,6 +17,7 @@ pub const Error = native_kernel.Error || error{
     UnsupportedAbiVersion,
 };
 const TEST_PORT_TASK_BYTES: usize = 512;
+pub const PREVALIDATED_SYSCALL_HEADER_RECHECKS: u8 = 0;
 
 pub const TaskCreateRequest = struct {
     header: abi.RequestHeader,
@@ -157,13 +158,23 @@ pub const DeviceMmioWindowRequest = struct {
 
 pub const KernelPort = struct {
     kernel: *native_kernel.Kernel,
+    syscall_header_prevalidated: bool = false,
 
     pub fn init(kernel: *native_kernel.Kernel) KernelPort {
         return .{ .kernel = kernel };
     }
 
+    fn validateIncomingHeader(
+        self: *const KernelPort,
+        header: abi.RequestHeader,
+        comptime expected: abi.NativeOperation,
+    ) Error!void {
+        if (self.syscall_header_prevalidated) return;
+        return validateHeader(header, expected);
+    }
+
     pub fn taskCreate(self: *KernelPort, request: TaskCreateRequest, now_ticks: u64) Error!abi.TaskDescriptor {
-        try validateHeader(request.header, .task_create);
+        try self.validateIncomingHeader(request.header, .task_create);
         return self.kernel.taskCreate(
             callContext(request.header, request.authority_capability_id, .{ .task = 0 }),
             request.request,
@@ -172,7 +183,7 @@ pub const KernelPort = struct {
     }
 
     pub fn taskTerminate(self: *KernelPort, request: TaskTerminateRequest, now_ticks: u64) Error!bool {
-        try validateHeader(request.header, .task_terminate);
+        try self.validateIncomingHeader(request.header, .task_terminate);
         return self.kernel.taskTerminate(
             callContext(request.header, request.task_capability_id, .none),
             now_ticks,
@@ -184,7 +195,7 @@ pub const KernelPort = struct {
         request: EndpointCreateRequest,
         now_ticks: u64,
     ) Error!native_kernel.EndpointCreateResult {
-        try validateHeader(request.header, .endpoint_create);
+        try self.validateIncomingHeader(request.header, .endpoint_create);
         return self.kernel.endpointCreate(
             callContext(request.header, request.authority_capability_id, .{ .task = request.owner_task_id }),
             request.owner_task_id,
@@ -195,7 +206,7 @@ pub const KernelPort = struct {
     }
 
     pub fn endpointConnect(self: *KernelPort, request: EndpointConnectRequest, now_ticks: u64) Error!abi.EndpointDescriptor {
-        try validateHeader(request.header, .endpoint_connect);
+        try self.validateIncomingHeader(request.header, .endpoint_connect);
         return self.kernel.endpointConnect(
             callContext(request.header, request.endpoint_capability_id, .none),
             request.peer_endpoint_capability_id,
@@ -205,7 +216,7 @@ pub const KernelPort = struct {
     }
 
     pub fn endpointSend(self: *KernelPort, request: EndpointSendRequest, now_ticks: u64) Error!void {
-        try validateHeader(request.header, .endpoint_send);
+        try self.validateIncomingHeader(request.header, .endpoint_send);
         try validateOptionalCallerCapability(self, request.header, request.attached_capability_id, now_ticks);
         return self.kernel.endpointSend(
             callContext(request.header, request.endpoint_capability_id, .none),
@@ -222,7 +233,7 @@ pub const KernelPort = struct {
         request: EndpointRecvRequest,
         now_ticks: u64,
     ) Error!?native_kernel.EndpointReceiveResult {
-        try validateHeader(request.header, .endpoint_recv);
+        try self.validateIncomingHeader(request.header, .endpoint_recv);
         try validateSubjectTask(request.header, request.receiver_task_id);
         const received = try self.kernel.endpointRecv(
             callContext(request.header, request.endpoint_capability_id, .none),
@@ -244,7 +255,7 @@ pub const KernelPort = struct {
         request: CapabilityMintRequest,
         now_ticks: u64,
     ) Error!abi.CapabilityDescriptor {
-        try validateHeader(request.header, .capability_mint);
+        try self.validateIncomingHeader(request.header, .capability_mint);
         return self.kernel.capabilityMint(
             callContext(request.header, request.policy_capability_id, .none),
             request.request,
@@ -253,7 +264,7 @@ pub const KernelPort = struct {
     }
 
     pub fn capabilityDerive(self: *KernelPort, request: CapabilityDeriveRequest) Error!abi.CapabilityDescriptor {
-        try validateHeader(request.header, .capability_derive);
+        try self.validateIncomingHeader(request.header, .capability_derive);
         return self.kernel.capabilityDerive(
             callContext(request.header, request.request.parent_capability_id, .none),
             request.request,
@@ -265,7 +276,7 @@ pub const KernelPort = struct {
         request: CapabilityPassRequest,
         now_ticks: u64,
     ) Error!abi.CapabilityDescriptor {
-        try validateHeader(request.header, .capability_pass);
+        try self.validateIncomingHeader(request.header, .capability_pass);
         return self.kernel.capabilityPass(
             callContext(request.header, request.capability_id, .none),
             request.receiver_task_id,
@@ -275,7 +286,7 @@ pub const KernelPort = struct {
     }
 
     pub fn capabilityRevoke(self: *KernelPort, request: CapabilityRevokeRequest, now_ticks: u64) Error!void {
-        try validateHeader(request.header, .capability_revoke);
+        try self.validateIncomingHeader(request.header, .capability_revoke);
         return self.kernel.capabilityRevoke(
             callContext(request.header, request.authority_capability_id, .{ .capability = request.capability_id }),
             request.capability_id,
@@ -288,7 +299,7 @@ pub const KernelPort = struct {
         request: CapabilityQueryRequest,
         now_ticks: u64,
     ) Error!abi.CapabilityDescriptor {
-        try validateHeader(request.header, .capability_query);
+        try self.validateIncomingHeader(request.header, .capability_query);
         return self.kernel.capabilityQuery(
             callContext(request.header, request.authority_capability_id, .{ .capability = request.capability_id }),
             request.capability_id,
@@ -301,7 +312,7 @@ pub const KernelPort = struct {
         request: SharedMemoryCreateRequest,
         now_ticks: u64,
     ) Error!native_kernel.SharedMemoryCreateResult {
-        try validateHeader(request.header, .shared_memory_create);
+        try self.validateIncomingHeader(request.header, .shared_memory_create);
         return self.kernel.sharedMemoryCreate(
             callContext(request.header, request.authority_capability_id, .{ .task = request.owner_task_id }),
             request.owner_task_id,
@@ -315,7 +326,7 @@ pub const KernelPort = struct {
         request: SharedMemoryMapRequest,
         now_ticks: u64,
     ) Error!abi.SharedMemoryDescriptor {
-        try validateHeader(request.header, .shared_memory_map);
+        try self.validateIncomingHeader(request.header, .shared_memory_map);
         try validateSubjectTask(request.header, request.task_id);
         return self.kernel.sharedMemoryMap(
             callContext(request.header, request.shared_memory_capability_id, .none),
@@ -325,7 +336,7 @@ pub const KernelPort = struct {
     }
 
     pub fn sharedMemoryUnmap(self: *KernelPort, request: SharedMemoryUnmapRequest, now_ticks: u64) Error!bool {
-        try validateHeader(request.header, .shared_memory_unmap);
+        try self.validateIncomingHeader(request.header, .shared_memory_unmap);
         try validateSubjectTask(request.header, request.task_id);
         return self.kernel.sharedMemoryUnmap(
             callContext(request.header, request.shared_memory_capability_id, .none),
@@ -339,7 +350,7 @@ pub const KernelPort = struct {
         request: SharedMemoryRevokeRequest,
         now_ticks: u64,
     ) Error!abi.SharedMemoryDescriptor {
-        try validateHeader(request.header, .shared_memory_revoke);
+        try self.validateIncomingHeader(request.header, .shared_memory_revoke);
         return self.kernel.sharedMemoryRevoke(
             callContext(request.header, request.shared_memory_capability_id, .none),
             now_ticks,
@@ -347,7 +358,7 @@ pub const KernelPort = struct {
     }
 
     pub fn timeQuery(self: *KernelPort, request: TimeQueryRequest, now_ticks: u64) Error!u64 {
-        try validateHeader(request.header, .time_query);
+        try self.validateIncomingHeader(request.header, .time_query);
         return self.kernel.timeQuery(callContext(request.header, request.authority_capability_id, .none), now_ticks);
     }
 
@@ -356,7 +367,7 @@ pub const KernelPort = struct {
         request: ResourceQueryRequest,
         now_ticks: u64,
     ) Error!abi.ResourceDescriptor {
-        try validateHeader(request.header, .resource_query);
+        try self.validateIncomingHeader(request.header, .resource_query);
         return self.kernel.resourceQuery(
             callContext(request.header, request.authority_capability_id, .{ .task = request.task_id }),
             request.task_id,
@@ -369,7 +380,7 @@ pub const KernelPort = struct {
         request: AccountingQueryRequest,
         now_ticks: u64,
     ) Error!abi.AccountingDescriptor {
-        try validateHeader(request.header, .accounting_query);
+        try self.validateIncomingHeader(request.header, .accounting_query);
         return self.kernel.accountingQuery(
             callContext(request.header, request.authority_capability_id, .{ .task = request.task_id }),
             request.task_id,
@@ -382,7 +393,7 @@ pub const KernelPort = struct {
         request: InputRecvRequest,
         now_ticks: u64,
     ) Error!?abi.InputEventDescriptor {
-        try validateHeader(request.header, .input_recv);
+        try self.validateIncomingHeader(request.header, .input_recv);
         try validateSubjectTask(request.header, request.receiver_task_id);
         return self.kernel.inputRecv(
             callContext(request.header, request.input_capability_id, .{ .task = request.receiver_task_id }),
@@ -396,7 +407,7 @@ pub const KernelPort = struct {
         request: SurfacePresentRequest,
         now_ticks: u64,
     ) Error!bool {
-        try validateHeader(request.header, .surface_present);
+        try self.validateIncomingHeader(request.header, .surface_present);
         try validateSubjectTask(request.header, request.presenter_task_id);
         return self.kernel.surfacePresent(
             callContext(request.header, request.presentation_capability_id, .{ .task = request.presenter_task_id }),
@@ -411,7 +422,7 @@ pub const KernelPort = struct {
         request: DeviceDescribeRequest,
         now_ticks: u64,
     ) Error!abi.DeviceDescriptor {
-        try validateHeader(request.header, .device_describe);
+        try self.validateIncomingHeader(request.header, .device_describe);
         return self.kernel.deviceDescribe(callContext(request.header, request.device_capability_id, .none), now_ticks);
     }
 
@@ -420,7 +431,7 @@ pub const KernelPort = struct {
         request: DeviceMmioWindowRequest,
         now_ticks: u64,
     ) Error!abi.DeviceMmioWindowDescriptor {
-        try validateHeader(request.header, .device_mmio_window);
+        try self.validateIncomingHeader(request.header, .device_mmio_window);
         return self.kernel.deviceMmioWindow(
             callContext(request.header, request.device_capability_id, .none),
             request.window_index,
@@ -507,6 +518,17 @@ pub fn invokeGenerated(
         .with_now_ticks => method(self, request, now_ticks),
         .without_now_ticks => method(self, request),
     };
+}
+
+pub fn invokeGeneratedFromValidatedSyscall(
+    comptime operation: abi.NativeOperation,
+    self: *KernelPort,
+    request: PortRequest(operation),
+    now_ticks: u64,
+) PortCallResult(operation) {
+    var validated_port = self.*;
+    validated_port.syscall_header_prevalidated = true;
+    return invokeGenerated(operation, &validated_port, request, now_ticks);
 }
 
 fn generatedWrapperFromMetadata(comptime descriptor: operation_metadata.Descriptor) GeneratedWrapper {

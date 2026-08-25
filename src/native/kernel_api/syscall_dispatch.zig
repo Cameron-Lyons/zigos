@@ -187,7 +187,7 @@ pub fn invokeAndWriteResponse(
     response_len: usize,
 ) DispatchResult {
     const request = readRequest(component_port.PortRequest(operation), memory, request_addr) orelse return invalidRequest();
-    const response = component_port.invokeGenerated(operation, port, request, now_ticks) catch |err| return mapError(err);
+    const response = component_port.invokeGeneratedFromValidatedSyscall(operation, port, request, now_ticks) catch |err| return mapError(err);
     return writeResponse(memory, response_addr, response_len, response);
 }
 
@@ -203,7 +203,7 @@ pub fn invokeNoResponse(
     _ = response_addr;
     _ = response_len;
     const request = readRequest(component_port.PortRequest(operation), memory, request_addr) orelse return invalidRequest();
-    _ = component_port.invokeGenerated(operation, port, request, now_ticks) catch |err| return mapError(err);
+    _ = component_port.invokeGeneratedFromValidatedSyscall(operation, port, request, now_ticks) catch |err| return mapError(err);
     return success();
 }
 

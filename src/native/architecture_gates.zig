@@ -19,6 +19,7 @@ const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const syscall_dispatch = @import("kernel_api/syscall_dispatch.zig");
+const component_port = @import("kernel_api/component_port.zig");
 const debug_contract = @import("security/debug_contract.zig");
 const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
@@ -406,6 +407,8 @@ pub const indexed_hot_path_tables = .{
         .validates_ordered_address_space_ranges_in_one_pass = task_runtime.ORDERED_EXECUTABLE_SEGMENTS and
             syscall_dispatch.SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION,
         .validates_terminal_stack_ranges_directly = syscall_dispatch.DIRECT_STACK_RANGE_VALIDATION,
+        .avoids_rechecking_dispatched_syscall_headers = component_port.PREVALIDATED_SYSCALL_HEADER_RECHECKS == 0 and
+            @hasDecl(component_port, "invokeGeneratedFromValidatedSyscall"),
     },
     .debug_contract = .{
         .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and
