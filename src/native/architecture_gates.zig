@@ -415,6 +415,7 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(native_kernel.KernelCallContext) <= native_kernel.KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES,
         .authorizes_with_one_task_index_lookup = native_kernel.AUTHORIZATION_TASK_INDEX_LOOKUPS_PER_CALL == 1 and
             @hasDecl(task_runtime.TaskRecord, "hasCapability"),
+        .reuses_resolved_tasks_for_budget_checks = native_kernel.RESOLVED_TASK_BUDGET_RELOOKUPS_PER_CALL == 0,
     },
     .debug_contract = .{
         .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and
