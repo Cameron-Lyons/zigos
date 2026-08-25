@@ -61,6 +61,8 @@ pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
 pub const COMPACT_COMMAND_QUEUE_METADATA = true;
 pub const COMPACT_REVIEW_PROGRESS_METADATA = true;
+pub const RENDERED_BEGIN_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const COMMAND_INPUT_SIZE_CEILING_BYTES: usize = 1_664;
 pub const RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES: usize = 1_272;
 
@@ -448,7 +450,7 @@ pub const RenderedReviewSurface = struct {
         if (self.bundle.requested_permissions.len > self.decisions.len) return error.TooManyPermissions;
         const app_task = self.service.runtime.find(self.app_task_id) orelse return error.TaskNotFound;
         self.review_window_id = self.service.ensureReviewWindow(app_task, self.bundle) orelse return error.ReviewWindowMissing;
-        try self.service.runtime.audit(self.app_task_id, .{
+        app_task.appendAudit(.{
             .kind = .permission_prompted,
             .detail = @intCast(self.bundle.requested_permissions.len),
             .tick = self.now_ticks,
@@ -703,7 +705,7 @@ pub const Service = struct {
         var decisions: [MAX_REVIEW_DECISIONS]permission_review.ReviewDecision = undefined;
         var decision_count: usize = 0;
 
-        try self.runtime.audit(app_task_id, .{
+        app_task.appendAudit(.{
             .kind = .permission_prompted,
             .detail = @intCast(bundle.requested_permissions.len),
             .tick = now_ticks,
@@ -748,7 +750,7 @@ pub const Service = struct {
             now_ticks,
             output,
         );
-        try self.runtime.audit(app_task_id, .{
+        app_task.appendAudit(.{
             .kind = .permission_reviewed,
             .detail = @intCast(grants.len),
             .tick = now_ticks,
