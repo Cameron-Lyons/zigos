@@ -794,6 +794,7 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(permission_review_service.CommandInput) <= permission_review_service.COMMAND_INPUT_SIZE_CEILING_BYTES,
     },
     .permission_review = .{
+        .groups_render_text_writes = permission_review.GROUPS_REVIEW_TEXT_WRITES,
         .stores_compact_session_decisions = permission_review.COMPACT_REVIEW_SESSION_DECISIONS and
             @FieldType(permission_review.ReviewSession, "decision_count") == u8 and
             @FieldType(permission_review.ReviewSession, "allowed_mask") == u16 and
