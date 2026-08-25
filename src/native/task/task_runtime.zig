@@ -150,6 +150,18 @@ pub fn commitBackgroundWork(task: *TaskRecord, reservation: BackgroundWorkReserv
     task.last_background_tick = reservation.tick;
 }
 
+pub inline fn releaseBackgroundWorkFromTask(
+    task: *TaskRecord,
+    budget: manifest.BackgroundResourceBudget,
+) bool {
+    if (task.background_active_count == 0) return false;
+
+    task.background_active_count -= 1;
+    task.background_reserved_memory_bytes = saturatingSub(task.background_reserved_memory_bytes, budget.memory_bytes);
+    task.background_reserved_shared_memory_bytes = saturatingSub(task.background_reserved_shared_memory_bytes, budget.shared_memory_bytes);
+    return true;
+}
+
 fn planBackgroundCapacity(task: *const TaskRecord, budget: manifest.BackgroundResourceBudget) ?BackgroundCapacity {
     if (task.state != .active or !task.background_allowed) return null;
 
@@ -1053,12 +1065,7 @@ pub const Runtime = struct {
         budget: manifest.BackgroundResourceBudget,
     ) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        if (task.background_active_count == 0) return false;
-
-        task.background_active_count -= 1;
-        task.background_reserved_memory_bytes = saturatingSub(task.background_reserved_memory_bytes, budget.memory_bytes);
-        task.background_reserved_shared_memory_bytes = saturatingSub(task.background_reserved_shared_memory_bytes, budget.shared_memory_bytes);
-        return true;
+        return releaseBackgroundWorkFromTask(task, budget);
     }
 
     pub fn terminateTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {

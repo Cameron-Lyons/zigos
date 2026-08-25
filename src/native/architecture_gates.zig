@@ -467,6 +467,7 @@ pub const indexed_hot_path_tables = .{
         .tracks_active_count = @hasField(background_dispatch.Controller, "active_count"),
         .uses_fair_reuse_cursor = @hasField(background_dispatch.Controller, "next_reusable_slot"),
         .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
+        .resolves_expiration_task_once = background_dispatch.EXPIRATION_TASK_ID_LOOKUPS_PER_RECORD == 1,
     },
     .indexing_service = .{
         .uses_bounded_document_scan = indexing_service.BOUNDED_DOCUMENT_SCAN,

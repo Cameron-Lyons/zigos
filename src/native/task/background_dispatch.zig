@@ -14,6 +14,7 @@ pub const MAX_RECORDS: usize = 16;
 pub const MAX_TASK_ID_BYTES: usize = 48;
 pub const BOUNDED_RECORD_SCAN = true;
 pub const COMPACT_DISPATCH_METADATA = true;
+pub const EXPIRATION_TASK_ID_LOOKUPS_PER_RECORD: u8 = 1;
 pub const DISPATCH_RECORD_SIZE_CEILING_BYTES: usize = 120;
 pub const CONTROLLER_SIZE_CEILING_BYTES: usize = 2_056;
 
@@ -255,13 +256,14 @@ pub const Controller = struct {
         var expired_count: usize = 0;
         for (&self.records) |*record| {
             if (record.id == 0 or !record.isOverdue(now_tick)) continue;
-            if (!try runtime.releaseBackgroundWork(record.task_id, record.budget)) continue;
+            const task = runtime.find(record.task_id) orelse return error.TaskNotFound;
+            if (!task_runtime.releaseBackgroundWorkFromTask(task, record.budget)) continue;
             self.deactivateRunningRecord(record);
             record.state = .expired;
             record.reason = .expired;
             record.completed_tick = now_tick;
             expired_count += 1;
-            try runtime.audit(record.task_id, .{
+            task.appendAudit(.{
                 .kind = .background_expired,
                 .detail = @intFromEnum(record.trigger),
                 .tick = now_tick,
