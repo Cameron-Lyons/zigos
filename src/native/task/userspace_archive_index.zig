@@ -1,5 +1,6 @@
 const std = @import("std");
 const archive = @import("userspace_archive");
+const embedded_file = @import("embedded_file.zig");
 const id_index = @import("../core/id_index.zig");
 const native_util = @import("../core/util.zig");
 
@@ -63,7 +64,7 @@ test "userspace archive index resolves every generated artifact bundle" {
         try std.testing.expectEqualStrings(artifact.bundle_id, indexed.bundle_id);
         try std.testing.expectEqualStrings(artifact.display_name, indexed.display_name);
         try std.testing.expectEqual(artifact.data.byte_len, indexed.data.byte_len);
-        try std.testing.expectEqualSlices(u32, artifact.data.chunk_indices, indexed.data.chunk_indices);
+        try std.testing.expectEqualSlices(embedded_file.ChunkIndex, artifact.data.chunk_indices, indexed.data.chunk_indices);
     }
     try std.testing.expect(artifactFor("zigos.system.missing-artifact") == null);
 }

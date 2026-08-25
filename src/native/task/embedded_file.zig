@@ -2,12 +2,13 @@ const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 
 pub const CHUNK_SIZE_BYTES: usize = 1024;
+pub const ChunkIndex = u16;
 
 pub const File = struct {
     data_bytes: ?[*]const u8 = null,
     byte_len: usize = 0,
-    chunk_indices: ?[*]const u32 = null,
-    pool_chunk_count: u32 = 0,
+    chunk_indices: ?[*]const ChunkIndex = null,
+    pool_chunk_count: ChunkIndex = 0,
 
     pub fn fromBytes(bytes: []const u8) File {
         return .{
@@ -19,7 +20,7 @@ pub const File = struct {
     pub fn fromChunks(
         byte_len: usize,
         chunk_pool: []const u8,
-        chunk_indices: []const u32,
+        chunk_indices: []const ChunkIndex,
     ) File {
         if (byte_len == 0) {
             if (chunk_pool.len == 0 and chunk_indices.len == 0) return .{};
@@ -28,7 +29,7 @@ pub const File = struct {
         if (chunk_pool.len == 0 or chunk_pool.len % CHUNK_SIZE_BYTES != 0) return invalid(byte_len);
         const required_chunks = std.math.divCeil(usize, byte_len, CHUNK_SIZE_BYTES) catch return invalid(byte_len);
         if (chunk_indices.len != required_chunks) return invalid(byte_len);
-        const pool_chunk_count = std.math.cast(u32, chunk_pool.len / CHUNK_SIZE_BYTES) orelse return invalid(byte_len);
+        const pool_chunk_count = std.math.cast(ChunkIndex, chunk_pool.len / CHUNK_SIZE_BYTES) orelse return invalid(byte_len);
         for (chunk_indices) |chunk_index| {
             if (chunk_index >= pool_chunk_count) return invalid(byte_len);
         }
@@ -95,7 +96,7 @@ pub const File = struct {
     fn invalid(byte_len: usize) File {
         return .{
             .byte_len = byte_len,
-            .pool_chunk_count = std.math.maxInt(u32),
+            .pool_chunk_count = std.math.maxInt(ChunkIndex),
         };
     }
 };
@@ -172,8 +173,9 @@ pub const Reader = struct {
 };
 
 test "chunked embedded files preserve logical bytes across shared chunks" {
+    try std.testing.expectEqual(u16, ChunkIndex);
     const chunk_pool = ([_]u8{'a'} ** CHUNK_SIZE_BYTES) ++ ([_]u8{'A'} ** CHUNK_SIZE_BYTES);
-    const chunk_indices = [_]u32{ 0, 1, 0 };
+    const chunk_indices = [_]ChunkIndex{ 0, 1, 0 };
     const byte_len = CHUNK_SIZE_BYTES * 2 + 2;
     const file = File.fromChunks(byte_len, &chunk_pool, &chunk_indices);
     try std.testing.expect(file.isPresent());
@@ -194,8 +196,8 @@ test "chunked embedded files preserve logical bytes across shared chunks" {
 
 test "chunked embedded files reject invalid index layouts" {
     const chunk_pool = [_]u8{0} ** CHUNK_SIZE_BYTES;
-    const missing_index = [_]u32{0};
-    const out_of_range = [_]u32{ 0, 1 };
+    const missing_index = [_]ChunkIndex{0};
+    const out_of_range = [_]ChunkIndex{ 0, 1 };
     try std.testing.expect(!File.fromChunks(CHUNK_SIZE_BYTES + 1, &chunk_pool, &missing_index).isValid());
     try std.testing.expect(!File.fromChunks(CHUNK_SIZE_BYTES + 1, &chunk_pool, &out_of_range).isValid());
     try std.testing.expect(!(File{ .byte_len = 1 }).isValid());

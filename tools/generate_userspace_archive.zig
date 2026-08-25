@@ -9,6 +9,7 @@ const units = native_archive_deps.units;
 const userspace_descriptor = @import("userspace_descriptor");
 
 const EmbeddedInfo = elf_image_inspector.Inspection;
+const ChunkIndex = native_archive_deps.EmbeddedFileChunkIndex;
 const max_userspace_image_bytes: usize = units.mebibytes(16);
 const max_bootloader_source_bytes: usize = units.mebibytes(1);
 const max_build_artifact_entries: usize = 32;
@@ -37,13 +38,13 @@ const Artifact = struct {
 };
 
 const StoredChunk = struct {
-    pool_index: u32,
+    pool_index: ChunkIndex,
     byte_len: usize,
 };
 
 const ChunkedArchive = struct {
     pool: []u8,
-    artifact_chunk_indices: [][]u32,
+    artifact_chunk_indices: [][]ChunkIndex,
 
     fn deinit(self: *ChunkedArchive, allocator: std.mem.Allocator) void {
         allocator.free(self.pool);
@@ -294,7 +295,7 @@ fn buildChunkedArchive(
 ) !ChunkedArchive {
     var pool = std.ArrayList(u8).empty;
     defer pool.deinit(allocator);
-    var artifact_chunk_indices = std.ArrayList([]u32).empty;
+    var artifact_chunk_indices = std.ArrayList([]ChunkIndex).empty;
     defer artifact_chunk_indices.deinit(allocator);
     errdefer {
         for (artifact_chunk_indices.items) |indices| allocator.free(indices);
@@ -311,7 +312,7 @@ fn buildChunkedArchive(
     for (artifacts) |artifact| {
         const bytes = try cwd.readFileAlloc(io, artifact.source_path, allocator, .limited(max_userspace_image_bytes));
         defer allocator.free(bytes);
-        var indices = std.ArrayList(u32).empty;
+        var indices = std.ArrayList(ChunkIndex).empty;
         defer indices.deinit(allocator);
 
         var offset: usize = 0;
@@ -320,7 +321,7 @@ fn buildChunkedArchive(
             const chunk = bytes[offset..end];
             const digest = rawSha256(chunk);
             const stored = chunks_by_digest.get(&digest) orelse stored: {
-                const pool_index = std.math.cast(u32, pool.items.len / archive_chunk_bytes) orelse
+                const pool_index = std.math.cast(ChunkIndex, pool.items.len / archive_chunk_bytes) orelse
                     return error.ArchiveChunkTableFull;
                 try pool.appendSlice(allocator, chunk);
                 try pool.appendSlice(allocator, zero_padding[0 .. archive_chunk_bytes - chunk.len]);
@@ -390,7 +391,8 @@ fn writeArchive(
 
     try writer.writeAll("pub const ArchiveRole = enum { production, verification };\n");
     try writer.print("pub const archive_role: ArchiveRole = .{s};\n", .{@tagName(archive_role)});
-    try writer.writeAll("pub const includes_verification_images = archive_role == .verification;\n\n");
+    try writer.writeAll("pub const includes_verification_images = archive_role == .verification;\n");
+    try writer.print("pub const ChunkIndex = {s};\n\n", .{@typeName(ChunkIndex)});
 
     try writer.writeAll(
         \\const builtin = @import("builtin");
@@ -418,7 +420,7 @@ fn writeArchive(
         \\pub const EmbeddedFile = struct {
         \\    byte_len: usize,
         \\    chunk_pool: []const u8,
-        \\    chunk_indices: []const u32,
+        \\    chunk_indices: []const ChunkIndex,
         \\};
         \\
         \\pub const Artifact = struct {
@@ -450,7 +452,7 @@ fn writeArchive(
         .{std.zig.fmtString(archive_chunk_pool_name)},
     );
     for (chunked_archive.artifact_chunk_indices, 0..) |indices, index| {
-        try writer.print("const artifact_chunk_indices_{d} = [_]u32{{", .{index});
+        try writer.print("const artifact_chunk_indices_{d} = [_]ChunkIndex{{", .{index});
         for (indices, 0..) |chunk_index, chunk_ordinal| {
             if (chunk_ordinal != 0) try writer.writeAll(", ");
             try writer.print("{d}", .{chunk_index});
