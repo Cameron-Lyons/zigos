@@ -713,6 +713,18 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             self.rebuildMaxBlobPayloadBytes();
         }
 
+        pub fn indexReplayedObjectSlot(self: *Self, slot_index: usize) void {
+            self.indexObjectTypeSlot(slot_index);
+        }
+
+        pub fn recordReplayedVersionId(self: *Self, version_id: ids.VersionId) void {
+            self.recordLatestInsertedVersionId(version_id);
+        }
+
+        pub fn recordReplayedBlobPayloadBytes(self: *Self, payload_len: usize) void {
+            self.recordBlobPayloadBytes(payload_len);
+        }
+
         pub fn putVersion(self: *Self, request: PutRequest) Error!PutResult {
             return self.putVersionRef(&request);
         }

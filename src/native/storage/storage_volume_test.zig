@@ -566,6 +566,12 @@ test "storage volume image reloads the latest persisted state across slot genera
     try std.testing.expectEqual(@as(usize, 1), loaded_store.objectCount());
     try std.testing.expectEqual(@as(usize, 2), loaded_store.blobCount());
     try std.testing.expectEqual(second.version_id, loaded_store.latestVersion(900).?.id);
+    try std.testing.expectEqual(second.version_id, loaded_store.latestInsertedVersionConst().?.id);
+    try std.testing.expectEqual("hello again".len, loaded_store.maxBlobPayloadBytes());
+    var document_results: [2]object_store.ObjectQueryResult = undefined;
+    const loaded_documents = loaded_store.queryObjects(.{ .object_type = .document }, &document_results);
+    try std.testing.expectEqual(@as(usize, 1), loaded_documents.len);
+    try std.testing.expectEqual(first.object_id, loaded_documents[0].object_id);
     try std.testing.expectEqualStrings("hello again", try loaded_store.versionPayload(loaded_store.latestVersion(900).?));
     try std.testing.expectEqualStrings("zigos-storage-key", loaded_store.latestVersion(900).?.metadata.signature.signer);
     const loaded_first = loaded_store.version(first.version_id).?;
