@@ -13,6 +13,7 @@ const units = @import("../core/units.zig");
 
 pub const MAX_PERMISSION_DECISIONS: usize = 16;
 pub const COMPACT_ACTIVATION_SUMMARY_METADATA = true;
+pub const REVOCATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 1_160;
 const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
 const REVOCATION_RECEIPT_BUFFER_BYTES: usize = 240;
@@ -281,10 +282,10 @@ pub const PolicyMediator = struct {
         detail: []const u8,
     ) Error!bool {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        const detached = try self.runtime.revokeCapability(task_id, capability_id);
+        const detached = task_runtime.revokeCapabilityFromTask(task, capability_id);
         if (!detached) return false;
         try self.capability_table.revokeGrant(capability_id);
-        try self.runtime.audit(task_id, .{
+        task.appendAudit(.{
             .kind = .capability_revoked,
             .capability_id = capability_id,
             .tick = now_ticks,
@@ -711,6 +712,7 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expect(try mediator.revokeGrantedCapability(task.id, revoked_capability_id, .network_egress, 20, "data route grant revoked"));
     try std.testing.expect(!runtime.hasCapability(task.id, revoked_capability_id));
     try std.testing.expect(capability_table.query(revoked_capability_id) == null);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.capability_revoked, task.latestAuditEvent().?.kind);
     try std.testing.expectEqual(event_ledger.EventKind.capability_revocation, ledger.latestKind(.capability_revocation).?.kind);
     var revoke_buffer: [REVOCATION_RECEIPT_BUFFER_BYTES]u8 = undefined;
     const revoke_receipt = try humane_permissions.renderRevocationReceiptToBuffer(
