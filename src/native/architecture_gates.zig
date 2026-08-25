@@ -424,6 +424,7 @@ pub const indexed_hot_path_tables = .{
         .reuses_resolved_revocation_targets = capability.TARGET_REVOCATION_INDEX_RELOOKUPS == 0,
         .centralizes_attached_capability_validation = component_port.ATTACHED_CAPABILITY_PRECHECKS_PER_SEND == 0 and
             native_kernel.ATTACHED_CAPABILITY_TASK_INDEX_RELOOKUPS_PER_SEND == 0,
+        .detaches_moved_capabilities_on_send = native_kernel.MOVED_CAPABILITY_RECEIVE_TASK_INDEX_RELOOKUPS == 0,
         .centralizes_subject_task_validation = component_port.SUBJECT_TASK_PRECHECKS_PER_CALL == 0 and
             native_kernel.SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL == 0,
         .reuses_owner_tasks_for_auto_grants = native_kernel.SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS == 0,

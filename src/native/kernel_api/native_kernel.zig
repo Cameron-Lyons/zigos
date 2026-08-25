@@ -89,6 +89,7 @@ pub const SELF_TARGET_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
 pub const CAPABILITY_MUTATION_SELF_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const CAPABILITY_PASS_SOURCE_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const ATTACHED_CAPABILITY_TASK_INDEX_RELOOKUPS_PER_SEND: usize = 0;
+pub const MOVED_CAPABILITY_RECEIVE_TASK_INDEX_RELOOKUPS: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -268,6 +269,7 @@ pub const Kernel = struct {
     ) Error!void {
         const authorization = try self.authorizeOperationWithSubject(.endpoint_send, context, now_ticks, .{});
         const endpoint_capability = authorization.resolved_capability.capability;
+        var move_source_task: ?*task_runtime.TaskRecord = null;
         if (attached_capability_id) |capability_id| {
             const attached = if (authorization.subject_task) |caller_task|
                 try self.requireResolvedTaskCapability(caller_task, capability_id, now_ticks)
@@ -275,6 +277,11 @@ pub const Kernel = struct {
                 try self.capability_table.requireUsable(capability_id, now_ticks);
             if (!attached.rights.has(.capability_pass)) return error.PermissionDenied;
             if (attached.scope.task_id != endpoint_capability.scope.task_id) return error.ScopeViolation;
+            if (move_attached_capability) {
+                if (attached.scope.task_id) |source_task_id| {
+                    move_source_task = try self.taskForAuthorizedRequest(authorization, source_task_id);
+                }
+            }
         }
 
         try self.endpoint_table.send(
@@ -285,6 +292,9 @@ pub const Kernel = struct {
             if (attached_capability_id) |id| ids.capability(id) else null,
             move_attached_capability,
         );
+        if (move_source_task) |source_task| {
+            _ = task_runtime.revokeCapabilityFromTask(source_task, attached_capability_id.?);
+        }
     }
 
     pub fn endpointRecv(
@@ -334,12 +344,6 @@ pub const Kernel = struct {
             }, resolved_original);
             errdefer self.capability_table.rollbackGrant(&.{passed});
             try task_runtime.grantCapabilityToTask(receiver, passed.id);
-
-            if (message.move_attached_capability) {
-                if (original.scope.task_id) |source_task_id| {
-                    _ = try self.runtime.revokeCapability(source_task_id, original.id);
-                }
-            }
 
             result.attached_capability = capabilityDescriptor(&passed);
         }
@@ -1264,6 +1268,22 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     const received = (try kernel.endpointRecv(testContext(.endpoint_recv, service_endpoint.capability_id, .none), service_task_desc.task_id, &received_payload, 10)).?;
     try std.testing.expectEqualStrings("sync-open", received_payload[0..received.message.payload_len]);
     try std.testing.expect(received.attached_capability != null);
+
+    const service_task = harness.runtime.find(service_task_desc.task_id).?;
+    const copied_capability_id = received.attached_capability.?.capability_id;
+    try std.testing.expect(service_task.hasCapability(copied_capability_id));
+    var move_context = testContext(.endpoint_send, service_endpoint.capability_id, .none);
+    move_context.caller_task_id = service_task.id;
+    try kernel.endpointSend(move_context, 12, "move-back", copied_capability_id, true, 10);
+    try std.testing.expect(!service_task.hasCapability(copied_capability_id));
+
+    var moved_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    var moved_receive_context = testContext(.endpoint_recv, app_endpoint.capability_id, .none);
+    moved_receive_context.caller_task_id = app_task_desc.task_id;
+    const moved = (try kernel.endpointRecv(moved_receive_context, app_task_desc.task_id, &moved_payload, 10)).?;
+    try std.testing.expectEqualStrings("move-back", moved_payload[0..moved.message.payload_len]);
+    try std.testing.expect(harness.capabilities.query(copied_capability_id) == null);
+    try std.testing.expect(harness.runtime.find(app_task_desc.task_id).?.hasCapability(moved.attached_capability.?.capability_id));
 
     _ = try kernel.sharedMemoryMap(testContext(.shared_memory_map, shared_result.capability_id, .none), app_task_desc.task_id, 10);
     const resources = try kernel.resourceQuery(testContext(.resource_query, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, 10);
