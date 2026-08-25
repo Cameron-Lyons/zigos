@@ -26,7 +26,7 @@ pub fn benchmarkCases(handlers: anytype) [26]BenchmarkCase {
         .{ .name = "paging.address_space_roundtrip", .iterations = 50_000, .runIteration = handlers.address_space_roundtrip },
         .{ .name = "syscall.fast_entry_roundtrip", .iterations = 64_000, .operations_per_iteration = 64, .runIteration = handlers.syscall_fast_entry_roundtrip },
         .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = handlers.accelerator_claim_release },
-        .{ .name = "storage.file_bridge.resolve_view", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },
+        .{ .name = "storage.file_bridge.resolve_shared_view", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },
         .{ .name = "storage.workspace.commit_overlay", .iterations = 128, .runIteration = handlers.workspace_commit_overlay },
         .{ .name = "storage.volume.replay_segmented_log", .iterations = 24, .runIteration = handlers.storage_volume_replay_segmented_log },
         .{ .name = "storage.volume.compact_checkpoint", .iterations = 1, .runIteration = handlers.storage_volume_compact_checkpoint },

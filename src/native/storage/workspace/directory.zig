@@ -859,8 +859,12 @@ pub const Directory = struct {
     }
 
     pub fn resolveBorrowed(self: *const Directory, workspace_id: ids.WorkspaceId, path: []const u8) Error!*const Entry {
+        return self.resolveBorrowedWithPathHash(workspace_id, path, workspace_index.pathHash(path));
+    }
+
+    pub fn resolveBorrowedWithPathHash(self: *const Directory, workspace_id: ids.WorkspaceId, path: []const u8, path_hash: u64) Error!*const Entry {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
-        const index = findWorkspaceEntryIndex(workspace, path) orelse return error.EntryNotFound;
+        const index = findWorkspaceEntryIndexWithPathHash(workspace, path, path_hash) orelse return error.EntryNotFound;
         return &workspace.path_index.entries[index];
     }
 
@@ -1409,8 +1413,12 @@ fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
 }
 
 fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
+    return findWorkspaceEntryIndexWithPathHash(workspace, path, workspace_index.pathHash(path));
+}
+
+fn findWorkspaceEntryIndexWithPathHash(workspace: *const WorkspaceRecord, path: []const u8, path_hash: u64) ?usize {
     const entries = workspace.path_index.entries[0..workspace.counts.entry_count];
-    if (workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, path)) |index| return index;
+    if (workspace_index.findIndexedEntryPathWithHash(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, path, path_hash)) |index| return index;
     debugAssertPathIndexMissAbsent(entries, path);
     return null;
 }
