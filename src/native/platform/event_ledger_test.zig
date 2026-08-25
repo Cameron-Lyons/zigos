@@ -20,6 +20,7 @@ const DETAIL_PAYLOAD_BUFFER_BYTES: usize = 96;
 const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
 
 test "event ledger text metadata stays compact" {
+    try std.testing.expect(event_ledger.RECORDS_EVENTS_IN_PLACE);
     try std.testing.expectEqual(u8, @FieldType(Event, "policy_label_len"));
     try std.testing.expectEqual(u8, @FieldType(Event, "missing_capability_len"));
     try std.testing.expectEqual(u16, @FieldType(Event, "detail_len"));

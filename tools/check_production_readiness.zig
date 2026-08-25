@@ -309,7 +309,10 @@ fn validateEventLedgerRollover(
         .{ .path = source_path, .source = source, .snippet = "oldest_retained_sequence: u64 = 0" },
         .{ .path = source_path, .source = source, .snippet = "backing.event_order_index.head(EVENT_ORDER_KEY)" },
         .{ .path = source_path, .source = source, .snippet = "fn nextOldestSequence(" },
+        .{ .path = source_path, .source = source, .snippet = "pub const RECORDS_EVENTS_IN_PLACE = true" },
+        .{ .path = source_path, .source = source, .snippet = "reserveIndexForOverwrite(sequence)" },
         .{ .path = test_path, .source = test_source, .snippet = "event ledger evicts oldest events instead of jamming past MAX_EVENTS" },
+        .{ .path = test_path, .source = test_source, .snippet = "expect(event_ledger.RECORDS_EVENTS_IN_PLACE)" },
         .{ .path = test_path, .source = test_source, .snippet = "ledger.oldest_retained_sequence" },
     };
     for (required_snippets) |required| {

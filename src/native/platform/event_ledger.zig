@@ -28,6 +28,7 @@ else
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 512;
 pub const COMPACT_EVENT_TEXT_METADATA = true;
+pub const RECORDS_EVENTS_IN_PLACE = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 688;
 pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 53_192;
 pub const state_workspace_label = "system-diagnostics";
@@ -1832,37 +1833,55 @@ pub const Ledger = struct {
     }
 
     fn append(self: *Ledger, input: EventInput) Error!void {
-        var event = Event{
-            .kind = input.kind,
-            .tick = input.tick,
-            .subject = input.subject,
-            .task_id = input.task_id,
-            .workspace_id = input.workspace_id,
-            .related_id = input.related_id,
-            .detail_code = input.detail_code,
-            .service_class = input.service_class,
-            .permission_kind = input.permission_kind,
-            .allowed = input.allowed,
-            .denial_reason = input.denial_reason,
-            .user_approval_can_resolve = input.user_approval_can_resolve,
-            .retry_safe = input.retry_safe,
-            .detail_protected = input.detail_protected,
+        const backing = try self.ensureBacking();
+        const sequence = self.next_sequence;
+        const event_index = try self.reserveEventIndex(backing, sequence);
+        const slot = &backing.events.slots[event_index];
+        slot.* = .{
+            .in_use = true,
+            .event = .{
+                .sequence = sequence,
+                .kind = input.kind,
+                .tick = input.tick,
+                .subject = input.subject,
+                .task_id = input.task_id,
+                .workspace_id = input.workspace_id,
+                .related_id = input.related_id,
+                .detail_code = input.detail_code,
+                .service_class = input.service_class,
+                .permission_kind = input.permission_kind,
+                .allowed = input.allowed,
+                .denial_reason = input.denial_reason,
+                .user_approval_can_resolve = input.user_approval_can_resolve,
+                .retry_safe = input.retry_safe,
+                .detail_protected = input.detail_protected,
+            },
         };
-        event.policy_label_len = @intCast(copyText(&event.policy_label, input.policy_label));
-        event.missing_capability_len = @intCast(copyText(&event.missing_capability, input.missing_capability));
-        event.detail_len = @intCast(copyText(&event.detail, input.detail));
-        try self.appendEvent(&event);
+        slot.event.policy_label_len = @intCast(copyText(&slot.event.policy_label, input.policy_label));
+        slot.event.missing_capability_len = @intCast(copyText(&slot.event.missing_capability, input.missing_capability));
+        slot.event.detail_len = @intCast(copyText(&slot.event.detail, input.detail));
+        try self.finishEventAppend(backing, event_index);
     }
 
     fn appendEvent(self: *Ledger, event: *const Event) Error!void {
         const backing = try self.ensureBacking();
         const sequence = self.next_sequence;
-        const event_index = backing.events.insertIndex(sequence, .{ .event = event.* }) orelse reserve: {
-            if (!self.evictOldestEvent()) return error.EventTableFull;
-            break :reserve backing.events.insertIndex(sequence, .{ .event = event.* }) orelse return error.EventTableFull;
-        };
+        const event_index = try self.reserveEventIndex(backing, sequence);
         const slot = &backing.events.slots[event_index];
+        slot.* = .{ .in_use = true, .event = event.* };
         slot.event.sequence = sequence;
+        try self.finishEventAppend(backing, event_index);
+    }
+
+    fn reserveEventIndex(self: *Ledger, backing: *EventBacking, sequence: u64) Error!usize {
+        return backing.events.reserveIndexForOverwrite(sequence) orelse reserve: {
+            if (!self.evictOldestEvent()) return error.EventTableFull;
+            break :reserve backing.events.reserveIndexForOverwrite(sequence) orelse return error.EventTableFull;
+        };
+    }
+
+    fn finishEventAppend(self: *Ledger, backing: *EventBacking, event_index: usize) Error!void {
+        const slot = &backing.events.slots[event_index];
         self.next_sequence += 1;
         self.indexEvent(event_index) catch |err| {
             _ = backing.events.removeIndex(event_index);
@@ -1874,7 +1893,7 @@ pub const Ledger = struct {
             try self.rebuildIndexes();
             return error.EventTableFull;
         }
-        if (self.oldest_retained_sequence == 0) self.oldest_retained_sequence = sequence;
+        if (self.oldest_retained_sequence == 0) self.oldest_retained_sequence = slot.event.sequence;
         if (self.persistence_batch_depth == 0) {
             try self.persistRange(slot.event.sequence, slot.event.sequence, slot.event.tick);
         } else {
