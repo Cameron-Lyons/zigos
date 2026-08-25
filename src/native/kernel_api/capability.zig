@@ -22,6 +22,7 @@ pub const CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY: u8 = 0;
 pub const CAPABILITY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 pub const PASS_SOURCE_REMOVAL_INDEX_RELOOKUPS: u8 = 0;
 pub const DELEGATION_SOURCE_INDEX_RELOOKUPS: u8 = 0;
+pub const TARGET_REVOCATION_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_CAPABILITY_SIZE_CEILING_BYTES: usize = 16;
 
 comptime {
@@ -306,7 +307,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn derive(self: *Self, request: DeriveRequest) Error!Capability {
-            const parent = self.resolveCapability(request.parent_capability_id) orelse return error.CapabilityNotFound;
+            const parent = self.resolve(request.parent_capability_id) orelse return error.CapabilityNotFound;
             return self.deriveResolved(request, parent);
         }
 
@@ -337,7 +338,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn pass(self: *Self, request: PassRequest) Error!Capability {
-            const source = self.resolveCapability(request.capability_id) orelse return error.CapabilityNotFound;
+            const source = self.resolve(request.capability_id) orelse return error.CapabilityNotFound;
             return self.passResolved(request, source);
         }
 
@@ -376,9 +377,14 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn revokeTargetAuthority(self: *Self, capability_id: u64) Error!void {
-            const slot_index = self.findSlotIndex(capability_id) orelse return error.CapabilityNotFound;
-            const target_generation_index = self.slots.slots[slot_index].target_generation_index;
-            self.removeSlot(slot_index);
+            const resolved = self.resolve(capability_id) orelse return error.CapabilityNotFound;
+            return self.revokeTargetAuthorityResolved(capability_id, resolved);
+        }
+
+        pub fn revokeTargetAuthorityResolved(self: *Self, capability_id: u64, resolved: ResolvedCapability) Error!void {
+            const slot = self.resolvedSlot(resolved, capability_id) orelse return error.CapabilityNotFound;
+            const target_generation_index = slot.target_generation_index;
+            self.removeSlot(resolved.slot_index);
             const target_generation = self.targetGenerationAtMut(target_generation_index);
             target_generation.generation += 1;
         }
@@ -438,8 +444,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn query(self: *const Self, capability_id: u64) ?Capability {
-            const slot = self.findConstSlot(capability_id) orelse return null;
-            return slot.capability;
+            return (self.resolve(capability_id) orelse return null).capability.*;
         }
 
         pub fn inspect(self: *const Self, capability_id: u64, now_ticks: u64) ?Inspection {
@@ -451,7 +456,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn resolveUsable(self: *const Self, capability_id: u64, now_ticks: u64) LookupError!ResolvedCapability {
-            const resolved = self.resolveCapability(capability_id) orelse return error.CapabilityNotFound;
+            const resolved = self.resolve(capability_id) orelse return error.CapabilityNotFound;
             const slot = self.resolvedSlot(resolved, capability_id) orelse
                 native_util.impossibleByInvariant("freshly resolved capability remains in its slot");
             if (!self.isUsableSlot(slot, now_ticks)) return error.CapabilityRevoked;
@@ -507,7 +512,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return self.slots.getConstByHandle(.{ .value = capability_id });
         }
 
-        fn resolveCapability(self: *const Self, capability_id: u64) ?ResolvedCapability {
+        pub fn resolve(self: *const Self, capability_id: u64) ?ResolvedCapability {
             const handle = CapabilityHandle{ .value = capability_id };
             const slot = self.slots.getConstByHandle(handle) orelse return null;
             return .{
@@ -1415,6 +1420,7 @@ test "capability ids encode slot generations and reject stale reuse" {
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
     const slot_index = table.findSlotIndex(first.id).?;
+    const resolved_first = table.resolve(first.id).?;
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(first.id >> 32)));
     try std.testing.expect(table.query(0) == null);
 
@@ -1430,6 +1436,8 @@ test "capability ids encode slot generations and reject stale reuse" {
     try std.testing.expectEqual(slot_index, table.findSlotIndex(replacement.id).?);
     try std.testing.expect(first.id != replacement.id);
     try std.testing.expect(table.query(first.id) == null);
+    try std.testing.expect(table.query(replacement.id) != null);
+    try std.testing.expectError(error.CapabilityNotFound, table.revokeTargetAuthorityResolved(first.id, resolved_first));
     try std.testing.expect(table.query(replacement.id) != null);
 
     try table.revokeGrant(replacement.id);
