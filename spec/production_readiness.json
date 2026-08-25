@@ -680,6 +680,7 @@
         "Host launch, service, syscall, storage, sync, and scheduler tests now use generated-image fixture readers for archive-backed executable descriptors in critical userspace paths.",
         "The QEMU native smoke gate now requires generated userspace artifacts, scheduler binding, userspace exec/resume probes, service contract registration, service IPC connectivity, and driver restart markers before native-ready.",
         "The service registry now rejects invalid bootstrap endpoints, zero binding identifiers, and unknown service connection flags before registering typed interfaces.",
+        "Typed service registration, discovery, and wire-message validation now require the one exact schema version; implicit minor-version compatibility is absent, and registry bindings retain only compact interface identifiers instead of duplicate contract pointers and version fields.",
         "The secure pasteboard service is now generated as a userspace service image, launched through the kernel-contract service bootstrap path, published as a native service contract, and included in the service IPC connectivity proof loop.",
         "Core manifest validation now rejects POSIX and compat.* bundle/component namespaces before application packaging, and the SDK linter delegates bundle/component compatibility checks to that manifest policy while keeping IDL text diagnostics."
       ],

@@ -7,6 +7,9 @@ const typed_component_abi = @import("typed_component_abi.zig");
 
 pub const MAX_BINDINGS: usize = 32;
 pub const DERIVES_STATIC_CONTRACT_METADATA = true;
+pub const COMPACT_BINDING_METADATA = true;
+pub const BINDING_SIZE_CEILING_BYTES: usize = 40;
+pub const REGISTRY_SIZE_CEILING_BYTES: usize = 2_472;
 
 pub const BootstrapEndpoint = struct {
     task_id: u64,
@@ -19,22 +22,21 @@ pub const Binding = struct {
     owner_task_id: u64,
     endpoint_id: u64,
     endpoint_capability_id: u64,
-    contract: ?*const typed_component_abi.InterfaceContract,
-    version_major: u16,
-    version_minor: u16,
+    interface_id: ?typed_component_abi.InterfaceId,
     flags: u16 = 0,
 
     pub fn typedContract(self: *const Binding) *const typed_component_abi.InterfaceContract {
-        return self.contract orelse
+        return typed_component_abi.contractForId(self.interfaceId()) orelse
             native_util.impossibleByInvariant("registered service interface retains its typed contract");
     }
 
     pub fn interfaceId(self: *const Binding) typed_component_abi.InterfaceId {
-        return self.typedContract().interface_id;
+        return self.interface_id orelse
+            native_util.impossibleByInvariant("registered service binding retains its typed interface id");
     }
 
     comptime {
-        if (@sizeOf(@This()) > 48) {
+        if (@sizeOf(@This()) > BINDING_SIZE_CEILING_BYTES) {
             @compileError("typed service bindings exceed their compact schema-derived layout");
         }
     }
@@ -137,8 +139,6 @@ pub const Registry = struct {
             error.UnsupportedPlatformInterface => return error.UnsupportedPlatformInterface,
             error.TypedContractMismatch => return error.TypedContractMismatch,
         };
-        const contract = typed_component_abi.contractForId(interface_id) orelse
-            native_util.impossibleByInvariant("validated service interface retains its typed contract");
         if (self.find(interface_id)) |_| return error.DuplicateInterface;
 
         const slot_index = self.bindings.reserveIndex(interfaceIdKey(interface_id)) orelse return error.BindingTableFull;
@@ -147,9 +147,7 @@ pub const Registry = struct {
         slot.binding.owner_task_id = owner_task_id;
         slot.binding.endpoint_id = endpoint_id;
         slot.binding.endpoint_capability_id = endpoint_capability_id;
-        slot.binding.contract = contract;
-        slot.binding.version_major = interface.version_major;
-        slot.binding.version_minor = interface.version_minor;
+        slot.binding.interface_id = interface_id;
         slot.binding.flags = flags;
     }
 
@@ -159,16 +157,14 @@ pub const Registry = struct {
             error.TypedContractMismatch => return error.VersionMismatch,
         };
         const binding = self.find(interface_id) orelse return error.InterfaceNotFound;
-        if (binding.version_major != interface.version_major) return error.VersionMismatch;
-        if (binding.version_minor < interface.version_minor) return error.VersionMismatch;
 
         return .{
             .service_id = binding.service_id,
             .endpoint_id = binding.endpoint_id,
             .endpoint_capability_id = binding.endpoint_capability_id,
             .interface_id = @intFromEnum(binding.interfaceId()),
-            .version_major = binding.version_major,
-            .version_minor = binding.version_minor,
+            .version_major = interface.version_major,
+            .version_minor = interface.version_minor,
             .flags = binding.flags,
         };
     }
@@ -184,7 +180,7 @@ pub const Registry = struct {
     }
 
     comptime {
-        if (@sizeOf(@This()) > 2_816) {
+        if (@sizeOf(@This()) > REGISTRY_SIZE_CEILING_BYTES) {
             @compileError("typed binding arena exceeds its compact resident layout");
         }
     }
@@ -201,9 +197,7 @@ fn zeroBinding() Binding {
         .owner_task_id = 0,
         .endpoint_id = 0,
         .endpoint_capability_id = 0,
-        .contract = null,
-        .version_major = 0,
-        .version_minor = 0,
+        .interface_id = null,
         .flags = 0,
     };
 }
@@ -250,7 +244,7 @@ test "service registry service requires bootstrap endpoint before discovery" {
     try service.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
         .version_major = 1,
-        .version_minor = 2,
+        .version_minor = 0,
     }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
 
     const connection = try service.connect(.{
@@ -268,7 +262,7 @@ test "service registry only connects by typed interface declaration" {
     try registry.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
         .version_major = 1,
-        .version_minor = 2,
+        .version_minor = 0,
     }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
 
     const connection = try registry.connect(.{
@@ -315,6 +309,16 @@ test "service registry rejects duplicate interfaces and incompatible versions" {
         .version_major = 2,
         .version_minor = 0,
     }));
+    try std.testing.expectError(error.VersionMismatch, registry.connect(.{
+        .name = "zigos.object.workspace",
+        .version_major = 1,
+        .version_minor = 1,
+    }));
+    try std.testing.expectError(error.TypedContractMismatch, registry.register(45, 8, 102, 202, .{
+        .name = "zigos.task.runtime",
+        .version_major = 1,
+        .version_minor = 1,
+    }, 0));
 }
 
 test "service registry does not consume a binding slot for untyped interface names" {

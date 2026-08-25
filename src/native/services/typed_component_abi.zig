@@ -201,10 +201,6 @@ pub fn validateInterfaceId(interface_id: InterfaceId, interface: manifest.Interf
     return schema.validateInterfaceId(interface_id, interface);
 }
 
-pub fn validateCompatibility(provided: manifest.InterfaceDecl, requested: manifest.InterfaceDecl) Error!void {
-    return schema.validateCompatibility(provided, requested);
-}
-
 pub fn validateMessage(
     interface: manifest.InterfaceDecl,
     operation_id: OperationId,
@@ -445,6 +441,11 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .version_major = 2,
         .version_minor = 0,
     }));
+    try std.testing.expectError(Error.UnsupportedInterfaceVersion, validateInterface(.{
+        .name = "zigos.service.registry",
+        .version_major = 1,
+        .version_minor = 1,
+    }));
 
     const iface = Interface(.service_registry);
     var header = WireHeader{
@@ -463,6 +464,15 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         @sizeOf(ServiceConnectionRequest),
         @sizeOf(ServiceConnectionResponse),
     );
+    header.interface_minor += 1;
+    try std.testing.expectError(Error.UnsupportedInterfaceVersion, validateMessage(
+        iface,
+        .service_connect,
+        header,
+        @sizeOf(ServiceConnectionRequest),
+        @sizeOf(ServiceConnectionResponse),
+    ));
+    header.interface_minor -= 1;
 
     header.magic = 0;
     try std.testing.expectError(Error.InvalidMagic, validateMessage(
