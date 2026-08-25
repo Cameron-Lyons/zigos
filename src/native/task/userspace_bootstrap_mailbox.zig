@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 pub const MAILBOX_RESERVED_BYTES: usize = 3;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
@@ -24,7 +24,7 @@ const COMPONENT_CLASS_APP_COMPONENT: u8 = 1;
 
 pub const Stage = enum(u8) {
     boot = 0x10,
-    descriptor_ready = 0x20,
+    runtime_ready = 0x20,
     mailbox_ready = 0x30,
     syscall_ready = 0x40,
     service_ready = 0x48,
@@ -117,7 +117,7 @@ pub const Mailbox = extern struct {
     service_ipc_roundtrips: u16 = 0,
     service_status_flags: u32 = 0,
     last_counter: u32 = 0,
-    _reserved1: [4]u8 = [_]u8{0} ** 4,
+    heartbeat_increment: u32 = 1,
     input_capability_id: u64 = 0,
     input_event_count: u64 = 0,
     last_input_sequence: u64 = 0,

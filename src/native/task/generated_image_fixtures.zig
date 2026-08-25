@@ -145,7 +145,8 @@ fn executableImageFromArtifact(artifact: anytype) task_runtime.ExecutableImageSp
 test "generated image fixture reader returns archive-backed executable images" {
     const image = try storageServiceImage();
     try std.testing.expect(image.isPresent());
-    try std.testing.expect(image.file_size_bytes > task_runtime.DEFAULT_SYNTHETIC_IMAGE_BYTES);
+    try std.testing.expect(image.file_size_bytes != 0);
+    try std.testing.expect(image.bootstrap_mailbox_address != 0);
     try std.testing.expect(!std.mem.allEqual(u8, &image.file_sha256, 0));
 }
 

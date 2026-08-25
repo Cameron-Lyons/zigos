@@ -1,12 +1,10 @@
 const std = @import("std");
-const elf = std.elf;
 const native_archive_deps = @import("native_archive_deps");
 const crypto_hash = native_archive_deps.crypto_hash;
 const elf_image_inspector = native_archive_deps;
 const hex = native_archive_deps.hex;
 const signing = native_archive_deps;
 const units = native_archive_deps.units;
-const userspace_descriptor = @import("userspace_descriptor");
 
 const EmbeddedInfo = elf_image_inspector.Inspection;
 const ChunkIndex = native_archive_deps.EmbeddedFileChunkIndex;
@@ -25,14 +23,6 @@ const ArchiveRole = enum {
 const Artifact = struct {
     source_path: []const u8,
     bundle_id: []const u8,
-    display_name: []const u8,
-    publisher: []const u8,
-    label: []const u8,
-    entry: []const u8,
-    component_class: u8,
-    role_tag: u32,
-    heartbeat_increment: u32,
-    contract_flags: u32,
     embedded_info: EmbeddedInfo,
 };
 
@@ -128,11 +118,17 @@ pub fn main(init: std.process.Init) !void {
     var artifacts = std.ArrayList(Artifact).empty;
     defer artifacts.deinit(allocator);
 
-    for (args[6..]) |path| {
-        try artifacts.append(allocator, try parseArtifact(arena, allocator, cwd, io, path));
+    const artifact_args = args[6..];
+    if (artifact_args.len == 0) return error.MissingArtifactInput;
+    if (artifact_args.len % 2 != 0) return error.InvalidArtifactArguments;
+    var artifact_arg_index: usize = 0;
+    while (artifact_arg_index < artifact_args.len) : (artifact_arg_index += 2) {
+        const bundle_id = artifact_args[artifact_arg_index];
+        const path = artifact_args[artifact_arg_index + 1];
+        if (bundle_id.len == 0) return error.InvalidArtifactBundleId;
+        try artifacts.append(allocator, try parseArtifact(arena, allocator, cwd, io, bundle_id, path));
     }
 
-    if (artifacts.items.len == 0) return error.MissingArtifactInput;
     try writeArchive(cwd, io, allocator, output_dir, archive_role, artifacts.items);
     try writeBuildArtifactManifest(cwd, io, allocator, output_dir, boot_profile, archive_role, bootloader_label, bootloader_path, artifacts.items);
 }
@@ -142,147 +138,17 @@ fn parseArtifact(
     allocator: std.mem.Allocator,
     cwd: std.Io.Dir,
     io: std.Io,
+    bundle_id: []const u8,
     path: []const u8,
 ) !Artifact {
     const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_userspace_image_bytes));
     defer allocator.free(bytes);
 
-    if (bytes.len < elf.EI_NIDENT) return error.UnexpectedEof;
-    if (!std.mem.eql(u8, bytes[0..4], "\x7fELF")) return error.InvalidElfMagic;
-    const descriptor_offset = switch (bytes[elf.EI_CLASS]) {
-        elf.ELFCLASS32 => descriptor: {
-            const header = try readStruct(elf.Elf32_Ehdr, bytes, 0);
-            try validateHeader(elf.Elf32_Shdr, header, bytes.len, elf.ELFCLASS32, .@"386");
-            break :descriptor try findDescriptorOffset(elf.Elf32_Shdr, elf.Elf32_Sym, bytes, header);
-        },
-        elf.ELFCLASS64 => descriptor: {
-            const header = try readStruct(elf.Elf64_Ehdr, bytes, 0);
-            try validateHeader(elf.Elf64_Shdr, header, bytes.len, elf.ELFCLASS64, .X86_64);
-            break :descriptor try findDescriptorOffset(elf.Elf64_Shdr, elf.Elf64_Sym, bytes, header);
-        },
-        else => return error.UnsupportedElfClass,
-    };
-    var descriptor = try readStruct(userspace_descriptor.Descriptor, bytes, descriptor_offset);
-    try userspace_descriptor.validate(&descriptor);
-
     return .{
         .source_path = try arena.dupe(u8, path),
-        .bundle_id = try arena.dupe(u8, descriptor.bundleIdSlice()),
-        .display_name = try arena.dupe(u8, descriptor.displayNameSlice()),
-        .publisher = try arena.dupe(u8, descriptor.publisherSlice()),
-        .label = try arena.dupe(u8, descriptor.labelSlice()),
-        .entry = try arena.dupe(u8, descriptor.entrySlice()),
-        .component_class = descriptor.component_class,
-        .role_tag = descriptor.role_tag,
-        .heartbeat_increment = descriptor.heartbeat_increment,
-        .contract_flags = descriptor.contract_flags,
+        .bundle_id = try arena.dupe(u8, bundle_id),
         .embedded_info = try elf_image_inspector.inspect(bytes),
     };
-}
-
-fn validateHeader(
-    comptime SectionHeader: type,
-    header: anytype,
-    byte_len: usize,
-    expected_class: u8,
-    expected_machine: elf.EM,
-) !void {
-    if (!std.mem.eql(u8, header.e_ident[0..4], "\x7fELF")) return error.InvalidElfMagic;
-    if (header.e_ident[elf.EI_CLASS] != expected_class) return error.UnsupportedElfClass;
-    if (header.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) return error.UnsupportedElfEndian;
-    if (header.e_machine != expected_machine) return error.UnsupportedElfMachine;
-    if (header.e_shentsize != @sizeOf(SectionHeader)) return error.InvalidSectionHeaderSize;
-
-    const sh_offset = std.math.cast(usize, header.e_shoff) orelse return error.InvalidSectionHeaderTable;
-    const sh_bytes = std.math.mul(usize, @as(usize, header.e_shentsize), @as(usize, header.e_shnum)) catch
-        return error.InvalidSectionHeaderTable;
-    const sh_end = std.math.add(usize, sh_offset, sh_bytes) catch return error.InvalidSectionHeaderTable;
-    if (sh_offset == 0 or sh_end > byte_len) return error.InvalidSectionHeaderTable;
-}
-
-fn findDescriptorOffset(comptime SectionHeader: type, comptime Symbol: type, bytes: []const u8, header: anytype) !usize {
-    return findDescriptorSectionOffset(SectionHeader, bytes, header) catch |err| switch (err) {
-        error.DescriptorSectionNotFound => findDescriptorSymbolOffset(SectionHeader, Symbol, bytes, header),
-        else => return err,
-    };
-}
-
-fn findDescriptorSectionOffset(comptime SectionHeader: type, bytes: []const u8, header: anytype) !usize {
-    const section_count: usize = header.e_shnum;
-    if (header.e_shstrndx == 0 or header.e_shstrndx >= section_count) return error.InvalidSectionNameTable;
-
-    const section_names = try sliceSection(bytes, try sectionHeader(SectionHeader, bytes, header, header.e_shstrndx));
-
-    var index: usize = 0;
-    while (index < section_count) : (index += 1) {
-        const section = try sectionHeader(SectionHeader, bytes, header, index);
-        const name = readString(section_names, section.sh_name) orelse continue;
-        if (!std.mem.eql(u8, name, userspace_descriptor.ELF_SECTION_NAME)) continue;
-
-        if (section.sh_size < @sizeOf(userspace_descriptor.Descriptor)) {
-            return error.DescriptorSectionTooSmall;
-        }
-        const file_offset = std.math.cast(usize, section.sh_offset) orelse return error.DescriptorOutOfBounds;
-        const descriptor_end = std.math.add(usize, file_offset, @sizeOf(userspace_descriptor.Descriptor)) catch
-            return error.DescriptorOutOfBounds;
-        if (descriptor_end > bytes.len) {
-            return error.DescriptorOutOfBounds;
-        }
-        return file_offset;
-    }
-
-    return error.DescriptorSectionNotFound;
-}
-
-fn findDescriptorSymbolOffset(
-    comptime SectionHeader: type,
-    comptime Symbol: type,
-    bytes: []const u8,
-    header: anytype,
-) !usize {
-    const section_count: usize = header.e_shnum;
-    var symtab: ?SectionHeader = null;
-
-    var index: usize = 0;
-    while (index < section_count) : (index += 1) {
-        const section = try sectionHeader(SectionHeader, bytes, header, index);
-        if (section.sh_type == elf.SHT_SYMTAB) {
-            symtab = section;
-            break;
-        }
-    }
-    const symbol_table = symtab orelse return error.SymbolTableNotFound;
-    if (symbol_table.sh_entsize != @sizeOf(Symbol)) return error.InvalidSymbolTable;
-    if (symbol_table.sh_link >= section_count) return error.InvalidStringTableReference;
-
-    const strings_section = try sectionHeader(SectionHeader, bytes, header, symbol_table.sh_link);
-    const strings = try sliceSection(bytes, strings_section);
-    const symbol_bytes = try sliceSection(bytes, symbol_table);
-    const symbol_count = symbol_bytes.len / @sizeOf(Symbol);
-
-    index = 0;
-    while (index < symbol_count) : (index += 1) {
-        const offset = index * @sizeOf(Symbol);
-        const symbol = try readStruct(Symbol, symbol_bytes, offset);
-        const name = readString(strings, symbol.st_name) orelse continue;
-        if (!std.mem.eql(u8, name, "zigos_userspace_descriptor")) continue;
-        if (symbol.st_shndx == 0 or symbol.st_shndx >= section_count) return error.InvalidDescriptorSection;
-
-        const section = try sectionHeader(SectionHeader, bytes, header, symbol.st_shndx);
-        if (symbol.st_value < section.sh_addr) return error.InvalidDescriptorAddress;
-        const relative = symbol.st_value - section.sh_addr;
-        const section_offset = std.math.cast(usize, section.sh_offset) orelse return error.DescriptorOutOfBounds;
-        const relative_offset = std.math.cast(usize, relative) orelse return error.DescriptorOutOfBounds;
-        const file_offset = std.math.add(usize, section_offset, relative_offset) catch return error.DescriptorOutOfBounds;
-        const descriptor_end = std.math.add(usize, file_offset, @sizeOf(userspace_descriptor.Descriptor)) catch
-            return error.DescriptorOutOfBounds;
-        if (descriptor_end > bytes.len) {
-            return error.DescriptorOutOfBounds;
-        }
-        return file_offset;
-    }
-
-    return error.DescriptorSymbolNotFound;
 }
 
 fn buildChunkedArchive(
@@ -637,34 +503,4 @@ fn writeByteArray(writer: anytype, bytes: []const u8) !void {
         if (index != 0) try writer.writeAll(", ");
         try writer.print("0x{x:0>2}", .{byte});
     }
-}
-
-fn sectionHeader(comptime SectionHeader: type, bytes: []const u8, header: anytype, index: usize) !SectionHeader {
-    const table_offset = std.math.cast(usize, header.e_shoff) orelse return error.InvalidSectionHeaderTable;
-    const section_delta = std.math.mul(usize, index, @as(usize, header.e_shentsize)) catch
-        return error.InvalidSectionHeaderTable;
-    const offset = std.math.add(usize, table_offset, section_delta) catch return error.InvalidSectionHeaderTable;
-    return readStruct(SectionHeader, bytes, offset);
-}
-
-fn sliceSection(bytes: []const u8, section: anytype) ![]const u8 {
-    const start = std.math.cast(usize, section.sh_offset) orelse return error.SectionOutOfBounds;
-    const size = std.math.cast(usize, section.sh_size) orelse return error.SectionOutOfBounds;
-    const end = std.math.add(usize, start, size) catch return error.SectionOutOfBounds;
-    if (end > bytes.len) return error.SectionOutOfBounds;
-    return bytes[start..end];
-}
-
-fn readString(strings: []const u8, offset: u32) ?[]const u8 {
-    if (offset >= strings.len) return null;
-    var end: usize = offset;
-    while (end < strings.len and strings[end] != 0) : (end += 1) {}
-    return strings[offset..end];
-}
-
-fn readStruct(comptime T: type, bytes: []const u8, offset: usize) !T {
-    if (offset + @sizeOf(T) > bytes.len) return error.UnexpectedEof;
-    var value: T = undefined;
-    @memcpy(std.mem.asBytes(&value), bytes[offset..][0..@sizeOf(T)]);
-    return value;
 }

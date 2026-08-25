@@ -13,7 +13,6 @@ const request_header = @import("native/core/request_header.zig");
 const storage_volume = @import("native/storage/storage_volume.zig");
 const sync_state_store = @import("native/sync/sync_state_store.zig");
 const syscall_dispatch = @import("native/kernel_api/syscall_dispatch.zig");
-const userspace_descriptor = @import("native/task/userspace_descriptor.zig");
 const workspace = @import("native/storage/workspace.zig");
 
 const FUZZ_CORPUS_PATH = "spec/release_security/fuzz_corpus.json";
@@ -31,7 +30,6 @@ const REQUIRED_RELEASE_EVIDENCE_NAMES = release_catalog.release_evidence_names;
 
 const REQUIRED_HARNESS_IDS = [_][]const u8{
     "binary-cursor",
-    "userspace-descriptor",
     "elf-image-metadata",
     "storage-volume-image",
     "sync-record",
@@ -231,7 +229,6 @@ fn runHarnessMutations(
 
 fn runFuzzHarness(id: []const u8, input: []const u8) void {
     if (std.mem.eql(u8, id, "binary-cursor")) return fuzzBinaryCursor(input);
-    if (std.mem.eql(u8, id, "userspace-descriptor")) return fuzzUserspaceDescriptor(input);
     if (std.mem.eql(u8, id, "elf-image-metadata")) return fuzzElfImageMetadata(input);
     if (std.mem.eql(u8, id, "storage-volume-image")) return fuzzStorageVolumeImage(input);
     if (std.mem.eql(u8, id, "sync-record")) return fuzzSyncRecord(input);
@@ -249,13 +246,6 @@ fn fuzzBinaryCursor(input: []const u8) void {
     _ = reader.readU32() catch {};
     _ = reader.readU64() catch {};
     _ = reader.readSlice(@min(@as(usize, 3), input.len)) catch {};
-}
-
-fn fuzzUserspaceDescriptor(input: []const u8) void {
-    var descriptor = std.mem.zeroes(userspace_descriptor.Descriptor);
-    const bytes = std.mem.asBytes(&descriptor);
-    @memcpy(bytes[0..@min(bytes.len, input.len)], input[0..@min(bytes.len, input.len)]);
-    userspace_descriptor.validate(&descriptor) catch {};
 }
 
 fn fuzzElfImageMetadata(input: []const u8) void {

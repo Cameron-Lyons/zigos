@@ -317,6 +317,7 @@ const MappingDispatchMetadata = struct {
     initial_stack_pointer: u32 = 0,
     bootstrap_mailbox_address: u32 = 0,
     contract_flags: u32 = 0,
+    heartbeat_increment: u32 = 1,
 };
 
 const MappingEntry = struct {
@@ -823,6 +824,7 @@ pub const Executor = struct {
             mapping.resume_valid,
             task.component_class,
             mapping.dispatch_metadata.contract_flags,
+            mapping.dispatch_metadata.heartbeat_increment,
             task.id,
             task.ui_surface_id orelse 0,
             authorities,
@@ -843,6 +845,7 @@ pub const Executor = struct {
             image.id,
             image.bootstrap_mailbox_address,
             image.contract_flags,
+            image.heartbeat_increment,
         );
         if (self.findMappingWithHandle(address_space.id)) |resolution| {
             if (resolution.entry.state != .live) return error.AddressSpaceRetiring;
@@ -1004,6 +1007,7 @@ fn prepareMappingDispatchMetadata(
     image_id: u64,
     bootstrap_mailbox_address: u64,
     contract_flags: u32,
+    heartbeat_increment: u32,
 ) MaterializationError!MappingDispatchMetadata {
     if (owner_task_id == 0) return error.AddressSpaceOwnerInvalid;
     if (image_id == 0 or address_space_image_id != image_id) return error.AddressSpaceImageMismatch;
@@ -1015,6 +1019,7 @@ fn prepareMappingDispatchMetadata(
         .initial_stack_pointer = std.math.cast(u32, initial_stack_pointer) orelse return error.InitialContextInvalid,
         .bootstrap_mailbox_address = std.math.cast(u32, bootstrap_mailbox_address) orelse return error.InitialContextInvalid,
         .contract_flags = contract_flags,
+        .heartbeat_increment = heartbeat_increment,
     };
 }
 
@@ -1033,6 +1038,7 @@ const BootstrapMailboxUpdate = struct {
     address: usize,
     preserve_runtime_state: bool,
     detail: u8,
+    heartbeat_increment: u32,
     authorities: MailboxAuthorities,
     task_id: u64,
     ui_surface_id: u64,
@@ -1049,6 +1055,7 @@ fn prepareCachedBootstrapMailboxUpdate(
     preserve_runtime_state: bool,
     component_class: task_runtime.ComponentClass,
     contract_flags: u32,
+    heartbeat_increment: u32,
     task_id: u64,
     ui_surface_id: u64,
     authorities: MailboxAuthorities,
@@ -1060,6 +1067,7 @@ fn prepareCachedBootstrapMailboxUpdate(
         preserve_runtime_state,
         component_class,
         contract_flags,
+        heartbeat_increment,
         task_id,
         ui_surface_id,
         authorities,
@@ -1083,6 +1091,7 @@ fn prepareBootstrapMailboxUpdate(
     preserve_runtime_state: bool,
     component_class: task_runtime.ComponentClass,
     contract_flags: u32,
+    heartbeat_increment: u32,
     task_id: u64,
     ui_surface_id: u64,
     authorities: MailboxAuthorities,
@@ -1092,6 +1101,7 @@ fn prepareBootstrapMailboxUpdate(
         .address = @intCast(address),
         .preserve_runtime_state = preserve_runtime_state,
         .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(component_class), contract_flags)),
+        .heartbeat_increment = heartbeat_increment,
         .authorities = authorities,
         .task_id = task_id,
         .ui_surface_id = ui_surface_id,
@@ -1123,6 +1133,7 @@ fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
             .service_id = update.authorities.bootstrap_service_id,
             .resource_mask = 0,
             .last_counter = 0,
+            .heartbeat_increment = update.heartbeat_increment,
         };
         return;
     }
@@ -1133,6 +1144,7 @@ fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
     mailbox_ptr.ui_surface_id = update.ui_surface_id;
     mailbox_ptr.task_id = update.task_id;
     mailbox_ptr.service_id = update.authorities.bootstrap_service_id;
+    mailbox_ptr.heartbeat_increment = update.heartbeat_increment;
 }
 
 pub const MailboxAuthorityCache = struct {
@@ -1600,6 +1612,7 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
         41,
         0x4000_3000,
         userspace_flags.FLAG_NX_PROOF_PROBE,
+        9,
     );
     try std.testing.expectEqual(@as(u64, 40), metadata.owner_task_id);
     try std.testing.expectEqual(@as(u64, 41), metadata.image_id);
@@ -1607,27 +1620,28 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
     try std.testing.expectEqual(@as(u32, 0x7FFF_EFF0), metadata.initial_stack_pointer);
     try std.testing.expectEqual(@as(u32, 0x4000_3000), metadata.bootstrap_mailbox_address);
     try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contract_flags);
+    try std.testing.expectEqual(@as(u32, 9), metadata.heartbeat_increment);
     try std.testing.expectEqual(@as(u8, 0), STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS);
 
     try std.testing.expectError(
         error.AddressSpaceOwnerInvalid,
-        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0),
+        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 1),
     );
     try std.testing.expectError(
         error.AddressSpaceImageMismatch,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0),
+        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0, 1),
     );
 }
 
@@ -1649,7 +1663,7 @@ test "mailbox publication preserves resume state and resets first launch" {
     };
     const address: u64 = @intCast(@intFromPtr(&mailbox));
 
-    const resumed = prepareBootstrapMailboxUpdate(address, true, .app_component, 0, 105, 106, authorities).?;
+    const resumed = prepareBootstrapMailboxUpdate(address, true, .app_component, 0, 9, 105, 106, authorities).?;
     writeBootstrapMailbox(resumed);
     try std.testing.expect(resumed.preserve_runtime_state);
     try std.testing.expectEqual(userspace_bootstrap_mailbox.VERSION, mailbox.version);
@@ -1664,10 +1678,11 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u32, 0x7), mailbox.resource_mask);
     try std.testing.expectEqual(@as(u16, 9), mailbox.service_operation_count);
     try std.testing.expectEqual(@as(u32, 41), mailbox.last_counter);
+    try std.testing.expectEqual(@as(u32, 9), mailbox.heartbeat_increment);
     try std.testing.expectEqual(@as(u64, 12), mailbox.input_event_count);
     try std.testing.expectEqual(@as(u64, 15), mailbox.ui_state_revision);
 
-    const first_launch = prepareBootstrapMailboxUpdate(address, false, .app_component, 0, 107, 108, authorities).?;
+    const first_launch = prepareBootstrapMailboxUpdate(address, false, .app_component, 0, 11, 107, 108, authorities).?;
     writeBootstrapMailbox(first_launch);
     try std.testing.expect(!first_launch.preserve_runtime_state);
     try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.boot)), mailbox.stage);
@@ -1675,12 +1690,13 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u32, 0), mailbox.resource_mask);
     try std.testing.expectEqual(@as(u16, 0), mailbox.service_operation_count);
     try std.testing.expectEqual(@as(u32, 0), mailbox.last_counter);
+    try std.testing.expectEqual(@as(u32, 11), mailbox.heartbeat_increment);
     try std.testing.expectEqual(@as(u64, 0), mailbox.input_event_count);
     try std.testing.expectEqual(@as(u64, 0), mailbox.ui_state_revision);
     try std.testing.expectEqual(@as(u64, 107), mailbox.task_id);
     try std.testing.expectEqual(@as(u64, 108), mailbox.ui_surface_id);
 
-    try std.testing.expect(prepareBootstrapMailboxUpdate(0, false, .app_component, 0, 1, 0, .{}) == null);
+    try std.testing.expect(prepareBootstrapMailboxUpdate(0, false, .app_component, 0, 1, 1, 0, .{}) == null);
     try std.testing.expectEqual(@as(u8, 1), USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH);
 }
 
@@ -1701,6 +1717,7 @@ test "mailbox publication cache suppresses unchanged resumed kernel writes" {
         false,
         .app_component,
         userspace_flags.FLAG_OWNS_UI_SURFACE,
+        9,
         205,
         206,
         initial_authorities,
@@ -1716,6 +1733,7 @@ test "mailbox publication cache suppresses unchanged resumed kernel writes" {
         false,
         .app_component,
         userspace_flags.FLAG_OWNS_UI_SURFACE,
+        9,
         205,
         206,
         initial_authorities,
@@ -1733,6 +1751,7 @@ test "mailbox publication cache suppresses unchanged resumed kernel writes" {
         true,
         .app_component,
         userspace_flags.FLAG_OWNS_UI_SURFACE,
+        9,
         205,
         206,
         initial_authorities,
@@ -1752,6 +1771,7 @@ test "mailbox publication cache suppresses unchanged resumed kernel writes" {
         true,
         .app_component,
         userspace_flags.FLAG_OWNS_UI_SURFACE,
+        9,
         205,
         206,
         refreshed_authorities,
@@ -1769,6 +1789,7 @@ test "mailbox publication cache suppresses unchanged resumed kernel writes" {
         true,
         .app_component,
         userspace_flags.FLAG_OWNS_UI_SURFACE,
+        9,
         205,
         206,
         refreshed_authorities,

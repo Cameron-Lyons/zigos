@@ -8,7 +8,6 @@ const task_runtime_service = @import("../../native/task/task_runtime_service.zig
 const userspace_bootstrap_mailbox = @import("../../native/task/userspace_bootstrap_mailbox.zig");
 const userspace_boot_registry = @import("../../native/task/userspace_boot_registry.zig");
 const userspace_contract_registry = @import("../../native/task/userspace_contract_registry.zig");
-const userspace_descriptor = @import("../../native/task/userspace_descriptor.zig");
 const userspace_executor = @import("../../native/task/userspace_executor.zig");
 const userspace_launch = @import("../../native/task/userspace_launch.zig");
 const userspace_loader = @import("../../native/task/userspace_loader.zig");
@@ -26,7 +25,6 @@ test "task host tests import native task modules" {
     std.testing.refAllDecls(userspace_bootstrap_mailbox);
     std.testing.refAllDecls(userspace_boot_registry);
     std.testing.refAllDecls(userspace_contract_registry);
-    std.testing.refAllDecls(userspace_descriptor);
     std.testing.refAllDecls(userspace_executor);
     std.testing.refAllDecls(userspace_launch);
     std.testing.refAllDecls(userspace_loader);
