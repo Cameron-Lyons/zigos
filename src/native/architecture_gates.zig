@@ -413,6 +413,8 @@ pub const indexed_hot_path_tables = .{
         .derives_kernel_operations_from_typed_methods = native_kernel.TYPED_METHOD_DERIVES_KERNEL_OPERATION and
             !@hasField(native_kernel.KernelCallContext, "operation") and
             @sizeOf(native_kernel.KernelCallContext) <= native_kernel.KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES,
+        .authorizes_with_one_task_index_lookup = native_kernel.AUTHORIZATION_TASK_INDEX_LOOKUPS_PER_CALL == 1 and
+            @hasDecl(task_runtime.TaskRecord, "hasCapability"),
     },
     .debug_contract = .{
         .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and
