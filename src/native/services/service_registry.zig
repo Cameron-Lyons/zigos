@@ -26,8 +26,7 @@ pub const Binding = struct {
     flags: u16 = 0,
 
     pub fn typedContract(self: *const Binding) *const typed_component_abi.InterfaceContract {
-        return typed_component_abi.contractForId(self.interfaceId()) orelse
-            native_util.impossibleByInvariant("registered service interface retains its typed contract");
+        return typed_component_abi.contractForId(self.interfaceId());
     }
 
     pub fn interfaceId(self: *const Binding) typed_component_abi.InterfaceId {
@@ -125,8 +124,7 @@ pub const Registry = struct {
         }
         const known_flags = abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
         if ((flags & ~known_flags) != 0) return error.InvalidServiceFlags;
-        const slot_index = typed_component_abi.interfaceIndexForId(interface_id) orelse
-            native_util.impossibleByInvariant("typed service interface has a direct registry slot");
+        const slot_index = typed_component_abi.interfaceIndexForId(interface_id);
         const binding = &self.bindings[slot_index];
         if (binding.service_id != 0) return error.DuplicateInterface;
 
@@ -158,7 +156,7 @@ pub const Registry = struct {
     }
 
     fn find(self: *const Registry, interface_id: typed_component_abi.InterfaceId) ?*const Binding {
-        const slot_index = typed_component_abi.interfaceIndexForId(interface_id) orelse return null;
+        const slot_index = typed_component_abi.interfaceIndexForId(interface_id);
         const binding = &self.bindings[slot_index];
         if (binding.service_id == 0) return null;
         if (binding.interfaceId() != interface_id) native_util.impossibleByInvariant("service registry direct slot retains the wrong interface");
@@ -190,11 +188,11 @@ test "service registry stores one direct slot per typed interface" {
     try std.testing.expectEqual(REGISTRY_SIZE_CEILING_BYTES, @sizeOf(Registry));
     try std.testing.expectEqual(
         @as(usize, 0),
-        typed_component_abi.interfaceIndexForId(.task_runtime).?,
+        typed_component_abi.interfaceIndexForId(.task_runtime),
     );
     try std.testing.expectEqual(
         MAX_BINDINGS - 1,
-        typed_component_abi.interfaceIndexForId(.personal_context).?,
+        typed_component_abi.interfaceIndexForId(.personal_context),
     );
 }
 

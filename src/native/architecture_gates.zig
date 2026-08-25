@@ -128,6 +128,7 @@ pub const indexed_hot_path_tables = .{
     .service_registry = .{
         .uses_direct_interface_slots = service_registry.DIRECT_INTERFACE_BINDINGS and
             component_abi_schema.DIRECT_INTERFACE_INDEX and
+            component_abi_schema.TOTAL_INTERFACE_ID_MAP and
             service_registry.MAX_BINDINGS == component_abi_schema.INTERFACE_COUNT and
             @FieldType(service_registry.Registry, "bindings") == [component_abi_schema.INTERFACE_COUNT]service_registry.Binding,
         .uses_typed_id_only_api = service_registry.TYPED_ID_ONLY_API and

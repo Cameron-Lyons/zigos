@@ -42,7 +42,7 @@ pub const Binding = struct {
 };
 
 pub fn binding(comptime key: InterfaceKey) Binding {
-    const abi_contract = typed_component_abi.contractForId(typed_component_abi.interfaceId(key)).?;
+    const abi_contract = typed_component_abi.contractForId(typed_component_abi.interfaceId(key));
     return .{
         .interface_id = abi_contract.interface_id,
         .interface = abi_contract.interface,
@@ -52,7 +52,7 @@ pub fn binding(comptime key: InterfaceKey) Binding {
 }
 
 pub fn contract(comptime key: InterfaceKey) *const InterfaceContract {
-    return typed_component_abi.contractForId(typed_component_abi.interfaceId(key)).?;
+    return typed_component_abi.contractForId(typed_component_abi.interfaceId(key));
 }
 
 pub fn operation(comptime key: InterfaceKey, operation_id: OperationId) Error!OperationDecl {

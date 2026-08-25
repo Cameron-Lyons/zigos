@@ -256,6 +256,7 @@ pub const interface_specs = [_]InterfaceSpec{
 
 pub const INTERFACE_COUNT: usize = interface_specs.len;
 pub const DIRECT_INTERFACE_INDEX = true;
+pub const TOTAL_INTERFACE_ID_MAP = true;
 const FIRST_INTERFACE_ID: u16 = @intFromEnum(interface_specs[0].id);
 
 const OperationSpec = struct {
@@ -506,17 +507,12 @@ pub fn contractFor(interface_name: []const u8) ?*const InterfaceContract {
     return null;
 }
 
-pub fn contractForId(interface_id: InterfaceId) ?*const InterfaceContract {
-    const index = interfaceIndexForId(interface_id) orelse return null;
-    return &contracts[index];
+pub fn contractForId(interface_id: InterfaceId) *const InterfaceContract {
+    return &contracts[interfaceIndexForId(interface_id)];
 }
 
-pub fn interfaceIndexForId(interface_id: InterfaceId) ?usize {
-    const raw_id = @intFromEnum(interface_id);
-    if (raw_id < FIRST_INTERFACE_ID) return null;
-    const index: usize = @intCast(raw_id - FIRST_INTERFACE_ID);
-    if (index >= contracts.len or contracts[index].interface_id != interface_id) return null;
-    return index;
+pub fn interfaceIndexForId(interface_id: InterfaceId) usize {
+    return @intCast(@intFromEnum(interface_id) - FIRST_INTERFACE_ID);
 }
 
 pub fn interfaceIdForDecl(interface: manifest.InterfaceDecl) ?InterfaceId {
@@ -531,7 +527,7 @@ pub fn validateInterface(interface: manifest.InterfaceDecl) Error!void {
 }
 
 pub fn validateInterfaceId(interface_id: InterfaceId, interface: manifest.InterfaceDecl) Error!void {
-    const iface_contract = contractForId(interface_id) orelse return error.UnknownInterface;
+    const iface_contract = contractForId(interface_id);
     if (!std.mem.eql(u8, iface_contract.interface.name, interface.name)) return error.UnknownInterface;
     if (iface_contract.interface.version_major != interface.version_major) return error.UnsupportedInterfaceVersion;
     if (iface_contract.interface.version_minor != interface.version_minor) return error.UnsupportedInterfaceVersion;
@@ -641,6 +637,9 @@ fn buildServiceCatalogBindings() [service_binding_specs.len]ServiceCatalogBindin
 
 fn buildContracts() [interface_specs.len]InterfaceContract {
     @setEvalBranchQuota(65536);
+    if (interface_specs.len != std.meta.fields(InterfaceId).len) {
+        @compileError("every component interface id must have one schema contract");
+    }
     var result: [interface_specs.len]InterfaceContract = undefined;
     inline for (interface_specs, 0..) |spec, index| {
         if (@as(usize, @intFromEnum(spec.id)) != @as(usize, FIRST_INTERFACE_ID) + index) {
@@ -757,6 +756,7 @@ fn buildCoverageReferences() [interface_specs.len + service_binding_specs.len + 
 
 test "component ABI schema emits manifest interfaces and service catalog bindings" {
     try std.testing.expect(DIRECT_INTERFACE_INDEX);
+    try std.testing.expect(TOTAL_INTERFACE_ID_MAP);
     try std.testing.expect(COMPACT_INTERFACE_CONTRACT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(InterfaceContract, "operation_count"));
     try std.testing.expect(@sizeOf(InterfaceContract) <= INTERFACE_CONTRACT_SIZE_CEILING_BYTES);
@@ -771,8 +771,8 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expectEqual(InterfaceId.package_install, interfaceIdForService(.package_install_update));
     try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceForService(.storage_object)).?);
     try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceForService(.service_registry).name).?.interface_id);
-    try std.testing.expectEqual(@as(usize, 0), interfaceIndexForId(.task_runtime).?);
-    try std.testing.expectEqual(INTERFACE_COUNT - 1, interfaceIndexForId(.personal_context).?);
+    try std.testing.expectEqual(@as(usize, 0), interfaceIndexForId(.task_runtime));
+    try std.testing.expectEqual(INTERFACE_COUNT - 1, interfaceIndexForId(.personal_context));
     try std.testing.expect(contractFor("zigos.service.network.policy").?.operation(.network_open_session) != null);
     try std.testing.expect(contractFor("zigos.index.search").?.operation(.semantic_index_query) != null);
     try std.testing.expect(contractFor("zigos.sync.replication").?.operation(.sync_workspace_replicate) != null);

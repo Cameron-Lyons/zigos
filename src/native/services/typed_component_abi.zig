@@ -19,6 +19,7 @@ pub const CoverageReferenceKind = schema.CoverageReferenceKind;
 pub const MAX_OPERATIONS_PER_INTERFACE = schema.MAX_OPERATIONS_PER_INTERFACE;
 pub const INTERFACE_COUNT = schema.INTERFACE_COUNT;
 pub const DIRECT_INTERFACE_INDEX = schema.DIRECT_INTERFACE_INDEX;
+pub const TOTAL_INTERFACE_ID_MAP = schema.TOTAL_INTERFACE_ID_MAP;
 pub const COMPACT_INTERFACE_CONTRACT_METADATA = schema.COMPACT_INTERFACE_CONTRACT_METADATA;
 pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES = schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES;
 
@@ -187,11 +188,11 @@ pub fn contractFor(interface_name: []const u8) ?*const InterfaceContract {
     return schema.contractFor(interface_name);
 }
 
-pub fn contractForId(interface_id: InterfaceId) ?*const InterfaceContract {
+pub fn contractForId(interface_id: InterfaceId) *const InterfaceContract {
     return schema.contractForId(interface_id);
 }
 
-pub fn interfaceIndexForId(interface_id: InterfaceId) ?usize {
+pub fn interfaceIndexForId(interface_id: InterfaceId) usize {
     return schema.interfaceIndexForId(interface_id);
 }
 
