@@ -370,6 +370,7 @@ pub const indexed_hot_path_tables = .{
         .caches_ui_presentation_eligibility = userspace_scheduler.STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS == 0,
         .derives_task_handles_from_scheduler_records = userspace_scheduler.TASK_REGISTRATION_HANDLE_SLOT_RELOOKUPS == 0 and
             userspace_scheduler.TASK_WAKE_HANDLE_SLOT_RELOOKUPS == 0,
+        .reuses_faulted_task_records_for_containment = userspace_scheduler.FAULT_CONTAINMENT_TASK_INDEX_RELOOKUPS == 0,
         .uses_generational_task_handles_for_dispatch = @hasDecl(task_runtime.Runtime, "findByHandle") and
             userspace_scheduler.SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH == 0,
     },
@@ -406,10 +407,12 @@ pub const indexed_hot_path_tables = .{
         .reuses_resolved_termination_tasks = task_runtime.TERMINATION_TASK_INDEX_RELOOKUPS == 0 and
             task_runtime.TERMINATION_TASK_SLOT_LOOKUPS == 1 and
             task_runtime.RESOLVED_TERMINATION_SLOT_RELOOKUPS == 0 and
+            task_runtime.RESOLVED_TERMINATION_HANDLE_DERIVATIONS == 0 and
             task_runtime.RESOLVED_TASK_HANDLE_INDEX_LOOKUPS == 0 and
             task_runtime.RESOLVED_TASK_HANDLE_SLOT_LOOKUPS == 0 and
             @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "handleForClaimedIndex") and
-            @hasDecl(task_runtime.Runtime, "terminateResolvedTaskByHandle") and
+            @hasDecl(task_runtime.Runtime, "terminateResolvedTask") and
+            !@hasDecl(task_runtime.Runtime, "terminateResolvedTaskByHandle") and
             @hasDecl(task_runtime.Runtime, "taskHandleForResolved") and
             !@hasDecl(task_runtime.Runtime, "taskHandle"),
         .records_resolved_task_audits = task_runtime.RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS == 0,
@@ -444,10 +447,10 @@ pub const indexed_hot_path_tables = .{
         .reuses_authorized_capabilities_for_pass = native_kernel.CAPABILITY_PASS_QUERY_RELOOKUPS == 0,
         .records_task_creation_audits_directly = native_kernel.TASK_CREATE_AUDIT_INDEX_RELOOKUPS == 0,
         .captures_termination_capabilities_during_transition = native_kernel.TASK_TERMINATE_PREVIEW_SLOT_LOOKUPS == 0,
-        .derives_termination_handles_from_resolved_tasks = native_kernel.TASK_TERMINATE_HANDLE_INDEX_RELOOKUPS == 0,
+        .terminates_resolved_tasks_without_handles = native_kernel.TASK_TERMINATE_HANDLE_DERIVATIONS == 0,
         .returns_resolved_task_lifecycle_results = task_lifecycle_service.RESULT_TASK_INDEX_RELOOKUPS == 0,
         .resolves_task_lifecycle_transitions_once = task_lifecycle_service.TRANSITION_TASK_INDEX_LOOKUPS == 1 and
-            task_lifecycle_service.TRANSITION_HANDLE_SLOT_RELOOKUPS == 0,
+            task_lifecycle_service.TRANSITION_HANDLE_DERIVATIONS == 0,
         .derives_kernel_operations_from_typed_methods = native_kernel.TYPED_METHOD_DERIVES_KERNEL_OPERATION and
             !@hasField(native_kernel.KernelCallContext, "operation") and
             @sizeOf(native_kernel.KernelCallContext) <= native_kernel.KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES,

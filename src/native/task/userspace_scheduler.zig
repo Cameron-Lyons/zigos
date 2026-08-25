@@ -49,6 +49,7 @@ pub const COMPACT_QUEUE_METADATA = true;
 pub const STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS: u8 = 0;
 pub const TASK_REGISTRATION_HANDLE_SLOT_RELOOKUPS: u8 = 0;
 pub const TASK_WAKE_HANDLE_SLOT_RELOOKUPS: u8 = 0;
+pub const FAULT_CONTAINMENT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
 
 comptime {
@@ -573,14 +574,14 @@ pub const Scheduler = struct {
     pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) userspace_executor.ExecutionOutcome {
         if (!self.initialized) return .unavailable;
         const runtime = self.runtime_ptr orelse return .unavailable;
-        const task = runtime.findConst(task_id) orelse return .unavailable;
+        const task = runtime.find(task_id) orelse return .unavailable;
         var uncached_mapping_handle = userspace_executor.MappingHandle{};
         const mapping_handle = if (self.slots.get(task_id)) |slot|
             &slot.mapping_handle
         else
             &uncached_mapping_handle;
         const outcome = self.executePreparedTask(task, mapping_handle, now_ticks);
-        if (outcome == .faulted) self.containUserException(runtime, task_id, now_ticks);
+        if (outcome == .faulted) self.containUserException(runtime, task, now_ticks);
         return outcome;
     }
 
@@ -680,7 +681,7 @@ pub const Scheduler = struct {
             ) catch std.math.maxInt(usize);
             self.accountDispatchResources(dispatch_memory_bandwidth_units, decision);
             if (outcome == .faulted) {
-                self.containUserException(runtime, task_id, now_ticks);
+                self.containUserException(runtime, task, now_ticks);
                 return true;
             }
             if (builtin.target.os.tag == .freestanding and yielded and !self.active_marker_printed) {
@@ -708,22 +709,22 @@ pub const Scheduler = struct {
     fn containUserException(
         self: *Scheduler,
         runtime: *task_runtime.Runtime,
-        task_id: u64,
+        task: *task_runtime.TaskRecord,
         now_ticks: u64,
     ) void {
+        const task_id = task.id;
         const exception = self.executor.lastUserException() orelse
             native_util.impossibleByInvariant("faulted userspace dispatch has no exception record");
-        runtime.recordCrashReport(
-            task_id,
+        runtime.recordCrashReportForResolved(
+            task,
             USER_EXCEPTION_CRASH_SERVICE_ID,
             now_ticks,
             exception.vector,
             USER_EXCEPTION_REDACTION_POLICY_VERSION,
             exception.reasonFingerprint(),
             true,
-        ) catch |err| native_util.impossibleByInvariantError("userspace exception crash report was rejected", err);
-        const terminated = runtime.terminateTask(task_id, now_ticks) catch |err|
-            native_util.impossibleByInvariantError("faulted userspace task termination was rejected", err);
+        );
+        const terminated = runtime.terminateResolvedTask(task, now_ticks, null);
         if (!terminated) native_util.impossibleByInvariant("faulted userspace task was already terminated");
         if (self.slots.slotIndexOf(task_id)) |slot_index| {
             if (!self.unregisterSlotIndex(slot_index)) {
