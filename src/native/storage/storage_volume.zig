@@ -881,7 +881,7 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
     if (!volume_root_slot.hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     store.reset();
-    workspaces.reset();
+    workspaces.resetRetainingMutationLogBacking();
     self.resetSignerText();
 
     self.workspace_state_hashes.reset();
@@ -1189,7 +1189,7 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     const workspace_id = ids.workspace(try reader.readU64());
     const existing_slot = workspaces.workspaces.get(workspace_id);
     const slot = existing_slot orelse
-        workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
+        workspaces.workspaces.reserveCleanRetainingPayload(workspace_id) orelse return error.CorruptImage;
     slot.workspace.mutation_log.ensureBacking() catch {
         if (existing_slot == null) std.debug.assert(workspaces.workspaces.remove(workspace_id));
         return error.NoSpaceLeft;
@@ -1440,7 +1440,7 @@ fn deserializeState(
     for (0..@as(usize, workspace_count_value)) |_| {
         const workspace_id = ids.workspace(try reader.readU64());
         replayed_id_bounds.noteWorkspace(workspace_id.raw());
-        const slot = workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
+        const slot = workspaces.workspaces.reserveCleanRetainingPayload(workspace_id) orelse return error.CorruptImage;
         slot.workspace.mutation_log.ensureBacking() catch {
             std.debug.assert(workspaces.workspaces.remove(workspace_id));
             return error.NoSpaceLeft;

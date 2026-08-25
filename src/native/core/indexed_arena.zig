@@ -459,6 +459,13 @@ pub fn IndexedArenaWithKeyOptions(
             return &self.slots[slot_index];
         }
 
+        /// Claims a clean slot without clearing its payload. The caller must
+        /// establish that any retained payload is safe to reuse.
+        pub fn reserveCleanRetainingPayload(self: *Self, key: Key) ?*Slot {
+            const slot_index = self.reserveIndexCleanRetainingPayload(key) orelse return null;
+            return &self.slots[slot_index];
+        }
+
         pub fn reserveIndex(self: *Self, key: Key) ?usize {
             return self.reserveIndexWithDirty(key, true);
         }
@@ -488,6 +495,17 @@ pub fn IndexedArenaWithKeyOptions(
         pub fn reserveIndexClean(self: *Self, key: Key) ?usize {
             if (!options.track_dirty) @compileError("clean reservation is only available on dirty-tracked arenas");
             return self.reserveIndexWithDirty(key, false);
+        }
+
+        pub fn reserveIndexCleanRetainingPayload(self: *Self, key: Key) ?usize {
+            if (!options.track_dirty) @compileError("clean reservation is only available on dirty-tracked arenas");
+            const raw_key = ids.raw(key);
+            if (raw_key == 0) return null;
+            if (self.primary_index.lookup(raw_key) != null) return null;
+
+            const slot_index = self.popFreeIndex() orelse return null;
+            self.claimSlotMetadata(key, raw_key, slot_index, false);
+            return slot_index;
         }
 
         fn reserveIndexWithDirty(self: *Self, key: Key, mark_dirty: bool) ?usize {
@@ -1604,6 +1622,22 @@ test "indexed arena can reset membership while retaining unreachable payloads" {
     try std.testing.expectEqualStrings("", replacement.record.label);
     replacement.record = .{ .id = 44, .owner = 8, .label = "replacement" };
     try std.testing.expectEqualStrings("replacement", arena.get(44).?.record.label);
+}
+
+test "dirty tracked arena can reclaim clean retained payloads" {
+    const Arena = DirtyTrackedIndexedArenaWithKey(u64, TestSlot, 2, 4, testSlotId);
+    var arena = Arena.init();
+
+    const original = arena.reserveClean(41).?;
+    original.record = .{ .id = 41, .owner = 7, .label = "retained" };
+    arena.resetRetainingPayloads();
+
+    const reclaimed = arena.reserveCleanRetainingPayload(42).?;
+    try std.testing.expectEqualStrings("retained", reclaimed.record.label);
+    reclaimed.record.id = 42;
+    try std.testing.expectEqual(@as(usize, 1), arena.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
+    try std.testing.expectEqualStrings("retained", arena.get(42).?.record.label);
 }
 
 test "indexed arena supports secondary indexes" {

@@ -1021,6 +1021,9 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(workspace.ExportPackage) <= workspace.EXPORT_PACKAGE_SIZE_CEILING_BYTES,
         .stores_compact_workspace_label_metadata = workspace.COMPACT_WORKSPACE_LABEL_METADATA and
             @FieldType(workspace.WorkspaceRecord, "label_len") == u8,
+        .retains_replay_mutation_log_backing = workspace.RETAINS_REPLAY_MUTATION_LOG_BACKING and
+            @hasDecl(workspace.Directory, "resetRetainingMutationLogBacking") and
+            @hasDecl(@FieldType(workspace.Directory, "workspaces"), "reserveCleanRetainingPayload"),
         .stores_compact_workspace_table_metadata = workspace.COMPACT_WORKSPACE_TABLE_METADATA and
             @FieldType(workspace.WorkspaceTableCounts, "entry_count") == workspace.WorkspaceEntryCount and
             @FieldType(workspace.WorkspaceTableCounts, "entry_mutation_count") == workspace.WorkspaceMutationCount and

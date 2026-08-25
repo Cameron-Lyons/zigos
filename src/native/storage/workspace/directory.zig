@@ -40,6 +40,7 @@ pub const SNAPSHOT_RECORD_SIZE_CEILING_BYTES: usize = 224;
 pub const EXPORT_PACKAGE_SIZE_CEILING_BYTES: usize = 11_808;
 pub const COMPACT_WORKSPACE_LABEL_METADATA = true;
 pub const COMPACT_WORKSPACE_TABLE_METADATA = true;
+pub const RETAINS_REPLAY_MUTATION_LOG_BACKING = true;
 pub const NO_SNAPSHOT_GENERATION: u32 = std.math.maxInt(u32);
 
 comptime {
@@ -361,6 +362,13 @@ pub const WorkspaceMutationLog = struct {
             @memset(std.mem.asBytes(&self.backing), 0);
         }
     }
+
+    fn scrubUsedEntries(self: *WorkspaceMutationLog, used_count: usize) void {
+        if (comptime heap_backed_mutation_logs) {
+            const backing = self.backing orelse return;
+            for (backing[0..@min(used_count, backing.len)]) |*mutation| mutation.* = .{};
+        }
+    }
 };
 
 pub const WorkspaceShareTable = struct {
@@ -605,12 +613,43 @@ pub const Directory = struct {
     pub fn reset(self: *Directory) void {
         self.next_workspace_id = 1;
         self.next_snapshot_id = 1;
-        for (self.workspaces.slots[0..self.workspaces.next_unclaimed_index]) |*slot| {
-            if (slot.in_use) {
+        const workspace_reset_count = if (comptime heap_backed_mutation_logs)
+            MAX_WORKSPACES
+        else
+            self.workspaces.next_unclaimed_index;
+        for (self.workspaces.slots[0..workspace_reset_count]) |*slot| {
+            if (comptime heap_backed_mutation_logs) {
+                slot.workspace.mutation_log.releaseBacking();
+                slot.* = WorkspaceSlot{};
+            } else if (slot.in_use) {
                 slot.workspace.mutation_log.releaseBacking();
                 slot.* = WorkspaceSlot{};
             }
         }
+        self.finishResetMembership();
+    }
+
+    pub fn resetRetainingMutationLogBacking(self: *Directory) void {
+        self.next_workspace_id = 1;
+        self.next_snapshot_id = 1;
+        for (self.workspaces.slots[0..self.workspaces.next_unclaimed_index]) |*slot| {
+            if (!slot.in_use) continue;
+            if (comptime heap_backed_mutation_logs) {
+                var mutation_log = slot.workspace.mutation_log;
+                mutation_log.scrubUsedEntries(
+                    @as(usize, slot.workspace.counts.entry_mutation_count) + slot.workspace.staging.staged_entry_count,
+                );
+                slot.* = WorkspaceSlot{};
+                slot.workspace.mutation_log = mutation_log;
+            } else {
+                slot.workspace.mutation_log.releaseBacking();
+                slot.* = WorkspaceSlot{};
+            }
+        }
+        self.finishResetMembership();
+    }
+
+    fn finishResetMembership(self: *Directory) void {
         self.workspaces.resetRetainingPayloads();
         for (self.snapshots.slots[0..self.snapshots.next_unclaimed_index]) |*slot| {
             if (slot.in_use) slot.* = SnapshotSlot{};
