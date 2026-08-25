@@ -373,6 +373,7 @@ pub const indexed_hot_path_tables = .{
         .reuses_faulted_task_records_for_containment = userspace_scheduler.FAULT_CONTAINMENT_TASK_INDEX_RELOOKUPS == 0,
         .uses_generational_task_handles_for_dispatch = @hasDecl(task_runtime.Runtime, "findByHandle") and
             userspace_scheduler.SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH == 0,
+        .reuses_accelerator_wait_slots = userspace_scheduler.ACCELERATOR_WAIT_TASK_INDEX_RELOOKUPS == 0,
     },
     .userspace_executor = .{
         .resolves_mailbox_authorities_together = @hasDecl(userspace_executor, "resolveMailboxAuthorities"),
