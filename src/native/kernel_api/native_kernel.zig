@@ -80,6 +80,7 @@ pub const RESOLVED_TASK_BUDGET_RELOOKUPS_PER_CALL: usize = 0;
 pub const GRANT_PLAN_TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK: usize = 1;
 pub const GRANT_ATTACHMENT_TASK_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
 pub const RESOLVED_TASK_REVOCATION_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
+pub const SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -93,12 +94,23 @@ const AuthorizationInput = struct {
     target_capability: ?*const capability.Capability = null,
 };
 
+const AuthorizationResult = struct {
+    capability: *const capability.Capability,
+    subject_task: ?*task_runtime.TaskRecord,
+};
+
+const SubjectTaskAuthorization = struct {
+    capability: *const capability.Capability,
+    task: *task_runtime.TaskRecord,
+};
+
 pub const Error = task_runtime.Error || capability.Error || device_broker.Error || endpoint.Error || shared_memory.Error || error{
     InvalidCapabilityTarget,
     InvalidUserspaceImage,
     PermissionDenied,
     ResourceBudgetExceeded,
     ScopeViolation,
+    SubjectTaskMismatch,
     UserspaceLaunchRequired,
     InvalidSurfacePresentation,
     StaleSurfacePresentation,
@@ -273,9 +285,10 @@ pub const Kernel = struct {
         payload_out: []u8,
         now_ticks: u64,
     ) Error!?EndpointReceiveResult {
-        const endpoint_capability = try self.authorizeOperation(.endpoint_recv, context, now_ticks, .{
+        const authorization = try self.authorizeSubjectTaskOperation(.endpoint_recv, context, receiver_task_id, now_ticks, .{
             .request_task_id = receiver_task_id,
         });
+        const endpoint_capability = authorization.capability;
 
         const message = (try self.endpoint_table.recvInto(
             ids.endpoint(endpoint_capability.target.id),
@@ -293,7 +306,7 @@ pub const Kernel = struct {
         };
 
         if (message.attached_capability_id) |attached_capability_id| {
-            const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
+            const receiver = authorization.task;
             try validateRuntimeGrantForTask(receiver, 1);
             const original = self.capability_table.query(attached_capability_id.raw()) orelse return error.CapabilityNotFound;
             const passed = try self.capability_table.pass(.{
@@ -543,13 +556,14 @@ pub const Kernel = struct {
         task_id: u64,
         now_ticks: u64,
     ) Error!abi.SharedMemoryDescriptor {
-        const object_capability = try self.authorizeOperation(.shared_memory_map, context, now_ticks, .{
+        const authorization = try self.authorizeSubjectTaskOperation(.shared_memory_map, context, task_id, now_ticks, .{
             .request_task_id = task_id,
         });
+        const object_capability = authorization.capability;
         const object_id = ids.sharedMemory(object_capability.target.id);
         if (!self.shared_memory_table.hasMapping(object_id, ids.task(task_id))) {
             const object_size = try self.shared_memory_table.objectSize(object_id);
-            try self.validateSharedMemoryMapBudget(task_id, object_size);
+            try self.validateSharedMemoryMapBudget(authorization.task, object_size);
         }
         try self.shared_memory_table.map(object_id, ids.task(task_id));
         return self.shared_memory_table.descriptor(object_id);
@@ -561,10 +575,10 @@ pub const Kernel = struct {
         task_id: u64,
         now_ticks: u64,
     ) Error!bool {
-        const object_capability = try self.authorizeOperation(.shared_memory_unmap, context, now_ticks, .{
+        const authorization = try self.authorizeSubjectTaskOperation(.shared_memory_unmap, context, task_id, now_ticks, .{
             .request_task_id = task_id,
         });
-        return self.shared_memory_table.unmap(ids.sharedMemory(object_capability.target.id), ids.task(task_id));
+        return self.shared_memory_table.unmap(ids.sharedMemory(authorization.capability.target.id), ids.task(task_id));
     }
 
     pub fn sharedMemoryRevoke(
@@ -633,10 +647,9 @@ pub const Kernel = struct {
         receiver_task_id: u64,
         now_ticks: u64,
     ) Error!?abi.InputEventDescriptor {
-        _ = try self.authorizeOperation(.input_recv, context, now_ticks, .{
+        _ = try self.authorizeSubjectTaskOperation(.input_recv, context, receiver_task_id, now_ticks, .{
             .request_task_id = receiver_task_id,
         });
-        _ = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
         const receiver = self.focused_input_receiver orelse return null;
         const event = receiver.poll(receiver.context, receiver_task_id) orelse return null;
         if (event.task_id != receiver_task_id) return error.ScopeViolation;
@@ -650,10 +663,10 @@ pub const Kernel = struct {
         presentation: *const abi.SurfacePresentation,
         now_ticks: u64,
     ) Error!bool {
-        _ = try self.authorizeOperation(.surface_present, context, now_ticks, .{
+        const authorization = try self.authorizeSubjectTaskOperation(.surface_present, context, presenter_task_id, now_ticks, .{
             .request_task_id = presenter_task_id,
         });
-        const task = self.runtime.find(presenter_task_id) orelse return error.TaskNotFound;
+        const task = authorization.task;
         if (task.state != .active) return error.InvalidSurfacePresentation;
         if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.ScopeViolation;
         if (!abi.isCanonicalSurfacePresentation(presentation)) return error.InvalidSurfacePresentation;
@@ -725,6 +738,30 @@ pub const Kernel = struct {
         now_ticks: u64,
         input: AuthorizationInput,
     ) Error!*const capability.Capability {
+        return (try self.authorizeOperationWithSubject(expected_operation, context, now_ticks, input)).capability;
+    }
+
+    fn authorizeSubjectTaskOperation(
+        self: *Kernel,
+        comptime expected_operation: abi.NativeOperation,
+        context: KernelCallContext,
+        task_id: u64,
+        now_ticks: u64,
+        input: AuthorizationInput,
+    ) Error!SubjectTaskAuthorization {
+        if (context.caller_task_id != 0 and context.caller_task_id != task_id) return error.SubjectTaskMismatch;
+        const authorization = try self.authorizeOperationWithSubject(expected_operation, context, now_ticks, input);
+        const task = authorization.subject_task orelse self.runtime.find(task_id) orelse return error.TaskNotFound;
+        return .{ .capability = authorization.capability, .task = task };
+    }
+
+    fn authorizeOperationWithSubject(
+        self: *Kernel,
+        comptime expected_operation: abi.NativeOperation,
+        context: KernelCallContext,
+        now_ticks: u64,
+        input: AuthorizationInput,
+    ) Error!AuthorizationResult {
         const descriptor = operation_metadata.declarationFor(expected_operation);
 
         const subject_task = if (context.caller_task_id != 0)
@@ -761,7 +798,7 @@ pub const Kernel = struct {
             },
         }
         try validateOperationScope(descriptor.scope_rule, owned.scope, input);
-        return owned;
+        return .{ .capability = owned, .subject_task = subject_task };
     }
 
     fn requireTargetedCapability(
@@ -847,9 +884,8 @@ pub const Kernel = struct {
         if (next_allocated > task.budget.shared_memory_bytes) return error.ResourceBudgetExceeded;
     }
 
-    fn validateSharedMemoryMapBudget(self: *Kernel, task_id: u64, size_bytes: usize) Error!void {
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        const mapped = self.shared_memory_table.liveMappedBytesForTask(ids.task(task_id));
+    fn validateSharedMemoryMapBudget(self: *Kernel, task: *const task_runtime.TaskRecord, size_bytes: usize) Error!void {
+        const mapped = self.shared_memory_table.liveMappedBytesForTask(ids.task(task.id));
         const next_mapped = std.math.add(usize, mapped, size_bytes) catch return error.ResourceBudgetExceeded;
         if (next_mapped > task.budget.shared_memory_bytes) return error.ResourceBudgetExceeded;
     }
