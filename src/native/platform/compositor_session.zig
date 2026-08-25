@@ -33,6 +33,8 @@ pub const COMPACT_SESSION_COUNT_METADATA = true;
 pub const WINDOW_ALLOCATION_INDEX_RELOOKUPS: u8 = 0;
 pub const MODAL_REVIEWER_INDEX_RELOOKUPS: u8 = 0;
 pub const STEADY_SURFACE_PRIMARY_INDEX_LOOKUPS: u8 = 1;
+pub const SURFACE_LIFECYCLE_BACKING_RELOOKUPS: u8 = 0;
+pub const SURFACE_REMOVAL_TASK_INDEX_LOOKUPS: u8 = 1;
 pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
@@ -634,7 +636,7 @@ pub const Session = struct {
             .presentation = presentation.*,
         };
         self.surface_task_index.insertAbsent(surfaceTaskKey(task.id), slot_index);
-        self.linkActiveSurface(slot_index);
+        self.linkActiveSurface(surfaces, slot_index);
         return .accepted;
     }
 
@@ -665,12 +667,12 @@ pub const Session = struct {
             if (!slot.in_use) native_util.impossibleByInvariant("active surface chain points at a free slot");
             const next_index = slot.next_active_index;
             const task = runtime.findConst(slot.surface.task_id) orelse {
-                if (self.removeSurfaceSlot(index)) removed += 1;
+                if (self.removeSurfaceSlot(surfaces, index)) removed += 1;
                 index = next_index;
                 continue;
             };
             if (task.state != .active or task.ui_surface_id != slot.surface.presentation.surface_id) {
-                if (self.removeSurfaceSlot(index)) removed += 1;
+                if (self.removeSurfaceSlot(surfaces, index)) removed += 1;
             }
             index = next_index;
         }
@@ -1022,12 +1024,10 @@ pub const Session = struct {
         if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("surface task index points outside slots");
         const slot = &surfaces.slots[slot_index];
         if (!slot.in_use or slot.surface.task_id != task_id) native_util.impossibleByInvariant("surface task index points at the wrong task");
-        if (!self.removeSurfaceSlot(slot_index)) native_util.impossibleByInvariant("task-owned surface remains live until task teardown");
+        if (!self.removeSurfaceSlot(surfaces, slot_index)) native_util.impossibleByInvariant("task-owned surface remains live until task teardown");
     }
 
-    fn linkActiveSurface(self: *Session, slot_index: usize) void {
-        const surfaces = self.surfaceArena() orelse
-            native_util.impossibleByInvariant("active compositor surfaces retain arena backing");
+    fn linkActiveSurface(self: *Session, surfaces: *SurfaceArena, slot_index: usize) void {
         if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface append points outside slots");
         const slot = &surfaces.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("active surface append requires a live slot");
@@ -1043,9 +1043,7 @@ pub const Session = struct {
         self.active_surface_tail = encoded_index;
     }
 
-    fn unlinkActiveSurface(self: *Session, slot_index: usize) void {
-        const surfaces = self.surfaceArena() orelse
-            native_util.impossibleByInvariant("active compositor surfaces retain arena backing");
+    fn unlinkActiveSurface(self: *Session, surfaces: *SurfaceArena, slot_index: usize) void {
         if (slot_index >= MAX_PRESENTED_SURFACES) native_util.impossibleByInvariant("active surface unlink points outside slots");
         const slot = &surfaces.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("active surface unlink requires a live slot");
@@ -1069,17 +1067,16 @@ pub const Session = struct {
         slot.next_active_index = NO_SURFACE_SLOT_INDEX;
     }
 
-    fn removeSurfaceSlot(self: *Session, slot_index: usize) bool {
-        const surfaces = self.surfaceArena() orelse return false;
+    fn removeSurfaceSlot(self: *Session, surfaces: *SurfaceArena, slot_index: usize) bool {
         if (slot_index >= MAX_PRESENTED_SURFACES) return false;
         const slot = &surfaces.slots[slot_index];
         if (!slot.in_use) return false;
         const task_key = surfaceTaskKey(slot.surface.task_id);
-        if (self.surface_task_index.lookup(task_key) != slot_index) {
-            native_util.impossibleByInvariant("removed surface task index points at the matching slot");
+        if (builtin.mode == .Debug) {
+            std.debug.assert(self.surface_task_index.lookup(task_key) == slot_index);
         }
         self.surface_task_index.remove(task_key);
-        self.unlinkActiveSurface(slot_index);
+        self.unlinkActiveSurface(surfaces, slot_index);
         return surfaces.removeIndex(slot_index);
     }
 
