@@ -402,6 +402,7 @@ pub const indexed_hot_path_tables = .{
         .keeps_runtime_within_target_ceiling = @sizeOf(task_runtime.Runtime) <= task_runtime.RUNTIME_SIZE_CEILING_BYTES,
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
         .reuses_resolved_termination_tasks = task_runtime.TERMINATION_TASK_INDEX_RELOOKUPS == 0 and
+            task_runtime.TERMINATION_TASK_SLOT_LOOKUPS == 1 and
             @hasDecl(task_runtime.Runtime, "taskHandle"),
         .records_resolved_task_audits = task_runtime.RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS == 0,
         .transitions_resolved_task_states = task_runtime.RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS == 0,
@@ -434,6 +435,7 @@ pub const indexed_hot_path_tables = .{
             native_kernel.CAPABILITY_PASS_SOURCE_TASK_INDEX_RELOOKUPS == 0,
         .reuses_authorized_capabilities_for_pass = native_kernel.CAPABILITY_PASS_QUERY_RELOOKUPS == 0,
         .records_task_creation_audits_directly = native_kernel.TASK_CREATE_AUDIT_INDEX_RELOOKUPS == 0,
+        .captures_termination_capabilities_during_transition = native_kernel.TASK_TERMINATE_PREVIEW_SLOT_LOOKUPS == 0,
         .returns_resolved_task_lifecycle_results = task_lifecycle_service.RESULT_TASK_INDEX_RELOOKUPS == 0,
         .resolves_task_lifecycle_transitions_once = task_lifecycle_service.TRANSITION_TASK_INDEX_LOOKUPS == 1,
         .derives_kernel_operations_from_typed_methods = native_kernel.TYPED_METHOD_DERIVES_KERNEL_OPERATION and

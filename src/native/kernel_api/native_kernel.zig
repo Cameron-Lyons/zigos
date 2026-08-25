@@ -90,6 +90,7 @@ pub const CAPABILITY_MUTATION_SELF_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const CAPABILITY_PASS_SOURCE_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const ATTACHED_CAPABILITY_TASK_INDEX_RELOOKUPS_PER_SEND: usize = 0;
 pub const MOVED_CAPABILITY_RECEIVE_TASK_INDEX_RELOOKUPS: usize = 0;
+pub const TASK_TERMINATE_PREVIEW_SLOT_LOOKUPS: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -189,13 +190,10 @@ pub const Kernel = struct {
         const task_capability = try self.authorizeOperation(.task_terminate, context, now_ticks, .{});
         const task_id = task_capability.target.id;
         const task_handle = self.runtime.taskHandle(task_id) orelse return error.TaskNotFound;
-        const task = self.runtime.findByHandle(task_handle, task_id) orelse return error.TaskNotFound;
-        var held_capability_ids: [task_runtime.MAX_TASK_CAPABILITIES]u64 = undefined;
-        const held_capability_count = task.capability_count;
-        @memcpy(held_capability_ids[0..held_capability_count], task.capabilityIds());
-        const terminated = try self.runtime.terminateTaskByHandle(task_handle, task_id, now_ticks);
+        var terminated_capabilities = task_runtime.TerminationCapabilities{};
+        const terminated = try self.runtime.terminateTaskByHandle(task_handle, task_id, now_ticks, &terminated_capabilities);
         if (!terminated) return false;
-        _ = self.capability_table.retireHeldTaskAuthority(task_id, held_capability_ids[0..held_capability_count]);
+        _ = self.capability_table.retireHeldTaskAuthority(task_id, terminated_capabilities.ids[0..terminated_capabilities.count]);
         self.retireCapabilityTarget(.{ .kind = .task, .id = task_id });
         const retired_endpoints = self.endpoint_table.retireTask(ids.task(task_id));
         for (retired_endpoints.retiredEndpointIds()) |endpoint_id| {
