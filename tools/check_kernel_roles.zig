@@ -94,6 +94,8 @@ const mmu_probe_fault_code_push_imm8_machine_code = [_]u8{ 0x6a, 0x72 };
 const mmu_probe_fault_code_mov_dl_imm8_machine_code = [_]u8{ 0xb2, 0x72 };
 const mmu_probe_fault_code_max_distance: usize = 24;
 const mmu_probe_machine_code_sentinel_count: usize = 2;
+const userspace_page_size: u64 = 4096;
+const maximum_packed_userspace_overhead_bytes: u64 = 2048;
 
 comptime {
     if (verification_userspace_identities.len != verification_only_userspace_count) {
@@ -112,6 +114,7 @@ const ParseError = error{
     InvalidProgramHeaderSize,
     InvalidProgramHeaderTable,
     InvalidLoadSegment,
+    InvalidUserspacePacking,
     WritableExecutableLoadSegment,
     MissingWritableLoadSegment,
     MissingSectionHeaderTable,
@@ -496,6 +499,9 @@ fn analyzeUserspaceElf(bytes: []const u8) ParseError!UserspaceAnalysis {
     const header = try parseHeader(bytes);
     const programs = try resolveProgramTable(bytes, header);
     _ = try analyzeProgramHeaders(bytes, programs);
+    if (kernel_role_options.enforce_packed_userspace) {
+        try validatePackedUserspaceLayout(bytes, programs);
+    }
 
     var verification_identity_mask: u8 = 0;
     for (verification_userspace_identities, 0..) |identity, identity_index| {
@@ -895,6 +901,27 @@ fn analyzeProgramHeaders(bytes: []const u8, table: ProgramTable) ParseError!Prog
     };
 }
 
+fn validatePackedUserspaceLayout(bytes: []const u8, table: ProgramTable) ParseError!void {
+    var loadable_file_bytes: u64 = 0;
+    var index: usize = 0;
+    while (index < table.count) : (index += 1) {
+        const program = try parseProgramHeader(bytes, table, index);
+        if (program.segment_type != pt_load) continue;
+        if (program.virtual_address % userspace_page_size != 0) {
+            return error.InvalidUserspacePacking;
+        }
+        loadable_file_bytes = std.math.add(u64, loadable_file_bytes, program.file_size) catch
+            return error.IntegerOverflow;
+    }
+
+    const file_bytes: u64 = @intCast(bytes.len);
+    if (file_bytes > loadable_file_bytes and
+        file_bytes - loadable_file_bytes > maximum_packed_userspace_overhead_bytes)
+    {
+        return error.InvalidUserspacePacking;
+    }
+}
+
 fn sectionCoveredByLoad(bytes: []const u8, table: ProgramTable, section: Section) bool {
     if (section.size == 0) return true;
     const section_start: u64 = section.address;
@@ -1190,6 +1217,7 @@ fn parseErrorDescription(err: ParseError) []const u8 {
         error.InvalidProgramHeaderSize => "the program-header entry size is invalid",
         error.InvalidProgramHeaderTable => "the program-header table is invalid",
         error.InvalidLoadSegment => "an allocated section or load segment is invalid",
+        error.InvalidUserspacePacking => "userspace load segments are not compactly packed in the file",
         error.WritableExecutableLoadSegment => "a load segment is both writable and executable",
         error.MissingWritableLoadSegment => "the ELF has no writable load segment",
         error.MissingSectionHeaderTable => "the section-header table is missing",
@@ -1592,6 +1620,23 @@ test "userspace ELF analysis scans loaded identities and executable probe sentin
     try std.testing.expectEqual(
         @as(usize, 0),
         executable_flag_removed.mmu_probe_machine_code_sentinels,
+    );
+}
+
+test "userspace ELF analysis rejects page-padded file layouts" {
+    var storage = [_]u8{0} ** 8192;
+    const compact = buildTestElf(&storage);
+    const header = try parseHeader(compact);
+    const programs = try resolveProgramTable(compact, header);
+    try validatePackedUserspaceLayout(compact, programs);
+
+    const padded_len = compact.len + @as(usize, maximum_packed_userspace_overhead_bytes) + 32;
+    const padded = storage[0..padded_len];
+    const padded_header = try parseHeader(padded);
+    const padded_programs = try resolveProgramTable(padded, padded_header);
+    try std.testing.expectError(
+        error.InvalidUserspacePacking,
+        validatePackedUserspaceLayout(padded, padded_programs),
     );
 }
 

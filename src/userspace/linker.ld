@@ -11,13 +11,15 @@ SECTIONS
 {
     . = 0x40000000;
 
-    .text : ALIGN(4K)
+    . = ALIGN(4K);
+    .text :
     {
         *(.text)
         *(.text.*)
     } :text
 
-    .rodata : ALIGN(4K)
+    . = ALIGN(4K);
+    .rodata :
     {
         *(.rodata)
         *(.rodata.*)
@@ -27,23 +29,27 @@ SECTIONS
         *(.eh_frame.*)
     } :rodata
 
-    .zigos_userspace_descriptor : ALIGN(4K)
+    . = ALIGN(4K);
+    .zigos_userspace_descriptor :
     {
         KEEP(*(.zigos_userspace_descriptor))
     } :rodata
 
-    .zigos_userspace_bootstrap : ALIGN(4K)
+    . = ALIGN(4K);
+    .zigos_userspace_bootstrap :
     {
         KEEP(*(.zigos_userspace_bootstrap))
     } :data
 
-    .data : ALIGN(4K)
+    . = ALIGN(4K);
+    .data :
     {
         *(.data)
         *(.data.*)
     } :data
 
-    .bss : ALIGN(4K)
+    . = ALIGN(4K);
+    .bss :
     {
         *(COMMON)
         *(.bss)
