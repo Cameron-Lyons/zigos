@@ -81,6 +81,11 @@ const BUNDLE_INDEX_CAPACITY: usize = verification_boot_image_specs.len * 2;
 const bundle_index = buildBundleIndex();
 
 pub fn findVerification(bundle_id: []const u8) ?*const ImageSpec {
+    const spec_index = indexForRole(bundle_id) orelse return null;
+    return &verification_boot_image_specs[spec_index];
+}
+
+pub fn indexForRole(bundle_id: []const u8) ?usize {
     const key = production_registry.bundleIndexKey(bundle_id);
     const spec_index = id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, key) orelse {
         debugAssertBundleIndexMissAbsent(bundle_id);
@@ -92,7 +97,7 @@ pub fn findVerification(bundle_id: []const u8) ?*const ImageSpec {
     if (!std.mem.eql(u8, verification_boot_image_specs[spec_index].bundle_id, bundle_id)) {
         native_util.impossibleByInvariant("verification boot bundle id index points at the wrong registry spec");
     }
-    return &verification_boot_image_specs[spec_index];
+    return spec_index;
 }
 
 pub fn findForRole(bundle_id: []const u8) ?*const ImageSpec {
@@ -126,6 +131,10 @@ test "verification userspace registry extends production with proof and journey 
         try std.testing.expect(production_registry.findProduction(spec.bundle_id) == null);
         const verification_spec = findVerification(spec.bundle_id) orelse return error.MissingVerificationImage;
         try std.testing.expectEqualStrings(spec.bundle_id, verification_spec.bundle_id);
+    }
+
+    for (verification_boot_image_specs, 0..) |spec, spec_index| {
+        try std.testing.expectEqual(spec_index, indexForRole(spec.bundle_id).?);
     }
 
     for (production_registry.production_boot_image_specs) |spec| {

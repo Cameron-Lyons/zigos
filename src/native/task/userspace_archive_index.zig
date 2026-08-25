@@ -1,8 +1,11 @@
 const std = @import("std");
 const archive = @import("userspace_archive");
 const embedded_file = @import("embedded_file.zig");
-const id_index = @import("../core/id_index.zig");
 const native_util = @import("../core/util.zig");
+const role_registry = if (archive.includes_verification_images)
+    @import("userspace_verification_registry.zig")
+else
+    @import("userspace_registry.zig");
 
 pub const GeneratedArtifact = @TypeOf(archive.artifacts[0]);
 pub const ArchiveRole = archive.ArchiveRole;
@@ -14,55 +17,42 @@ comptime {
     if (includes_verification_images != (archive_role == .verification)) {
         @compileError("generated userspace archive role metadata is inconsistent");
     }
-}
-
-const BUNDLE_INDEX_CAPACITY: usize = archive.artifacts.len * 2;
-const bundle_index = buildBundleIndex();
-
-pub fn artifactFor(bundle_id: []const u8) ?GeneratedArtifact {
-    const artifact_index = id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, bundleIndexKey(bundle_id)) orelse {
-        debugAssertArchiveIndexMissAbsent(bundle_id);
-        return null;
-    };
-    if (artifact_index >= archive.artifacts.len) {
-        native_util.impossibleByInvariant("userspace archive index points outside artifacts");
+    if (archive.artifacts.len != role_registry.role_boot_image_specs.len) {
+        @compileError("generated userspace archive does not match its role-specific registry");
     }
-    const artifact = archive.artifacts[artifact_index];
-    if (!std.mem.eql(u8, artifact.bundle_id, bundle_id)) {
-        native_util.impossibleByInvariant("userspace archive index points at the wrong artifact");
-    }
-    return artifact;
-}
-
-fn bundleIndexKey(bundle_id: []const u8) u64 {
-    const hash = native_util.fnv1a64(bundle_id);
-    return if (hash == 0) 1 else hash;
-}
-
-fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
-    @setEvalBranchQuota(10_000);
-    var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
-    for (archive.artifacts, 0..) |artifact, artifact_index| {
-        id_index.insert(BUNDLE_INDEX_CAPACITY, &index, bundleIndexKey(artifact.bundle_id), artifact_index, "userspace archive bundle index covers generated artifacts");
-    }
-    return index;
-}
-
-fn debugAssertArchiveIndexMissAbsent(bundle_id: []const u8) void {
-    if (@import("builtin").mode != .Debug) return;
-    for (archive.artifacts) |artifact| {
-        if (std.mem.eql(u8, artifact.bundle_id, bundle_id)) {
-            native_util.impossibleByInvariant("userspace archive bundle index missed a generated artifact");
+    for ([_][]const u8{
+        "bundle_id",
+        "display_name",
+        "publisher",
+        "label",
+        "entry",
+        "component_class",
+        "role_tag",
+        "heartbeat_increment",
+        "contract_flags",
+    }) |field_name| {
+        if (@hasField(GeneratedArtifact, field_name)) {
+            @compileError("generated userspace artifacts must not duplicate registry identity field: " ++ field_name);
         }
     }
 }
 
+pub fn artifactFor(bundle_id: []const u8) ?GeneratedArtifact {
+    // Archive artifacts are emitted in registry order, so the registry's
+    // existing bundle index is the single source of identity lookup truth.
+    const artifact_index = role_registry.indexForRole(bundle_id) orelse return null;
+    if (artifact_index >= archive.artifacts.len) {
+        native_util.impossibleByInvariant("userspace registry index points outside archive artifacts");
+    }
+    return archive.artifacts[artifact_index];
+}
+
 test "userspace archive index resolves every generated artifact bundle" {
     try std.testing.expect(archive.artifacts.len > 0);
-    for (archive.artifacts) |artifact| {
-        const indexed = artifactFor(artifact.bundle_id) orelse return error.MissingGeneratedArtifact;
-        try std.testing.expectEqualStrings(artifact.bundle_id, indexed.bundle_id);
-        try std.testing.expectEqualStrings(artifact.display_name, indexed.display_name);
+    for (role_registry.role_boot_image_specs, 0..) |spec, artifact_index| {
+        const artifact = archive.artifacts[artifact_index];
+        const indexed = artifactFor(spec.bundle_id) orelse return error.MissingGeneratedArtifact;
+        try std.testing.expectEqual(artifact.signed, indexed.signed);
         try std.testing.expectEqual(artifact.data.byte_len, indexed.data.byte_len);
         try std.testing.expectEqualSlices(embedded_file.ChunkIndex, artifact.data.chunk_indices, indexed.data.chunk_indices);
     }

@@ -424,15 +424,6 @@ fn writeArchive(
         \\};
         \\
         \\pub const Artifact = struct {
-        \\    bundle_id: []const u8,
-        \\    display_name: []const u8,
-        \\    publisher: []const u8,
-        \\    label: []const u8,
-        \\    entry: []const u8,
-        \\    component_class: u8,
-        \\    role_tag: u32,
-        \\    heartbeat_increment: u32,
-        \\    contract_flags: u32,
         \\    signed: bool,
         \\    entry_point: u64,
         \\    stack_top: u64,
@@ -468,15 +459,6 @@ fn writeArchive(
 
     for (artifacts, 0..) |artifact, index| {
         try writer.writeAll("    .{\n");
-        try writer.print("        .bundle_id = \"{f}\",\n", .{std.zig.fmtString(artifact.bundle_id)});
-        try writer.print("        .display_name = \"{f}\",\n", .{std.zig.fmtString(artifact.display_name)});
-        try writer.print("        .publisher = \"{f}\",\n", .{std.zig.fmtString(artifact.publisher)});
-        try writer.print("        .label = \"{f}\",\n", .{std.zig.fmtString(artifact.label)});
-        try writer.print("        .entry = \"{f}\",\n", .{std.zig.fmtString(artifact.entry)});
-        try writer.print("        .component_class = {d},\n", .{artifact.component_class});
-        try writer.print("        .role_tag = 0x{x},\n", .{artifact.role_tag});
-        try writer.print("        .heartbeat_increment = {d},\n", .{artifact.heartbeat_increment});
-        try writer.print("        .contract_flags = 0x{x},\n", .{artifact.contract_flags});
         try writer.print("        .signed = {},\n", .{artifact.signed});
         try writer.print("        .entry_point = 0x{x},\n", .{artifact.embedded_info.entry_point});
         try writer.print("        .stack_top = 0x{x},\n", .{artifact.embedded_info.executable_image.stack_top});
