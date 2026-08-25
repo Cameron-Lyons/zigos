@@ -40,6 +40,7 @@ pub const COMPACT_LIFECYCLE_METADATA = true;
 pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
 pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
+pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
 pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
 pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_624;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
@@ -1100,6 +1101,10 @@ pub const Runtime = struct {
 
     pub fn suspendTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
+        return self.suspendResolvedTask(task, tick);
+    }
+
+    pub fn suspendResolvedTask(self: *Runtime, task: *TaskRecord, tick: u64) bool {
         if (task.state != .active) return false;
 
         self.setTaskState(task, .suspended);
@@ -1112,6 +1117,10 @@ pub const Runtime = struct {
 
     pub fn resumeTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
+        return self.resumeResolvedTask(task, tick);
+    }
+
+    pub fn resumeResolvedTask(self: *Runtime, task: *TaskRecord, tick: u64) bool {
         if (task.state != .suspended) return false;
 
         self.setTaskState(task, .active);
