@@ -1192,10 +1192,12 @@ pub const indexed_hot_path_tables = .{
     },
     .service_bootstrap = .{
         .has_launch_service_request = @hasDecl(service_bootstrap, "LaunchServiceRequest"),
+        .reuses_direct_service_tasks = service_bootstrap.DIRECT_SERVICE_AUTHORITY_TASK_INDEX_RELOOKUPS == 0,
     },
     .session_service_bootstrap = .{
         .launches_contract_services = @hasDecl(session_service_bootstrap, "bootServices"),
         .reuses_service_client_tasks = session_service_bootstrap.SERVICE_CLIENT_TASK_INDEX_RELOOKUPS == 0,
+        .reuses_service_launch_controller_tasks = session_service_bootstrap.SERVICE_LAUNCH_CONTROLLER_TASK_INDEX_RELOOKUPS == 0,
     },
     .session_manager_boot_flow = .{
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
