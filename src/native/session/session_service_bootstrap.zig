@@ -31,6 +31,8 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
+pub const SERVICE_CLIENT_TASK_INDEX_RELOOKUPS: u8 = 0;
+
 const storage_restart_scratch_lba: u64 = storage_volume_mod.required_device_sectors + 16;
 const storage_restart_probe_sectors: u64 = 2;
 const booted_storage_sector_count: u64 = storage_restart_scratch_lba + storage_restart_probe_sectors;
@@ -851,7 +853,7 @@ pub fn connectClient(
         recordBootFailure(env, state.services.service_registry.id, 56, err);
         return false;
     };
-    env.runtime.grantCapability(service_client_task.id, service_client_authority.id) catch |err| {
+    task_runtime.grantCapabilityToTask(service_client_task, service_client_authority.id) catch |err| {
         recordBootFailure(env, state.services.service_registry.id, 56, err);
         return false;
     };
@@ -883,14 +885,11 @@ pub fn connectClient(
             recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };
-        env.runtime.audit(service_client_task.id, .{
+        service_client_task.appendAudit(.{
             .kind = .service_connected,
             .detail = @truncate(registry_connection.service_id),
             .tick = 57 + @as(u64, @intCast(index)),
-        }) catch |err| {
-            recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
-            return false;
-        };
+        });
         const service = env.supervisor.findByClass(entry.class) orelse return false;
         if (registry_connection.service_id == service.id) {
             service_connect_count += 1;
