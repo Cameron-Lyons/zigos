@@ -29,6 +29,8 @@ pub const PAGE_ACCESSED: u32 = 0x20;
 pub const PAGE_DIRTY: u32 = 0x40;
 
 pub const PAGE_EXECUTABLE: u32 = 0x200;
+pub const CACHES_PROCESS_CONTEXT_MODE = true;
+pub const PRECOMPUTES_ADDRESS_SPACE_CR3 = true;
 
 const ENTRY_PRESENT = table64.PRESENT;
 const ENTRY_WRITABLE = table64.WRITABLE;
@@ -48,6 +50,7 @@ pub const FrameReleaseError = frame_allocator.Error;
 pub const UserAddressSpace = struct {
     directory: *PageDirectory,
     pcid: pcid_allocator.Identifier,
+    switch_cr3: usize,
 };
 
 pub const UserPermissions = struct {
@@ -105,6 +108,7 @@ var physical_frames = PhysicalFrameAllocator.init();
 var frame_lock: bool = false;
 var process_contexts = pcid_allocator.Allocator.init();
 var process_context_lock: bool = false;
+var process_context_identifiers_enabled: bool = false;
 
 const tableIndex = table64.index;
 
@@ -202,7 +206,7 @@ fn tryAllocProcessContext() ?pcid_allocator.Identifier {
 fn releaseProcessContext(identifier: pcid_allocator.Identifier) void {
     acquireProcessContextLock();
     defer releaseProcessContextLock();
-    if (x86.processContextIdentifiersEnabled()) x86.invalidatePcid(identifier);
+    if (process_context_identifiers_enabled) x86.invalidatePcid(identifier);
     process_contexts.release(identifier) catch
         haltWithMessage("Corrupt process-context identifier accounting!\n");
 }
@@ -391,7 +395,11 @@ pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
         release_frames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
         return error.ProcessContextExhausted;
     };
-    return .{ .directory = pml4, .pcid = pcid };
+    return .{
+        .directory = pml4,
+        .pcid = pcid,
+        .switch_cr3 = addressSpaceCr3(pml4, pcid),
+    };
 }
 
 fn ensureOwnedLeaf(space: *UserAddressSpace, virtual_address: u32) UserMapError!*PageTableEntry {
@@ -537,11 +545,11 @@ pub fn destroyUserAddressSpace(space: *UserAddressSpace) UserAddressSpaceDestroy
 }
 
 pub fn switchToUserAddressSpace(space: *const UserAddressSpace) void {
-    switchAddressSpace(space.directory, space.pcid);
+    switchAddressSpace(space.directory, space.switch_cr3);
 }
 
 pub fn switchToKernelAddressSpace() void {
-    switchAddressSpace(&kernel_pml4, pcid_allocator.KERNEL_IDENTIFIER);
+    switchAddressSpace(&kernel_pml4, kernel_switch_cr3);
 }
 
 fn initializeKernelHierarchy() void {
@@ -605,9 +613,10 @@ pub fn init() void {
     }
 
     enableWriteProtect();
+    process_context_identifiers_enabled = x86.processContextIdentifiersEnabled();
     current_page_directory = &kernel_pml4;
-    current_process_context = pcid_allocator.KERNEL_IDENTIFIER;
     x86.writeCr3(@intFromPtr(&kernel_pml4));
+    kernel_switch_cr3 = addressSpaceCr3(&kernel_pml4, pcid_allocator.KERNEL_IDENTIFIER);
     unmapBootStackGuardPage();
     early_console.print("Four-level paging enabled!\n");
     const stats = frameStats();
@@ -665,21 +674,22 @@ fn printHex(value: anytype, console: anytype) void {
 }
 
 var current_page_directory: *PageDirectory = &kernel_pml4;
-var current_process_context: pcid_allocator.Identifier = pcid_allocator.KERNEL_IDENTIFIER;
+var kernel_switch_cr3: usize = 0;
 
 pub fn getCurrentPageDirectory() *PageDirectory {
     return current_page_directory;
 }
 
-fn switchAddressSpace(directory: *PageDirectory, pcid: pcid_allocator.Identifier) void {
-    if (directory == current_page_directory and pcid == current_process_context) return;
-    if (x86.processContextIdentifiersEnabled()) {
-        x86.writeCr3WithPcid(@intFromPtr(directory), pcid, true);
-    } else {
-        x86.writeCr3(@intFromPtr(directory));
-    }
+fn addressSpaceCr3(directory: *PageDirectory, pcid: pcid_allocator.Identifier) usize {
+    if (!process_context_identifiers_enabled) return @intFromPtr(directory);
+    return x86.pcidCr3Value(@intFromPtr(directory), pcid, true) orelse
+        haltWithMessage("Invalid address-space CR3 value!\n");
+}
+
+fn switchAddressSpace(directory: *PageDirectory, switch_cr3: usize) void {
+    if (directory == current_page_directory) return;
+    x86.writeCr3(switch_cr3);
     current_page_directory = directory;
-    current_process_context = pcid;
 }
 
 fn invalidate_page(virt_addr: usize) void {
