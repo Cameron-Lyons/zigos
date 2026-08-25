@@ -1074,6 +1074,11 @@ test "address-space range validation requires full mapped coverage and permissio
     try std.testing.expect(validateAddressSpaceRange(&address_space, 0x30010, 0x30100, .write));
     try std.testing.expect(!validateAddressSpaceRange(&address_space, 0x22000, 0x22020, .read));
     try std.testing.expect(!validateAddressSpaceRange(&address_space, 0x20FF0, 0x22010, .read));
+
+    var unordered_address_space = address_space;
+    unordered_address_space.regions[0] = address_space.regions[1];
+    unordered_address_space.regions[1] = address_space.regions[0];
+    try std.testing.expect(!validateAddressSpaceRange(&unordered_address_space, 0x20020, 0x20080, .read));
 }
 
 test "syscall surface dispatches typed PCI device broker requests" {

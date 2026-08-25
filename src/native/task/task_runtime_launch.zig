@@ -11,6 +11,7 @@ pub const USER_VIRTUAL_ADDRESS_MIN: u64 = userspace_layout.image_start;
 pub const USER_IMAGE_ADDRESS_MAX_EXCLUSIVE: u64 = userspace_layout.image_end_exclusive;
 pub const USER_STACK_ADDRESS_MIN: u64 = userspace_layout.stack_start;
 pub const USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE: u64 = userspace_layout.user_end_exclusive;
+pub const ORDERED_EXECUTABLE_SEGMENTS = true;
 
 comptime {
     if (userspace_bootstrap_mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR != userspace_layout.shared_start) {
@@ -114,6 +115,7 @@ pub fn validateUserspaceImage(
     }
 
     var entry_is_executable = false;
+    var previous_segment_end: u64 = 0;
     var index: usize = 0;
     while (index < image.segment_count) : (index += 1) {
         const segment = image.segments[index];
@@ -138,6 +140,10 @@ pub fn validateUserspaceImage(
         ) orelse
             return error.InvalidUserspaceImage;
         if (rangesOverlap(segment_range, stack_range)) return error.InvalidUserspaceImage;
+        if (index != 0 and segment_range.start < previous_segment_end) {
+            return error.InvalidUserspaceImage;
+        }
+        previous_segment_end = segment_range.end;
 
         const file_end = std.math.add(
             u64,
@@ -145,19 +151,6 @@ pub fn validateUserspaceImage(
             @as(u64, segment.file_size),
         ) catch return error.InvalidUserspaceImage;
         if (file_end > image_file_size) return error.InvalidUserspaceImage;
-
-        var previous_index: usize = 0;
-        while (previous_index < index) : (previous_index += 1) {
-            const previous = image.segments[previous_index];
-            const previous_range = checkedUserRange(
-                previous.virtual_address,
-                previous.memory_size,
-                USER_VIRTUAL_ADDRESS_MIN,
-                USER_IMAGE_ADDRESS_MAX_EXCLUSIVE,
-            ) orelse
-                return error.InvalidUserspaceImage;
-            if (rangesOverlap(segment_range, previous_range)) return error.InvalidUserspaceImage;
-        }
 
         if (segment.access.execute and
             image.entry_point >= segment_range.start and

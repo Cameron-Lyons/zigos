@@ -38,6 +38,7 @@ pub const USER_VIRTUAL_ADDRESS_MIN: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MI
 pub const USER_IMAGE_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_IMAGE_ADDRESS_MAX_EXCLUSIVE;
 pub const USER_STACK_ADDRESS_MIN: u64 = launch_helpers.USER_STACK_ADDRESS_MIN;
 pub const USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE;
+pub const ORDERED_EXECUTABLE_SEGMENTS = launch_helpers.ORDERED_EXECUTABLE_SEGMENTS;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = USER_VIRTUAL_ADDRESS_MIN;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: usize = units.kibibytes(8);
 
@@ -934,6 +935,11 @@ test "userspace image validation rejects malformed rounded mappings" {
     overlapping_segments.segments[1].virtual_address = overlapping_segments.segments[0].virtual_address;
     overlapping_segments.segments[1].file_offset = 0;
     try expectInvalidUserspaceImage(overlapping_segments);
+
+    var unordered_segments = valid;
+    unordered_segments.segments[0] = valid.segments[1];
+    unordered_segments.segments[1] = valid.segments[0];
+    try expectInvalidUserspaceImage(unordered_segments);
 
     var stack_collision = valid;
     stack_collision.stack_size_bytes = USER_PAGE_SIZE;
