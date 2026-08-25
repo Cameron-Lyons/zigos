@@ -18,7 +18,6 @@ const workspace = @import("../storage/workspace.zig");
 const kinds = @import("event_kinds.zig");
 const root = @import("root");
 const copyText = native_util.copyText;
-const yesNo = native_util.yesNo;
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
@@ -29,6 +28,7 @@ pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 512;
 pub const COMPACT_EVENT_TEXT_METADATA = true;
 pub const RECORDS_EVENTS_IN_PLACE = true;
+pub const INLINE_EVENT_TEXT_WRITES = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 688;
 pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 53_192;
 pub const state_workspace_label = "system-diagnostics";
@@ -2665,18 +2665,18 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
     try appendText(buffer, used, "\n");
 }
 
-fn exportDetailSlice(event: *const Event, include_protected_content: bool) []const u8 {
+inline fn exportDetailSlice(event: *const Event, include_protected_content: bool) []const u8 {
     if (event.detail_protected and !include_protected_content) return "redacted";
     return event.detailSlice();
 }
 
-fn appendText(buffer: []u8, used: *usize, value: []const u8) Error!void {
+inline fn appendText(buffer: []u8, used: *usize, value: []const u8) Error!void {
     if (value.len > buffer.len -| used.*) return error.NoSpaceLeft;
     @memcpy(buffer[used.*..][0..value.len], value);
     used.* += value.len;
 }
 
-fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) Error!void {
+inline fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) Error!void {
     var total_len: usize = 0;
     inline for (parts) |part| total_len += part.len;
     if (total_len > buffer.len -| used.*) return error.NoSpaceLeft;
@@ -2687,7 +2687,7 @@ fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) Error!void {
     }
 }
 
-fn appendUnsigned(buffer: []u8, used: *usize, value: anytype) Error!void {
+inline fn appendUnsigned(buffer: []u8, used: *usize, value: anytype) Error!void {
     var number_buffer: [20]u8 = undefined;
     const number_len = std.fmt.printInt(&number_buffer, value, 10, .lower, .{});
     try appendText(buffer, used, number_buffer[0..number_len]);
@@ -2696,6 +2696,10 @@ fn appendUnsigned(buffer: []u8, used: *usize, value: anytype) Error!void {
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) Error!void {
     const rendered = std.fmt.bufPrint(buffer[used.*..], fmt, args) catch return error.NoSpaceLeft;
     used.* += rendered.len;
+}
+
+inline fn yesNo(value: bool) []const u8 {
+    return if (value) "yes" else "no";
 }
 
 fn stateObjectId() u64 {
