@@ -76,6 +76,7 @@ pub const KernelCallContext = struct {
 pub const TYPED_METHOD_DERIVES_KERNEL_OPERATION = true;
 pub const KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES: usize = 32;
 pub const AUTHORIZATION_TASK_INDEX_LOOKUPS_PER_CALL: usize = 1;
+pub const RESOLVED_TASK_BUDGET_RELOOKUPS_PER_CALL: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -196,7 +197,7 @@ pub const Kernel = struct {
         });
 
         const task = self.runtime.find(owner_task_id) orelse return error.TaskNotFound;
-        try self.validateEndpointBudget(owner_task_id);
+        try self.validateEndpointBudget(task);
         const created = try self.endpoint_table.create(ids.task(owner_task_id), label, flags);
         const endpoint_capability = try self.applySingleAutoGrant(
             .endpoint_create,
@@ -290,7 +291,7 @@ pub const Kernel = struct {
 
         if (message.attached_capability_id) |attached_capability_id| {
             const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
-            try self.validateRuntimeGrant(receiver_task_id, 1);
+            try validateRuntimeGrantForTask(receiver, 1);
             const original = self.capability_table.query(attached_capability_id.raw()) orelse return error.CapabilityNotFound;
             const passed = try self.capability_table.pass(.{
                 .capability_id = attached_capability_id.raw(),
@@ -430,7 +431,7 @@ pub const Kernel = struct {
         if (request.scope.task_id) |task_id| {
             const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
             if (!task.owner.eql(request.holder)) return error.PermissionDenied;
-            try self.validateRuntimeGrant(task_id, 1);
+            try validateRuntimeGrantForTask(task, 1);
         }
         const derived = try self.capability_table.derive(request);
         errdefer self.capability_table.rollbackGrant(&.{derived});
@@ -450,7 +451,7 @@ pub const Kernel = struct {
         const capability_id = context.presented_capability_id;
         _ = try self.authorizeOperation(.capability_pass, context, now_ticks, .{});
         const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
-        try self.validateRuntimeGrant(receiver_task_id, 1);
+        try validateRuntimeGrantForTask(receiver, 1);
         const original = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
         const passed = try self.capability_table.pass(.{
             .capability_id = capability_id,
@@ -511,7 +512,7 @@ pub const Kernel = struct {
         });
 
         const task = self.runtime.find(owner_task_id) orelse return error.TaskNotFound;
-        try self.validateSharedMemoryCreateBudget(owner_task_id, size_bytes);
+        try self.validateSharedMemoryCreateBudget(task, size_bytes);
         const object = try self.shared_memory_table.create(ids.task(owner_task_id), size_bytes);
         const object_capability = try self.applySingleAutoGrant(
             .shared_memory_create,
@@ -797,14 +798,8 @@ pub const Kernel = struct {
             for (plan.entries[0 .. index + 1]) |candidate| {
                 if (candidate.task_id == entry.task_id) planned_for_task += 1;
             }
-            try self.validateRuntimeGrant(entry.task_id, planned_for_task);
-        }
-    }
-
-    fn validateRuntimeGrant(self: *Kernel, task_id: u64, additional_count: usize) Error!void {
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        if (task.capability_count + additional_count > task_runtime.MAX_TASK_CAPABILITIES) {
-            return error.CapabilityTableFull;
+            const task = self.runtime.find(entry.task_id) orelse return error.TaskNotFound;
+            try validateRuntimeGrantForTask(task, planned_for_task);
         }
     }
 
@@ -826,16 +821,14 @@ pub const Kernel = struct {
         }
     }
 
-    fn validateEndpointBudget(self: *Kernel, task_id: u64) Error!void {
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        if (self.endpoint_table.activeForTask(ids.task(task_id)) >= task.budget.endpoint_slots) {
+    fn validateEndpointBudget(self: *Kernel, task: *const task_runtime.TaskRecord) Error!void {
+        if (self.endpoint_table.activeForTask(ids.task(task.id)) >= task.budget.endpoint_slots) {
             return error.ResourceBudgetExceeded;
         }
     }
 
-    fn validateSharedMemoryCreateBudget(self: *Kernel, task_id: u64, size_bytes: usize) Error!void {
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        const allocated = self.shared_memory_table.liveOwnedBytesForTask(ids.task(task_id));
+    fn validateSharedMemoryCreateBudget(self: *Kernel, task: *const task_runtime.TaskRecord, size_bytes: usize) Error!void {
+        const allocated = self.shared_memory_table.liveOwnedBytesForTask(ids.task(task.id));
         const next_allocated = std.math.add(usize, allocated, size_bytes) catch return error.ResourceBudgetExceeded;
         if (next_allocated > task.budget.shared_memory_bytes) return error.ResourceBudgetExceeded;
     }
@@ -847,6 +840,12 @@ pub const Kernel = struct {
         if (next_mapped > task.budget.shared_memory_bytes) return error.ResourceBudgetExceeded;
     }
 };
+
+fn validateRuntimeGrantForTask(task: *const task_runtime.TaskRecord, additional_count: usize) Error!void {
+    if (task.capability_count + additional_count > task_runtime.MAX_TASK_CAPABILITIES) {
+        return error.CapabilityTableFull;
+    }
+}
 
 fn taskDescriptor(task: *const task_runtime.TaskRecord) abi.TaskDescriptor {
     return kernel_descriptors.taskDescriptor(task);
