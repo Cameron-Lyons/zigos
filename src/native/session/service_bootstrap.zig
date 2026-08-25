@@ -21,6 +21,7 @@ const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
 pub const Error = error{ MissingBootstrapGrant, DriverAttachmentNotAllowed } || device_inventory.Error || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
+pub const DIRECT_SERVICE_AUTHORITY_TASK_INDEX_RELOOKUPS: u8 = 0;
 
 const driver_endpoint_slots = 4;
 const kibibytes = units.kibibytes;
@@ -82,7 +83,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
                 .broker_service_id = request.service_id,
             },
         });
-        try request.kernel_port.kernel.runtime.grantCapability(service_task.id, service_authority.id);
+        try task_runtime.grantCapabilityToTask(service_task, service_authority.id);
         break :blk .{ service_task.id, service_authority.id };
     } else blk: {
         const service_task = try userspace_launch.launchRegisteredKernel(

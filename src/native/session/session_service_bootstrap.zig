@@ -32,6 +32,7 @@ else
     };
 
 pub const SERVICE_CLIENT_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const SERVICE_LAUNCH_CONTROLLER_TASK_INDEX_RELOOKUPS: u8 = 0;
 
 const storage_restart_scratch_lba: u64 = storage_volume_mod.required_device_sectors + 16;
 const storage_restart_probe_sectors: u64 = 2;
@@ -561,7 +562,7 @@ fn launchService(
     kernel_port: *component_port.KernelPort,
     entry: service_contract.ServiceContract,
 ) service_bootstrap.Error!service_bootstrap.ServiceBinding {
-    try env.runtime.grantCapability(state.session_task.id, state.session_capability.id);
+    try task_runtime.grantCapabilityToTask(state.session_task, state.session_capability.id);
     return service_bootstrap.launchContractService(.{
         .catalog = env.userspace_catalog,
         .kernel_port = kernel_port,
