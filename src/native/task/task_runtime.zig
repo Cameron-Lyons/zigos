@@ -39,6 +39,7 @@ pub const TaskStateCount = u8;
 pub const COMPACT_LIFECYCLE_METADATA = true;
 pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
 pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
 pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
 pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_624;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
@@ -879,7 +880,7 @@ pub const Runtime = struct {
         const record = try self.makeExecutionComponent(component);
         cold.execution_components[task.execution_component_count] = record;
         task.execution_component_count += 1;
-        try self.audit(task_id, .{
+        task.appendAudit(.{
             .kind = .component_attached,
             .detail = @intFromEnum(record.substrate),
             .tick = tick,
@@ -1095,7 +1096,7 @@ pub const Runtime = struct {
         if (task.state != .active) return false;
 
         self.setTaskState(task, .suspended);
-        try self.audit(task_id, .{
+        task.appendAudit(.{
             .kind = .suspended,
             .tick = tick,
         });
@@ -1107,7 +1108,7 @@ pub const Runtime = struct {
         if (task.state != .suspended) return false;
 
         self.setTaskState(task, .active);
-        try self.audit(task_id, .{
+        task.appendAudit(.{
             .kind = .resumed,
             .tick = tick,
         });
