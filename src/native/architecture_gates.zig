@@ -375,7 +375,8 @@ pub const indexed_hot_path_tables = .{
             userspace_scheduler.SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH == 0,
         .reuses_accelerator_wait_slots = userspace_scheduler.ACCELERATOR_WAIT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_task_slots_during_unregister = userspace_scheduler.TASK_UNREGISTER_SLOT_RELOOKUPS == 0,
-        .resolves_accelerator_rank_tasks_once = userspace_scheduler.ACCELERATOR_RANK_TASK_INDEX_LOOKUPS_PER_CANDIDATE == 1,
+        .resolves_accelerator_rank_tasks_once = userspace_scheduler.ACCELERATOR_RANK_TASK_INDEX_LOOKUPS_PER_CANDIDATE == 1 and
+            userspace_scheduler.ACCELERATOR_RANK_BACKING_RELOOKUPS_PER_COMPARISON == 0,
     },
     .userspace_executor = .{
         .resolves_mailbox_authorities_together = @hasDecl(userspace_executor, "resolveMailboxAuthorities"),

@@ -54,6 +54,7 @@ pub const SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
 pub const ACCELERATOR_WAIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const TASK_UNREGISTER_SLOT_RELOOKUPS: u8 = 0;
 pub const ACCELERATOR_RANK_TASK_INDEX_LOOKUPS_PER_CANDIDATE: u8 = 1;
+pub const ACCELERATOR_RANK_BACKING_RELOOKUPS_PER_COMPARISON: u8 = 0;
 
 comptime {
     if (task_runtime.MAX_TASKS > std.math.maxInt(QueueSlotIndex) or
@@ -1080,7 +1081,7 @@ pub const Scheduler = struct {
 
         var current = self.accelerator_claim_heads[queue_index];
         while (current != QUEUE_NO_INDEX) : (current = backing.claims.slots[current].next_claim_index) {
-            if (self.acceleratorClaimPriorityBeats(claim_index, @intCast(current))) {
+            if (self.acceleratorClaimPriorityBeats(&claim.record, &backing.claims.slots[current].record)) {
                 self.linkAcceleratorClaimBefore(queue_index, claim_index, @intCast(current));
                 self.insertAcceleratorDeadlineIndex(queue_index, claim_index);
                 self.accelerator_claim_counts[queue_index] += 1;
@@ -1126,7 +1127,7 @@ pub const Scheduler = struct {
 
         var current = self.accelerator_deadline_heads[queue_index];
         while (current != QUEUE_NO_INDEX) : (current = backing.claims.slots[current].next_deadline_index) {
-            if (self.acceleratorClaimDeadlineBeats(claim_index, @intCast(current))) {
+            if (self.acceleratorClaimDeadlineBeats(&claim.record, &backing.claims.slots[current].record)) {
                 self.linkAcceleratorDeadlineBefore(queue_index, claim_index, @intCast(current));
                 return;
             }
@@ -1228,14 +1229,9 @@ pub const Scheduler = struct {
 
     fn acceleratorClaimPriorityBeats(
         self: *const Scheduler,
-        candidate_index: usize,
-        selected_index: usize,
+        candidate: *const AcceleratorClaimRecord,
+        selected: *const AcceleratorClaimRecord,
     ) bool {
-        const backing = self.acceleratorClaimBackingConst() orelse
-            native_util.impossibleByInvariant("ranked accelerator claims retain their backing");
-        const candidate = backing.claims.slots[candidate_index].record;
-        const selected = backing.claims.slots[selected_index].record;
-
         const candidate_priority = resourceClassPriorityRank(candidate.resource_class);
         const selected_priority = resourceClassPriorityRank(selected.resource_class);
         if (candidate_priority < selected_priority) return true;
@@ -1261,16 +1257,12 @@ pub const Scheduler = struct {
 
     fn acceleratorClaimDeadlineBeats(
         self: *const Scheduler,
-        candidate_index: usize,
-        selected_index: usize,
+        candidate: *const AcceleratorClaimRecord,
+        selected: *const AcceleratorClaimRecord,
     ) bool {
-        const backing = self.acceleratorClaimBackingConst() orelse
-            native_util.impossibleByInvariant("ranked accelerator deadlines retain their backing");
-        const candidate = backing.claims.slots[candidate_index].record;
-        const selected = backing.claims.slots[selected_index].record;
         if (candidate.deadline_tick < selected.deadline_tick) return true;
         if (candidate.deadline_tick > selected.deadline_tick) return false;
-        return self.acceleratorClaimPriorityBeats(candidate_index, selected_index);
+        return self.acceleratorClaimPriorityBeats(candidate, selected);
     }
 
     fn taskSchedulingRank(self: *const Scheduler, task_id: u64) TaskSchedulingRank {
