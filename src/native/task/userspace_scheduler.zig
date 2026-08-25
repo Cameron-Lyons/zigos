@@ -47,6 +47,8 @@ pub const QueueSlotIndex = u8;
 pub const QUEUE_NO_INDEX: QueueSlotIndex = @intCast(task_runtime.MAX_TASKS);
 pub const COMPACT_QUEUE_METADATA = true;
 pub const STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS: u8 = 0;
+pub const TASK_REGISTRATION_HANDLE_SLOT_RELOOKUPS: u8 = 0;
+pub const TASK_WAKE_HANDLE_SLOT_RELOOKUPS: u8 = 0;
 pub const SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
 
 comptime {
@@ -385,8 +387,8 @@ pub const Scheduler = struct {
     pub fn registerTask(self: *Scheduler, task_id: u64) bool {
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
-        const task_handle = runtime.taskHandle(task_id) orelse return false;
-        const task = runtime.findByHandle(task_handle, task_id) orelse return false;
+        const task = runtime.find(task_id) orelse return false;
+        const task_handle = runtime.taskHandleForResolved(task);
         const catalog = self.catalog_ptr orelse return false;
         const owns_ui_surface = taskUiPresentationEligible(catalog, task);
         const slot_index = self.slots.reserveIndex(task_id) orelse return false;
@@ -444,8 +446,8 @@ pub const Scheduler = struct {
         _ = reason;
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
-        const task_handle = runtime.taskHandle(task_id) orelse return false;
-        const task = runtime.findByHandle(task_handle, task_id) orelse return false;
+        const task = runtime.find(task_id) orelse return false;
+        const task_handle = runtime.taskHandleForResolved(task);
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         const slot = &self.slots.slots[slot_index];
         if (slot.queued_ready and slot.resource_class != task.resourceClass()) {

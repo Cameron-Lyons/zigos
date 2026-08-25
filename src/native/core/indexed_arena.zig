@@ -1183,6 +1183,16 @@ pub fn PagedIndexedArenaWithKey(
             return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
 
+        /// The caller must already own a currently claimed slot. Optimized
+        /// builds avoid rereading its payload membership flag.
+        pub inline fn handleForClaimedIndex(self: *const Self, slot_index: usize) Handle {
+            if (builtin.mode == .Debug) {
+                std.debug.assert(slot_index < capacity);
+                std.debug.assert(self.slotAtConst(slot_index).in_use);
+            }
+            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
+        }
+
         pub fn slotAt(self: *Self, slot_index: usize) *Slot {
             if (slot_index >= capacity) native_util.impossibleByInvariant("paged indexed arena slot index points outside slabs");
             return &self.pages[slot_index / page_size].slots[slot_index % page_size];
@@ -1892,6 +1902,7 @@ test "paged indexed arena uses slab pages and invalidates stale handles" {
     const first_index = arena.reserveIndex(11).?;
     arena.slotAt(first_index).record = .{ .id = 11, .owner = 1, .label = "first" };
     const first_handle = arena.handleForIndex(first_index).?;
+    try std.testing.expect(arena.handleForClaimedIndex(first_index).eql(first_handle));
 
     const second_handle = arena.reserveHandle(12).?;
     arena.getByHandle(second_handle).?.record = .{ .id = 12, .owner = 2, .label = "second" };
@@ -1905,8 +1916,10 @@ test "paged indexed arena uses slab pages and invalidates stale handles" {
 
     const reused_index = arena.reserveIndex(13).?;
     arena.slotAt(reused_index).record = .{ .id = 13, .owner = 3, .label = "reused" };
+    const reused_handle = arena.handleForIndex(reused_index).?;
     try std.testing.expectEqual(first_index, reused_index);
-    try std.testing.expect(!arena.handleForIndex(reused_index).?.eql(first_handle));
+    try std.testing.expect(!reused_handle.eql(first_handle));
+    try std.testing.expect(arena.handleForClaimedIndex(reused_index).eql(reused_handle));
     try std.testing.expectEqualStrings("reused", arena.get(13).?.record.label);
 }
 

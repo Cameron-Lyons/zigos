@@ -42,6 +42,7 @@ pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const TERMINATION_TASK_SLOT_LOOKUPS: u8 = 1;
 pub const RESOLVED_TERMINATION_SLOT_RELOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
+pub const RESOLVED_TASK_HANDLE_SLOT_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
 pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
@@ -655,12 +656,12 @@ pub const Runtime = struct {
     }
 
     pub inline fn taskHandleForResolved(self: *const Runtime, task: *const TaskRecord) TaskHandle {
-        const slot_index: usize = task.arena_slot_index;
+        const handle = self.tasks.handleForClaimedIndex(task.arena_slot_index);
         if (builtin.mode == .Debug) {
-            const slot = self.tasks.slotAtConst(slot_index);
+            const slot = self.tasks.getConstByHandle(handle).?;
             std.debug.assert(slot.in_use and &slot.task == task and slot.task.id == task.id);
         }
-        return self.tasks.handleForIndex(slot_index).?;
+        return handle;
     }
 
     pub fn findByHandle(self: *Runtime, handle: TaskHandle, expected_task_id: u64) ?*TaskRecord {
