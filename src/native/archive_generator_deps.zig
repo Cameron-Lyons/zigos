@@ -9,6 +9,7 @@ pub const units = @import("core/units.zig");
 pub const Inspection = elf_image_inspector.Inspection;
 pub const inspect = elf_image_inspector.inspect;
 pub const embedded_file_chunk_bytes = embedded_file.CHUNK_SIZE_BYTES;
+pub const EmbeddedFileChunkIndex = embedded_file.ChunkIndex;
 
 pub const SIGNATURE_FORMAT_ED25519 = signing.SIGNATURE_FORMAT_ED25519;
 pub const SIGNATURE_FORMAT_ML_DSA65 = signing.SIGNATURE_FORMAT_ML_DSA65;
