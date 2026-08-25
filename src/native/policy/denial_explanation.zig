@@ -62,25 +62,39 @@ pub fn renderUserHelpToBuffer(
     explanation: Explanation,
 ) RenderError![]const u8 {
     var used: usize = 0;
-    try appendFmt(buffer, &used, "Blocked: {s} could not {s}", .{
-        display_name,
-        actionLabel(kind),
-    });
+    const action = actionLabel(kind);
+    const reason = plainReason(explanation.reason);
+    const missing = humanCapabilityLabel(kind);
+    const resolution = resolutionHint(explanation);
     if (resource.len != 0) {
-        try appendFmt(buffer, &used, " for {s}", .{resource});
-    }
-    try appendFmt(buffer, &used, " because {s}. Missing: {s}. ", .{
-        plainReason(explanation.reason),
-        humanCapabilityLabel(kind),
-    });
-    if (explanation.user_approval_can_resolve) {
-        try appendText(buffer, &used, "Open Permission Review to grant a narrower scope or keep it blocked.");
-    } else if (explanation.retry_safe) {
-        try appendText(buffer, &used, "It is safe to try again after activity quiets down.");
+        try appendTextParts(buffer, &used, .{
+            "Blocked: ",   display_name,
+            " could not ", action,
+            " for ",       resource,
+            " because ",   reason,
+            ". Missing: ", missing,
+            ". ",          resolution,
+        });
     } else {
-        try appendText(buffer, &used, "This needs a different app route or administrator policy change.");
+        try appendTextParts(buffer, &used, .{
+            "Blocked: ",   display_name,
+            " could not ", action,
+            " because ",   reason,
+            ". Missing: ", missing,
+            ". ",          resolution,
+        });
     }
     return buffer[0..used];
+}
+
+fn resolutionHint(explanation: Explanation) []const u8 {
+    if (explanation.user_approval_can_resolve) {
+        return "Open Permission Review to grant a narrower scope or keep it blocked.";
+    }
+    if (explanation.retry_safe) {
+        return "It is safe to try again after activity quiets down.";
+    }
+    return "This needs a different app route or administrator policy change.";
 }
 
 fn capabilityLabel(kind: manifest.PermissionKind) []const u8 {
@@ -192,9 +206,15 @@ fn appendText(buffer: []u8, used: *usize, text: []const u8) RenderError!void {
     used.* += text.len;
 }
 
-fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) RenderError!void {
-    const rendered = std.fmt.bufPrint(buffer[used.*..], fmt, args) catch return error.NoSpaceLeft;
-    used.* += rendered.len;
+fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) RenderError!void {
+    var total_len: usize = 0;
+    inline for (parts) |part| total_len += part.len;
+    if (total_len > buffer.len -| used.*) return error.NoSpaceLeft;
+
+    inline for (parts) |part| {
+        @memcpy(buffer[used.*..][0..part.len], part);
+        used.* += part.len;
+    }
 }
 
 test "permission denials explain blocking policy capability approval and retry hints" {
@@ -234,10 +254,19 @@ test "permission denial rendering respects exact buffer bounds" {
 
 test "permission denials render a user readable blocked explanation" {
     const denied = forPermissionDecision(.network_egress, .policy_denied);
-    var buffer: [USER_HELP_BUFFER_BYTES]u8 = undefined;
-    const rendered = try renderUserHelpToBuffer(&buffer, "Notes", .network_egress, "relay.zigos.dev", denied);
+    const expected =
+        "Blocked: Notes could not send data through the approved route for relay.zigos.dev" ++
+        " because the permission was not granted. Missing: data egress." ++
+        " Open Permission Review to grant a narrower scope or keep it blocked.";
+    try std.testing.expect(expected.len <= USER_HELP_BUFFER_BYTES);
 
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Blocked: Notes") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "not granted") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission Review") != null);
+    var exact_buffer: [expected.len]u8 = undefined;
+    const rendered = try renderUserHelpToBuffer(&exact_buffer, "Notes", .network_egress, "relay.zigos.dev", denied);
+    try std.testing.expectEqualStrings(expected, rendered);
+
+    var short_buffer: [expected.len - 1]u8 = undefined;
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        renderUserHelpToBuffer(&short_buffer, "Notes", .network_egress, "relay.zigos.dev", denied),
+    );
 }
