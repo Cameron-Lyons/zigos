@@ -7,6 +7,7 @@ const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
 
 pub const LifecycleOperation = policy_object.LifecycleOperation;
+pub const RESULT_TASK_INDEX_RELOOKUPS: u8 = 0;
 
 pub const Error = task_runtime.Error || event_ledger.Error || error{
     InvalidLifecycleTransition,
@@ -69,10 +70,9 @@ pub const Service = struct {
         try recordLifecycle(ledger, request, transitioned);
         if (!transitioned) return error.InvalidLifecycleTransition;
 
-        const updated = self.runtime.find(request.task_id) orelse return error.TaskNotFound;
         return .{
-            .task_id = updated.id,
-            .state = updated.state,
+            .task_id = task.id,
+            .state = task.state,
         };
     }
 };
