@@ -411,7 +411,7 @@ pub const indexed_hot_path_tables = .{
             @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "handleForClaimedIndex") and
             @hasDecl(task_runtime.Runtime, "terminateResolvedTaskByHandle") and
             @hasDecl(task_runtime.Runtime, "taskHandleForResolved") and
-            @hasDecl(task_runtime.Runtime, "taskHandle"),
+            !@hasDecl(task_runtime.Runtime, "taskHandle"),
         .records_resolved_task_audits = task_runtime.RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS == 0,
         .transitions_resolved_task_states = task_runtime.RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS == 0,
         .resolves_process_isolation_tasks_once = process_isolation.TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK == 1 and
@@ -446,7 +446,8 @@ pub const indexed_hot_path_tables = .{
         .captures_termination_capabilities_during_transition = native_kernel.TASK_TERMINATE_PREVIEW_SLOT_LOOKUPS == 0,
         .derives_termination_handles_from_resolved_tasks = native_kernel.TASK_TERMINATE_HANDLE_INDEX_RELOOKUPS == 0,
         .returns_resolved_task_lifecycle_results = task_lifecycle_service.RESULT_TASK_INDEX_RELOOKUPS == 0,
-        .resolves_task_lifecycle_transitions_once = task_lifecycle_service.TRANSITION_TASK_INDEX_LOOKUPS == 1,
+        .resolves_task_lifecycle_transitions_once = task_lifecycle_service.TRANSITION_TASK_INDEX_LOOKUPS == 1 and
+            task_lifecycle_service.TRANSITION_HANDLE_SLOT_RELOOKUPS == 0,
         .derives_kernel_operations_from_typed_methods = native_kernel.TYPED_METHOD_DERIVES_KERNEL_OPERATION and
             !@hasField(native_kernel.KernelCallContext, "operation") and
             @sizeOf(native_kernel.KernelCallContext) <= native_kernel.KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES,
