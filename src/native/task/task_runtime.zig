@@ -857,16 +857,7 @@ pub const Runtime = struct {
 
     pub fn grantCapability(self: *Runtime, task_id: u64, capability_id: u64) Error!void {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        const cold = taskCold(task);
-        if (capability_id == 0) {
-            native_util.impossibleByInvariant("task capability attachments never use the reserved zero id");
-        }
-        if (task.hasCapability(capability_id)) return;
-        if (task.capability_count >= MAX_TASK_CAPABILITIES) return error.CapabilityTableFull;
-        cold.capability_ids[task.capability_count] = capability_id;
-        task.capability_count += 1;
-        advanceTaskCapabilityGeneration(task);
-        appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task_id, capability_id, 0));
+        return grantCapabilityToTask(task, capability_id);
     }
 
     pub fn hasCapability(self: *const Runtime, task_id: u64, capability_id: u64) bool {
@@ -1167,6 +1158,19 @@ pub const Runtime = struct {
         }
     }
 };
+
+pub fn grantCapabilityToTask(task: *TaskRecord, capability_id: u64) Error!void {
+    const cold = taskCold(task);
+    if (capability_id == 0) {
+        native_util.impossibleByInvariant("task capability attachments never use the reserved zero id");
+    }
+    if (task.hasCapability(capability_id)) return;
+    if (task.capability_count >= MAX_TASK_CAPABILITIES) return error.CapabilityTableFull;
+    cold.capability_ids[task.capability_count] = capability_id;
+    task.capability_count += 1;
+    advanceTaskCapabilityGeneration(task);
+    appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task.id, capability_id, 0));
+}
 
 fn advanceTaskCapabilityGeneration(task: *TaskRecord) void {
     const cold = taskCold(task);

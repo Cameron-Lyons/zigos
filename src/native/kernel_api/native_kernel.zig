@@ -77,6 +77,8 @@ pub const TYPED_METHOD_DERIVES_KERNEL_OPERATION = true;
 pub const KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES: usize = 32;
 pub const AUTHORIZATION_TASK_INDEX_LOOKUPS_PER_CALL: usize = 1;
 pub const RESOLVED_TASK_BUDGET_RELOOKUPS_PER_CALL: usize = 0;
+pub const GRANT_PLAN_TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK: usize = 1;
+pub const GRANT_ATTACHMENT_TASK_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -307,7 +309,7 @@ pub const Kernel = struct {
                 },
             });
             errdefer self.capability_table.rollbackGrant(&.{passed});
-            try self.runtime.grantCapability(receiver_task_id, passed.id);
+            try task_runtime.grantCapabilityToTask(receiver, passed.id);
 
             if (message.move_attached_capability) {
                 if (original.scope.task_id) |source_task_id| {
@@ -351,7 +353,8 @@ pub const Kernel = struct {
         plan: *const capability.GrantPlan,
         output: []capability.Capability,
     ) Error![]capability.Capability {
-        try self.validateRuntimeGrantPlan(plan);
+        var runtime_tasks = [_]?*task_runtime.TaskRecord{null} ** capability.MAX_GRANT_PLAN_ENTRIES;
+        try self.validateRuntimeGrantPlan(plan, &runtime_tasks);
         const minted = try self.capability_table.applyGrantPlan(plan, output);
         var attached_count: usize = 0;
         errdefer {
@@ -365,9 +368,9 @@ pub const Kernel = struct {
             }
             self.capability_table.rollbackGrant(minted);
         }
-        for (plan.slice(), minted) |entry, granted_capability| {
+        for (plan.slice(), minted, 0..) |entry, granted_capability, entry_index| {
             if (entry.task_id != 0) {
-                try self.runtime.grantCapability(entry.task_id, granted_capability.id);
+                try task_runtime.grantCapabilityToTask(runtime_tasks[entry_index].?, granted_capability.id);
             }
             attached_count += 1;
         }
@@ -428,15 +431,16 @@ pub const Kernel = struct {
         _ = try self.authorizeOperation(.capability_derive, context, request.lease.issued_at_ticks, .{
             .request_task_id = request.scope.task_id,
         });
-        if (request.scope.task_id) |task_id| {
+        const target_task = if (request.scope.task_id) |task_id| blk: {
             const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
             if (!task.owner.eql(request.holder)) return error.PermissionDenied;
             try validateRuntimeGrantForTask(task, 1);
-        }
+            break :blk task;
+        } else null;
         const derived = try self.capability_table.derive(request);
         errdefer self.capability_table.rollbackGrant(&.{derived});
-        if (request.scope.task_id) |task_id| {
-            try self.runtime.grantCapability(task_id, derived.id);
+        if (target_task) |task| {
+            try task_runtime.grantCapabilityToTask(task, derived.id);
         }
         return capabilityDescriptor(&derived);
     }
@@ -467,7 +471,7 @@ pub const Kernel = struct {
             },
         });
         errdefer self.capability_table.rollbackGrant(&.{passed});
-        try self.runtime.grantCapability(receiver_task_id, passed.id);
+        try task_runtime.grantCapabilityToTask(receiver, passed.id);
         if (revoke_source) {
             if (original.scope.task_id) |source_task_id| {
                 _ = try self.runtime.revokeCapability(source_task_id, original.id);
@@ -791,15 +795,24 @@ pub const Kernel = struct {
         return peer;
     }
 
-    fn validateRuntimeGrantPlan(self: *Kernel, plan: *const capability.GrantPlan) Error!void {
+    fn validateRuntimeGrantPlan(
+        self: *Kernel,
+        plan: *const capability.GrantPlan,
+        tasks: *[capability.MAX_GRANT_PLAN_ENTRIES]?*task_runtime.TaskRecord,
+    ) Error!void {
         for (plan.slice(), 0..) |entry, index| {
             if (entry.task_id == 0) continue;
-            var planned_for_task: usize = 0;
-            for (plan.entries[0 .. index + 1]) |candidate| {
-                if (candidate.task_id == entry.task_id) planned_for_task += 1;
+            var planned_for_task: usize = 1;
+            var task: ?*task_runtime.TaskRecord = null;
+            for (plan.entries[0..index], 0..) |candidate, candidate_index| {
+                if (candidate.task_id == entry.task_id) {
+                    planned_for_task += 1;
+                    if (task == null) task = tasks[candidate_index];
+                }
             }
-            const task = self.runtime.find(entry.task_id) orelse return error.TaskNotFound;
-            try validateRuntimeGrantForTask(task, planned_for_task);
+            const resolved_task = task orelse self.runtime.find(entry.task_id) orelse return error.TaskNotFound;
+            try validateRuntimeGrantForTask(resolved_task, planned_for_task);
+            tasks[index] = resolved_task;
         }
     }
 
