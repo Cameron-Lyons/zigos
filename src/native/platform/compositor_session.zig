@@ -32,6 +32,7 @@ pub const COMPACT_RECORD_METADATA = true;
 pub const COMPACT_SESSION_COUNT_METADATA = true;
 pub const WINDOW_ALLOCATION_INDEX_RELOOKUPS: u8 = 0;
 pub const MODAL_REVIEWER_INDEX_RELOOKUPS: u8 = 0;
+pub const STEADY_SURFACE_PRIMARY_INDEX_LOOKUPS: u8 = 1;
 pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
@@ -604,10 +605,9 @@ pub const Session = struct {
         if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.InvalidSurface;
 
         if (self.surfaceArena()) |surfaces| {
-            if (surfaces.get(presentation.surface_id)) |slot| {
+            if (surfaces.slotIndexOf(presentation.surface_id)) |slot_index| {
+                const slot = &surfaces.slots[slot_index];
                 if (slot.surface.task_id != task.id) return error.InvalidSurface;
-                const slot_index = surfaces.slotIndexOf(presentation.surface_id) orelse
-                    native_util.impossibleByInvariant("presented surface remains indexed by surface id");
                 if (self.surface_task_index.lookup(surfaceTaskKey(task.id)) != slot_index) {
                     native_util.impossibleByInvariant("presented surface task index points at the matching slot");
                 }
