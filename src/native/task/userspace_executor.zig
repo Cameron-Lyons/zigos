@@ -1357,6 +1357,27 @@ fn userspaceExceptionHandler(frame: *freestanding.isr.InterruptFrame) void {
     freestanding.paging.switchToKernelAddressSpace();
 }
 
+pub export fn zigos_handle_invalid_interrupt_return(frame: *freestanding.isr.InterruptFrame) void {
+    if (comptime builtin.target.os.tag != .freestanding) return;
+    const executor = registered_executor orelse
+        @call(.never_inline, freestanding.isr.haltUnhandledException, .{frame});
+    if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) {
+        @call(.never_inline, freestanding.isr.haltUnhandledException, .{frame});
+    }
+    _ = executor.active_mapping orelse
+        @call(.never_inline, freestanding.isr.haltUnhandledException, .{frame});
+
+    @call(.never_inline, freestanding.isr.reportInvalidInterruptReturn, .{frame});
+    executor.last_user_exception = .{
+        .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+        .error_code = @truncate(frame.ss & ~@as(usize, 0x3)),
+        .instruction_pointer = frame.eip,
+    };
+    executor.handoff_completed = true;
+    zigos_userspace_resume_requested = 1;
+    freestanding.paging.switchToKernelAddressSpace();
+}
+
 fn isContainableUserExceptionVector(vector: u8) bool {
     return for (CONTAINABLE_USER_EXCEPTION_VECTORS) |candidate| {
         if (vector == candidate) break true;

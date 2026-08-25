@@ -1345,6 +1345,17 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "NUC11TNKi5 interrupt assembly must expose the x2APIC timer surface: {s}", .{snippet});
         }
     }
+    const required_interrupt_return_guard_snippets = [_][]const u8{
+        "FRAME_USER_SS",
+        "RFLAGS_FORBIDDEN_RETURN",
+        "larl %eax, %eax",
+        "call zigos_handle_invalid_interrupt_return",
+    };
+    for (required_interrupt_return_guard_snippets) |snippet| {
+        if (std.mem.indexOf(u8, interrupt_stubs_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86 interrupt return must retain its privilege-state guard: {s}", .{snippet});
+        }
+    }
     const retired_irq_assembly_snippets = [_][]const u8{
         ".macro IRQ",
         "irq_common_stub",

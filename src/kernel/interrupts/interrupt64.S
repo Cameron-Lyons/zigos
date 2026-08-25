@@ -3,9 +3,23 @@
 .extern isrHandler
 .extern zigos_userspace_resume_requested
 .extern zigos_resume_from_userspace_interrupt
+.extern zigos_handle_invalid_interrupt_return
 
 .equ FXSAVE_BYTES, 512
 .equ FXSAVE_ALIGN_SLACK, 16
+.equ KERNEL_CODE_SELECTOR, 0x08
+.equ USER_DATA_SELECTOR, 0x1b
+.equ USER_CODE_SELECTOR, 0x23
+.equ FRAME_RIP, 152
+.equ FRAME_CS, 160
+.equ FRAME_RFLAGS, 168
+.equ FRAME_USER_RSP, 176
+.equ FRAME_USER_SS, 184
+.equ RFLAGS_RESERVED, 0x2
+.equ RFLAGS_FORBIDDEN_RETURN, 0x27000
+.equ DESCRIPTOR_RIGHTS_MASK, 0x00f0ff00
+.equ USER_DATA_RIGHTS, 0x00c0f300
+.equ USER_CODE_RIGHTS, 0x00a0fb00
 
 .macro ISR_NOERRCODE num
 .global isr\num
@@ -113,6 +127,45 @@ isr_common_stub:
     cld
 
     call isrHandler
+
+    movq FRAME_CS(%r12), %rax
+    cmpq $KERNEL_CODE_SELECTOR, %rax
+    je .validate_common_return
+    cmpq $USER_CODE_SELECTOR, %rax
+    jne .invalid_interrupt_return
+    cmpq $USER_DATA_SELECTOR, FRAME_USER_SS(%r12)
+    jne .invalid_interrupt_return
+    movq FRAME_USER_RSP(%r12), %rax
+    shrq $32, %rax
+    jne .invalid_interrupt_return
+
+    movl $USER_DATA_SELECTOR, %eax
+    larl %eax, %eax
+    jnz .invalid_interrupt_return
+    andl $DESCRIPTOR_RIGHTS_MASK, %eax
+    cmpl $USER_DATA_RIGHTS, %eax
+    jne .invalid_interrupt_return
+    movl $USER_CODE_SELECTOR, %eax
+    larl %eax, %eax
+    jnz .invalid_interrupt_return
+    andl $DESCRIPTOR_RIGHTS_MASK, %eax
+    cmpl $USER_CODE_RIGHTS, %eax
+    jne .invalid_interrupt_return
+
+.validate_common_return:
+    movq FRAME_RIP(%r12), %rax
+    shrq $32, %rax
+    jne .invalid_interrupt_return
+    movq FRAME_RFLAGS(%r12), %rax
+    testq $RFLAGS_RESERVED, %rax
+    jz .invalid_interrupt_return
+    testq $RFLAGS_FORBIDDEN_RETURN, %rax
+    jnz .invalid_interrupt_return
+    jmp .isr_dispatch_complete
+
+.invalid_interrupt_return:
+    movq %r12, %rdi
+    call zigos_handle_invalid_interrupt_return
 
 .isr_dispatch_complete:
     fxrstor64 (%rsp)
