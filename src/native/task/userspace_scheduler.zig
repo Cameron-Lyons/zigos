@@ -55,6 +55,7 @@ pub const ACCELERATOR_WAIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const TASK_UNREGISTER_SLOT_RELOOKUPS: u8 = 0;
 pub const ACCELERATOR_RANK_TASK_INDEX_LOOKUPS_PER_CANDIDATE: u8 = 1;
 pub const ACCELERATOR_RANK_BACKING_RELOOKUPS_PER_COMPARISON: u8 = 0;
+pub const ACCELERATOR_INSERT_BACKING_RELOOKUPS: u8 = 0;
 
 comptime {
     if (task_runtime.MAX_TASKS > std.math.maxInt(QueueSlotIndex) or
@@ -1082,8 +1083,8 @@ pub const Scheduler = struct {
         var current = self.accelerator_claim_heads[queue_index];
         while (current != QUEUE_NO_INDEX) : (current = backing.claims.slots[current].next_claim_index) {
             if (self.acceleratorClaimPriorityBeats(&claim.record, &backing.claims.slots[current].record)) {
-                self.linkAcceleratorClaimBefore(queue_index, claim_index, @intCast(current));
-                self.insertAcceleratorDeadlineIndex(queue_index, claim_index);
+                self.linkAcceleratorClaimBefore(backing, queue_index, claim_index, @intCast(current));
+                self.insertAcceleratorDeadlineIndex(backing, queue_index, claim_index);
                 self.accelerator_claim_counts[queue_index] += 1;
                 return;
             }
@@ -1096,18 +1097,17 @@ pub const Scheduler = struct {
             backing.claims.slots[self.accelerator_claim_tails[queue_index]].next_claim_index = compactQueueIndex(claim_index);
         }
         self.accelerator_claim_tails[queue_index] = compactQueueIndex(claim_index);
-        self.insertAcceleratorDeadlineIndex(queue_index, claim_index);
+        self.insertAcceleratorDeadlineIndex(backing, queue_index, claim_index);
         self.accelerator_claim_counts[queue_index] += 1;
     }
 
     fn linkAcceleratorClaimBefore(
         self: *Scheduler,
+        backing: *AcceleratorClaimBacking,
         queue_index: usize,
         claim_index: usize,
         before_index: usize,
     ) void {
-        const backing = self.acceleratorClaimBacking() orelse
-            native_util.impossibleByInvariant("linked accelerator claims retain their backing");
         const previous = backing.claims.slots[before_index].prev_claim_index;
         backing.claims.slots[claim_index].prev_claim_index = previous;
         backing.claims.slots[claim_index].next_claim_index = compactQueueIndex(before_index);
@@ -1119,16 +1119,19 @@ pub const Scheduler = struct {
         }
     }
 
-    fn insertAcceleratorDeadlineIndex(self: *Scheduler, queue_index: usize, claim_index: usize) void {
-        const backing = self.acceleratorClaimBacking() orelse
-            native_util.impossibleByInvariant("accelerator deadline insertion requires allocated backing");
+    fn insertAcceleratorDeadlineIndex(
+        self: *Scheduler,
+        backing: *AcceleratorClaimBacking,
+        queue_index: usize,
+        claim_index: usize,
+    ) void {
         const claim = &backing.claims.slots[claim_index];
         if (claim.record.deadline_tick == 0) return;
 
         var current = self.accelerator_deadline_heads[queue_index];
         while (current != QUEUE_NO_INDEX) : (current = backing.claims.slots[current].next_deadline_index) {
             if (self.acceleratorClaimDeadlineBeats(&claim.record, &backing.claims.slots[current].record)) {
-                self.linkAcceleratorDeadlineBefore(queue_index, claim_index, @intCast(current));
+                self.linkAcceleratorDeadlineBefore(backing, queue_index, claim_index, @intCast(current));
                 return;
             }
         }
@@ -1144,12 +1147,11 @@ pub const Scheduler = struct {
 
     fn linkAcceleratorDeadlineBefore(
         self: *Scheduler,
+        backing: *AcceleratorClaimBacking,
         queue_index: usize,
         claim_index: usize,
         before_index: usize,
     ) void {
-        const backing = self.acceleratorClaimBacking() orelse
-            native_util.impossibleByInvariant("linked accelerator deadlines retain their backing");
         const previous = backing.claims.slots[before_index].prev_deadline_index;
         backing.claims.slots[claim_index].prev_deadline_index = previous;
         backing.claims.slots[claim_index].next_deadline_index = compactQueueIndex(before_index);
