@@ -9,8 +9,8 @@ pub const MAX_REVIEW_NODES: usize = permission_review.MAX_REVIEW_DECISIONS + 4;
 pub const MAX_REVIEW_TEXT_BYTES: usize = ui.MAX_RENDER_BYTES;
 pub const COMPACT_PERMISSION_REVIEW_METADATA = true;
 pub const DERIVES_HARNESS_COMMAND_COUNT = true;
-pub const REVIEW_PLAN_SIZE_CEILING_BYTES: usize = 3_616;
-pub const HARNESS_RESULT_SIZE_CEILING_BYTES: usize = 3_624;
+pub const REVIEW_PLAN_SIZE_CEILING_BYTES: usize = 3_488;
+pub const HARNESS_RESULT_SIZE_CEILING_BYTES: usize = 3_496;
 pub const HARNESS_SIZE_CEILING_BYTES: usize = 400;
 pub const ReviewCommand = permission_review.ReviewCommand;
 pub const ReviewDecision = permission_review.ReviewDecision;
@@ -184,7 +184,7 @@ fn buildReviewUi(bundle: *const manifest.BundleManifest, plan: *ReviewPlan) void
 
     for (bundle.requested_permissions, 0..) |request, index| {
         if (plan.node_count >= plan.nodes.len) break;
-        const allowed = index < plan.session.decision_count and plan.session.decisions[index].allow;
+        const allowed = if (plan.session.decisionAt(index)) |decision| decision.allow else false;
         plan.nodes[plan.node_count] = ui.permissionRow(@intCast(10 + index), manifest.permissionDisplayLabel(request.kind), allowed);
         plan.node_count += 1;
     }

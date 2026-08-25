@@ -35,4 +35,5 @@ pub const KernelArtifact = struct {
 
 pub const native_store_image_path = "build/native-store.img";
 pub const native_store_smoke_image_path = "build/native-store-smoke.img";
+pub const native_store_spec_image_path = "build/native-store-spec.img";
 pub const native_store_size_mib = "8";

@@ -2,7 +2,7 @@
 capability.derive.workspace_object 9000
 capability.mint_reuse_free_slot 92000
 capability.target_generation_lookup 64
-permission.review.render_grants 1700
+permission.review.render_grants 1550
 network_policy.authorize_connection 160
 background_dispatch.allowed_sync 720
 service_supervisor.ready_lookup 32
