@@ -865,6 +865,8 @@ pub const indexed_hot_path_tables = .{
         .indexes_windows_from_reserved_slots = compositor_session.WINDOW_ALLOCATION_INDEX_RELOOKUPS == 0 and
             compositor_session.MODAL_REVIEWER_INDEX_RELOOKUPS == 0,
         .resolves_existing_surfaces_once = compositor_session.STEADY_SURFACE_PRIMARY_INDEX_LOOKUPS == 1,
+        .reuses_resolved_surface_slots_for_lifecycle = compositor_session.SURFACE_LIFECYCLE_BACKING_RELOOKUPS == 0 and
+            compositor_session.SURFACE_REMOVAL_TASK_INDEX_LOOKUPS == 1,
         .uses_window_review_item_index = @hasDecl(compositor_session.WindowReviewItemIndex, "append"),
         .tracks_visible_window_count = @hasField(compositor_session.Session, "visible_window_count"),
         .supports_indexed_task_window_ownership = @hasDecl(compositor_session.Session, "taskOwnsVisibleWindow"),
