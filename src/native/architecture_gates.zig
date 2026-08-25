@@ -428,6 +428,8 @@ pub const indexed_hot_path_tables = .{
         .reuses_owner_tasks_for_auto_grants = native_kernel.SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_scoped_mint_tasks = native_kernel.SCOPED_MINT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_self_target_tasks = native_kernel.SELF_TARGET_TASK_INDEX_RELOOKUPS_PER_CALL == 0,
+        .reuses_capability_mutation_tasks = native_kernel.CAPABILITY_MUTATION_SELF_TASK_INDEX_RELOOKUPS == 0 and
+            native_kernel.CAPABILITY_PASS_SOURCE_TASK_INDEX_RELOOKUPS == 0,
         .reuses_authorized_capabilities_for_pass = native_kernel.CAPABILITY_PASS_QUERY_RELOOKUPS == 0,
         .records_task_creation_audits_directly = native_kernel.TASK_CREATE_AUDIT_INDEX_RELOOKUPS == 0,
         .returns_resolved_task_lifecycle_results = task_lifecycle_service.RESULT_TASK_INDEX_RELOOKUPS == 0,
