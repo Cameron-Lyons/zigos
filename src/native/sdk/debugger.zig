@@ -260,10 +260,7 @@ test "debugger keeps bounded event metadata compact" {
 
 test "debugger records ABI checks and exports a redaction-safe trace" {
     var session = Session.init();
-    const iface = typed_component_abi.Interface(.package_install);
     const header = typed_component_abi.WireHeader{
-        .interface_major = iface.version_major,
-        .interface_minor = iface.version_minor,
         .operation = @intFromEnum(typed_component_abi.OperationId.package_rollback),
         .request_len = @sizeOf(typed_component_abi.PackageRollbackRequest),
         .response_len = @sizeOf(typed_component_abi.PackageRollbackResponse),

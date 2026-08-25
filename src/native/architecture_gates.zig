@@ -1,4 +1,5 @@
 const indexed_arena = @import("core/indexed_arena.zig");
+const abi = @import("core/abi.zig");
 const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
 const signing = @import("core/signing.zig");
@@ -12,6 +13,7 @@ const sdk_simulator = @import("sdk/simulator.zig");
 const sdk_ui = @import("sdk/ui.zig");
 const service_registry = @import("services/service_registry.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
+const component_abi_wire = @import("services/component_abi_wire.zig");
 const userspace_scheduler = @import("task/userspace_scheduler.zig");
 const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
@@ -135,6 +137,21 @@ pub const indexed_hot_path_tables = .{
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
         .binds_services_by_interface_id = @hasDecl(component_abi_schema, "interfaceIdForService"),
+        .uses_exact_interface_id_only_service_wires = component_abi_wire.VERSION == 2 and
+            @sizeOf(component_abi_wire.WireHeader) == 32 and
+            @sizeOf(component_abi_wire.ServiceRegisterRequestWire) == 64 and
+            @sizeOf(component_abi_wire.ServiceConnectionRequestWire) == 40 and
+            @sizeOf(abi.ServiceConnectionDescriptor) == 32 and
+            !@hasField(component_abi_wire.WireHeader, "interface_major") and
+            !@hasField(component_abi_wire.WireHeader, "interface_minor") and
+            !@hasField(component_abi_wire.WireHeader, "flags") and
+            !@hasField(component_abi_wire.ServiceRegisterRequestWire, "interface_name_len") and
+            !@hasField(component_abi_wire.ServiceRegisterRequestWire, "version_major") and
+            !@hasField(component_abi_wire.ServiceRegisterRequestWire, "version_minor") and
+            !@hasField(component_abi_wire.ServiceConnectionRequestWire, "version_major") and
+            !@hasField(component_abi_wire.ServiceConnectionRequestWire, "version_minor") and
+            !@hasField(abi.ServiceConnectionDescriptor, "version_major") and
+            !@hasField(abi.ServiceConnectionDescriptor, "version_minor"),
         .stores_compact_contract_metadata = component_abi_schema.COMPACT_INTERFACE_CONTRACT_METADATA and
             @FieldType(component_abi_schema.InterfaceContract, "operation_count") == u8,
         .keeps_contracts_within_ceiling = @sizeOf(component_abi_schema.InterfaceContract) <= component_abi_schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES,

@@ -163,8 +163,6 @@ pub const Registry = struct {
             .endpoint_id = binding.endpoint_id,
             .endpoint_capability_id = binding.endpoint_capability_id,
             .interface_id = @intFromEnum(binding.interfaceId()),
-            .version_major = interface.version_major,
-            .version_minor = interface.version_minor,
             .flags = binding.flags,
         };
     }

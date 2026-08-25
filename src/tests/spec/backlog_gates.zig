@@ -222,8 +222,6 @@ pub fn componentAbiDepthGate() !void {
     try std.testing.expectEqualStrings("zigos.package.install", typed_component_abi.interfaceForService(.package_install_update).name);
 
     var header = typed_component_abi.WireHeader{
-        .interface_major = 1,
-        .interface_minor = 0,
         .operation = @intFromEnum(typed_component_abi.OperationId.service_connect),
         .request_len = @sizeOf(typed_component_abi.ServiceConnectionRequest),
         .response_len = @sizeOf(typed_component_abi.ServiceConnectionResponse),
@@ -258,8 +256,6 @@ pub fn componentAbiDepthGate() !void {
 
     const package_iface = typed_component_abi.Interface(.package_install);
     const rollback_header = typed_component_abi.WireHeader{
-        .interface_major = package_iface.version_major,
-        .interface_minor = package_iface.version_minor,
         .operation = @intFromEnum(typed_component_abi.OperationId.package_rollback),
         .request_len = @sizeOf(typed_component_abi.PackageRollbackRequest),
         .response_len = @sizeOf(typed_component_abi.PackageRollbackResponse),

@@ -5742,8 +5742,6 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
 fn packageRemoveWireValidationCheck() bool {
     const iface = typed_component_abi.Interface(.package_install);
     const header = typed_component_abi.WireHeader{
-        .interface_major = iface.version_major,
-        .interface_minor = iface.version_minor,
         .operation = @intFromEnum(typed_component_abi.OperationId.package_remove),
         .request_len = @sizeOf(typed_component_abi.PackageRemoveRequest),
         .response_len = @sizeOf(typed_component_abi.PackageRemoveResponse),
@@ -6512,8 +6510,6 @@ fn networkSessionEvidence() NetworkSessionEvidence {
 fn networkSessionWireValidationCheck() bool {
     const iface = typed_component_abi.Interface(.network_policy);
     const header = typed_component_abi.WireHeader{
-        .interface_major = iface.version_major,
-        .interface_minor = iface.version_minor,
         .operation = @intFromEnum(typed_component_abi.OperationId.network_open_session),
         .request_len = @sizeOf(typed_component_abi.NetworkOpenSessionRequest),
         .response_len = @sizeOf(typed_component_abi.NetworkSessionResponse),
@@ -7321,8 +7317,6 @@ fn personalContextReceiptPolicyReauthorizationCheck() bool {
 fn personalContextWireValidationCheck() bool {
     const iface = typed_component_abi.Interface(.personal_context);
     const header = typed_component_abi.WireHeader{
-        .interface_major = iface.version_major,
-        .interface_minor = iface.version_minor,
         .operation = @intFromEnum(typed_component_abi.OperationId.personal_context_query),
         .request_len = @sizeOf(typed_component_abi.PersonalContextQueryRequest),
         .response_len = @sizeOf(typed_component_abi.PersonalContextResponse),
