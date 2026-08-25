@@ -209,13 +209,13 @@ pub fn validateInterfaceId(interface_id: InterfaceId, interface: manifest.Interf
 }
 
 pub fn validateMessage(
-    interface: manifest.InterfaceDecl,
+    interface_id: InterfaceId,
     operation_id: OperationId,
     header: WireHeader,
     actual_request_len: usize,
     actual_response_len: usize,
 ) Error!void {
-    return schema.validateMessage(interface, operation_id, header, actual_request_len, actual_response_len);
+    return schema.validateMessage(interface_id, operation_id, header, actual_request_len, actual_response_len);
 }
 
 pub fn coverageReferenceCountForRequirement(requirement_id: []const u8) usize {
@@ -458,7 +458,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .version_minor = 1,
     }));
 
-    const iface = Interface(.service_registry);
+    const interface_id = InterfaceId.service_registry;
     var header = WireHeader{
         .operation = @intFromEnum(OperationId.service_connect),
         .request_len = @sizeOf(ServiceConnectionRequest),
@@ -467,34 +467,38 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 44,
     };
     try validateMessage(
-        iface,
+        interface_id,
         .service_connect,
         header,
         @sizeOf(ServiceConnectionRequest),
         @sizeOf(ServiceConnectionResponse),
     );
+    const wrong_interface_header = WireHeader{
+        .operation = @intFromEnum(OperationId.network_open_session),
+        .request_len = @sizeOf(NetworkOpenSessionRequest),
+        .response_len = @sizeOf(NetworkSessionResponse),
+        .correlation_id = 2,
+        .subject_task_id = 44,
+    };
+    try std.testing.expectError(Error.UnknownOperation, validateMessage(
+        interface_id,
+        .network_open_session,
+        wrong_interface_header,
+        @sizeOf(NetworkOpenSessionRequest),
+        @sizeOf(NetworkSessionResponse),
+    ));
     header.abi_version = VERSION - 1;
     try std.testing.expectError(Error.UnsupportedAbiVersion, validateMessage(
-        iface,
+        interface_id,
         .service_connect,
         header,
         @sizeOf(ServiceConnectionRequest),
         @sizeOf(ServiceConnectionResponse),
     ));
     header.abi_version = VERSION;
-    var wrong_version = iface;
-    wrong_version.version_minor += 1;
-    try std.testing.expectError(Error.UnsupportedInterfaceVersion, validateMessage(
-        wrong_version,
-        .service_connect,
-        header,
-        @sizeOf(ServiceConnectionRequest),
-        @sizeOf(ServiceConnectionResponse),
-    ));
-
     header.magic = 0;
     try std.testing.expectError(Error.InvalidMagic, validateMessage(
-        iface,
+        interface_id,
         .service_connect,
         header,
         @sizeOf(ServiceConnectionRequest),
@@ -503,7 +507,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     header.magic = MAGIC;
     header.request_len -= 1;
     try std.testing.expectError(Error.MalformedMessage, validateMessage(
-        iface,
+        interface_id,
         .service_connect,
         header,
         @sizeOf(ServiceConnectionRequest),
@@ -512,14 +516,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     header.request_len += 1;
     header.subject_task_id = 0;
     try std.testing.expectError(Error.SubjectTaskRequired, validateMessage(
-        iface,
+        interface_id,
         .service_connect,
         header,
         @sizeOf(ServiceConnectionRequest),
         @sizeOf(ServiceConnectionResponse),
     ));
 
-    const package_iface = Interface(.package_install);
     const package_header = WireHeader{
         .operation = @intFromEnum(OperationId.package_rollback),
         .request_len = @sizeOf(PackageRollbackRequest),
@@ -528,14 +531,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 78,
     };
     try validateMessage(
-        package_iface,
+        .package_install,
         .package_rollback,
         package_header,
         @sizeOf(PackageRollbackRequest),
         @sizeOf(PackageRollbackResponse),
     );
 
-    const ai_iface = Interface(.ai_inference);
     const ai_header = WireHeader{
         .operation = @intFromEnum(OperationId.ai_run_local),
         .request_len = @sizeOf(AiRunLocalRequest),
@@ -544,14 +546,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 79,
     };
     try validateMessage(
-        ai_iface,
+        .ai_inference,
         .ai_run_local,
         ai_header,
         @sizeOf(AiRunLocalRequest),
         @sizeOf(AiRunLocalResponse),
     );
 
-    const privacy_iface = Interface(.privacy_budget);
     const privacy_header = WireHeader{
         .operation = @intFromEnum(OperationId.privacy_authorize_egress),
         .request_len = @sizeOf(PrivacyAuthorizeEgressRequest),
@@ -560,14 +561,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 80,
     };
     try validateMessage(
-        privacy_iface,
+        .privacy_budget,
         .privacy_authorize_egress,
         privacy_header,
         @sizeOf(PrivacyAuthorizeEgressRequest),
         @sizeOf(PrivacyAuthorizeEgressResponse),
     );
 
-    const network_iface = Interface(.network_policy);
     const network_header = WireHeader{
         .operation = @intFromEnum(OperationId.network_open_session),
         .request_len = @sizeOf(NetworkOpenSessionRequest),
@@ -576,14 +576,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 80,
     };
     try validateMessage(
-        network_iface,
+        .network_policy,
         .network_open_session,
         network_header,
         @sizeOf(NetworkOpenSessionRequest),
         @sizeOf(NetworkSessionResponse),
     );
 
-    const diagnostics_iface = Interface(.diagnostics_export);
     const diagnostics_header = WireHeader{
         .operation = @intFromEnum(OperationId.diagnostics_share_remote),
         .request_len = @sizeOf(DiagnosticsShareRemoteRequest),
@@ -592,14 +591,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 81,
     };
     try validateMessage(
-        diagnostics_iface,
+        .diagnostics_export,
         .diagnostics_share_remote,
         diagnostics_header,
         @sizeOf(DiagnosticsShareRemoteRequest),
         @sizeOf(DiagnosticsShareRemoteResponse),
     );
 
-    const consent_iface = Interface(.consent_receipts);
     const consent_header = WireHeader{
         .operation = @intFromEnum(OperationId.consent_record),
         .request_len = @sizeOf(ConsentRecordRequest),
@@ -608,14 +606,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 82,
     };
     try validateMessage(
-        consent_iface,
+        .consent_receipts,
         .consent_record,
         consent_header,
         @sizeOf(ConsentRecordRequest),
         @sizeOf(ConsentRecordResponse),
     );
 
-    const lease_iface = Interface(.permission_lease);
     const lease_header = WireHeader{
         .operation = @intFromEnum(OperationId.permission_lease_expire),
         .request_len = @sizeOf(PermissionLeaseExpireRequest),
@@ -624,14 +621,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 83,
     };
     try validateMessage(
-        lease_iface,
+        .permission_lease,
         .permission_lease_expire,
         lease_header,
         @sizeOf(PermissionLeaseExpireRequest),
         @sizeOf(PermissionLeaseExpireResponse),
     );
 
-    const identity_iface = Interface(.identity_session);
     const identity_header = WireHeader{
         .operation = @intFromEnum(OperationId.identity_session_authorize),
         .request_len = @sizeOf(IdentitySessionAuthorizeRequest),
@@ -640,7 +636,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         .subject_task_id = 84,
     };
     try validateMessage(
-        identity_iface,
+        .identity_session,
         .identity_session_authorize,
         identity_header,
         @sizeOf(IdentitySessionAuthorizeRequest),

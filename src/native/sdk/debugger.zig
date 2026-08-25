@@ -139,7 +139,7 @@ pub const Session = struct {
     ) Error!void {
         const iface = typed_component_abi.Interface(interface);
         typed_component_abi.validateMessage(
-            iface,
+            typed_component_abi.interfaceId(interface),
             operation_id,
             header,
             actual_request_len,

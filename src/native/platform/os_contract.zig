@@ -5740,7 +5740,6 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
 }
 
 fn packageRemoveWireValidationCheck() bool {
-    const iface = typed_component_abi.Interface(.package_install);
     const header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.package_remove),
         .request_len = @sizeOf(typed_component_abi.PackageRemoveRequest),
@@ -5749,7 +5748,7 @@ fn packageRemoveWireValidationCheck() bool {
         .subject_task_id = 7601,
     };
     typed_component_abi.validateMessage(
-        iface,
+        .package_install,
         .package_remove,
         header,
         @sizeOf(typed_component_abi.PackageRemoveRequest),
@@ -6508,7 +6507,6 @@ fn networkSessionEvidence() NetworkSessionEvidence {
 }
 
 fn networkSessionWireValidationCheck() bool {
-    const iface = typed_component_abi.Interface(.network_policy);
     const header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.network_open_session),
         .request_len = @sizeOf(typed_component_abi.NetworkOpenSessionRequest),
@@ -6517,7 +6515,7 @@ fn networkSessionWireValidationCheck() bool {
         .subject_task_id = 8812,
     };
     typed_component_abi.validateMessage(
-        iface,
+        .network_policy,
         .network_open_session,
         header,
         @sizeOf(typed_component_abi.NetworkOpenSessionRequest),
@@ -7315,7 +7313,6 @@ fn personalContextReceiptPolicyReauthorizationCheck() bool {
 }
 
 fn personalContextWireValidationCheck() bool {
-    const iface = typed_component_abi.Interface(.personal_context);
     const header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.personal_context_query),
         .request_len = @sizeOf(typed_component_abi.PersonalContextQueryRequest),
@@ -7324,7 +7321,7 @@ fn personalContextWireValidationCheck() bool {
         .subject_task_id = 7060,
     };
     typed_component_abi.validateMessage(
-        iface,
+        .personal_context,
         .personal_context_query,
         header,
         @sizeOf(typed_component_abi.PersonalContextQueryRequest),
