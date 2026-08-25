@@ -81,6 +81,7 @@ pub const GRANT_PLAN_TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK: usize = 1;
 pub const GRANT_ATTACHMENT_TASK_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
 pub const RESOLVED_TASK_REVOCATION_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
 pub const SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
+pub const SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -217,8 +218,7 @@ pub const Kernel = struct {
         const endpoint_capability = try self.applySingleAutoGrant(
             .endpoint_create,
             .created_endpoint_owner,
-            owner_task_id,
-            task.owner,
+            task,
             .{ .kind = .endpoint, .id = created.id.raw() },
             flags.local_only,
             now_ticks,
@@ -358,16 +358,18 @@ pub const Kernel = struct {
             try plan.addMint(0, request);
         }
         var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
-        const minted = (try self.applyGrantPlan(&plan, &minted_buffer))[0];
+        const minted = (try self.applyGrantPlan(&plan, &minted_buffer, null))[0];
         return capabilityDescriptor(&minted);
     }
 
-    pub fn applyGrantPlan(
+    fn applyGrantPlan(
         self: *Kernel,
         plan: *const capability.GrantPlan,
         output: []capability.Capability,
+        first_task: ?*task_runtime.TaskRecord,
     ) Error![]capability.Capability {
         var runtime_tasks = [_]?*task_runtime.TaskRecord{null} ** capability.MAX_GRANT_PLAN_ENTRIES;
+        runtime_tasks[0] = first_task;
         try self.validateRuntimeGrantPlan(plan, &runtime_tasks);
         const minted = try self.capability_table.applyGrantPlan(plan, output);
         var attached_count: usize = 0;
@@ -394,13 +396,13 @@ pub const Kernel = struct {
 
     fn applySingleGrantPlan(
         self: *Kernel,
-        task_id: u64,
+        task: *task_runtime.TaskRecord,
         request: capability.MintRequest,
     ) Error!struct { capability: capability.Capability } {
         var plan = capability.GrantPlan{};
-        try plan.addMint(task_id, request);
+        try plan.addMint(task.id, request);
         var minted_buffer: [1]capability.Capability = undefined;
-        const minted = try self.applyGrantPlan(&plan, &minted_buffer);
+        const minted = try self.applyGrantPlan(&plan, &minted_buffer, task);
         return .{ .capability = minted[0] };
     }
 
@@ -408,20 +410,19 @@ pub const Kernel = struct {
         self: *Kernel,
         comptime operation: abi.NativeOperation,
         comptime grant_kind: operation_metadata.AutoGrantKind,
-        task_id: u64,
-        holder: principal.PrincipalId,
+        task: *task_runtime.TaskRecord,
         target: capability.CapabilityTarget,
         request_local_only: bool,
         now_ticks: u64,
     ) Error!capability.Capability {
         const grant = operation_metadata.autoGrantFor(operation, grant_kind);
-        const scoped_task_id: ?u64 = if (grant.task_scoped) task_id else null;
+        const scoped_task_id: ?u64 = if (grant.task_scoped) task.id else null;
         const local_only = switch (grant.locality) {
             .request => request_local_only,
             .always_local => true,
         };
-        return (try self.applySingleGrantPlan(task_id, .{
-            .holder = holder,
+        return (try self.applySingleGrantPlan(task, .{
+            .holder = task.owner,
             .issuer = self.policy_authority,
             .target = target,
             .rights = grant.rights,
@@ -437,7 +438,7 @@ pub const Kernel = struct {
             },
             .audit = .{
                 .policy_generation = 1,
-                .source_task_id = task_id,
+                .source_task_id = task.id,
             },
         })).capability;
     }
@@ -536,8 +537,7 @@ pub const Kernel = struct {
         const object_capability = try self.applySingleAutoGrant(
             .shared_memory_create,
             .created_shared_memory_owner,
-            owner_task_id,
-            task.owner,
+            task,
             .{ .kind = .shared_memory, .id = object.id.raw() },
             true,
             now_ticks,
@@ -842,7 +842,12 @@ pub const Kernel = struct {
         for (plan.slice(), 0..) |entry, index| {
             if (entry.task_id == 0) continue;
             var planned_for_task: usize = 1;
-            var task: ?*task_runtime.TaskRecord = null;
+            var task = tasks[index];
+            if (task) |resolved_task| {
+                if (resolved_task.id != entry.task_id) {
+                    native_util.impossibleByInvariant("pre-resolved grant task matches its transaction entry");
+                }
+            }
             for (plan.entries[0..index], 0..) |candidate, candidate_index| {
                 if (candidate.task_id == entry.task_id) {
                     planned_for_task += 1;
