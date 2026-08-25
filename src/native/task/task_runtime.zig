@@ -650,11 +650,6 @@ pub const Runtime = struct {
         return self.tasks.slotAtConst(slot_index);
     }
 
-    pub fn taskHandle(self: *const Runtime, task_id: u64) ?TaskHandle {
-        const slot_index = self.tasks.slotIndexOf(task_id) orelse return null;
-        return self.tasks.handleForIndex(slot_index);
-    }
-
     pub inline fn taskHandleForResolved(self: *const Runtime, task: *const TaskRecord) TaskHandle {
         const handle = self.tasks.handleForClaimedIndex(task.arena_slot_index);
         if (builtin.mode == .Debug) {
@@ -1090,8 +1085,8 @@ pub const Runtime = struct {
     }
 
     pub fn terminateTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
-        const handle = self.taskHandle(task_id) orelse return error.TaskNotFound;
-        const task = self.findByHandle(handle, task_id) orelse return error.TaskNotFound;
+        const task = self.find(task_id) orelse return error.TaskNotFound;
+        const handle = self.taskHandleForResolved(task);
         return self.terminateResolvedTaskByHandle(handle, task, tick, null);
     }
 
@@ -1444,17 +1439,16 @@ test "task runtime crosses the first task slab page with indexed handles" {
     try std.testing.expect(runtime.find(last_task_id) != null);
     try std.testing.expectEqual(last_task_id, runtime.findByOwner(last_owner).?.id);
     const last_task = runtime.find(last_task_id).?;
-    const last_handle = runtime.taskHandle(last_task_id).?;
-    try std.testing.expect(runtime.taskHandleForResolved(last_task).eql(last_handle));
+    const last_handle = runtime.taskHandleForResolved(last_task);
+    try std.testing.expectEqual(last_task_id, runtime.findByHandle(last_handle, last_task_id).?.id);
 }
 
 test "task handles reject stale task records across restore and reuse" {
     var runtime = Runtime.init();
     const first = try createTaskIdTestTask(&runtime, 1);
     const task_id = first.id;
-    const first_handle = runtime.taskHandle(task_id).?;
+    const first_handle = runtime.taskHandleForResolved(first);
 
-    try std.testing.expect(runtime.taskHandleForResolved(first).eql(first_handle));
     try std.testing.expectEqual(task_id, runtime.findByHandle(first_handle, task_id).?.id);
     try std.testing.expectEqual(task_id, runtime.findConstByHandle(first_handle, task_id).?.id);
     try std.testing.expect(runtime.findByHandle(first_handle, task_id + 1) == null);
@@ -1464,7 +1458,7 @@ test "task handles reject stale task records across restore and reuse" {
     try runtime.restoreFromSnapshot(&snapshot);
 
     try std.testing.expect(runtime.findByHandle(first_handle, task_id) == null);
-    const restored_handle = runtime.taskHandle(task_id).?;
+    const restored_handle = runtime.taskHandleForResolved(runtime.find(task_id).?);
     try std.testing.expect(!restored_handle.eql(first_handle));
     const restored_task = runtime.findByHandle(restored_handle, task_id).?;
     try std.testing.expectEqual(task_id, restored_task.id);
@@ -1473,7 +1467,7 @@ test "task handles reject stale task records across restore and reuse" {
     runtime.reset();
     try std.testing.expect(runtime.findByHandle(restored_handle, task_id) == null);
     const replacement = try createTaskIdTestTask(&runtime, 2);
-    const replacement_handle = runtime.taskHandle(replacement.id).?;
+    const replacement_handle = runtime.taskHandleForResolved(replacement);
     try std.testing.expectEqual(task_id, replacement.id);
     try std.testing.expect(!replacement_handle.eql(restored_handle));
     try std.testing.expect(runtime.findByHandle(restored_handle, replacement.id) == null);
@@ -2255,7 +2249,7 @@ test "sparse checkpoints preserve cross-page slot order and retire only live add
     }
     const first_task_id = task_ids[0];
     const removed_task_id = task_ids[1];
-    const stale_task_handle = runtime.taskHandle(removed_task_id).?;
+    const stale_task_handle = runtime.taskHandleForResolved(runtime.find(removed_task_id).?);
     const high_task_id = task_ids[task_ids.len - 1];
     try runtime.grantCapability(high_task_id, 0xBEEF);
     try runtime.audit(high_task_id, .{

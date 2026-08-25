@@ -1716,7 +1716,7 @@ test "userspace scheduler refreshes task handles after runtime restore" {
     var snapshot = task_runtime.Runtime.initSnapshot();
     runtime.writeSnapshot(&snapshot);
     try runtime.restoreFromSnapshot(&snapshot);
-    const restored_handle = runtime.taskHandle(task_id).?;
+    const restored_handle = runtime.taskHandleForResolved(runtime.find(task_id).?);
     try std.testing.expect(!restored_handle.eql(original_handle));
 
     try std.testing.expect(scheduler.wakeTask(task_id, .external_event, 1, 0));
@@ -1754,7 +1754,7 @@ test "userspace scheduler rejects stale handles after task id reuse" {
         null,
     );
     try std.testing.expectEqual(task_id, replacement.id);
-    try std.testing.expect(!runtime.taskHandle(task_id).?.eql(original_handle));
+    try std.testing.expect(!runtime.taskHandleForResolved(runtime.find(task_id).?).eql(original_handle));
 
     try std.testing.expect(!scheduler.runNext(1));
     try std.testing.expect(scheduler.slots.get(task_id) == null);
