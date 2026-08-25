@@ -38,6 +38,7 @@ pub const DEFAULT_SYNTHETIC_IMAGE_BYTES = model.DEFAULT_SYNTHETIC_IMAGE_BYTES;
 pub const TaskStateCount = u8;
 pub const COMPACT_LIFECYCLE_METADATA = true;
 pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
+pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
 pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_624;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
@@ -1060,8 +1061,15 @@ pub const Runtime = struct {
     }
 
     pub fn terminateTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
-        const slot_index = self.tasks.slotIndexOf(task_id) orelse return error.TaskNotFound;
-        const task = &self.tasks.slotAt(slot_index).task;
+        const handle = self.taskHandle(task_id) orelse return error.TaskNotFound;
+        return self.terminateTaskByHandle(handle, task_id, tick);
+    }
+
+    pub fn terminateTaskByHandle(self: *Runtime, handle: TaskHandle, task_id: u64, tick: u64) Error!bool {
+        const slot = self.tasks.getByHandle(handle) orelse return error.TaskNotFound;
+        if (slot.task.id != task_id) return error.TaskNotFound;
+        const slot_index = handle.slotIndex();
+        const task = &slot.task;
         if (task.state == .terminated) return false;
         const retired_address_space_id = task.address_space_id;
 
@@ -2194,6 +2202,8 @@ test "sparse checkpoints preserve cross-page slot order and retire only live add
         task_id.* = task.id;
     }
     const first_task_id = task_ids[0];
+    const removed_task_id = task_ids[1];
+    const stale_task_handle = runtime.taskHandle(removed_task_id).?;
     const high_task_id = task_ids[task_ids.len - 1];
     try runtime.grantCapability(high_task_id, 0xBEEF);
     try runtime.audit(high_task_id, .{
@@ -2218,6 +2228,8 @@ test "sparse checkpoints preserve cross-page slot order and retire only live add
     const replacement_task_id = replacement.id;
     try std.testing.expect(replacement_task_id > high_task_id);
     try std.testing.expectEqual(@as(usize, 1), runtime.tasks.slotIndexOf(replacement_task_id).?);
+    try std.testing.expectError(error.TaskNotFound, runtime.terminateTaskByHandle(stale_task_handle, removed_task_id, 200));
+    try std.testing.expectEqual(TaskState.active, replacement.state);
     try std.testing.expectEqual(task_count, runtime.tasks.claimedCount());
     try std.testing.expectEqual(task_count, runtime.address_spaces.claimedCount());
 

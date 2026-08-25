@@ -182,11 +182,12 @@ pub const Kernel = struct {
     pub fn taskTerminate(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!bool {
         const task_capability = try self.authorizeOperation(.task_terminate, context, now_ticks, .{});
         const task_id = task_capability.target.id;
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const task_handle = self.runtime.taskHandle(task_id) orelse return error.TaskNotFound;
+        const task = self.runtime.findByHandle(task_handle, task_id) orelse return error.TaskNotFound;
         var held_capability_ids: [task_runtime.MAX_TASK_CAPABILITIES]u64 = undefined;
         const held_capability_count = task.capability_count;
         @memcpy(held_capability_ids[0..held_capability_count], task.capabilityIds());
-        const terminated = try self.runtime.terminateTask(task_id, now_ticks);
+        const terminated = try self.runtime.terminateTaskByHandle(task_handle, task_id, now_ticks);
         if (!terminated) return false;
         _ = self.capability_table.retireHeldTaskAuthority(task_id, held_capability_ids[0..held_capability_count]);
         self.retireCapabilityTarget(.{ .kind = .task, .id = task_id });

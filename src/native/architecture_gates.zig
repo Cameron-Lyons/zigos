@@ -399,6 +399,8 @@ pub const indexed_hot_path_tables = .{
             @FieldType(task_runtime.Runtime, "task_state_counts") == [@typeInfo(task_runtime.TaskState).@"enum".fields.len]task_runtime.TaskStateCount,
         .keeps_runtime_within_target_ceiling = @sizeOf(task_runtime.Runtime) <= task_runtime.RUNTIME_SIZE_CEILING_BYTES,
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
+        .reuses_resolved_termination_tasks = task_runtime.TERMINATION_TASK_INDEX_RELOOKUPS == 0 and
+            @hasDecl(task_runtime.Runtime, "taskHandle"),
         .bounds_task_capability_scans = task_runtime.TASK_CAPABILITY_SCAN_BOUND == task_runtime.MAX_TASK_CAPABILITIES,
         .avoids_task_capability_primary_index_lookups = task_runtime.TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
         .tracks_task_capability_generation = @hasDecl(task_runtime.TaskRecord, "capabilityGeneration"),
