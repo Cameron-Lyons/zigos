@@ -1202,6 +1202,7 @@ pub const indexed_hot_path_tables = .{
     .session_manager_boot_flow = .{
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
         .reuses_bootstrap_task_records = session_manager_boot_flow.BOOTSTRAP_TASK_INDEX_RELOOKUPS == 0,
+        .reuses_ui_authority_task_records = session_manager_boot_flow.UI_AUTHORITY_TASK_INDEX_RELOOKUPS == 0,
         .caches_surface_authority_lifecycle_generation = @hasField(session_manager_boot_flow.SessionManager, "surface_authority_scanned_lifecycle_generation"),
         .heap_backs_capability_table_on_freestanding = session_manager_boot_flow.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING,
         .heap_backs_userspace_catalog_on_freestanding = session_manager_boot_flow.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING,
