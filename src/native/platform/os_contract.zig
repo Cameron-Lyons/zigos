@@ -5742,8 +5742,6 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
 fn packageRemoveWireValidationCheck() bool {
     const header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.package_remove),
-        .request_len = @sizeOf(typed_component_abi.PackageRemoveRequest),
-        .response_len = @sizeOf(typed_component_abi.PackageRemoveResponse),
         .correlation_id = 2026,
         .subject_task_id = 7601,
     };
@@ -6509,8 +6507,6 @@ fn networkSessionEvidence() NetworkSessionEvidence {
 fn networkSessionWireValidationCheck() bool {
     const header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.network_open_session),
-        .request_len = @sizeOf(typed_component_abi.NetworkOpenSessionRequest),
-        .response_len = @sizeOf(typed_component_abi.NetworkSessionResponse),
         .correlation_id = 2026,
         .subject_task_id = 8812,
     };
@@ -7315,8 +7311,6 @@ fn personalContextReceiptPolicyReauthorizationCheck() bool {
 fn personalContextWireValidationCheck() bool {
     const header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.personal_context_query),
-        .request_len = @sizeOf(typed_component_abi.PersonalContextQueryRequest),
-        .response_len = @sizeOf(typed_component_abi.PersonalContextResponse),
         .correlation_id = 2027,
         .subject_task_id = 7060,
     };

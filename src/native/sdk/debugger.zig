@@ -262,8 +262,6 @@ test "debugger records ABI checks and exports a redaction-safe trace" {
     var session = Session.init();
     const header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.package_rollback),
-        .request_len = @sizeOf(typed_component_abi.PackageRollbackRequest),
-        .response_len = @sizeOf(typed_component_abi.PackageRollbackResponse),
         .correlation_id = 7,
         .subject_task_id = 9,
     };

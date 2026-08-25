@@ -24,7 +24,6 @@ pub const Error = error{
     InvalidMagic,
     InvalidRequestLength,
     InvalidResponseLength,
-    MalformedMessage,
     SubjectTaskRequired,
 };
 
@@ -550,9 +549,6 @@ pub fn validateMessage(
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
     const iface_contract = contractForId(interface_id);
     if (header.operation != @intFromEnum(operation_id)) return error.UnknownOperation;
-    if (header.request_len != actual_request_len) return error.MalformedMessage;
-    if (header.response_len != actual_response_len) return error.MalformedMessage;
-
     const operation_decl = iface_contract.operation(operation_id) orelse return error.UnknownOperation;
     if (operation_decl.request_size != actual_request_len) return error.InvalidRequestLength;
     if (operation_decl.response_size != actual_response_len) return error.InvalidResponseLength;

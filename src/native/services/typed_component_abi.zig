@@ -281,9 +281,9 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(u16, 0x1A03), @intFromEnum(OperationId.personal_context_revoke));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionRequest), @sizeOf(Request(.service_connect)));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionResponse), @sizeOf(Response(.service_connect)));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(WireHeader));
-    try std.testing.expectEqual(@as(usize, 64), @sizeOf(ServiceRegisterRequest));
-    try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceConnectionRequest));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(WireHeader));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(ServiceRegisterRequest));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(ServiceConnectionRequest));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ServiceConnectionResponse));
     try std.testing.expectEqual(@sizeOf(NetworkOpenSessionRequest), @sizeOf(Request(.network_open_session)));
     try std.testing.expectEqual(@sizeOf(NetworkRecordTransferRequest), @sizeOf(Request(.network_record_transfer)));
@@ -461,8 +461,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     const interface_id = InterfaceId.service_registry;
     var header = WireHeader{
         .operation = @intFromEnum(OperationId.service_connect),
-        .request_len = @sizeOf(ServiceConnectionRequest),
-        .response_len = @sizeOf(ServiceConnectionResponse),
         .correlation_id = 1,
         .subject_task_id = 44,
     };
@@ -475,8 +473,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     );
     const wrong_interface_header = WireHeader{
         .operation = @intFromEnum(OperationId.network_open_session),
-        .request_len = @sizeOf(NetworkOpenSessionRequest),
-        .response_len = @sizeOf(NetworkSessionResponse),
         .correlation_id = 2,
         .subject_task_id = 44,
     };
@@ -505,15 +501,13 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         @sizeOf(ServiceConnectionResponse),
     ));
     header.magic = MAGIC;
-    header.request_len -= 1;
-    try std.testing.expectError(Error.MalformedMessage, validateMessage(
+    try std.testing.expectError(Error.InvalidRequestLength, validateMessage(
         interface_id,
         .service_connect,
         header,
-        @sizeOf(ServiceConnectionRequest),
+        @sizeOf(ServiceConnectionRequest) - 1,
         @sizeOf(ServiceConnectionResponse),
     ));
-    header.request_len += 1;
     header.subject_task_id = 0;
     try std.testing.expectError(Error.SubjectTaskRequired, validateMessage(
         interface_id,
@@ -525,8 +519,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const package_header = WireHeader{
         .operation = @intFromEnum(OperationId.package_rollback),
-        .request_len = @sizeOf(PackageRollbackRequest),
-        .response_len = @sizeOf(PackageRollbackResponse),
         .correlation_id = 902,
         .subject_task_id = 78,
     };
@@ -540,8 +532,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const ai_header = WireHeader{
         .operation = @intFromEnum(OperationId.ai_run_local),
-        .request_len = @sizeOf(AiRunLocalRequest),
-        .response_len = @sizeOf(AiRunLocalResponse),
         .correlation_id = 903,
         .subject_task_id = 79,
     };
@@ -555,8 +545,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const privacy_header = WireHeader{
         .operation = @intFromEnum(OperationId.privacy_authorize_egress),
-        .request_len = @sizeOf(PrivacyAuthorizeEgressRequest),
-        .response_len = @sizeOf(PrivacyAuthorizeEgressResponse),
         .correlation_id = 904,
         .subject_task_id = 80,
     };
@@ -570,8 +558,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const network_header = WireHeader{
         .operation = @intFromEnum(OperationId.network_open_session),
-        .request_len = @sizeOf(NetworkOpenSessionRequest),
-        .response_len = @sizeOf(NetworkSessionResponse),
         .correlation_id = 9041,
         .subject_task_id = 80,
     };
@@ -585,8 +571,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const diagnostics_header = WireHeader{
         .operation = @intFromEnum(OperationId.diagnostics_share_remote),
-        .request_len = @sizeOf(DiagnosticsShareRemoteRequest),
-        .response_len = @sizeOf(DiagnosticsShareRemoteResponse),
         .correlation_id = 905,
         .subject_task_id = 81,
     };
@@ -600,8 +584,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const consent_header = WireHeader{
         .operation = @intFromEnum(OperationId.consent_record),
-        .request_len = @sizeOf(ConsentRecordRequest),
-        .response_len = @sizeOf(ConsentRecordResponse),
         .correlation_id = 906,
         .subject_task_id = 82,
     };
@@ -615,8 +597,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const lease_header = WireHeader{
         .operation = @intFromEnum(OperationId.permission_lease_expire),
-        .request_len = @sizeOf(PermissionLeaseExpireRequest),
-        .response_len = @sizeOf(PermissionLeaseExpireResponse),
         .correlation_id = 907,
         .subject_task_id = 83,
     };
@@ -630,8 +610,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const identity_header = WireHeader{
         .operation = @intFromEnum(OperationId.identity_session_authorize),
-        .request_len = @sizeOf(IdentitySessionAuthorizeRequest),
-        .response_len = @sizeOf(IdentitySessionAuthorizeResponse),
         .correlation_id = 908,
         .subject_task_id = 84,
     };

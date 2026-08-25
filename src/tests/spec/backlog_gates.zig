@@ -223,8 +223,6 @@ pub fn componentAbiDepthGate() !void {
 
     var header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.service_connect),
-        .request_len = @sizeOf(typed_component_abi.ServiceConnectionRequest),
-        .response_len = @sizeOf(typed_component_abi.ServiceConnectionResponse),
         .correlation_id = 901,
         .subject_task_id = 77,
     };
@@ -245,19 +243,16 @@ pub fn componentAbiDepthGate() !void {
         @sizeOf(typed_component_abi.ServiceConnectionResponse),
     ));
     header.subject_task_id = 77;
-    header.response_len -= 1;
-    try std.testing.expectError(error.MalformedMessage, typed_component_abi.validateMessage(
+    try std.testing.expectError(error.InvalidResponseLength, typed_component_abi.validateMessage(
         interface_id,
         .service_connect,
         header,
         @sizeOf(typed_component_abi.ServiceConnectionRequest),
-        @sizeOf(typed_component_abi.ServiceConnectionResponse),
+        @sizeOf(typed_component_abi.ServiceConnectionResponse) - 1,
     ));
 
     const rollback_header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.package_rollback),
-        .request_len = @sizeOf(typed_component_abi.PackageRollbackRequest),
-        .response_len = @sizeOf(typed_component_abi.PackageRollbackResponse),
         .correlation_id = 902,
         .subject_task_id = 78,
     };
