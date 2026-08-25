@@ -652,6 +652,7 @@ pub const indexed_hot_path_tables = .{
         .uses_scope_index = @hasField(policy_object.Directory, "scope_index"),
     },
     .event_ledger = .{
+        .inlines_event_text_writes = event_ledger.INLINE_EVENT_TEXT_WRITES,
         .stores_compact_event_text_metadata = event_ledger.COMPACT_EVENT_TEXT_METADATA and
             @FieldType(event_ledger.Event, "policy_label_len") == u8 and
             @FieldType(event_ledger.Event, "missing_capability_len") == u8 and
