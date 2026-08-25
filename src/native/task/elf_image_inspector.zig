@@ -3,6 +3,7 @@ const crypto_hash = @import("../core/crypto_hash.zig");
 const embedded_file = @import("embedded_file.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
+const userspace_layout = @import("../core/userspace_layout.zig");
 
 pub const Inspection = struct {
     entry_point: u64,
@@ -141,10 +142,10 @@ fn inspectTyped(
                 .file_offset = std.math.cast(u32, program_header.p_offset) orelse return error.InvalidLoadableSegment,
                 .file_size = std.math.cast(u32, program_header.p_filesz) orelse return error.InvalidLoadableSegment,
                 .memory_size = std.math.cast(u32, program_header.p_memsz) orelse return error.InvalidLoadableSegment,
-                .alignment = if (program_header.p_align == 0)
-                    1
-                else
-                    std.math.cast(u32, program_header.p_align) orelse return error.InvalidLoadableSegment,
+                .alignment = std.math.cast(
+                    u32,
+                    @max(@as(u64, userspace_layout.page_size), @as(u64, program_header.p_align)),
+                ) orelse return error.InvalidLoadableSegment,
                 .access = .{
                     .read = (program_header.p_flags & std.elf.PF_R) != 0,
                     .write = (program_header.p_flags & std.elf.PF_W) != 0,

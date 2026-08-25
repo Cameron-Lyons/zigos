@@ -1,8 +1,18 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 
-pub const CHUNK_SIZE_BYTES: usize = 1024;
+// This measured knee caps a 4 KiB file window at six chunks while retaining
+// compact cross-image deduplication for the packed userspace artifacts.
+pub const CHUNK_SIZE_BYTES: usize = 896;
 pub const ChunkIndex = u16;
+
+test "archive chunk geometry balances page traversal and deduplication" {
+    try std.testing.expectEqual(@as(usize, 0), CHUNK_SIZE_BYTES % 128);
+    try std.testing.expect(CHUNK_SIZE_BYTES < 1024);
+    try std.testing.expect(
+        try std.math.divCeil(usize, 4096 + CHUNK_SIZE_BYTES - 1, CHUNK_SIZE_BYTES) <= 6,
+    );
+}
 
 pub const File = struct {
     data_bytes: ?[*]const u8 = null,

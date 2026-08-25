@@ -196,6 +196,7 @@ fn addUserspaceCompile(
         .name = artifact_name,
         .root_module = module,
     });
+    artifact.link_z_max_page_size = 1;
     artifact.image_base = userspace_layout.image_start;
     artifact.setLinkerScript(b.path("src/userspace/linker.ld"));
     return artifact;
