@@ -1195,6 +1195,7 @@ pub const indexed_hot_path_tables = .{
     },
     .session_service_bootstrap = .{
         .launches_contract_services = @hasDecl(session_service_bootstrap, "bootServices"),
+        .reuses_service_client_tasks = session_service_bootstrap.SERVICE_CLIENT_TASK_INDEX_RELOOKUPS == 0,
     },
     .session_manager_boot_flow = .{
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
