@@ -405,6 +405,7 @@ pub const indexed_hot_path_tables = .{
         .reuses_live_snapshot_cold_backing = task_runtime.SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING,
         .validates_ordered_address_space_ranges_in_one_pass = task_runtime.ORDERED_EXECUTABLE_SEGMENTS and
             syscall_dispatch.SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION,
+        .validates_terminal_stack_ranges_directly = syscall_dispatch.DIRECT_STACK_RANGE_VALIDATION,
     },
     .debug_contract = .{
         .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and

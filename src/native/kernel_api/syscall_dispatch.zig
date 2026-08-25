@@ -17,6 +17,7 @@ else
 const USER_POINTER_FLOOR: usize = 0x10000;
 const USER_POINTER_CEILING_32: usize = 0xC0000000;
 pub const SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION = true;
+pub const DIRECT_STACK_RANGE_VALIDATION = true;
 
 pub const DispatchResult = struct {
     status: abi.SyscallStatus,
@@ -103,6 +104,7 @@ pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, ali
             if (builtin.target.os.tag == .freestanding) return false;
             return true;
         }
+        if (validateTerminalStackRange(address_space, addr, end_exclusive, access)) |valid| return valid;
         return validateAddressSpaceRange(address_space, addr, end_exclusive, access);
     }
     return true;
@@ -131,6 +133,23 @@ pub fn validateAddressSpaceRange(
         if (covered_until == end_exclusive) return true;
     }
     return false;
+}
+
+fn validateTerminalStackRange(
+    address_space: *const task_runtime.AddressSpaceRecord,
+    addr: usize,
+    end_exclusive: usize,
+    access: UserMemoryAccess,
+) ?bool {
+    if (address_space.region_count == 0 or address_space.region_count > address_space.regions.len) return false;
+    const stack = address_space.regions[address_space.region_count - 1];
+    if (stack.kind != .stack) return null;
+
+    const stack_start = std.math.cast(usize, stack.virtual_address) orelse return false;
+    if (addr < stack_start) return null;
+    const stack_end = std.math.add(usize, stack_start, @as(usize, stack.size_bytes)) catch return false;
+    if (stack_end <= stack_start or addr >= stack_end or end_exclusive > stack_end) return false;
+    return regionAllows(stack.access, access);
 }
 
 pub fn writeResponse(memory: UserMemoryContext, response_addr: usize, response_len: usize, value: anytype) DispatchResult {
@@ -404,4 +423,43 @@ test "user slice copies enforce source and destination bounds" {
 
     const invalid_ptr: [*]const u8 = @ptrFromInt(0x1000);
     try std.testing.expect(copyUserSlice(memory, invalid_ptr[0..1], &copied_buffer) == null);
+}
+
+test "user range validation resolves the terminal stack mapping directly" {
+    var address_space = std.mem.zeroes(task_runtime.AddressSpaceRecord);
+    address_space.region_count = 3;
+    address_space.regions[0] = .{
+        .kind = .load_segment,
+        .virtual_address = 0x20000,
+        .size_bytes = 0x1000,
+        .file_offset = 0,
+        .file_size = 0,
+        .access = .{ .read = true, .execute = true },
+    };
+    address_space.regions[1] = .{
+        .kind = .load_segment,
+        .virtual_address = 0x21000,
+        .size_bytes = 0x1000,
+        .file_offset = 0,
+        .file_size = 0,
+        .access = .{ .read = true, .write = true },
+    };
+    address_space.regions[2] = .{
+        .kind = .stack,
+        .virtual_address = 0x30000,
+        .size_bytes = 0x2000,
+        .file_offset = 0,
+        .file_size = 0,
+        .access = .{ .read = true, .write = true },
+    };
+
+    try std.testing.expectEqual(true, validateTerminalStackRange(&address_space, 0x30020, 0x30080, .read).?);
+    try std.testing.expectEqual(true, validateTerminalStackRange(&address_space, 0x30020, 0x30080, .write).?);
+    try std.testing.expectEqual(false, validateTerminalStackRange(&address_space, 0x31FF0, 0x32010, .write).?);
+    try std.testing.expect(validateTerminalStackRange(&address_space, 0x21020, 0x21080, .read) == null);
+
+    const memory = UserMemoryContext{ .address_space = &address_space };
+    try std.testing.expect(validateUserRange(memory, 0x30020, 0x60, 8, .write));
+    try std.testing.expect(!validateUserRange(memory, 0x31FF0, 0x20, 8, .write));
+    try std.testing.expect(validateUserRange(memory, 0x21020, 0x60, 8, .read));
 }
