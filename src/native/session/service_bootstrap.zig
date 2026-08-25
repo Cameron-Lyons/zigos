@@ -138,7 +138,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
         service_task_id,
         endpoint.endpoint.endpoint_id,
         endpoint.capability_id,
-        request.entry.interface,
+        request.entry.interface_id,
         kernel_descriptors.serviceBindingFlags(service_record),
     );
     _ = request.supervisor.noteContractBound(request.service_id, endpoint.endpoint.endpoint_id, request.entry.boot_tick);
@@ -292,7 +292,7 @@ fn driverResourceBudget(cpu_time_ticks: u64, memory_bytes: usize, shared_memory_
 
 pub fn contractsReady(service_directory: *const service_registry.Service) bool {
     for (service_contract.ordered_service_contracts) |entry| {
-        _ = service_directory.connect(entry.interface) catch return false;
+        _ = service_directory.connect(entry.interface_id) catch return false;
     }
     return true;
 }
@@ -339,7 +339,7 @@ test "contractsReady requires every ordered service contract" {
             20 + @as(u64, @intCast(index)),
             30 + @as(u64, @intCast(index)),
             40 + @as(u64, @intCast(index)),
-            entry.interface,
+            entry.interface_id,
             0,
         );
     }

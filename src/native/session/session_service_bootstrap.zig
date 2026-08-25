@@ -870,7 +870,7 @@ pub fn connectClient(
             recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };
-        const registry_connection = env.service_directory.connect(entry.interface) catch |err| {
+        const registry_connection = env.service_directory.connect(entry.interface_id) catch |err| {
             recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };

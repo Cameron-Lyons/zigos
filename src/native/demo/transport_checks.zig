@@ -8,6 +8,7 @@ const component_port = @import("../kernel_api/component_port.zig");
 const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 const support = @import("../session/session_manager_support.zig");
+const typed_component_abi = @import("../services/typed_component_abi.zig");
 const units = @import("../core/units.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 
@@ -112,7 +113,7 @@ pub fn run(
         storage_task_desc.task_id,
         storage_endpoint.endpoint.endpoint_id,
         storage_endpoint.capability_id,
-        support.bootstrap_storage_interface,
+        typed_component_abi.interfaceId(.bootstrap_workspace),
         kernel_descriptors.serviceBindingFlags(storage_record),
     ) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:SERVICE_REGISTER:OK");
@@ -124,7 +125,7 @@ pub fn run(
         .label = "transport.probe",
         .flags = .{ .local_only = true },
     }, 4) catch |err| native_util.bootProofFailure("transport checks", err);
-    const storage_connection = env.service_directory.connect(support.bootstrap_storage_interface) catch |err| native_util.bootProofFailure("transport checks", err);
+    const storage_connection = env.service_directory.connect(typed_component_abi.interfaceId(.bootstrap_workspace)) catch |err| native_util.bootProofFailure("transport checks", err);
     _ = kernel_port.endpointConnect(.{
         .header = component_port.makeHeader(.endpoint_connect, 6, transport_probe_task.task_id),
         .endpoint_capability_id = transport_probe_endpoint.capability_id,
