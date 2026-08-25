@@ -46,6 +46,7 @@ pub const ServiceBindings = session_support.ServiceBindings;
 pub const Environment = session_support.Environment;
 pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = session_contexts.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
+pub const BOOTSTRAP_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
@@ -809,7 +810,7 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
         self.recordBootFailure(services.policy_service.id, 0, err);
         return err;
     };
-    recordSessionTaskBootstrap(self, session_task.id, session_capability.id, policy_capability.id) catch |err| {
+    recordSessionTaskBootstrap(session_task, session_capability.id, policy_capability.id) catch |err| {
         self.recordBootFailure(services.session.id, 0, err);
         return err;
     };
@@ -923,7 +924,7 @@ fn grantNativeServiceTaskAuthority(
             .broker_service_id = service.id,
         },
     });
-    self.runtimePtr().grantCapability(task.id, granted.id) catch |err| {
+    task_runtime.grantCapabilityToTask(task, granted.id) catch |err| {
         self.capabilityTablePtr().revokeGrant(granted.id) catch {};
         return err;
     };
@@ -938,24 +939,22 @@ fn catalogDeclaresGrant(class: service_catalog.ServiceClass, grant: service_cata
 }
 
 fn recordSessionTaskBootstrap(
-    self: *SessionManager,
-    session_task_id: u64,
+    session_task: *task_runtime.TaskRecord,
     session_capability_id: u64,
     policy_capability_id: u64,
 ) task_runtime.Error!void {
-    const runtime = self.runtimePtr();
-    try runtime.grantCapability(session_task_id, session_capability_id);
-    try runtime.grantCapability(session_task_id, policy_capability_id);
-    try runtime.audit(session_task_id, .{
+    try task_runtime.grantCapabilityToTask(session_task, session_capability_id);
+    try task_runtime.grantCapabilityToTask(session_task, policy_capability_id);
+    session_task.appendAudit(.{
         .kind = .created,
         .tick = 0,
     });
-    try runtime.audit(session_task_id, .{
+    session_task.appendAudit(.{
         .kind = .capability_granted,
         .capability_id = session_capability_id,
         .tick = 0,
     });
-    try runtime.audit(session_task_id, .{
+    session_task.appendAudit(.{
         .kind = .capability_granted,
         .capability_id = policy_capability_id,
         .tick = 0,
