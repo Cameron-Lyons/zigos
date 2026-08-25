@@ -183,8 +183,9 @@ const CONTAINABLE_USER_EXCEPTION_VECTORS = [_]u8{
     19, // SIMD floating-point exception.
     21, // Control-protection exception.
 };
-const TRAP_STACK_BYTES: usize = units.kibibytes(48);
 const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
+pub const TRAP_STACK_TOTAL_BYTES: usize = units.kibibytes(32);
+pub const TRAP_STACK_USABLE_BYTES: usize = TRAP_STACK_TOTAL_BYTES - TRAP_STACK_GUARD_BYTES;
 
 const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
@@ -207,7 +208,7 @@ const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || 
     InitialContextInvalid,
 };
 
-var trap_stack: [TRAP_STACK_BYTES]u8 align(PAGE_SIZE) = [_]u8{0} ** TRAP_STACK_BYTES;
+var trap_stack: [TRAP_STACK_TOTAL_BYTES]u8 align(PAGE_SIZE) = [_]u8{0} ** TRAP_STACK_TOTAL_BYTES;
 var trap_stack_guard_armed: bool = false;
 
 fn trapStackPaintableBase() usize {
@@ -221,7 +222,7 @@ fn armTrapStackGuard() void {
     _ = freestanding.paging.unmapBorrowedCurrentPage(guard_address);
     const base = trapStackPaintableBase();
     const words: [*]u32 = @ptrFromInt(base);
-    const count = (TRAP_STACK_BYTES - TRAP_STACK_GUARD_BYTES) / @sizeOf(u32);
+    const count = TRAP_STACK_USABLE_BYTES / @sizeOf(u32);
     var index: usize = 0;
     while (index < count) : (index += 1) {
         words[index] = TRAP_STACK_PAINT_PATTERN;
@@ -284,7 +285,7 @@ pub const UserContext64 = extern struct {
 };
 
 comptime {
-    if (TRAP_STACK_BYTES % PAGE_SIZE != 0 or TRAP_STACK_BYTES <= TRAP_STACK_GUARD_BYTES) {
+    if (TRAP_STACK_TOTAL_BYTES % PAGE_SIZE != 0 or TRAP_STACK_TOTAL_BYTES <= TRAP_STACK_GUARD_BYTES) {
         @compileError("userspace trap stack must retain a page-aligned guarded capacity");
     }
     if (@offsetOf(UserContext64, "instruction_pointer") != 120 or

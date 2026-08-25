@@ -396,6 +396,8 @@ pub const indexed_hot_path_tables = .{
         .avoids_cold_mapping_slot_scans = userspace_executor.COLD_MAPPING_LINEAR_SLOT_SCANS == 0,
         .avoids_steady_retirement_slot_scans = userspace_executor.STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH == 0,
         .reuses_resolved_retirement_mappings = userspace_executor.RETIREMENT_MAPPING_HANDLE_RELOOKUPS == 0,
+        .right_sizes_userspace_trap_stack = userspace_executor.TRAP_STACK_TOTAL_BYTES <= 32 * 1024 and
+            userspace_executor.TRAP_STACK_USABLE_BYTES >= 28 * 1024,
         .avoids_unrelated_capability_mutation_authority_scans = userspace_executor.UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS == 0,
         .avoids_unchanged_resume_mailbox_writes = userspace_executor.UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH == 0,
     },
