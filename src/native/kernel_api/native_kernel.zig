@@ -190,8 +190,9 @@ pub const Kernel = struct {
         const task_capability = try self.authorizeOperation(.task_terminate, context, now_ticks, .{});
         const task_id = task_capability.target.id;
         const task_handle = self.runtime.taskHandle(task_id) orelse return error.TaskNotFound;
+        const task = self.runtime.findByHandle(task_handle, task_id) orelse return error.TaskNotFound;
         var terminated_capabilities = task_runtime.TerminationCapabilities{};
-        const terminated = try self.runtime.terminateTaskByHandle(task_handle, task_id, now_ticks, &terminated_capabilities);
+        const terminated = self.runtime.terminateResolvedTaskByHandle(task_handle, task, now_ticks, &terminated_capabilities);
         if (!terminated) return false;
         _ = self.capability_table.retireHeldTaskAuthority(task_id, terminated_capabilities.ids[0..terminated_capabilities.count]);
         self.retireCapabilityTarget(.{ .kind = .task, .id = task_id });
