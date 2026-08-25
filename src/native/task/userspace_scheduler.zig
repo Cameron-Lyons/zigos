@@ -52,6 +52,7 @@ pub const TASK_WAKE_HANDLE_SLOT_RELOOKUPS: u8 = 0;
 pub const FAULT_CONTAINMENT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
 pub const ACCELERATOR_WAIT_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const TASK_UNREGISTER_SLOT_RELOOKUPS: u8 = 0;
 
 comptime {
     if (task_runtime.MAX_TASKS > std.math.maxInt(QueueSlotIndex) or
@@ -427,9 +428,7 @@ pub const Scheduler = struct {
 
     pub fn unregisterTask(self: *Scheduler, task_id: u64) bool {
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
-        self.unlinkReadyIndex(slot_index);
-        self.removeAcceleratorClaimsForTask(task_id);
-        return self.slots.removeIndex(slot_index);
+        return self.unregisterSlotIndex(slot_index);
     }
 
     pub fn parkTaskUntilEvent(self: *Scheduler, task_id: u64) bool {
@@ -1055,9 +1054,11 @@ pub const Scheduler = struct {
 
     fn unregisterSlotIndex(self: *Scheduler, slot_index: usize) bool {
         if (slot_index >= self.slots.slots.len) return false;
-        const task_id = self.slots.slots[slot_index].task_id;
+        const slot = &self.slots.slots[slot_index];
+        if (!slot.in_use) return false;
+        const task_id = slot.task_id;
         self.unlinkReadyIndex(slot_index);
-        self.removeAcceleratorClaimsForTask(task_id);
+        self.removeAcceleratorClaimsForTask(task_id, slot);
         return self.slots.removeIndex(slot_index);
     }
 
@@ -1276,7 +1277,10 @@ pub const Scheduler = struct {
         return if (self.slots.getConst(task_id)) |slot| slot.last_dispatch_tick else std.math.maxInt(u64);
     }
 
-    fn removeAcceleratorClaimsForTask(self: *Scheduler, task_id: u64) void {
+    fn removeAcceleratorClaimsForTask(self: *Scheduler, task_id: u64, task_slot: *Slot) void {
+        if (builtin.mode == .Debug) {
+            std.debug.assert(task_slot.in_use and task_slot.task_id == task_id);
+        }
         const backing = self.acceleratorClaimBacking() orelse return;
         const task_key = acceleratorClaimTaskKey(task_id);
         var current = backing.task_index.head(task_key);
@@ -1293,11 +1297,9 @@ pub const Scheduler = struct {
             const record = claim_slot.record;
             self.unlinkAcceleratorClaimIndex(record.engine, current);
             self.accelerator_claim_counts[engineIndex(record.engine)] -= 1;
-            if (self.slots.get(task_id)) |slot| {
-                if (slot.pending_accelerator_claim_id == record.id) {
-                    slot.pending_accelerator_claim_id = 0;
-                    slot.pending_accelerator_engine = .cpu;
-                }
+            if (task_slot.pending_accelerator_claim_id == record.id) {
+                task_slot.pending_accelerator_claim_id = 0;
+                task_slot.pending_accelerator_engine = .cpu;
             }
             _ = backing.claims.removeIndex(current);
             current = next;
