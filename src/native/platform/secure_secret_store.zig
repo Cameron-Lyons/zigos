@@ -11,7 +11,9 @@ pub const MAX_VALUE_BYTES: usize = 96;
 pub const DIRECT_SECRET_LOOKUP = true;
 pub const DENSE_SECRET_TABLE = true;
 pub const COMPACT_SECRET_METADATA = true;
+pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true;
 pub const DIRECT_HANDLE_LOOKUP = true;
+pub const OVERWRITES_RESERVED_HANDLE_SLOTS = true;
 pub const STORE_SIZE_CEILING_BYTES: usize = 5_312;
 
 pub const SecretRecord = struct {
@@ -120,15 +122,16 @@ pub const Store = struct {
     ) Error!*SecretRecord {
         if (raw.len > MAX_VALUE_BYTES) return error.SecretTooLarge;
         if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
-        if (self.countSecrets() >= MAX_SECRETS) return error.SecretTableFull;
         const slot_index = self.countSecrets();
+        if (slot_index >= MAX_SECRETS) return error.SecretTableFull;
         const secret_id: u64 = @intCast(slot_index + 1);
         const hardware_sealed_digest = if (hardware_backed)
             self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable
         else
             crypto_hash.zero_digest;
 
-        var secret = zeroSecret();
+        const secret = &self.secrets[slot_index];
+        if (secret.id != 0) native_util.impossibleByInvariant("dense secret imports append into pre-zeroed slots");
         secret.id = secret_id;
         secret.owner = owner;
         secret.hardware_backed = hardware_backed;
@@ -147,10 +150,8 @@ pub const Store = struct {
             secret.value_len = @intCast(native_util.copyTextExact(&secret.value, raw) catch return error.SecretTooLarge);
         }
 
-        const slot = &self.secrets[slot_index];
-        slot.* = secret;
         self.secret_count += 1;
-        return slot;
+        return secret;
     }
 
     pub fn lendHandle(
@@ -191,7 +192,7 @@ pub const Store = struct {
             self.handles.replaceHandle(retired) orelse
                 native_util.impossibleByInvariant("secure store replacement keeps its retired handle live")
         else
-            self.handles.reserveHandle() orelse return error.HandleTableFull;
+            self.handles.reserveHandleForOverwrite() orelse return error.HandleTableFull;
         const handle = SecretHandle{
             .id = handle_id.value,
             .secret_id = secret.id,
@@ -202,7 +203,10 @@ pub const Store = struct {
         };
         const slot = self.handles.getByHandle(handle_id) orelse
             native_util.impossibleByInvariant("secure store reserved handle resolves directly");
-        slot.handle = handle;
+        slot.* = .{
+            .in_use = true,
+            .handle = handle,
+        };
         return handle;
     }
 
@@ -266,6 +270,30 @@ fn defaultSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
     crypto_hash.updateBytes(&hasher, "hardware-seal-label", label);
     crypto_hash.updateBytes(&hasher, "hardware-seal-material", raw);
     return crypto_hash.finalize(&hasher);
+}
+
+test "secret imports preserve zeroed inactive storage" {
+    try std.testing.expect(IMPORTS_INTO_PREZEROED_SECRET_SLOTS);
+    try std.testing.expect(OVERWRITES_RESERVED_HANDLE_SLOTS);
+
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 9 };
+    const holder = principal.PrincipalId{ .kind = .app, .serial = 10 };
+    const secret = try store.importSecret(owner, "key", "value", false, true);
+
+    try std.testing.expectEqual(@as(u64, 1), secret.id);
+    try std.testing.expectEqualStrings("key", secret.labelSlice());
+    try std.testing.expectEqualStrings("value", secret.value[0..@as(usize, secret.value_len)]);
+    for (secret.label[@as(usize, secret.label_len)..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    for (secret.value[@as(usize, secret.value_len)..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    for (secret.sealed_digest) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+
+    const handle = try store.lendHandle(secret.id, holder, 44, true);
+    try std.testing.expectEqual(handle, store.describeHandle(handle.id).?);
+    try std.testing.expectEqualStrings("value", try store.exportRaw(handle.id, .{
+        .holder = holder,
+        .task_id = 44,
+    }));
 }
 
 test "secure secret store requires a hardware provider before hardware-backed imports" {
