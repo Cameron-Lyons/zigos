@@ -22,6 +22,7 @@ const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
 pub const Error = error{ MissingBootstrapGrant, DriverAttachmentNotAllowed } || device_inventory.Error || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
 pub const DIRECT_SERVICE_AUTHORITY_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const BOOTSTRAP_DRIVER_TASK_INDEX_LOOKUPS: u8 = 1;
 
 const driver_endpoint_slots = 4;
 const kibibytes = units.kibibytes;
@@ -151,16 +152,13 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
 }
 
 pub fn attachDriver(
-    kernel_port: *component_port.KernelPort,
+    runtime: *task_runtime.Runtime,
     capability_table: *capability.CapabilityTable,
     directory: *driver_service.Directory,
     supervisor: *supervisor_mod.Supervisor,
     policy_authority: principal.PrincipalId,
-    policy_capability_id: u64,
-    controller_task_id: u64,
     service_id: u64,
     task_id: u64,
-    owner: principal.PrincipalId,
     device_class: driver_service.DeviceClass,
     bootstrap_transport: driver_service.BootstrapTransport,
     driver_bundle_id: []const u8,
@@ -168,56 +166,45 @@ pub fn attachDriver(
 ) Error!*driver_service.DriverRecord {
     if (!supervisor.allowsDriverAttachment(service_id, device_class)) return error.DriverAttachmentNotAllowed;
     const device_id = try device_inventory.requireProductionDriverDeviceId(device_class);
+    const requester = runtime.find(task_id) orelse return error.TaskNotFound;
+    const driver_capability = try capability_table.mintBootRoot(.{
+        .holder = requester.owner,
+        .issuer = policy_authority,
+        .target = driver_service.authorityTarget(device_id),
+        .rights = driver_service.allowedRightsFor(device_class),
+        .scope = .{
+            .task_id = requester.id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = now_ticks,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = false,
+        },
+        .audit = .{
+            .policy_generation = 1,
+            .source_task_id = 0,
+            .broker_service_id = service_id,
+        },
+    });
+    errdefer capability_table.rollbackGrant(&.{driver_capability});
+    try task_runtime.grantCapabilityToTask(requester, driver_capability.id);
+    errdefer _ = task_runtime.revokeCapabilityFromTask(requester, driver_capability.id);
 
-    const driver_capability_id = if (controller_task_id == 0) blk: {
-        const driver_capability = try capability_table.mintBootRoot(.{
-            .holder = owner,
-            .issuer = policy_authority,
-            .target = driver_service.authorityTarget(device_id),
-            .rights = driver_service.allowedRightsFor(device_class),
-            .scope = .{
-                .task_id = task_id,
-                .local_only = true,
-                .broker_only = true,
-            },
-            .lease = .{
-                .issued_at_ticks = now_ticks,
-                .expires_at_ticks = std.math.maxInt(u64),
-                .renewable = false,
-            },
-            .audit = .{
-                .policy_generation = 1,
-                .source_task_id = 0,
-                .broker_service_id = service_id,
-            },
-        });
-        try kernel_port.kernel.runtime.grantCapability(task_id, driver_capability.id);
-        break :blk driver_capability.id;
-    } else try bootstrap_capabilities.mintTaskCapability(
-        kernel_port,
-        controller_task_id,
-        policy_capability_id,
-        task_id,
-        driver_service.authorityTarget(device_id),
-        driver_service.allowedRightsFor(device_class),
-        policy_authority,
-        360 + now_ticks,
-        now_ticks,
-    );
-    const requester = kernel_port.kernel.runtime.find(task_id) orelse return error.TaskNotFound;
     const driver = try directory.registerSigned(.{
         .service_id = service_id,
-        .owner_task_id = task_id,
+        .owner_task_id = requester.id,
         .device_id = device_id,
         .device_class = device_class,
-        .authority_capability_id = driver_capability_id,
+        .authority_capability_id = driver_capability.id,
         .capability_table = capability_table,
         .requester = requester.owner,
         .now_ticks = now_ticks,
         .signer = try driverSigner(device_class, driver_bundle_id),
         .bootstrap_transport = bootstrap_transport,
     });
-    _ = supervisor.noteDriverAttached(service_id, device_class, driver_capability_id, now_ticks);
+    _ = supervisor.noteDriverAttached(service_id, device_class, driver_capability.id, now_ticks);
     return driver;
 }
 
@@ -346,4 +333,42 @@ test "contractsReady requires every ordered service contract" {
     }
 
     try std.testing.expect(contractsReady(&registry));
+}
+
+test "bootstrap driver attachment rolls back authority when signer resolution fails" {
+    device_inventory.reset();
+    defer device_inventory.reset();
+    device_inventory.registerDetected(.network_adapter, 0x8086_15F2_0001, .intel_i225_lm_inventory, false);
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 700 };
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = owner,
+        .component_class = .service_component,
+        .budget = driverBudget(.network_adapter),
+        .local_only = true,
+    });
+    var capability_table = capability.CapabilityTable.init();
+    var directory = driver_service.Directory.init();
+    var supervisor = supervisor_mod.Supervisor.init();
+    const service = try supervisor.register(.network_stack, owner);
+
+    try std.testing.expectError(error.UnknownBundleId, attachDriver(
+        &runtime,
+        &capability_table,
+        &directory,
+        &supervisor,
+        .{ .kind = .policy_authority, .serial = 1 },
+        service.id,
+        task.id,
+        .network_adapter,
+        .none,
+        "zigos.system.unknown-driver",
+        1,
+    ));
+
+    try std.testing.expectEqual(@as(usize, 0), capability_table.activeCount());
+    try std.testing.expectEqual(@as(usize, 0), task.capability_count);
+    try std.testing.expect(directory.findByServiceAndClass(service.id, .network_adapter) == null);
+    try std.testing.expect(!supervisor.hasDiagnostic(service.id, .driver_attached));
 }
