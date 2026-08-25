@@ -33,6 +33,7 @@ pub const COMPACT_SESSION_COUNT_METADATA = true;
 pub const WINDOW_ALLOCATION_INDEX_RELOOKUPS: u8 = 0;
 pub const MODAL_REVIEWER_INDEX_RELOOKUPS: u8 = 0;
 pub const STEADY_SURFACE_PRIMARY_INDEX_LOOKUPS: u8 = 1;
+pub const STEADY_SURFACE_TASK_INDEX_LOOKUPS: u8 = 0;
 pub const SURFACE_LIFECYCLE_BACKING_RELOOKUPS: u8 = 0;
 pub const SURFACE_REMOVAL_TASK_INDEX_LOOKUPS: u8 = 1;
 pub const WindowOrderIndex = u8;
@@ -610,8 +611,8 @@ pub const Session = struct {
             if (surfaces.slotIndexOf(presentation.surface_id)) |slot_index| {
                 const slot = &surfaces.slots[slot_index];
                 if (slot.surface.task_id != task.id) return error.InvalidSurface;
-                if (self.surface_task_index.lookup(surfaceTaskKey(task.id)) != slot_index) {
-                    native_util.impossibleByInvariant("presented surface task index points at the matching slot");
+                if (builtin.mode == .Debug) {
+                    std.debug.assert(self.surface_task_index.lookup(surfaceTaskKey(task.id)) == slot_index);
                 }
                 const previous_revision = slot.surface.presentation.revision;
                 if (presentation.revision < previous_revision) return error.StalePresentation;
