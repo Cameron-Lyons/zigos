@@ -22,7 +22,7 @@ pub fn dispatchTaskCreate(
     var request = dispatch.readRequest(component_port.TaskCreateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
     var scratch = TaskCreateScratch{};
     if (!sanitizeTaskCreateRequest(memory, &request, &scratch)) return dispatch.invalidRequest();
-    const task = component_port.invokeGenerated(.task_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const task = component_port.invokeGeneratedFromValidatedSyscall(.task_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, task);
 }
 
@@ -35,7 +35,7 @@ pub fn dispatchTaskTerminate(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.TaskTerminateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const terminated = component_port.invokeGenerated(.task_terminate, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const terminated = component_port.invokeGeneratedFromValidatedSyscall(.task_terminate, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(terminated));
 }
 
@@ -48,7 +48,7 @@ pub fn dispatchTimeQuery(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.TimeQueryRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const queried = component_port.invokeGenerated(.time_query, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const queried = component_port.invokeGeneratedFromValidatedSyscall(.time_query, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.TimeQueryResponse{
         .now_ticks = queried,
     });
@@ -85,7 +85,7 @@ pub fn dispatchInputRecv(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.InputRecvRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const received = component_port.invokeGenerated(.input_recv, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const received = component_port.invokeGeneratedFromValidatedSyscall(.input_recv, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     var response = @import("std").mem.zeroes(abi.InputRecvResponse);
     if (received) |event| {
         response.present = 1;
@@ -103,7 +103,7 @@ pub fn dispatchSurfacePresent(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.SurfacePresentRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const presented = component_port.invokeGenerated(.surface_present, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const presented = component_port.invokeGeneratedFromValidatedSyscall(.surface_present, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(presented));
 }
 

@@ -14,7 +14,7 @@ pub fn dispatchEndpointCreate(
     var request = dispatch.readRequest(component_port.EndpointCreateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
     var label_buffer: [endpoint.MAX_ENDPOINT_LABEL_BYTES]u8 = undefined;
     request.label = dispatch.copyUserSlice(memory, request.label, &label_buffer) orelse return dispatch.invalidRequest();
-    const created = component_port.invokeGenerated(.endpoint_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const created = component_port.invokeGeneratedFromValidatedSyscall(.endpoint_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.EndpointCreateResponse{
         .endpoint = created.endpoint,
         .capability = created.capability,
@@ -46,7 +46,7 @@ pub fn dispatchEndpointSend(
     var request = dispatch.readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return dispatch.invalidRequest();
     var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer) orelse return dispatch.invalidRequest();
-    component_port.invokeGenerated(.endpoint_send, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.success();
 }
 
@@ -86,7 +86,7 @@ pub fn dispatchEndpointRecv(
     var kernel_request = request;
     kernel_request.payload_out = payload_buffer[0..request.payload_out.len];
     kernel_request.attached_capability_out = &attached_capability;
-    const received = component_port.invokeGenerated(.endpoint_recv, port, kernel_request, now_ticks) catch |err| return dispatch.mapError(err);
+    const received = component_port.invokeGeneratedFromValidatedSyscall(.endpoint_recv, port, kernel_request, now_ticks) catch |err| return dispatch.mapError(err);
 
     var response = @import("std").mem.zeroes(abi.EndpointRecvResponse);
     if (received) |message| {

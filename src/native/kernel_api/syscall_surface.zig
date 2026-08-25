@@ -347,6 +347,7 @@ test "syscall surface dispatches typed task creation requests" {
     const created_task = test_kernel.runtime.find(response.task_id).?;
     try std.testing.expectEqualStrings("app.example.syscall", created_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("store://release/app.example.syscall/1", created_task.launchSourceIdentitySlice());
+    try std.testing.expect(!test_kernel.port.syscall_header_prevalidated);
 }
 
 test "syscall surface explains preflight request failures" {
@@ -829,6 +830,30 @@ test "syscall surface rejects unsupported native operations" {
     try std.testing.expectEqual(abi.SyscallStatus.unsupported_operation, result.status);
     try std.testing.expectEqual(abi.DenialReason.unsupported_operation, result.denial_reason);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+}
+
+test "syscall surface rejects unsupported ABI versions before trusted port entry" {
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+
+    var request = component_port.TimeQueryRequest{
+        .header = component_port.makeHeader(.time_query, 911, test_kernel.session_task_id),
+        .authority_capability_id = test_kernel.authority_capability_id,
+    };
+    request.header.version = abi.ABI_VERSION + 1;
+    var response = std.mem.zeroes(abi.TimeQueryResponse);
+    const result = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        9,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.TimeQueryResponse),
+    );
+
+    try std.testing.expectEqual(abi.SyscallStatus.unsupported_abi_version, result.status);
+    try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+    try std.testing.expect(!test_kernel.port.syscall_header_prevalidated);
 }
 
 test "syscall surface rejects invalid request and response pointer ranges" {
