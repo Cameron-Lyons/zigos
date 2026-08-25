@@ -85,6 +85,7 @@ pub const SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const SCOPED_MINT_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const CAPABILITY_PASS_QUERY_RELOOKUPS: usize = 0;
 pub const TASK_CREATE_AUDIT_INDEX_RELOOKUPS: usize = 0;
+pub const SELF_TARGET_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -211,12 +212,12 @@ pub const Kernel = struct {
         flags: endpoint.EndpointFlags,
         now_ticks: u64,
     ) Error!EndpointCreateResult {
-        _ = try self.authorizeOperation(.endpoint_create, context, now_ticks, .{
+        const authorization = try self.authorizeOperationWithSubject(.endpoint_create, context, now_ticks, .{
             .request_task_id = owner_task_id,
             .request_local_only = flags.local_only,
         });
 
-        const task = self.runtime.find(owner_task_id) orelse return error.TaskNotFound;
+        const task = try self.taskForAuthorizedRequest(authorization, owner_task_id);
         try self.validateEndpointBudget(task);
         const created = try self.endpoint_table.create(ids.task(owner_task_id), label, flags);
         const endpoint_capability = try self.applySingleAutoGrant(
@@ -348,11 +349,11 @@ pub const Kernel = struct {
         request: capability.MintRequest,
         now_ticks: u64,
     ) Error!abi.CapabilityDescriptor {
-        _ = try self.authorizeOperation(.capability_mint, context, now_ticks, .{
+        const authorization = try self.authorizeOperationWithSubject(.capability_mint, context, now_ticks, .{
             .request_task_id = request.scope.task_id,
         });
         const target_task = if (request.scope.task_id) |task_id| blk: {
-            const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+            const task = try self.taskForAuthorizedRequest(authorization, task_id);
             if (!task.owner.eql(request.holder)) return error.PermissionDenied;
             break :blk task;
         } else null;
@@ -534,11 +535,11 @@ pub const Kernel = struct {
         size_bytes: usize,
         now_ticks: u64,
     ) Error!SharedMemoryCreateResult {
-        _ = try self.authorizeOperation(.shared_memory_create, context, now_ticks, .{
+        const authorization = try self.authorizeOperationWithSubject(.shared_memory_create, context, now_ticks, .{
             .request_task_id = owner_task_id,
         });
 
-        const task = self.runtime.find(owner_task_id) orelse return error.TaskNotFound;
+        const task = try self.taskForAuthorizedRequest(authorization, owner_task_id);
         try self.validateSharedMemoryCreateBudget(task, size_bytes);
         const object = try self.shared_memory_table.create(ids.task(owner_task_id), size_bytes);
         const object_capability = try self.applySingleAutoGrant(
@@ -611,10 +612,10 @@ pub const Kernel = struct {
         task_id: u64,
         now_ticks: u64,
     ) Error!abi.ResourceDescriptor {
-        _ = try self.authorizeOperation(.resource_query, context, now_ticks, .{
+        const authorization = try self.authorizeOperationWithSubject(.resource_query, context, now_ticks, .{
             .request_task_id = task_id,
         });
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const task = try self.taskForAuthorizedRequest(authorization, task_id);
         return .{
             .task_id = task.id,
             .state = @intFromEnum(task.state),
@@ -633,10 +634,10 @@ pub const Kernel = struct {
         task_id: u64,
         now_ticks: u64,
     ) Error!abi.AccountingDescriptor {
-        _ = try self.authorizeOperation(.accounting_query, context, now_ticks, .{
+        const authorization = try self.authorizeOperationWithSubject(.accounting_query, context, now_ticks, .{
             .request_task_id = task_id,
         });
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const task = try self.taskForAuthorizedRequest(authorization, task_id);
         return .{
             .task_id = task.id,
             .audit_event_count = @intCast(task.audit_count),
@@ -760,6 +761,17 @@ pub const Kernel = struct {
         const authorization = try self.authorizeOperationWithSubject(expected_operation, context, now_ticks, input);
         const task = authorization.subject_task orelse self.runtime.find(task_id) orelse return error.TaskNotFound;
         return .{ .capability = authorization.resolved_capability.capability, .task = task };
+    }
+
+    fn taskForAuthorizedRequest(
+        self: *Kernel,
+        authorization: AuthorizationResult,
+        task_id: u64,
+    ) Error!*task_runtime.TaskRecord {
+        if (authorization.subject_task) |subject_task| {
+            if (subject_task.id == task_id) return subject_task;
+        }
+        return self.runtime.find(task_id) orelse error.TaskNotFound;
     }
 
     fn authorizeOperationWithSubject(
@@ -1118,6 +1130,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         .ipc_peer = true,
         .capability_query = true,
     } });
+    try task_runtime.grantCapabilityToTask(session_task, authority_capability.id);
 
     const workspace_storage_image = try generated_image_fixtures.workspaceStorageImage();
     const example_client_image = try generated_image_fixtures.serviceClientImage();
@@ -1191,6 +1204,16 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     try std.testing.expectEqual(@as(u16, 1), resources.endpoint_count);
     try std.testing.expect(accounting.audit_event_count >= 1);
     try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(resources.flags));
+
+    var self_resource_context = testContext(.resource_query, authority_capability.id, .{ .task = session_task.id });
+    self_resource_context.caller_task_id = session_task.id;
+    const self_resources = try kernel.resourceQuery(self_resource_context, session_task.id, 10);
+    var self_accounting_context = testContext(.accounting_query, authority_capability.id, .{ .task = session_task.id });
+    self_accounting_context.caller_task_id = session_task.id;
+    const self_accounting = try kernel.accountingQuery(self_accounting_context, session_task.id, 10);
+    try std.testing.expectEqual(session_task.id, self_resources.task_id);
+    try std.testing.expectEqual(session_task.id, self_accounting.task_id);
+
     try std.testing.expectEqual(@as(u64, 10), try kernel.timeQuery(testContext(.time_query, authority_capability.id, .none), 10));
 }
 
