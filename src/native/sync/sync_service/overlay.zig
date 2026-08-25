@@ -9,6 +9,7 @@ pub const TransportMode = state_support.TransportMode;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 pub const COMPACT_OVERLAY_SESSION_METADATA = true;
 pub const OVERWRITES_REUSED_SESSION_SLOTS = true;
+pub const GENERATIONAL_OVERLAY_SESSION_IDS = true;
 pub const OVERLAY_SESSION_SIZE_CEILING_BYTES: usize = 232;
 pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES: usize = 216;
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES: usize = 240;
@@ -157,10 +158,6 @@ pub const OverlaySessionSlot = struct {
 };
 
 pub const closed_session_key: u64 = 1;
-
-pub fn sessionSlotId(slot: *const OverlaySessionSlot) u64 {
-    return slot.session.session_id;
-}
 
 test "compact overlay session metadata preserves exact label capacities" {
     const full_label = [_]u8{'o'} ** MAX_LABEL_BYTES;
