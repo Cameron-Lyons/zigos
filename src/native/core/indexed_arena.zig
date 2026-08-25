@@ -448,6 +448,12 @@ pub fn IndexedArenaWithKeyOptions(
             return &self.slots[slot_index];
         }
 
+        /// The caller must overwrite the entire returned slot before reading it.
+        pub fn reserveForOverwrite(self: *Self, key: Key) ?*Slot {
+            const slot_index = self.reserveIndexForOverwrite(key) orelse return null;
+            return &self.slots[slot_index];
+        }
+
         pub fn reserveClean(self: *Self, key: Key) ?*Slot {
             const slot_index = self.reserveIndexClean(key) orelse return null;
             return &self.slots[slot_index];
@@ -455,6 +461,17 @@ pub fn IndexedArenaWithKeyOptions(
 
         pub fn reserveIndex(self: *Self, key: Key) ?usize {
             return self.reserveIndexWithDirty(key, true);
+        }
+
+        /// The caller must overwrite the entire reserved slot before reading it.
+        pub fn reserveIndexForOverwrite(self: *Self, key: Key) ?usize {
+            const raw_key = ids.raw(key);
+            if (raw_key == 0) return null;
+            if (self.primary_index.lookup(raw_key) != null) return null;
+
+            const slot_index = self.popFreeIndex() orelse return null;
+            self.claimSlotMetadata(key, raw_key, slot_index, true);
+            return slot_index;
         }
 
         pub fn insertIndex(self: *Self, key: Key, value: Slot) ?usize {
@@ -497,6 +514,31 @@ pub fn IndexedArenaWithKeyOptions(
 
             self.claimSlot(key, raw_key, slot_index, true);
             return slot_index;
+        }
+
+        /// Rekeys a live slot without clearing its payload. The caller must
+        /// overwrite the entire returned slot before reading it.
+        pub fn replaceAtIndexForOverwrite(self: *Self, key: Key, slot_index: usize) ?*Slot {
+            const raw_key = ids.raw(key);
+            if (raw_key == 0 or slot_index >= capacity) return null;
+            const slot = &self.slots[slot_index];
+            if (!slot.in_use) return null;
+            if (self.primary_index.lookup(raw_key)) |existing_index| {
+                if (existing_index != slot_index) return null;
+            }
+
+            const previous_key = self.slot_keys[slot_index];
+            const previous_raw_key = ids.raw(previous_key);
+            if (previous_raw_key != raw_key) {
+                if (previous_raw_key != 0) {
+                    self.primary_index.remove(previous_raw_key);
+                    self.noteDirty(previous_key);
+                }
+                self.slot_keys[slot_index] = key;
+                self.primary_index.insertAbsent(raw_key, slot_index);
+            }
+            self.noteDirty(key);
+            return slot;
         }
 
         pub fn insertIndexAt(self: *Self, key: Key, slot_index: usize, value: Slot) ?usize {
@@ -1498,6 +1540,30 @@ test "indexed arena inserts complete values at explicit free indexes" {
     }).?;
     try std.testing.expectEqual(inserted_index, reused_index);
     try std.testing.expectEqualStrings("reused", arena.get(42).?.record.label);
+}
+
+test "indexed arena supports explicit whole-slot overwrite and rekey" {
+    const Arena = IndexedArena(TestSlot, 2, 4, testSlotId);
+    var arena = Arena.init();
+
+    const first = arena.reserveForOverwrite(41).?;
+    first.* = .{
+        .in_use = true,
+        .record = .{ .id = 41, .owner = 7, .label = "first" },
+    };
+    const first_index = arena.slotIndexOf(41).?;
+
+    const replacement = arena.replaceAtIndexForOverwrite(42, first_index).?;
+    replacement.* = .{
+        .in_use = true,
+        .record = .{ .id = 42, .owner = 8, .label = "replacement" },
+    };
+
+    try std.testing.expectEqual(@as(usize, 1), arena.countInUse());
+    try std.testing.expect(arena.get(41) == null);
+    try std.testing.expectEqual(first_index, arena.slotIndexOf(42).?);
+    try std.testing.expectEqualStrings("replacement", arena.get(42).?.record.label);
+    try std.testing.expectEqual(@as(?*TestSlot, null), arena.reserveForOverwrite(42));
 }
 
 test "indexed arena can reset membership while retaining unreachable payloads" {

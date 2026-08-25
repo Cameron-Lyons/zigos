@@ -36,6 +36,7 @@ pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_OVERLAY_SESSIONS = overlay_model.MAX_OVERLAY_SESSIONS;
 pub const COMPACT_OVERLAY_SESSION_METADATA = overlay_model.COMPACT_OVERLAY_SESSION_METADATA;
+pub const OVERWRITES_REUSED_SESSION_SLOTS = overlay_model.OVERWRITES_REUSED_SESSION_SLOTS;
 pub const OVERLAY_SESSION_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SIZE_CEILING_BYTES;
 pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES;
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
@@ -124,6 +125,14 @@ fn transportFrameSlotIdLessThan(
 fn sourceFrameOutsideReplayWindow(source_frame_id: u64, high_water: u64) bool {
     if (high_water < state_support.TRANSPORT_REPLAY_WINDOW) return false;
     return source_frame_id <= high_water - state_support.TRANSPORT_REPLAY_WINDOW;
+}
+
+fn copyOverlaySessionLabel(destination: *[MAX_LABEL_BYTES]u8, value: []const u8) u8 {
+    if (value.len > destination.len) {
+        native_util.impossibleByInvariant("validated overlay labels fit session storage");
+    }
+    @memcpy(destination[0..value.len], value);
+    return @intCast(value.len);
 }
 
 const sync_port = @import("port.zig");
@@ -599,45 +608,49 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 return error.RemoteAccessDisabled;
             }
 
-            var session = OverlaySession{
-                .session_id = self.nextOverlaySessionId(),
-                .overlay_id = overlay.id,
-                .workspace_id = workspace_id,
-                .source_device = from_device,
-                .target_device = to_device,
-                .usage = usage,
-                .transport = transport,
-                .state = .establishing,
-                .encrypted = true,
-                .relay_encrypted = transport == .relay_assisted,
-                .remote_access = false,
-                .open_tick = tick,
-                .last_activity_tick = tick,
-            };
-            session.service_identity_len = @intCast(native_util.copyTextExact(&session.service_identity, overlay.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong);
+            var remote_access = false;
+            var private_service: []const u8 = "";
 
             switch (usage) {
                 .sync_replication => {},
                 .remote_access => {
                     if (!overlay.remote_access_enabled) return error.RemoteAccessDisabled;
-                    session.remote_access = true;
+                    remote_access = true;
                 },
                 .private_service => {
                     const label = private_service_label orelse return error.PrivateServiceNotPublished;
                     if (!overlay.hasPrivateService(label)) return error.PrivateServiceNotPublished;
-                    session.private_service_len = @intCast(native_util.copyTextExact(&session.private_service, label) catch return error.ServiceIdentityTooLong);
-                    session.remote_access = overlay.remote_access_enabled and transport == .relay_assisted;
+                    private_service = label;
+                    remote_access = overlay.remote_access_enabled and transport == .relay_assisted;
                 },
             }
 
-            if (transport == .relay_assisted) {
-                session.relay_domain_len = @intCast(native_util.copyTextExact(&session.relay_domain, policy.relayDomainSlice()) catch return error.NetworkTargetTooLong);
-                session.remote_access = true;
-            }
+            const relay_domain = if (transport == .relay_assisted) policy.relayDomainSlice() else "";
+            if (transport == .relay_assisted) remote_access = true;
 
-            const slot = self.allocateOverlaySessionSlot(session.session_id) orelse return error.OverlayTableFull;
-            slot.session = session;
-            slot.session.state = .established;
+            const session_id = self.nextOverlaySessionId();
+            const slot = self.allocateOverlaySessionSlot(session_id) orelse return error.OverlayTableFull;
+            slot.* = .{
+                .in_use = true,
+                .session = .{
+                    .session_id = session_id,
+                    .overlay_id = overlay.id,
+                    .workspace_id = workspace_id,
+                    .source_device = from_device,
+                    .target_device = to_device,
+                    .usage = usage,
+                    .transport = transport,
+                    .state = .established,
+                    .encrypted = true,
+                    .relay_encrypted = transport == .relay_assisted,
+                    .remote_access = remote_access,
+                    .open_tick = tick,
+                    .last_activity_tick = tick,
+                },
+            };
+            slot.session.service_identity_len = copyOverlaySessionLabel(&slot.session.service_identity, overlay.serviceIdentitySlice());
+            slot.session.relay_domain_len = copyOverlaySessionLabel(&slot.session.relay_domain, relay_domain);
+            slot.session.private_service_len = copyOverlaySessionLabel(&slot.session.private_service, private_service);
             self.active_overlay_session_count += 1;
             return &slot.session;
         }
@@ -1200,14 +1213,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn allocateOverlaySessionSlot(self: *Self, session_id: u64) ?*OverlaySessionSlot {
-            if (self.overlay_sessions.reserve(session_id)) |slot| return slot;
+            if (self.overlay_sessions.countInUse() < MAX_SERVICE_OVERLAY_SESSIONS) {
+                return self.overlay_sessions.reserveForOverwrite(session_id);
+            }
 
             const slot_index = self.closed_overlay_sessions.head(overlay_model.closed_session_key);
             if (slot_index == indexed_arena.no_index) return null;
             if (slot_index >= MAX_SERVICE_OVERLAY_SESSIONS) native_util.impossibleByInvariant("closed overlay session index points outside slots");
             _ = self.closed_overlay_sessions.remove(overlay_model.closed_session_key, slot_index);
-            _ = self.overlay_sessions.removeIndex(slot_index);
-            return self.overlay_sessions.reserveAtIndex(session_id, slot_index);
+            return self.overlay_sessions.replaceAtIndexForOverwrite(session_id, slot_index);
         }
 
         fn nextOverlaySessionId(self: *Self) u64 {
