@@ -585,7 +585,6 @@ fn callContext(
     return .{
         .caller_task_id = header.subject_task_id,
         .presented_capability_id = presented_capability_id,
-        .operation = @as(abi.NativeOperation, @enumFromInt(header.operation)),
         .target = target,
     };
 }

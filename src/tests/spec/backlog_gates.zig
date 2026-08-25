@@ -1767,10 +1767,10 @@ fn kernelContext(
     capability_id: u64,
     target: native_kernel.KernelTarget,
 ) native_kernel.KernelCallContext {
+    _ = operation;
     return .{
         .caller_task_id = caller_task_id,
         .presented_capability_id = capability_id,
-        .operation = operation,
         .target = target,
     };
 }
