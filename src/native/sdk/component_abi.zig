@@ -83,7 +83,7 @@ pub fn validateHeader(
     actual_response_len: usize,
 ) Error!void {
     return typed_component_abi.validateMessage(
-        typed_component_abi.Interface(key),
+        typed_component_abi.interfaceId(key),
         operation_id,
         wire_header,
         actual_request_len,

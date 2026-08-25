@@ -8,6 +8,7 @@ const wire = @import("component_abi_wire.zig");
 pub const MAGIC = wire.MAGIC;
 pub const VERSION = wire.VERSION;
 pub const EXACT_INTERFACE_VERSIONS = true;
+pub const TYPED_ID_ONLY_MESSAGE_VALIDATION = true;
 
 const COMPONENT_MODEL_REQ = "REQ-COMPONENT-MODEL";
 const SCHEMA_TEST_FILE = "src/native/services/component_abi_schema.zig";
@@ -538,7 +539,7 @@ pub fn validateInterfaceId(interface_id: InterfaceId, interface: manifest.Interf
 }
 
 pub fn validateMessage(
-    interface: manifest.InterfaceDecl,
+    interface_id: InterfaceId,
     operation_id: OperationId,
     header: WireHeader,
     actual_request_len: usize,
@@ -547,12 +548,7 @@ pub fn validateMessage(
     if (header.magic != MAGIC) return error.InvalidMagic;
     if (header.abi_version != VERSION) return error.UnsupportedAbiVersion;
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
-    const iface_contract = contractFor(interface.name) orelse return error.UnknownInterface;
-    if (iface_contract.interface.version_major != interface.version_major or
-        iface_contract.interface.version_minor != interface.version_minor)
-    {
-        return error.UnsupportedInterfaceVersion;
-    }
+    const iface_contract = contractForId(interface_id);
     if (header.operation != @intFromEnum(operation_id)) return error.UnknownOperation;
     if (header.request_len != actual_request_len) return error.MalformedMessage;
     if (header.response_len != actual_response_len) return error.MalformedMessage;

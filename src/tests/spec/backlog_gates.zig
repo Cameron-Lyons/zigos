@@ -216,7 +216,7 @@ pub fn syncPrivateOverlayEndToEndGate() !void {
 }
 
 pub fn componentAbiDepthGate() !void {
-    const iface = typed_component_abi.Interface(.service_registry);
+    const interface_id = typed_component_abi.InterfaceId.service_registry;
     try std.testing.expectEqual(typed_component_abi.coverage_references.len, typed_component_abi.coverageReferenceCountForRequirement("REQ-COMPONENT-MODEL"));
     try std.testing.expectEqualStrings("zigos.object.workspace", typed_component_abi.interfaceForService(.storage_object).name);
     try std.testing.expectEqualStrings("zigos.package.install", typed_component_abi.interfaceForService(.package_install_update).name);
@@ -229,7 +229,7 @@ pub fn componentAbiDepthGate() !void {
         .subject_task_id = 77,
     };
     try typed_component_abi.validateMessage(
-        iface,
+        interface_id,
         .service_connect,
         header,
         @sizeOf(typed_component_abi.ServiceConnectionRequest),
@@ -238,7 +238,7 @@ pub fn componentAbiDepthGate() !void {
 
     header.subject_task_id = 0;
     try std.testing.expectError(error.SubjectTaskRequired, typed_component_abi.validateMessage(
-        iface,
+        interface_id,
         .service_connect,
         header,
         @sizeOf(typed_component_abi.ServiceConnectionRequest),
@@ -247,14 +247,13 @@ pub fn componentAbiDepthGate() !void {
     header.subject_task_id = 77;
     header.response_len -= 1;
     try std.testing.expectError(error.MalformedMessage, typed_component_abi.validateMessage(
-        iface,
+        interface_id,
         .service_connect,
         header,
         @sizeOf(typed_component_abi.ServiceConnectionRequest),
         @sizeOf(typed_component_abi.ServiceConnectionResponse),
     ));
 
-    const package_iface = typed_component_abi.Interface(.package_install);
     const rollback_header = typed_component_abi.WireHeader{
         .operation = @intFromEnum(typed_component_abi.OperationId.package_rollback),
         .request_len = @sizeOf(typed_component_abi.PackageRollbackRequest),
@@ -263,7 +262,7 @@ pub fn componentAbiDepthGate() !void {
         .subject_task_id = 78,
     };
     try typed_component_abi.validateMessage(
-        package_iface,
+        .package_install,
         .package_rollback,
         rollback_header,
         @sizeOf(typed_component_abi.PackageRollbackRequest),

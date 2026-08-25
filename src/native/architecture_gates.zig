@@ -170,6 +170,8 @@ pub const indexed_hot_path_tables = .{
         .stores_compact_contract_metadata = component_abi_schema.COMPACT_INTERFACE_CONTRACT_METADATA and
             @FieldType(component_abi_schema.InterfaceContract, "operation_count") == u8,
         .direct_indexes_operation_metadata = component_abi_schema.DIRECT_OPERATION_INDEX,
+        .validates_typed_messages_by_exact_interface_id = component_abi_schema.TYPED_ID_ONLY_MESSAGE_VALIDATION and
+            @typeInfo(@TypeOf(component_abi_schema.validateMessage)).@"fn".params[0].type.? == component_abi_schema.InterfaceId,
         .omits_tooling_strings_from_runtime_contracts =
             !@hasField(component_abi_schema.OperationDecl, "name") and
             !@hasField(component_abi_schema.OperationDecl, "coverage_requirement_id") and
