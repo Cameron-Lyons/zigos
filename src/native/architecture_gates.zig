@@ -403,6 +403,8 @@ pub const indexed_hot_path_tables = .{
         .tracks_task_lifecycle_generation = @hasField(task_runtime.Runtime, "task_lifecycle_generation"),
         .reuses_resolved_termination_tasks = task_runtime.TERMINATION_TASK_INDEX_RELOOKUPS == 0 and
             task_runtime.TERMINATION_TASK_SLOT_LOOKUPS == 1 and
+            task_runtime.RESOLVED_TERMINATION_SLOT_RELOOKUPS == 0 and
+            @hasDecl(task_runtime.Runtime, "terminateResolvedTaskByHandle") and
             @hasDecl(task_runtime.Runtime, "taskHandle"),
         .records_resolved_task_audits = task_runtime.RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS == 0,
         .transitions_resolved_task_states = task_runtime.RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS == 0,
