@@ -586,9 +586,8 @@ pub const TrustBoot = struct {
             if (!capabilityTargetAffectsProductionPolicy(slot.capability.target.kind)) continue;
             hashCapability(&hasher, "capability", &slot.capability);
         }
-        for (&self.service_directory.registry.bindings.slots) |*slot| {
-            if (!slot.in_use) continue;
-            const binding = &slot.binding;
+        for (&self.service_directory.registry.bindings) |*binding| {
+            if (binding.service_id == 0) continue;
             const contract = binding.typedContract();
             crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);
             crypto_hash.updateInt(&hasher, "registry-owner-task-id", binding.owner_task_id);

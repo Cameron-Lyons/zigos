@@ -354,7 +354,6 @@ pub fn mapError(err: anyerror) DispatchResult {
     };
     if (err == error.TableFull or
         err == error.TargetTableFull or
-        err == error.BindingTableFull or
         err == error.ComponentTableFull or
         err == error.CapabilityTableFull or
         err == error.TaskTableFull or

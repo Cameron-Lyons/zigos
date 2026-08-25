@@ -54,12 +54,12 @@ pub const InterfaceKey = enum(u8) {
     agent_delegation,
     accessibility_profile,
     background_activity,
-    attention_broker,
-    task_lifecycle,
     secure_pasteboard,
     object_resilience,
     sensitive_capture,
     secret_vault,
+    attention_broker,
+    task_lifecycle,
     personal_context,
 };
 
@@ -245,14 +245,18 @@ pub const interface_specs = [_]InterfaceSpec{
     iface(.agent_delegation, "zigos.agent.delegation"),
     iface(.accessibility_profile, "zigos.accessibility.profile"),
     iface(.background_activity, "zigos.background.activity"),
-    iface(.attention_broker, "zigos.attention.broker"),
-    iface(.task_lifecycle, "zigos.task.lifecycle"),
     iface(.secure_pasteboard, "zigos.secure.pasteboard"),
     iface(.object_resilience, "zigos.object.resilience"),
     iface(.sensitive_capture, "zigos.sensitive.capture"),
     iface(.secret_vault, "zigos.secret.vault"),
+    iface(.attention_broker, "zigos.attention.broker"),
+    iface(.task_lifecycle, "zigos.task.lifecycle"),
     iface(.personal_context, "zigos.personal.context"),
 };
+
+pub const INTERFACE_COUNT: usize = interface_specs.len;
+pub const DIRECT_INTERFACE_INDEX = true;
+const FIRST_INTERFACE_ID: u16 = @intFromEnum(interface_specs[0].id);
 
 const OperationSpec = struct {
     id: OperationId,
@@ -503,10 +507,16 @@ pub fn contractFor(interface_name: []const u8) ?*const InterfaceContract {
 }
 
 pub fn contractForId(interface_id: InterfaceId) ?*const InterfaceContract {
-    for (&contracts) |*iface_contract| {
-        if (iface_contract.interface_id == interface_id) return iface_contract;
-    }
-    return null;
+    const index = interfaceIndexForId(interface_id) orelse return null;
+    return &contracts[index];
+}
+
+pub fn interfaceIndexForId(interface_id: InterfaceId) ?usize {
+    const raw_id = @intFromEnum(interface_id);
+    if (raw_id < FIRST_INTERFACE_ID) return null;
+    const index: usize = @intCast(raw_id - FIRST_INTERFACE_ID);
+    if (index >= contracts.len or contracts[index].interface_id != interface_id) return null;
+    return index;
 }
 
 pub fn interfaceIdForDecl(interface: manifest.InterfaceDecl) ?InterfaceId {
@@ -633,6 +643,9 @@ fn buildContracts() [interface_specs.len]InterfaceContract {
     @setEvalBranchQuota(65536);
     var result: [interface_specs.len]InterfaceContract = undefined;
     inline for (interface_specs, 0..) |spec, index| {
+        if (@as(usize, @intFromEnum(spec.id)) != @as(usize, FIRST_INTERFACE_ID) + index) {
+            @compileError("component interface ids must remain contiguous for direct indexing");
+        }
         result[index] = buildContract(spec);
     }
     return result;
@@ -743,10 +756,12 @@ fn buildCoverageReferences() [interface_specs.len + service_binding_specs.len + 
 }
 
 test "component ABI schema emits manifest interfaces and service catalog bindings" {
+    try std.testing.expect(DIRECT_INTERFACE_INDEX);
     try std.testing.expect(COMPACT_INTERFACE_CONTRACT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(InterfaceContract, "operation_count"));
     try std.testing.expect(@sizeOf(InterfaceContract) <= INTERFACE_CONTRACT_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(interface_specs.len, manifest_interfaces.len);
+    try std.testing.expectEqual(interface_specs.len, INTERFACE_COUNT);
     try std.testing.expectEqual(service_binding_specs.len, service_catalog_bindings.len);
     try std.testing.expectEqualStrings("zigos.service.registry", interfaceDecl(.service_registry).name);
     try std.testing.expectEqualStrings("zigos.service.network.policy", interfaceForService(.network_stack).name);
@@ -756,6 +771,8 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expectEqual(InterfaceId.package_install, interfaceIdForService(.package_install_update));
     try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceForService(.storage_object)).?);
     try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceForService(.service_registry).name).?.interface_id);
+    try std.testing.expectEqual(@as(usize, 0), interfaceIndexForId(.task_runtime).?);
+    try std.testing.expectEqual(INTERFACE_COUNT - 1, interfaceIndexForId(.personal_context).?);
     try std.testing.expect(contractFor("zigos.service.network.policy").?.operation(.network_open_session) != null);
     try std.testing.expect(contractFor("zigos.index.search").?.operation(.semantic_index_query) != null);
     try std.testing.expect(contractFor("zigos.sync.replication").?.operation(.sync_workspace_replicate) != null);

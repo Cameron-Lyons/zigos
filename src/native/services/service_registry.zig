@@ -1,15 +1,15 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const typed_component_abi = @import("typed_component_abi.zig");
 
-pub const MAX_BINDINGS: usize = 32;
+pub const MAX_BINDINGS: usize = typed_component_abi.INTERFACE_COUNT;
 pub const DERIVES_STATIC_CONTRACT_METADATA = true;
 pub const COMPACT_BINDING_METADATA = true;
+pub const DIRECT_INTERFACE_BINDINGS = true;
 pub const BINDING_SIZE_CEILING_BYTES: usize = 40;
-pub const REGISTRY_SIZE_CEILING_BYTES: usize = 2_472;
+pub const REGISTRY_SIZE_CEILING_BYTES: usize = 1_248;
 
 pub const BootstrapEndpoint = struct {
     task_id: u64,
@@ -43,7 +43,6 @@ pub const Binding = struct {
 };
 
 pub const Error = error{
-    BindingTableFull,
     DuplicateInterface,
     InvalidBootstrapEndpoint,
     InvalidBindingEndpoint,
@@ -54,13 +53,6 @@ pub const Error = error{
     TypedContractMismatch,
     UnsupportedPlatformInterface,
 };
-
-const BindingSlot = struct {
-    in_use: bool = false,
-    binding: Binding = zeroBinding(),
-};
-
-const BindingArena = indexed_arena.IndexedArenaWithKey(u64, BindingSlot, MAX_BINDINGS, MAX_BINDINGS * 2, bindingSlotInterfaceIdKey);
 
 pub const Service = struct {
     bootstrap: ?BootstrapEndpoint = null,
@@ -115,7 +107,8 @@ fn validateBootstrap(bootstrap: ?BootstrapEndpoint) Error!void {
 }
 
 pub const Registry = struct {
-    bindings: BindingArena = BindingArena.init(),
+    bindings: [MAX_BINDINGS]Binding = [_]Binding{zeroBinding()} ** MAX_BINDINGS,
+    binding_count: u8 = 0,
 
     pub fn init() Registry {
         return .{};
@@ -139,16 +132,20 @@ pub const Registry = struct {
             error.UnsupportedPlatformInterface => return error.UnsupportedPlatformInterface,
             error.TypedContractMismatch => return error.TypedContractMismatch,
         };
-        if (self.find(interface_id)) |_| return error.DuplicateInterface;
+        const slot_index = typed_component_abi.interfaceIndexForId(interface_id) orelse
+            native_util.impossibleByInvariant("typed service interface has a direct registry slot");
+        const binding = &self.bindings[slot_index];
+        if (binding.service_id != 0) return error.DuplicateInterface;
 
-        const slot_index = self.bindings.reserveIndex(interfaceIdKey(interface_id)) orelse return error.BindingTableFull;
-        const slot = &self.bindings.slots[slot_index];
-        slot.binding.service_id = service_id;
-        slot.binding.owner_task_id = owner_task_id;
-        slot.binding.endpoint_id = endpoint_id;
-        slot.binding.endpoint_capability_id = endpoint_capability_id;
-        slot.binding.interface_id = interface_id;
-        slot.binding.flags = flags;
+        binding.* = .{
+            .service_id = service_id,
+            .owner_task_id = owner_task_id,
+            .endpoint_id = endpoint_id,
+            .endpoint_capability_id = endpoint_capability_id,
+            .interface_id = interface_id,
+            .flags = flags,
+        };
+        self.binding_count += 1;
     }
 
     pub fn connect(self: *const Registry, interface: manifest.InterfaceDecl) Error!abi.ServiceConnectionDescriptor {
@@ -168,26 +165,23 @@ pub const Registry = struct {
     }
 
     pub fn bindingCount(self: *const Registry) usize {
-        return self.bindings.countInUse();
+        return self.binding_count;
     }
 
     fn find(self: *const Registry, interface_id: typed_component_abi.InterfaceId) ?*const Binding {
-        const slot = self.bindings.getConst(interfaceIdKey(interface_id)) orelse return null;
-        if (slot.binding.interfaceId() != interface_id) native_util.impossibleByInvariant("service registry primary index points at the wrong binding");
-        return &slot.binding;
+        const slot_index = typed_component_abi.interfaceIndexForId(interface_id) orelse return null;
+        const binding = &self.bindings[slot_index];
+        if (binding.service_id == 0) return null;
+        if (binding.interfaceId() != interface_id) native_util.impossibleByInvariant("service registry direct slot retains the wrong interface");
+        return binding;
     }
 
     comptime {
         if (@sizeOf(@This()) > REGISTRY_SIZE_CEILING_BYTES) {
-            @compileError("typed binding arena exceeds its compact resident layout");
+            @compileError("typed binding registry exceeds its compact resident layout");
         }
     }
 };
-
-fn bindingSlotInterfaceIdKey(slot: *const BindingSlot) u64 {
-    if (slot.binding.service_id == 0) return 0;
-    return interfaceIdKey(slot.binding.interfaceId());
-}
 
 fn zeroBinding() Binding {
     return .{
@@ -200,9 +194,6 @@ fn zeroBinding() Binding {
     };
 }
 
-fn interfaceIdKey(interface_id: typed_component_abi.InterfaceId) u64 {
-    return indexed_arena.nonZeroKey(@intFromEnum(interface_id));
-}
 
 fn interfaceIdForRequest(interface: manifest.InterfaceDecl) error{ UnsupportedPlatformInterface, TypedContractMismatch }!typed_component_abi.InterfaceId {
     if (!platformInterfaceNameAllowed(interface.name) or interface.version_major == 0) return error.UnsupportedPlatformInterface;
@@ -217,6 +208,20 @@ fn platformInterfaceNameAllowed(name: []const u8) bool {
         !std.mem.startsWith(u8, name, "kernel.") and
         !std.mem.startsWith(u8, name, "sys.") and
         !std.mem.startsWith(u8, name, "vfs.");
+}
+
+test "service registry stores one direct slot per typed interface" {
+    try std.testing.expect(DIRECT_INTERFACE_BINDINGS);
+    try std.testing.expectEqual(typed_component_abi.INTERFACE_COUNT, MAX_BINDINGS);
+    try std.testing.expectEqual(REGISTRY_SIZE_CEILING_BYTES, @sizeOf(Registry));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        typed_component_abi.interfaceIndexForId(.task_runtime).?,
+    );
+    try std.testing.expectEqual(
+        MAX_BINDINGS - 1,
+        typed_component_abi.interfaceIndexForId(.personal_context).?,
+    );
 }
 
 test "service registry service requires bootstrap endpoint before discovery" {
