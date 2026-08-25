@@ -29,6 +29,7 @@ pub const max_payload_bytes = volume_layout.max_payload_bytes;
 pub const required_device_sectors = volume_layout.required_device_sectors;
 pub const max_signer_bytes = volume_layout.max_signer_bytes;
 pub const SIGNER_TEXT_POOL_BYTES: usize = 12 * 1024;
+pub const SCRUBS_ONLY_USED_SIGNER_TEXT = true;
 pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
@@ -150,9 +151,11 @@ pub const Volume = struct {
         }
     }
 
-    fn resetSignerText(self: *Volume) void {
+    // Keep the variable-length secure scrub out of replay's hot instruction path.
+    noinline fn resetSignerText(self: *Volume) void {
+        const used = @min(@as(usize, self.signer_text_len), self.signer_text_pool.len);
+        if (used != 0) @memset(self.signer_text_pool[0..used], 0);
         self.signer_text_len = 0;
-        @memset(&self.signer_text_pool, 0);
     }
 
     fn internSigner(self: *Volume, signer: []const u8) Error![]const u8 {
@@ -1970,6 +1973,19 @@ test "storage volume interns repeated signer labels within a bounded pool" {
     }
     try std.testing.expect(overflowed);
     try std.testing.expect(@as(usize, volume.signer_text_len) <= volume.signer_text_pool.len);
+}
+
+test "storage volume signer reset scrubs only interned text" {
+    var volume = Volume.init();
+    _ = try volume.internSigner("persistent-key");
+    const used: usize = volume.signer_text_len;
+    volume.signer_text_pool[used] = 0xa5;
+
+    volume.resetSignerText();
+
+    try std.testing.expectEqual(@as(u16, 0), volume.signer_text_len);
+    try std.testing.expect(std.mem.allEqual(u8, volume.signer_text_pool[0..used], 0));
+    try std.testing.expectEqual(@as(u8, 0xa5), volume.signer_text_pool[used]);
 }
 
 pub const testing = struct {
