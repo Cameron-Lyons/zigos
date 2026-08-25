@@ -1054,6 +1054,7 @@ pub const indexed_hot_path_tables = .{
         .bounds_log_io_workspace_to_one_data_region = storage_volume.IO_LOG_WORKSPACE_BYTES == storage_volume.DATA_REGION_BYTES,
         .tracks_replay_id_bounds_inline = storage_volume.TRACKS_REPLAY_ID_BOUNDS_INLINE,
         .builds_object_store_derived_indexes_during_replay = storage_volume.BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY,
+        .skips_empty_object_store_arena_reset_work = object_store.SKIPS_EMPTY_ARENA_RESET_WORK,
         .interns_replayed_signer_text = @hasField(storage_volume.Volume, "signer_text_pool") and
             !@hasField(storage_volume.Volume, "version_signers") and
             !@hasField(storage_volume.Volume, "object_signers") and

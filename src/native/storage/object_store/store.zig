@@ -32,6 +32,7 @@ const MAX_METADATA_MESSAGE_BYTES: usize = 256;
 pub const MAX_METADATA_LABEL_BYTES: usize = 48;
 pub const MAX_CONTENT_TYPE_BYTES: usize = 64;
 pub const COMPACT_OBJECT_RESULT_METADATA = true;
+pub const SKIPS_EMPTY_ARENA_RESET_WORK = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
@@ -667,36 +668,52 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn reset(self: *Self) void {
+            self.resetState(false);
+        }
+
+        pub fn initializeZeroed(self: *Self) void {
+            self.resetState(true);
+        }
+
+        fn resetState(self: *Self, initialize_indexes: bool) void {
             self.next_object_id = 1;
             self.next_version_id = 1;
             self.latest_inserted_version_id = ids.VersionId.zero;
             self.max_blob_payload_bytes = 0;
-            for (self.objects.slots[0..self.objects.next_unclaimed_index]) |*slot| {
-                if (slot.in_use) slot.* = ObjectSlot{};
-            }
-            self.objects.resetRetainingPayloads();
-            self.object_type_index.reset();
-            for (self.versions.slots[0..self.versions.next_unclaimed_index]) |*slot| {
-                if (slot.in_use) slot.* = VersionSlot{};
-            }
-            self.versions.resetRetainingPayloads();
-
-            var slot_index: usize = 0;
-            while (slot_index < self.blobs.next_unclaimed_index) : (slot_index += 1) {
-                const slot = self.blobs.slotAt(slot_index);
-                if (slot.in_use) slot.* = BlobSlot{};
-            }
-            self.blobs.resetRetainingPayloads();
-
-            slot_index = 0;
-            while (slot_index < self.chunks.next_unclaimed_index) : (slot_index += 1) {
-                const slot = self.chunks.slotAt(slot_index);
-                if (slot.in_use) {
-                    slot.chunk.releasePayload();
-                    slot.* = ChunkSlot{};
+            if (initialize_indexes or self.objects.next_unclaimed_index != 0) {
+                for (self.objects.slots[0..self.objects.next_unclaimed_index]) |*slot| {
+                    if (slot.in_use) slot.* = ObjectSlot{};
                 }
+                self.objects.resetRetainingPayloads();
+                self.object_type_index.reset();
             }
-            self.chunks.resetRetainingPayloads();
+            if (initialize_indexes or self.versions.next_unclaimed_index != 0) {
+                for (self.versions.slots[0..self.versions.next_unclaimed_index]) |*slot| {
+                    if (slot.in_use) slot.* = VersionSlot{};
+                }
+                self.versions.resetRetainingPayloads();
+            }
+
+            if (initialize_indexes or self.blobs.next_unclaimed_index != 0) {
+                var slot_index: usize = 0;
+                while (slot_index < self.blobs.next_unclaimed_index) : (slot_index += 1) {
+                    const slot = self.blobs.slotAt(slot_index);
+                    if (slot.in_use) slot.* = BlobSlot{};
+                }
+                self.blobs.resetRetainingPayloads();
+            }
+
+            if (initialize_indexes or self.chunks.next_unclaimed_index != 0) {
+                var slot_index: usize = 0;
+                while (slot_index < self.chunks.next_unclaimed_index) : (slot_index += 1) {
+                    const slot = self.chunks.slotAt(slot_index);
+                    if (slot.in_use) {
+                        slot.chunk.releasePayload();
+                        slot.* = ChunkSlot{};
+                    }
+                }
+                self.chunks.resetRetainingPayloads();
+            }
         }
 
         pub fn rebuildIndexes(self: *Self) void {
