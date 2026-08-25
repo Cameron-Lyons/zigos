@@ -13,9 +13,10 @@ pub const MAX_POLICIES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TARGET_BYTES: usize = 64;
 pub const COMPACT_POLICY_METADATA = true;
+pub const DENSE_POLICY_IDS = true;
 pub const POLICY_RECORD_SIZE_CEILING_BYTES: usize = 224;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_848;
-const POLICY_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_352;
+const POLICY_REQUEST_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
 
 comptime {
     if (MAX_LABEL_BYTES > std.math.maxInt(u8) or MAX_TARGET_BYTES > std.math.maxInt(u8)) {
@@ -214,16 +215,47 @@ const PolicySlot = struct {
     policy: PolicyRecord = zeroPolicy(),
 };
 
-fn policySlotKey(slot: *const PolicySlot) u64 {
-    return slot.policy.id;
+fn densePolicySlotIndex(policy_id: u64) ?usize {
+    if (policy_id == 0 or policy_id > MAX_POLICIES) return null;
+    return @intCast(policy_id - 1);
 }
 
-const PolicyArena = indexed_arena.IndexedArenaWithKey(u64, PolicySlot, MAX_POLICIES, POLICY_INDEX_CAPACITY, policySlotKey);
-const PolicyRequestIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_INDEX_CAPACITY);
+const DensePolicyTable = struct {
+    slots: [MAX_POLICIES]PolicySlot = [_]PolicySlot{.{}} ** MAX_POLICIES,
+
+    pub fn init() DensePolicyTable {
+        return .{};
+    }
+
+    pub fn countInUse(self: *const DensePolicyTable) usize {
+        var count: usize = 0;
+        for (self.slots) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn reserveIndex(self: *DensePolicyTable, policy_id: u64) ?usize {
+        const slot_index = densePolicySlotIndex(policy_id) orelse return null;
+        const slot = &self.slots[slot_index];
+        if (slot.in_use) return null;
+        slot.* = .{ .in_use = true };
+        return slot_index;
+    }
+
+    pub fn get(self: *DensePolicyTable, policy_id: u64) ?*PolicySlot {
+        const slot_index = densePolicySlotIndex(policy_id) orelse return null;
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.policy.id != policy_id) return null;
+        return slot;
+    }
+};
+
+const PolicyRequestIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_REQUEST_INDEX_CAPACITY);
 
 pub const Directory = struct {
     next_policy_id: u64 = 1,
-    policies: PolicyArena = PolicyArena.init(),
+    policies: DensePolicyTable = DensePolicyTable.init(),
     request_index: PolicyRequestIndex = PolicyRequestIndex.init(),
 
     pub fn init() Directory {
@@ -275,7 +307,6 @@ pub const Directory = struct {
     }
 
     pub fn rebuildIndexes(self: *Directory) void {
-        self.policies.rebuildPrimaryIndex();
         self.request_index.reset();
         for (self.policies.slots, 0..) |slot, slot_index| {
             if (!slot.in_use) continue;
@@ -373,6 +404,7 @@ pub const Directory = struct {
         if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("network policy index update points outside slots");
         const slot = &self.policies.slots[slot_index];
         if (!slot.in_use or slot.policy.id == 0) native_util.impossibleByInvariant("network policy index update requires a live policy");
+        if (densePolicySlotIndex(slot.policy.id) != slot_index) native_util.impossibleByInvariant("network policy id does not match its dense slot");
         const request_key = policyRecordRequestKey(&slot.policy);
         if (!self.request_index.append(request_key, slot_index)) {
             native_util.impossibleByInvariant("network policy request index capacity covers policy slots");
@@ -971,7 +1003,7 @@ fn paddedTarget(text: []const u8) [MAX_TARGET_BYTES]u8 {
     return buffer;
 }
 
-test "network policy indexes rebuild after persisted slots are loaded" {
+test "network policy request index rebuilds after dense persisted slots are loaded" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 12 };
     const pinned_digest = crypto_hash.digestFromByte(0xDE);
@@ -980,7 +1012,7 @@ test "network policy indexes rebuild after persisted slots are loaded" {
     directory.policies.slots[3] = .{
         .in_use = true,
         .policy = .{
-            .id = 44,
+            .id = 4,
             .owner = owner,
             .workspace_id = 91,
             .label_len = 7,
@@ -996,11 +1028,11 @@ test "network policy indexes rebuild after persisted slots are loaded" {
             .pinned_attestation_verifier_metadata_digest = metadata_digest,
         },
     };
-    directory.next_policy_id = 45;
+    directory.next_policy_id = 5;
     directory.rebuildIndexes();
 
-    const found = directory.find(44).?;
-    try std.testing.expectEqual(@as(u64, 44), found.id);
+    const found = directory.find(4).?;
+    try std.testing.expectEqual(@as(u64, 4), found.id);
     try std.testing.expectEqualStrings("overlay", found.labelSlice());
 
     const duplicate = try directory.create(.{
@@ -1013,7 +1045,31 @@ test "network policy indexes rebuild after persisted slots are loaded" {
         .pinned_root_digest = pinned_digest,
         .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
-    try std.testing.expectEqual(@as(u64, 44), duplicate.id);
+    try std.testing.expectEqual(@as(u64, 4), duplicate.id);
+}
+
+test "network policy ids address their dense slots directly" {
+    var directory = Directory.init();
+
+    for (0..MAX_POLICIES) |slot_index| {
+        const policy = try directory.create(.{
+            .owner = .{ .kind = .service, .serial = slot_index + 1 },
+            .label = "local",
+            .mode = .local_network,
+        });
+        try std.testing.expectEqual(@as(u64, slot_index + 1), policy.id);
+        try std.testing.expect(policy == &directory.policies.slots[slot_index].policy);
+        try std.testing.expect(directory.find(policy.id) == policy);
+    }
+
+    try std.testing.expect(directory.find(0) == null);
+    try std.testing.expect(directory.find(MAX_POLICIES + 1) == null);
+    try std.testing.expectError(error.PolicyTableFull, directory.create(.{
+        .owner = .{ .kind = .service, .serial = MAX_POLICIES + 1 },
+        .label = "full",
+        .mode = .local_network,
+    }));
+    try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
 }
 
 test "egress broker requires a usable network policy capability before connecting" {
