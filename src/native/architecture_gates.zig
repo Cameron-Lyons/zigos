@@ -12,6 +12,7 @@ const sdk_permissions = @import("sdk/permissions.zig");
 const sdk_simulator = @import("sdk/simulator.zig");
 const sdk_ui = @import("sdk/ui.zig");
 const service_registry = @import("services/service_registry.zig");
+const task_lifecycle_service = @import("services/task_lifecycle_service.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
 const component_abi_wire = @import("services/component_abi_wire.zig");
 const userspace_scheduler = @import("task/userspace_scheduler.zig");
@@ -424,6 +425,7 @@ pub const indexed_hot_path_tables = .{
         .reuses_scoped_mint_tasks = native_kernel.SCOPED_MINT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_authorized_capabilities_for_pass = native_kernel.CAPABILITY_PASS_QUERY_RELOOKUPS == 0,
         .records_task_creation_audits_directly = native_kernel.TASK_CREATE_AUDIT_INDEX_RELOOKUPS == 0,
+        .returns_resolved_task_lifecycle_results = task_lifecycle_service.RESULT_TASK_INDEX_RELOOKUPS == 0,
         .derives_kernel_operations_from_typed_methods = native_kernel.TYPED_METHOD_DERIVES_KERNEL_OPERATION and
             !@hasField(native_kernel.KernelCallContext, "operation") and
             @sizeOf(native_kernel.KernelCallContext) <= native_kernel.KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES,
