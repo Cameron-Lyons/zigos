@@ -423,6 +423,7 @@ pub const indexed_hot_path_tables = .{
         .reuses_owner_tasks_for_auto_grants = native_kernel.SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_scoped_mint_tasks = native_kernel.SCOPED_MINT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_authorized_capabilities_for_pass = native_kernel.CAPABILITY_PASS_QUERY_RELOOKUPS == 0,
+        .records_task_creation_audits_directly = native_kernel.TASK_CREATE_AUDIT_INDEX_RELOOKUPS == 0,
         .derives_kernel_operations_from_typed_methods = native_kernel.TYPED_METHOD_DERIVES_KERNEL_OPERATION and
             !@hasField(native_kernel.KernelCallContext, "operation") and
             @sizeOf(native_kernel.KernelCallContext) <= native_kernel.KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES,
