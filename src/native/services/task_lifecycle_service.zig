@@ -8,6 +8,7 @@ const units = @import("../core/units.zig");
 
 pub const LifecycleOperation = policy_object.LifecycleOperation;
 pub const RESULT_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const TRANSITION_TASK_INDEX_LOOKUPS: u8 = 1;
 
 pub const Error = task_runtime.Error || event_ledger.Error || error{
     InvalidLifecycleTransition,
@@ -44,7 +45,11 @@ pub const Service = struct {
         request: ControlRequest,
         ledger: ?*event_ledger.Ledger,
     ) Error!ControlResult {
-        const task = self.runtime.find(request.task_id) orelse {
+        const task_handle = self.runtime.taskHandle(request.task_id) orelse {
+            try recordLifecycle(ledger, request, false);
+            return error.TaskNotFound;
+        };
+        const task = self.runtime.findByHandle(task_handle, request.task_id) orelse {
             try recordLifecycle(ledger, request, false);
             return error.TaskNotFound;
         };
@@ -63,9 +68,9 @@ pub const Service = struct {
         }
 
         const transitioned = switch (request.operation) {
-            .suspend_task => try self.runtime.suspendTask(request.task_id, request.now_ticks),
-            .resume_task => try self.runtime.resumeTask(request.task_id, request.now_ticks),
-            .terminate_task => try self.runtime.terminateTask(request.task_id, request.now_ticks),
+            .suspend_task => self.runtime.suspendResolvedTask(task, request.now_ticks),
+            .resume_task => self.runtime.resumeResolvedTask(task, request.now_ticks),
+            .terminate_task => try self.runtime.terminateTaskByHandle(task_handle, request.task_id, request.now_ticks),
         };
         try recordLifecycle(ledger, request, transitioned);
         if (!transitioned) return error.InvalidLifecycleTransition;
