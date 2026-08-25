@@ -53,6 +53,7 @@ pub const FAULT_CONTAINMENT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
 pub const ACCELERATOR_WAIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const TASK_UNREGISTER_SLOT_RELOOKUPS: u8 = 0;
+pub const ACCELERATOR_RANK_TASK_INDEX_LOOKUPS_PER_CANDIDATE: u8 = 1;
 
 comptime {
     if (task_runtime.MAX_TASKS > std.math.maxInt(QueueSlotIndex) or
@@ -88,6 +89,11 @@ pub const AcceleratorClaimRecord = struct {
     requested_at_tick: u64,
     deadline_tick: u64,
     shared_memory_bytes: usize,
+};
+
+const TaskSchedulingRank = struct {
+    dispatch_count: u64,
+    last_dispatch_tick: u64,
 };
 
 pub const TaskDispatchStats = struct {
@@ -1242,15 +1248,13 @@ pub const Scheduler = struct {
             return candidate.deadline_tick != 0;
         }
 
-        const candidate_dispatches = self.taskDispatchCount(candidate.task_id);
-        const selected_dispatches = self.taskDispatchCount(selected.task_id);
-        if (candidate_dispatches < selected_dispatches) return true;
-        if (candidate_dispatches > selected_dispatches) return false;
+        const candidate_rank = self.taskSchedulingRank(candidate.task_id);
+        const selected_rank = self.taskSchedulingRank(selected.task_id);
+        if (candidate_rank.dispatch_count < selected_rank.dispatch_count) return true;
+        if (candidate_rank.dispatch_count > selected_rank.dispatch_count) return false;
 
-        const candidate_last_dispatch = self.taskLastDispatchTick(candidate.task_id);
-        const selected_last_dispatch = self.taskLastDispatchTick(selected.task_id);
-        if (candidate_last_dispatch < selected_last_dispatch) return true;
-        if (candidate_last_dispatch > selected_last_dispatch) return false;
+        if (candidate_rank.last_dispatch_tick < selected_rank.last_dispatch_tick) return true;
+        if (candidate_rank.last_dispatch_tick > selected_rank.last_dispatch_tick) return false;
 
         return candidate.requested_at_tick < selected.requested_at_tick;
     }
@@ -1269,12 +1273,15 @@ pub const Scheduler = struct {
         return self.acceleratorClaimPriorityBeats(candidate_index, selected_index);
     }
 
-    fn taskDispatchCount(self: *const Scheduler, task_id: u64) u64 {
-        return if (self.slots.getConst(task_id)) |slot| slot.dispatch_count else std.math.maxInt(u64);
-    }
-
-    fn taskLastDispatchTick(self: *const Scheduler, task_id: u64) u64 {
-        return if (self.slots.getConst(task_id)) |slot| slot.last_dispatch_tick else std.math.maxInt(u64);
+    fn taskSchedulingRank(self: *const Scheduler, task_id: u64) TaskSchedulingRank {
+        const slot = self.slots.getConst(task_id) orelse return .{
+            .dispatch_count = std.math.maxInt(u64),
+            .last_dispatch_tick = std.math.maxInt(u64),
+        };
+        return .{
+            .dispatch_count = slot.dispatch_count,
+            .last_dispatch_tick = slot.last_dispatch_tick,
+        };
     }
 
     fn removeAcceleratorClaimsForTask(self: *Scheduler, task_id: u64, task_slot: *Slot) void {
