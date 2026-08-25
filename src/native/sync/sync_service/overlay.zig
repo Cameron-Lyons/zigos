@@ -8,6 +8,7 @@ pub const MAX_OVERLAY_SESSIONS: usize = 8;
 pub const TransportMode = state_support.TransportMode;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 pub const COMPACT_OVERLAY_SESSION_METADATA = true;
+pub const OVERWRITES_REUSED_SESSION_SLOTS = true;
 pub const OVERLAY_SESSION_SIZE_CEILING_BYTES: usize = 232;
 pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES: usize = 216;
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES: usize = 240;

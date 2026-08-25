@@ -872,6 +872,9 @@ pub const indexed_hot_path_tables = .{
             @FieldType(sync_service.OverlayRelayFrameResult, "service_identity_len") == u8 and
             @FieldType(sync_service.OverlayRelayFrameResult, "relay_domain_len") == u8 and
             @FieldType(sync_service.OverlayRelayFrameResult, "private_service_len") == u8,
+        .overwrites_reused_overlay_session_slots = sync_service.OVERWRITES_REUSED_SESSION_SLOTS and
+            @hasDecl(@FieldType(sync_service.Service, "overlay_sessions"), "reserveForOverwrite") and
+            @hasDecl(@FieldType(sync_service.Service, "overlay_sessions"), "replaceAtIndexForOverwrite"),
         .keeps_overlay_session_state_within_ceilings = @sizeOf(sync_service.OverlaySession) <= sync_service.OVERLAY_SESSION_SIZE_CEILING_BYTES and
             @sizeOf(sync_service.OverlayRelayFrameResult) <= sync_service.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES and
             @sizeOf(sync_service.Service) <= sync_service.SERVICE_SIZE_CEILING_BYTES,

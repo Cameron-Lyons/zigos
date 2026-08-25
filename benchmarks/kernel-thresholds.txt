@@ -21,7 +21,7 @@ media_print.submit_complete 4800
 event_ledger.export_redacted 14200
 secret_store.import_handle_export 1200
 denial_explanation.render_policy_hint 120
-sync_service.overlay_session_flow 1900
+sync_service.overlay_session_flow 1000
 recovery_environment.reinstall_restore_repair 17000000
 update_health.validate_pending_activation 10000000
 driver_recovery.restart_driver 22000

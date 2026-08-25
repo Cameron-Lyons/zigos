@@ -2019,6 +2019,10 @@ test "overlay sessions cover sync remote access private service publishing and e
         30,
     );
     const first_replacement_slot_index = service.overlay_sessions.slotIndexOf(first_replacement.session_id).?;
+    try std.testing.expectEqualStrings("", first_replacement.relayDomainSlice());
+    try std.testing.expectEqualStrings("", first_replacement.privateServiceSlice());
+    try std.testing.expect(!first_replacement.relay_encrypted);
+    try std.testing.expect(!first_replacement.remote_access);
     const second_replacement = try service_port.openOverlaySession(
         service_authority,
         workspace_id,
@@ -2030,6 +2034,10 @@ test "overlay sessions cover sync remote access private service publishing and e
         31,
     );
     const second_replacement_slot_index = service.overlay_sessions.slotIndexOf(second_replacement.session_id).?;
+    try std.testing.expectEqualStrings("", second_replacement.relayDomainSlice());
+    try std.testing.expectEqualStrings("", second_replacement.privateServiceSlice());
+    try std.testing.expect(!second_replacement.relay_encrypted);
+    try std.testing.expect(!second_replacement.remote_access);
 
     try std.testing.expect(
         remote_session_slot_index == first_replacement_slot_index or
