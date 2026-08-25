@@ -83,6 +83,7 @@ pub const RESOLVED_TASK_REVOCATION_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
 pub const SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
 pub const SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const SCOPED_MINT_TASK_INDEX_RELOOKUPS: usize = 0;
+pub const CAPABILITY_PASS_QUERY_RELOOKUPS: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -471,10 +472,9 @@ pub const Kernel = struct {
         revoke_source: bool,
     ) Error!abi.CapabilityDescriptor {
         const capability_id = context.presented_capability_id;
-        _ = try self.authorizeOperation(.capability_pass, context, now_ticks, .{});
+        const original = (try self.authorizeOperation(.capability_pass, context, now_ticks, .{})).*;
         const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
         try validateRuntimeGrantForTask(receiver, 1);
-        const original = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
         const passed = try self.capability_table.pass(.{
             .capability_id = capability_id,
             .new_holder = receiver.owner,
@@ -1017,6 +1017,40 @@ const TestKernelHarness = struct {
         });
     }
 };
+
+test "moving a capability removes its source task attachment" {
+    var harness = TestKernelHarness{};
+    var kernel = harness.kernel();
+    const source_task = try harness.createSessionTask();
+    const receiver_task = try harness.runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 3 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = shared_memory.PAGE_SIZE,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
+        },
+        .local_only = true,
+    });
+    const source_capability = try harness.capabilities.mintBootRoot(.{
+        .holder = source_task.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .service, .id = 42 },
+        .rights = .{ .service = .{ .capability_pass = true } },
+        .scope = .{ .task_id = source_task.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    try harness.runtime.grantCapability(source_task.id, source_capability.id);
+
+    var context = testContext(.capability_pass, source_capability.id, .none);
+    context.caller_task_id = source_task.id;
+    const passed = try kernel.capabilityPass(context, receiver_task.id, 10, true);
+
+    try std.testing.expect(harness.capabilities.query(source_capability.id) == null);
+    try std.testing.expect(!source_task.hasCapability(source_capability.id));
+    try std.testing.expect(receiver_task.hasCapability(passed.capability_id));
+}
 
 test "native kernel creates tasks endpoints and shared memory without owning service discovery" {
     var harness = TestKernelHarness{};
