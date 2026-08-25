@@ -612,9 +612,7 @@ test "example apps are complete signed typed app manifests" {
         try manifest.validate(package.bundle);
         try manifest.validateApplicationPackaging(package.bundle);
         try std.testing.expect(package.idl_source.len != 0);
-        for (package.bundle.components) |component| {
-            try std.testing.expectEqual(manifest.ComponentAbi.typed_component_v1, component.abi);
-        }
+        try std.testing.expect(!@hasField(manifest.ExecutionComponentDecl, "abi"));
     }
 }
 

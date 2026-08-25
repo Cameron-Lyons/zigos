@@ -135,7 +135,6 @@ pub const StoredComponent = struct {
     id: [MAX_COMPONENT_ID_BYTES]u8 = [_]u8{0} ** MAX_COMPONENT_ID_BYTES,
     entry_len: u8 = 0,
     entry: [MAX_COMPONENT_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_COMPONENT_ENTRY_BYTES,
-    abi: manifest.ComponentAbi = .typed_component_v1,
 
     pub fn idSlice(self: *const StoredComponent) []const u8 {
         return self.id[0..self.id_len];
@@ -594,10 +593,10 @@ pub const BundleSlot = struct {
 };
 
 test "package catalog uses capacity-sized resident metadata" {
-    try std.testing.expectEqual(@as(usize, 115), @sizeOf(StoredComponent));
+    try std.testing.expectEqual(@as(usize, 114), @sizeOf(StoredComponent));
     try std.testing.expectEqual(@as(usize, 180), @sizeOf(StoredSignature));
-    try std.testing.expectEqual(@as(usize, 10_408), @sizeOf(BundleRevision));
-    try std.testing.expectEqual(@as(usize, 20_904), @sizeOf(BundleSlot));
+    try std.testing.expectEqual(@as(usize, 10_400), @sizeOf(BundleRevision));
+    try std.testing.expectEqual(@as(usize, 20_888), @sizeOf(BundleSlot));
 }
 
 test "package results use compact bounded metadata" {

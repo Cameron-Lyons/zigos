@@ -2,6 +2,7 @@ const indexed_arena = @import("core/indexed_arena.zig");
 const id_index = @import("core/id_index.zig");
 const principal = @import("core/principal.zig");
 const signing = @import("core/signing.zig");
+const manifest = @import("policy/manifest.zig");
 const sdk_idl = @import("sdk/idl.zig");
 const sdk_app_platform = @import("sdk/app_platform.zig");
 const sdk_component_abi = @import("sdk/component_abi.zig");
@@ -546,6 +547,9 @@ pub const indexed_hot_path_tables = .{
     },
     .package_service = .{
         .uses_bundle_arena = @hasDecl(package_service.BundleArena, "reserve"),
+        .uses_single_typed_component_model = !@hasField(manifest.ExecutionComponentDecl, "abi") and
+            !@hasField(package_service.StoredComponent, "abi"),
+        .reuses_revision_metadata_backing = package_service.REUSES_REVISION_METADATA_BACKING,
         .uses_revision_permission_text_pool = @hasField(package_service.BundleRevision, "permission_text"),
         .uses_compact_permission_text_refs = @sizeOf(@FieldType(package_service.StoredPermission, "resource")) == 4 and
             @sizeOf(package_service.StoredPermission) < package_service.MAX_PERMISSION_RESOURCE_BYTES,

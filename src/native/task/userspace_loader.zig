@@ -423,10 +423,10 @@ fn validateExecutableBundle(
     if (!manifest.isApplicationBundle(bundle.bundle_id) and bundle.components.len == 0) {
         return error.MissingBundleComponent;
     }
-    const declared_component = declaredInitialComponent(bundle, initial_component) orelse {
+    if (declaredInitialComponent(bundle, initial_component) == null) {
         return error.InitialComponentNotDeclared;
-    };
-    if (initial_component.substrate != substrateForComponentAbi(declared_component.abi)) {
+    }
+    if (initial_component.substrate != .typed_component_abi) {
         return error.InitialComponentAbiMismatch;
     }
     if (!has_embedded_artifact) {
@@ -446,13 +446,6 @@ fn declaredInitialComponent(
         }
     }
     return null;
-}
-
-pub fn substrateForComponentAbi(component_abi: manifest.ComponentAbi) task_runtime.ExecutionSubstrate {
-    return switch (component_abi) {
-        .typed_component_v1 => .typed_component_abi,
-        .native_sandbox => .early_elf_runner,
-    };
 }
 
 fn zeroImage() ImageRecord {
@@ -1238,7 +1231,7 @@ test "catalog rejects unsigned bundles and missing declared components for users
         },
     }));
 
-    try std.testing.expectError(error.UntypedApplicationComponent, catalog.register(.{
+    try std.testing.expectError(error.InitialComponentAbiMismatch, catalog.register(.{
         .bundle = blk: {
             var bundle = manifest.BundleManifest{
                 .bundle_id = "app.abi-mismatch",
@@ -1247,7 +1240,7 @@ test "catalog rejects unsigned bundles and missing declared components for users
                 .provided_interfaces = interfaces[0..1],
                 .consumed_interfaces = interfaces[1..2],
                 .components = &[_]manifest.ExecutionComponentDecl{
-                    .{ .id = "native-main", .entry = "app.abi-mismatch", .abi = .native_sandbox },
+                    .{ .id = "typed-main", .entry = "app.abi-mismatch" },
                 },
                 .assets = &assets,
             };
@@ -1256,7 +1249,8 @@ test "catalog rejects unsigned bundles and missing declared components for users
         },
         .component_class = .app_component,
         .initial_component = .{
-            .label = "native-main",
+            .substrate = .early_elf_runner,
+            .label = "typed-main",
             .entry = "app.abi-mismatch",
         },
     }));

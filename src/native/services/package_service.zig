@@ -45,6 +45,7 @@ pub const REMOVE_RESULT_SIZE_CEILING_BYTES = model.REMOVE_RESULT_SIZE_CEILING_BY
 pub const OFFBOARD_RESULT_SIZE_CEILING_BYTES = model.OFFBOARD_RESULT_SIZE_CEILING_BYTES;
 pub const PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES = model.PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES;
 pub const LAUNCH_PLAN_SIZE_CEILING_BYTES = model.LAUNCH_PLAN_SIZE_CEILING_BYTES;
+pub const REUSES_REVISION_METADATA_BACKING = bundle_ops.REUSES_REVISION_METADATA_BACKING;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
 pub const RemoveResult = model.RemoveResult;
@@ -679,7 +680,6 @@ fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const
         crypto_hash.updateInt(&hasher, "component-index", index);
         crypto_hash.updateBytes(&hasher, "component-id", component.idSlice());
         crypto_hash.updateBytes(&hasher, "component-entry", component.entrySlice());
-        crypto_hash.updateEnum(&hasher, "component-abi", component.abi);
     }
     crypto_hash.updateInt(&hasher, "asset-count", revision.asset_count);
     for (revision.assets[0..revision.asset_count], 0..) |asset, index| {
@@ -1374,6 +1374,48 @@ test "package revision identifiers issue the maximum once and stop before mutati
         permission_digest,
     ));
     try std.testing.expectEqualDeep(exhausted, bundle);
+}
+
+test "package revision rewrites reuse inaccessible metadata backing" {
+    var bundle = zeroBundle();
+    var source = manifest_fixtures.notesBundle();
+    try bundle_ops.installNewValidated(
+        &bundle,
+        source,
+        "store:zigos",
+        1,
+        bundle_digest.permissionDigest(source.requested_permissions),
+    );
+
+    const revision = bundle.activeRevisionMut();
+    revision.ai_metadata.model_family[revision.ai_metadata.model_family.len - 1] = 0xA5;
+    revision.supply_chain.sbom_digest[revision.supply_chain.sbom_digest.len - 1] = 0xB6;
+    revision.signature.signer[revision.signature.signer.len - 1] = 0xC7;
+
+    source.ai_metadata = .{};
+    source.supply_chain = .{};
+    source.signature = .{};
+    try bundle_ops.installNewValidated(
+        &bundle,
+        source,
+        "store:zigos",
+        1,
+        bundle_digest.permissionDigest(source.requested_permissions),
+    );
+
+    const rewritten = bundle.activeRevision();
+    try std.testing.expectEqual(@as(u8, 0), rewritten.ai_metadata.model_family_len);
+    try std.testing.expectEqual(@as(u8, 0), rewritten.supply_chain.sbom_digest_len);
+    try std.testing.expectEqual(@as(u8, 0), rewritten.signature.signer_len);
+    try std.testing.expectEqual(@as(u8, 0xA5), rewritten.ai_metadata.model_family[rewritten.ai_metadata.model_family.len - 1]);
+    try std.testing.expectEqual(@as(u8, 0xB6), rewritten.supply_chain.sbom_digest[rewritten.supply_chain.sbom_digest.len - 1]);
+    try std.testing.expectEqual(@as(u8, 0xC7), rewritten.signature.signer[rewritten.signature.signer.len - 1]);
+
+    var resolved: ResolvedManifest = undefined;
+    const logical = bundle_ops.resolveActiveManifest(&bundle, &resolved);
+    try std.testing.expectEqual(@as(usize, 0), logical.ai_metadata.model_family.len);
+    try std.testing.expectEqual(@as(usize, 0), logical.supply_chain.sbom_digest.len);
+    try std.testing.expectEqual(@as(usize, 0), logical.signature.signer.len);
 }
 
 test "package service rejects stale update metadata publisher drift and channel drift" {

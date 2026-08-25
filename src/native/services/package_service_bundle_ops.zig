@@ -5,6 +5,8 @@ const native_util = @import("../core/util.zig");
 
 const copyTextExact = native_util.copyTextExact;
 
+pub const REUSES_REVISION_METADATA_BACKING = true;
+
 pub const Error = manifest.ValidationError || error{
     InstallSourceTooLong,
     PermissionTextBudgetExceeded,
@@ -197,7 +199,6 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         resolved.components[index] = .{
             .id = stored.idSlice(),
             .entry = stored.entrySlice(),
-            .abi = stored.abi,
         };
     }
 
@@ -374,7 +375,6 @@ fn writeLaunchMetadata(revision: anytype, source: manifest.BundleManifest) Error
     for (source.components, 0..) |component, component_index| {
         revision.components[component_index].id_len = copyValidatedText(&revision.components[component_index].id, component.id);
         revision.components[component_index].entry_len = copyValidatedText(&revision.components[component_index].entry, component.entry);
-        revision.components[component_index].abi = component.abi;
     }
 
     revision.asset_count = @intCast(source.assets.len);
@@ -406,7 +406,6 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     );
     revision.permission_text_len = 0;
     for (source.requested_permissions, 0..) |permission, permission_index| {
-        revision.requested_permissions[permission_index] = .{};
         const stored = &revision.requested_permissions[permission_index];
         stored.kind = permission.kind;
         try writePermissionText(revision, &stored.resource, permission.resource);
@@ -440,7 +439,6 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
         revision.background_tasks[background_index].visibility = task.visibility;
     }
 
-    revision.ai_metadata = .{};
     revision.ai_metadata.model_family_len = copyValidatedText(&revision.ai_metadata.model_family, source.ai_metadata.model_family);
     revision.ai_metadata.model_digest_len = copyValidatedText(&revision.ai_metadata.model_digest, source.ai_metadata.model_digest);
     revision.ai_metadata.model_source_identity_len = copyValidatedText(&revision.ai_metadata.model_source_identity, source.ai_metadata.model_source_identity);
@@ -451,14 +449,12 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.ai_metadata.max_context_bytes = source.ai_metadata.max_context_bytes;
     revision.ai_metadata.audit_prompt_use = source.ai_metadata.audit_prompt_use;
 
-    revision.data_rights = .{};
     revision.data_rights.user_data_present = source.data_rights.user_data_present;
     revision.data_rights.portable_export = source.data_rights.portable_export;
     revision.data_rights.deletion_supported = source.data_rights.deletion_supported;
     revision.data_rights.deletion_receipt_required = source.data_rights.deletion_receipt_required;
     revision.data_rights.export_format_len = copyValidatedText(&revision.data_rights.export_format, source.data_rights.export_format);
 
-    revision.supply_chain = .{};
     revision.supply_chain.sbom_digest_len = copyValidatedText(&revision.supply_chain.sbom_digest, source.supply_chain.sbom_digest);
     revision.supply_chain.source_archive_digest_len = copyValidatedText(&revision.supply_chain.source_archive_digest, source.supply_chain.source_archive_digest);
     revision.supply_chain.build_recipe_digest_len = copyValidatedText(&revision.supply_chain.build_recipe_digest, source.supply_chain.build_recipe_digest);
@@ -467,7 +463,6 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.supply_chain.reproducible_build = source.supply_chain.reproducible_build;
     revision.supply_chain.trusted_builder = source.supply_chain.trusted_builder;
 
-    revision.agent_delegation = .{};
     revision.agent_delegation.enabled = source.agent_delegation.enabled;
     revision.agent_delegation.purpose_len = copyValidatedText(&revision.agent_delegation.purpose, source.agent_delegation.purpose);
     revision.agent_delegation.max_autonomous_actions = source.agent_delegation.max_autonomous_actions;
@@ -479,7 +474,6 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.agent_delegation.max_context_bytes = source.agent_delegation.max_context_bytes;
     revision.agent_delegation.kill_switch_supported = source.agent_delegation.kill_switch_supported;
 
-    revision.accessibility = .{};
     revision.accessibility.adaptive_ui = source.accessibility.adaptive_ui;
     revision.accessibility.supports_screen_reader = source.accessibility.supports_screen_reader;
     revision.accessibility.supports_keyboard_navigation = source.accessibility.supports_keyboard_navigation;
@@ -487,7 +481,6 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.accessibility.supports_high_contrast = source.accessibility.supports_high_contrast;
     revision.accessibility.profile_notes_len = copyValidatedText(&revision.accessibility.profile_notes, source.accessibility.profile_notes);
 
-    revision.object_resilience = .{};
     revision.object_resilience.backup_enabled = source.object_resilience.backup_enabled;
     revision.object_resilience.encrypted_snapshots = source.object_resilience.encrypted_snapshots;
     revision.object_resilience.recovery_key_required = source.object_resilience.recovery_key_required;
@@ -496,7 +489,6 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.object_resilience.max_restore_age_days = source.object_resilience.max_restore_age_days;
     revision.object_resilience.backup_format_len = copyValidatedText(&revision.object_resilience.backup_format, source.object_resilience.backup_format);
 
-    revision.semantic_index = .{};
     revision.semantic_index.enabled = source.semantic_index.enabled;
     revision.semantic_index.local_only = source.semantic_index.local_only;
     revision.semantic_index.encrypted_index = source.semantic_index.encrypted_index;
@@ -504,7 +496,6 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.semantic_index.max_query_bytes = source.semantic_index.max_query_bytes;
     revision.semantic_index.model_digest_len = copyValidatedText(&revision.semantic_index.model_digest, source.semantic_index.model_digest);
 
-    revision.signature = .{};
     revision.signature.format_len = copyValidatedText(&revision.signature.format, source.signature.formatSlice());
     revision.signature.signer_len = copyValidatedText(&revision.signature.signer, source.signature.signer);
     revision.signature.public_key_len = source.signature.public_key_len;

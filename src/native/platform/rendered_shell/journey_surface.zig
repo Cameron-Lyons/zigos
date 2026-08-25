@@ -252,13 +252,9 @@ pub const JourneySurface = struct {
     }
 
     fn containmentDenial(self: *JourneySurface, tick: u64) !void {
-        const untyped_components = [_]manifest.ExecutionComponentDecl{
-            .{ .id = "trip-importer", .entry = "app.trip.importer", .abi = .native_sandbox },
-        };
         var denied_bundle = self.config.install_bundle;
-        denied_bundle.bundle_id = "app.trip.importer";
-        denied_bundle.display_name = "Trip Importer";
-        denied_bundle.components = &untyped_components;
+        denied_bundle.bundle_id = "compat.trip.importer";
+        denied_bundle.display_name = "Compatibility Importer";
         denied_bundle.signature = .{};
         if (self.packages.install(self.package_authority, .{
             .bundle = denied_bundle,
@@ -267,10 +263,10 @@ pub const JourneySurface = struct {
         }, null)) |_| {
             return error.ContainmentBypassAccepted;
         } else |err| switch (err) {
-            error.UntypedApplicationComponent => {},
+            error.CompatibilityNamespaceUnsupported => {},
             else => return err,
         }
-        _ = try self.ux.containmentDenial(self.task_id, self.config.user, "untyped native component blocked");
+        _ = try self.ux.containmentDenial(self.task_id, self.config.user, "compatibility package blocked");
         self.containment_blocked = true;
         try self.recordPendingTaskFlows(tick);
     }
