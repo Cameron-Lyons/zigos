@@ -658,6 +658,8 @@ pub const indexed_hot_path_tables = .{
         .keeps_event_state_within_ceilings = @sizeOf(event_ledger.Event) <= event_ledger.EVENT_SIZE_CEILING_BYTES and
             @sizeOf(event_ledger.EventBacking) <= event_ledger.EVENT_BACKING_SIZE_CEILING_BYTES,
         .uses_event_arena = @hasField(event_ledger.EventBacking, "events"),
+        .records_events_in_place = event_ledger.RECORDS_EVENTS_IN_PLACE and
+            @hasDecl(@FieldType(event_ledger.EventBacking, "events"), "reserveIndexForOverwrite"),
         .indexes_kind = @hasField(event_ledger.EventBacking, "kind_index"),
         .indexes_subject = @hasField(event_ledger.EventBacking, "subject_index"),
         .indexes_task = @hasField(event_ledger.EventBacking, "task_index"),
