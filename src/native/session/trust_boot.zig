@@ -596,8 +596,8 @@ pub const TrustBoot = struct {
             crypto_hash.updateInt(&hasher, "registry-endpoint-capability-id", binding.endpoint_capability_id);
             crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(binding.interfaceId()));
             crypto_hash.updateBytes(&hasher, "registry-interface-name", contract.interface.name);
-            crypto_hash.updateInt(&hasher, "registry-version-major", binding.version_major);
-            crypto_hash.updateInt(&hasher, "registry-version-minor", binding.version_minor);
+            crypto_hash.updateInt(&hasher, "registry-version-major", contract.interface.version_major);
+            crypto_hash.updateInt(&hasher, "registry-version-minor", contract.interface.version_minor);
             crypto_hash.updateInt(&hasher, "registry-flags", binding.flags);
             crypto_hash.updateInt(&hasher, "registry-contract-hash", contract.contract_hash);
         }

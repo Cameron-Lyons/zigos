@@ -127,6 +127,10 @@ pub const indexed_hot_path_tables = .{
         .uses_binding_arena = @hasField(service_registry.Registry, "bindings"),
         .uses_typed_interface_ids = @hasDecl(service_registry.Binding, "interfaceId"),
         .derives_static_contract_metadata = service_registry.DERIVES_STATIC_CONTRACT_METADATA,
+        .requires_exact_interface_versions = component_abi_schema.EXACT_INTERFACE_VERSIONS,
+        .stores_compact_binding_metadata = service_registry.COMPACT_BINDING_METADATA and
+            @sizeOf(service_registry.Binding) == service_registry.BINDING_SIZE_CEILING_BYTES and
+            @sizeOf(service_registry.Registry) <= service_registry.REGISTRY_SIZE_CEILING_BYTES,
     },
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),

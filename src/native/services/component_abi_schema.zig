@@ -7,6 +7,7 @@ const wire = @import("component_abi_wire.zig");
 
 pub const MAGIC = wire.MAGIC;
 pub const VERSION = wire.VERSION;
+pub const EXACT_INTERFACE_VERSIONS = true;
 
 const COMPONENT_MODEL_REQ = "REQ-COMPONENT-MODEL";
 const SCHEMA_TEST_FILE = "src/native/services/component_abi_schema.zig";
@@ -516,22 +517,14 @@ pub fn interfaceIdForDecl(interface: manifest.InterfaceDecl) ?InterfaceId {
 pub fn validateInterface(interface: manifest.InterfaceDecl) Error!void {
     const iface_contract = contractFor(interface.name) orelse return error.UnknownInterface;
     if (iface_contract.interface.version_major != interface.version_major) return error.UnsupportedInterfaceVersion;
-    if (interface.version_minor < iface_contract.interface.version_minor) return error.UnsupportedInterfaceVersion;
+    if (iface_contract.interface.version_minor != interface.version_minor) return error.UnsupportedInterfaceVersion;
 }
 
 pub fn validateInterfaceId(interface_id: InterfaceId, interface: manifest.InterfaceDecl) Error!void {
     const iface_contract = contractForId(interface_id) orelse return error.UnknownInterface;
     if (!std.mem.eql(u8, iface_contract.interface.name, interface.name)) return error.UnknownInterface;
     if (iface_contract.interface.version_major != interface.version_major) return error.UnsupportedInterfaceVersion;
-    if (interface.version_minor < iface_contract.interface.version_minor) return error.UnsupportedInterfaceVersion;
-}
-
-pub fn validateCompatibility(provided: manifest.InterfaceDecl, requested: manifest.InterfaceDecl) Error!void {
-    if (!std.mem.eql(u8, provided.name, requested.name)) return error.UnknownInterface;
-    try validateInterface(provided);
-    try validateInterface(requested);
-    if (provided.version_major != requested.version_major) return error.UnsupportedInterfaceVersion;
-    if (provided.version_minor < requested.version_minor) return error.UnsupportedInterfaceVersion;
+    if (iface_contract.interface.version_minor != interface.version_minor) return error.UnsupportedInterfaceVersion;
 }
 
 pub fn validateMessage(
@@ -544,8 +537,14 @@ pub fn validateMessage(
     if (header.magic != MAGIC) return error.InvalidMagic;
     if (header.abi_version != VERSION) return error.UnsupportedAbiVersion;
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
+    const iface_contract = contractFor(interface.name) orelse return error.UnknownInterface;
+    if (iface_contract.interface.version_major != interface.version_major or
+        iface_contract.interface.version_minor != interface.version_minor)
+    {
+        return error.UnsupportedInterfaceVersion;
+    }
     if (header.interface_major != interface.version_major or
-        header.interface_minor > interface.version_minor)
+        header.interface_minor != interface.version_minor)
     {
         return error.UnsupportedInterfaceVersion;
     }
@@ -553,7 +552,6 @@ pub fn validateMessage(
     if (header.request_len != actual_request_len) return error.MalformedMessage;
     if (header.response_len != actual_response_len) return error.MalformedMessage;
 
-    const iface_contract = contractFor(interface.name) orelse return error.UnknownInterface;
     const operation_decl = iface_contract.operation(operation_id) orelse return error.UnknownOperation;
     if (operation_decl.request_size != actual_request_len) return error.InvalidRequestLength;
     if (operation_decl.response_size != actual_response_len) return error.InvalidResponseLength;
