@@ -379,6 +379,7 @@ pub const indexed_hot_path_tables = .{
             userspace_scheduler.ACCELERATOR_RANK_BACKING_RELOOKUPS_PER_COMPARISON == 0,
         .reuses_accelerator_claim_backing_on_insert = userspace_scheduler.ACCELERATOR_INSERT_BACKING_RELOOKUPS == 0,
         .reuses_accelerator_claim_backing_on_remove = userspace_scheduler.ACCELERATOR_REMOVE_BACKING_RELOOKUPS == 0,
+        .reuses_accelerator_claim_backing_on_enqueue = userspace_scheduler.ACCELERATOR_ENQUEUE_BACKING_RELOOKUPS == 0,
     },
     .userspace_executor = .{
         .resolves_mailbox_authorities_together = @hasDecl(userspace_executor, "resolveMailboxAuthorities"),
