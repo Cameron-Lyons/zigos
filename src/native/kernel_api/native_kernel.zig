@@ -75,6 +75,7 @@ pub const KernelCallContext = struct {
 };
 pub const TYPED_METHOD_DERIVES_KERNEL_OPERATION = true;
 pub const KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES: usize = 32;
+pub const AUTHORIZATION_TASK_INDEX_LOOKUPS_PER_CALL: usize = 1;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -685,7 +686,7 @@ pub const Kernel = struct {
     ) Error!*const capability.Capability {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
         const owned = try self.capability_table.requireUsable(capability_id, now_ticks);
-        if (!self.runtime.hasCapability(task_id, capability_id)) return error.CapabilityNotFound;
+        if (!task.hasCapability(capability_id)) return error.CapabilityNotFound;
         if (!task.owner.eql(owned.holder)) return error.PermissionDenied;
         if (owned.scope.task_id) |scoped_task_id| {
             if (scoped_task_id != task_id) return error.ScopeViolation;
@@ -727,7 +728,7 @@ pub const Kernel = struct {
         const owned = try self.capability_table.requireUsable(context.presented_capability_id, now_ticks);
 
         if (subject_task) |task| {
-            if (!self.runtime.hasCapability(context.caller_task_id, context.presented_capability_id)) return error.CapabilityNotFound;
+            if (!task.hasCapability(context.presented_capability_id)) return error.CapabilityNotFound;
             if (!task.owner.eql(owned.holder)) return error.PermissionDenied;
             if (owned.scope.task_id) |scoped_task_id| {
                 if (scoped_task_id != context.caller_task_id) return error.ScopeViolation;

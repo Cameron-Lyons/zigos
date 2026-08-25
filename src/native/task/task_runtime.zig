@@ -186,7 +186,6 @@ const bindTaskColdStates = model.bindTaskColdStates;
 const taskCold = model.taskCold;
 const taskColdConst = model.taskColdConst;
 const taskCapabilityIndex = model.taskCapabilityIndex;
-const taskHasCapability = model.taskHasCapability;
 const taskOwnerIndexKey = model.taskOwnerIndexKey;
 const validateUserspaceImage = model.validateUserspaceImage;
 const TEST_TASK_MEMORY_BYTES: usize = units.kibibytes(4);
@@ -862,7 +861,7 @@ pub const Runtime = struct {
         if (capability_id == 0) {
             native_util.impossibleByInvariant("task capability attachments never use the reserved zero id");
         }
-        if (taskHasCapability(task, capability_id)) return;
+        if (task.hasCapability(capability_id)) return;
         if (task.capability_count >= MAX_TASK_CAPABILITIES) return error.CapabilityTableFull;
         cold.capability_ids[task.capability_count] = capability_id;
         task.capability_count += 1;
@@ -872,7 +871,7 @@ pub const Runtime = struct {
 
     pub fn hasCapability(self: *const Runtime, task_id: u64, capability_id: u64) bool {
         const task = self.findConst(task_id) orelse return false;
-        return taskHasCapability(task, capability_id);
+        return task.hasCapability(capability_id);
     }
 
     pub fn attachComponent(
@@ -922,7 +921,7 @@ pub const Runtime = struct {
         var revoked_count: u16 = 0;
         for (0..self.taskSlotCapacity()) |slot_index| {
             const slot = self.taskSlotAt(slot_index);
-            if (!slot.in_use or !taskHasCapability(&slot.task, capability_id)) continue;
+            if (!slot.in_use or !slot.task.hasCapability(capability_id)) continue;
             const revoked = self.revokeCapability(slot.task.id, capability_id) catch |err|
                 native_util.impossibleByInvariantError("indexed live task accepts capability retirement", err);
             if (!revoked) {

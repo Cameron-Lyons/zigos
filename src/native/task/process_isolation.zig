@@ -96,7 +96,7 @@ pub const Broker = struct {
                 return error.CapabilityRevoked;
             },
         };
-        if (!self.runtime.hasCapability(request.caller_task_id, owned.id)) {
+        if (!caller.hasCapability(owned.id)) {
             try self.auditDenied(request, owned.id, .capability_missing);
             return error.CapabilityNotFound;
         }

@@ -522,6 +522,10 @@ pub const TaskRecord = struct {
         return taskColdConst(self).capability_ids[0..self.capability_count];
     }
 
+    pub fn hasCapability(self: *const TaskRecord, capability_id: u64) bool {
+        return taskCapabilityIndex(self, capability_id) != null;
+    }
+
     pub fn capabilityGeneration(self: *const TaskRecord) u64 {
         return taskColdConst(self).capability_generation;
     }
@@ -806,10 +810,6 @@ pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {
         if (attached_capability_id == capability_id) return capability_index;
     }
     return null;
-}
-
-pub fn taskHasCapability(task: *const TaskRecord, capability_id: u64) bool {
-    return taskCapabilityIndex(task, capability_id) != null;
 }
 
 pub fn zeroAddressSpace() AddressSpaceRecord {
