@@ -254,7 +254,12 @@ pub const indexed_hot_path_tables = .{
         .uses_direct_right_masks = capability.DIRECT_RIGHT_MASKS and @hasDecl(capability, "bitsContainRight"),
         .uses_target_generation_arena = @hasDecl(@FieldType(capability.CapabilityTable, "target_generations"), "reserveIndex"),
         .supports_direct_capability_slot_insertion = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandleAt"),
-        .uses_holder_multimap = @hasField(capability.CapabilityTable, "holder_index"),
+        .overwrites_reserved_capability_slots = capability.OVERWRITES_RESERVED_CAPABILITY_SLOTS and
+            @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandleForOverwrite") and
+            @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandleAtForOverwrite"),
+        .avoids_redundant_holder_index = capability.AVOIDS_REDUNDANT_HOLDER_INDEX and
+            !@hasField(capability.CapabilityTable, "holder_index") and
+            !@hasDecl(capability.CapabilityTable, "queryByHolder"),
         .uses_target_generation_capability_chains = capability.TARGET_GENERATION_OWNS_CAPABILITY_CHAINS and
             !@hasField(capability.CapabilityTable, "target_index"),
         .caches_recent_target_generation = capability.CACHES_RECENT_TARGET_GENERATION and

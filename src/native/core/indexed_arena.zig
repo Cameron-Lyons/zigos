@@ -847,6 +847,13 @@ pub fn GenerationalArena(
             return self.handleForIndex(slot_index);
         }
 
+        /// The caller must overwrite the entire returned slot before reading it.
+        pub fn reserveHandleForOverwrite(self: *Self) ?Handle {
+            const slot_index = self.popFreeIndex() orelse return null;
+            self.claimSlotForOverwrite(slot_index);
+            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
+        }
+
         pub fn reserveIndex(self: *Self) ?usize {
             const slot_index = self.popFreeIndex() orelse return null;
             self.claimSlot(slot_index);
@@ -856,6 +863,14 @@ pub fn GenerationalArena(
         pub fn reserveHandleAt(self: *Self, slot_index: usize) ?Handle {
             const reserved_index = self.reserveIndexAt(slot_index) orelse return null;
             return self.handleForIndex(reserved_index);
+        }
+
+        /// The caller must overwrite the entire returned slot before reading it.
+        pub fn reserveHandleAtForOverwrite(self: *Self, slot_index: usize) ?Handle {
+            if (slot_index >= capacity or self.slots[slot_index].in_use) return null;
+            if (!self.claimFreeIndex(slot_index)) return null;
+            self.claimSlotForOverwrite(slot_index);
+            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
 
         pub fn reserveIndexAt(self: *Self, slot_index: usize) ?usize {
@@ -947,6 +962,10 @@ pub fn GenerationalArena(
 
         fn claimSlot(self: *Self, slot_index: usize) void {
             self.slots[slot_index] = Slot{};
+            self.claimSlotForOverwrite(slot_index);
+        }
+
+        fn claimSlotForOverwrite(self: *Self, slot_index: usize) void {
             self.slots[slot_index].in_use = true;
             if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
             self.used_count += 1;
@@ -1719,6 +1738,34 @@ test "generational arena reuses slots and rejects stale handles" {
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
     try std.testing.expect(arena.getByHandle(second_handle) == null);
     try std.testing.expect(arena.getByHandle(replacement_handle) == null);
+}
+
+test "generational arena supports explicit whole-slot overwrite reservations" {
+    const Arena = GenerationalArena("TestGenerationalHandle", TestSlot, 1);
+    var arena = Arena.init();
+
+    const first_handle = arena.reserveHandle().?;
+    arena.getByHandle(first_handle).?.record = .{ .id = 11, .owner = 1, .label = "stale" };
+    try std.testing.expect(arena.removeHandle(first_handle));
+
+    const replacement_handle = arena.reserveHandleForOverwrite().?;
+    try std.testing.expect(!replacement_handle.eql(first_handle));
+    const replacement = arena.getByHandle(replacement_handle).?;
+    replacement.* = .{
+        .in_use = true,
+        .record = .{ .id = 12, .owner = 2, .label = "replacement" },
+    };
+    try std.testing.expectEqual(@as(u64, 12), replacement.record.id);
+    try std.testing.expectEqualStrings("replacement", replacement.record.label);
+    try std.testing.expect(arena.getByHandle(first_handle) == null);
+
+    try std.testing.expect(arena.removeHandle(replacement_handle));
+    const exact_handle = arena.reserveHandleAtForOverwrite(0).?;
+    arena.getByHandle(exact_handle).?.* = .{
+        .in_use = true,
+        .record = .{ .id = 13, .owner = 3, .label = "exact" },
+    };
+    try std.testing.expectEqual(@as(u64, 13), arena.getByHandle(exact_handle).?.record.id);
 }
 
 test "generational arena generations wrap without zero" {

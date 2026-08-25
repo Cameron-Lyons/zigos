@@ -414,11 +414,11 @@ pub fn userspaceCreateWorkspaceRoundTripProof() !void {
     try std.testing.expect(harness.storage.findWorkspace(owner, "ipc-created-notes") != null);
     try std.testing.expect(harness.storage.findWorkspace(.{ .kind = .user, .serial = 78 }, "ipc-created-notes") == null);
 
-    var service_caps: [8]capability.Capability = undefined;
-    const passed_caps = harness.capabilities.queryByHolder(harness.storage_owner, &service_caps);
     var found_passed_storage_authority = false;
-    for (passed_caps) |capability_record| {
-        if (capability_record.target.kind == .service and
+    for (storage_task.capabilityIds()) |capability_id| {
+        const capability_record = harness.capabilities.query(capability_id) orelse continue;
+        if (capability_record.holder.eql(harness.storage_owner) and
+            capability_record.target.kind == .service and
             capability_record.target.id == harness.storage_service_id and
             capability_record.scope.task_id == harness.storage_task_id and
             capability_record.rights.has(.object_write))

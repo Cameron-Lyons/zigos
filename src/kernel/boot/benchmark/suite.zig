@@ -80,8 +80,8 @@ const QualityGateCase = benchmark_cases.QualityGateCase;
 
 const ScalingCapabilityTable = capability.CapabilityTableWith(.{
     .max_capabilities = 512,
-    .capability_index_capacity = 1024,
     .max_target_generations = 128,
+    .target_generation_index_capacity = 256,
     .debug_index_checks = false,
 });
 
