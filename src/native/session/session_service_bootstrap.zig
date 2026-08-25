@@ -9,7 +9,6 @@ const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const native_util = @import("../core/util.zig");
-const principal = @import("../core/principal.zig");
 const std = @import("std");
 const service_bootstrap = @import("service_bootstrap.zig");
 const service_contract = @import("service_contracts.zig");
@@ -602,10 +601,8 @@ fn activateDrivers(
     const network_driver = attachBootstrapDriver(
         env,
         state,
-        kernel_port,
         state.services.network_service.id,
         service_bindings.bindingFor(.network_stack).task_id,
-        state.ids.network_service,
         .network_adapter,
         .none,
         "zigos.system.network-stack",
@@ -614,10 +611,8 @@ fn activateDrivers(
     const storage_driver = attachBootstrapDriver(
         env,
         state,
-        kernel_port,
         state.services.storage_service.id,
         storage_driver_task.task_id,
-        state.ids.storage_service,
         .storage_controller,
         .kernel_bootstrap_broker,
         "zigos.system.storage-driver",
@@ -638,10 +633,8 @@ fn activateDrivers(
     const graphics_driver = attachBootstrapDriver(
         env,
         state,
-        kernel_port,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
-        state.ids.compositor_service,
         .graphics_adapter,
         .none,
         "zigos.system.compositor",
@@ -650,10 +643,8 @@ fn activateDrivers(
     const usb_driver = attachBootstrapDriver(
         env,
         state,
-        kernel_port,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
-        state.ids.compositor_service,
         .usb_controller,
         .none,
         "zigos.system.compositor",
@@ -662,10 +653,8 @@ fn activateDrivers(
     const input_driver = attachBootstrapDriver(
         env,
         state,
-        kernel_port,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
-        state.ids.compositor_service,
         .input_device,
         .none,
         "zigos.system.compositor",
@@ -674,10 +663,8 @@ fn activateDrivers(
     const audio_driver = attachBootstrapDriver(
         env,
         state,
-        kernel_port,
         state.services.media_service.id,
         service_bindings.bindingFor(.media_print_helpers).task_id,
-        state.ids.media_service,
         .audio_print_io,
         .none,
         "zigos.system.media-print",
@@ -686,10 +673,8 @@ fn activateDrivers(
     const compositor_policy_driver = attachBootstrapDriver(
         env,
         state,
-        kernel_port,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
-        state.ids.compositor_service,
         .compositor_policy,
         .none,
         "zigos.system.compositor",
@@ -743,26 +728,21 @@ fn activateDrivers(
 fn attachBootstrapDriver(
     env: *const support.Environment,
     state: *const support.BootstrapState,
-    kernel_port: *component_port.KernelPort,
     service_id: u64,
     task_id: u64,
-    owner: principal.PrincipalId,
     device_class: driver_service.DeviceClass,
     bootstrap_transport: driver_service.BootstrapTransport,
     driver_bundle_id: []const u8,
     tick: u64,
 ) ?*driver_service.DriverRecord {
     return service_bootstrap.attachDriver(
-        kernel_port,
+        env.runtime,
         env.capability_table,
         env.driver_directory,
         env.supervisor,
         state.ids.policy_authority,
-        state.policy_capability.id,
-        0,
         service_id,
         task_id,
-        owner,
         device_class,
         bootstrap_transport,
         driver_bundle_id,

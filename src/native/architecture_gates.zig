@@ -1201,6 +1201,7 @@ pub const indexed_hot_path_tables = .{
     .service_bootstrap = .{
         .has_launch_service_request = @hasDecl(service_bootstrap, "LaunchServiceRequest"),
         .reuses_direct_service_tasks = service_bootstrap.DIRECT_SERVICE_AUTHORITY_TASK_INDEX_RELOOKUPS == 0,
+        .resolves_bootstrap_driver_tasks_once = service_bootstrap.BOOTSTRAP_DRIVER_TASK_INDEX_LOOKUPS == 1,
     },
     .session_service_bootstrap = .{
         .launches_contract_services = @hasDecl(session_service_bootstrap, "bootServices"),
