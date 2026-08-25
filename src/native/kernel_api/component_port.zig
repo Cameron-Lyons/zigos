@@ -13,12 +13,12 @@ const units = @import("../core/units.zig");
 pub const Error = native_kernel.Error || error{
     UnexpectedOperation,
     SubjectTaskRequired,
-    SubjectTaskMismatch,
     UnsupportedAbiVersion,
 };
 const TEST_PORT_TASK_BYTES: usize = 512;
 pub const PREVALIDATED_SYSCALL_HEADER_RECHECKS: u8 = 0;
 pub const ATTACHED_CAPABILITY_PRECHECKS_PER_SEND: u8 = 0;
+pub const SUBJECT_TASK_PRECHECKS_PER_CALL: u8 = 0;
 
 pub const TaskCreateRequest = struct {
     header: abi.RequestHeader,
@@ -234,7 +234,6 @@ pub const KernelPort = struct {
         now_ticks: u64,
     ) Error!?native_kernel.EndpointReceiveResult {
         try self.validateIncomingHeader(request.header, .endpoint_recv);
-        try validateSubjectTask(request.header, request.receiver_task_id);
         const received = try self.kernel.endpointRecv(
             callContext(request.header, request.endpoint_capability_id, .none),
             request.receiver_task_id,
@@ -327,7 +326,6 @@ pub const KernelPort = struct {
         now_ticks: u64,
     ) Error!abi.SharedMemoryDescriptor {
         try self.validateIncomingHeader(request.header, .shared_memory_map);
-        try validateSubjectTask(request.header, request.task_id);
         return self.kernel.sharedMemoryMap(
             callContext(request.header, request.shared_memory_capability_id, .none),
             request.task_id,
@@ -337,7 +335,6 @@ pub const KernelPort = struct {
 
     pub fn sharedMemoryUnmap(self: *KernelPort, request: SharedMemoryUnmapRequest, now_ticks: u64) Error!bool {
         try self.validateIncomingHeader(request.header, .shared_memory_unmap);
-        try validateSubjectTask(request.header, request.task_id);
         return self.kernel.sharedMemoryUnmap(
             callContext(request.header, request.shared_memory_capability_id, .none),
             request.task_id,
@@ -394,7 +391,6 @@ pub const KernelPort = struct {
         now_ticks: u64,
     ) Error!?abi.InputEventDescriptor {
         try self.validateIncomingHeader(request.header, .input_recv);
-        try validateSubjectTask(request.header, request.receiver_task_id);
         return self.kernel.inputRecv(
             callContext(request.header, request.input_capability_id, .{ .task = request.receiver_task_id }),
             request.receiver_task_id,
@@ -408,7 +404,6 @@ pub const KernelPort = struct {
         now_ticks: u64,
     ) Error!bool {
         try self.validateIncomingHeader(request.header, .surface_present);
-        try validateSubjectTask(request.header, request.presenter_task_id);
         return self.kernel.surfacePresent(
             callContext(request.header, request.presentation_capability_id, .{ .task = request.presenter_task_id }),
             request.presenter_task_id,
@@ -571,10 +566,6 @@ fn validateHeader(header: abi.RequestHeader, comptime expected: abi.NativeOperat
     const descriptor = operation_metadata.declarationFor(expected);
     try request_header.validateHeader(header, abi.opcode(descriptor.operation));
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
-}
-
-fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) Error!void {
-    try request_header.validateSubjectTask(header, task_id);
 }
 
 fn callContext(

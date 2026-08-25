@@ -3263,7 +3263,7 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const InputRecvResponse = ex" ++ "tern struct" },
         .{ .path = component_port_path, .source = component_port_source, .snippet = "pub fn inputRecv(" },
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "pub fn bindFocusedInputReceiver" },
-        .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeOperation(.input_recv" },
+        .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.input_recv" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "syscall surface delivers focused input only through task-scoped authority" },
     };
     for (focused_input_abi_snippets) |required| {
@@ -3318,7 +3318,7 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512" },
         .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SurfacePresentation = ex" ++ "tern struct" },
         .{ .path = component_port_path, .source = component_port_source, .snippet = "pub fn surfacePresent(" },
-        .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeOperation(.surface_present" },
+        .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.surface_present" },
         .{ .path = compositor_session_path, .source = compositor_session_source, .snippet = "pub fn presentSurface(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 4" },
