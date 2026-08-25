@@ -263,18 +263,14 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
     try std.testing.expectEqual(@as(u16, 5), abi.ABI_VERSION);
-    const storage_interface = typed_component_abi.interfaceForService(.storage_object);
-    try registry.register(55, 7, 101, 201, storage_interface, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
-    const connection = try registry.connect(storage_interface);
+    const storage_interface_id = typed_component_abi.interfaceIdForService(.storage_object);
+    try registry.register(55, 7, 101, 201, storage_interface_id, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
+    const connection = try registry.connect(storage_interface_id);
     try std.testing.expectEqual(@as(u64, 55), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
     try std.testing.expectEqual(@as(u16, @intFromEnum(typed_component_abi.interfaceIdForService(.storage_object))), connection.interface_id);
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
-    try std.testing.expectError(service_registry.Error.VersionMismatch, registry.connect(.{
-        .name = storage_interface.name,
-        .version_major = 2,
-        .version_minor = 0,
-    }));
+    try std.testing.expectError(service_registry.Error.InterfaceNotFound, registry.connect(.task_runtime));
 
     const network_rights = driver_service.allowedRightsFor(.network_adapter);
     const usb_rights = driver_service.allowedRightsFor(.usb_controller);
@@ -698,11 +694,11 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         launched.task_id,
         service_endpoint.endpoint.endpoint_id,
         service_endpoint.capability_id,
-        typed_component_abi.interfaceForService(.storage_object),
+        typed_component_abi.interfaceIdForService(.storage_object),
         kernel_descriptors.serviceBindingFlags(launched_record),
     );
 
-    const connection = try service_directory.connect(typed_component_abi.interfaceForService(.storage_object));
+    const connection = try service_directory.connect(typed_component_abi.interfaceIdForService(.storage_object));
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
 }

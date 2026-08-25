@@ -94,7 +94,7 @@ test "boot assembles core services without running explicit scenarios" {
 
     for (service_contract.ordered_service_contracts) |entry| {
         const descriptor = service_contract.contractForClass(entry.class).?;
-        const connection = try service_directory.connect(descriptor.interface);
+        const connection = try service_directory.connect(descriptor.interface_id);
         try std.testing.expectEqual(supervisor.findByClass(entry.class).?.id, connection.service_id);
     }
     const network_service_task = session_manager.testing.findTask("network-service").?;
@@ -255,7 +255,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     };
     for (service_classes) |class| {
         const descriptor = service_contract.contractForClass(class).?;
-        const connection = try service_directory.connect(descriptor.interface);
+        const connection = try service_directory.connect(descriptor.interface_id);
         try std.testing.expectEqual(supervisor.findByClass(class).?.id, connection.service_id);
     }
     const notes_task = session_manager.testing.findTask("notes").?;

@@ -130,6 +130,11 @@ pub const indexed_hot_path_tables = .{
             component_abi_schema.DIRECT_INTERFACE_INDEX and
             service_registry.MAX_BINDINGS == component_abi_schema.INTERFACE_COUNT and
             @FieldType(service_registry.Registry, "bindings") == [component_abi_schema.INTERFACE_COUNT]service_registry.Binding,
+        .uses_typed_id_only_api = service_registry.TYPED_ID_ONLY_API and
+            @typeInfo(@TypeOf(service_registry.Registry.register)).@"fn".params[5].type.? == component_abi_schema.InterfaceId and
+            @typeInfo(@TypeOf(service_registry.Registry.connect)).@"fn".params[1].type.? == component_abi_schema.InterfaceId and
+            @typeInfo(@TypeOf(service_registry.Service.register)).@"fn".params[5].type.? == component_abi_schema.InterfaceId and
+            @typeInfo(@TypeOf(service_registry.Service.connect)).@"fn".params[1].type.? == component_abi_schema.InterfaceId,
         .uses_typed_interface_ids = @hasDecl(service_registry.Binding, "interfaceId"),
         .derives_static_contract_metadata = service_registry.DERIVES_STATIC_CONTRACT_METADATA,
         .requires_exact_interface_versions = component_abi_schema.EXACT_INTERFACE_VERSIONS,
