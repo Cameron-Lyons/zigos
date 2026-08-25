@@ -71,9 +71,16 @@ pub const KernelTarget = union(enum) {
 pub const KernelCallContext = struct {
     caller_task_id: u64,
     presented_capability_id: u64,
-    operation: abi.NativeOperation,
     target: KernelTarget,
 };
+pub const TYPED_METHOD_DERIVES_KERNEL_OPERATION = true;
+pub const KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES: usize = 32;
+
+comptime {
+    if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
+        @compileError("kernel call context exceeds its compact size ceiling");
+    }
+}
 
 const AuthorizationInput = struct {
     request_task_id: ?u64 = null,
@@ -87,7 +94,6 @@ pub const Error = task_runtime.Error || capability.Error || device_broker.Error 
     PermissionDenied,
     ResourceBudgetExceeded,
     ScopeViolation,
-    UnexpectedOperation,
     UserspaceLaunchRequired,
     InvalidSurfacePresentation,
     StaleSurfacePresentation,
@@ -712,7 +718,6 @@ pub const Kernel = struct {
         input: AuthorizationInput,
     ) Error!*const capability.Capability {
         const descriptor = operation_metadata.declarationFor(expected_operation);
-        if (context.operation != descriptor.operation) return error.UnexpectedOperation;
 
         const subject_task = if (context.caller_task_id != 0)
             (self.runtime.find(context.caller_task_id) orelse return error.TaskNotFound)
@@ -900,10 +905,10 @@ fn validateContextTarget(context_target: KernelTarget, capability_target: capabi
 }
 
 fn testContext(operation: abi.NativeOperation, capability_id: u64, target: KernelTarget) KernelCallContext {
+    _ = operation;
     return .{
         .caller_task_id = 0,
         .presented_capability_id = capability_id,
-        .operation = operation,
         .target = target,
     };
 }
