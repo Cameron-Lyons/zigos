@@ -169,7 +169,14 @@ pub const indexed_hot_path_tables = .{
             !@hasField(abi.ServiceConnectionDescriptor, "flags"),
         .stores_compact_contract_metadata = component_abi_schema.COMPACT_INTERFACE_CONTRACT_METADATA and
             @FieldType(component_abi_schema.InterfaceContract, "operation_count") == u8,
-        .keeps_contracts_within_ceiling = @sizeOf(component_abi_schema.InterfaceContract) <= component_abi_schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES,
+        .direct_indexes_operation_metadata = component_abi_schema.DIRECT_OPERATION_INDEX,
+        .omits_tooling_strings_from_runtime_contracts =
+            !@hasField(component_abi_schema.OperationDecl, "name") and
+            !@hasField(component_abi_schema.OperationDecl, "coverage_requirement_id") and
+            !@hasField(component_abi_schema.InterfaceContract, "coverage_requirement_id"),
+        .keeps_contracts_within_ceiling =
+            @sizeOf(component_abi_schema.OperationDecl) == component_abi_schema.OPERATION_DECL_SIZE_CEILING_BYTES and
+            @sizeOf(component_abi_schema.InterfaceContract) == component_abi_schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES,
     },
     .sdk_component_abi = .{
         .stores_compact_binding_metadata = sdk_component_abi.COMPACT_COMPONENT_BINDING_METADATA and

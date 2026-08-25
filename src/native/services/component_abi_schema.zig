@@ -404,15 +404,15 @@ pub const service_binding_specs = [_]ServiceBindingSpec{
 
 pub const OperationDecl = struct {
     id: OperationId,
-    name: []const u8,
     request_size: u32,
     response_size: u32,
-    coverage_requirement_id: []const u8,
 };
 
 pub const MAX_OPERATIONS_PER_INTERFACE: usize = maxOperationsPerInterface();
 pub const COMPACT_INTERFACE_CONTRACT_METADATA = true;
-pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES: usize = 392;
+pub const DIRECT_OPERATION_INDEX = true;
+pub const OPERATION_DECL_SIZE_CEILING_BYTES: usize = 12;
+pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES: usize = 120;
 
 comptime {
     if (MAX_OPERATIONS_PER_INTERFACE > std.math.maxInt(u8)) {
@@ -424,18 +424,22 @@ pub const InterfaceContract = struct {
     interface_id: InterfaceId,
     interface: manifest.InterfaceDecl,
     contract_hash: u64,
-    coverage_requirement_id: []const u8,
     operation_count: u8,
     operations: [MAX_OPERATIONS_PER_INTERFACE]OperationDecl,
 
     pub fn operation(self: *const InterfaceContract, operation_id: OperationId) ?OperationDecl {
-        for (self.operations[0..@as(usize, self.operation_count)]) |decl| {
-            if (decl.id == operation_id) return decl;
-        }
-        return null;
+        const ordinal = @intFromEnum(operation_id) & 0x00FF;
+        if (ordinal == 0) return null;
+        const operation_index: usize = @intCast(ordinal - 1);
+        if (operation_index >= @as(usize, self.operation_count)) return null;
+        const decl = self.operations[operation_index];
+        return if (decl.id == operation_id) decl else null;
     }
 
     comptime {
+        if (@sizeOf(OperationDecl) > OPERATION_DECL_SIZE_CEILING_BYTES) {
+            @compileError("component ABI operation metadata exceeds its compact size ceiling");
+        }
         if (@sizeOf(@This()) > INTERFACE_CONTRACT_SIZE_CEILING_BYTES) {
             @compileError("component ABI interface contract exceeds its compact size ceiling");
         }
@@ -593,10 +597,8 @@ fn operationSpec(comptime operation_id: OperationId) OperationSpec {
 fn operationDecl(comptime spec: OperationSpec) OperationDecl {
     return .{
         .id = spec.id,
-        .name = spec.name,
         .request_size = @intCast(@sizeOf(spec.Request)),
         .response_size = @intCast(@sizeOf(spec.Response)),
-        .coverage_requirement_id = spec.coverage_requirement_id,
     };
 }
 
@@ -659,15 +661,29 @@ fn buildContract(comptime spec: InterfaceSpec) InterfaceContract {
             .version_minor = spec.version_minor,
         },
         .contract_hash = hashContract(spec),
-        .coverage_requirement_id = spec.coverage_requirement_id,
         .operation_count = 0,
         .operations = [_]OperationDecl{emptyOperation()} ** MAX_OPERATIONS_PER_INTERFACE,
     };
+    comptime var expected_ordinal: u16 = 1;
+    comptime var operation_prefix: ?u16 = null;
     inline for (operation_specs) |operation_spec| {
         _ = interfaceSpec(operation_spec.interface);
         if (operation_spec.interface == spec.key) {
+            const raw_id = @intFromEnum(operation_spec.id);
+            if ((raw_id & 0x00FF) != expected_ordinal) {
+                @compileError("component ABI operation ids must remain contiguous within each interface");
+            }
+            const prefix = raw_id >> 8;
+            if (operation_prefix) |expected_prefix| {
+                if (prefix != expected_prefix) {
+                    @compileError("component ABI operations for one interface must retain one id prefix");
+                }
+            } else {
+                operation_prefix = prefix;
+            }
             result.operations[@as(usize, result.operation_count)] = operationDecl(operation_spec);
             result.operation_count += 1;
+            expected_ordinal += 1;
         }
     }
     return result;
@@ -681,7 +697,7 @@ fn hashContract(comptime spec: InterfaceSpec) u64 {
     inline for (operation_specs) |operation_spec| {
         if (operation_spec.interface == spec.key) {
             const decl = operationDecl(operation_spec);
-            hash = native_util.fnv1a64WithSeed(hash, decl.name);
+            hash = native_util.fnv1a64WithSeed(hash, operation_spec.name);
             hash = native_util.fnv1a64WithSeed(hash, @tagName(decl.id));
             hash = native_util.fnv1a64AppendU64LittleEndian(hash, decl.request_size);
             hash = native_util.fnv1a64AppendU64LittleEndian(hash, decl.response_size);
@@ -693,10 +709,8 @@ fn hashContract(comptime spec: InterfaceSpec) u64 {
 fn emptyOperation() OperationDecl {
     return .{
         .id = operation_specs[0].id,
-        .name = "",
         .request_size = 0,
         .response_size = 0,
-        .coverage_requirement_id = "",
     };
 }
 
@@ -758,8 +772,10 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expect(DIRECT_INTERFACE_INDEX);
     try std.testing.expect(TOTAL_INTERFACE_ID_MAP);
     try std.testing.expect(COMPACT_INTERFACE_CONTRACT_METADATA);
+    try std.testing.expect(DIRECT_OPERATION_INDEX);
     try std.testing.expectEqual(u8, @FieldType(InterfaceContract, "operation_count"));
-    try std.testing.expect(@sizeOf(InterfaceContract) <= INTERFACE_CONTRACT_SIZE_CEILING_BYTES);
+    try std.testing.expectEqual(OPERATION_DECL_SIZE_CEILING_BYTES, @sizeOf(OperationDecl));
+    try std.testing.expectEqual(INTERFACE_CONTRACT_SIZE_CEILING_BYTES, @sizeOf(InterfaceContract));
     try std.testing.expectEqual(interface_specs.len, manifest_interfaces.len);
     try std.testing.expectEqual(interface_specs.len, INTERFACE_COUNT);
     try std.testing.expectEqual(service_binding_specs.len, service_catalog_bindings.len);
@@ -773,6 +789,13 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceForService(.service_registry).name).?.interface_id);
     try std.testing.expectEqual(@as(usize, 0), interfaceIndexForId(.task_runtime));
     try std.testing.expectEqual(INTERFACE_COUNT - 1, interfaceIndexForId(.personal_context));
+    const service_registry_contract = contractForId(.service_registry);
+    try std.testing.expectEqual(OperationId.service_register, service_registry_contract.operation(.service_register).?.id);
+    try std.testing.expect(service_registry_contract.operation(.network_open_session) == null);
+    try std.testing.expectEqual(
+        OperationId.identity_credential_revoke,
+        contractForId(.identity_session).operation(.identity_credential_revoke).?.id,
+    );
     try std.testing.expect(contractFor("zigos.service.network.policy").?.operation(.network_open_session) != null);
     try std.testing.expect(contractFor("zigos.index.search").?.operation(.semantic_index_query) != null);
     try std.testing.expect(contractFor("zigos.sync.replication").?.operation(.sync_workspace_replicate) != null);
