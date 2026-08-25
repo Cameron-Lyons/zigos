@@ -13,6 +13,7 @@ const units = @import("../core/units.zig");
 
 pub const MAX_PERMISSION_DECISIONS: usize = 16;
 pub const COMPACT_ACTIVATION_SUMMARY_METADATA = true;
+pub const GRANT_RECEIPT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const REVOCATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 1_160;
 const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
@@ -213,7 +214,8 @@ pub const PolicyMediator = struct {
     ) Error!PermissionDecision {
         const minted = try self.applyGrantPlanTransactional(grant_plan, minted_buffer);
         const capability_id = minted[0].id;
-        try self.runtime.audit(decision.task_id, .{
+        const task = self.runtime.find(decision.task_id) orelse return error.TaskNotFound;
+        task.appendAudit(.{
             .kind = .policy_allowed,
             .capability_id = capability_id,
             .detail = @intFromEnum(decision.request.kind),
@@ -221,7 +223,6 @@ pub const PolicyMediator = struct {
         });
         try self.recordDecision(decision.owner, decision.task_id, decision.request, true, .none, now_ticks);
         if (self.ledger) |ledger| {
-            const task = self.runtime.find(decision.task_id) orelse return error.TaskNotFound;
             var receipt_buffer: [PERMISSION_RECEIPT_BUFFER_BYTES]u8 = undefined;
             const grant_receipt = humane_permissions.renderPermissionReceiptToBuffer(&receipt_buffer, .{
                 .task_id = decision.task_id,
@@ -707,6 +708,7 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expect(std.mem.indexOf(u8, ledger.latestKind(.capability_grant).?.detailSlice(), "Permission receipt") != null);
     try std.testing.expect(std.mem.indexOf(u8, ledger.latestKind(.capability_grant).?.detailSlice(), "capability=") != null);
     try std.testing.expect(std.mem.indexOf(u8, ledger.latestKind(.capability_grant).?.detailSlice(), "revoke:") != null);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, task.latestAuditEvent().?.kind);
 
     const revoked_capability_id = summary.decisionForKind(.network_egress).?.capability_id.?;
     try std.testing.expect(try mediator.revokeGrantedCapability(task.id, revoked_capability_id, .network_egress, 20, "data route grant revoked"));

@@ -898,6 +898,7 @@ pub const indexed_hot_path_tables = .{
             @FieldType(policy_mediation.ActivationSummary, "required_denials") == u8 and
             @FieldType(policy_mediation.ActivationSummary, "decision_count") == u8,
         .keeps_summary_within_ceiling = @sizeOf(policy_mediation.ActivationSummary) <= policy_mediation.ACTIVATION_SUMMARY_SIZE_CEILING_BYTES,
+        .reuses_policy_grant_receipt_tasks = policy_mediation.GRANT_RECEIPT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_policy_revocation_tasks = policy_mediation.REVOCATION_TASK_INDEX_RELOOKUPS == 0,
     },
     .native_ux = .{
