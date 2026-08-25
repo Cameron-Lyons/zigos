@@ -56,6 +56,7 @@ pub const TASK_UNREGISTER_SLOT_RELOOKUPS: u8 = 0;
 pub const ACCELERATOR_RANK_TASK_INDEX_LOOKUPS_PER_CANDIDATE: u8 = 1;
 pub const ACCELERATOR_RANK_BACKING_RELOOKUPS_PER_COMPARISON: u8 = 0;
 pub const ACCELERATOR_INSERT_BACKING_RELOOKUPS: u8 = 0;
+pub const ACCELERATOR_REMOVE_BACKING_RELOOKUPS: u8 = 0;
 
 comptime {
     if (task_runtime.MAX_TASKS > std.math.maxInt(QueueSlotIndex) or
@@ -565,9 +566,8 @@ pub const Scheduler = struct {
         now_ticks: u64,
     ) ?AcceleratorClaimRecord {
         if (!self.physicalEngineAvailable(engine)) return null;
-        const claim_index = self.popBestAcceleratorClaimIndex(engine, now_ticks) orelse return null;
-        const backing = self.acceleratorClaimBacking() orelse
-            native_util.impossibleByInvariant("queued accelerator claim retains its backing");
+        const backing = self.acceleratorClaimBacking() orelse return null;
+        const claim_index = self.popBestAcceleratorClaimIndex(backing, engine, now_ticks) orelse return null;
         const record = backing.claims.slots[claim_index].record;
         _ = backing.claims.removeIndex(claim_index);
         if (self.slots.get(record.task_id)) |slot| {
@@ -1165,10 +1165,10 @@ pub const Scheduler = struct {
 
     fn popBestAcceleratorClaimIndex(
         self: *Scheduler,
+        backing: *AcceleratorClaimBacking,
         engine: accelerator_scheduler.Engine,
         now_ticks: u64,
     ) ?usize {
-        const backing = self.acceleratorClaimBacking() orelse return null;
         const queue_index = engineIndex(engine);
         const deadline_head = self.accelerator_deadline_heads[queue_index];
         const best = if (deadline_head != QUEUE_NO_INDEX and
@@ -1178,18 +1178,17 @@ pub const Scheduler = struct {
             self.accelerator_claim_heads[queue_index];
         if (best == QUEUE_NO_INDEX or best >= backing.claims.slots.len) return null;
 
-        self.unlinkAcceleratorClaimIndex(engine, @intCast(best));
+        self.unlinkAcceleratorClaimIndex(backing, engine, @intCast(best));
         self.accelerator_claim_counts[queue_index] -= 1;
         return @intCast(best);
     }
 
     fn unlinkAcceleratorClaimIndex(
         self: *Scheduler,
+        backing: *AcceleratorClaimBacking,
         engine: accelerator_scheduler.Engine,
         claim_index: usize,
     ) void {
-        const backing = self.acceleratorClaimBacking() orelse
-            native_util.impossibleByInvariant("linked accelerator claim retains its backing");
         const queue_index = engineIndex(engine);
         const previous = backing.claims.slots[claim_index].prev_claim_index;
         const next = backing.claims.slots[claim_index].next_claim_index;
@@ -1296,7 +1295,7 @@ pub const Scheduler = struct {
                 native_util.impossibleByInvariant("accelerator claim task index points at the wrong task");
             }
             const record = claim_slot.record;
-            self.unlinkAcceleratorClaimIndex(record.engine, current);
+            self.unlinkAcceleratorClaimIndex(backing, record.engine, current);
             self.accelerator_claim_counts[engineIndex(record.engine)] -= 1;
             if (task_slot.pending_accelerator_claim_id == record.id) {
                 task_slot.pending_accelerator_claim_id = 0;
