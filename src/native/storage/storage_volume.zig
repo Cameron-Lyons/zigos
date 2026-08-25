@@ -33,6 +33,7 @@ pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
+pub const TRACKS_REPLAY_ID_BOUNDS_INLINE = true;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
 const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 
@@ -714,6 +715,36 @@ const WorkspaceStateHashCache = struct {
     }
 };
 
+const ReplayIdBounds = struct {
+    max_object_id: u64 = 0,
+    max_version_id: u64 = 0,
+    max_workspace_id: u64 = 0,
+    max_snapshot_id: u64 = 0,
+
+    fn noteObject(self: *ReplayIdBounds, id: u64) void {
+        self.max_object_id = @max(self.max_object_id, id);
+    }
+
+    fn noteVersion(self: *ReplayIdBounds, id: u64) void {
+        self.max_version_id = @max(self.max_version_id, id);
+    }
+
+    fn noteWorkspace(self: *ReplayIdBounds, id: u64) void {
+        self.max_workspace_id = @max(self.max_workspace_id, id);
+    }
+
+    fn noteSnapshot(self: *ReplayIdBounds, id: u64) void {
+        self.max_snapshot_id = @max(self.max_snapshot_id, id);
+    }
+
+    fn fitRoot(self: ReplayIdBounds, root: RootState) bool {
+        return issuedBeforeNext(self.max_object_id, root.next_object_id) and
+            self.max_version_id <= root.last_version_id and
+            issuedBeforeNext(self.max_workspace_id, root.next_workspace_id) and
+            self.max_snapshot_id <= root.last_snapshot_id;
+    }
+};
+
 fn buildDeltaLog(
     buffer: []u8,
     root: RootState,
@@ -801,26 +832,6 @@ fn canAppendToRoot(root: RootState, store: *const object_store.Store, workspaces
     return true;
 }
 
-fn replayedIdsFitRoot(root: RootState, store: *const object_store.Store, workspaces: *const workspace.Directory) bool {
-    for (&store.objects.slots) |*slot| {
-        if (!slot.in_use) continue;
-        if (!issuedBeforeNext(slot.object.id.raw(), root.next_object_id)) return false;
-    }
-    for (&store.versions.slots) |*slot| {
-        if (!slot.in_use) continue;
-        if (slot.version.id.raw() > root.last_version_id) return false;
-    }
-    for (&workspaces.workspaces.slots) |*slot| {
-        if (!slot.in_use) continue;
-        if (!issuedBeforeNext(slot.workspace.id.raw(), root.next_workspace_id)) return false;
-    }
-    for (&workspaces.snapshots.slots) |*slot| {
-        if (!slot.in_use) continue;
-        if (slot.snapshot.id.raw() > root.last_snapshot_id) return false;
-    }
-    return true;
-}
-
 fn issuedBeforeNext(id: u64, next_id: u64) bool {
     return next_id == 0 or id < next_id;
 }
@@ -874,6 +885,7 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     if (root.log_segment_count > max_log_segments) return error.CorruptImage;
 
     var reader = CursorReader{ .buffer = log };
+    var replayed_id_bounds = ReplayIdBounds{};
     var replayed_records: u16 = 0;
     var replayed_segments: u16 = 0;
     while (reader.offset < reader.buffer.len) {
@@ -886,24 +898,24 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
         if (replayed_records > max_replay_log_records) return error.CorruptImage;
 
         switch (header.kind) {
-            .checkpoint => try deserializeState(self, store, workspaces, payload),
+            .checkpoint => try deserializeState(self, store, workspaces, payload, &replayed_id_bounds),
             .segment_boundary => {
                 if (payload.len != 0) return error.CorruptImage;
                 replayed_segments += 1;
                 if (replayed_segments > max_log_segments) return error.CorruptImage;
             },
-            .object_state => try applyObjectRecord(self, store, payload),
+            .object_state => replayed_id_bounds.noteObject(try applyObjectRecord(self, store, payload)),
             .chunk_state => try applyChunkRecord(store, payload),
             .blob_state => try applyBlobRecord(store, payload),
-            .version_state => try applyVersionRecord(self, store, payload),
-            .workspace_state => try applyWorkspaceRecord(workspaces, payload),
-            .snapshot_state => try applySnapshotRecord(self, workspaces, payload),
+            .version_state => replayed_id_bounds.noteVersion(try applyVersionRecord(self, store, payload)),
+            .workspace_state => replayed_id_bounds.noteWorkspace(try applyWorkspaceRecord(workspaces, payload)),
+            .snapshot_state => replayed_id_bounds.noteSnapshot(try applySnapshotRecord(self, workspaces, payload)),
         }
     }
     if (replayed_records == 0) return error.MissingCheckpoint;
     if (replayed_records != root.log_record_count) return error.CorruptImage;
     if (replayed_segments != root.log_segment_count) return error.CorruptImage;
-    if (!replayedIdsFitRoot(root, store, workspaces)) return error.CorruptImage;
+    if (!replayed_id_bounds.fitRoot(root)) return error.CorruptImage;
 
     store.next_object_id = root.next_object_id;
     store.next_version_id = root.next_version_id;
@@ -1067,7 +1079,7 @@ fn encodeSnapshotBody(writer: *CursorWriter, record: *const workspace.SnapshotRe
     try writer.writeU16(@intCast(record.entry_count));
 }
 
-fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!void {
+fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!u64 {
     var reader = CursorReader{ .buffer = payload };
     const object_id = ids.object(try reader.readU64());
     const slot_index = store.objects.slotIndexOf(object_id) orelse store.objects.reserveIndexClean(object_id) orelse return error.CorruptImage;
@@ -1082,9 +1094,10 @@ fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const
     };
     try readObjectUserDataTail(self, &reader, &object_record);
     store.objects.slots[slot_index].object = object_record;
+    return object_id.raw();
 }
 
-fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!void {
+fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!u64 {
     var reader = CursorReader{ .buffer = payload };
     const version_id = ids.version(try reader.readU64());
     const slot_index = store.versions.reserveIndexClean(version_id) orelse return error.CorruptImage;
@@ -1110,6 +1123,7 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     const blob = &store.blobSlotAtConst(blob_slot_index).blob;
     if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
     store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
+    return version_id.raw();
 }
 
 fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
@@ -1160,7 +1174,7 @@ fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void 
     _ = store.putChunk(address, bytes[0..payload_len]) catch return error.CorruptImage;
 }
 
-fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!void {
+fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!u64 {
     var reader = CursorReader{ .buffer = payload };
     const workspace_id = ids.workspace(try reader.readU64());
     const existing_slot = workspaces.workspaces.get(workspace_id);
@@ -1228,9 +1242,10 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     slot.workspace.staging.transaction_open = false;
     slot.workspace.staging.staged_entry_count = 0;
     slot.workspace.staging.staged_effective_entry_count = 0;
+    return workspace_id.raw();
 }
 
-fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload: []const u8) Error!void {
+fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload: []const u8) Error!u64 {
     var reader = CursorReader{ .buffer = payload };
     const snapshot_id = ids.snapshot(try reader.readU64());
     const slot_index = workspaces.snapshots.slotIndexOf(snapshot_id) orelse
@@ -1242,6 +1257,7 @@ fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload:
     try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
     workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
     workspaces.snapshots.slots[slot_index].snapshot.entry_count = try readBoundedCount(u8, &reader, workspace.MAX_WORKSPACE_ENTRIES);
+    return snapshot_id.raw();
 }
 
 fn serializeCheckpointRecord(
@@ -1308,7 +1324,13 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     return writer.offset;
 }
 
-fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, payload: []const u8) Error!void {
+fn deserializeState(
+    self: *Volume,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+    payload: []const u8,
+    replayed_id_bounds: *ReplayIdBounds,
+) Error!void {
     var reader = CursorReader{ .buffer = payload };
     var payload_magic_bytes: [payload_magic.len]u8 = undefined;
     try reader.readBytes(&payload_magic_bytes);
@@ -1338,6 +1360,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, object_count)) |_| {
         const object_id = ids.object(try reader.readU64());
+        replayed_id_bounds.noteObject(object_id.raw());
         const slot_index = store.objects.reserveIndexClean(object_id) orelse return error.CorruptImage;
         const slot = &store.objects.slots[slot_index];
         slot.object.id = object_id;
@@ -1376,6 +1399,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, version_count)) |_| {
         const version_id = ids.version(try reader.readU64());
+        replayed_id_bounds.noteVersion(version_id.raw());
         const slot_index = store.versions.reserveIndexClean(version_id) orelse return error.CorruptImage;
         store.versions.slots[slot_index].version.id = version_id;
         store.versions.slots[slot_index].version.object_id = ids.object(try reader.readU64());
@@ -1403,6 +1427,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, workspace_count_value)) |_| {
         const workspace_id = ids.workspace(try reader.readU64());
+        replayed_id_bounds.noteWorkspace(workspace_id.raw());
         const slot = workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
         slot.workspace.mutation_log.ensureBacking() catch {
             std.debug.assert(workspaces.workspaces.remove(workspace_id));
@@ -1436,6 +1461,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, snapshot_count_value)) |_| {
         const snapshot_id = ids.snapshot(try reader.readU64());
+        replayed_id_bounds.noteSnapshot(snapshot_id.raw());
         const slot_index = workspaces.snapshots.reserveIndexClean(snapshot_id) orelse return error.CorruptImage;
         workspaces.snapshots.slots[slot_index].snapshot.id = snapshot_id;
         workspaces.snapshots.slots[slot_index].snapshot.workspace_id = ids.workspace(try reader.readU64());
@@ -1834,7 +1860,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     defer allocator.free(payload);
     var writer = CursorWriter{ .buffer = payload };
     try encodeWorkspaceBody(&writer, replacement);
-    try applyWorkspaceRecord(workspaces, payload[0..writer.offset]);
+    _ = try applyWorkspaceRecord(workspaces, payload[0..writer.offset]);
 
     try std.testing.expectEqualStrings("replacement-workspace", live.labelSlice());
     try std.testing.expectEqual(@as(u32, 7), live.generation);
@@ -1848,6 +1874,48 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     try std.testing.expect(!live.staging.transaction_open);
     try std.testing.expectEqual(@as(usize, 0), live.staging.staged_entry_count);
     try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[2]);
+}
+
+test "inline replay ID bounds preserve root watermark validation" {
+    try std.testing.expect(TRACKS_REPLAY_ID_BOUNDS_INLINE);
+
+    var bounds = ReplayIdBounds{};
+    bounds.noteObject(4);
+    bounds.noteObject(8);
+    bounds.noteVersion(12);
+    bounds.noteWorkspace(3);
+    bounds.noteSnapshot(9);
+
+    try std.testing.expect(bounds.fitRoot(.{
+        .next_object_id = 9,
+        .last_version_id = 12,
+        .next_workspace_id = 4,
+        .last_snapshot_id = 9,
+    }));
+    try std.testing.expect(!bounds.fitRoot(.{
+        .next_object_id = 8,
+        .last_version_id = 12,
+        .next_workspace_id = 4,
+        .last_snapshot_id = 9,
+    }));
+    try std.testing.expect(!bounds.fitRoot(.{
+        .next_object_id = 9,
+        .last_version_id = 11,
+        .next_workspace_id = 4,
+        .last_snapshot_id = 9,
+    }));
+    try std.testing.expect(!bounds.fitRoot(.{
+        .next_object_id = 9,
+        .last_version_id = 12,
+        .next_workspace_id = 3,
+        .last_snapshot_id = 9,
+    }));
+    try std.testing.expect(!bounds.fitRoot(.{
+        .next_object_id = 9,
+        .last_version_id = 12,
+        .next_workspace_id = 4,
+        .last_snapshot_id = 8,
+    }));
 }
 
 test "storage append rejects issuance watermark rewind" {

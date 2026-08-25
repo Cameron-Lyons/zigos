@@ -1052,6 +1052,7 @@ pub const indexed_hot_path_tables = .{
         .replays_state_by_primary_index = @hasDecl(storage_volume, "loadFromImage"),
         .requires_target_nvme_attachment = @hasDecl(storage_volume.Volume, "hasProductionStorageBackend"),
         .bounds_log_io_workspace_to_one_data_region = storage_volume.IO_LOG_WORKSPACE_BYTES == storage_volume.DATA_REGION_BYTES,
+        .tracks_replay_id_bounds_inline = storage_volume.TRACKS_REPLAY_ID_BOUNDS_INLINE,
         .interns_replayed_signer_text = @hasField(storage_volume.Volume, "signer_text_pool") and
             !@hasField(storage_volume.Volume, "version_signers") and
             !@hasField(storage_volume.Volume, "object_signers") and
