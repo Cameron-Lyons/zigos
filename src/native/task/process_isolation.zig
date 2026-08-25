@@ -15,6 +15,9 @@ pub const Operation = enum(u8) {
     register_global_hook,
 };
 
+pub const TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK: u8 = 1;
+pub const AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
+
 pub const Request = struct {
     caller_task_id: u64,
     target_task_id: u64 = 0,
@@ -64,68 +67,71 @@ pub const Broker = struct {
     pub fn authorize(self: *Broker, request: Request) Error!Decision {
         const caller = self.runtime.find(request.caller_task_id) orelse return error.TaskNotFound;
         const target_task_id = try requiredTargetTaskId(request);
-        _ = self.runtime.find(target_task_id) orelse return error.TaskNotFound;
+        const target = if (target_task_id == caller.id)
+            caller
+        else
+            self.runtime.find(target_task_id) orelse return error.TaskNotFound;
 
         if (isCrossTaskOperation(request.operation)) {
             if (target_task_id == request.caller_task_id) {
-                try self.auditDenied(request, 0, .invalid_target);
+                auditDenied(caller, request, 0, .invalid_target);
                 return error.InvalidIsolationTarget;
             }
-            if (!self.runtime.processSeparated(request.caller_task_id, target_task_id)) {
-                try self.auditDenied(request, 0, .scope_violation);
+            if (!tasksAreProcessSeparated(caller, target)) {
+                auditDenied(caller, request, 0, .scope_violation);
                 return error.ScopeViolation;
             }
         }
 
         if (request.hidden) {
-            try self.auditDenied(request, 0, .policy_denied);
+            auditDenied(caller, request, 0, .policy_denied);
             return error.HiddenOperationDenied;
         }
         if (request.continuous and !operationSupportsContinuous(request.operation)) {
-            try self.auditDenied(request, 0, .policy_denied);
+            auditDenied(caller, request, 0, .policy_denied);
             return error.ContinuousOperationDenied;
         }
 
         const owned = self.capability_table.requireUsable(request.capability_id, request.now_ticks) catch |err| switch (err) {
             error.CapabilityNotFound => {
-                try self.auditDenied(request, 0, .capability_missing);
+                auditDenied(caller, request, 0, .capability_missing);
                 return error.CapabilityNotFound;
             },
             error.CapabilityRevoked => {
-                try self.auditDenied(request, request.capability_id, .capability_revoked);
+                auditDenied(caller, request, request.capability_id, .capability_revoked);
                 return error.CapabilityRevoked;
             },
         };
         if (!caller.hasCapability(owned.id)) {
-            try self.auditDenied(request, owned.id, .capability_missing);
+            auditDenied(caller, request, owned.id, .capability_missing);
             return error.CapabilityNotFound;
         }
         if (!caller.owner.eql(owned.holder)) {
-            try self.auditDenied(request, owned.id, .policy_denied);
+            auditDenied(caller, request, owned.id, .policy_denied);
             return error.PermissionDenied;
         }
         if (owned.target.kind != .task or owned.target.id != target_task_id) {
-            try self.auditDenied(request, owned.id, .invalid_target);
+            auditDenied(caller, request, owned.id, .invalid_target);
             return error.InvalidIsolationTarget;
         }
         if (!owned.rights.has(.process_control)) {
-            try self.auditDenied(request, owned.id, .policy_denied);
+            auditDenied(caller, request, owned.id, .policy_denied);
             return error.PermissionDenied;
         }
         if (owned.scope.task_id == null or owned.scope.task_id.? != request.caller_task_id) {
-            try self.auditDenied(request, owned.id, .scope_violation);
+            auditDenied(caller, request, owned.id, .scope_violation);
             return error.ScopeViolation;
         }
         if (!owned.audit.user_visible_entitlement or !request.user_visible) {
-            try self.auditDenied(request, owned.id, .policy_denied);
+            auditDenied(caller, request, owned.id, .policy_denied);
             return error.VisibleEntitlementRequired;
         }
         if (!privacyIndicatorActive(request)) {
-            try self.auditDenied(request, owned.id, .policy_denied);
+            auditDenied(caller, request, owned.id, .policy_denied);
             return error.ActivePrivacyIndicatorRequired;
         }
 
-        try self.runtime.audit(request.caller_task_id, .{
+        caller.appendAudit(.{
             .kind = .policy_allowed,
             .capability_id = owned.id,
             .detail = allowedAuditDetail(request),
@@ -141,15 +147,22 @@ pub const Broker = struct {
         };
     }
 
-    fn auditDenied(self: *Broker, request: Request, capability_id: u64, reason: abi.DenialReason) task_runtime.Error!void {
-        try self.runtime.audit(request.caller_task_id, .{
-            .kind = .policy_denied,
-            .capability_id = capability_id,
-            .detail = (@as(u32, @intFromEnum(reason)) << 8) | @as(u32, @intFromEnum(request.operation)),
-            .tick = request.now_ticks,
-        });
-    }
 };
+
+fn auditDenied(caller: *task_runtime.TaskRecord, request: Request, capability_id: u64, reason: abi.DenialReason) void {
+    caller.appendAudit(.{
+        .kind = .policy_denied,
+        .capability_id = capability_id,
+        .detail = (@as(u32, @intFromEnum(reason)) << 8) | @as(u32, @intFromEnum(request.operation)),
+        .tick = request.now_ticks,
+    });
+}
+
+fn tasksAreProcessSeparated(left: *const task_runtime.TaskRecord, right: *const task_runtime.TaskRecord) bool {
+    return left.process_id != right.process_id and
+        left.address_space_id != right.address_space_id and
+        left.namespace_id != right.namespace_id;
+}
 
 fn privacyIndicatorActive(request: Request) bool {
     return request.privacy_indicator_id != 0 and request.privacy_indicator_expires_at_ticks > request.now_ticks;
