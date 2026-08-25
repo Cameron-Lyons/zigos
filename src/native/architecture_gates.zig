@@ -893,6 +893,8 @@ pub const indexed_hot_path_tables = .{
             @FieldType(permission_review_service.RenderedReviewSurface, "decision_count") == u8,
         .keeps_rendered_surface_within_ceiling = @sizeOf(permission_review_service.RenderedReviewSurface) <=
             permission_review_service.RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES,
+        .reuses_review_audit_tasks = permission_review_service.RENDERED_BEGIN_AUDIT_TASK_INDEX_RELOOKUPS == 0 and
+            permission_review_service.BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS == 0,
     },
     .policy_activation = .{
         .stores_compact_summary_metadata = policy_mediation.COMPACT_ACTIVATION_SUMMARY_METADATA and
