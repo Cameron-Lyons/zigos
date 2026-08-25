@@ -98,7 +98,7 @@ const AuthorizationInput = struct {
 };
 
 const AuthorizationResult = struct {
-    capability: *const capability.Capability,
+    resolved_capability: capability.ResolvedCapability,
     subject_task: ?*task_runtime.TaskRecord,
 };
 
@@ -310,8 +310,9 @@ pub const Kernel = struct {
         if (message.attached_capability_id) |attached_capability_id| {
             const receiver = authorization.task;
             try validateRuntimeGrantForTask(receiver, 1);
-            const original = self.capability_table.query(attached_capability_id.raw()) orelse return error.CapabilityNotFound;
-            const passed = try self.capability_table.pass(.{
+            const resolved_original = try self.capability_table.resolveUsable(attached_capability_id.raw(), now_ticks);
+            const original = resolved_original.capability.*;
+            const passed = try self.capability_table.passResolved(.{
                 .capability_id = attached_capability_id.raw(),
                 .new_holder = receiver.owner,
                 .now_ticks = now_ticks,
@@ -323,7 +324,7 @@ pub const Kernel = struct {
                     .source_task_id = message.sender_task_id.raw(),
                     .broker_service_id = original.audit.broker_service_id,
                 },
-            });
+            }, resolved_original);
             errdefer self.capability_table.rollbackGrant(&.{passed});
             try task_runtime.grantCapabilityToTask(receiver, passed.id);
 
@@ -447,7 +448,7 @@ pub const Kernel = struct {
     }
 
     pub fn capabilityDerive(self: *Kernel, context: KernelCallContext, request: capability.DeriveRequest) Error!abi.CapabilityDescriptor {
-        _ = try self.authorizeOperation(.capability_derive, context, request.lease.issued_at_ticks, .{
+        const authorization = try self.authorizeOperationWithSubject(.capability_derive, context, request.lease.issued_at_ticks, .{
             .request_task_id = request.scope.task_id,
         });
         const target_task = if (request.scope.task_id) |task_id| blk: {
@@ -456,7 +457,7 @@ pub const Kernel = struct {
             try validateRuntimeGrantForTask(task, 1);
             break :blk task;
         } else null;
-        const derived = try self.capability_table.derive(request);
+        const derived = try self.capability_table.deriveResolved(request, authorization.resolved_capability);
         errdefer self.capability_table.rollbackGrant(&.{derived});
         if (target_task) |task| {
             try task_runtime.grantCapabilityToTask(task, derived.id);
@@ -472,10 +473,11 @@ pub const Kernel = struct {
         revoke_source: bool,
     ) Error!abi.CapabilityDescriptor {
         const capability_id = context.presented_capability_id;
-        const original = (try self.authorizeOperation(.capability_pass, context, now_ticks, .{})).*;
+        const authorization = try self.authorizeOperationWithSubject(.capability_pass, context, now_ticks, .{});
+        const original = authorization.resolved_capability.capability.*;
         const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
         try validateRuntimeGrantForTask(receiver, 1);
-        const passed = try self.capability_table.pass(.{
+        const passed = try self.capability_table.passResolved(.{
             .capability_id = capability_id,
             .new_holder = receiver.owner,
             .now_ticks = now_ticks,
@@ -487,7 +489,7 @@ pub const Kernel = struct {
                 .source_task_id = original.scope.task_id orelse 0,
                 .broker_service_id = original.audit.broker_service_id,
             },
-        });
+        }, authorization.resolved_capability);
         errdefer self.capability_table.rollbackGrant(&.{passed});
         try task_runtime.grantCapabilityToTask(receiver, passed.id);
         if (revoke_source) {
@@ -740,7 +742,7 @@ pub const Kernel = struct {
         now_ticks: u64,
         input: AuthorizationInput,
     ) Error!*const capability.Capability {
-        return (try self.authorizeOperationWithSubject(expected_operation, context, now_ticks, input)).capability;
+        return (try self.authorizeOperationWithSubject(expected_operation, context, now_ticks, input)).resolved_capability.capability;
     }
 
     fn authorizeSubjectTaskOperation(
@@ -754,7 +756,7 @@ pub const Kernel = struct {
         if (context.caller_task_id != 0 and context.caller_task_id != task_id) return error.SubjectTaskMismatch;
         const authorization = try self.authorizeOperationWithSubject(expected_operation, context, now_ticks, input);
         const task = authorization.subject_task orelse self.runtime.find(task_id) orelse return error.TaskNotFound;
-        return .{ .capability = authorization.capability, .task = task };
+        return .{ .capability = authorization.resolved_capability.capability, .task = task };
     }
 
     fn authorizeOperationWithSubject(
@@ -771,7 +773,8 @@ pub const Kernel = struct {
         else
             null;
 
-        const owned = try self.capability_table.requireUsable(context.presented_capability_id, now_ticks);
+        const resolved = try self.capability_table.resolveUsable(context.presented_capability_id, now_ticks);
+        const owned = resolved.capability;
 
         if (subject_task) |task| {
             if (!task.hasCapability(context.presented_capability_id)) return error.CapabilityNotFound;
@@ -800,7 +803,7 @@ pub const Kernel = struct {
             },
         }
         try validateOperationScope(descriptor.scope_rule, owned.scope, input);
-        return .{ .capability = owned, .subject_task = subject_task };
+        return .{ .resolved_capability = resolved, .subject_task = subject_task };
     }
 
     fn requireTargetedCapability(
@@ -1050,6 +1053,46 @@ test "moving a capability removes its source task attachment" {
     try std.testing.expect(harness.capabilities.query(source_capability.id) == null);
     try std.testing.expect(!source_task.hasCapability(source_capability.id));
     try std.testing.expect(receiver_task.hasCapability(passed.capability_id));
+}
+
+test "capability derivation is bound to its authorized source" {
+    var harness = TestKernelHarness{};
+    var kernel = harness.kernel();
+    const source_task = try harness.createSessionTask();
+    const receiver_task = try harness.runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 4 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = shared_memory.PAGE_SIZE,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
+        },
+        .local_only = true,
+    });
+    const rights = capability.CapabilityRights{ .service = .{
+        .capability_derive = true,
+        .time_query = true,
+    } };
+    const authorized_source = try harness.mintSessionServiceAuthority(source_task, rights);
+    const other_source = try harness.mintSessionServiceAuthority(source_task, rights);
+    try harness.runtime.grantCapability(source_task.id, authorized_source.id);
+    try harness.runtime.grantCapability(source_task.id, other_source.id);
+
+    var request = capability.DeriveRequest{
+        .parent_capability_id = other_source.id,
+        .holder = receiver_task.owner,
+        .rights = .{ .service = .{ .time_query = true } },
+        .scope = .{ .task_id = receiver_task.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 100 },
+    };
+    var context = testContext(.capability_derive, authorized_source.id, .none);
+    context.caller_task_id = source_task.id;
+    try std.testing.expectError(error.CapabilityNotFound, kernel.capabilityDerive(context, request));
+
+    request.parent_capability_id = authorized_source.id;
+    const derived = try kernel.capabilityDerive(context, request);
+    try std.testing.expect(receiver_task.hasCapability(derived.capability_id));
 }
 
 test "native kernel creates tasks endpoints and shared memory without owning service discovery" {
