@@ -91,7 +91,7 @@ pub const CAPABILITY_PASS_SOURCE_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const ATTACHED_CAPABILITY_TASK_INDEX_RELOOKUPS_PER_SEND: usize = 0;
 pub const MOVED_CAPABILITY_RECEIVE_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const TASK_TERMINATE_PREVIEW_SLOT_LOOKUPS: usize = 0;
-pub const TASK_TERMINATE_HANDLE_INDEX_RELOOKUPS: usize = 0;
+pub const TASK_TERMINATE_HANDLE_DERIVATIONS: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -191,9 +191,8 @@ pub const Kernel = struct {
         const authorization = try self.authorizeOperationWithSubject(.task_terminate, context, now_ticks, .{});
         const task_id = authorization.resolved_capability.capability.target.id;
         const task = try self.taskForAuthorizedRequest(authorization, task_id);
-        const task_handle = self.runtime.taskHandleForResolved(task);
         var terminated_capabilities = task_runtime.TerminationCapabilities{};
-        const terminated = self.runtime.terminateResolvedTaskByHandle(task_handle, task, now_ticks, &terminated_capabilities);
+        const terminated = self.runtime.terminateResolvedTask(task, now_ticks, &terminated_capabilities);
         if (!terminated) return false;
         _ = self.capability_table.retireHeldTaskAuthority(task_id, terminated_capabilities.ids[0..terminated_capabilities.count]);
         self.retireCapabilityTarget(.{ .kind = .task, .id = task_id });

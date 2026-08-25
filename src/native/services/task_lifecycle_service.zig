@@ -9,7 +9,7 @@ const units = @import("../core/units.zig");
 pub const LifecycleOperation = policy_object.LifecycleOperation;
 pub const RESULT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const TRANSITION_TASK_INDEX_LOOKUPS: u8 = 1;
-pub const TRANSITION_HANDLE_SLOT_RELOOKUPS: u8 = 0;
+pub const TRANSITION_HANDLE_DERIVATIONS: u8 = 0;
 
 pub const Error = task_runtime.Error || event_ledger.Error || error{
     InvalidLifecycleTransition,
@@ -67,12 +67,7 @@ pub const Service = struct {
         const transitioned = switch (request.operation) {
             .suspend_task => self.runtime.suspendResolvedTask(task, request.now_ticks),
             .resume_task => self.runtime.resumeResolvedTask(task, request.now_ticks),
-            .terminate_task => self.runtime.terminateResolvedTaskByHandle(
-                self.runtime.taskHandleForResolved(task),
-                task,
-                request.now_ticks,
-                null,
-            ),
+            .terminate_task => self.runtime.terminateResolvedTask(task, request.now_ticks, null),
         };
         try recordLifecycle(ledger, request, transitioned);
         if (!transitioned) return error.InvalidLifecycleTransition;

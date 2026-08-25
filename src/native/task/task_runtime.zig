@@ -41,6 +41,7 @@ pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
 pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const TERMINATION_TASK_SLOT_LOOKUPS: u8 = 1;
 pub const RESOLVED_TERMINATION_SLOT_RELOOKUPS: u8 = 0;
+pub const RESOLVED_TERMINATION_HANDLE_DERIVATIONS: u8 = 0;
 pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_HANDLE_SLOT_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
@@ -1030,19 +1031,19 @@ pub const Runtime = struct {
         appendProvenanceToTask(task, event);
     }
 
-    pub fn recordCrashReport(
+    pub fn recordCrashReportForResolved(
         self: *Runtime,
-        task_id: u64,
+        task: *TaskRecord,
         service_id: u64,
         tick: u64,
         crash_code: u32,
         redaction_policy_version: u16,
         reason_fingerprint: u64,
         redacted: bool,
-    ) Error!void {
-        const task = self.find(task_id) orelse return error.TaskNotFound;
+    ) void {
+        if (builtin.mode == .Debug) _ = self.taskHandleForResolved(task);
         appendProvenanceToTask(task, debug_contract.crashReportProvenance(
-            task_id,
+            task.id,
             service_id,
             tick,
             crash_code,
@@ -1086,18 +1087,17 @@ pub const Runtime = struct {
 
     pub fn terminateTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        const handle = self.taskHandleForResolved(task);
-        return self.terminateResolvedTaskByHandle(handle, task, tick, null);
+        return self.terminateResolvedTask(task, tick, null);
     }
 
-    pub fn terminateResolvedTaskByHandle(
+    pub fn terminateResolvedTask(
         self: *Runtime,
-        handle: TaskHandle,
         task: *TaskRecord,
         tick: u64,
         terminated_capabilities: ?*TerminationCapabilities,
     ) bool {
-        const slot_index = handle.slotIndex();
+        if (builtin.mode == .Debug) _ = self.taskHandleForResolved(task);
+        const slot_index: usize = task.arena_slot_index;
         if (terminated_capabilities) |output| output.count = 0;
         if (task.state == .terminated) return false;
         const retired_address_space_id = task.address_space_id;
@@ -1690,7 +1690,7 @@ test "task runtime records redacted crash report provenance" {
         .userspace_image = &service_image,
     });
 
-    try runtime.recordCrashReport(task.id, 704, 77, 0xCA11, 1, 0xFEED, true);
+    runtime.recordCrashReportForResolved(task, 704, 77, 0xCA11, 1, 0xFEED, true);
     const latest = task.latestProvenanceEvent().?;
     try std.testing.expectEqual(debug_contract.ProvenanceKind.crash_report, latest.kind);
     try std.testing.expectEqual(@as(u64, 704), latest.service_id);
