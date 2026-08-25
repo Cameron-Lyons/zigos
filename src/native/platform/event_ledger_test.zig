@@ -63,6 +63,33 @@ test "event ledger text export preserves the stable diagnostic wire format" {
     );
 }
 
+test "event ledger permission export has an exact bounded wire format" {
+    var ledger = Ledger.init();
+    try ledger.recordPermissionDecision(
+        .{ .kind = .user, .serial = 7 },
+        11,
+        .screen_capture,
+        false,
+        .policy_denied,
+        20,
+        "org policy denied capture",
+        true,
+    );
+
+    const expected =
+        "#1 tick=20 kind=permission_decision subject=user:7 permission=screen_capture allowed=no" ++
+        " denial=policy_denied policy=user-grant-policy missing=screen-capture-capability" ++
+        " approval=yes retry_safe=no blocked_help=\"Blocked: This app could not capture the screen" ++
+        " for redacted because the permission was not granted. Missing: screen capture." ++
+        " Open Permission Review to grant a narrower scope or keep it blocked.\" detail=redacted\n";
+    var exact_buffer: [expected.len]u8 = undefined;
+    const exported = try ledger.exportText(&exact_buffer, .{});
+    try std.testing.expectEqualStrings(expected, exported);
+
+    var short_buffer: [expected.len - 1]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, ledger.exportText(&short_buffer, .{}));
+}
+
 test "event ledger compact inputs preserve truncation and zeroed tails" {
     var ledger = Ledger.init();
     const subject = principal.PrincipalId{ .kind = .service, .serial = 12 };

@@ -2499,17 +2499,20 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
     try appendText(buffer, used, ":");
     try appendUnsigned(buffer, used, event.subject.serial);
     if (event.permission_kind) |permission_kind| {
-        try appendFmt(buffer, used, " permission={s} allowed={s}", .{
-            @tagName(permission_kind),
-            yesNo(event.allowed),
-        });
-        if (!event.allowed) {
-            try appendFmt(buffer, used, " denial={s} policy={s} missing={s} approval={s} retry_safe={s}", .{
-                @tagName(event.denial_reason),
-                event.policyLabelSlice(),
-                event.missingCapabilitySlice(),
-                yesNo(event.user_approval_can_resolve),
-                yesNo(event.retry_safe),
+        if (event.allowed) {
+            try appendTextParts(buffer, used, .{
+                " permission=", @tagName(permission_kind),
+                " allowed=",    yesNo(event.allowed),
+            });
+        } else {
+            try appendTextParts(buffer, used, .{
+                " permission=", @tagName(permission_kind),
+                " allowed=",    yesNo(event.allowed),
+                " denial=",     @tagName(event.denial_reason),
+                " policy=",     event.policyLabelSlice(),
+                " missing=",    event.missingCapabilitySlice(),
+                " approval=",   yesNo(event.user_approval_can_resolve),
+                " retry_safe=", yesNo(event.retry_safe),
             });
             var blocked_buffer: [DENIAL_HELP_BUFFER_BYTES]u8 = undefined;
             const blocked = denial_explanation.renderUserHelpToBuffer(
@@ -2523,7 +2526,7 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
                     .retry_safe = event.retry_safe,
                 },
             ) catch "Blocked: open Permission Review for details.";
-            try appendFmt(buffer, used, " blocked_help=\"{s}\"", .{blocked});
+            try appendTextParts(buffer, used, .{ " blocked_help=\"", blocked, "\"" });
         }
     }
     switch (event.kind) {
@@ -2542,7 +2545,8 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
             try appendText(buffer, used, yesNo(event.allowed));
         },
         .capability_grant, .capability_revocation => {
-            try appendFmt(buffer, used, " capability={d}", .{event.related_id});
+            try appendText(buffer, used, " capability=");
+            try appendUnsigned(buffer, used, event.related_id);
         },
         .notification => {
             try appendFmt(buffer, used, " notification={d} reason={s} visible={s}", .{
@@ -2670,6 +2674,17 @@ fn appendText(buffer: []u8, used: *usize, value: []const u8) Error!void {
     if (value.len > buffer.len -| used.*) return error.NoSpaceLeft;
     @memcpy(buffer[used.*..][0..value.len], value);
     used.* += value.len;
+}
+
+fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) Error!void {
+    var total_len: usize = 0;
+    inline for (parts) |part| total_len += part.len;
+    if (total_len > buffer.len -| used.*) return error.NoSpaceLeft;
+
+    inline for (parts) |part| {
+        @memcpy(buffer[used.*..][0..part.len], part);
+        used.* += part.len;
+    }
 }
 
 fn appendUnsigned(buffer: []u8, used: *usize, value: anytype) Error!void {
