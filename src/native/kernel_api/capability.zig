@@ -21,6 +21,8 @@ pub const CAPABILITY_TABLE_SIZE_CEILING_BYTES: usize = 32_040;
 pub const CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY: u8 = 0;
 pub const CAPABILITY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 pub const PASS_SOURCE_REMOVAL_INDEX_RELOOKUPS: u8 = 0;
+pub const DELEGATION_SOURCE_INDEX_RELOOKUPS: u8 = 0;
+pub const RESOLVED_CAPABILITY_SIZE_CEILING_BYTES: usize = 16;
 
 comptime {
     if (MAX_GRANT_PLAN_ENTRIES > std.math.maxInt(u8)) {
@@ -134,6 +136,17 @@ pub const Inspection = struct {
     capability: *const Capability,
     usable: bool,
 };
+
+pub const ResolvedCapability = struct {
+    capability: *const Capability,
+    slot_index: usize,
+};
+
+comptime {
+    if (@sizeOf(ResolvedCapability) > RESOLVED_CAPABILITY_SIZE_CEILING_BYTES) {
+        @compileError("resolved capability exceeds its compact size ceiling");
+    }
+}
 
 pub const RetiredAuthority = struct {
     capability_id: u64,
@@ -293,7 +306,12 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn derive(self: *Self, request: DeriveRequest) Error!Capability {
-            const parent_slot = self.findConstSlot(request.parent_capability_id) orelse return error.CapabilityNotFound;
+            const parent = self.resolveCapability(request.parent_capability_id) orelse return error.CapabilityNotFound;
+            return self.deriveResolved(request, parent);
+        }
+
+        pub fn deriveResolved(self: *Self, request: DeriveRequest, resolved_parent: ResolvedCapability) Error!Capability {
+            const parent_slot = self.resolvedSlot(resolved_parent, request.parent_capability_id) orelse return error.CapabilityNotFound;
             const parent = &parent_slot.capability;
             if (!self.isUsableSlot(parent_slot, request.lease.issued_at_ticks)) return error.CapabilityRevoked;
             if (!parent.rights.has(.capability_derive)) return error.RightsEscalation;
@@ -319,8 +337,12 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn pass(self: *Self, request: PassRequest) Error!Capability {
-            const source_handle = CapabilityHandle{ .value = request.capability_id };
-            const original_slot = self.slots.getConstByHandle(source_handle) orelse return error.CapabilityNotFound;
+            const source = self.resolveCapability(request.capability_id) orelse return error.CapabilityNotFound;
+            return self.passResolved(request, source);
+        }
+
+        pub fn passResolved(self: *Self, request: PassRequest, source: ResolvedCapability) Error!Capability {
+            const original_slot = self.resolvedSlot(source, request.capability_id) orelse return error.CapabilityNotFound;
             const original = &original_slot.capability;
             if (!self.isUsableSlot(original_slot, request.now_ticks)) return error.CapabilityRevoked;
             if (!original.rights.has(.capability_pass)) return error.RightsEscalation;
@@ -342,7 +364,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             const passed = try self.insertWithNewCapabilityId(record, original_slot.target_generation_index);
 
             if (request.revoke_source) {
-                self.removeSlot(source_handle.slotIndex());
+                self.removeSlot(source.slot_index);
             }
 
             return passed.*;
@@ -428,10 +450,16 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             };
         }
 
+        pub fn resolveUsable(self: *const Self, capability_id: u64, now_ticks: u64) LookupError!ResolvedCapability {
+            const resolved = self.resolveCapability(capability_id) orelse return error.CapabilityNotFound;
+            const slot = self.resolvedSlot(resolved, capability_id) orelse
+                native_util.impossibleByInvariant("freshly resolved capability remains in its slot");
+            if (!self.isUsableSlot(slot, now_ticks)) return error.CapabilityRevoked;
+            return resolved;
+        }
+
         pub fn requireUsable(self: *const Self, capability_id: u64, now_ticks: u64) LookupError!*const Capability {
-            const inspected = self.inspect(capability_id, now_ticks) orelse return error.CapabilityNotFound;
-            if (!inspected.usable) return error.CapabilityRevoked;
-            return inspected.capability;
+            return (try self.resolveUsable(capability_id, now_ticks)).capability;
         }
 
         fn insertCapabilitySlot(
@@ -477,6 +505,22 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         fn findConstSlot(self: *const Self, capability_id: u64) ?*const CapabilitySlot {
             return self.slots.getConstByHandle(.{ .value = capability_id });
+        }
+
+        fn resolveCapability(self: *const Self, capability_id: u64) ?ResolvedCapability {
+            const handle = CapabilityHandle{ .value = capability_id };
+            const slot = self.slots.getConstByHandle(handle) orelse return null;
+            return .{
+                .capability = &slot.capability,
+                .slot_index = handle.slotIndex(),
+            };
+        }
+
+        fn resolvedSlot(self: *const Self, resolved: ResolvedCapability, capability_id: u64) ?*const CapabilitySlot {
+            if (resolved.slot_index >= self.slots.slots.len) return null;
+            const slot = &self.slots.slots[resolved.slot_index];
+            if (!slot.in_use or slot.capability.id != capability_id) return null;
+            return slot;
         }
 
         fn isUsableSlot(self: *const Self, slot: *const CapabilitySlot, now_ticks: u64) bool {
