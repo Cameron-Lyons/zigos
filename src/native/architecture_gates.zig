@@ -419,6 +419,8 @@ pub const indexed_hot_path_tables = .{
         .reserves_grant_tasks_once = native_kernel.GRANT_PLAN_TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK == 1 and
             native_kernel.GRANT_ATTACHMENT_TASK_INDEX_LOOKUPS_PER_ENTRY == 0 and
             @hasDecl(task_runtime, "grantCapabilityToTask"),
+        .revokes_through_resolved_tasks = native_kernel.RESOLVED_TASK_REVOCATION_INDEX_LOOKUPS_PER_ENTRY == 0 and
+            @hasDecl(task_runtime, "revokeCapabilityFromTask"),
     },
     .debug_contract = .{
         .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and
