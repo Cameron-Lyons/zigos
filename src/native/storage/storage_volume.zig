@@ -34,6 +34,7 @@ pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
 pub const TRACKS_REPLAY_ID_BOUNDS_INLINE = true;
+pub const BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY = true;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
 const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 
@@ -921,7 +922,6 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     store.next_version_id = root.next_version_id;
     workspaces.next_workspace_id = root.next_workspace_id;
     workspaces.next_snapshot_id = root.next_snapshot_id;
-    store.rebuildDerivedIndexes();
     workspaces.rebuildDerivedIndexes();
 }
 
@@ -1082,8 +1082,12 @@ fn encodeSnapshotBody(writer: *CursorWriter, record: *const workspace.SnapshotRe
 fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!u64 {
     var reader = CursorReader{ .buffer = payload };
     const object_id = ids.object(try reader.readU64());
-    const slot_index = store.objects.slotIndexOf(object_id) orelse store.objects.reserveIndexClean(object_id) orelse return error.CorruptImage;
+    const existing_slot_index = store.objects.slotIndexOf(object_id);
+    const slot_index = existing_slot_index orelse store.objects.reserveIndexClean(object_id) orelse return error.CorruptImage;
     const object_type = try parseObjectType(try reader.readByte());
+    if (existing_slot_index != null and store.objects.slots[slot_index].object.object_type != object_type) {
+        return error.CorruptImage;
+    }
     const latest_version_id = ids.version(try reader.readU64());
     const version_count = try reader.readU16();
     var object_record = object_store.ObjectRecord{
@@ -1094,6 +1098,7 @@ fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const
     };
     try readObjectUserDataTail(self, &reader, &object_record);
     store.objects.slots[slot_index].object = object_record;
+    if (existing_slot_index == null) store.indexReplayedObjectSlot(slot_index);
     return object_id.raw();
 }
 
@@ -1123,6 +1128,7 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     const blob = &store.blobSlotAtConst(blob_slot_index).blob;
     if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
     store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
+    store.recordReplayedVersionId(version_id);
     return version_id.raw();
 }
 
@@ -1161,6 +1167,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     slot.blob.chunk_count = @intCast(chunk_count);
     slot.blob.chunk_slot_indexes = chunk_slot_indexes;
     slot.blob.manifest_verified = false;
+    store.recordReplayedBlobPayloadBytes(payload_len);
 }
 
 fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void {
@@ -1368,6 +1375,7 @@ fn deserializeState(
         slot.object.latest_version_id = ids.version(try reader.readU64());
         slot.object.version_count = try reader.readU16();
         try readObjectUserDataTail(self, &reader, &slot.object);
+        store.indexReplayedObjectSlot(slot_index);
     }
 
     for (0..@as(usize, chunk_count)) |_| {
@@ -1423,6 +1431,7 @@ fn deserializeState(
         const blob = &store.blobSlotAtConst(blob_slot_index).blob;
         if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
         store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
+        store.recordReplayedVersionId(version_id);
     }
 
     for (0..@as(usize, workspace_count_value)) |_| {
