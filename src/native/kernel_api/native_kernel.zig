@@ -88,6 +88,7 @@ pub const TASK_CREATE_AUDIT_INDEX_RELOOKUPS: usize = 0;
 pub const SELF_TARGET_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
 pub const CAPABILITY_MUTATION_SELF_TASK_INDEX_RELOOKUPS: usize = 0;
 pub const CAPABILITY_PASS_SOURCE_TASK_INDEX_RELOOKUPS: usize = 0;
+pub const ATTACHED_CAPABILITY_TASK_INDEX_RELOOKUPS_PER_SEND: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -265,10 +266,11 @@ pub const Kernel = struct {
         move_attached_capability: bool,
         now_ticks: u64,
     ) Error!void {
-        const endpoint_capability = try self.authorizeOperation(.endpoint_send, context, now_ticks, .{});
+        const authorization = try self.authorizeOperationWithSubject(.endpoint_send, context, now_ticks, .{});
+        const endpoint_capability = authorization.resolved_capability.capability;
         if (attached_capability_id) |capability_id| {
-            const attached = if (context.caller_task_id != 0)
-                try self.requireTaskCapability(context.caller_task_id, capability_id, now_ticks)
+            const attached = if (authorization.subject_task) |caller_task|
+                try self.requireResolvedTaskCapability(caller_task, capability_id, now_ticks)
             else
                 try self.capability_table.requireUsable(capability_id, now_ticks);
             if (!attached.rights.has(.capability_pass)) return error.PermissionDenied;
@@ -715,11 +717,20 @@ pub const Kernel = struct {
         now_ticks: u64,
     ) Error!*const capability.Capability {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        return self.requireResolvedTaskCapability(task, capability_id, now_ticks);
+    }
+
+    fn requireResolvedTaskCapability(
+        self: *Kernel,
+        task: *const task_runtime.TaskRecord,
+        capability_id: u64,
+        now_ticks: u64,
+    ) Error!*const capability.Capability {
         const owned = try self.capability_table.requireUsable(capability_id, now_ticks);
         if (!task.hasCapability(capability_id)) return error.CapabilityNotFound;
         if (!task.owner.eql(owned.holder)) return error.PermissionDenied;
         if (owned.scope.task_id) |scoped_task_id| {
-            if (scoped_task_id != task_id) return error.ScopeViolation;
+            if (scoped_task_id != task.id) return error.ScopeViolation;
         }
         return owned;
     }
@@ -1246,7 +1257,9 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     _ = try kernel.endpointConnect(testContext(.endpoint_connect, app_endpoint.capability_id, .none), service_endpoint.capability_id, service_endpoint.endpoint.endpoint_id, 8);
 
     const shared_result = try kernel.sharedMemoryCreate(testContext(.shared_memory_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, shared_memory.PAGE_SIZE, 9);
-    try kernel.endpointSend(testContext(.endpoint_send, app_endpoint.capability_id, .none), 11, "sync-open", shared_result.capability_id, false, 9);
+    var send_context = testContext(.endpoint_send, app_endpoint.capability_id, .none);
+    send_context.caller_task_id = app_task_desc.task_id;
+    try kernel.endpointSend(send_context, 11, "sync-open", shared_result.capability_id, false, 9);
     var received_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try kernel.endpointRecv(testContext(.endpoint_recv, service_endpoint.capability_id, .none), service_task_desc.task_id, &received_payload, 10)).?;
     try std.testing.expectEqualStrings("sync-open", received_payload[0..received.message.payload_len]);
