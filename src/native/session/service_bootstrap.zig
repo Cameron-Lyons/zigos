@@ -340,7 +340,7 @@ test "contractsReady requires every ordered service contract" {
             30 + @as(u64, @intCast(index)),
             40 + @as(u64, @intCast(index)),
             entry.interface_id,
-            0,
+            service_registry.REQUIRED_BINDING_FLAGS,
         );
     }
 

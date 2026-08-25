@@ -41,6 +41,7 @@ const DPL_USER: u8 = 0x60;
 const SEGMENT: u8 = 0x10;
 const EXECUTABLE: u8 = 0x08;
 const RW: u8 = 0x02;
+const ACCESSED: u8 = 0x01;
 const AVAILABLE_TSS: u8 = 0x09;
 const GRANULARITY: u4 = 0x8;
 const LONG_MODE: u4 = 0x2;
@@ -53,35 +54,40 @@ var gdt_ptr: GdtPtr = undefined;
 var tss: Tss align(16) = .{};
 var double_fault_stack: [DOUBLE_FAULT_STACK_BYTES]u8 align(16) = [_]u8{0} ** DOUBLE_FAULT_STACK_BYTES;
 
+const KERNEL_CODE_DESCRIPTOR = segmentDescriptor(
+    0,
+    FLAT_SEGMENT_LIMIT,
+    PRESENT | SEGMENT | EXECUTABLE | RW | ACCESSED,
+    GRANULARITY | LONG_MODE,
+);
+const KERNEL_DATA_DESCRIPTOR = segmentDescriptor(
+    0,
+    FLAT_SEGMENT_LIMIT,
+    PRESENT | SEGMENT | RW | ACCESSED,
+    GRANULARITY | SIZE_32,
+);
+const USER_CODE_DESCRIPTOR = segmentDescriptor(
+    0,
+    FLAT_SEGMENT_LIMIT,
+    PRESENT | DPL_USER | SEGMENT | EXECUTABLE | RW | ACCESSED,
+    GRANULARITY | LONG_MODE,
+);
+const USER_DATA_DESCRIPTOR = segmentDescriptor(
+    0,
+    FLAT_SEGMENT_LIMIT,
+    PRESENT | DPL_USER | SEGMENT | RW | ACCESSED,
+    GRANULARITY | SIZE_32,
+);
+
 extern fn gdt_flush(gdt_ptr: *const GdtPtr) void;
 extern fn tss_flush() void;
 
 pub fn init() void {
     gdt[NULL_DESCRIPTOR_INDEX] = 0;
-    gdt[KERNEL_CODE_DESCRIPTOR_INDEX] = segmentDescriptor(
-        0,
-        FLAT_SEGMENT_LIMIT,
-        PRESENT | SEGMENT | EXECUTABLE | RW,
-        GRANULARITY | LONG_MODE,
-    );
-    gdt[KERNEL_DATA_DESCRIPTOR_INDEX] = segmentDescriptor(
-        0,
-        FLAT_SEGMENT_LIMIT,
-        PRESENT | SEGMENT | RW,
-        GRANULARITY | SIZE_32,
-    );
-    gdt[USER_CODE_DESCRIPTOR_INDEX] = segmentDescriptor(
-        0,
-        FLAT_SEGMENT_LIMIT,
-        PRESENT | DPL_USER | SEGMENT | EXECUTABLE | RW,
-        GRANULARITY | LONG_MODE,
-    );
-    gdt[USER_DATA_DESCRIPTOR_INDEX] = segmentDescriptor(
-        0,
-        FLAT_SEGMENT_LIMIT,
-        PRESENT | DPL_USER | SEGMENT | RW,
-        GRANULARITY | SIZE_32,
-    );
+    gdt[KERNEL_CODE_DESCRIPTOR_INDEX] = KERNEL_CODE_DESCRIPTOR;
+    gdt[KERNEL_DATA_DESCRIPTOR_INDEX] = KERNEL_DATA_DESCRIPTOR;
+    gdt[USER_CODE_DESCRIPTOR_INDEX] = USER_CODE_DESCRIPTOR;
+    gdt[USER_DATA_DESCRIPTOR_INDEX] = USER_DATA_DESCRIPTOR;
 
     tss = .{};
     configureDoubleFaultIst();
@@ -101,6 +107,14 @@ pub fn setKernelStack(stack: usize) void {
 
 pub fn configureDoubleFaultIst() void {
     tss.ist1 = @intFromPtr(&double_fault_stack) + double_fault_stack.len;
+}
+
+pub fn userDataDescriptor() u64 {
+    return gdt[USER_DATA_DESCRIPTOR_INDEX];
+}
+
+pub fn userCodeDescriptor() u64 {
+    return gdt[USER_CODE_DESCRIPTOR_INDEX];
 }
 
 fn segmentDescriptor(base: u32, limit: u20, access: u8, flags: u4) u64 {
@@ -127,6 +141,13 @@ fn writeTssDescriptor() void {
 comptime {
     if (@sizeOf(Tss) != 104) @compileError("x86-64 TSS must be 104 bytes");
     if (@sizeOf(GdtPtr) != 10) @compileError("x86-64 GDTR operand must be 10 bytes");
+    if (KERNEL_CODE_DESCRIPTOR != 0x00AF_9B00_0000_FFFF or
+        KERNEL_DATA_DESCRIPTOR != 0x00CF_9300_0000_FFFF or
+        USER_CODE_DESCRIPTOR != 0x00AF_FB00_0000_FFFF or
+        USER_DATA_DESCRIPTOR != 0x00CF_F300_0000_FFFF)
+    {
+        @compileError("x86-64 flat descriptors must be valid without processor mutation");
+    }
     if (segmentDescriptor(0, FLAT_SEGMENT_LIMIT, 0x9A, 0xA) != 0x00AF_9A00_0000_FFFF) {
         @compileError("x86-64 code descriptor encoding diverged from the hardware ABI");
     }

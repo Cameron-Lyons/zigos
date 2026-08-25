@@ -136,21 +136,25 @@ pub const indexed_hot_path_tables = .{
             @typeInfo(@TypeOf(service_registry.Registry.connect)).@"fn".params[1].type.? == component_abi_schema.InterfaceId and
             @typeInfo(@TypeOf(service_registry.Service.register)).@"fn".params[5].type.? == component_abi_schema.InterfaceId and
             @typeInfo(@TypeOf(service_registry.Service.connect)).@"fn".params[1].type.? == component_abi_schema.InterfaceId,
-        .uses_typed_interface_ids = @hasDecl(service_registry.Binding, "interfaceId"),
+        .derives_typed_interface_ids_from_slots = !@hasDecl(service_registry.Binding, "interfaceId"),
         .derives_static_contract_metadata = service_registry.DERIVES_STATIC_CONTRACT_METADATA,
         .requires_exact_interface_versions = component_abi_schema.EXACT_INTERFACE_VERSIONS,
         .stores_compact_binding_metadata = service_registry.COMPACT_BINDING_METADATA and
             @sizeOf(service_registry.Binding) == service_registry.BINDING_SIZE_CEILING_BYTES and
-            @sizeOf(service_registry.Registry) == service_registry.REGISTRY_SIZE_CEILING_BYTES,
+            @sizeOf(service_registry.Registry) == service_registry.REGISTRY_SIZE_CEILING_BYTES and
+            !@hasField(service_registry.Binding, "interface_id") and
+            !@hasField(service_registry.Binding, "flags"),
+        .requires_authenticated_bindings = service_registry.AUTHENTICATED_BINDINGS_ONLY and
+            service_registry.REQUIRED_BINDING_FLAGS == (abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE),
     },
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
         .binds_services_by_interface_id = @hasDecl(component_abi_schema, "interfaceIdForService"),
-        .uses_exact_interface_id_only_service_wires = component_abi_wire.VERSION == 2 and
+        .uses_exact_interface_id_only_service_wires = component_abi_wire.VERSION == 3 and
             @sizeOf(component_abi_wire.WireHeader) == 32 and
             @sizeOf(component_abi_wire.ServiceRegisterRequestWire) == 64 and
             @sizeOf(component_abi_wire.ServiceConnectionRequestWire) == 40 and
-            @sizeOf(abi.ServiceConnectionDescriptor) == 32 and
+            @sizeOf(abi.ServiceConnectionDescriptor) == 24 and
             !@hasField(component_abi_wire.WireHeader, "interface_major") and
             !@hasField(component_abi_wire.WireHeader, "interface_minor") and
             !@hasField(component_abi_wire.WireHeader, "flags") and
@@ -160,7 +164,9 @@ pub const indexed_hot_path_tables = .{
             !@hasField(component_abi_wire.ServiceConnectionRequestWire, "version_major") and
             !@hasField(component_abi_wire.ServiceConnectionRequestWire, "version_minor") and
             !@hasField(abi.ServiceConnectionDescriptor, "version_major") and
-            !@hasField(abi.ServiceConnectionDescriptor, "version_minor"),
+            !@hasField(abi.ServiceConnectionDescriptor, "version_minor") and
+            !@hasField(abi.ServiceConnectionDescriptor, "interface_id") and
+            !@hasField(abi.ServiceConnectionDescriptor, "flags"),
         .stores_compact_contract_metadata = component_abi_schema.COMPACT_INTERFACE_CONTRACT_METADATA and
             @FieldType(component_abi_schema.InterfaceContract, "operation_count") == u8,
         .keeps_contracts_within_ceiling = @sizeOf(component_abi_schema.InterfaceContract) <= component_abi_schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES,

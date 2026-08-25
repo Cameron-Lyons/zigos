@@ -12,6 +12,7 @@ const immutable_base = @import("../platform/immutable_base.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const measured_boot_console = @import("../platform/measured_boot_console.zig");
 const native_service_registry = @import("../services/service_registry.zig");
+const typed_component_abi = @import("../services/typed_component_abi.zig");
 const native_store_mount = @import("native_store_mount.zig");
 const principal = @import("../core/principal.zig");
 const service_catalog = @import("service_catalog.zig");
@@ -586,18 +587,18 @@ pub const TrustBoot = struct {
             if (!capabilityTargetAffectsProductionPolicy(slot.capability.target.kind)) continue;
             hashCapability(&hasher, "capability", &slot.capability);
         }
-        for (&self.service_directory.registry.bindings) |*binding| {
+        for (&self.service_directory.registry.bindings, 0..) |*binding, interface_index| {
             if (binding.service_id == 0) continue;
-            const contract = binding.typedContract();
+            const contract = &typed_component_abi.contracts[interface_index];
             crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);
             crypto_hash.updateInt(&hasher, "registry-owner-task-id", binding.owner_task_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-id", binding.endpoint_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-capability-id", binding.endpoint_capability_id);
-            crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(binding.interfaceId()));
+            crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(contract.interface_id));
             crypto_hash.updateBytes(&hasher, "registry-interface-name", contract.interface.name);
             crypto_hash.updateInt(&hasher, "registry-version-major", contract.interface.version_major);
             crypto_hash.updateInt(&hasher, "registry-version-minor", contract.interface.version_minor);
-            crypto_hash.updateInt(&hasher, "registry-flags", binding.flags);
+            crypto_hash.updateInt(&hasher, "registry-flags", native_service_registry.REQUIRED_BINDING_FLAGS);
             crypto_hash.updateInt(&hasher, "registry-contract-hash", contract.contract_hash);
         }
         return crypto_hash.finalize(&hasher);

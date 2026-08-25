@@ -134,8 +134,7 @@ fn assertBootedUserspaceServiceBinding(
     const service_record = supervisor.findByClass(class) orelse return error.MissingBootedServiceBinding;
     const connection = try service_directory.connect(contract.interface_id);
     try std.testing.expectEqual(service_record.id, connection.service_id);
-    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
-    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
+    try std.testing.expect(native_service_registry.AUTHENTICATED_BINDINGS_ONLY);
 
     const endpoint_descriptor = try kernel_port.kernel.endpoint_table.descriptor(ids.endpoint(connection.endpoint_id));
     const endpoint_flags: endpoint.EndpointFlags = @bitCast(endpoint_descriptor.flags);
