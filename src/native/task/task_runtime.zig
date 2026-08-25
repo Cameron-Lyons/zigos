@@ -41,6 +41,7 @@ pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
 pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const TERMINATION_TASK_SLOT_LOOKUPS: u8 = 1;
 pub const RESOLVED_TERMINATION_SLOT_RELOOKUPS: u8 = 0;
+pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
 pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
@@ -526,6 +527,7 @@ pub const Runtime = struct {
         const slot = self.tasks.slotAt(slot_index);
         const task_cold = self.taskColdRecords() orelse
             native_util.impossibleByInvariant("live tasks retain cold runtime state");
+        slot.task.arena_slot_index = @intCast(slot_index);
         slot.task.cold_state = &task_cold[slot_index];
         if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
             native_util.impossibleByInvariant("task owner index capacity covers task slots");
@@ -580,6 +582,7 @@ pub const Runtime = struct {
             .audit_count = 0,
             .provenance_start = 0,
             .provenance_count = 0,
+            .arena_slot_index = @intCast(slot_index),
             .ui_surface_id = request.ui_surface_id,
             .resource_class = request.budget.effectiveResourceClass(),
             .background_allowed = request.budget.background_allowed,
@@ -649,6 +652,15 @@ pub const Runtime = struct {
     pub fn taskHandle(self: *const Runtime, task_id: u64) ?TaskHandle {
         const slot_index = self.tasks.slotIndexOf(task_id) orelse return null;
         return self.tasks.handleForIndex(slot_index);
+    }
+
+    pub inline fn taskHandleForResolved(self: *const Runtime, task: *const TaskRecord) TaskHandle {
+        const slot_index: usize = task.arena_slot_index;
+        if (builtin.mode == .Debug) {
+            const slot = self.tasks.slotAtConst(slot_index);
+            std.debug.assert(slot.in_use and &slot.task == task and slot.task.id == task.id);
+        }
+        return self.tasks.handleForIndex(slot_index).?;
     }
 
     pub fn findByHandle(self: *Runtime, handle: TaskHandle, expected_task_id: u64) ?*TaskRecord {
@@ -1430,7 +1442,9 @@ test "task runtime crosses the first task slab page with indexed handles" {
     try std.testing.expectEqual(@as(usize, model.TASK_PAGE_SIZE + 5), runtime.taskCount());
     try std.testing.expect(runtime.find(last_task_id) != null);
     try std.testing.expectEqual(last_task_id, runtime.findByOwner(last_owner).?.id);
-    try std.testing.expect(runtime.taskHandle(last_task_id) != null);
+    const last_task = runtime.find(last_task_id).?;
+    const last_handle = runtime.taskHandle(last_task_id).?;
+    try std.testing.expect(runtime.taskHandleForResolved(last_task).eql(last_handle));
 }
 
 test "task handles reject stale task records across restore and reuse" {
@@ -1439,6 +1453,7 @@ test "task handles reject stale task records across restore and reuse" {
     const task_id = first.id;
     const first_handle = runtime.taskHandle(task_id).?;
 
+    try std.testing.expect(runtime.taskHandleForResolved(first).eql(first_handle));
     try std.testing.expectEqual(task_id, runtime.findByHandle(first_handle, task_id).?.id);
     try std.testing.expectEqual(task_id, runtime.findConstByHandle(first_handle, task_id).?.id);
     try std.testing.expect(runtime.findByHandle(first_handle, task_id + 1) == null);
@@ -1450,7 +1465,9 @@ test "task handles reject stale task records across restore and reuse" {
     try std.testing.expect(runtime.findByHandle(first_handle, task_id) == null);
     const restored_handle = runtime.taskHandle(task_id).?;
     try std.testing.expect(!restored_handle.eql(first_handle));
-    try std.testing.expectEqual(task_id, runtime.findByHandle(restored_handle, task_id).?.id);
+    const restored_task = runtime.findByHandle(restored_handle, task_id).?;
+    try std.testing.expectEqual(task_id, restored_task.id);
+    try std.testing.expect(runtime.taskHandleForResolved(restored_task).eql(restored_handle));
 
     runtime.reset();
     try std.testing.expect(runtime.findByHandle(restored_handle, task_id) == null);
@@ -1460,6 +1477,7 @@ test "task handles reject stale task records across restore and reuse" {
     try std.testing.expect(!replacement_handle.eql(restored_handle));
     try std.testing.expect(runtime.findByHandle(restored_handle, replacement.id) == null);
     try std.testing.expectEqual(replacement.id, runtime.findByHandle(replacement_handle, replacement.id).?.id);
+    try std.testing.expect(runtime.taskHandleForResolved(replacement).eql(replacement_handle));
 }
 
 test "task runtime ids are monotonic and exhaust without wrapping" {
