@@ -889,23 +889,7 @@ pub const Runtime = struct {
 
     pub fn revokeCapability(self: *Runtime, task_id: u64, capability_id: u64) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        const cold = taskCold(task);
-        if (taskCapabilityIndex(task, capability_id)) |index| {
-            const last_index = task.capability_count - 1;
-            const moved_capability_id = cold.capability_ids[last_index];
-
-            if (index != last_index) {
-                cold.capability_ids[index] = moved_capability_id;
-            }
-
-            task.capability_count -= 1;
-            cold.capability_ids[task.capability_count] = 0;
-            advanceTaskCapabilityGeneration(task);
-            appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task_id, capability_id, 0));
-            return true;
-        }
-
-        return false;
+        return revokeCapabilityFromTask(task, capability_id);
     }
 
     pub fn revokeCapabilityEverywhere(self: *Runtime, capability_id: u64) u16 {
@@ -913,8 +897,7 @@ pub const Runtime = struct {
         for (0..self.taskSlotCapacity()) |slot_index| {
             const slot = self.taskSlotAt(slot_index);
             if (!slot.in_use or !slot.task.hasCapability(capability_id)) continue;
-            const revoked = self.revokeCapability(slot.task.id, capability_id) catch |err|
-                native_util.impossibleByInvariantError("indexed live task accepts capability retirement", err);
+            const revoked = revokeCapabilityFromTask(&slot.task, capability_id);
             if (!revoked) {
                 native_util.impossibleByInvariant("capability retirement removes every located task attachment");
             }
@@ -1170,6 +1153,23 @@ pub fn grantCapabilityToTask(task: *TaskRecord, capability_id: u64) Error!void {
     task.capability_count += 1;
     advanceTaskCapabilityGeneration(task);
     appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task.id, capability_id, 0));
+}
+
+pub fn revokeCapabilityFromTask(task: *TaskRecord, capability_id: u64) bool {
+    const cold = taskCold(task);
+    const index = taskCapabilityIndex(task, capability_id) orelse return false;
+    const last_index = task.capability_count - 1;
+    const moved_capability_id = cold.capability_ids[last_index];
+
+    if (index != last_index) {
+        cold.capability_ids[index] = moved_capability_id;
+    }
+
+    task.capability_count -= 1;
+    cold.capability_ids[task.capability_count] = 0;
+    advanceTaskCapabilityGeneration(task);
+    appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task.id, capability_id, 0));
+    return true;
 }
 
 fn advanceTaskCapabilityGeneration(task: *TaskRecord) void {

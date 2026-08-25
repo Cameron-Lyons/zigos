@@ -79,6 +79,7 @@ pub const AUTHORIZATION_TASK_INDEX_LOOKUPS_PER_CALL: usize = 1;
 pub const RESOLVED_TASK_BUDGET_RELOOKUPS_PER_CALL: usize = 0;
 pub const GRANT_PLAN_TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK: usize = 1;
 pub const GRANT_ATTACHMENT_TASK_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
+pub const RESOLVED_TASK_REVOCATION_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -362,8 +363,9 @@ pub const Kernel = struct {
             while (revoke_index < attached_count) : (revoke_index += 1) {
                 const entry = plan.entries[revoke_index];
                 if (entry.task_id != 0) {
-                    _ = self.runtime.revokeCapability(entry.task_id, minted[revoke_index].id) catch |err|
-                        native_util.impossibleByInvariantError("rollback revokes capabilities attached earlier in this kernel grant transaction", err);
+                    if (!task_runtime.revokeCapabilityFromTask(runtime_tasks[revoke_index].?, minted[revoke_index].id)) {
+                        native_util.impossibleByInvariant("rollback revokes capabilities attached earlier in this kernel grant transaction");
+                    }
                 }
             }
             self.capability_table.rollbackGrant(minted);
@@ -824,9 +826,8 @@ pub const Kernel = struct {
         }
         for (retired_buffer[0..retired_count]) |retired| {
             if (retired.scoped_task_id) |task_id| {
-                if (self.runtime.find(task_id) != null) {
-                    _ = self.runtime.revokeCapability(task_id, retired.capability_id) catch |err|
-                        native_util.impossibleByInvariantError("scoped capability retirement resolves its runtime task", err);
+                if (self.runtime.find(task_id)) |task| {
+                    _ = task_runtime.revokeCapabilityFromTask(task, retired.capability_id);
                 }
             } else {
                 _ = self.runtime.revokeCapabilityEverywhere(retired.capability_id);
