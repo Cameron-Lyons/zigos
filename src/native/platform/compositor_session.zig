@@ -30,6 +30,8 @@ pub const MAX_PRESENTED_SURFACES: usize = MAX_WINDOWS;
 pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 pub const COMPACT_RECORD_METADATA = true;
 pub const COMPACT_SESSION_COUNT_METADATA = true;
+pub const WINDOW_ALLOCATION_INDEX_RELOOKUPS: u8 = 0;
+pub const MODAL_REVIEWER_INDEX_RELOOKUPS: u8 = 0;
 pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
@@ -223,6 +225,11 @@ pub const WindowSlot = struct {
     in_use: bool = false,
     order_index: WindowOrderIndex = NO_WINDOW_ORDER_INDEX,
     window: WindowRecord = zeroWindow(),
+};
+
+const WindowAllocation = struct {
+    slot_index: usize,
+    window: *WindowRecord,
 };
 
 const ReviewItemSlot = struct {
@@ -483,7 +490,8 @@ pub const Session = struct {
             return window;
         }
 
-        const window = try self.allocateWindow();
+        const allocation = try self.allocateWindow();
+        const window = allocation.window;
         window.reviewer_task_id = reviewer_task_id;
         window.subject_task_id = app_task.id;
         window.ui_surface_id = surface_id;
@@ -495,9 +503,9 @@ pub const Session = struct {
         const title = std.fmt.bufPrint(&window.title, "{s} permission review", .{bundle.display_name}) catch
             window.title[0..copyText(&window.title, bundle.display_name)];
         window.title_len = @intCast(title.len);
-        self.indexWindowForTaskBundle(window);
-        self.indexWindowForTask(window);
-        self.indexWindowForReviewer(window);
+        self.indexWindowForTaskBundle(allocation.slot_index, window);
+        self.indexWindowForTask(allocation.slot_index, window);
+        self.indexWindowForReviewer(allocation.slot_index, window);
         self.active_window_id = window.id;
         return window;
     }
@@ -706,7 +714,7 @@ pub const Session = struct {
         self.removeWindowFromReviewerIndex(slot_index, window);
         window.modal = true;
         window.reviewer_task_id = reviewer_task_id;
-        self.indexWindowForReviewer(window);
+        self.indexWindowForReviewer(slot_index, window);
         return window;
     }
 
@@ -922,7 +930,8 @@ pub const Session = struct {
         modal: bool,
     ) Error!*WindowRecord {
         const surface_id = try requireTaskSurface(app_task);
-        const window = try self.allocateWindow();
+        const allocation = try self.allocateWindow();
+        const window = allocation.window;
         window.subject_task_id = app_task.id;
         window.ui_surface_id = surface_id;
         window.view_type = view_type;
@@ -933,12 +942,12 @@ pub const Session = struct {
         window.display_name_len = @intCast(copyText(&window.display_name, display_name));
         window.title_len = @intCast(deriveWindowTitle(&window.title, title_prefix, detail));
         window.detail_len = @intCast(copyText(&window.detail, detail));
-        self.indexWindowForTask(window);
+        self.indexWindowForTask(allocation.slot_index, window);
         self.active_window_id = window.id;
         return window;
     }
 
-    fn allocateWindow(self: *Session) Error!*WindowRecord {
+    fn allocateWindow(self: *Session) Error!WindowAllocation {
         if (self.windows.countInUse() >= MAX_WINDOWS) return error.WindowTableFull;
         const window_id = self.next_window_id;
         if (window_id == 0) return error.WindowIdExhausted;
@@ -952,27 +961,23 @@ pub const Session = struct {
         self.window_order[order_index] = window_id;
         self.window_count += 1;
         if (slot.window.visible) self.visible_window_count += 1;
-        return &slot.window;
+        return .{ .slot_index = slot_index, .window = &slot.window };
     }
 
-    fn indexWindowForTaskBundle(self: *Session, window: *const WindowRecord) void {
+    fn indexWindowForTaskBundle(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (window.subject_task_id == 0 or window.bundle_id_len == 0) return;
-        self.task_bundle_index.insert(taskBundleKey(window.subject_task_id, window.bundleIdSlice()), self.windows.slotIndexOf(window.id).?);
+        self.task_bundle_index.insert(taskBundleKey(window.subject_task_id, window.bundleIdSlice()), slot_index);
     }
 
-    fn indexWindowForTask(self: *Session, window: *const WindowRecord) void {
+    fn indexWindowForTask(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (window.subject_task_id == 0) return;
-        const slot_index = self.windows.slotIndexOf(window.id) orelse
-            native_util.impossibleByInvariant("window must be indexed before task indexing");
         if (!self.task_window_index.append(taskWindowKey(window.subject_task_id), slot_index)) {
             native_util.impossibleByInvariant("task window index capacity covers window slots");
         }
     }
 
-    fn indexWindowForReviewer(self: *Session, window: *const WindowRecord) void {
+    fn indexWindowForReviewer(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (!window.modal or window.reviewer_task_id == 0) return;
-        const slot_index = self.windows.slotIndexOf(window.id) orelse
-            native_util.impossibleByInvariant("window must be indexed before reviewer indexing");
         if (!self.reviewer_window_index.append(taskWindowKey(window.reviewer_task_id), slot_index)) {
             native_util.impossibleByInvariant("reviewer window index capacity covers window slots");
         }
