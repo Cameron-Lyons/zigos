@@ -13,7 +13,7 @@ const max_userspace_image_bytes: usize = units.mebibytes(16);
 const max_bootloader_source_bytes: usize = units.mebibytes(1);
 const max_build_artifact_entries: usize = 32;
 const build_artifact_manifest_payload_buffer_bytes: usize = units.kibibytes(4);
-const archive_chunk_bytes: usize = units.kibibytes(4);
+const archive_chunk_bytes: usize = native_archive_deps.embedded_file_chunk_bytes;
 const archive_chunk_pool_name = "userspace_chunks.bin";
 
 const ArchiveRole = enum {

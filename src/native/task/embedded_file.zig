@@ -1,7 +1,7 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 
-pub const CHUNK_SIZE_BYTES: usize = 4096;
+pub const CHUNK_SIZE_BYTES: usize = 1024;
 
 pub const File = struct {
     data_bytes: ?[*]const u8 = null,
