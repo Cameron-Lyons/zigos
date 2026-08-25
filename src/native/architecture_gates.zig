@@ -410,6 +410,7 @@ pub const indexed_hot_path_tables = .{
         .validates_terminal_stack_ranges_directly = syscall_dispatch.DIRECT_STACK_RANGE_VALIDATION,
         .avoids_rechecking_dispatched_syscall_headers = component_port.PREVALIDATED_SYSCALL_HEADER_RECHECKS == 0 and
             @hasDecl(component_port, "invokeGeneratedFromValidatedSyscall"),
+        .reuses_capability_pass_source_slots = capability.PASS_SOURCE_REMOVAL_INDEX_RELOOKUPS == 0,
         .centralizes_attached_capability_validation = component_port.ATTACHED_CAPABILITY_PRECHECKS_PER_SEND == 0,
         .centralizes_subject_task_validation = component_port.SUBJECT_TASK_PRECHECKS_PER_CALL == 0 and
             native_kernel.SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL == 0,
