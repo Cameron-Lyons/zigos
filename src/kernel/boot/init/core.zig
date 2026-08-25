@@ -32,8 +32,4 @@ pub fn init() void {
 
     console.print("Initializing memory allocator...\n");
     memory.init();
-
-    console.print("Initializing environment variables...\n");
-    const environ = @import("../../utils/environ.zig");
-    environ.init();
 }
