@@ -20,6 +20,11 @@ pub const ResolveRequest = struct {
     access: AccessMode,
 };
 
+pub const ValidatedPath = struct {
+    bytes: []const u8,
+    hash: u64,
+};
+
 pub const View = struct {
     authoritative: bool = false,
     export_only: bool = true,
@@ -47,7 +52,7 @@ pub const Error = error{
 pub const ResolveEntryFn = *const fn (
     context: *const anyopaque,
     workspace_id: u64,
-    path: []const u8,
+    path: ValidatedPath,
 ) workspace.Error!*const workspace.Entry;
 
 pub const HasVersionFn = *const fn (context: *const anyopaque, version_id: u64) bool;
@@ -93,32 +98,41 @@ pub const Bridge = struct {
             if (workspace_id != request.workspace_id) return error.WorkspaceScopeViolation;
         }
 
+        return self.resolveAuthorized(request.workspace_id, bridge_path, request.access, authority, null);
+    }
+
+    /// Completes a resolution after the caller has checked capability usability,
+    /// holder identity, and task/workspace scope. A supplied entry must have been
+    /// resolved from `bridge_path` while enforcing any workspace share scope.
+    pub fn resolveAuthorized(
+        self: *Bridge,
+        workspace_id: u64,
+        bridge_path: ValidatedPath,
+        access: AccessMode,
+        authority: *const capability.Capability,
+        resolved_entry: ?*const workspace.Entry,
+    ) Error!View {
         switch (authority.target.kind) {
-            .workspace => if (authority.target.id != request.workspace_id) return error.WorkspaceScopeViolation,
+            .workspace => if (authority.target.id != workspace_id) return error.WorkspaceScopeViolation,
             .object => {},
             else => return error.CapabilityRequired,
         }
 
         const can_read = authority.rights.has(.object_read);
 
-        if (request.access == .write or !can_read) return error.PermissionDenied;
+        if (access == .write or !can_read) return error.PermissionDenied;
 
-        const entry = switch (authority.target.kind) {
-            .workspace => blk: {
-                break :blk self.resolve_entry(self.context, request.workspace_id, bridge_path) catch return error.PathNotFound;
-            },
-            .object => blk: {
-                const resolved = self.resolve_entry(self.context, request.workspace_id, bridge_path) catch return error.PermissionDenied;
-                if (authority.target.id != resolved.object_id.raw()) return error.PermissionDenied;
-                break :blk resolved;
-            },
+        const entry = resolved_entry orelse switch (authority.target.kind) {
+            .workspace => self.resolve_entry(self.context, workspace_id, bridge_path) catch return error.PathNotFound,
+            .object => self.resolve_entry(self.context, workspace_id, bridge_path) catch return error.PermissionDenied,
             else => native_util.impossibleByInvariant("authority target kind was validated before resolving file bridge entry"),
         };
+        if (authority.target.kind == .object and authority.target.id != entry.object_id.raw()) return error.PermissionDenied;
 
         if (!self.has_version(self.context, entry.version_id.raw())) return error.ObjectMissing;
 
         return .{
-            .workspace_id = request.workspace_id,
+            .workspace_id = workspace_id,
             .object_id = entry.object_id.raw(),
             .version_id = entry.version_id.raw(),
             .object_type = entry.object_type,
@@ -128,14 +142,16 @@ pub const Bridge = struct {
     }
 };
 
-pub fn validateBridgePath(path: []const u8) error{ PathAuthorityRejected, PathSyntaxInvalid, PathTooLong }![]const u8 {
+pub fn validateBridgePath(path: []const u8) error{ PathAuthorityRejected, PathSyntaxInvalid, PathTooLong }!ValidatedPath {
     if (path.len == 0) return error.PathSyntaxInvalid;
     if (path.len > MAX_BRIDGE_PATH_BYTES) return error.PathTooLong;
     if (path[0] == '/' or path[0] == '~') return error.PathAuthorityRejected;
     if (looksLikeDrivePath(path)) return error.PathAuthorityRejected;
 
+    var path_hash = native_util.FNV1A_64_OFFSET_BASIS;
     var segment_start: usize = 0;
     for (path, 0..) |byte, index| {
+        path_hash = native_util.fnv1a64AppendByte(path_hash, byte);
         switch (byte) {
             0, '\\' => return error.PathAuthorityRejected,
             '/' => {
@@ -146,7 +162,7 @@ pub fn validateBridgePath(path: []const u8) error{ PathAuthorityRejected, PathSy
         }
     }
     if (!validBridgeSegment(path[segment_start..])) return error.PathSyntaxInvalid;
-    return path;
+    return .{ .bytes = path, .hash = path_hash };
 }
 
 fn validBridgeSegment(segment: []const u8) bool {
@@ -163,6 +179,7 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     const TestContext = struct {
         store: *object_store.Store,
         workspaces: *const workspace.Directory,
+        resolve_count: *usize,
     };
 
     var store = object_store.Store.init();
@@ -185,15 +202,18 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     try workspaces.beginTransaction(notes.id);
     try workspaces.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try workspaces.commit(notes.id, 20);
+    var resolve_count: usize = 0;
     var test_context = TestContext{
         .store = &store,
         .workspaces = &workspaces,
+        .resolve_count = &resolve_count,
     };
 
     const resolve_entry = struct {
-        fn call(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!*const workspace.Entry {
+        fn call(context: *const anyopaque, workspace_id: u64, path: ValidatedPath) workspace.Error!*const workspace.Entry {
             const bridge_context: *const TestContext = @ptrCast(@alignCast(context));
-            return bridge_context.workspaces.resolveBorrowed(ids.workspace(workspace_id), path);
+            bridge_context.resolve_count.* += 1;
+            return bridge_context.workspaces.resolveBorrowedWithPathHash(ids.workspace(workspace_id), path.bytes, path.hash);
         }
     }.call;
     const has_version = struct {
@@ -230,6 +250,16 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     try std.testing.expect(view.export_only);
     try std.testing.expect(!view.writable);
     try std.testing.expectEqual(object.version_id.raw(), view.version_id);
+    try std.testing.expectEqual(@as(usize, 1), resolve_count);
+
+    const validated_path = try validateBridgePath("documents/notes.md");
+    try std.testing.expectEqualStrings("documents/notes.md", validated_path.bytes);
+    try std.testing.expectEqual(native_util.fnv1a64(validated_path.bytes), validated_path.hash);
+    const checked_authority = try capabilities.requireUsable(read_capability.id, 30);
+    const resolved_entry = try workspaces.resolveBorrowedWithPathHash(notes.id, validated_path.bytes, validated_path.hash);
+    const reused_view = try bridge.resolveAuthorized(notes.id.raw(), validated_path, .read, checked_authority, resolved_entry);
+    try std.testing.expectEqual(object.version_id.raw(), reused_view.version_id);
+    try std.testing.expectEqual(@as(usize, 1), resolve_count);
 
     try std.testing.expectError(error.PathAuthorityRejected, bridge.resolve(.{
         .workspace_id = notes.id.raw(),

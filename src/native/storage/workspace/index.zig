@@ -41,7 +41,17 @@ pub fn findIndexedEntryPath(
     entries: anytype,
     path: []const u8,
 ) ?usize {
-    const key = entryPathIndexKey(path);
+    return findIndexedEntryPathWithHash(capacity, slots, entries, path, pathHash(path));
+}
+
+pub fn findIndexedEntryPathWithHash(
+    comptime capacity: usize,
+    slots: *const [capacity]EntryIndexSlot,
+    entries: anytype,
+    path: []const u8,
+    path_hash: u64,
+) ?usize {
+    const key = entryPathIndexKeyFromHash(path_hash);
     var index = id_index.hash(key, capacity);
     var attempts: usize = 0;
     while (attempts < capacity) : (attempts += 1) {
@@ -120,7 +130,11 @@ pub fn insertEntryObjectSlot(comptime capacity: usize, slots: *[capacity]EntryOb
 }
 
 fn entryPathIndexKey(path: []const u8) u64 {
-    return indexed_arena.nonZeroKey(native_util.fnv1a64(path));
+    return entryPathIndexKeyFromHash(pathHash(path));
+}
+
+fn entryPathIndexKeyFromHash(path_hash: u64) u64 {
+    return indexed_arena.nonZeroKey(path_hash);
 }
 
 fn objectIdIndexKey(object_id: anytype) u64 {

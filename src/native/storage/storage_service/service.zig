@@ -269,6 +269,10 @@ pub const StorageCore = struct {
         return self.workspaces.resolveBorrowed(workspaceId(workspace_id), path);
     }
 
+    pub fn resolveBorrowedWithPathHash(self: *const Service, workspace_id: anytype, path: []const u8, path_hash: u64) workspace.Error!*const workspace.Entry {
+        return self.workspaces.resolveBorrowedWithPathHash(workspaceId(workspace_id), path, path_hash);
+    }
+
     pub fn entries(self: *const Service, workspace_id: anytype) workspace.Error![]const workspace.Entry {
         return self.workspaces.entries(workspaceId(workspace_id));
     }
@@ -746,26 +750,27 @@ pub const StoragePort = struct {
 
     pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {
         const workspace_id = ids.workspace(request.workspace_id);
-        _ = try file_bridge.validateBridgePath(request.path);
+        const path = try file_bridge.validateBridgePath(request.path);
         const storage_authority = try self.requireStorageAuthority(authority, workspace_id, request.access);
-        if (storage_authority.target.kind == .workspace) {
-            try self.requireGrantScopeForResolve(authority, request);
-        }
+        const scoped_entry = if (storage_authority.target.kind == .workspace)
+            try self.requireGrantScopeForResolve(authority, request, path)
+        else
+            null;
         var bridge = file_bridge.Bridge.init(self.core, self.capability_table, bridgeResolveEntry, bridgeHasVersion);
-        return bridge.resolve(request, authority.principal, authority.capability_id, authority.now_ticks);
+        return bridge.resolveAuthorized(request.workspace_id, path, request.access, storage_authority, scoped_entry);
     }
 
     fn requireGrantScopeForResolve(
         self: *const StoragePort,
         authority: AuthorityContext,
         request: file_bridge.ResolveRequest,
-    ) (AuthorityError || workspace.Error)!void {
+        path: file_bridge.ValidatedPath,
+    ) (AuthorityError || workspace.Error)!?*const workspace.Entry {
         const workspace_id = ids.workspace(request.workspace_id);
         const record = self.core.findWorkspaceRecordConst(workspace_id) orelse return error.WorkspaceNotFound;
-        if (record.owner.eql(authority.principal)) return;
+        if (record.owner.eql(authority.principal)) return null;
 
-        const path = try file_bridge.validateBridgePath(request.path);
-        const entry = try self.core.resolve(workspace_id, path);
+        const entry = try self.core.resolveBorrowedWithPathHash(workspace_id, path.bytes, path.hash);
         if (!self.core.workspaceHasAccess(workspace_id, .{
             .principal_id = authority.principal,
             .object_id = entry.object_id,
@@ -774,6 +779,7 @@ pub const StoragePort = struct {
             .network_scope = .local_only,
             .now_ticks = authority.now_ticks,
         })) return error.PermissionDenied;
+        return entry;
     }
 
     fn requireObjectAuthority(
@@ -1034,9 +1040,9 @@ fn writeStorageTrace(
     }
 }
 
-fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!*const workspace.Entry {
+fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: file_bridge.ValidatedPath) workspace.Error!*const workspace.Entry {
     const service: *const StorageCore = @ptrCast(@alignCast(context));
-    return service.resolveBorrowed(ids.workspace(workspace_id), path);
+    return service.resolveBorrowedWithPathHash(ids.workspace(workspace_id), path.bytes, path.hash);
 }
 
 fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {

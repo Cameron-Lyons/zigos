@@ -11,7 +11,7 @@ task_runtime.checkpoint.write_low_occupancy 1600
 paging.address_space_roundtrip 40000
 syscall.fast_entry_roundtrip 1200
 accelerator_scheduler.claim_release 7200
-storage.file_bridge.resolve_view 144
+storage.file_bridge.resolve_shared_view 400
 storage.workspace.commit_overlay 12000
 storage.volume.replay_segmented_log 1020000
 storage.volume.compact_checkpoint 1100000

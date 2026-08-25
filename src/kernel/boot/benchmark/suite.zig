@@ -93,15 +93,16 @@ const CapabilityLookupContext = struct {
 };
 
 const FileBridgeContext = struct {
-    expected_workspace_id: u64 = 0,
-    expected_path: []const u8 = "",
-    expected_version_id: u64 = 0,
-    entry: workspace.Entry = .{},
-    version_present: bool = false,
+    checkpoint_store: storage_service.CheckpointStore = .{},
+    storage: storage_service.Service = undefined,
     capability_table: capability.CapabilityTable = capability.CapabilityTable.init(),
-    bridge: ?file_bridge.Bridge = null,
-    authority_capability_id: u64 = 0,
-    requester: principal.PrincipalId = .{ .kind = .app, .serial = 0 },
+    workspace_id: u64 = 0,
+    authority: storage_service.AuthorityContext = .{
+        .task_id = 0,
+        .principal = .{ .kind = .app, .serial = 0 },
+        .capability_id = 0,
+        .now_ticks = 0,
+    },
 };
 
 const PermissionReviewContext = struct {
@@ -633,25 +634,58 @@ fn benchmarkServiceImage() task_runtime.ExecutableImageSpec {
 }
 
 fn prepareFileBridgeFixture() void {
+    file_bridge_context.checkpoint_store.resetPersistent();
+    file_bridge_context.storage = storage_service.Service.initWithStore(
+        940,
+        7,
+        service(40),
+        &file_bridge_context.checkpoint_store,
+    );
     file_bridge_context.capability_table = capability.CapabilityTable.init();
-    file_bridge_context.expected_workspace_id = 41;
-    file_bridge_context.expected_path = "documents/plan.md";
-    file_bridge_context.expected_version_id = 901;
-    file_bridge_context.entry = workspace.Entry.init(
-        file_bridge_context.expected_path,
-        ids.object(900),
-        ids.version(file_bridge_context.expected_version_id),
+    const workspace_owner = app(41);
+    const requester = app(1);
+    const stored = file_bridge_context.storage.store.putVersion(.{
+        .preferred_object_id = ids.object(900),
+        .object_type = .document,
+        .payload = "benchmark plan",
+        .metadata = object_store.signMetadata(
+            signer("file-bridge", 0x44),
+            "plan",
+            "text/markdown",
+            .document,
+            "benchmark plan",
+            10,
+        ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err),
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const notes = file_bridge_context.storage.workspaces.create(.{
+        .owner = workspace_owner,
+        .label = "benchmark-notes",
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    file_bridge_context.storage.workspaces.beginTransaction(notes.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    file_bridge_context.storage.workspaces.stagePut(
+        notes.id,
+        "documents/plan.md",
+        stored.object_id,
+        stored.version_id,
         .document,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    file_bridge_context.version_present = true;
+    _ = file_bridge_context.storage.workspaces.commit(notes.id, 10) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    file_bridge_context.storage.workspaces.share(notes.id, .{
+        .principal_id = requester,
+        .can_read = true,
+        .expires_at_ticks = std.math.maxInt(u64),
+        .network_scope = .local_only,
+        .audit_visibility = .shared_participants,
+    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    file_bridge_context.workspace_id = notes.id.raw();
     const authority = file_bridge_context.capability_table.mintBootRoot(.{
-        .holder = app(1),
+        .holder = requester,
         .issuer = policyAuthority(1),
-        .target = .{ .kind = .object, .id = 900 },
-        .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+        .target = .{ .kind = .workspace, .id = notes.id.raw() },
+        .rights = .{ .workspace = .{ .object_read = true } },
         .scope = .{
             .task_id = 7,
-            .workspace_id = file_bridge_context.expected_workspace_id,
+            .workspace_id = notes.id.raw(),
             .local_only = true,
             .broker_only = true,
         },
@@ -661,14 +695,13 @@ fn prepareFileBridgeFixture() void {
         },
         .audit = .{},
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    file_bridge_context.bridge = file_bridge.Bridge.init(
-        &file_bridge_context,
-        &file_bridge_context.capability_table,
-        resolveBridgeEntry,
-        bridgeHasVersion,
-    );
-    file_bridge_context.authority_capability_id = authority.id;
-    file_bridge_context.requester = authority.holder;
+    file_bridge_context.storage.bindCapabilityTable(&file_bridge_context.capability_table);
+    file_bridge_context.authority = .{
+        .task_id = 7,
+        .principal = requester,
+        .capability_id = authority.id,
+        .now_ticks = 30,
+    };
 }
 
 fn prepareNetworkPolicyFixture() void {
@@ -1369,13 +1402,14 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
 }
 
 fn benchmarkFileBridgeResolve(iteration: u32) u64 {
-    var bridge = file_bridge_context.bridge.?;
     const path = "documents/plan.md";
-    const view = bridge.resolve(.{
-        .workspace_id = file_bridge_context.expected_workspace_id,
+    var authority = file_bridge_context.authority;
+    authority.now_ticks = 30 + iteration;
+    const view = file_bridge_context.storage.bridgeResolve(.{
+        .workspace_id = file_bridge_context.workspace_id,
         .path = path,
         .access = .read,
-    }, file_bridge_context.requester, file_bridge_context.authority_capability_id, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    }, authority) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return view.object_id + view.version_id + path.len + @intFromBool(view.readable);
 }
 
@@ -2729,20 +2763,4 @@ fn seedUpdateHealthUiProbe(session: *compositor_session.Session) update_health.U
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     _ = session.openTaskView(task, "Update Health") catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return .{ .session = session };
-}
-
-fn resolveBridgeEntry(
-    context: *const anyopaque,
-    workspace_id: u64,
-    path: []const u8,
-) workspace.Error!*const workspace.Entry {
-    const bridge_context: *const FileBridgeContext = @ptrCast(@alignCast(context));
-    if (workspace_id != bridge_context.expected_workspace_id) return error.EntryNotFound;
-    if (!std.mem.eql(u8, path, bridge_context.expected_path)) return error.EntryNotFound;
-    return &bridge_context.entry;
-}
-
-fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
-    const bridge_context: *const FileBridgeContext = @ptrCast(@alignCast(context));
-    return bridge_context.version_present and version_id == bridge_context.expected_version_id;
 }
