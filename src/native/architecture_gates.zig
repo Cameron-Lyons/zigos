@@ -906,6 +906,8 @@ pub const indexed_hot_path_tables = .{
         .keeps_summary_within_ceiling = @sizeOf(policy_mediation.ActivationSummary) <= policy_mediation.ACTIVATION_SUMMARY_SIZE_CEILING_BYTES,
         .reuses_policy_grant_receipt_tasks = policy_mediation.GRANT_RECEIPT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_policy_revocation_tasks = policy_mediation.REVOCATION_TASK_INDEX_RELOOKUPS == 0,
+        .resolves_policy_authorization_tasks_once = policy_mediation.AUTHORIZATION_TASK_INDEX_LOOKUPS == 1 and
+            policy_mediation.MANIFEST_PERMISSION_TASK_INDEX_RELOOKUPS == 0,
     },
     .native_ux = .{
         .uses_append_only_flow_log = native_ux.APPEND_ONLY_FLOW_LOG,

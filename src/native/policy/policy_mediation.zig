@@ -15,6 +15,8 @@ pub const MAX_PERMISSION_DECISIONS: usize = 16;
 pub const COMPACT_ACTIVATION_SUMMARY_METADATA = true;
 pub const GRANT_RECEIPT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const REVOCATION_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const AUTHORIZATION_TASK_INDEX_LOOKUPS: u8 = 1;
+pub const MANIFEST_PERMISSION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 1_160;
 const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
 const REVOCATION_RECEIPT_BUFFER_BYTES: usize = 240;
@@ -134,24 +136,40 @@ pub const PolicyMediator = struct {
         grants: []const UserGrant,
         now_ticks: u64,
     ) Error!PermissionDecision {
-        const decision = try self.evaluate(task_id, request, grants, now_ticks);
-        if (!decision.allowed) {
-            return self.commitDeniedDecision(decision, now_ticks);
-        }
-
-        const grant_plan = try self.planGrant(decision, now_ticks);
-        var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
-        return self.commitGrantPlan(decision, &grant_plan, &minted_buffer, now_ticks);
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        return self.authorizeTask(task, request, grants, now_ticks);
     }
 
-    pub fn evaluate(
-        self: *const PolicyMediator,
-        task_id: u64,
+    fn authorizeTask(
+        self: *PolicyMediator,
+        task: *task_runtime.TaskRecord,
         request: manifest.PermissionRequest,
         grants: []const UserGrant,
         now_ticks: u64,
-    ) Error!Decision {
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+    ) Error!PermissionDecision {
+        const decision = self.evaluateTask(task, request, grants, now_ticks);
+        if (!decision.allowed) {
+            return self.commitDeniedDecisionForTask(task, decision, now_ticks);
+        }
+
+        const grant_plan = try self.grantPlanForTask(
+            task,
+            decision.request,
+            decision.grant.?,
+            decision.lease_end,
+            now_ticks,
+        );
+        var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
+        return self.commitGrantPlanForTask(task, decision, &grant_plan, &minted_buffer, now_ticks);
+    }
+
+    fn evaluateTask(
+        self: *const PolicyMediator,
+        task: *const task_runtime.TaskRecord,
+        request: manifest.PermissionRequest,
+        grants: []const UserGrant,
+        now_ticks: u64,
+    ) Decision {
         const matched_grant = self.matchGrant(request, grants, now_ticks) orelse {
             return self.denialDecision(task, request, .policy_denied);
         };
@@ -190,31 +208,16 @@ pub const PolicyMediator = struct {
         };
     }
 
-    pub fn planGrant(
-        self: *const PolicyMediator,
-        decision: Decision,
-        now_ticks: u64,
-    ) Error!GrantPlan {
-        if (!decision.allowed) return GrantPlan{};
-        return self.grantPlanForRequest(
-            decision.task_id,
-            decision.request,
-            decision.grant.?,
-            decision.lease_end,
-            now_ticks,
-        );
-    }
-
-    pub fn commitGrantPlan(
+    fn commitGrantPlanForTask(
         self: *PolicyMediator,
+        task: *task_runtime.TaskRecord,
         decision: Decision,
         grant_plan: *const GrantPlan,
         minted_buffer: []capability.Capability,
         now_ticks: u64,
     ) Error!PermissionDecision {
-        const minted = try self.applyGrantPlanTransactional(grant_plan, minted_buffer);
+        const minted = try self.applyGrantPlanTransactional(task, grant_plan, minted_buffer);
         const capability_id = minted[0].id;
-        const task = self.runtime.find(decision.task_id) orelse return error.TaskNotFound;
         task.appendAudit(.{
             .kind = .policy_allowed,
             .capability_id = capability_id,
@@ -254,12 +257,29 @@ pub const PolicyMediator = struct {
         };
     }
 
-    pub fn commitDeniedDecision(
+    pub fn commitDeniedRequestForTask(
         self: *PolicyMediator,
+        task: *task_runtime.TaskRecord,
+        request: manifest.PermissionRequest,
+        reason: abi.DenialReason,
+        now_ticks: u64,
+    ) Error!PermissionDecision {
+        return self.commitDeniedDecisionForTask(task, .{
+            .request = request,
+            .task_id = task.id,
+            .owner = task.owner,
+            .allowed = false,
+            .reason = reason,
+        }, now_ticks);
+    }
+
+    fn commitDeniedDecisionForTask(
+        self: *PolicyMediator,
+        task: *task_runtime.TaskRecord,
         decision: Decision,
         now_ticks: u64,
     ) Error!PermissionDecision {
-        try self.runtime.audit(decision.task_id, .{
+        task.appendAudit(.{
             .kind = .policy_denied,
             .detail = @intFromEnum(decision.reason),
             .tick = now_ticks,
@@ -304,15 +324,14 @@ pub const PolicyMediator = struct {
         return true;
     }
 
-    pub fn grantPlanForRequest(
+    fn grantPlanForTask(
         self: *const PolicyMediator,
-        task_id: u64,
+        task: *const task_runtime.TaskRecord,
         request: manifest.PermissionRequest,
         grant: UserGrant,
         lease_end: u64,
         now_ticks: u64,
     ) Error!GrantPlan {
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
         const granted_local_only = request.local_only or grant.local_only;
         const target = self.resolveTarget(request);
         var plan = GrantPlan{};
@@ -343,6 +362,7 @@ pub const PolicyMediator = struct {
 
     fn applyGrantPlanTransactional(
         self: *PolicyMediator,
+        task: *task_runtime.TaskRecord,
         plan: *const GrantPlan,
         output: []capability.Capability,
     ) Error![]capability.Capability {
@@ -353,8 +373,9 @@ pub const PolicyMediator = struct {
             while (revoke_index < attached_count) : (revoke_index += 1) {
                 const entry = plan.entries[revoke_index];
                 if (entry.task_id != 0) {
-                    _ = self.runtime.revokeCapability(entry.task_id, minted[revoke_index].id) catch |err|
-                        native_util.impossibleByInvariantError("rollback revokes capabilities attached earlier in this grant transaction", err);
+                    if (!task_runtime.revokeCapabilityFromTask(task, minted[revoke_index].id)) {
+                        native_util.impossibleByInvariant("rollback revokes capabilities attached earlier in this grant transaction");
+                    }
                 }
             }
             self.capability_table.rollbackGrant(minted);
@@ -362,7 +383,7 @@ pub const PolicyMediator = struct {
 
         for (plan.slice(), minted) |entry, granted_capability| {
             if (entry.task_id != 0) {
-                try self.runtime.grantCapability(entry.task_id, granted_capability.id);
+                try task_runtime.grantCapabilityToTask(task, granted_capability.id);
             }
             attached_count += 1;
         }
@@ -381,7 +402,7 @@ pub const PolicyMediator = struct {
         var summary = ActivationSummary{};
 
         for (bundle.requested_permissions) |request| {
-            const decision = try self.authorizeRequest(task_id, request, grants, now_ticks);
+            const decision = try self.authorizeTask(task, request, grants, now_ticks);
             summary.addDecision(decision, request.required);
         }
 

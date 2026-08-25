@@ -83,13 +83,7 @@ pub fn authorizePermission(
         const policy_decision = policies.screenCaptureDecision(subjects);
         if (!policy_decision.allowed) {
             const task = mediator.runtime.find(task_id) orelse return error.TaskNotFound;
-            return mediator.commitDeniedDecision(.{
-                .request = request,
-                .task_id = task.id,
-                .owner = task.owner,
-                .allowed = false,
-                .reason = .policy_denied,
-            }, now_ticks);
+            return mediator.commitDeniedRequestForTask(task, request, .policy_denied, now_ticks);
         }
     }
     return mediator.authorizeRequest(task_id, request, grants, now_ticks);
