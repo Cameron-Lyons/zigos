@@ -12,6 +12,7 @@ const REVIEW_REQUEST_BUFFER_BYTES: usize = 512;
 
 pub const MAX_REVIEW_DECISIONS: usize = policy_mediation.MAX_PERMISSION_DECISIONS;
 pub const COMPACT_REVIEW_SESSION_DECISIONS = true;
+pub const GROUPS_REVIEW_TEXT_WRITES = true;
 pub const REVIEW_SESSION_SIZE_CEILING_BYTES: usize = 152;
 
 const DecisionMask = u16;
@@ -126,11 +127,11 @@ pub fn renderToBuffer(
 ) ![]const u8 {
     var used: usize = 0;
 
-    try appendText(buffer, &used, "Permission review for ");
-    try appendText(buffer, &used, session.bundle.display_name);
-    try appendText(buffer, &used, " [");
-    try appendText(buffer, &used, session.bundle.bundle_id);
-    try appendText(buffer, &used, "] task=");
+    try appendTextParts(buffer, &used, .{
+        "Permission review for ", session.bundle.display_name,
+        " [",                    session.bundle.bundle_id,
+        "] task=",
+    });
     try appendUnsigned(buffer, &used, session.task_id);
     try appendText(buffer, &used, "\n");
 
@@ -254,13 +255,11 @@ fn appendRequest(
     try appendUnsigned(buffer, used, @intCast(index + 1));
     try appendText(buffer, used, "/");
     try appendUnsigned(buffer, used, @intCast(bundle.requested_permissions.len));
-    try appendText(buffer, used, "] ");
-    try appendText(buffer, used, manifest.permissionDisplayLabel(request.kind));
-    try appendText(buffer, used, ": ");
-    try appendText(buffer, used, request.resource);
-    try appendText(buffer, used, "\n");
-
-    try appendText(buffer, used, "    ");
+    try appendTextParts(buffer, used, .{
+        "] ", manifest.permissionDisplayLabel(request.kind),
+        ": ", request.resource,
+        "\n    ",
+    });
     const scope_summary = try humane_permissions.renderRequestScopeToBuffer(buffer[used.*..], request);
     used.* += scope_summary.len;
     try appendText(buffer, used, "\n");
@@ -269,11 +268,11 @@ fn appendRequest(
         try appendDataEgressIntentSummary(buffer, used, request.egress_intent);
         try appendText(buffer, used, "\n");
     }
-    try appendText(buffer, used, "    required: ");
-    try appendText(buffer, used, yesNo(request.required));
-    try appendText(buffer, used, " local_only: ");
-    try appendText(buffer, used, yesNo(request.local_only));
-    try appendText(buffer, used, "\n");
+    try appendTextParts(buffer, used, .{
+        "    required: ", yesNo(request.required),
+        " local_only: ",  yesNo(request.local_only),
+        "\n",
+    });
     if (request.kind == .background_execution) {
         if (manifest.findBackgroundTask(bundle.*, request.resource)) |task| {
             try appendFmt(buffer, used, "    trigger: {s}\n", .{backgroundTriggerLabel(task.trigger)});
@@ -299,9 +298,10 @@ fn appendRequest(
         if (!decision.allow) {
             try appendText(buffer, used, "    decision: deny\n");
         } else if (decision.lease_ticks) |lease_ticks| {
-            try appendText(buffer, used, "    decision: allow local_only=");
-            try appendText(buffer, used, yesNo(decision.local_only));
-            try appendText(buffer, used, " lease=");
+            try appendTextParts(buffer, used, .{
+                "    decision: allow local_only=", yesNo(decision.local_only),
+                " lease=",
+            });
             try appendUnsigned(buffer, used, lease_ticks);
             try appendText(buffer, used, " ticks\n    decision lease summary: ");
             const expiry = try humane_permissions.requestedLeaseLabel(buffer[used.*..], lease_ticks);
@@ -324,9 +324,10 @@ fn appendCompactReceipt(
     request: manifest.PermissionRequest,
     decision: ReviewCommand,
 ) !void {
-    try appendText(buffer, used, "    receipt: granted=");
-    try appendText(buffer, used, manifest.permissionDisplayLabel(request.kind));
-    try appendText(buffer, used, " duration=");
+    try appendTextParts(buffer, used, .{
+        "    receipt: granted=", manifest.permissionDisplayLabel(request.kind),
+        " duration=",
+    });
     if (decision.lease_ticks) |lease_ticks| {
         try appendUnsigned(buffer, used, lease_ticks);
         try appendText(buffer, used, " ticks");
@@ -398,6 +399,17 @@ fn appendText(buffer: []u8, used: *usize, text: []const u8) !void {
     used.* += text.len;
 }
 
+inline fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) !void {
+    var total_len: usize = 0;
+    inline for (parts) |part| total_len += part.len;
+    if (total_len > buffer.len -| used.*) return error.NoSpaceLeft;
+
+    inline for (parts) |part| {
+        @memcpy(buffer[used.*..][0..part.len], part);
+        used.* += part.len;
+    }
+}
+
 fn appendUnsigned(buffer: []u8, used: *usize, value: u64) !void {
     var number_buffer: [20]u8 = undefined;
     const number_len = std.fmt.printInt(&number_buffer, value, 10, .lower, .{});
@@ -411,6 +423,7 @@ fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype
 
 test "review sessions store decisions in compact masks" {
     try std.testing.expect(COMPACT_REVIEW_SESSION_DECISIONS);
+    try std.testing.expect(GROUPS_REVIEW_TEXT_WRITES);
     try std.testing.expectEqual(u8, @FieldType(ReviewSession, "decision_count"));
     try std.testing.expectEqual(u16, @FieldType(ReviewSession, "allowed_mask"));
     try std.testing.expectEqual(u16, @FieldType(ReviewSession, "local_only_mask"));
