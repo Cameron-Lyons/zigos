@@ -1545,9 +1545,27 @@ fn benchmarkEventLedgerExport(iteration: u32) u64 {
     return exported.len + event_ledger_context.ledger.next_sequence;
 }
 
-fn benchmarkSecretStoreImportHandleExport(iteration: u32) u64 {
+fn benchmarkSecretStoreImportHandleExport(batch_iteration: u32) u64 {
+    comptime {
+        if (benchmark_cases.SECRET_STORE_OPERATIONS_PER_ITERATION > secure_secret_store.MAX_SECRETS or
+            benchmark_cases.SECRET_STORE_OPERATIONS_PER_ITERATION > secure_secret_store.MAX_HANDLES)
+        {
+            @compileError("secret-store benchmark batch exceeds store capacity");
+        }
+    }
+
     secret_store_context.store = secure_secret_store.Store.init();
     secret_store_context.store.attachHardwareProvider(.{ .available = true });
+    var checksum: u64 = 0;
+    for (0..benchmark_cases.SECRET_STORE_OPERATIONS_PER_ITERATION) |offset| {
+        const iteration = batch_iteration * benchmark_cases.SECRET_STORE_OPERATIONS_PER_ITERATION +
+            @as(u32, @intCast(offset));
+        checksum +%= benchmarkSecretStoreOperation(iteration);
+    }
+    return checksum;
+}
+
+fn benchmarkSecretStoreOperation(iteration: u32) u64 {
     const exportable = (iteration & 1) != 0;
     const secret = secret_store_context.store.importSecret(
         secret_store_context.owner,

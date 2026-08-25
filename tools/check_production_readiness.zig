@@ -3015,8 +3015,9 @@ fn validateSecretVaultHardwareProviderBoundary(
         "if (hardware_backed and !exportable)",
         "secret.resident_material = false",
         "secret.value_len = 0",
-        "const slot = &self.secrets[slot_index]",
-        "slot.* = secret",
+        "pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true",
+        "const secret = &self.secrets[slot_index]",
+        "dense secret imports append into pre-zeroed slots",
         "self.secret_count += 1",
         "secure secret store requires a hardware provider before hardware-backed imports",
     };

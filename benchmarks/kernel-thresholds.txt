@@ -19,7 +19,7 @@ package_revision.rollforward_rollback 3600
 indexing_service.query_ranked 420
 media_print.submit_complete 4800
 event_ledger.export_redacted 14200
-secret_store.import_handle_export 2800
+secret_store.import_handle_export 1200
 denial_explanation.render_policy_hint 120
 sync_service.overlay_session_flow 1900
 recovery_environment.reinstall_restore_repair 17000000

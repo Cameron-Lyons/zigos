@@ -408,8 +408,11 @@ pub const indexed_hot_path_tables = .{
         .stores_compact_secret_metadata = secure_secret_store.COMPACT_SECRET_METADATA and
             @FieldType(secure_secret_store.SecretRecord, "label_len") == u8 and
             @FieldType(secure_secret_store.SecretRecord, "value_len") == u8,
+        .imports_into_prezeroed_slots = secure_secret_store.IMPORTS_INTO_PREZEROED_SECRET_SLOTS,
         .drops_secret_arena = @FieldType(secure_secret_store.Store, "secrets") == [secure_secret_store.MAX_SECRETS]secure_secret_store.SecretRecord,
         .uses_handle_arena = @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "reserve"),
+        .overwrites_reserved_handle_slots = secure_secret_store.OVERWRITES_RESERVED_HANDLE_SLOTS and
+            @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "reserveHandleForOverwrite"),
         .uses_direct_generational_handles = secure_secret_store.DIRECT_HANDLE_LOOKUP and
             @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "getByHandle"),
         .uses_in_place_handle_replacement = @hasDecl(@FieldType(secure_secret_store.Store, "handles"), "replaceHandle"),
