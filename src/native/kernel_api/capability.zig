@@ -20,6 +20,7 @@ pub const GRANT_RESERVATION_SIZE_CEILING_BYTES: usize = 312;
 pub const CAPABILITY_TABLE_SIZE_CEILING_BYTES: usize = 32_040;
 pub const CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY: u8 = 0;
 pub const CAPABILITY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
+pub const PASS_SOURCE_REMOVAL_INDEX_RELOOKUPS: u8 = 0;
 
 comptime {
     if (MAX_GRANT_PLAN_ENTRIES > std.math.maxInt(u8)) {
@@ -318,7 +319,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn pass(self: *Self, request: PassRequest) Error!Capability {
-            const original_slot = self.findConstSlot(request.capability_id) orelse return error.CapabilityNotFound;
+            const source_handle = CapabilityHandle{ .value = request.capability_id };
+            const original_slot = self.slots.getConstByHandle(source_handle) orelse return error.CapabilityNotFound;
             const original = &original_slot.capability;
             if (!self.isUsableSlot(original_slot, request.now_ticks)) return error.CapabilityRevoked;
             if (!original.rights.has(.capability_pass)) return error.RightsEscalation;
@@ -340,8 +342,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             const passed = try self.insertWithNewCapabilityId(record, original_slot.target_generation_index);
 
             if (request.revoke_source) {
-                const source_slot_index = self.findSlotIndex(request.capability_id) orelse return error.CapabilityNotFound;
-                self.removeSlot(source_slot_index);
+                self.removeSlot(source_handle.slotIndex());
             }
 
             return passed.*;
