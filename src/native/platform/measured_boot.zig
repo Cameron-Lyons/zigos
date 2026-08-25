@@ -514,10 +514,9 @@ pub fn generatedUserspaceArchiveMatchesManifest(manifest: *const BuildArtifactMa
 }
 
 fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, spec: anytype, artifact: anytype) bool {
-    userspace_boot_registry.validateGeneratedArtifactMatchesSpec(spec, artifact) catch return false;
+    userspace_boot_registry.validateGeneratedArtifact(artifact) catch return false;
     const file = embedded_file.File.fromChunkedArtifact(artifact);
     if (!file.isPresent()) return false;
-    if (!artifact.signed) return false;
     if (artifact.file_size_bytes != file.byte_len) return false;
 
     const digest = file.sha256() orelse return false;

@@ -2,7 +2,7 @@ const std = @import("std");
 const userspace_wire = @import("userspace_wire");
 
 pub const MAGIC: u32 = 0x5A474F53;
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const ELF_SECTION_NAME = ".zigos_userspace_descriptor";
 pub const MAX_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_DISPLAY_NAME_BYTES: usize = 48;
@@ -14,7 +14,7 @@ pub const Descriptor = extern struct {
     magic: u32,
     version: u16,
     component_class: u8,
-    signed: u8,
+    header_reserved: u8,
     role_tag: u32,
     heartbeat_increment: u32,
     contract_flags: u32,
@@ -55,7 +55,6 @@ pub const Descriptor = extern struct {
 
 pub const InitSpec = struct {
     component_class: u8,
-    signed: bool,
     role_tag: u32,
     heartbeat_increment: u32,
     contract_flags: u32,
@@ -74,6 +73,7 @@ pub const ValidationError = error{
     InvalidLabelLength,
     InvalidEntryLength,
     InvalidPublisherLength,
+    InvalidReservedHeader,
     UnsupportedTypedAbiVersion,
 };
 
@@ -90,7 +90,6 @@ pub fn init(spec: InitSpec) InitError!Descriptor {
     descriptor.magic = MAGIC;
     descriptor.version = VERSION;
     descriptor.component_class = spec.component_class;
-    descriptor.signed = @intFromBool(spec.signed);
     descriptor.role_tag = spec.role_tag;
     descriptor.heartbeat_increment = spec.heartbeat_increment;
     descriptor.contract_flags = spec.contract_flags;
@@ -117,6 +116,7 @@ pub fn initComptime(comptime spec: InitSpec) Descriptor {
 pub fn validate(descriptor: *const Descriptor) ValidationError!void {
     if (descriptor.magic != MAGIC) return error.InvalidMagic;
     if (descriptor.version != VERSION) return error.UnsupportedVersion;
+    if (descriptor.header_reserved != 0) return error.InvalidReservedHeader;
     if (descriptor.bundle_id_len > descriptor.bundle_id.len) return error.InvalidBundleIdLength;
     if (descriptor.display_name_len > descriptor.display_name.len) return error.InvalidDisplayNameLength;
     if (descriptor.label_len > descriptor.label.len) return error.InvalidLabelLength;
@@ -128,7 +128,6 @@ pub fn validate(descriptor: *const Descriptor) ValidationError!void {
 test "descriptor init and validate preserve the embedded metadata" {
     const descriptor = try init(.{
         .component_class = 2,
-        .signed = true,
         .role_tag = 0xA101,
         .heartbeat_increment = 1,
         .contract_flags = 0x3,
@@ -140,6 +139,7 @@ test "descriptor init and validate preserve the embedded metadata" {
     });
 
     try validate(&descriptor);
+    try std.testing.expect(!@hasField(Descriptor, "signed"));
     try std.testing.expectEqual(@as(u8, 2), descriptor.component_class);
     try std.testing.expectEqual(@as(u32, 0xA101), descriptor.role_tag);
     try std.testing.expectEqual(@as(u32, 1), descriptor.heartbeat_increment);
@@ -151,6 +151,10 @@ test "descriptor init and validate preserve the embedded metadata" {
     try std.testing.expectEqualStrings("session-manager", descriptor.labelSlice());
     try std.testing.expectEqualStrings("zigos.session.manager", descriptor.entrySlice());
     try std.testing.expectEqualStrings("zigos.system", descriptor.publisherSlice());
+
+    var reserved_header = descriptor;
+    reserved_header.header_reserved = 1;
+    try std.testing.expectError(error.InvalidReservedHeader, validate(&reserved_header));
 }
 
 test "descriptor init rejects oversized identity strings instead of truncating" {
@@ -162,7 +166,6 @@ test "descriptor init rejects oversized identity strings instead of truncating" 
 
     const base = InitSpec{
         .component_class = 2,
-        .signed = true,
         .role_tag = 0xA101,
         .heartbeat_increment = 1,
         .contract_flags = 0x3,

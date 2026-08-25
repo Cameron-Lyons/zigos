@@ -171,7 +171,6 @@ fn addUserspaceCompile(
     options.addOption([]const u8, "entry", spec.entry);
     options.addOption([]const u8, "publisher", spec.publisher);
     options.addOption(u8, "component_class", @intFromEnum(spec.component_class));
-    options.addOption(bool, "signed", spec.signed);
     options.addOption(u32, "role_tag", spec.role_tag);
     options.addOption(u32, "heartbeat_increment", spec.heartbeat_increment);
     options.addOption(u32, "contract_flags", spec.contract_flags);

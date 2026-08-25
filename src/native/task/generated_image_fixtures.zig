@@ -19,7 +19,6 @@ pub const Error = task_runtime.Error || elf_image_inspector.Error || error{
     GeneratedImageMetadataMismatch,
     GeneratedImageMissing,
     GeneratedImageMissingBytes,
-    GeneratedImageUnsigned,
 };
 
 pub fn imageByBundleId(bundle_id: []const u8) Error!task_runtime.ExecutableImageSpec {
@@ -58,7 +57,6 @@ pub fn workspaceStorageImage() Error!task_runtime.ExecutableImageSpec {
 pub fn validateArtifact(artifact: anytype) Error!task_runtime.ExecutableImageSpec {
     const file = embedded_file.File.fromChunkedArtifact(artifact);
     if (!file.isPresent()) return error.GeneratedImageMissingBytes;
-    if (!artifact.signed) return error.GeneratedImageUnsigned;
     if (artifact.file_size_bytes != file.byte_len) return error.GeneratedImageLengthMismatch;
 
     const digest = file.sha256() orelse return error.GeneratedImageMissingBytes;
@@ -86,10 +84,6 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     missing_bytes.file_size_bytes = 0;
     missing_bytes.file_sha256 = [_]u8{0} ** 32;
     try std.testing.expectError(error.GeneratedImageMissingBytes, validateArtifact(missing_bytes));
-
-    var unsigned = archive_index.artifacts[0];
-    unsigned.signed = false;
-    try std.testing.expectError(error.GeneratedImageUnsigned, validateArtifact(unsigned));
 
     var digest_mismatch = archive_index.artifacts[0];
     digest_mismatch.file_sha256[0] ^= 0x5A;
