@@ -410,6 +410,7 @@ pub const indexed_hot_path_tables = .{
         .validates_terminal_stack_ranges_directly = syscall_dispatch.DIRECT_STACK_RANGE_VALIDATION,
         .avoids_rechecking_dispatched_syscall_headers = component_port.PREVALIDATED_SYSCALL_HEADER_RECHECKS == 0 and
             @hasDecl(component_port, "invokeGeneratedFromValidatedSyscall"),
+        .centralizes_attached_capability_validation = component_port.ATTACHED_CAPABILITY_PRECHECKS_PER_SEND == 0,
         .derives_kernel_operations_from_typed_methods = native_kernel.TYPED_METHOD_DERIVES_KERNEL_OPERATION and
             !@hasField(native_kernel.KernelCallContext, "operation") and
             @sizeOf(native_kernel.KernelCallContext) <= native_kernel.KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES,

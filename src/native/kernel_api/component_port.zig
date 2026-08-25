@@ -18,6 +18,7 @@ pub const Error = native_kernel.Error || error{
 };
 const TEST_PORT_TASK_BYTES: usize = 512;
 pub const PREVALIDATED_SYSCALL_HEADER_RECHECKS: u8 = 0;
+pub const ATTACHED_CAPABILITY_PRECHECKS_PER_SEND: u8 = 0;
 
 pub const TaskCreateRequest = struct {
     header: abi.RequestHeader,
@@ -217,7 +218,6 @@ pub const KernelPort = struct {
 
     pub fn endpointSend(self: *KernelPort, request: EndpointSendRequest, now_ticks: u64) Error!void {
         try self.validateIncomingHeader(request.header, .endpoint_send);
-        try validateOptionalCallerCapability(self, request.header, request.attached_capability_id, now_ticks);
         return self.kernel.endpointSend(
             callContext(request.header, request.endpoint_capability_id, .none),
             request.header.correlation_id,
@@ -587,27 +587,6 @@ fn callContext(
         .presented_capability_id = presented_capability_id,
         .target = target,
     };
-}
-
-fn validateCallerCapability(
-    self: *KernelPort,
-    header: abi.RequestHeader,
-    capability_id: u64,
-    now_ticks: u64,
-) Error!void {
-    if (header.subject_task_id == 0) return error.SubjectTaskRequired;
-    _ = try self.kernel.requireTaskCapability(header.subject_task_id, capability_id, now_ticks);
-}
-
-fn validateOptionalCallerCapability(
-    self: *KernelPort,
-    header: abi.RequestHeader,
-    capability_id: ?u64,
-    now_ticks: u64,
-) Error!void {
-    if (capability_id) |id| {
-        try validateCallerCapability(self, header, id, now_ticks);
-    }
 }
 
 test "kernel port generated wrappers cover operation metadata" {
