@@ -37,11 +37,12 @@ pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_OVERLAY_SESSIONS = overlay_model.MAX_OVERLAY_SESSIONS;
 pub const COMPACT_OVERLAY_SESSION_METADATA = overlay_model.COMPACT_OVERLAY_SESSION_METADATA;
 pub const OVERWRITES_REUSED_SESSION_SLOTS = overlay_model.OVERWRITES_REUSED_SESSION_SLOTS;
+pub const GENERATIONAL_OVERLAY_SESSION_IDS = overlay_model.GENERATIONAL_OVERLAY_SESSION_IDS;
 pub const OVERLAY_SESSION_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SIZE_CEILING_BYTES;
 pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES;
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
 pub const COMPACT_SERVICE_QUEUE_METADATA = true;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 89_760;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 88_800;
 pub const COMPACT_REPLICATION_SUMMARY_METADATA = state_support.COMPACT_REPLICATION_SUMMARY_METADATA;
 pub const REPLICATION_SUMMARY_SIZE_CEILING_BYTES = state_support.REPLICATION_SUMMARY_SIZE_CEILING_BYTES;
 pub const COMPACT_PEER_REPLICATION_RESULT_METADATA = replication_model.COMPACT_PEER_REPLICATION_RESULT_METADATA;
@@ -55,6 +56,7 @@ pub const OverlayRecord = state_support.OverlayRecord;
 pub const OverlaySessionUse = overlay_model.OverlaySessionUse;
 pub const OverlaySessionState = overlay_model.OverlaySessionState;
 pub const OverlaySession = overlay_model.OverlaySession;
+pub const OverlaySessionHandle = indexed_arena.GenerationalHandle("OverlaySessionHandle");
 pub const OverlayRelayFrameRequest = overlay_model.OverlayRelayFrameRequest;
 pub const OverlayRelayFrameResult = overlay_model.OverlayRelayFrameResult;
 pub const ReplicaEntry = state_support.ReplicaEntry;
@@ -185,9 +187,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
     return struct {
         const Self = @This();
         const MAX_SERVICE_OVERLAY_SESSIONS = config.max_overlay_sessions;
-        const OVERLAY_SESSION_INDEX_CAPACITY: usize = MAX_SERVICE_OVERLAY_SESSIONS * 2;
-        const OverlaySessionArena = indexed_arena.IndexedArenaWithKey(u64, OverlaySessionSlot, MAX_SERVICE_OVERLAY_SESSIONS, OVERLAY_SESSION_INDEX_CAPACITY, overlay_model.sessionSlotId);
-        const ClosedOverlaySessionIndex = indexed_arena.MultimapIndex(MAX_SERVICE_OVERLAY_SESSIONS, MAX_SERVICE_OVERLAY_SESSIONS, OVERLAY_SESSION_INDEX_CAPACITY);
+        const OVERLAY_SESSION_SECONDARY_INDEX_CAPACITY: usize = MAX_SERVICE_OVERLAY_SESSIONS * 2;
+        const OverlaySessionArena = indexed_arena.GenerationalArena("OverlaySessionHandle", OverlaySessionSlot, MAX_SERVICE_OVERLAY_SESSIONS);
+        const ClosedOverlaySessionIndex = indexed_arena.MultimapIndex(MAX_SERVICE_OVERLAY_SESSIONS, MAX_SERVICE_OVERLAY_SESSIONS, OVERLAY_SESSION_SECONDARY_INDEX_CAPACITY);
+        const OverlaySessionAllocation = struct {
+            slot: *OverlaySessionSlot,
+            session_id: u64,
+        };
 
         service_id: u64,
         task_id: u64,
@@ -217,7 +223,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         inbound_transport_frame_count: u8 = 0,
         next_outbound_transport_frame_slot_index: u8 = 0,
         next_inbound_transport_frame_slot_index: u8 = 0,
-        next_overlay_session_id: u64 = 1,
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
         closed_overlay_sessions: ClosedOverlaySessionIndex = ClosedOverlaySessionIndex.init(),
         active_overlay_session_count: u8 = 0,
@@ -576,7 +581,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         pub fn findOverlaySession(self: *Self, session_id: u64) ?*OverlaySession {
-            const slot = self.overlay_sessions.get(session_id) orelse return null;
+            const slot = self.overlay_sessions.getByHandle(.{ .value = session_id }) orelse return null;
+            if (slot.session.session_id != session_id) return null;
             return &slot.session;
         }
 
@@ -628,8 +634,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const relay_domain = if (transport == .relay_assisted) policy.relayDomainSlice() else "";
             if (transport == .relay_assisted) remote_access = true;
 
-            const session_id = self.nextOverlaySessionId();
-            const slot = self.allocateOverlaySessionSlot(session_id) orelse return error.OverlayTableFull;
+            const allocation = self.allocateOverlaySessionSlot() orelse return error.OverlayTableFull;
+            const session_id = allocation.session_id;
+            const slot = allocation.slot;
             slot.* = .{
                 .in_use = true,
                 .session = .{
@@ -664,9 +671,12 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         pub fn closeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {
-            const slot_index = self.overlay_sessions.slotIndexOf(session_id) orelse return error.OverlaySessionNotFound;
+            const handle = OverlaySessionHandle{ .value = session_id };
+            const slot = self.overlay_sessions.getByHandle(handle) orelse return error.OverlaySessionNotFound;
+            const slot_index = handle.slotIndex();
             if (slot_index >= MAX_SERVICE_OVERLAY_SESSIONS) native_util.impossibleByInvariant("overlay session primary index points outside slots");
-            const session = &self.overlay_sessions.slots[slot_index].session;
+            if (slot.session.session_id != session_id) return error.OverlaySessionNotFound;
+            const session = &slot.session;
             if (session.state == .closed) return false;
             if (session.state == .established and self.active_overlay_session_count != 0) {
                 self.active_overlay_session_count -= 1;
@@ -1212,21 +1222,25 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
         }
 
-        fn allocateOverlaySessionSlot(self: *Self, session_id: u64) ?*OverlaySessionSlot {
+        fn allocateOverlaySessionSlot(self: *Self) ?OverlaySessionAllocation {
             if (self.overlay_sessions.countInUse() < MAX_SERVICE_OVERLAY_SESSIONS) {
-                return self.overlay_sessions.reserveForOverwrite(session_id);
+                const handle = self.overlay_sessions.reserveHandleForOverwrite() orelse return null;
+                return .{
+                    .slot = self.overlay_sessions.getByHandle(handle) orelse native_util.impossibleByInvariant("reserved overlay session handle resolves its slot"),
+                    .session_id = handle.value,
+                };
             }
 
             const slot_index = self.closed_overlay_sessions.head(overlay_model.closed_session_key);
             if (slot_index == indexed_arena.no_index) return null;
             if (slot_index >= MAX_SERVICE_OVERLAY_SESSIONS) native_util.impossibleByInvariant("closed overlay session index points outside slots");
             _ = self.closed_overlay_sessions.remove(overlay_model.closed_session_key, slot_index);
-            return self.overlay_sessions.replaceAtIndexForOverwrite(session_id, slot_index);
-        }
-
-        fn nextOverlaySessionId(self: *Self) u64 {
-            defer self.next_overlay_session_id += 1;
-            return self.next_overlay_session_id;
+            const handle = self.overlay_sessions.replaceIndexForOverwrite(slot_index) orelse
+                native_util.impossibleByInvariant("closed overlay session index points at a live slot");
+            return .{
+                .slot = self.overlay_sessions.getByHandle(handle) orelse native_util.impossibleByInvariant("replacement overlay session handle resolves its slot"),
+                .session_id = handle.value,
+            };
         }
 
         pub fn recordConflict(

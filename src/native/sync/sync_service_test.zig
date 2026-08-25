@@ -1887,7 +1887,7 @@ test "overlay sessions cover sync remote access private service publishing and e
     try std.testing.expect(remote_session.relay_encrypted);
     try std.testing.expectEqualStrings("relay.zigos.dev", remote_session.relayDomainSlice());
     const remote_session_id = remote_session.session_id;
-    const remote_session_slot_index = service.overlay_sessions.slotIndexOf(remote_session_id).?;
+    const remote_session_slot_index = (sync_service.OverlaySessionHandle{ .value = remote_session_id }).slotIndex();
 
     const private_service = try service_port.openOverlaySession(
         service_authority,
@@ -2018,7 +2018,7 @@ test "overlay sessions cover sync remote access private service publishing and e
         null,
         30,
     );
-    const first_replacement_slot_index = service.overlay_sessions.slotIndexOf(first_replacement.session_id).?;
+    const first_replacement_slot_index = (sync_service.OverlaySessionHandle{ .value = first_replacement.session_id }).slotIndex();
     try std.testing.expectEqualStrings("", first_replacement.relayDomainSlice());
     try std.testing.expectEqualStrings("", first_replacement.privateServiceSlice());
     try std.testing.expect(!first_replacement.relay_encrypted);
@@ -2033,7 +2033,7 @@ test "overlay sessions cover sync remote access private service publishing and e
         null,
         31,
     );
-    const second_replacement_slot_index = service.overlay_sessions.slotIndexOf(second_replacement.session_id).?;
+    const second_replacement_slot_index = (sync_service.OverlaySessionHandle{ .value = second_replacement.session_id }).slotIndex();
     try std.testing.expectEqualStrings("", second_replacement.relayDomainSlice());
     try std.testing.expectEqualStrings("", second_replacement.privateServiceSlice());
     try std.testing.expect(!second_replacement.relay_encrypted);
@@ -2043,7 +2043,17 @@ test "overlay sessions cover sync remote access private service publishing and e
         remote_session_slot_index == first_replacement_slot_index or
             remote_session_slot_index == second_replacement_slot_index,
     );
+    const replacement_session_id = if (remote_session_slot_index == first_replacement_slot_index)
+        first_replacement.session_id
+    else
+        second_replacement.session_id;
+    const remote_handle = sync_service.OverlaySessionHandle{ .value = remote_session_id };
+    const replacement_handle = sync_service.OverlaySessionHandle{ .value = replacement_session_id };
+    try std.testing.expectEqual(remote_handle.slotIndex(), replacement_handle.slotIndex());
+    try std.testing.expect(!remote_handle.eql(replacement_handle));
     try std.testing.expect(service.findOverlaySession(remote_session_id) == null);
+    try std.testing.expectError(error.OverlaySessionNotFound, service_port.probeOverlaySession(service_authority, remote_session_id, 32));
+    try std.testing.expectError(error.OverlaySessionNotFound, service_port.closeOverlaySession(service_authority, remote_session_id, 33));
 }
 
 test "sync service overlay session capacity is configurable" {
@@ -2051,4 +2061,8 @@ test "sync service overlay session capacity is configurable" {
     const service = SmallService.init(1, 2, .{ .kind = .service, .serial = 3 });
 
     try std.testing.expectEqual(@as(usize, 2), service.overlaySessionCapacity());
+}
+
+test "sync service default state matches its exact size ceiling" {
+    try std.testing.expectEqual(@as(usize, sync_service.SERVICE_SIZE_CEILING_BYTES), @sizeOf(sync_service.Service));
 }
