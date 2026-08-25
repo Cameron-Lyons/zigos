@@ -634,7 +634,8 @@ pub const indexed_hot_path_tables = .{
             @FieldType(network_policy.PolicyRecord, "target_len") == u8,
         .keeps_policy_state_within_ceilings = @sizeOf(network_policy.PolicyRecord) <= network_policy.POLICY_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(network_policy.Directory) <= network_policy.DIRECTORY_SIZE_CEILING_BYTES,
-        .uses_policy_arena = @hasDecl(@FieldType(network_policy.Directory, "policies"), "reserve"),
+        .uses_dense_policy_ids = network_policy.DENSE_POLICY_IDS and
+            @hasDecl(@FieldType(network_policy.Directory, "policies"), "reserveIndex"),
     },
     .policy_object = .{
         .stores_compact_policy_metadata = policy_object.COMPACT_POLICY_METADATA and
