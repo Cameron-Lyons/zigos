@@ -543,11 +543,6 @@ pub fn validateMessage(
     {
         return error.UnsupportedInterfaceVersion;
     }
-    if (header.interface_major != interface.version_major or
-        header.interface_minor != interface.version_minor)
-    {
-        return error.UnsupportedInterfaceVersion;
-    }
     if (header.operation != @intFromEnum(operation_id)) return error.UnknownOperation;
     if (header.request_len != actual_request_len) return error.MalformedMessage;
     if (header.response_len != actual_response_len) return error.MalformedMessage;

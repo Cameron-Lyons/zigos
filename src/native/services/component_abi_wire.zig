@@ -1,19 +1,16 @@
 const crypto_hash = @import("../core/crypto_hash.zig");
 
 pub const MAGIC: u32 = 0x54434142;
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 pub const WireHeader = extern struct {
-    magic: u32 = MAGIC,
-    abi_version: u16 = VERSION,
-    interface_major: u16,
-    interface_minor: u16,
-    operation: u16,
-    flags: u16 = 0,
-    request_len: u32,
-    response_len: u32,
     correlation_id: u64,
     subject_task_id: u64,
+    magic: u32 = MAGIC,
+    request_len: u32,
+    response_len: u32,
+    abi_version: u16 = VERSION,
+    operation: u16,
 };
 
 pub const ServiceRegisterRequestWire = extern struct {
@@ -21,19 +18,15 @@ pub const ServiceRegisterRequestWire = extern struct {
     service_id: u64,
     owner_task_id: u64,
     endpoint_id: u64,
-    flags: u16,
     interface_id: u16,
-    interface_name_len: u16,
-    version_major: u16,
-    version_minor: u16,
+    flags: u16,
+    _reserved: u32 = 0,
 };
 
 pub const ServiceConnectionRequestWire = extern struct {
     header: WireHeader,
     interface_id: u16,
-    version_major: u16,
-    version_minor: u16,
-    _reserved: u16 = 0,
+    _reserved: [6]u8 = [_]u8{0} ** 6,
 };
 
 pub const TaskDescribeRequestWire = extern struct {

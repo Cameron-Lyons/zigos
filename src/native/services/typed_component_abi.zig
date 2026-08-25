@@ -274,6 +274,10 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expectEqual(@as(u16, 0x1A03), @intFromEnum(OperationId.personal_context_revoke));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionRequest), @sizeOf(Request(.service_connect)));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionResponse), @sizeOf(Response(.service_connect)));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(WireHeader));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(ServiceRegisterRequest));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceConnectionRequest));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(ServiceConnectionResponse));
     try std.testing.expectEqual(@sizeOf(NetworkOpenSessionRequest), @sizeOf(Request(.network_open_session)));
     try std.testing.expectEqual(@sizeOf(NetworkRecordTransferRequest), @sizeOf(Request(.network_record_transfer)));
     try std.testing.expect(@hasField(NetworkRecordTransferRequest, "expected_policy_id"));
@@ -449,8 +453,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const iface = Interface(.service_registry);
     var header = WireHeader{
-        .interface_major = iface.version_major,
-        .interface_minor = iface.version_minor,
         .operation = @intFromEnum(OperationId.service_connect),
         .request_len = @sizeOf(ServiceConnectionRequest),
         .response_len = @sizeOf(ServiceConnectionResponse),
@@ -464,15 +466,24 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         @sizeOf(ServiceConnectionRequest),
         @sizeOf(ServiceConnectionResponse),
     );
-    header.interface_minor += 1;
-    try std.testing.expectError(Error.UnsupportedInterfaceVersion, validateMessage(
+    header.abi_version = VERSION - 1;
+    try std.testing.expectError(Error.UnsupportedAbiVersion, validateMessage(
         iface,
         .service_connect,
         header,
         @sizeOf(ServiceConnectionRequest),
         @sizeOf(ServiceConnectionResponse),
     ));
-    header.interface_minor -= 1;
+    header.abi_version = VERSION;
+    var wrong_version = iface;
+    wrong_version.version_minor += 1;
+    try std.testing.expectError(Error.UnsupportedInterfaceVersion, validateMessage(
+        wrong_version,
+        .service_connect,
+        header,
+        @sizeOf(ServiceConnectionRequest),
+        @sizeOf(ServiceConnectionResponse),
+    ));
 
     header.magic = 0;
     try std.testing.expectError(Error.InvalidMagic, validateMessage(
@@ -503,8 +514,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const package_iface = Interface(.package_install);
     const package_header = WireHeader{
-        .interface_major = package_iface.version_major,
-        .interface_minor = package_iface.version_minor,
         .operation = @intFromEnum(OperationId.package_rollback),
         .request_len = @sizeOf(PackageRollbackRequest),
         .response_len = @sizeOf(PackageRollbackResponse),
@@ -521,8 +530,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const ai_iface = Interface(.ai_inference);
     const ai_header = WireHeader{
-        .interface_major = ai_iface.version_major,
-        .interface_minor = ai_iface.version_minor,
         .operation = @intFromEnum(OperationId.ai_run_local),
         .request_len = @sizeOf(AiRunLocalRequest),
         .response_len = @sizeOf(AiRunLocalResponse),
@@ -539,8 +546,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const privacy_iface = Interface(.privacy_budget);
     const privacy_header = WireHeader{
-        .interface_major = privacy_iface.version_major,
-        .interface_minor = privacy_iface.version_minor,
         .operation = @intFromEnum(OperationId.privacy_authorize_egress),
         .request_len = @sizeOf(PrivacyAuthorizeEgressRequest),
         .response_len = @sizeOf(PrivacyAuthorizeEgressResponse),
@@ -557,8 +562,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const network_iface = Interface(.network_policy);
     const network_header = WireHeader{
-        .interface_major = network_iface.version_major,
-        .interface_minor = network_iface.version_minor,
         .operation = @intFromEnum(OperationId.network_open_session),
         .request_len = @sizeOf(NetworkOpenSessionRequest),
         .response_len = @sizeOf(NetworkSessionResponse),
@@ -575,8 +578,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const diagnostics_iface = Interface(.diagnostics_export);
     const diagnostics_header = WireHeader{
-        .interface_major = diagnostics_iface.version_major,
-        .interface_minor = diagnostics_iface.version_minor,
         .operation = @intFromEnum(OperationId.diagnostics_share_remote),
         .request_len = @sizeOf(DiagnosticsShareRemoteRequest),
         .response_len = @sizeOf(DiagnosticsShareRemoteResponse),
@@ -593,8 +594,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const consent_iface = Interface(.consent_receipts);
     const consent_header = WireHeader{
-        .interface_major = consent_iface.version_major,
-        .interface_minor = consent_iface.version_minor,
         .operation = @intFromEnum(OperationId.consent_record),
         .request_len = @sizeOf(ConsentRecordRequest),
         .response_len = @sizeOf(ConsentRecordResponse),
@@ -611,8 +610,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const lease_iface = Interface(.permission_lease);
     const lease_header = WireHeader{
-        .interface_major = lease_iface.version_major,
-        .interface_minor = lease_iface.version_minor,
         .operation = @intFromEnum(OperationId.permission_lease_expire),
         .request_len = @sizeOf(PermissionLeaseExpireRequest),
         .response_len = @sizeOf(PermissionLeaseExpireResponse),
@@ -629,8 +626,6 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const identity_iface = Interface(.identity_session);
     const identity_header = WireHeader{
-        .interface_major = identity_iface.version_major,
-        .interface_minor = identity_iface.version_minor,
         .operation = @intFromEnum(OperationId.identity_session_authorize),
         .request_len = @sizeOf(IdentitySessionAuthorizeRequest),
         .response_len = @sizeOf(IdentitySessionAuthorizeResponse),

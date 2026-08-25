@@ -235,9 +235,8 @@ pub const ServiceConnectionDescriptor = extern struct {
     endpoint_id: u64,
     endpoint_capability_id: u64,
     interface_id: u16,
-    version_major: u16,
-    version_minor: u16,
     flags: u16,
+    _reserved: u32 = 0,
 };
 
 pub const MMIO_WINDOW_FLAG_WRITABLE: u16 = 1 << 0;

@@ -65,11 +65,8 @@ pub fn header(
     correlation_id: u64,
     subject_task_id: u64,
 ) Error!WireHeader {
-    const iface = typed_component_abi.Interface(key);
     const op = try operation(key, operation_id);
     return .{
-        .interface_major = iface.version_major,
-        .interface_minor = iface.version_minor,
         .operation = @intFromEnum(operation_id),
         .request_len = op.request_size,
         .response_len = op.response_size,
