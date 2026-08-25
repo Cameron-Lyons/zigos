@@ -1,12 +1,14 @@
 const console = @import("console.zig");
 const panic_utils = @import("panic.zig");
 
-const MAX_ENV_VARS = 64;
+pub const MAX_ENV_VARS = 16;
 const MAX_VAR_NAME_LEN = 64;
 const MAX_VAR_VALUE_LEN = 256;
+const DEFAULT_ENV_VAR_COUNT = 5;
 
 pub const MAX_EXPORT_ENTRIES = MAX_ENV_VARS;
 pub const MAX_EXPORT_ENTRY_LEN = MAX_VAR_NAME_LEN + 1 + MAX_VAR_VALUE_LEN;
+pub const ENVIRONMENT_STORAGE_SIZE_CEILING_BYTES = 6 * 1024;
 
 pub const EnvVar = struct {
     name: [MAX_VAR_NAME_LEN]u8,
@@ -15,7 +17,23 @@ pub const EnvVar = struct {
     value_len: usize,
 };
 
-var env_vars: [MAX_ENV_VARS]EnvVar = undefined;
+const empty_env_var = EnvVar{
+    .name = [_]u8{0} ** MAX_VAR_NAME_LEN,
+    .value = [_]u8{0} ** MAX_VAR_VALUE_LEN,
+    .name_len = 0,
+    .value_len = 0,
+};
+
+comptime {
+    if (MAX_ENV_VARS < DEFAULT_ENV_VAR_COUNT) {
+        @compileError("kernel environment capacity must cover every default variable");
+    }
+    if (@sizeOf(EnvVar) * MAX_ENV_VARS > ENVIRONMENT_STORAGE_SIZE_CEILING_BYTES) {
+        @compileError("kernel environment storage exceeds its compact layout ceiling");
+    }
+}
+
+var env_vars: [MAX_ENV_VARS]EnvVar = [_]EnvVar{empty_env_var} ** MAX_ENV_VARS;
 var env_count: usize = 0;
 var initialized: bool = false;
 
@@ -23,13 +41,6 @@ pub fn init() void {
     if (initialized) return;
 
     env_count = 0;
-    for (&env_vars) |*var_entry| {
-        var_entry.name = [_]u8{0} ** MAX_VAR_NAME_LEN;
-        var_entry.value = [_]u8{0} ** MAX_VAR_VALUE_LEN;
-        var_entry.name_len = 0;
-        var_entry.value_len = 0;
-    }
-
     initialized = true;
 
     setDefaultVar("PATH", "/bin:/usr/bin:/mnt/bin");
