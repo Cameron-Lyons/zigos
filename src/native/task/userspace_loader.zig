@@ -9,6 +9,7 @@ const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
+const task_runtime_launch = @import("task_runtime_launch.zig");
 const units = @import("../core/units.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
@@ -229,6 +230,24 @@ pub const Catalog = struct {
         embedded_info: EmbeddedElfInfo,
     ) Error!*const ImageRecord {
         try validateEmbeddedElfInfo(request.elf_file, embedded_info);
+        return self.registerValidatedEmbeddedArtifact(request, embedded_info.executable_image);
+    }
+
+    /// Registers build-inspected archive metadata after rechecking bytes, digest, and launch contract.
+    pub fn registerBuildValidatedArtifact(
+        self: *Catalog,
+        request: EmbeddedImageRegisterRequest,
+        executable_image: task_runtime.ExecutableImageSpec,
+    ) Error!*const ImageRecord {
+        try validateBuildValidatedImage(request.elf_file, executable_image);
+        return self.registerValidatedEmbeddedArtifact(request, executable_image);
+    }
+
+    fn registerValidatedEmbeddedArtifact(
+        self: *Catalog,
+        request: EmbeddedImageRegisterRequest,
+        executable_image: task_runtime.ExecutableImageSpec,
+    ) Error!*const ImageRecord {
         return self.registerWithEmbeddedElf(.{
             .bundle = request.bundle,
             .component_class = request.component_class,
@@ -236,7 +255,7 @@ pub const Catalog = struct {
             .role_tag = request.role_tag,
             .heartbeat_increment = request.heartbeat_increment,
             .contract_flags = request.contract_flags,
-        }, embedded_info, request.elf_file);
+        }, executable_image, request.elf_file);
     }
 
     pub fn findByBundleId(self: *Catalog, bundle_id: []const u8) ?*const ImageRecord {
@@ -291,7 +310,7 @@ pub const Catalog = struct {
     fn registerWithEmbeddedElf(
         self: *Catalog,
         request: ImageRegisterRequest,
-        embedded: ?EmbeddedElfInfo,
+        embedded: ?task_runtime.ExecutableImageSpec,
         elf_file: embedded_file.File,
     ) Error!*const ImageRecord {
         try manifest.validate(request.bundle);
@@ -306,10 +325,9 @@ pub const Catalog = struct {
             return existing;
         }
 
-        const embedded_info = embedded orelse return error.EmbeddedArtifactRequired;
+        const executable_image = embedded orelse return error.EmbeddedArtifactRequired;
         const image_id = self.nextReservableImageId() orelse return error.ImageTableFull;
         var image = zeroImage();
-        const executable_image = embedded_info.executable_image;
         image.id = image_id;
         image.component_class = request.component_class;
         image.component_abi_version = componentAbiVersion(request.initial_component.substrate);
@@ -322,7 +340,7 @@ pub const Catalog = struct {
         image.entry_point = executable_image.entry_point;
         image.loadable_segment_count = @intCast(executable_image.segment_count);
         image.byte_len = executable_image.file_size_bytes;
-        image.bootstrap_mailbox_address = embedded_info.bootstrap_mailbox_address;
+        image.bootstrap_mailbox_address = executable_image.bootstrap_mailbox_address;
         image.file_sha256 = executable_image.file_sha256;
         image.executable_image = executable_image;
         image.elf_file = elf_file;
@@ -482,15 +500,14 @@ fn zeroImage() ImageRecord {
 fn imageMatchesRequest(
     existing: *const ImageRecord,
     request: ImageRegisterRequest,
-    embedded: ?EmbeddedElfInfo,
+    embedded: ?task_runtime.ExecutableImageSpec,
 ) bool {
-    const embedded_info = embedded orelse return false;
+    const expected_image = embedded orelse return false;
     const expected_source: ArtifactSource = .embedded_elf;
-    const expected_image = embedded_info.executable_image;
     const expected_entry_point: u64 = expected_image.entry_point;
     const expected_segment_count: u16 = @intCast(expected_image.segment_count);
     const expected_byte_len: usize = expected_image.file_size_bytes;
-    const expected_bootstrap_mailbox_address: u64 = embedded_info.bootstrap_mailbox_address;
+    const expected_bootstrap_mailbox_address: u64 = expected_image.bootstrap_mailbox_address;
     const expected_hash = expected_image.file_sha256;
 
     return existing.component_class == request.component_class and
@@ -525,6 +542,25 @@ fn validateEmbeddedElfInfo(
     if (!inspected.executable_image.eql(&embedded_info.executable_image)) {
         return error.EmbeddedArtifactMetadataMismatch;
     }
+}
+
+fn validateBuildValidatedImage(
+    elf_file: embedded_file.File,
+    executable_image: task_runtime.ExecutableImageSpec,
+) Error!void {
+    if (!elf_file.isPresent() or elf_file.byte_len != executable_image.file_size_bytes) {
+        return error.EmbeddedArtifactMetadataMismatch;
+    }
+
+    const digest = elf_file.sha256() orelse return error.EmbeddedArtifactMetadataMismatch;
+    if (!std.mem.eql(u8, &digest, &executable_image.file_sha256)) {
+        return error.EmbeddedArtifactMetadataMismatch;
+    }
+    _ = try task_runtime_launch.validateUserspaceImage(
+        Error,
+        task_runtime.MAX_EXECUTABLE_SEGMENTS,
+        executable_image,
+    );
 }
 
 fn componentAbiVersion(substrate: task_runtime.ExecutionSubstrate) u16 {
@@ -1016,6 +1052,8 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
 
     var valid_catalog = Catalog.init();
     _ = try valid_catalog.registerEmbeddedArtifactWithInfo(request, valid_info);
+    var generated_catalog = Catalog.init();
+    _ = try generated_catalog.registerBuildValidatedArtifact(request, valid_info.executable_image);
 
     var stale_digest = valid_info;
     stale_digest.file_sha256[0] = stale_digest.file_sha256[0] ^ 0x5A;
@@ -1024,6 +1062,13 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
         error.EmbeddedArtifactMetadataMismatch,
         digest_catalog.registerEmbeddedArtifactWithInfo(request, stale_digest),
     );
+    var stale_build_digest = valid_info.executable_image;
+    stale_build_digest.file_sha256[0] ^= 0x5A;
+    var generated_digest_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.EmbeddedArtifactMetadataMismatch,
+        generated_digest_catalog.registerBuildValidatedArtifact(request, stale_build_digest),
+    );
 
     var stale_entry = valid_info;
     stale_entry.entry_point += SYNTHETIC_ELF_SEGMENT_ALIGNMENT;
@@ -1031,6 +1076,13 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
     try std.testing.expectError(
         error.EmbeddedArtifactMetadataMismatch,
         entry_catalog.registerEmbeddedArtifactWithInfo(request, stale_entry),
+    );
+    var stale_build_entry = valid_info.executable_image;
+    stale_build_entry.entry_point += SYNTHETIC_ELF_SEGMENT_ALIGNMENT;
+    var generated_entry_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.InvalidUserspaceImage,
+        generated_entry_catalog.registerBuildValidatedArtifact(request, stale_build_entry),
     );
 
     var stale_segment = valid_info;
@@ -1041,12 +1093,25 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
         segment_catalog.registerEmbeddedArtifactWithInfo(request, stale_segment),
     );
 
+    var invalid_generated_segment = valid_info;
+    invalid_generated_segment.executable_image.segments[0].file_offset = std.math.maxInt(u32);
+    var generated_segment_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.InvalidUserspaceImage,
+        generated_segment_catalog.registerBuildValidatedArtifact(request, invalid_generated_segment.executable_image),
+    );
+
     var missing_bytes_request = request;
     missing_bytes_request.elf_file = .{};
     var missing_catalog = Catalog.init();
     try std.testing.expectError(
         error.InvalidElfHeader,
         missing_catalog.registerEmbeddedArtifactWithInfo(missing_bytes_request, valid_info),
+    );
+    var generated_missing_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.EmbeddedArtifactMetadataMismatch,
+        generated_missing_catalog.registerBuildValidatedArtifact(missing_bytes_request, valid_info.executable_image),
     );
 
     var malformed_bytes = bytes;
@@ -1057,6 +1122,11 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
     try std.testing.expectError(
         error.InvalidElfMagic,
         malformed_catalog.registerEmbeddedArtifactWithInfo(malformed_request, valid_info),
+    );
+    var generated_malformed_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.EmbeddedArtifactMetadataMismatch,
+        generated_malformed_catalog.registerBuildValidatedArtifact(malformed_request, valid_info.executable_image),
     );
 }
 
