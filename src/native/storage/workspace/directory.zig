@@ -427,6 +427,43 @@ pub const WorkspaceRecord = struct {
         if (self.oldest_snapshot_generation == NO_SNAPSHOT_GENERATION) return null;
         return self.oldest_snapshot_generation;
     }
+
+    pub fn findShareGrant(self: *const WorkspaceRecord, principal_id: principal.PrincipalId) ?ShareGrant {
+        const grant_index = findShareGrantIndex(self, principal_id) orelse return null;
+        return self.share_table.share_grants[grant_index];
+    }
+
+    pub fn hasAccess(self: *const WorkspaceRecord, request: AccessRequest) bool {
+        if (self.owner.eql(request.principal_id)) return true;
+
+        const grant = self.findShareGrant(request.principal_id) orelse return false;
+        if (!grant.isActive(request.now_ticks)) return false;
+        if (!grant.allowsNetworkScope(request.network_scope)) return false;
+        if (!grant.allowsObject(request.object_id, request.path)) return false;
+        if (request.wants_admin and !grant.can_admin) return false;
+        if (request.wants_write and !grant.can_write) return false;
+        if (request.wants_export and !grant.can_export) return false;
+        if (!request.wants_write and !request.wants_admin and !grant.can_read) return false;
+        return true;
+    }
+
+    pub fn hasAnyAccess(self: *const WorkspaceRecord, request: AccessRequest) bool {
+        if (self.owner.eql(request.principal_id)) return true;
+
+        const grant = self.findShareGrant(request.principal_id) orelse return false;
+        if (!grant.isActive(request.now_ticks)) return false;
+        if (!grant.allowsNetworkScope(request.network_scope)) return false;
+        if (request.wants_admin and !grant.can_admin) return false;
+        if (request.wants_write and !grant.can_write) return false;
+        if (request.wants_export and !grant.can_export) return false;
+        if (!request.wants_write and !request.wants_admin and !grant.can_read) return false;
+        return true;
+    }
+
+    pub fn resolveBorrowedWithPathHash(self: *const WorkspaceRecord, path: []const u8, path_hash: u64) Error!*const Entry {
+        const index = findWorkspaceEntryIndexWithPathHash(self, path, path_hash) orelse return error.EntryNotFound;
+        return &self.path_index.entries[index];
+    }
 };
 
 pub const Error = error{
@@ -801,37 +838,17 @@ pub const Directory = struct {
         principal_id: principal.PrincipalId,
     ) ?ShareGrant {
         const workspace = self.lookupConst(workspace_id) orelse return null;
-        const grant_index = findShareGrantIndex(workspace, principal_id) orelse return null;
-        return workspace.share_table.share_grants[grant_index];
+        return workspace.findShareGrant(principal_id);
     }
 
     pub fn hasAccess(self: *const Directory, workspace_id: ids.WorkspaceId, request: AccessRequest) bool {
         const workspace = self.lookupConst(workspace_id) orelse return false;
-        if (workspace.owner.eql(request.principal_id)) return true;
-
-        const grant = self.findShareGrant(workspace_id, request.principal_id) orelse return false;
-        if (!grant.isActive(request.now_ticks)) return false;
-        if (!grant.allowsNetworkScope(request.network_scope)) return false;
-        if (!grant.allowsObject(request.object_id, request.path)) return false;
-        if (request.wants_admin and !grant.can_admin) return false;
-        if (request.wants_write and !grant.can_write) return false;
-        if (request.wants_export and !grant.can_export) return false;
-        if (!request.wants_write and !request.wants_admin and !grant.can_read) return false;
-        return true;
+        return workspace.hasAccess(request);
     }
 
     pub fn hasAnyAccess(self: *const Directory, workspace_id: ids.WorkspaceId, request: AccessRequest) bool {
         const workspace = self.lookupConst(workspace_id) orelse return false;
-        if (workspace.owner.eql(request.principal_id)) return true;
-
-        const grant = self.findShareGrant(workspace_id, request.principal_id) orelse return false;
-        if (!grant.isActive(request.now_ticks)) return false;
-        if (!grant.allowsNetworkScope(request.network_scope)) return false;
-        if (request.wants_admin and !grant.can_admin) return false;
-        if (request.wants_write and !grant.can_write) return false;
-        if (request.wants_export and !grant.can_export) return false;
-        if (!request.wants_write and !request.wants_admin and !grant.can_read) return false;
-        return true;
+        return workspace.hasAnyAccess(request);
     }
 
     pub fn canReshare(
@@ -864,8 +881,7 @@ pub const Directory = struct {
 
     pub fn resolveBorrowedWithPathHash(self: *const Directory, workspace_id: ids.WorkspaceId, path: []const u8, path_hash: u64) Error!*const Entry {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
-        const index = findWorkspaceEntryIndexWithPathHash(workspace, path, path_hash) orelse return error.EntryNotFound;
-        return &workspace.path_index.entries[index];
+        return workspace.resolveBorrowedWithPathHash(path, path_hash);
     }
 
     pub fn resolveObject(self: *const Directory, workspace_id: ids.WorkspaceId, object_id: ids.ObjectId) Error!Entry {

@@ -770,8 +770,8 @@ pub const StoragePort = struct {
         const record = self.core.findWorkspaceRecordConst(workspace_id) orelse return error.WorkspaceNotFound;
         if (record.owner.eql(authority.principal)) return null;
 
-        const entry = try self.core.resolveBorrowedWithPathHash(workspace_id, path.bytes, path.hash);
-        if (!self.core.workspaceHasAccess(workspace_id, .{
+        const entry = try record.resolveBorrowedWithPathHash(path.bytes, path.hash);
+        if (!record.hasAccess(.{
             .principal_id = authority.principal,
             .object_id = entry.object_id,
             .path = entry.pathSlice(),

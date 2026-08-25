@@ -1034,6 +1034,8 @@ pub const indexed_hot_path_tables = .{
         .supports_indexed_path_lookup = @hasField(workspace.WorkspacePathIndex, "path_slots"),
         .uses_compact_entry_slot_indexes = @sizeOf(workspace.WorkspaceEntrySlotIndex) == 1,
         .supports_borrowed_path_lookup = @hasDecl(workspace.Directory, "resolveBorrowed"),
+        .resolves_shared_paths_from_one_workspace_record = @hasDecl(workspace.WorkspaceRecord, "resolveBorrowedWithPathHash") and
+            @hasDecl(workspace.WorkspaceRecord, "hasAccess"),
         .supports_indexed_object_lookup = @hasField(workspace.WorkspacePathIndex, "object_slots"),
         .supports_indexed_snapshot_lookup = @hasDecl(workspace.Directory, "findSnapshotConst"),
         .tracks_workspace_count = @hasDecl(workspace.Directory, "workspaceCount"),
