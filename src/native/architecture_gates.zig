@@ -18,6 +18,7 @@ const userspace_scheduler = @import("task/userspace_scheduler.zig");
 const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
 const task_runtime = @import("task/task_runtime.zig");
+const syscall_dispatch = @import("kernel_api/syscall_dispatch.zig");
 const debug_contract = @import("security/debug_contract.zig");
 const accelerator_scheduler = @import("task/accelerator_scheduler.zig");
 const background_dispatch = @import("task/background_dispatch.zig");
@@ -402,6 +403,8 @@ pub const indexed_hot_path_tables = .{
         .removes_retired_capability_attachments = @hasDecl(task_runtime.Runtime, "revokeCapabilityEverywhere"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
         .reuses_live_snapshot_cold_backing = task_runtime.SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING,
+        .validates_ordered_address_space_ranges_in_one_pass = task_runtime.ORDERED_EXECUTABLE_SEGMENTS and
+            syscall_dispatch.SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION,
     },
     .debug_contract = .{
         .stores_compact_contract_text_lengths = debug_contract.COMPACT_DEBUG_TEXT_METADATA and

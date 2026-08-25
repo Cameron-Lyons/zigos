@@ -16,6 +16,7 @@ else
 
 const USER_POINTER_FLOOR: usize = 0x10000;
 const USER_POINTER_CEILING_32: usize = 0xC0000000;
+pub const SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION = true;
 
 pub const DispatchResult = struct {
     status: abi.SyscallStatus,
@@ -113,23 +114,23 @@ pub fn validateAddressSpaceRange(
     end_exclusive: usize,
     access: UserMemoryAccess,
 ) bool {
-    if (address_space.region_count == 0) return false;
+    if (address_space.region_count == 0 or address_space.region_count > address_space.regions.len) return false;
 
     var covered_until = addr;
-    while (covered_until < end_exclusive) {
-        var advanced = false;
-        for (address_space.regions[0..address_space.region_count]) |region| {
-            const region_start = std.math.cast(usize, region.virtual_address) orelse continue;
-            const region_end = std.math.add(usize, region_start, @as(usize, region.size_bytes)) catch continue;
-            if (covered_until < region_start or covered_until >= region_end) continue;
-            if (!regionAllows(region.access, access)) return false;
-            covered_until = @min(end_exclusive, region_end);
-            advanced = true;
-            break;
-        }
-        if (!advanced) return false;
+    var previous_region_end: usize = 0;
+    for (address_space.regions[0..address_space.region_count]) |region| {
+        const region_start = std.math.cast(usize, region.virtual_address) orelse return false;
+        const region_end = std.math.add(usize, region_start, @as(usize, region.size_bytes)) catch return false;
+        if (region_end <= region_start or region_start < previous_region_end) return false;
+        previous_region_end = region_end;
+
+        if (region_end <= covered_until) continue;
+        if (region_start > covered_until) return false;
+        if (!regionAllows(region.access, access)) return false;
+        covered_until = @min(end_exclusive, region_end);
+        if (covered_until == end_exclusive) return true;
     }
-    return true;
+    return false;
 }
 
 pub fn writeResponse(memory: UserMemoryContext, response_addr: usize, response_len: usize, value: anytype) DispatchResult {
