@@ -253,33 +253,50 @@ fn interruptVector(regs: *const Registers) usize {
 
 pub fn haltUnhandledException(regs: *const Registers) noreturn {
     const vector = interruptVector(regs);
-    console.print("Received interrupt: ");
+    @call(.never_inline, console.print, .{"Received interrupt: "});
     if (vector < EXCEPTION_VECTOR_COUNT) {
-        console.print(exception_messages[vector]);
+        @call(.never_inline, console.print, .{exception_messages[vector]});
     } else {
-        console.print("Unknown Interrupt");
+        @call(.never_inline, console.print, .{"Unknown Interrupt"});
     }
-    console.print("\n");
-    console.print("Exception context: vector=0x");
-    numfmt.printHex(vector);
-    console.print(" error=0x");
-    numfmt.printHex(regs.err_code);
-    console.print(" rip=0x");
-    numfmt.printHex(regs.eip);
-    console.print(" cs=0x");
-    numfmt.printHex(regs.cs);
-    console.print(" rflags=0x");
-    numfmt.printHex(regs.eflags);
+    @call(.never_inline, console.print, .{"\nException context: vector=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, vector)});
+    @call(.never_inline, console.print, .{" error=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.err_code)});
+    @call(.never_inline, console.print, .{" rip=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.eip)});
+    @call(.never_inline, console.print, .{" cs=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.cs)});
+    @call(.never_inline, console.print, .{" rflags=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.eflags)});
     if (frameOriginatesFromUserspace(regs.cs)) {
-        console.print(" rsp=0x");
-        numfmt.printHex(regs.useresp);
-        console.print(" ss=0x");
-        numfmt.printHex(regs.ss);
+        @call(.never_inline, console.print, .{" rsp=0x"});
+        @call(.never_inline, numfmt.printHex, .{@as(u64, regs.useresp)});
+        @call(.never_inline, console.print, .{" ss=0x"});
+        @call(.never_inline, numfmt.printHex, .{@as(u64, regs.ss)});
     }
-    console.print("\nSystem Halted!\n");
+    @call(.never_inline, console.print, .{"\nSystem Halted!\n"});
     while (true) {
         asm volatile ("hlt");
     }
+}
+
+pub fn reportInvalidInterruptReturn(regs: *const Registers) void {
+    @call(.never_inline, console.print, .{"Rejected interrupt return: rip=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.eip)});
+    @call(.never_inline, console.print, .{" cs=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.cs)});
+    @call(.never_inline, console.print, .{" rflags=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.eflags)});
+    @call(.never_inline, console.print, .{" rsp=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.useresp)});
+    @call(.never_inline, console.print, .{" ss=0x"});
+    @call(.never_inline, numfmt.printHex, .{@as(u64, regs.ss)});
+    @call(.never_inline, console.print, .{" user_data=0x"});
+    @call(.never_inline, numfmt.printHex, .{gdt.userDataDescriptor()});
+    @call(.never_inline, console.print, .{" user_code=0x"});
+    @call(.never_inline, numfmt.printHex, .{gdt.userCodeDescriptor()});
+    @call(.never_inline, console.print, .{"\n"});
 }
 
 fn frameOriginatesFromUserspace(code_selector: usize) bool {
