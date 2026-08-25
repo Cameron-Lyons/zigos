@@ -65,8 +65,8 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
         const artifact = generatedArtifactFor(spec.bundle_id) orelse return error.GeneratedArtifactMissing;
         try validateGeneratedArtifactMatchesSpec(&spec, artifact);
         const bundle = try bundleForSpec(&spec);
-        const embedded_info = try embeddedElfInfoFromArtifact(artifact);
-        _ = catalog.registerEmbeddedArtifactWithInfo(.{
+        const executable_image = try executableImageFromArtifact(artifact);
+        _ = catalog.registerBuildValidatedArtifact(.{
             .bundle = bundle,
             .component_class = componentClassForSpec(&spec),
             .initial_component = initialComponentForSpec(&spec),
@@ -74,7 +74,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
             .heartbeat_increment = spec.heartbeat_increment,
             .contract_flags = spec.contract_flags,
             .elf_file = embedded_file.File.fromChunkedArtifact(artifact),
-        }, embedded_info) catch |err| {
+        }, executable_image) catch |err| {
             console.print("ZIGOS:USERSPACE:ARTIFACT:FAIL ");
             console.print(artifact.bundle_id);
             console.print("\n");
@@ -154,20 +154,6 @@ fn componentClassForSpec(spec: *const role_registry.ImageSpec) task_runtime.Comp
     };
 }
 
-fn embeddedElfInfoFromArtifact(artifact: anytype) Error!userspace_loader.EmbeddedElfInfo {
-    if (artifact.segment_count > task_runtime.MAX_EXECUTABLE_SEGMENTS) {
-        return error.GeneratedArtifactSegmentCountInvalid;
-    }
-    return .{
-        .entry_point = artifact.entry_point,
-        .loadable_segment_count = @intCast(artifact.segment_count),
-        .byte_len = artifact.file_size_bytes,
-        .bootstrap_mailbox_address = artifact.bootstrap_mailbox_address,
-        .file_sha256 = artifact.file_sha256,
-        .executable_image = try executableImageFromArtifact(artifact),
-    };
-}
-
 fn executableImageFromArtifact(artifact: anytype) Error!task_runtime.ExecutableImageSpec {
     if (artifact.segment_count > task_runtime.MAX_EXECUTABLE_SEGMENTS) {
         return error.GeneratedArtifactSegmentCountInvalid;
@@ -233,7 +219,7 @@ test "boot registry rejects generated archive records that diverge from registry
     const spec = find(archive_index.artifacts[0].bundle_id) orelse return error.UnknownBundleId;
 
     try validateGeneratedArtifactMatchesSpec(spec, archive_index.artifacts[0]);
-    _ = try embeddedElfInfoFromArtifact(archive_index.artifacts[0]);
+    _ = try executableImageFromArtifact(archive_index.artifacts[0]);
 
     var stale_bundle_id = archive_index.artifacts[0];
     stale_bundle_id.bundle_id = "zigos.system.stale-generated-record";
@@ -278,6 +264,6 @@ test "boot registry rejects generated archive records that diverge from registry
     );
     try std.testing.expectError(
         error.GeneratedArtifactSegmentCountInvalid,
-        embeddedElfInfoFromArtifact(too_many_segments),
+        executableImageFromArtifact(too_many_segments),
     );
 }

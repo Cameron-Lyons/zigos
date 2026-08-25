@@ -3524,7 +3524,7 @@ fn validateNativeOnlyLaunchTrack(
         "GeneratedArtifactMissing",
         "validateGeneratedArchiveHasOnlyRegisteredSpecs",
         "generatedArtifactFor(spec.bundle_id) orelse return error.GeneratedArtifactMissing",
-        "catalog.registerEmbeddedArtifactWithInfo",
+        "catalog.registerBuildValidatedArtifact",
         "try std.testing.expect(catalog.findByBundleId(\"zigos.system.session-manager\").?.embedsElf())",
     };
     for (required_boot_registry_snippets) |snippet| {
@@ -3546,7 +3546,10 @@ fn validateNativeOnlyLaunchTrack(
     }
 
     const required_loader_snippets = [_][]const u8{
-        "const embedded_info = embedded orelse return error.EmbeddedArtifactRequired",
+        "const executable_image = embedded orelse return error.EmbeddedArtifactRequired",
+        "try validateBuildValidatedImage(request.elf_file, executable_image)",
+        "const digest = elf_file.sha256()",
+        "task_runtime_launch.validateUserspaceImage",
         "if (!has_embedded_artifact) {",
         "test \"catalog rejects metadata-only executable registration\"",
     };
