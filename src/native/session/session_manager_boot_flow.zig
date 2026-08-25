@@ -47,6 +47,7 @@ pub const Environment = session_support.Environment;
 pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = session_contexts.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 pub const BOOTSTRAP_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const UI_AUTHORITY_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
@@ -297,27 +298,30 @@ pub const SessionManager = struct {
 
     pub fn focusedInputCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         const task = self.runtimePtr().find(task_id) orelse return null;
+        return self.focusedInputCapabilityForResolvedTask(task, now_ticks);
+    }
+
+    fn focusedInputCapabilityForResolvedTask(self: *SessionManager, task: *const task_runtime.TaskRecord, now_ticks: u64) ?u64 {
         for (task.capabilityIds()) |capability_id| {
             const granted = self.capabilityTablePtr().requireUsable(capability_id, now_ticks) catch continue;
-            if (granted.target.kind != .task or granted.target.id != task_id) continue;
-            if (granted.scope.task_id != task_id or !granted.rights.has(.input_recv)) continue;
+            if (granted.target.kind != .task or granted.target.id != task.id) continue;
+            if (granted.scope.task_id != task.id or !granted.rights.has(.input_recv)) continue;
             return capability_id;
         }
         return null;
     }
 
     fn ensureFocusedInputCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
-        if (self.focusedInputCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
-        const runtime = self.runtimePtr();
-        const task = runtime.find(task_id) orelse return null;
+        const task = self.runtimePtr().find(task_id) orelse return null;
+        if (self.focusedInputCapabilityForResolvedTask(task, now_ticks)) |capability_id| return capability_id;
         if (self.compositor_broker_service_id == 0) return null;
         const granted = self.capabilityTablePtr().mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
-            .target = .{ .kind = .task, .id = task_id },
+            .target = .{ .kind = .task, .id = task.id },
             .rights = .{ .task = .{ .input_recv = true } },
             .scope = .{
-                .task_id = task_id,
+                .task_id = task.id,
                 .local_only = true,
                 .broker_only = true,
             },
@@ -333,7 +337,7 @@ pub const SessionManager = struct {
                 .user_visible_entitlement = true,
             },
         }) catch return null;
-        runtime.grantCapability(task_id, granted.id) catch {
+        task_runtime.grantCapabilityToTask(task, granted.id) catch {
             self.capabilityTablePtr().revokeGrant(granted.id) catch {};
             return null;
         };
@@ -342,27 +346,34 @@ pub const SessionManager = struct {
 
     pub fn surfacePresentationCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         const task = self.runtimePtr().find(task_id) orelse return null;
+        return self.surfacePresentationCapabilityForResolvedTask(task, now_ticks);
+    }
+
+    fn surfacePresentationCapabilityForResolvedTask(self: *SessionManager, task: *const task_runtime.TaskRecord, now_ticks: u64) ?u64 {
         for (task.capabilityIds()) |capability_id| {
             const granted = self.capabilityTablePtr().requireUsable(capability_id, now_ticks) catch continue;
-            if (granted.target.kind != .task or granted.target.id != task_id) continue;
-            if (granted.scope.task_id != task_id or !granted.rights.has(.surface_present)) continue;
+            if (granted.target.kind != .task or granted.target.id != task.id) continue;
+            if (granted.scope.task_id != task.id or !granted.rights.has(.surface_present)) continue;
             return capability_id;
         }
         return null;
     }
 
     fn ensureSurfacePresentationCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
-        if (self.surfacePresentationCapabilityForTask(task_id, now_ticks)) |capability_id| return capability_id;
-        const runtime = self.runtimePtr();
-        const task = runtime.find(task_id) orelse return null;
+        const task = self.runtimePtr().find(task_id) orelse return null;
+        return self.ensureSurfacePresentationCapabilityForResolvedTask(task, now_ticks);
+    }
+
+    fn ensureSurfacePresentationCapabilityForResolvedTask(self: *SessionManager, task: *task_runtime.TaskRecord, now_ticks: u64) ?u64 {
+        if (self.surfacePresentationCapabilityForResolvedTask(task, now_ticks)) |capability_id| return capability_id;
         if (!self.taskOwnsUiSurface(task) or self.compositor_broker_service_id == 0) return null;
         const granted = self.capabilityTablePtr().mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
-            .target = .{ .kind = .task, .id = task_id },
+            .target = .{ .kind = .task, .id = task.id },
             .rights = .{ .task = .{ .surface_present = true } },
             .scope = .{
-                .task_id = task_id,
+                .task_id = task.id,
                 .local_only = true,
                 .broker_only = true,
             },
@@ -378,7 +389,7 @@ pub const SessionManager = struct {
                 .user_visible_entitlement = true,
             },
         }) catch return null;
-        runtime.grantCapability(task_id, granted.id) catch {
+        task_runtime.grantCapabilityToTask(task, granted.id) catch {
             self.capabilityTablePtr().revokeGrant(granted.id) catch {};
             return null;
         };
@@ -392,7 +403,7 @@ pub const SessionManager = struct {
         while (slot_index < runtime.taskSlotCapacity()) : (slot_index += 1) {
             const slot = runtime.taskSlotAt(slot_index);
             if (!slot.in_use or !self.taskOwnsUiSurface(&slot.task)) continue;
-            if (self.ensureSurfacePresentationCapability(slot.task.id, now_ticks) != null) continue;
+            if (self.ensureSurfacePresentationCapabilityForResolvedTask(&slot.task, now_ticks) != null) continue;
             self.surface_authority_failures += 1;
             complete = false;
         }
