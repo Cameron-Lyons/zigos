@@ -368,6 +368,8 @@ pub const indexed_hot_path_tables = .{
         .keeps_queue_state_within_ceilings = @sizeOf(userspace_scheduler.Scheduler) <= userspace_scheduler.SCHEDULER_SIZE_CEILING_BYTES and
             @sizeOf(userspace_scheduler.AcceleratorClaimBacking) <= userspace_scheduler.ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES,
         .caches_ui_presentation_eligibility = userspace_scheduler.STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS == 0,
+        .derives_task_handles_from_scheduler_records = userspace_scheduler.TASK_REGISTRATION_HANDLE_SLOT_RELOOKUPS == 0 and
+            userspace_scheduler.TASK_WAKE_HANDLE_SLOT_RELOOKUPS == 0,
         .uses_generational_task_handles_for_dispatch = @hasDecl(task_runtime.Runtime, "findByHandle") and
             userspace_scheduler.SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH == 0,
     },
@@ -405,6 +407,8 @@ pub const indexed_hot_path_tables = .{
             task_runtime.TERMINATION_TASK_SLOT_LOOKUPS == 1 and
             task_runtime.RESOLVED_TERMINATION_SLOT_RELOOKUPS == 0 and
             task_runtime.RESOLVED_TASK_HANDLE_INDEX_LOOKUPS == 0 and
+            task_runtime.RESOLVED_TASK_HANDLE_SLOT_LOOKUPS == 0 and
+            @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "handleForClaimedIndex") and
             @hasDecl(task_runtime.Runtime, "terminateResolvedTaskByHandle") and
             @hasDecl(task_runtime.Runtime, "taskHandleForResolved") and
             @hasDecl(task_runtime.Runtime, "taskHandle"),
