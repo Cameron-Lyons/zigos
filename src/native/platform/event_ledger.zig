@@ -29,6 +29,7 @@ pub const MAX_DETAIL_BYTES: usize = 512;
 pub const COMPACT_EVENT_TEXT_METADATA = true;
 pub const RECORDS_EVENTS_IN_PLACE = true;
 pub const INLINE_EVENT_TEXT_WRITES = true;
+pub const RESETS_RETAINED_EVENT_MEMBERSHIP_IN_BULK = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 688;
 pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 53_192;
 pub const state_workspace_label = "system-diagnostics";
@@ -326,6 +327,11 @@ pub const EventBacking = struct {
         initializeEventIndex(&self.task_index);
         initializeEventIndex(&self.event_order_index);
     }
+
+    pub fn resetRetainingPayloads(self: *EventBacking) void {
+        self.events.resetRetainingPayloads();
+        self.resetIndexes();
+    }
 };
 
 fn initializeEventIndex(index: anytype) void {
@@ -390,8 +396,8 @@ pub const Ledger = struct {
 
     pub fn resetRetainingBacking(self: *Ledger) void {
         if (comptime heap_backed_event_ledger) {
-            while (self.evictOldestEvent()) {}
             const retained_backing = self.event_backing;
+            if (retained_backing) |backing| backing.resetRetainingPayloads();
             self.* = Ledger.init();
             self.event_backing = retained_backing;
             return;

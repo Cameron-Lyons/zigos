@@ -653,6 +653,9 @@ pub const indexed_hot_path_tables = .{
     },
     .event_ledger = .{
         .inlines_event_text_writes = event_ledger.INLINE_EVENT_TEXT_WRITES,
+        .resets_retained_event_membership_in_bulk = event_ledger.RESETS_RETAINED_EVENT_MEMBERSHIP_IN_BULK and
+            @hasDecl(event_ledger.EventBacking, "resetRetainingPayloads") and
+            @hasDecl(@FieldType(event_ledger.EventBacking, "events"), "resetRetainingPayloads"),
         .stores_compact_event_text_metadata = event_ledger.COMPACT_EVENT_TEXT_METADATA and
             @FieldType(event_ledger.Event, "policy_label_len") == u8 and
             @FieldType(event_ledger.Event, "missing_capability_len") == u8 and
