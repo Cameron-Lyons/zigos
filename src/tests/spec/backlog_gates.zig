@@ -1435,7 +1435,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .now_ticks = 6,
         .bundle = bundle,
     });
-    try std.testing.expect(session_supervisor.noteDriverAttached(storage_service.id, .storage_controller, device_authority.id, 6));
+    try std.testing.expect(session_supervisor.allowsDriverAttachment(storage_service.id, .storage_controller));
     try std.testing.expect(runtime.hasCapability(driver_task.task_id, device_authority.id));
     try std.testing.expect(!runtime.hasCapability(control_task.task_id, device_authority.id));
     try std.testing.expect(!runtime.hasCapability(untrusted_task.task_id, device_authority.id));

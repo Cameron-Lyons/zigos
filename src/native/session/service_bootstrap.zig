@@ -143,7 +143,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
         request.entry.interface_id,
         kernel_descriptors.serviceBindingFlags(service_record),
     );
-    _ = request.supervisor.noteContractBound(request.service_id, endpoint.endpoint.endpoint_id, request.entry.boot_tick);
+    _ = request.supervisor.noteContractBound(request.service_id, endpoint.endpoint.endpoint_id);
 
     return .{
         .task_id = service_task_id,
@@ -204,7 +204,6 @@ pub fn attachDriver(
         .signer = try driverSigner(device_class, driver_bundle_id),
         .bootstrap_transport = bootstrap_transport,
     });
-    _ = supervisor.noteDriverAttached(service_id, device_class, driver_capability.id, now_ticks);
     return driver;
 }
 
@@ -370,5 +369,5 @@ test "bootstrap driver attachment rolls back authority when signer resolution fa
     try std.testing.expectEqual(@as(usize, 0), capability_table.activeCount());
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
     try std.testing.expect(directory.findByServiceAndClass(service.id, .network_adapter) == null);
-    try std.testing.expect(!supervisor.hasDiagnostic(service.id, .driver_attached));
+    try std.testing.expect(supervisor.latestDiagnostic(service.id) == null);
 }

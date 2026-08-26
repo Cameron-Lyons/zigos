@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const contract = @import("contract.zig");
@@ -8,11 +9,16 @@ const manifest = @import("../policy/manifest.zig");
 const notification_center = @import("../services/notification_center.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
+const root = @import("root");
 
 pub const MAX_SERVICES: usize = 24;
 pub const MAX_DIAGNOSTICS: usize = 64;
 pub const COMPACT_DIAGNOSTIC_RING_METADATA = true;
-pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 5_504;
+pub const ACTIONABLE_DIAGNOSTICS_ONLY = true;
+pub const HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING = true;
+pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 32;
+pub const DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES: usize = 8;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 4_992;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
 
 comptime {
@@ -46,10 +52,6 @@ pub const ServiceRecord = struct {
 };
 
 pub const DiagnosticKind = enum(u8) {
-    registered,
-    healthy,
-    contract_bound,
-    driver_attached,
     crash,
     restart_requested,
     restart_completed,
@@ -58,11 +60,24 @@ pub const DiagnosticKind = enum(u8) {
 pub const DiagnosticEvent = struct {
     sequence: u64,
     service_id: u64,
-    class: contract.ServiceClass,
-    kind: DiagnosticKind,
     tick: u64,
-    related_id: u64 = 0,
     detail: u32 = 0,
+    kind: DiagnosticKind,
+};
+
+const DiagnosticArray = [MAX_DIAGNOSTICS]DiagnosticEvent;
+const heap_backed_actionable_diagnostics = builtin.target.os.tag == .freestanding and HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING;
+const DiagnosticBacking = if (heap_backed_actionable_diagnostics) ?*DiagnosticArray else DiagnosticArray;
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
+
+pub const actionable_diagnostic_layout = .{
+    .event_bytes = @sizeOf(DiagnosticEvent),
+    .ring_bytes = @sizeOf(DiagnosticArray),
+    .resident_backing_bytes = @sizeOf(DiagnosticBacking),
+    .heap_backed_on_freestanding = heap_backed_actionable_diagnostics,
 };
 
 pub const Error = error{
@@ -120,7 +135,7 @@ pub const Supervisor = struct {
     service_arena: ServiceArena = ServiceArena.init(),
     service_class_index: ServiceClassIndex = ServiceClassIndex.init(),
     next_diagnostic_sequence: u64 = 1,
-    diagnostics: [MAX_DIAGNOSTICS]DiagnosticEvent = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
+    diagnostics: DiagnosticBacking = if (heap_backed_actionable_diagnostics) null else [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
     diagnostic_count: u8 = 0,
     next_diagnostic_slot: u8 = 0,
 
@@ -132,6 +147,27 @@ pub const Supervisor = struct {
         if (@sizeOf(@This()) > SUPERVISOR_SIZE_CEILING_BYTES) {
             @compileError("supervisor exceeds its compact resident layout");
         }
+        if (@sizeOf(DiagnosticEvent) > DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES) {
+            @compileError("supervisor diagnostic event exceeds its compact layout");
+        }
+        if (heap_backed_actionable_diagnostics and @sizeOf(DiagnosticBacking) > DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES) {
+            @compileError("heap-backed supervisor diagnostics exceed their handle size ceiling");
+        }
+    }
+
+    pub fn deinit(self: *Supervisor) void {
+        if (comptime heap_backed_actionable_diagnostics) {
+            if (self.diagnostics) |diagnostics| {
+                @memset(std.mem.asBytes(diagnostics), 0);
+                kernel_memory.kfree(@ptrCast(diagnostics));
+                self.diagnostics = null;
+            }
+        } else {
+            self.diagnostics = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS;
+        }
+        self.next_diagnostic_sequence = 1;
+        self.diagnostic_count = 0;
+        self.next_diagnostic_slot = 0;
     }
 
     pub fn register(self: *Supervisor, class: contract.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
@@ -159,7 +195,6 @@ pub const Supervisor = struct {
             .last_transition_tick = 0,
         };
         self.service_class_index.insert(serviceClassKey(class), slot_index);
-        self.record(slot.service, .registered, 0, 0, 0);
         self.advanceNextServiceIdFrom(service_id);
         self.advanceNextIsolationDomainIdFrom(isolation_domain_id);
         return &slot.service;
@@ -195,7 +230,6 @@ pub const Supervisor = struct {
         const service = self.find(service_id) orelse return false;
         service.state = .healthy;
         service.last_transition_tick = tick;
-        self.record(service.*, .healthy, tick, 0, 0);
         return true;
     }
 
@@ -221,23 +255,11 @@ pub const Supervisor = struct {
         return true;
     }
 
-    pub fn noteContractBound(self: *Supervisor, service_id: u64, endpoint_id: u64, tick: u64) bool {
+    pub fn noteContractBound(self: *Supervisor, service_id: u64, endpoint_id: u64) bool {
         if (endpoint_id == 0) return false;
         const service = self.find(service_id) orelse return false;
         service.contract_endpoint_id = endpoint_id;
-        self.record(service.*, .contract_bound, tick, endpoint_id, 0);
         return true;
-    }
-
-    pub fn noteDriverAttached(
-        self: *Supervisor,
-        service_id: u64,
-        device_class: driver_service.DeviceClass,
-        authority_capability_id: u64,
-        tick: u64,
-    ) bool {
-        const service = self.find(service_id) orelse return false;
-        return self.noteDriverAttachedForService(service, device_class, authority_capability_id, tick);
     }
 
     pub fn recoverDriverCrash(
@@ -339,7 +361,6 @@ pub const Supervisor = struct {
         }
 
         const activation = try activateRuntimeDriver(runtime, swapped, tick + 1);
-        _ = self.noteDriverAttachedForService(service, request.device_class, swapped.authority_capability_id, tick + 1);
         self.completeRestartForService(service, tick + 1);
 
         if (ledger) |recording| {
@@ -385,10 +406,12 @@ pub const Supervisor = struct {
 
     fn newestDiagnostic(self: *const Supervisor, service_id: u64, kind: ?DiagnosticKind) ?DiagnosticEvent {
         if (self.diagnostic_count == 0) return null;
+        const diagnostics = self.diagnosticsConst() orelse
+            native_util.impossibleByInvariant("retained supervisor diagnostics have backing storage");
         var remaining: usize = self.diagnostic_count;
         var slot_index = (@as(usize, self.next_diagnostic_slot) + MAX_DIAGNOSTICS - 1) % MAX_DIAGNOSTICS;
         while (remaining != 0) : (remaining -= 1) {
-            const event = self.diagnostics[slot_index];
+            const event = diagnostics[slot_index];
             if (event.service_id == service_id and (kind == null or event.kind == kind.?)) return event;
             slot_index = if (slot_index == 0) MAX_DIAGNOSTICS - 1 else slot_index - 1;
         }
@@ -406,7 +429,7 @@ pub const Supervisor = struct {
     fn recordCrashForService(self: *Supervisor, service: *ServiceRecord, tick: u64, code: u32) void {
         service.state = .failed;
         service.last_transition_tick = tick;
-        self.record(service.*, .crash, tick, 0, code);
+        self.record(service.id, .crash, tick, code);
     }
 
     fn requestRestartForService(self: *Supervisor, service: *ServiceRecord, tick: u64) bool {
@@ -414,26 +437,14 @@ pub const Supervisor = struct {
         service.state = .restarting;
         service.restart_count += 1;
         service.last_transition_tick = tick;
-        self.record(service.*, .restart_requested, tick, 0, service.restart_count);
+        self.record(service.id, .restart_requested, tick, service.restart_count);
         return true;
     }
 
     fn completeRestartForService(self: *Supervisor, service: *ServiceRecord, tick: u64) void {
         service.state = .healthy;
         service.last_transition_tick = tick;
-        self.record(service.*, .restart_completed, tick, 0, service.restart_count);
-    }
-
-    fn noteDriverAttachedForService(
-        self: *Supervisor,
-        service: *ServiceRecord,
-        device_class: driver_service.DeviceClass,
-        authority_capability_id: u64,
-        tick: u64,
-    ) bool {
-        if (!contract.allowsDriverClass(service.class, device_class)) return false;
-        self.record(service.*, .driver_attached, tick, authority_capability_id, @intFromEnum(device_class));
-        return true;
+        self.record(service.id, .restart_completed, tick, service.restart_count);
     }
 
     fn advanceNextServiceIdFrom(self: *Supervisor, service_id: u64) void {
@@ -451,25 +462,45 @@ pub const Supervisor = struct {
 
     fn record(
         self: *Supervisor,
-        service: ServiceRecord,
+        service_id: u64,
         kind: DiagnosticKind,
         tick: u64,
-        related_id: u64,
         detail: u32,
     ) void {
+        const diagnostics = self.ensureDiagnostics() orelse return;
         const event = DiagnosticEvent{
             .sequence = self.nextDiagnosticSequence(),
-            .service_id = service.id,
-            .class = service.class,
-            .kind = kind,
+            .service_id = service_id,
             .tick = tick,
-            .related_id = related_id,
             .detail = detail,
+            .kind = kind,
         };
 
         const slot_index = self.nextDiagnosticSlot();
         if (slot_index >= self.diagnostic_count) self.diagnostic_count = @intCast(slot_index + 1);
-        self.diagnostics[slot_index] = event;
+        diagnostics[slot_index] = event;
+    }
+
+    fn diagnosticsPtr(self: *Supervisor) ?*DiagnosticArray {
+        if (comptime heap_backed_actionable_diagnostics) return self.diagnostics;
+        return &self.diagnostics;
+    }
+
+    fn diagnosticsConst(self: *const Supervisor) ?*const DiagnosticArray {
+        if (comptime heap_backed_actionable_diagnostics) return self.diagnostics;
+        return &self.diagnostics;
+    }
+
+    fn ensureDiagnostics(self: *Supervisor) ?*DiagnosticArray {
+        if (self.diagnosticsPtr()) |diagnostics| return diagnostics;
+        if (comptime heap_backed_actionable_diagnostics) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(DiagnosticArray)) orelse return null;
+            const diagnostics: *DiagnosticArray = @ptrCast(@alignCast(allocation));
+            @memset(std.mem.asBytes(diagnostics), 0);
+            self.diagnostics = diagnostics;
+            return diagnostics;
+        }
+        return &self.diagnostics;
     }
 
     fn nextDiagnosticSlot(self: *Supervisor) usize {
@@ -532,11 +563,9 @@ fn zeroDiagnostic() DiagnosticEvent {
     return .{
         .sequence = 0,
         .service_id = 0,
-        .class = .task_runtime,
-        .kind = .registered,
         .tick = 0,
-        .related_id = 0,
         .detail = 0,
+        .kind = .crash,
     };
 }
 
@@ -644,12 +673,9 @@ test "supervisor diagnostic sequences stop at exhaustion" {
 
     supervisor.next_diagnostic_sequence = std.math.maxInt(u64);
     const service = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 20 });
+    try std.testing.expect(supervisor.recordCrash(service.id, 1, 0xD1));
     try std.testing.expectEqual(std.math.maxInt(u64), supervisor.latestDiagnostic(service.id).?.sequence);
     try std.testing.expectEqual(@as(u64, 0), supervisor.next_diagnostic_sequence);
-
-    for (supervisor.diagnostics[0..supervisor.diagnostic_count]) |event| {
-        try std.testing.expect(event.sequence != 0);
-    }
 }
 
 test "restart requests only succeed for restartable services" {
@@ -669,16 +695,16 @@ test "supervisor emits structured crash and restart diagnostics" {
     var supervisor = Supervisor.init();
     const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 4 });
 
-    try std.testing.expect(supervisor.noteContractBound(network.id, 101, 5));
-    try std.testing.expect(supervisor.noteDriverAttached(network.id, .network_adapter, 77, 6));
+    try std.testing.expect(supervisor.noteContractBound(network.id, 101));
+    try std.testing.expect(supervisor.allowsDriverAttachment(network.id, .network_adapter));
+    try std.testing.expectEqual(@as(u8, 0), supervisor.diagnostic_count);
     try std.testing.expect(supervisor.recordCrash(network.id, 7, 0xD1));
     try std.testing.expect(supervisor.requestRestart(network.id, 8));
     try std.testing.expect(supervisor.completeRestart(network.id, 9));
-    try std.testing.expect(supervisor.hasDiagnostic(network.id, .contract_bound));
-    try std.testing.expect(supervisor.hasDiagnostic(network.id, .driver_attached));
     try std.testing.expect(supervisor.hasDiagnostic(network.id, .crash));
     try std.testing.expect(supervisor.hasDiagnostic(network.id, .restart_requested));
     try std.testing.expect(supervisor.hasDiagnostic(network.id, .restart_completed));
+    try std.testing.expectEqual(@as(u8, 3), supervisor.diagnostic_count);
     try std.testing.expectEqual(ServiceState.healthy, network.state);
     try std.testing.expectEqual(@as(u16, 1), network.restart_count);
     try std.testing.expectEqual(@as(u64, 9), supervisor.latestDiagnostic(network.id).?.tick);
@@ -687,24 +713,39 @@ test "supervisor emits structured crash and restart diagnostics" {
 test "supervisor keeps diagnostics queryable while recycling the bounded ring" {
     var supervisor = Supervisor.init();
     const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 40 });
-    try std.testing.expect(supervisor.hasDiagnostic(network.id, .registered));
+    try std.testing.expect(supervisor.latestDiagnostic(network.id) == null);
 
     var index: usize = 0;
     while (index < MAX_DIAGNOSTICS) : (index += 1) {
-        try std.testing.expect(supervisor.markHealthy(network.id, 100 + @as(u64, @intCast(index))));
+        try std.testing.expect(supervisor.recordCrash(network.id, 100 + @as(u64, @intCast(index)), @intCast(index)));
     }
 
     try std.testing.expectEqual(@as(u8, MAX_DIAGNOSTICS), supervisor.diagnostic_count);
-    try std.testing.expectEqual(@as(u8, 1), supervisor.next_diagnostic_slot);
-    try std.testing.expect(!supervisor.hasDiagnostic(network.id, .registered));
-    try std.testing.expect(supervisor.hasDiagnostic(network.id, .healthy));
+    try std.testing.expectEqual(@as(u8, 0), supervisor.next_diagnostic_slot);
+    try std.testing.expect(supervisor.hasDiagnostic(network.id, .crash));
     try std.testing.expectEqual(@as(u64, 100 + MAX_DIAGNOSTICS - 1), supervisor.latestDiagnostic(network.id).?.tick);
 }
 
 test "supervisor keeps bounded diagnostic metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "diagnostic_count"));
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "next_diagnostic_slot"));
-    try std.testing.expectEqual(@as(usize, 5_504), @sizeOf(Supervisor));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(DiagnosticEvent));
+    try std.testing.expectEqual(@as(usize, 2_048), actionable_diagnostic_layout.ring_bytes);
+    try std.testing.expectEqual(@as(usize, 4_992), @sizeOf(Supervisor));
+}
+
+test "supervisor deinit clears retained diagnostics and sequence state" {
+    var supervisor = Supervisor.init();
+    const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 44 });
+    try std.testing.expect(supervisor.recordCrash(network.id, 10, 1));
+    try std.testing.expectEqual(@as(u8, 1), supervisor.diagnostic_count);
+
+    supervisor.deinit();
+
+    try std.testing.expectEqual(@as(u8, 0), supervisor.diagnostic_count);
+    try std.testing.expectEqual(@as(u8, 0), supervisor.next_diagnostic_slot);
+    try std.testing.expectEqual(@as(u64, 1), supervisor.next_diagnostic_sequence);
+    try std.testing.expect(supervisor.latestDiagnostic(network.id) == null);
 }
 
 test "supervisor diagnostic ring scan selects the newest event per service" {
@@ -712,11 +753,11 @@ test "supervisor diagnostic ring scan selects the newest event per service" {
     const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 42 });
     const storage = try supervisor.register(.storage_object, .{ .kind = .service, .serial = 43 });
 
-    try std.testing.expect(supervisor.markHealthy(storage.id, 10));
-    try std.testing.expect(supervisor.markHealthy(network.id, 11));
+    try std.testing.expect(supervisor.recordCrash(storage.id, 10, 1));
+    try std.testing.expect(supervisor.recordCrash(network.id, 11, 2));
     try std.testing.expectEqual(@as(u64, 11), supervisor.latestDiagnostic(network.id).?.tick);
     try std.testing.expectEqual(@as(u64, 10), supervisor.latestDiagnostic(storage.id).?.tick);
-    try std.testing.expect(!supervisor.hasDiagnostic(storage.id, .crash));
+    try std.testing.expect(supervisor.hasDiagnostic(storage.id, .crash));
 }
 
 test "service readiness is live state independent of diagnostic retention" {
@@ -724,17 +765,12 @@ test "service readiness is live state independent of diagnostic retention" {
     const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 41 });
 
     try std.testing.expect(!supervisor.isReady(network.id));
-    try std.testing.expect(!supervisor.noteContractBound(network.id, 0, 1));
-    try std.testing.expect(supervisor.noteContractBound(network.id, 101, 2));
+    try std.testing.expect(!supervisor.noteContractBound(network.id, 0));
+    try std.testing.expect(supervisor.noteContractBound(network.id, 101));
     try std.testing.expect(!supervisor.isReady(network.id));
     try std.testing.expect(supervisor.markHealthy(network.id, 3));
     try std.testing.expect(supervisor.isReady(network.id));
-
-    for (0..MAX_DIAGNOSTICS) |index| {
-        try std.testing.expect(supervisor.markHealthy(network.id, 4 + @as(u64, @intCast(index))));
-    }
-
-    try std.testing.expect(!supervisor.hasDiagnostic(network.id, .contract_bound));
+    try std.testing.expectEqual(@as(u8, 0), supervisor.diagnostic_count);
     try std.testing.expect(supervisor.isReady(network.id));
     try std.testing.expect(supervisor.recordCrash(network.id, 100, 0xBAD));
     try std.testing.expect(!supervisor.isReady(network.id));
@@ -1006,7 +1042,6 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     try std.testing.expectEqual(@as(u16, 1), compositor.restart_count);
     try std.testing.expectEqual(ServiceState.healthy, storage.state);
     try std.testing.expectEqual(@as(u16, 0), storage.restart_count);
-    try std.testing.expect(supervisor.hasDiagnostic(compositor.id, .driver_attached));
     try std.testing.expect(supervisor.hasDiagnostic(compositor.id, .restart_completed));
     try std.testing.expectEqual(notification_center.Reason.driver_restart, notifications.latestVisible(20).?.reason);
     try std.testing.expectEqual(second_authority.id, ledger.latestKind(.driver_restart).?.related_id);

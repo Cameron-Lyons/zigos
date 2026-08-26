@@ -281,7 +281,7 @@ fn registerHealthyService(
     tick: u64,
 ) !u64 {
     const service = try supervisor.register(class, owner);
-    try std.testing.expect(supervisor.noteContractBound(service.id, 100 + service.id, tick));
+    try std.testing.expect(supervisor.noteContractBound(service.id, 100 + service.id));
     try std.testing.expect(supervisor.markHealthy(service.id, tick));
     return service.id;
 }
