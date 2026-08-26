@@ -101,7 +101,7 @@ test "resident object metadata uses capacity-sized length fields" {
     try std.testing.expect(@hasField(object_store.ObjectRecord, "arena_in_use"));
     try std.testing.expect(@hasField(object_store.VersionRecord, "arena_in_use"));
     try std.testing.expectEqual(@as(usize, 24), object_store.OBJECT_SLOT_SIZE_CEILING_BYTES);
-    try std.testing.expectEqual(@as(usize, 320), object_store.VERSION_SLOT_SIZE_CEILING_BYTES);
+    try std.testing.expectEqual(@as(usize, 288), object_store.VERSION_SLOT_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(usize, object_store.BLOB_RECORD_SIZE_CEILING_BYTES), @sizeOf(BlobRecord));
     try std.testing.expectEqual(@as(usize, object_store.BLOB_SLOT_SIZE_CEILING_BYTES), @sizeOf(BlobSlot));
 }
@@ -255,6 +255,9 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expect(!@hasField(object_store.VersionRecord, "previous_version_id"));
     try std.testing.expect(object_store.DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS);
     try std.testing.expect(!@hasField(object_store.VersionRecord, "parent_count"));
+    try std.testing.expect(object_store.DERIVES_VERSION_ADDRESS_FROM_CANONICAL_STATE);
+    try std.testing.expect(!@hasField(object_store.VersionRecord, "version_address"));
+    try std.testing.expect(@hasDecl(object_store.Store, "versionAddress"));
     try std.testing.expect(object_store.PACKS_VERSION_TYPE_INTO_TRAILING_PADDING);
     try std.testing.expect(object_store.DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS);
     try std.testing.expect(!@hasField(object_store.BlobRecord, "merkle_root"));
@@ -310,7 +313,8 @@ test "object store splits blob and version addresses" {
     try std.testing.expect(std.mem.eql(u8, &first.blob_address, &second.blob_address));
     try std.testing.expect(!std.mem.eql(u8, &first.version_address, &second.version_address));
     try std.testing.expect(std.mem.eql(u8, &store.versionBlob(store.version(first.version_id).?).?.address, &first.blob_address));
-    try std.testing.expect(std.mem.eql(u8, &store.version(second.version_id).?.version_address, &second.version_address));
+    const derived_second_address = try store.versionAddress(store.version(second.version_id).?);
+    try std.testing.expect(std.mem.eql(u8, &derived_second_address, &second.version_address));
     try std.testing.expectEqual(@as(usize, 1), store.blobCount());
 }
 

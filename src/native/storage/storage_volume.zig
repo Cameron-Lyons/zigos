@@ -1020,6 +1020,7 @@ fn encodeObjectBody(writer: *CursorWriter, record: *const object_store.ObjectRec
 
 fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.VersionRecord) Error!void {
     const blob = store.versionBlob(record) orelse return error.CorruptImage;
+    const version_address = store.versionAddress(record) catch return error.CorruptImage;
     try writer.writeU64(record.id.raw());
     try writer.writeU64(record.object_id.raw());
     var parent_index: usize = 0;
@@ -1028,7 +1029,7 @@ fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, re
     }
     try writer.writeByte(@intFromEnum(record.object_type));
     try writer.writeBytes(&blob.address);
-    try writer.writeBytes(&record.version_address);
+    try writer.writeBytes(&version_address);
     try writeMetadata(writer, record.metadata);
     try writer.writeU32(@intCast(blob.payloadLen()));
 }
@@ -1136,7 +1137,8 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     store.versions.slots[slot_index].version.object_type = try parseObjectType(try reader.readByte());
     var blob_address: object_store.BlobAddress = undefined;
     try reader.readBytes(&blob_address);
-    try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
+    var serialized_version_address: object_store.VersionAddress = undefined;
+    try reader.readBytes(&serialized_version_address);
     store.versions.slots[slot_index].version.metadata = try readMetadata(self, &reader);
     const payload_len: usize = @intCast(try reader.readU32());
     if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
@@ -1144,6 +1146,8 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     const blob = &store.blobSlotAtConst(blob_slot_index).blob;
     if (blob.payloadLen() != payload_len) return error.CorruptImage;
     store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
+    const derived_version_address = store.versionAddress(&store.versions.slots[slot_index].version) catch return error.CorruptImage;
+    if (!std.mem.eql(u8, &serialized_version_address, &derived_version_address)) return error.CorruptImage;
     return version_id.raw();
 }
 
@@ -1425,7 +1429,8 @@ fn deserializeState(
         store.versions.slots[slot_index].version.object_type = try parseObjectType(try reader.readByte());
         var blob_address: object_store.BlobAddress = undefined;
         try reader.readBytes(&blob_address);
-        try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
+        var serialized_version_address: object_store.VersionAddress = undefined;
+        try reader.readBytes(&serialized_version_address);
         store.versions.slots[slot_index].version.metadata = try readMetadata(self, &reader);
         const payload_len: usize = @intCast(try reader.readU32());
         if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
@@ -1433,6 +1438,8 @@ fn deserializeState(
         const blob = &store.blobSlotAtConst(blob_slot_index).blob;
         if (blob.payloadLen() != payload_len) return error.CorruptImage;
         store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
+        const derived_version_address = store.versionAddress(&store.versions.slots[slot_index].version) catch return error.CorruptImage;
+        if (!std.mem.eql(u8, &serialized_version_address, &derived_version_address)) return error.CorruptImage;
     }
 
     for (0..@as(usize, workspace_count_value)) |_| {
