@@ -22,7 +22,6 @@ const Store = object_store.Store;
 const StoreWith = object_store.StoreWith;
 const computeBlobAddress = object_store.computeBlobAddress;
 const computeBlobManifestAddress = object_store.computeBlobManifestAddress;
-const computeBlobMerkleRoot = object_store.computeBlobMerkleRoot;
 const ids = object_store.ids;
 const signMetadata = object_store.signMetadata;
 
@@ -30,12 +29,13 @@ test "blob manifests store compact chunk slot edges" {
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(BlobChunkSlotIndex));
     try std.testing.expect(@hasField(object_store.BlobRecord, "chunk_slot_indexes"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "chunks"));
+    try std.testing.expect(!@hasField(object_store.BlobRecord, "merkle_root"));
 }
 
 test "resident object metadata uses capacity-sized length fields" {
     try std.testing.expectEqual(@as(usize, 248), @sizeOf(SignedMetadata));
-    try std.testing.expectEqual(@as(usize, 132), @sizeOf(BlobRecord));
-    try std.testing.expectEqual(@as(usize, 136), @sizeOf(BlobSlot));
+    try std.testing.expectEqual(@as(usize, object_store.BLOB_RECORD_SIZE_CEILING_BYTES), @sizeOf(BlobRecord));
+    try std.testing.expectEqual(@as(usize, object_store.BLOB_SLOT_SIZE_CEILING_BYTES), @sizeOf(BlobSlot));
 }
 
 test "object query and history outputs use compact bounded metadata" {
@@ -154,8 +154,13 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expect(object_store.DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS);
     try std.testing.expect(!@hasField(object_store.VersionRecord, "parent_count"));
     try std.testing.expect(object_store.PACKS_VERSION_TYPE_INTO_TRAILING_PADDING);
+    try std.testing.expect(object_store.DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS);
+    try std.testing.expect(!@hasField(object_store.BlobRecord, "merkle_root"));
     try std.testing.expectEqual(@as(usize, object_store.OBJECT_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectRecord));
     try std.testing.expectEqual(@as(usize, object_store.VERSION_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.VersionRecord));
+    try std.testing.expectEqual(@as(usize, object_store.BLOB_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.BlobRecord));
+    try std.testing.expectEqual(@as(usize, object_store.BLOB_SLOT_SIZE_CEILING_BYTES), @sizeOf(object_store.BlobSlot));
+    try std.testing.expectEqual(@as(usize, object_store.STORE_SIZE_CEILING_BYTES), @sizeOf(Store));
 }
 
 test "signed metadata rejects overlong labels instead of truncating" {
@@ -261,7 +266,6 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
     var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
     const live_chunk_refs = try store.copyBlobChunkRefs(blob, &chunk_refs);
     const chunk_count = live_chunk_refs.len;
-    try std.testing.expect(std.mem.eql(u8, &blob.merkle_root, &computeBlobMerkleRoot(live_chunk_refs)));
     try std.testing.expect(std.mem.eql(u8, &blob.address, &computeBlobManifestAddress(blob.payloadLen(), live_chunk_refs)));
     try std.testing.expectEqual(@as(usize, 0), store.verifiedBlobManifestCount());
 
