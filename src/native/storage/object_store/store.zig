@@ -35,11 +35,10 @@ pub const COMPACT_OBJECT_RESULT_METADATA = true;
 pub const SKIPS_EMPTY_ARENA_RESET_WORK = true;
 pub const DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE = true;
 pub const DERIVES_OBJECT_MODEL_VERSION_IDS_FROM_CANONICAL_HEAD = true;
+pub const DERIVES_OBJECT_MODEL_COUNTERS_FROM_VERSION_COUNT = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
-pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 200;
-pub const OBJECT_SNAPSHOT_STATE_SIZE_CEILING_BYTES: usize = 2;
-pub const OBJECT_SYNC_STATE_SIZE_CEILING_BYTES: usize = 8;
+pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 192;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -292,8 +291,6 @@ pub const ObjectRecord = struct {
     latest_version_id: ids.VersionId,
     version_count: u16,
     provenance: ObjectProvenance = .{},
-    snapshot_state: ObjectSnapshotState = .{},
-    sync_state: ObjectSyncState = .{},
     sharing_policy: ObjectSharingPolicy = .{},
     recovery_history: ObjectRecoveryHistory = .{},
 
@@ -311,10 +308,10 @@ pub const ObjectRecord = struct {
             .typed = true,
             .signed = self.provenance.creator_signature.isPresent() and self.provenance.latest_version_addressed,
             .versioned = self.version_count > 0 and !self.latest_version_id.isZero(),
-            .sync_generation = self.sync_state.sync_generation,
+            .sync_generation = @as(u32, self.version_count),
             .sharing_policy_generation = self.sharing_policy.policy_generation,
-            .has_history = self.snapshot_state.snapshot_count >= self.version_count and !self.latest_version_id.isZero(),
-            .has_sync_policy = self.sync_state.version_watermark >= self.version_count and !self.latest_version_id.isZero(),
+            .has_history = self.version_count > 0 and !self.latest_version_id.isZero(),
+            .has_sync_policy = self.version_count > 0 and !self.latest_version_id.isZero(),
             .has_sharing_policy = self.sharing_policy.requires_explicit_file_bridge_grant and self.sharing_policy.export_only_file_bridge,
             .recoverable = self.recovery_history.recoverable,
         };
@@ -332,27 +329,6 @@ pub const ObjectProvenance = struct {
     updated_at_ticks: u64 = 0,
     creator_signature: manifest.Signature = .{},
     latest_version_addressed: bool = false,
-};
-
-pub const ObjectSnapshotState = struct {
-    snapshot_count: u16 = 0,
-
-    comptime {
-        if (@sizeOf(@This()) > OBJECT_SNAPSHOT_STATE_SIZE_CEILING_BYTES) {
-            @compileError("object snapshot state exceeds its compact size ceiling");
-        }
-    }
-};
-
-pub const ObjectSyncState = struct {
-    sync_generation: u32 = 0,
-    version_watermark: u16 = 0,
-
-    comptime {
-        if (@sizeOf(@This()) > OBJECT_SYNC_STATE_SIZE_CEILING_BYTES) {
-            @compileError("object sync state exceeds its compact size ceiling");
-        }
-    }
 };
 
 pub const ObjectSharingPolicy = struct {
@@ -863,9 +839,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 target_object.provenance.creator_signature = request.metadata.signature;
             }
             target_object.provenance.latest_version_addressed = true;
-            target_object.snapshot_state.snapshot_count += 1;
-            target_object.sync_state.sync_generation += 1;
-            target_object.sync_state.version_watermark = target_object.version_count;
             target_object.recovery_history.recovery_generation += 1;
             target_object.recovery_history.latest_recoverable_version_id = previous_version_id;
             self.markObjectDirty(target_object.id);
@@ -1428,7 +1401,7 @@ fn queryResultFor(object_record: *const ObjectRecord, latest: *const VersionReco
         .latest_version_id = object_record.latest_version_id,
         .object_type = object_record.object_type,
         .version_count = object_record.version_count,
-        .snapshot_count = object_record.snapshot_state.snapshot_count,
+        .snapshot_count = object_record.version_count,
         .updated_at_ticks = object_record.provenance.updated_at_ticks,
     };
     result.label_len = latest.metadata.label_len;
