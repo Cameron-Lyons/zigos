@@ -1333,6 +1333,10 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(@FieldType(@FieldType(object_store.Store, "blobs"), "slot_generations")) == 0 and
             @sizeOf(@FieldType(@FieldType(object_store.Store, "chunks"), "slot_generations")) == 0 and
             @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
+        .derives_object_store_arena_keys_from_payloads = object_store.DERIVES_OBJECT_STORE_ARENA_KEYS_FROM_PAYLOADS and
+            @sizeOf(@FieldType(@FieldType(object_store.Store, "blobs"), "slot_keys")) == 0 and
+            @sizeOf(@FieldType(@FieldType(object_store.Store, "chunks"), "slot_keys")) == 0 and
+            @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
         .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and
             !@hasField(object_store.VersionRecord, "blob_address") and
             !@hasField(object_store.VersionRecord, "payload_len") and

@@ -64,6 +64,7 @@ pub const PACKS_BLOB_SLOT_MEMBERSHIP_INTO_STATE = true;
 pub const PACKS_OBJECT_STORE_MEMBERSHIP_INTO_RECORD_PADDING = true;
 pub const PACKS_CHUNK_SLOT_MEMBERSHIP_INTO_PAYLOAD_STATE = true;
 pub const ELIDES_UNUSED_OBJECT_STORE_SLOT_GENERATIONS = true;
+pub const DERIVES_OBJECT_STORE_ARENA_KEYS_FROM_PAYLOADS = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
@@ -74,7 +75,7 @@ pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 320;
 pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 48 else 4_130;
 pub const CHUNK_SLOT_SIZE_CEILING_BYTES: usize = CHUNK_RECORD_SIZE_CEILING_BYTES;
-pub const STORE_SIZE_CEILING_BYTES: usize = 1_311_664;
+pub const STORE_SIZE_CEILING_BYTES: usize = 1_304_752;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -716,8 +717,8 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         const ObjectArena = indexed_arena.DirtyTrackedIndexedArenaWithKey(ids.ObjectId, ObjectSlot, MAX_STORE_OBJECTS, STORE_OBJECT_INDEX_CAPACITY, objectSlotId);
         const ObjectTypeIndex = ObjectTypeIndexWith(MAX_STORE_OBJECTS);
         const VersionArena = indexed_arena.DirtyTrackedIndexedArenaWithKey(ids.VersionId, VersionSlot, MAX_STORE_VERSIONS, STORE_VERSION_INDEX_CAPACITY, versionSlotId);
-        const BlobArena = indexed_arena.PagedIndexedArenaWithoutHandles(BlobSlot, BLOB_PAGE_SIZE, STORE_BLOB_PAGE_COUNT, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId);
-        const ChunkArena = indexed_arena.PagedIndexedArenaWithoutHandles(ChunkSlot, CHUNK_PAGE_SIZE, STORE_CHUNK_PAGE_COUNT, STORE_CHUNK_INDEX_CAPACITY, chunkSlotIndexId);
+        const BlobArena = indexed_arena.PagedIndexedArenaWithOptions(BlobSlot, BLOB_PAGE_SIZE, STORE_BLOB_PAGE_COUNT, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId, .{ .track_generations = false, .store_keys = false });
+        const ChunkArena = indexed_arena.PagedIndexedArenaWithOptions(ChunkSlot, CHUNK_PAGE_SIZE, STORE_CHUNK_PAGE_COUNT, STORE_CHUNK_INDEX_CAPACITY, chunkSlotIndexId, .{ .track_generations = false, .store_keys = false });
 
         pub const VersionChunkCursor = struct {
             store: *const Self,
