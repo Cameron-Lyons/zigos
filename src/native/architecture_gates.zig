@@ -451,6 +451,11 @@ pub const indexed_hot_path_tables = .{
             @FieldType(userspace_registry.ImageSpec, "consumed_interface") == ?*const [1]manifest.InterfaceDecl and
             @FieldType(userspace_registry.ImageSpec, "asset") == ?*const [1]manifest.AssetDecl and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
+        .uses_sentinel_runtime_boot_strings = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_USE_SENTINEL_BOOT_STRINGS and
+            @FieldType(userspace_registry.ImageSpec, "display_name") == [*:0]const u8 and
+            @FieldType(userspace_registry.ImageSpec, "label") == [*:0]const u8 and
+            @FieldType(userspace_registry.ImageSpec, "entry") == [*:0]const u8 and
+            @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
     },
     .userspace_launch = .{
         .avoids_registered_launch_manifest_signing = userspace_launch.REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL == 0,

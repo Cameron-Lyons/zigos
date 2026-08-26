@@ -58,7 +58,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
     for (active_boot_image_specs, 0..) |spec, artifact_index| {
         const artifact = archive_index.artifacts[artifact_index];
         try validateGeneratedArtifact(artifact);
-        const components = [_]manifest.ExecutionComponentDecl{.{ .id = spec.label, .entry = spec.entry }};
+        const components = [_]manifest.ExecutionComponentDecl{.{ .id = spec.componentLabel(), .entry = spec.entryName() }};
         const bundle = try bundleForSpec(&spec, &components);
         const executable_image = try executableImageFromArtifact(artifact);
         _ = catalog.registerBuildValidatedArtifact(.{
@@ -94,7 +94,7 @@ fn bundleForSpec(
 ) Error!manifest.BundleManifest {
     var bundle = manifest.BundleManifest{
         .bundle_id = spec.bundle_id,
-        .display_name = spec.display_name,
+        .display_name = spec.displayName(),
         .publisher = spec.publisher.name(),
         .provided_interfaces = spec.providedInterfaces(),
         .consumed_interfaces = spec.consumedInterfaces(),
@@ -108,8 +108,8 @@ fn bundleForSpec(
 
 fn initialComponentForSpec(spec: *const role_registry.ImageSpec) task_runtime.ExecutionComponentSpec {
     return .{
-        .label = spec.label,
-        .entry = spec.entry,
+        .label = spec.componentLabel(),
+        .entry = spec.entryName(),
     };
 }
 
