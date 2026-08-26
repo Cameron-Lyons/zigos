@@ -42,7 +42,7 @@ pub fn addUserspaceArtifacts(
     const native_archive_deps_module = b.createModule(.{
         .root_source_file = b.path("src/native/archive_generator_deps.zig"),
     });
-    const archive_generator = addArchiveGenerator(b, userspace_modules.descriptor, native_archive_deps_module);
+    const archive_generator = addArchiveGenerator(b, native_archive_deps_module);
     const production_archive_run = b.addRunArtifact(archive_generator);
     const production_archive_dir = production_archive_run.addOutputDirectoryArg("userspace-production-archive");
     const production_archive_source = production_archive_dir.path(b, "userspace_archive.zig");
@@ -70,7 +70,9 @@ pub fn addUserspaceArtifacts(
         const artifact = addUserspaceArtifact(b, target, optimize, userspace_modules, spec);
         production_compile_steps[artifact_index] = artifact.compile_step;
         production_install_steps[artifact_index] = artifact.install_step;
+        production_archive_run.addArg(spec.bundle_id);
         production_archive_run.addArtifactArg(artifact.compile_step);
+        verification_archive_run.addArg(spec.bundle_id);
         verification_archive_run.addArtifactArg(artifact.compile_step);
         production_step.dependOn(artifact.install_step);
         verification_step.dependOn(artifact.install_step);
@@ -79,6 +81,7 @@ pub fn addUserspaceArtifacts(
         const artifact = addUserspaceArtifact(b, target, optimize, userspace_modules, spec);
         verification_only_compile_steps[artifact_index] = artifact.compile_step;
         verification_only_install_steps[artifact_index] = artifact.install_step;
+        verification_archive_run.addArg(spec.bundle_id);
         verification_archive_run.addArtifactArg(artifact.compile_step);
         verification_step.dependOn(artifact.install_step);
     }
@@ -116,7 +119,6 @@ pub fn addUserspaceArtifacts(
 
 fn addArchiveGenerator(
     b: *std.Build,
-    descriptor_module: *std.Build.Module,
     native_archive_deps_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const archive_generator = b.addExecutable(.{
@@ -127,7 +129,6 @@ fn addArchiveGenerator(
             .optimize = .ReleaseSafe,
         }),
     });
-    archive_generator.root_module.addImport("userspace_descriptor", descriptor_module);
     archive_generator.root_module.addImport("native_archive_deps", native_archive_deps_module);
     return archive_generator;
 }
@@ -166,13 +167,7 @@ fn addUserspaceCompile(
 ) *std.Build.Step.Compile {
     const options = b.addOptions();
     options.addOption([]const u8, "bundle_id", spec.bundle_id);
-    options.addOption([]const u8, "display_name", spec.display_name);
-    options.addOption([]const u8, "label", spec.label);
-    options.addOption([]const u8, "entry", spec.entry);
-    options.addOption([]const u8, "publisher", spec.publisher);
-    options.addOption(u8, "component_class", @intFromEnum(spec.component_class));
     options.addOption(u32, "role_tag", spec.role_tag);
-    options.addOption(u32, "heartbeat_increment", spec.heartbeat_increment);
     options.addOption(u32, "contract_flags", spec.contract_flags);
     options.addOption(bool, "run_mmu_isolation_probe", (spec.contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
     options.addOption(bool, "run_nx_isolation_probe", (spec.contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
@@ -188,7 +183,6 @@ fn addUserspaceCompile(
     module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
     module.addAssemblyFile(b.path("src/arch/x86/userspace_start.S"));
     module.addOptions("build_options", options);
-    module.addImport("userspace_descriptor", userspace_modules.descriptor);
     module.addImport("userspace_runtime", userspace_modules.runtime);
 
     const artifact = b.addExecutable(.{

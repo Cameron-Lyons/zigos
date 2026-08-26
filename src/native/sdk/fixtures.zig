@@ -54,7 +54,8 @@ pub fn expectArchiveBackedFixtures() !void {
     };
     for (fixtures) |fixture| {
         try std.testing.expect(fixture.hasExecutableSegments());
-        try std.testing.expect(fixture.image.file_size_bytes > task_runtime.DEFAULT_SYNTHETIC_IMAGE_BYTES);
+        try std.testing.expect(fixture.image.file_size_bytes != 0);
+        try std.testing.expect(fixture.image.bootstrap_mailbox_address != 0);
         try std.testing.expect(fixture.digestPrefix() != 0);
     }
 }

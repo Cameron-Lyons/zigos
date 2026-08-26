@@ -3321,10 +3321,13 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.surface_present" },
         .{ .path = compositor_session_path, .source = compositor_session_source, .snippet = "pub fn presentSurface(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
-        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 4" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 5" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 192" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "heartbeat_increment: u32 = 1" },
         .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.surface_present)" },
+        .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = ".heartbeat_increment = update.heartbeat_increment" },
         .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn presentUiState(" },
+        .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "zigos_userspace_bootstrap.heartbeat_increment" },
         .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const input = drainFocusedInput();" },
         .{ .path = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn presentation(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "provisionSurfacePresentationCapabilities" },
@@ -3474,6 +3477,11 @@ fn validateNativeOnlyLaunchTrack(
     const loader_path = "src/native/task/userspace_loader.zig";
     const launch_path = "src/native/task/userspace_launch.zig";
     const rendered_shell_launch_path = "src/native/platform/rendered_shell/task_launch.zig";
+    const userspace_runtime_path = "src/userspace/runtime.zig";
+    const userspace_entry_path = "src/userspace/service_entry.zig";
+    const userspace_linker_path = "src/userspace/linker.ld";
+    const archive_generator_path = "tools/generate_userspace_archive.zig";
+    const userspace_build_path = "build_support/userspace.zig";
 
     const manifest_source = try readRequiredSource(allocator, io, errors, manifest_path) orelse return;
     const linter_source = try readRequiredSource(allocator, io, errors, linter_path) orelse return;
@@ -3483,6 +3491,11 @@ fn validateNativeOnlyLaunchTrack(
     const loader_source = try readRequiredSource(allocator, io, errors, loader_path) orelse return;
     const launch_source = try readRequiredSource(allocator, io, errors, launch_path) orelse return;
     const rendered_shell_launch_source = try readRequiredSource(allocator, io, errors, rendered_shell_launch_path) orelse return;
+    const userspace_runtime_source = try readRequiredSource(allocator, io, errors, userspace_runtime_path) orelse return;
+    const userspace_entry_source = try readRequiredSource(allocator, io, errors, userspace_entry_path) orelse return;
+    const userspace_linker_source = try readRequiredSource(allocator, io, errors, userspace_linker_path) orelse return;
+    const archive_generator_source = try readRequiredSource(allocator, io, errors, archive_generator_path) orelse return;
+    const userspace_build_source = try readRequiredSource(allocator, io, errors, userspace_build_path) orelse return;
 
     const required_manifest_snippets = [_][]const u8{
         "CompatibilityNamespaceUnsupported",
@@ -3555,6 +3568,62 @@ fn validateNativeOnlyLaunchTrack(
     for (forbidden_archive_index_snippets) |snippet| {
         if (std.mem.indexOf(u8, archive_index_source, snippet) != null) {
             try common.addError(errors, allocator, "Native-only launch track must not duplicate the role registry index in the userspace archive: {s}", .{snippet});
+        }
+    }
+
+    const required_runtime_snippets = [_][]const u8{
+        "fn bootstrapDetail() mailbox.Detail",
+        "zigos_userspace_bootstrap.heartbeat_increment",
+        "if (detail != .proof)",
+        "publishState(.runtime_ready, detail, 1)",
+    };
+    for (required_runtime_snippets) |snippet| {
+        if (std.mem.indexOf(u8, userspace_runtime_source, snippet) == null) {
+            try common.addError(errors, allocator, "Native-only userspace runtime must keep kernel-published launch metadata snippet: {s}", .{snippet});
+        }
+    }
+    const required_role_identity_snippets = [_]struct {
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .source = userspace_entry_source, .snippet = "pub export const zigos_userspace_role_identity: [8]u8 align(1)" },
+        .{ .source = userspace_entry_source, .snippet = "linksection(\".zigos_userspace_role_identity\")" },
+        .{ .source = userspace_linker_source, .snippet = "KEEP(*(.zigos_userspace_role_identity))" },
+    };
+    for (required_role_identity_snippets) |requirement| {
+        if (std.mem.indexOf(u8, requirement.source, requirement.snippet) == null) {
+            try common.addError(errors, allocator, "Native-only userspace must keep its minimal static role identity: {s}", .{requirement.snippet});
+        }
+    }
+    const forbidden_runtime_descriptor_snippets = [_][]const u8{
+        "userspace_descriptor",
+        "zigos_userspace_descriptor",
+    };
+    for (forbidden_runtime_descriptor_snippets) |snippet| {
+        if (std.mem.indexOf(u8, userspace_runtime_source, snippet) != null or
+            std.mem.indexOf(u8, userspace_linker_source, snippet) != null or
+            std.mem.indexOf(u8, archive_generator_source, snippet) != null)
+        {
+            try common.addError(errors, allocator, "Native-only userspace must not restore runtime descriptor plumbing: {s}", .{snippet});
+        }
+    }
+    const required_archive_generator_snippets = [_][]const u8{
+        "const artifact_args = args[6..]",
+        "const bundle_id = artifact_args[artifact_arg_index]",
+        ".bundle_id = try arena.dupe(u8, bundle_id)",
+    };
+    for (required_archive_generator_snippets) |snippet| {
+        if (std.mem.indexOf(u8, archive_generator_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace archive generation must keep registry-bound artifact arguments: {s}", .{snippet});
+        }
+    }
+    const required_userspace_build_snippets = [_][]const u8{
+        "production_archive_run.addArg(spec.bundle_id)",
+        "verification_archive_run.addArg(spec.bundle_id)",
+    };
+    for (required_userspace_build_snippets) |snippet| {
+        if (std.mem.indexOf(u8, userspace_build_source, snippet) == null) {
+            try common.addError(errors, allocator, "Userspace builds must bind registry bundle ids to generated artifacts: {s}", .{snippet});
         }
     }
 

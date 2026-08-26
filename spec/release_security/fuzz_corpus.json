@@ -14,17 +14,6 @@
       ]
     },
     {
-      "id": "userspace-descriptor",
-      "target_anchor": "src/native/task/userspace_descriptor.zig",
-      "scope": "Embedded userspace image descriptor metadata and fixed-size identity fields.",
-      "seeds": [
-        "534f475a0200010000000000010000000300000016000f000f0015000c0001000000",
-        "0000000000000000",
-        "ffffffffffffffffffffffffffffffff",
-        "534f475affff0100010000000100000003000000ffff000000000000000000000000"
-      ]
-    },
-    {
       "id": "elf-image-metadata",
       "target_anchor": "src/native/task/elf_image_inspector.zig",
       "scope": "Freestanding little-endian ELF32 and ELF64 userspace image headers, program-header tables, and loadable segment metadata.",

@@ -74,26 +74,26 @@ const verification_userspace_marker = "--verification-userspace";
 const expected_cli_arg_count = 1 + 2 + 1 + production_userspace_count + 1 + verification_only_userspace_count;
 
 const VerificationUserspaceIdentity = struct {
-    bundle_id: []const u8,
+    role_tag: u32,
     artifact_name: []const u8,
 };
 
 const verification_userspace_identities = [_]VerificationUserspaceIdentity{
-    .{ .bundle_id = "app.notes.daily", .artifact_name = "userspace-notes-daily.elf" },
-    .{ .bundle_id = "zigos.system.transport-probe", .artifact_name = "userspace-transport-probe.elf" },
-    .{ .bundle_id = "zigos.system.termination-probe", .artifact_name = "userspace-termination-probe.elf" },
-    .{ .bundle_id = "zigos.system.service-client", .artifact_name = "userspace-service-client.elf" },
-    .{ .bundle_id = "zigos.proof.mmu-isolation", .artifact_name = "userspace-mmu-isolation-proof.elf" },
+    .{ .role_tag = 0xA11D, .artifact_name = "userspace-notes-daily.elf" },
+    .{ .role_tag = 0xA104, .artifact_name = "userspace-transport-probe.elf" },
+    .{ .role_tag = 0xA105, .artifact_name = "userspace-termination-probe.elf" },
+    .{ .role_tag = 0xA114, .artifact_name = "userspace-service-client.elf" },
+    .{ .role_tag = 0xA116, .artifact_name = "userspace-mmu-isolation-proof.elf" },
 };
 const mmu_proof_identity_index = verification_userspace_identities.len - 1;
+const userspace_role_identity_bytes: usize = 8;
 
-const mmu_probe_role_tag_machine_code = [_]u8{ 0x16, 0xa1, 0x00, 0x00 };
 const mmu_probe_foreign_address_machine_code = [_]u8{ 0x00, 0x00, 0x00, 0x70 };
 const mmu_probe_fault_code_imm32_machine_code = [_]u8{ 0x72, 0x00, 0x00, 0x00 };
 const mmu_probe_fault_code_push_imm8_machine_code = [_]u8{ 0x6a, 0x72 };
 const mmu_probe_fault_code_mov_dl_imm8_machine_code = [_]u8{ 0xb2, 0x72 };
 const mmu_probe_fault_code_max_distance: usize = 24;
-const mmu_probe_machine_code_sentinel_count: usize = 2;
+const mmu_probe_machine_code_sentinel_count: usize = 1;
 const userspace_page_size: u64 = 4096;
 const maximum_packed_userspace_overhead_bytes: u64 = 2048;
 
@@ -505,7 +505,8 @@ fn analyzeUserspaceElf(bytes: []const u8) ParseError!UserspaceAnalysis {
 
     var verification_identity_mask: u8 = 0;
     for (verification_userspace_identities, 0..) |identity, identity_index| {
-        if (programsContainSignature(bytes, programs, 0, identity.bundle_id)) {
+        const role_identity = userspaceRoleIdentity(identity.role_tag);
+        if (programsContainSignature(bytes, programs, 0, &role_identity)) {
             verification_identity_mask |= @as(u8, 1) << @intCast(identity_index);
         }
     }
@@ -519,6 +520,19 @@ fn analyzeUserspaceElf(bytes: []const u8) ParseError!UserspaceAnalysis {
         ),
         .verification_identity_mask = verification_identity_mask,
         .mmu_probe_machine_code_sentinels = countMmuProbeMachineCodeSentinels(bytes, programs),
+    };
+}
+
+fn userspaceRoleIdentity(role_tag: u32) [userspace_role_identity_bytes]u8 {
+    return .{
+        'Z',
+        'R',
+        'O',
+        'L',
+        @truncate(role_tag),
+        @truncate(role_tag >> 8),
+        @truncate(role_tag >> 16),
+        @truncate(role_tag >> 24),
     };
 }
 
@@ -655,9 +669,6 @@ fn programsContainSignature(
 
 fn countMmuProbeMachineCodeSentinels(bytes: []const u8, programs: ProgramTable) usize {
     var count: usize = 0;
-    if (programsContainSignature(bytes, programs, pf_execute, &mmu_probe_role_tag_machine_code)) {
-        count += 1;
-    }
     if (programsContainOrderedSignatures(
         bytes,
         programs,
@@ -1566,11 +1577,6 @@ test "userspace ELF analysis scans loaded identities and executable probe sentin
 
     var sentinel_offset = testSymbolTableOffset();
     @memcpy(
-        storage[sentinel_offset..][0..mmu_probe_role_tag_machine_code.len],
-        &mmu_probe_role_tag_machine_code,
-    );
-    sentinel_offset += mmu_probe_role_tag_machine_code.len;
-    @memcpy(
         storage[sentinel_offset..][0..mmu_probe_foreign_address_machine_code.len],
         &mmu_probe_foreign_address_machine_code,
     );
@@ -1761,6 +1767,7 @@ fn buildTestElf(storage: []u8) []u8 {
     const signatures_offset: u32 = symbols_offset + 3 * @as(u32, symbol_size);
     var signature_blob_size: usize = 0;
     for (verification_only_signatures) |signature| signature_blob_size += signature.len + 1;
+    signature_blob_size += verification_userspace_identities.len * userspace_role_identity_bytes;
     const file_size: usize = @as(usize, signatures_offset) + signature_blob_size;
 
     @memcpy(storage[0..4], "\x7fELF");
@@ -1849,6 +1856,11 @@ fn buildTestElf(storage: []u8) []u8 {
         @memcpy(storage[signature_offset..][0..signature.len], signature);
         signature_offset += signature.len + 1;
     }
+    for (verification_userspace_identities) |identity| {
+        const role_identity = userspaceRoleIdentity(identity.role_tag);
+        @memcpy(storage[signature_offset..][0..role_identity.len], &role_identity);
+        signature_offset += role_identity.len;
+    }
 
     writeProgramHeader(storage, program_table_offset, .{
         .segment_type = pt_load,
@@ -1886,6 +1898,7 @@ fn buildTestElf64(storage: []u8) []u8 {
     const signatures_offset = symbols_offset + 3 * @sizeOf(elf.Elf64_Sym);
     var signature_blob_size: usize = 0;
     for (verification_only_signatures) |signature| signature_blob_size += signature.len + 1;
+    signature_blob_size += verification_userspace_identities.len * userspace_role_identity_bytes;
     const file_size = signatures_offset + signature_blob_size;
 
     var header = std.mem.zeroes(elf.Elf64_Ehdr);
@@ -2010,6 +2023,11 @@ fn buildTestElf64(storage: []u8) []u8 {
     for (verification_only_signatures) |signature| {
         @memcpy(storage[signature_offset..][0..signature.len], signature);
         signature_offset += signature.len + 1;
+    }
+    for (verification_userspace_identities) |identity| {
+        const role_identity = userspaceRoleIdentity(identity.role_tag);
+        @memcpy(storage[signature_offset..][0..role_identity.len], &role_identity);
+        signature_offset += role_identity.len;
     }
     return storage[0..file_size];
 }

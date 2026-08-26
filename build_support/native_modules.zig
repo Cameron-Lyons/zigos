@@ -7,7 +7,6 @@ pub const WireModules = struct {
 
 pub const UserspaceRuntimeModules = struct {
     wire: WireModules,
-    descriptor: *std.Build.Module,
     abi: *std.Build.Module,
     bootstrap_mailbox: *std.Build.Module,
     service_protocol: *std.Build.Module,
@@ -70,7 +69,6 @@ fn addUserspaceRuntimeModulesFor(
     runtime_optimize: std.builtin.OptimizeMode,
 ) UserspaceRuntimeModules {
     const wire = addWireModulesFor(b, support_target, support_optimize);
-    const descriptor = addDescriptorModule(b, wire, support_target, support_optimize);
     const abi = b.createModule(.{
         .root_source_file = b.path("src/native/core/abi.zig"),
         .target = support_target,
@@ -87,30 +85,14 @@ fn addUserspaceRuntimeModulesFor(
         .target = runtime_target,
         .optimize = runtime_optimize,
     });
-    addRuntimeImports(runtime, descriptor, abi, bootstrap_mailbox, service_protocol);
+    addRuntimeImports(runtime, abi, bootstrap_mailbox, service_protocol);
     return .{
         .wire = wire,
-        .descriptor = descriptor,
         .abi = abi,
         .bootstrap_mailbox = bootstrap_mailbox,
         .service_protocol = service_protocol,
         .runtime = runtime,
     };
-}
-
-fn addDescriptorModule(
-    b: *std.Build,
-    wire: WireModules,
-    target: ?std.Build.ResolvedTarget,
-    optimize: ?std.builtin.OptimizeMode,
-) *std.Build.Module {
-    const module = b.createModule(.{
-        .root_source_file = b.path("src/native/task/userspace_descriptor.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    module.addImport("userspace_wire", wire.userspace_wire);
-    return module;
 }
 
 fn addServiceProtocolModule(
@@ -130,12 +112,10 @@ fn addServiceProtocolModule(
 
 fn addRuntimeImports(
     runtime: *std.Build.Module,
-    descriptor: *std.Build.Module,
     abi: *std.Build.Module,
     bootstrap_mailbox: *std.Build.Module,
     service_protocol: *std.Build.Module,
 ) void {
-    runtime.addImport("userspace_descriptor", descriptor);
     runtime.addImport("native_abi", abi);
     runtime.addImport("userspace_bootstrap_mailbox", bootstrap_mailbox);
     runtime.addImport("userspace_service_protocol", service_protocol);

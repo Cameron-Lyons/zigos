@@ -4,10 +4,7 @@ const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
 const service_protocol = @import("userspace_service_protocol");
 const ui_surface_state = @import("ui_surface_state.zig");
-const userspace_descriptor = @import("userspace_descriptor");
 
-pub const Descriptor = userspace_descriptor.Descriptor;
-pub const ELF_SECTION_NAME = userspace_descriptor.ELF_SECTION_NAME;
 pub const ServiceKind = mailbox.ServiceKind;
 
 const TimeQueryRequest = extern struct {
@@ -80,14 +77,12 @@ const SurfacePresentRequest = struct {
 
 const INPUT_EVENTS_PER_DISPATCH: usize = 8;
 
-const contract_bindings = if (builtin.target.os.tag == .freestanding)
+const runtime_bindings = if (builtin.target.os.tag == .freestanding)
     struct {
-        extern var zigos_userspace_descriptor: Descriptor;
         extern var zigos_userspace_yield_counter: u32;
     }
 else
     struct {
-        pub var zigos_userspace_descriptor: Descriptor = std.mem.zeroes(Descriptor);
         pub var zigos_userspace_yield_counter: u32 = 0;
     };
 
@@ -156,15 +151,8 @@ else
         }
     };
 
-pub fn initDescriptor(spec: userspace_descriptor.InitSpec) userspace_descriptor.InitError!Descriptor {
-    return userspace_descriptor.init(spec);
-}
-
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
-    const detail = mailbox.classifyDetail(
-        contract_bindings.zigos_userspace_descriptor.component_class,
-        contract_bindings.zigos_userspace_descriptor.contract_flags,
-    );
+    const detail = bootstrapDetail();
     signalFault(detail, faultCode(msg));
 }
 
@@ -175,12 +163,9 @@ pub fn zigos_userspace_contract_main(
     comptime bundle_id: []const u8,
     comptime contract_flags: u32,
 ) noreturn {
-    const descriptor = &contract_bindings.zigos_userspace_descriptor;
-    userspace_descriptor.validate(descriptor) catch signalFault(.unknown, 1);
-
-    const detail = mailbox.classifyDetail(descriptor.component_class, descriptor.contract_flags);
+    const detail = bootstrapDetail();
     initializeUiState(bundle_id, contract_flags);
-    publishState(.descriptor_ready, detail, 1);
+    publishState(.runtime_ready, detail, 1);
 
     if (zigos_userspace_bootstrap.authority_capability_id != 0 and zigos_userspace_bootstrap.task_id != 0) {
         publishState(.mailbox_ready, detail, 2);
@@ -188,7 +173,7 @@ pub fn zigos_userspace_contract_main(
     }
 
     if (comptime run_mmu_isolation_probe or run_nx_isolation_probe) {
-        if (descriptor.role_tag != mailbox.MMU_ISOLATION_PROOF_ROLE_TAG) {
+        if (detail != .proof) {
             signalFault(detail, mailbox.PROOF_FOREIGN_MEMORY_ACCESS_FAULT_CODE);
         }
     }
@@ -204,7 +189,7 @@ pub fn zigos_userspace_contract_main(
 
     runSteadyState(
         detail,
-        descriptor.heartbeat_increment,
+        zigos_userspace_bootstrap.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
     );
 }
@@ -214,12 +199,9 @@ pub fn zigos_userspace_service_main(
     comptime bundle_id: []const u8,
     comptime contract_flags: u32,
 ) noreturn {
-    const descriptor = &contract_bindings.zigos_userspace_descriptor;
-    userspace_descriptor.validate(descriptor) catch signalFault(.unknown, 1);
-
-    const detail = mailbox.classifyDetail(descriptor.component_class, descriptor.contract_flags);
+    const detail = bootstrapDetail();
     initializeUiState(bundle_id, contract_flags);
-    publishState(.descriptor_ready, detail, 1);
+    publishState(.runtime_ready, detail, 1);
 
     waitForServiceBootstrapAuthority(detail);
     publishState(.mailbox_ready, detail, 2);
@@ -228,9 +210,13 @@ pub fn zigos_userspace_service_main(
     publishServiceReady(service_kind, detail);
     runSteadyState(
         detail,
-        descriptor.heartbeat_increment,
+        zigos_userspace_bootstrap.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
     );
+}
+
+fn bootstrapDetail() mailbox.Detail {
+    return std.enums.fromInt(mailbox.Detail, zigos_userspace_bootstrap.detail) orelse .unknown;
 }
 
 fn waitForServiceBootstrapAuthority(detail: mailbox.Detail) void {
@@ -661,7 +647,7 @@ fn publishStateWithDisposition(
     zigos_userspace_bootstrap.stage = @intFromEnum(stage);
     zigos_userspace_bootstrap.detail = @intFromEnum(detail);
     zigos_userspace_bootstrap.last_counter = counter;
-    contract_bindings.zigos_userspace_yield_counter = counter;
+    runtime_bindings.zigos_userspace_yield_counter = counter;
     _ = yieldCounter(counter, disposition, ui_state.revision);
 }
 

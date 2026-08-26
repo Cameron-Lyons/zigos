@@ -21,6 +21,7 @@ SECTIONS
     . = ALIGN(4K);
     .rodata :
     {
+        KEEP(*(.zigos_userspace_role_identity))
         *(.rodata)
         *(.rodata.*)
         *(.eh_frame_hdr)
@@ -30,11 +31,6 @@ SECTIONS
     } :rodata
 
     . = ALIGN(4K);
-    .zigos_userspace_descriptor :
-    {
-        KEEP(*(.zigos_userspace_descriptor))
-    } :rodata
-
     . = ALIGN(4K);
     .zigos_userspace_bootstrap :
     {
