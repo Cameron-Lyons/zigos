@@ -1,4 +1,5 @@
 const std = @import("std");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
@@ -9,11 +10,13 @@ const principal = @import("../core/principal.zig");
 const units = @import("../core/units.zig");
 
 pub const MAX_DRIVER_SERVICES: usize = 8;
-pub const MAX_SIGNER_BYTES: usize = 32;
+pub const SIGNER_FINGERPRINT_BYTES: usize = 16;
+pub const SignerFingerprint = [SIGNER_FINGERPRINT_BYTES]u8;
 pub const COMPACT_DRIVER_RECORD_METADATA = true;
+pub const COMPACT_DRIVER_SIGNER_FINGERPRINTS = true;
 pub const DERIVES_DMA_WINDOWS_FROM_DEVICE_POLICY = true;
-pub const DRIVER_RECORD_SIZE_CEILING_BYTES: usize = 80;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 1_752;
+pub const DRIVER_RECORD_SIZE_CEILING_BYTES: usize = 64;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 1_624;
 const DRIVER_INDEX_CAPACITY: usize = MAX_DRIVER_SERVICES * 2;
 
 pub const DeviceClass = enum(u8) {
@@ -48,9 +51,7 @@ const DMA_TEST_PAGE_BASE: u64 = 0x1000;
 const DMA_TEST_PAGE_BYTES: u64 = 4096;
 
 comptime {
-    if (MAX_DMA_RANGES > std.math.maxInt(u8) or
-        MAX_SIGNER_BYTES > std.math.maxInt(u8))
-    {
+    if (MAX_DMA_RANGES > std.math.maxInt(u8)) {
         @compileError("driver record capacities no longer fit compact metadata");
     }
 }
@@ -81,11 +82,11 @@ pub const DriverRecord = struct {
     bootstrap_transport: BootstrapTransport,
     dma_domain_id: u64,
     dma_protection: DmaProtection,
-    signer_len: u8,
-    signer: [MAX_SIGNER_BYTES]u8,
+    signer_fingerprint: SignerFingerprint,
 
-    pub fn signerSlice(self: *const DriverRecord) []const u8 {
-        return self.signer[0..@as(usize, self.signer_len)];
+    pub fn signerMatches(self: *const DriverRecord, signer: []const u8) bool {
+        const fingerprint = fingerprintSigner(signer);
+        return std.mem.eql(u8, &self.signer_fingerprint, &fingerprint);
     }
 
     pub fn allowsDma(self: *const DriverRecord, address: u64, length: u64) bool {
@@ -319,7 +320,7 @@ pub const Directory = struct {
         dma_domain_id: u64,
     ) DriverRecord {
         _ = self;
-        var record = DriverRecord{
+        const record = DriverRecord{
             .service_id = request.service_id,
             .owner_task_id = request.owner_task_id,
             .device_id = request.device_id,
@@ -329,10 +330,8 @@ pub const Directory = struct {
             .bootstrap_transport = request.bootstrap_transport,
             .dma_domain_id = dma_domain_id,
             .dma_protection = .iommu_enforced,
-            .signer_len = 0,
-            .signer = [_]u8{0} ** MAX_SIGNER_BYTES,
+            .signer_fingerprint = fingerprintSigner(request.signer),
         };
-        writeSigner(&record, request.signer);
         return record;
     }
 
@@ -512,10 +511,11 @@ fn validateSignedRequest(request: SignedRegistrationRequest) Error!u64 {
     return authority.id;
 }
 
-fn writeSigner(record: *DriverRecord, signer: []const u8) void {
-    const signer_len = @min(signer.len, record.signer.len);
-    record.signer_len = @intCast(signer_len);
-    @memcpy(record.signer[0..signer_len], signer[0..signer_len]);
+pub fn fingerprintSigner(signer: []const u8) SignerFingerprint {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "driver-signer-v1", signer);
+    const digest = crypto_hash.finalize(&hasher);
+    return digest[0..SIGNER_FINGERPRINT_BYTES].*;
 }
 
 fn dmaWindowLength(device_class: DeviceClass) u64 {
@@ -545,8 +545,7 @@ fn zeroDriver() DriverRecord {
         .bootstrap_transport = .none,
         .dma_domain_id = 0,
         .dma_protection = .iommu_enforced,
-        .signer_len = 0,
-        .signer = [_]u8{0} ** MAX_SIGNER_BYTES,
+        .signer_fingerprint = [_]u8{0} ** SIGNER_FINGERPRINT_BYTES,
     };
 }
 
@@ -581,10 +580,23 @@ fn registerDriverForTest(
 
 test "driver directory uses compact bounded record metadata" {
     try std.testing.expect(COMPACT_DRIVER_RECORD_METADATA);
+    try std.testing.expect(COMPACT_DRIVER_SIGNER_FINGERPRINTS);
     try std.testing.expect(DERIVES_DMA_WINDOWS_FROM_DEVICE_POLICY);
-    try std.testing.expectEqual(u8, @FieldType(DriverRecord, "signer_len"));
+    try std.testing.expectEqual(SignerFingerprint, @FieldType(DriverRecord, "signer_fingerprint"));
+    try std.testing.expect(!@hasField(DriverRecord, "signer_len"));
+    try std.testing.expect(!@hasField(DriverRecord, "signer"));
     try std.testing.expectEqual(@as(usize, DRIVER_RECORD_SIZE_CEILING_BYTES), @sizeOf(DriverRecord));
     try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
+}
+
+test "driver signer fingerprints bind identity beyond the former text limit" {
+    const first_signer = "0123456789abcdef0123456789abcdef-v1";
+    const second_signer = "0123456789abcdef0123456789abcdef-v2";
+    try std.testing.expectEqualStrings(first_signer[0..32], second_signer[0..32]);
+    const first = fingerprintSigner(first_signer);
+    const second = fingerprintSigner(second_signer);
+    try std.testing.expect(!std.mem.eql(u8, &first, &second));
+    try std.testing.expectEqual(first, fingerprintSigner(first_signer));
 }
 
 test "driver services require signed least-privilege device authority" {
@@ -619,7 +631,8 @@ test "driver services require signed least-privilege device authority" {
     });
 
     try std.testing.expectEqual(@as(u64, 44), driver.service_id);
-    try std.testing.expectEqualStrings("zigos-driver-key", driver.signerSlice());
+    try std.testing.expect(driver.signerMatches("zigos-driver-key"));
+    try std.testing.expect(!driver.signerMatches("other-driver-key"));
     try std.testing.expect(driver.dma_domain_id != 0);
     try std.testing.expectEqual(DmaProtection.iommu_enforced, driver.dma_protection);
     try std.testing.expectEqual(@as(usize, 2), driver.dmaRangeCount());
@@ -854,7 +867,8 @@ test "driver hot-swap rebinds authority signer and dma domain" {
     try std.testing.expectEqual(@as(u32, 2), swapped.restart_generation);
     try std.testing.expect(swapped.dma_domain_id != first_dma_domain);
     try std.testing.expectEqual(second_authority.id, swapped.authority_capability_id);
-    try std.testing.expectEqualStrings("driver-v2", swapped.signerSlice());
+    try std.testing.expect(swapped.signerMatches("driver-v2"));
+    try std.testing.expect(!swapped.signerMatches("driver-v1"));
     try std.testing.expectEqual(swapped.service_id, directory.findByClass(.graphics_adapter).?.service_id);
     try std.testing.expectError(error.InvalidHotSwapBinding, directory.hotSwapSigned(.{
         .service_id = 44,

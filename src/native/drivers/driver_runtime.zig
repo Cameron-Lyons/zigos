@@ -638,8 +638,7 @@ test "runtime deactivates only the requested driver class for shared services" {
         .bootstrap_transport = .none,
         .dma_domain_id = 391,
         .dma_protection = .iommu_enforced,
-        .signer_len = 0,
-        .signer = [_]u8{0} ** driver_service.MAX_SIGNER_BYTES,
+        .signer_fingerprint = [_]u8{0} ** driver_service.SIGNER_FINGERPRINT_BYTES,
     };
     const input_driver = driver_service.DriverRecord{
         .service_id = service_id,
@@ -651,8 +650,7 @@ test "runtime deactivates only the requested driver class for shared services" {
         .bootstrap_transport = .none,
         .dma_domain_id = 392,
         .dma_protection = .iommu_enforced,
-        .signer_len = 0,
-        .signer = [_]u8{0} ** driver_service.MAX_SIGNER_BYTES,
+        .signer_fingerprint = [_]u8{0} ** driver_service.SIGNER_FINGERPRINT_BYTES,
     };
 
     var runtime = Runtime.init();

@@ -827,7 +827,7 @@ fn driverSetDigest(directory: *const driver_service.Directory) crypto_hash.Diges
         crypto_hash.updateEnum(&hasher, "bootstrap-transport", driver.bootstrap_transport);
         crypto_hash.updateInt(&hasher, "dma-domain-id", driver.dma_domain_id);
         crypto_hash.updateEnum(&hasher, "dma-protection", driver.dma_protection);
-        crypto_hash.updateBytes(&hasher, "signer", driver.signerSlice());
+        crypto_hash.updateBytes(&hasher, "signer-fingerprint", &driver.signer_fingerprint);
         const dma_range_count = driver.dmaRangeCount();
         crypto_hash.updateInt(&hasher, "dma-range-count", dma_range_count);
         for (0..dma_range_count) |range_index| {

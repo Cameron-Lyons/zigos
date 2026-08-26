@@ -1016,7 +1016,8 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     try std.testing.expect(report.runtime_exclusive_claim);
     try std.testing.expect(report.userspace_brokered_data_plane);
     try std.testing.expectEqual(second_authority.id, swapped.authority_capability_id);
-    try std.testing.expectEqualStrings("graphics-v2", swapped.signerSlice());
+    try std.testing.expect(swapped.signerMatches("graphics-v2"));
+    try std.testing.expect(!swapped.signerMatches("graphics-v1"));
     try std.testing.expectEqual(@as(usize, 1), runtime.deactivation_count);
     try std.testing.expectEqual(@as(usize, 1), runtime.activation_count);
     try std.testing.expectEqual(compositor.id, runtime.last_deactivated_service_id);
