@@ -149,7 +149,16 @@ fn addUserspaceArtifact(
     userspace_modules: native_modules.UserspaceRuntimeModules,
     spec: production_registry.BuildImageSpec,
 ) BuiltArtifact {
-    const artifact = addUserspaceCompile(b, target, optimize, userspace_modules, spec.image, spec.source_path, spec.artifact_name);
+    const artifact = addUserspaceCompile(
+        b,
+        target,
+        optimize,
+        userspace_modules,
+        spec.image,
+        @intFromEnum(spec.service_kind),
+        spec.source_path,
+        spec.artifact_name,
+    );
     const install = b.addInstallArtifact(artifact, .{});
     return .{
         .compile_step = artifact,
@@ -163,6 +172,7 @@ fn addUserspaceCompile(
     optimize: std.builtin.OptimizeMode,
     userspace_modules: native_modules.UserspaceRuntimeModules,
     spec: production_registry.ImageSpec,
+    service_kind: u8,
     source_path: []const u8,
     artifact_name: []const u8,
 ) *std.Build.Step.Compile {
@@ -173,7 +183,7 @@ fn addUserspaceCompile(
     options.addOption(bool, "run_mmu_isolation_probe", (spec.contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
     options.addOption(bool, "run_nx_isolation_probe", (spec.contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
     options.addOption(bool, "run_gp_isolation_probe", (spec.contract_flags & production_registry.FLAG_GP_PROOF_PROBE) != 0);
-    options.addOption(u8, "service_kind", @intFromEnum(spec.service_kind));
+    options.addOption(u8, "service_kind", service_kind);
 
     const module = b.createModule(.{
         .root_source_file = b.path(source_path),
