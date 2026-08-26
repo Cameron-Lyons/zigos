@@ -750,7 +750,10 @@ pub const indexed_hot_path_tables = .{
     },
     .driver_runtime = .{
         .uses_activation_arena = @hasDecl(@FieldType(driver_runtime.Runtime, "arena"), "reserveIndex"),
-        .uses_activation_class_index = @hasField(driver_runtime.Runtime, "class_index"),
+        .uses_activation_class_index = driver_runtime.DIRECT_ACTIVATION_CLASS_SLOTS and
+            driver_runtime.ACTIVATION_CLASS_HASH_PROBES_PER_QUERY == 0 and
+            @FieldType(driver_runtime.Runtime, "class_slots") == [driver_runtime.ACTIVATION_CLASS_COUNT]driver_runtime.ActivationClassSlotIndex and
+            !@hasField(driver_runtime.Runtime, "class_index"),
         .uses_activation_service_index = @hasField(driver_runtime.Runtime, "service_index"),
         .stores_compact_activation_metadata = driver_runtime.COMPACT_ACTIVATION_METADATA and
             driver_runtime.DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION and
