@@ -1322,6 +1322,13 @@ pub const indexed_hot_path_tables = .{
             @hasDecl(object_store.BlobSlot, "arenaInUse") and
             @hasDecl(object_store.BlobSlot, "setArenaInUse") and
             @sizeOf(object_store.BlobSlot) <= object_store.BLOB_SLOT_SIZE_CEILING_BYTES,
+        .packs_chunk_slot_membership_into_payload_state = object_store.PACKS_CHUNK_SLOT_MEMBERSHIP_INTO_PAYLOAD_STATE and
+            !@hasField(object_store.ChunkRecord, "payload_len") and
+            !@hasField(object_store.ChunkSlot, "in_use") and
+            @hasDecl(object_store.ChunkRecord, "payloadLen") and
+            @hasDecl(object_store.ChunkSlot, "arenaInUse") and
+            @sizeOf(object_store.ChunkRecord) <= object_store.CHUNK_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(object_store.ChunkSlot) <= object_store.CHUNK_SLOT_SIZE_CEILING_BYTES,
         .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and
             !@hasField(object_store.VersionRecord, "blob_address") and
             !@hasField(object_store.VersionRecord, "payload_len") and
