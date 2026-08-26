@@ -23,13 +23,23 @@ pub const SERVICE_ID_IS_ISOLATION_DOMAIN = true;
 pub const DERIVES_SERVICE_IDS_FROM_ARENA_COUNT = true;
 pub const OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS = true;
 pub const OMITS_UNOBSERVED_DIAGNOSTIC_SEQUENCES = true;
+pub const DIRECT_SERVICE_CLASS_SLOTS = true;
+pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 40;
-pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 3_880;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 3_416;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
+pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(contract.ServiceClass).len;
+pub const ServiceClassSlotIndex = indexed_arena.ReusableIndex(MAX_SERVICES);
+const NO_SERVICE_CLASS_SLOT = indexed_arena.reusableNoIndex(MAX_SERVICES);
 
 comptime {
     if (MAX_DIAGNOSTICS > std.math.maxInt(u8)) {
         @compileError("supervisor diagnostic ring metadata exceeds u8 capacity");
+    }
+    for (std.meta.fields(contract.ServiceClass), 0..) |field, class_index| {
+        if (field.value != class_index) {
+            @compileError("service classes must remain dense for direct supervisor lookup");
+        }
     }
 }
 
@@ -132,18 +142,18 @@ const ServiceSlot = struct {
 };
 
 const ServiceArena = indexed_arena.IndexedArena(ServiceSlot, MAX_SERVICES, SERVICE_INDEX_CAPACITY, serviceSlotId);
-const ServiceClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
 
 pub const supervisor_indexing = .{
     .uses_service_arena = @hasDecl(ServiceArena, "reserveIndex"),
-    .uses_service_class_index = @hasDecl(ServiceClassIndex, "lookup"),
+    .uses_service_class_index = DIRECT_SERVICE_CLASS_SLOTS and
+        SERVICE_CLASS_HASH_PROBES_PER_QUERY == 0,
     .scans_bounded_diagnostic_ring = true,
     .scans_diagnostics_newest_first = true,
 };
 
 pub const Supervisor = struct {
     service_arena: ServiceArena = ServiceArena.init(),
-    service_class_index: ServiceClassIndex = ServiceClassIndex.init(),
+    service_class_slots: [SERVICE_CLASS_COUNT]ServiceClassSlotIndex = [_]ServiceClassSlotIndex{NO_SERVICE_CLASS_SLOT} ** SERVICE_CLASS_COUNT,
     diagnostics: DiagnosticBacking = if (heap_backed_actionable_diagnostics) null else [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
     diagnostic_count: u8 = 0,
     next_diagnostic_slot: u8 = 0,
@@ -193,7 +203,7 @@ pub const Supervisor = struct {
             .state = .registered,
             .restart_count = 0,
         };
-        self.service_class_index.insert(serviceClassKey(class), slot_index);
+        self.service_class_slots[serviceClassIndex(class)] = @intCast(slot_index);
         return &slot.service;
     }
 
@@ -203,7 +213,8 @@ pub const Supervisor = struct {
     }
 
     pub fn findByClass(self: *Supervisor, class: contract.ServiceClass) ?*ServiceRecord {
-        const slot_index = self.service_class_index.lookup(serviceClassKey(class)) orelse return null;
+        const slot_index = self.service_class_slots[serviceClassIndex(class)];
+        if (slot_index == NO_SERVICE_CLASS_SLOT) return null;
         const slot = self.serviceSlotAt(slot_index, class) orelse return null;
         return &slot.service;
     }
@@ -508,8 +519,8 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
     return slot.service.id;
 }
 
-fn serviceClassKey(class: contract.ServiceClass) u64 {
-    return @as(u64, @intFromEnum(class)) + 1;
+fn serviceClassIndex(class: contract.ServiceClass) usize {
+    return @intFromEnum(class);
 }
 
 fn zeroService() ServiceRecord {
@@ -677,6 +688,10 @@ test "supervisor keeps diagnostics queryable while recycling the bounded ring" {
 }
 
 test "supervisor keeps bounded diagnostic metadata compact" {
+    try std.testing.expect(DIRECT_SERVICE_CLASS_SLOTS);
+    try std.testing.expectEqual(@as(u8, 0), SERVICE_CLASS_HASH_PROBES_PER_QUERY);
+    try std.testing.expect(@FieldType(Supervisor, "service_class_slots") == [SERVICE_CLASS_COUNT]ServiceClassSlotIndex);
+    try std.testing.expect(!@hasField(Supervisor, "service_class_index"));
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "diagnostic_count"));
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "next_diagnostic_slot"));
     try std.testing.expect(OMITS_UNOBSERVED_DIAGNOSTIC_SEQUENCES);
@@ -687,7 +702,7 @@ test "supervisor keeps bounded diagnostic metadata compact" {
     try std.testing.expect(OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS);
     try std.testing.expect(!@hasField(ServiceRecord, "last_transition_tick"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceRecord));
-    try std.testing.expectEqual(@as(usize, 3_880), @sizeOf(Supervisor));
+    try std.testing.expectEqual(@as(usize, SUPERVISOR_SIZE_CEILING_BYTES), @sizeOf(Supervisor));
 }
 
 test "supervisor deinit clears retained diagnostic state" {
@@ -743,6 +758,15 @@ test "services can be located by class for mediated routing" {
     try std.testing.expect(supervisor.allowsDriverAttachment(network.id, .network_adapter));
     try std.testing.expect(!supervisor.allowsDriverAttachment(network.id, .storage_controller));
     try std.testing.expect(supervisor.findByClass(.sync_replication) == null);
+}
+
+test "direct service class slots follow the latest registration" {
+    var supervisor = Supervisor.init();
+    const first = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 6 });
+    const second = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 7 });
+
+    try std.testing.expect(first.id != second.id);
+    try std.testing.expectEqual(second.id, supervisor.findByClass(.network_stack).?.id);
 }
 
 test "driver recovery restarts the failed driver and emits visible diagnostics only when needed" {

@@ -1457,7 +1457,11 @@ pub const indexed_hot_path_tables = .{
     },
     .supervisor = .{
         .uses_service_arena = supervisor.supervisor_indexing.uses_service_arena,
-        .uses_service_class_index = supervisor.supervisor_indexing.uses_service_class_index,
+        .uses_service_class_index = supervisor.supervisor_indexing.uses_service_class_index and
+            supervisor.DIRECT_SERVICE_CLASS_SLOTS and
+            supervisor.SERVICE_CLASS_HASH_PROBES_PER_QUERY == 0 and
+            @FieldType(supervisor.Supervisor, "service_class_slots") == [supervisor.SERVICE_CLASS_COUNT]supervisor.ServiceClassSlotIndex and
+            !@hasField(supervisor.Supervisor, "service_class_index"),
         .derives_service_metadata_from_schema = supervisor.SCHEMA_DERIVED_SERVICE_METADATA and
             !@hasField(supervisor.ServiceRecord, "boundary") and
             !@hasField(supervisor.ServiceRecord, "restartable") and
