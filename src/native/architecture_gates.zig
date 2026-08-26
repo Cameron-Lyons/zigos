@@ -145,6 +145,10 @@ pub const indexed_hot_path_tables = .{
         .derives_typed_interface_ids_from_slots = !@hasDecl(service_registry.Binding, "interfaceId"),
         .derives_binding_count_from_slots = service_registry.DERIVES_BINDING_COUNT_FROM_SLOTS and
             !@hasField(service_registry.Registry, "binding_count"),
+        .stores_compact_bootstrap_validation_state = service_registry.COMPACT_BOOTSTRAP_VALIDATION_STATE and
+            @FieldType(service_registry.Service, "bootstrap_state") == service_registry.BootstrapValidationState and
+            !@hasField(service_registry.Service, "bootstrap") and
+            @sizeOf(service_registry.Service) == service_registry.SERVICE_SIZE_CEILING_BYTES,
         .derives_static_contract_metadata = service_registry.DERIVES_STATIC_CONTRACT_METADATA,
         .requires_exact_interface_versions = component_abi_schema.EXACT_INTERFACE_VERSIONS,
         .stores_compact_binding_metadata = service_registry.COMPACT_BINDING_METADATA and
