@@ -515,7 +515,8 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(background_dispatch.Controller) <= background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
         .tracks_active_count = @hasField(background_dispatch.Controller, "active_count"),
         .uses_fair_reuse_cursor = @hasField(background_dispatch.Controller, "next_reusable_slot"),
-        .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
+        .derives_latest_record_id_from_allocation_cursor = background_dispatch.DERIVES_LATEST_RECORD_ID_FROM_ALLOCATION_CURSOR and
+            !@hasField(background_dispatch.Controller, "latest_record_id"),
         .resolves_expiration_task_once = background_dispatch.EXPIRATION_TASK_ID_LOOKUPS_PER_RECORD == 1,
         .initializes_allocated_controller_state = @hasDecl(background_dispatch.Controller, "initializeAllocated"),
     },
