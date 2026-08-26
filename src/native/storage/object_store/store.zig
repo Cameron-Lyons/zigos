@@ -42,13 +42,14 @@ pub const DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS = true;
 pub const DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS = true;
 pub const PACKS_VERSION_TYPE_INTO_TRAILING_PADDING = true;
 pub const DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS = true;
+pub const DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 320;
-pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 100;
-pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 104;
-pub const STORE_SIZE_CEILING_BYTES: usize = 1_348_848;
+pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 96;
+pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 100;
+pub const STORE_SIZE_CEILING_BYTES: usize = 1_346_288;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -344,13 +345,16 @@ pub const ChunkRef = struct {
 pub const BlobRecord = struct {
     address: BlobAddress,
     payload_len: u32,
-    chunk_count: u16,
     chunk_slot_indexes: [MAX_BLOB_CHUNKS]BlobChunkSlotIndex,
     ref_count: u16,
     manifest_verified: bool = false,
 
     pub fn payloadLen(self: *const BlobRecord) usize {
         return @intCast(self.payload_len);
+    }
+
+    pub fn chunkCount(self: *const BlobRecord) usize {
+        return chunkCountForPayloadLen(self.payloadLen());
     }
 
     comptime {
@@ -477,7 +481,6 @@ pub const BlobSlot = struct {
     blob: BlobRecord = .{
         .address = crypto_hash.zero_digest,
         .payload_len = 0,
-        .chunk_count = 0,
         .chunk_slot_indexes = [_]BlobChunkSlotIndex{0} ** MAX_BLOB_CHUNKS,
         .ref_count = 0,
         .manifest_verified = false,
@@ -992,7 +995,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return .{
                 .store = self,
                 .blob = blob_record,
-                .chunk_count = @intCast(blob_record.chunk_count),
+                .chunk_count = blob_record.chunkCount(),
             };
         }
 
@@ -1007,7 +1010,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             var cursor = VersionChunkCursor{
                 .store = self,
                 .blob = blob_record,
-                .chunk_count = @intCast(blob_record.chunk_count),
+                .chunk_count = blob_record.chunkCount(),
             };
             var summary = PayloadTransferSummary{};
             while (try cursor.next()) |payload_chunk| {
@@ -1072,7 +1075,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             blob_record: *const BlobRecord,
             output: *[MAX_BLOB_CHUNKS]ChunkRef,
         ) Error![]const ChunkRef {
-            const chunk_count: usize = blob_record.chunk_count;
+            const chunk_count = blob_record.chunkCount();
             if (chunk_count > MAX_BLOB_CHUNKS) return error.CorruptBlob;
             for (0..chunk_count) |chunk_index| {
                 output[chunk_index] = try self.blobChunkRef(blob_record, chunk_index);
@@ -1137,7 +1140,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         fn checkedBlobChunk(self: *const Self, blob_record: *const BlobRecord, chunk_index: usize) Error!*const ChunkRecord {
-            if (chunk_index >= blob_record.chunk_count or chunk_index >= MAX_BLOB_CHUNKS) return error.CorruptBlob;
+            if (chunk_index >= blob_record.chunkCount() or chunk_index >= MAX_BLOB_CHUNKS) return error.CorruptBlob;
             const chunk_slot_index: usize = blob_record.chunk_slot_indexes[chunk_index];
             if (chunk_slot_index >= self.chunkSlotCapacity()) return error.CorruptBlob;
             const chunk_slot = self.chunkSlotAtConst(chunk_slot_index);
@@ -1282,7 +1285,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot = self.blobSlotAt(slot_index);
             slot.blob.address = address;
             slot.blob.payload_len = @intCast(payload.len);
-            slot.blob.chunk_count = @intCast(chunk_count);
             slot.blob.chunk_slot_indexes = chunk_slot_indexes;
             slot.blob.ref_count = 1;
             slot.blob.manifest_verified = false;
@@ -1333,6 +1335,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
             var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
             const live_chunk_refs = try self.copyBlobChunkRefs(&slot.blob, &chunk_refs);
+            if (!chunkRefsMatchPayloadLen(slot.blob.payloadLen(), live_chunk_refs)) return error.CorruptBlob;
             if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payloadLen(), live_chunk_refs), &slot.blob.address)) {
                 return error.CorruptBlob;
             }
@@ -1484,9 +1487,19 @@ fn indexIdForBytes(bytes: []const u8) u64 {
     return if (id == 0) 1 else id;
 }
 
-fn chunkCountForLen(payload_len: usize) usize {
-    if (payload_len == 0) return 0;
-    return (payload_len + MAX_CHUNK_BYTES - 1) / MAX_CHUNK_BYTES;
+pub fn chunkCountForPayloadLen(payload_len: usize) usize {
+    return payload_len / MAX_CHUNK_BYTES + @intFromBool(payload_len % MAX_CHUNK_BYTES != 0);
+}
+
+pub fn chunkRefsMatchPayloadLen(payload_len: usize, chunk_refs: []const ChunkRef) bool {
+    if (chunk_refs.len != chunkCountForPayloadLen(payload_len)) return false;
+    var remaining = payload_len;
+    for (chunk_refs) |chunk_ref| {
+        const expected_len = @min(remaining, MAX_CHUNK_BYTES);
+        if (chunk_ref.payload_len != expected_len) return false;
+        remaining -= expected_len;
+    }
+    return remaining == 0;
 }
 
 pub fn computeBlobAddress(payload: []const u8) BlobAddress {
@@ -1548,7 +1561,7 @@ pub fn computeBlobMerkleRoot(chunk_refs: []const ChunkRef) BlobAddress {
 
 fn buildChunkRefs(payload: []const u8, out: *[MAX_BLOB_CHUNKS]ChunkRef) Error!usize {
     if (payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
-    const chunk_count = chunkCountForLen(payload.len);
+    const chunk_count = chunkCountForPayloadLen(payload.len);
     if (chunk_count > MAX_BLOB_CHUNKS) return error.PayloadTooLarge;
     var chunk_index: usize = 0;
     while (chunk_index < chunk_count) : (chunk_index += 1) {
@@ -1613,7 +1626,7 @@ fn versionParentsAreCanonical(parent_version_ids: [MAX_VERSION_PARENTS]ids.Versi
 
 fn blobManifestMatches(store: anytype, blob_record: BlobRecord, payload_len: usize, chunk_refs: []const ChunkRef) bool {
     if (blob_record.payloadLen() != payload_len) return false;
-    const chunk_count: usize = @intCast(blob_record.chunk_count);
+    const chunk_count = blob_record.chunkCount();
     if (chunk_count != chunk_refs.len) return false;
     var index: usize = 0;
     while (index < chunk_count) : (index += 1) {

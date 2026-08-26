@@ -30,6 +30,7 @@ pub const DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS = store.DERIVES_PRE
 pub const DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS = store.DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS;
 pub const PACKS_VERSION_TYPE_INTO_TRAILING_PADDING = store.PACKS_VERSION_TYPE_INTO_TRAILING_PADDING;
 pub const DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS = store.DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS;
+pub const DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH = store.DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES = store.OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES = store.OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES = store.OBJECT_RECORD_SIZE_CEILING_BYTES;
@@ -77,6 +78,8 @@ pub const computeBlobAddress = store.computeBlobAddress;
 pub const computeChunkAddress = store.computeChunkAddress;
 pub const computeBlobManifestAddress = store.computeBlobManifestAddress;
 pub const computeBlobMerkleRoot = store.computeBlobMerkleRoot;
+pub const chunkCountForPayloadLen = store.chunkCountForPayloadLen;
+pub const chunkRefsMatchPayloadLen = store.chunkRefsMatchPayloadLen;
 
 comptime {
     if (builtin.is_test) _ = @import("object_store/tests.zig");
